@@ -9769,6 +9769,7 @@ class Reader {
   def readId(c: Counter): Int = c.id
   def readCount(c: Counter): Long = c.count
   def write(c: Counter, next: Long): Unit = c.count = next
+  def nestedWrite(a: Counter, b: Counter): Unit = a.count = { b.count = 2L; 3L }
   def readOther(c: OtherCounter): Long = c.count
   def localRead(c: Counter): Long = { val local = c; local.count }
   def localWrite(c: Counter, next: Long): Long = { val local = c; local.count = next; local.count }
@@ -9861,6 +9862,14 @@ class Reader {
     );
     assert_invocation_sequence(
         &reader,
+        emitted_method_code(&reader, "nestedWrite"),
+        &[
+            (0xb6, "Counter", "count_$eq", "(J)V"),
+            (0xb6, "Counter", "count_$eq", "(J)V"),
+        ],
+    );
+    assert_invocation_sequence(
+        &reader,
         emitted_method_code(&reader, "readOther"),
         &[(0xb6, "OtherCounter", "count", "()J")],
     );
@@ -9898,6 +9907,7 @@ class Reader {
         "readId",
         "readCount",
         "write",
+        "nestedWrite",
         "readOther",
         "localRead",
         "localWrite",
@@ -9954,6 +9964,10 @@ class Reader {
     check(reader.readId(first) == 7 && reader.readCount(first) == 10L, "parameter getters");
     reader.write(first, Long.MIN_VALUE + 9);
     check(first.count() == Long.MIN_VALUE + 9 && second.count() == 20L, "parameter setter and instance isolation");
+    Counter nestedA = new Counter(1, 10L);
+    Counter nestedB = new Counter(2, 20L);
+    reader.nestedWrite(nestedA, nestedB);
+    check(nestedA.count() == 3L && nestedB.count() == 2L, "nested assignments preserve outer receiver");
     check(reader.localRead(second) == 20L, "stable local getter");
     check(reader.localWrite(second, Long.MAX_VALUE - 4) == Long.MAX_VALUE - 4 && second.count() == Long.MAX_VALUE - 4, "stable local setter/getter and Long width");
     OtherCounter other = new OtherCounter(31L);

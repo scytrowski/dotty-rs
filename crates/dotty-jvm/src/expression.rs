@@ -155,6 +155,7 @@ struct JvmLoweringContext<'a> {
     local_layout: Option<&'a JvmLocalLayout>,
     initialized_locals: HashSet<SymbolId>,
     reference_assignment_restricted_region_depth: usize,
+    temporary_local_slots: usize,
     call_context: Option<(
         &'a JvmCompilationUnit<'a>,
         &'a JvmClassMetadata,
@@ -179,6 +180,7 @@ impl<'a> JvmLoweringContext<'a> {
             local_layout: None,
             initialized_locals: HashSet::new(),
             reference_assignment_restricted_region_depth: 0,
+            temporary_local_slots: 0,
             call_context: None,
             expected_expression_type: None,
             node_visits: 0,
@@ -212,6 +214,37 @@ impl<'a> JvmLoweringContext<'a> {
         validate_tree_type(self.store, tree, node.ty)?;
         self.node_visits += 1;
         Ok(())
+    }
+
+    fn reserve_temporary_local_slots(
+        &mut self,
+        tree: TreeId<Typed>,
+        slots: usize,
+    ) -> Result<usize, JvmCodegenError> {
+        let base = self
+            .local_layout
+            .map(|layout| usize::from(layout.max_locals()))
+            .ok_or(JvmCodegenError::JvmFieldWriteContextUnavailable {
+                tree,
+                method: self.method.symbol(),
+            })?;
+        let start = base.checked_add(self.temporary_local_slots).ok_or(
+            JvmCodegenError::TooManyLocalSlots {
+                method: self.method.symbol(),
+            },
+        )?;
+        let end = start
+            .checked_add(slots)
+            .filter(|end| *end <= usize::from(u16::MAX))
+            .ok_or(JvmCodegenError::TooManyLocalSlots {
+                method: self.method.symbol(),
+            })?;
+        self.temporary_local_slots = end - base;
+        Ok(start)
+    }
+
+    fn release_temporary_local_slots(&mut self, slots: usize) {
+        self.temporary_local_slots -= slots;
     }
 }
 
@@ -1649,27 +1682,6 @@ fn emit_field_assignment(
                 class: class.identity().symbol(),
             });
         }
-        let Some(local_layout) = context.local_layout else {
-            return Err(JvmCodegenError::JvmFieldWriteContextUnavailable {
-                tree: tree_id,
-                method: context.method.symbol(),
-            });
-        };
-        let receiver_slot = usize::from(local_layout.max_locals());
-        let value_slot =
-            receiver_slot
-                .checked_add(1)
-                .ok_or(JvmCodegenError::TooManyLocalSlots {
-                    method: context.method.symbol(),
-                })?;
-        if value_slot
-            .checked_add(usize::from(accessor.value_type().slot_width()))
-            .is_none_or(|end| end > usize::from(u16::MAX))
-        {
-            return Err(JvmCodegenError::TooManyLocalSlots {
-                method: context.method.symbol(),
-            });
-        }
         if let Some(receiver) = receiver {
             let receiver_type = context.tree(receiver)?.ty;
             if receiver_type != reference_prefix {
@@ -1705,79 +1717,93 @@ fn emit_field_assignment(
                     error,
                 })?;
         }
-        code.astore(receiver_slot)
-            .map_err(|error| JvmCodegenError::CodeBuilder {
-                tree: tree_id,
-                error,
-            })?;
-        let expected_type = match context.store.symbols.info(field) {
-            SymbolInfo::Complete(ty) => Some(*ty),
-            SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
-                return Err(JvmCodegenError::MissingSemanticInfo { symbol: field });
-            }
-            SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: field }),
-        };
-        match emit_expression_with_expected(context, rhs, expected_type, code, depth + 1)? {
-            Flow::Diverges => return Ok(Flow::Diverges),
-            Flow::Null if matches!(accessor.value_type(), JvmType::Reference(_)) => {
-                code.astore(value_slot)
-                    .map_err(|error| JvmCodegenError::CodeBuilder {
-                        tree: tree_id,
-                        error,
-                    })?;
-            }
-            Flow::Value(found) if flow_assignable(context, found, accessor.value_type())? => {
-                let code = match found {
-                    JvmType::Reference(_) => code.astore(value_slot),
-                    JvmType::Int | JvmType::Boolean => code.istore(value_slot),
-                    JvmType::Long => code.lstore(value_slot),
-                    JvmType::Float => code.fstore(value_slot),
-                    JvmType::Double => code.dstore(value_slot),
-                };
-                code.map_err(|error| JvmCodegenError::CodeBuilder {
+        let temporary_slot_count = 1 + usize::from(accessor.value_type().slot_width());
+        let receiver_slot = context.reserve_temporary_local_slots(tree_id, temporary_slot_count)?;
+        let value_slot = receiver_slot + 1;
+        let result = (|| {
+            code.astore(receiver_slot)
+                .map_err(|error| JvmCodegenError::CodeBuilder {
                     tree: tree_id,
                     error,
                 })?;
+            let expected_type = match context.store.symbols.info(field) {
+                SymbolInfo::Complete(ty) => Some(*ty),
+                SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+                    return Err(JvmCodegenError::MissingSemanticInfo { symbol: field });
+                }
+                SymbolInfo::Error => {
+                    return Err(JvmCodegenError::ErrorSemanticInfo { symbol: field });
+                }
+            };
+            match emit_expression_with_expected(context, rhs, expected_type, code, depth + 1)? {
+                Flow::Diverges => return Ok(Flow::Diverges),
+                Flow::Null if matches!(accessor.value_type(), JvmType::Reference(_)) => {
+                    code.astore(value_slot)
+                        .map_err(|error| JvmCodegenError::CodeBuilder {
+                            tree: tree_id,
+                            error,
+                        })?;
+                }
+                Flow::Value(found) if flow_assignable(context, found, accessor.value_type())? => {
+                    let code = match found {
+                        JvmType::Reference(_) => code.astore(value_slot),
+                        JvmType::Int | JvmType::Boolean => code.istore(value_slot),
+                        JvmType::Long => code.lstore(value_slot),
+                        JvmType::Float => code.fstore(value_slot),
+                        JvmType::Double => code.dstore(value_slot),
+                    };
+                    code.map_err(|error| JvmCodegenError::CodeBuilder {
+                        tree: tree_id,
+                        error,
+                    })?;
+                }
+                found => {
+                    return Err(JvmCodegenError::AssignmentValueFlowMismatch {
+                        tree: tree_id,
+                        symbol: field,
+                        expected: accessor.value_type(),
+                        found: public_flow(found),
+                    });
+                }
             }
-            found => {
-                return Err(JvmCodegenError::AssignmentValueFlowMismatch {
-                    tree: tree_id,
-                    symbol: field,
-                    expected: accessor.value_type(),
-                    found: public_flow(found),
+            let Some(setter) = accessor.setter() else {
+                return Err(JvmCodegenError::InvalidJvmAccessorCallMetadata {
+                    tree: lhs,
+                    field,
+                    owner: accessor.owner(),
+                    issue: crate::JvmAccessorCallMetadataIssue::SetterSignatureMismatch,
                 });
+            };
+            let code = code
+                .aload(receiver_slot)
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            let code = match accessor.value_type() {
+                JvmType::Reference(_) => code.aload(value_slot),
+                JvmType::Int | JvmType::Boolean => code.iload(value_slot),
+                JvmType::Long => code.lload(value_slot),
+                JvmType::Float => code.fload(value_slot),
+                JvmType::Double => code.dload(value_slot),
             }
-        }
-        let setter = accessor
-            .setter()
-            .expect("mutable accessor has validated setter");
-        let code = code
-            .aload(receiver_slot)
             .map_err(|error| JvmCodegenError::CodeBuilder {
                 tree: tree_id,
                 error,
             })?;
-        let code = match accessor.value_type() {
-            JvmType::Reference(_) => code.aload(value_slot),
-            JvmType::Int | JvmType::Boolean => code.iload(value_slot),
-            JvmType::Long => code.lload(value_slot),
-            JvmType::Float => code.fload(value_slot),
-            JvmType::Double => code.dload(value_slot),
-        }
-        .map_err(|error| JvmCodegenError::CodeBuilder {
-            tree: tree_id,
-            error,
-        })?;
-        code.invokevirtual(
-            &owner_internal_name,
-            setter.name(),
-            setter.descriptor().as_str(),
-        )
-        .map_err(|error| JvmCodegenError::CodeBuilder {
-            tree: tree_id,
-            error,
-        })?;
-        return Ok(Flow::Unit);
+            code.invokevirtual(
+                &owner_internal_name,
+                setter.name(),
+                setter.descriptor().as_str(),
+            )
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: tree_id,
+                error,
+            })?;
+            Ok(Flow::Unit)
+        })();
+        context.release_temporary_local_slots(temporary_slot_count);
+        return result;
     }
     let class_symbol = class.identity().symbol();
     if !class
@@ -1886,73 +1912,64 @@ fn emit_field_assignment(
         SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: field }),
     };
 
-    let Some(local_layout) = context.local_layout else {
-        return Err(JvmCodegenError::JvmFieldWriteContextUnavailable {
-            tree: tree_id,
-            method: context.method.symbol(),
-        });
-    };
-    let receiver_slot = usize::from(local_layout.max_locals());
-    let value_slot = receiver_slot
-        .checked_add(1)
-        .filter(|slot| {
-            slot.checked_add(usize::from(field_type.slot_width()))
-                .is_some_and(|end| end <= usize::from(u16::MAX))
-        })
-        .ok_or(JvmCodegenError::TooManyLocalSlots {
-            method: context.method.symbol(),
-        })?;
-    code.aload(0)
-        .and_then(|code| code.astore(receiver_slot))
-        .map_err(|error| JvmCodegenError::CodeBuilder {
-            tree: tree_id,
-            error,
-        })?;
-    match emit_expression(context, rhs, code, depth + 1)? {
-        Flow::Diverges => Ok(Flow::Diverges),
-        Flow::Value(found) if flow_assignable(context, found, field_type)? => {
-            let store_value = match found {
-                JvmType::Reference(_) => code.astore(value_slot),
-                JvmType::Int | JvmType::Boolean => code.istore(value_slot),
-                JvmType::Long => code.lstore(value_slot),
-                JvmType::Float => code.fstore(value_slot),
-                JvmType::Double => code.dstore(value_slot),
-            };
-            let code = store_value
-                .and_then(|code| code.aload(receiver_slot))
+    let temporary_slot_count = 1 + usize::from(field_type.slot_width());
+    let receiver_slot = context.reserve_temporary_local_slots(tree_id, temporary_slot_count)?;
+    let value_slot = receiver_slot + 1;
+    let result = (|| {
+        code.aload(0)
+            .and_then(|code| code.astore(receiver_slot))
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: tree_id,
+                error,
+            })?;
+        match emit_expression(context, rhs, code, depth + 1)? {
+            Flow::Diverges => Ok(Flow::Diverges),
+            Flow::Value(found) if flow_assignable(context, found, field_type)? => {
+                let store_value = match found {
+                    JvmType::Reference(_) => code.astore(value_slot),
+                    JvmType::Int | JvmType::Boolean => code.istore(value_slot),
+                    JvmType::Long => code.lstore(value_slot),
+                    JvmType::Float => code.fstore(value_slot),
+                    JvmType::Double => code.dstore(value_slot),
+                };
+                let code = store_value
+                    .and_then(|code| code.aload(receiver_slot))
+                    .map_err(|error| JvmCodegenError::CodeBuilder {
+                        tree: tree_id,
+                        error,
+                    })?;
+                let code = match found {
+                    JvmType::Reference(_) => code.aload(value_slot),
+                    JvmType::Int | JvmType::Boolean => code.iload(value_slot),
+                    JvmType::Long => code.lload(value_slot),
+                    JvmType::Float => code.fload(value_slot),
+                    JvmType::Double => code.dload(value_slot),
+                }
                 .map_err(|error| JvmCodegenError::CodeBuilder {
                     tree: tree_id,
                     error,
                 })?;
-            let code = match found {
-                JvmType::Reference(_) => code.aload(value_slot),
-                JvmType::Int | JvmType::Boolean => code.iload(value_slot),
-                JvmType::Long => code.lload(value_slot),
-                JvmType::Float => code.fload(value_slot),
-                JvmType::Double => code.dload(value_slot),
+                code.putfield(
+                    class.identity().internal_name(),
+                    field_metadata.name(),
+                    field_metadata.descriptor(),
+                )
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+                Ok(Flow::Unit)
             }
-            .map_err(|error| JvmCodegenError::CodeBuilder {
+            found => Err(JvmCodegenError::AssignmentValueFlowMismatch {
                 tree: tree_id,
-                error,
-            })?;
-            code.putfield(
-                class.identity().internal_name(),
-                field_metadata.name(),
-                field_metadata.descriptor(),
-            )
-            .map_err(|error| JvmCodegenError::CodeBuilder {
-                tree: tree_id,
-                error,
-            })?;
-            Ok(Flow::Unit)
+                symbol: field,
+                expected: field_type,
+                found: public_flow(found),
+            }),
         }
-        found => Err(JvmCodegenError::AssignmentValueFlowMismatch {
-            tree: tree_id,
-            symbol: field,
-            expected: field_type,
-            found: public_flow(found),
-        }),
-    }
+    })();
+    context.release_temporary_local_slots(temporary_slot_count);
+    result
 }
 
 fn emit_block(
