@@ -2387,6 +2387,386 @@ fn float_double_calls_and_control_flow_verify_and_execute() {
 }
 
 #[test]
+fn floating_point_category_two_acceptance_batch_is_complete_deterministic_and_jdk_verified() {
+    let first_output = TestOutputDirectory::new("floating-point-category-two-first");
+    let second_output = TestOutputDirectory::new("floating-point-category-two-second");
+    let first = compile_fixture_classes("FloatingPointCategory2.scala", first_output.path())
+        .expect("compile the complete Float/Double source batch");
+    let second = compile_fixture_classes("FloatingPointCategory2.scala", second_output.path())
+        .expect("compile the same source in an independent frontend session");
+    let artifact_bytes = |artifacts: &[EmittedArtifact]| {
+        artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        artifact_bytes(&first),
+        artifact_bytes(&second),
+        "all three independently compiled class files and their publication order are deterministic"
+    );
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["NumericBox", "NumericConstants", "Runner"]
+    );
+
+    let decode = |name: &str| {
+        let artifact = first
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == name)
+            .unwrap_or_else(|| panic!("missing emitted class {name}"));
+        let class = decode_emitted_class(artifact);
+        assert_eq!(class.version.major, 65, "{name} class-file major version");
+        assert!(class.access_flags.is_public() && class.access_flags.is_super());
+        class
+    };
+    let numeric_box = decode("NumericBox");
+    let constants = decode("NumericConstants");
+    let runner = decode("Runner");
+
+    let field_metadata = |class: &ClassFile<'_>| {
+        class
+            .fields
+            .iter()
+            .map(|field| {
+                (
+                    class
+                        .constant_pool
+                        .utf8(field.name_index)
+                        .unwrap()
+                        .to_owned(),
+                    class
+                        .constant_pool
+                        .utf8(field.descriptor_index)
+                        .unwrap()
+                        .to_owned(),
+                    field.access_flags.0,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        field_metadata(&numeric_box),
+        [
+            (
+                "f".to_owned(),
+                "F".to_owned(),
+                dotty_classfile::access_flags::ACC_PRIVATE
+            ),
+            (
+                "d".to_owned(),
+                "D".to_owned(),
+                dotty_classfile::access_flags::ACC_PRIVATE
+            ),
+        ]
+    );
+    let private_final =
+        dotty_classfile::access_flags::ACC_PRIVATE | dotty_classfile::access_flags::ACC_FINAL;
+    assert_eq!(
+        field_metadata(&constants),
+        [
+            ("f".to_owned(), "F".to_owned(), private_final),
+            ("d".to_owned(), "D".to_owned(), private_final),
+        ]
+    );
+    assert_eq!(
+        methods_with_descriptors(&numeric_box),
+        [
+            ("<init>".to_owned(), "(FD)V".to_owned()),
+            ("getF".to_owned(), "()F".to_owned()),
+            ("getD".to_owned(), "()D".to_owned()),
+            ("setF".to_owned(), "(F)V".to_owned()),
+            ("setD".to_owned(), "(D)V".to_owned()),
+        ]
+    );
+    assert_eq!(
+        methods_with_descriptors(&constants),
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("getF".to_owned(), "()F".to_owned()),
+            ("getD".to_owned(), "()D".to_owned()),
+        ]
+    );
+    assert_eq!(
+        methods_with_descriptors(&runner),
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("floatValue".to_owned(), "()F".to_owned()),
+            ("doubleValue".to_owned(), "()D".to_owned()),
+            ("roundTripF".to_owned(), "(F)F".to_owned()),
+            ("roundTripD".to_owned(), "(D)D".to_owned()),
+            ("replaceD".to_owned(), "(DD)D".to_owned()),
+            ("chooseF".to_owned(), "(ZFF)F".to_owned()),
+            ("chooseD".to_owned(), "(ZDD)D".to_owned()),
+            ("loop".to_owned(), "(IDD)D".to_owned()),
+            ("forwardD".to_owned(), "(LNumericBox;)D".to_owned()),
+            ("construct".to_owned(), "(FD)D".to_owned()),
+            ("mixed".to_owned(), "(IFDJ)D".to_owned()),
+        ]
+    );
+
+    let constructor = emitted_method_code(&numeric_box, "<init>");
+    assert_opcode_sequence(
+        constructor,
+        &[0x2a, 0xb7, 0x2a, 0x23, 0xb5, 0x2a, 0x28, 0xb5, 0xb1],
+    );
+    assert_method_reference(
+        &numeric_box,
+        constructor,
+        0xb7,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+    );
+    assert_field_reference_sequence(
+        &numeric_box,
+        constructor,
+        &[
+            (0xb5, "NumericBox", "f", "F"),
+            (0xb5, "NumericBox", "d", "D"),
+        ],
+    );
+    assert_eq!(code_max_locals(&numeric_box, "<init>"), 4);
+    assert_eq!(code_max_stack(&numeric_box, "<init>"), 3);
+    assert_eq!(
+        emitted_method_code(&runner, "floatValue")[0],
+        0x12,
+        "1.5f is loaded from CONSTANT_Float"
+    );
+    let float_code = emitted_method_code(&runner, "floatValue");
+    let float_index = ConstantPoolIndex(u16::from(float_code[1]));
+    assert!(matches!(
+        runner.constant_pool.get(float_index),
+        Some(ConstantPoolEntry::Float(value)) if value.to_bits() == 0x3fc0_0000
+    ));
+    assert_eq!(float_code[2], 0xae);
+    let double_code = emitted_method_code(&runner, "doubleValue");
+    assert_eq!(double_code[0], 0x14, "3.5 is loaded with ldc2_w");
+    let double_index = ConstantPoolIndex(u16::from_be_bytes([double_code[1], double_code[2]]));
+    assert!(matches!(
+        runner.constant_pool.get(double_index),
+        Some(ConstantPoolEntry::Double(value)) if value.to_bits() == 0x400c_0000_0000_0000
+    ));
+    assert_eq!(
+        runner
+            .constant_pool
+            .get(ConstantPoolIndex(double_index.0 + 1)),
+        None
+    );
+    assert_eq!(double_code[3], 0xaf);
+
+    let constant_loads = decode_subset_instructions(emitted_method_code(&constants, "<init>"))
+        .into_iter()
+        .filter_map(|(offset, opcode)| match opcode {
+            0x12 => Some(ConstantPoolIndex(u16::from(
+                emitted_method_code(&constants, "<init>")[offset + 1],
+            ))),
+            0x13 | 0x14 => Some(ConstantPoolIndex(u16::from_be_bytes([
+                emitted_method_code(&constants, "<init>")[offset + 1],
+                emitted_method_code(&constants, "<init>")[offset + 2],
+            ]))),
+            _ => None,
+        })
+        .filter_map(|index| constants.constant_pool.get(index))
+        .collect::<Vec<_>>();
+    assert!(constant_loads.iter().any(
+        |entry| matches!(entry, ConstantPoolEntry::Float(value) if value.to_bits() == 0x3fc0_0000)
+    ));
+    assert!(constant_loads.iter().any(
+        |entry| matches!(entry, ConstantPoolEntry::Double(value) if value.to_bits() == 0x400c_0000_0000_0000)
+    ));
+
+    assert_opcode_sequence(
+        emitted_method_code(&runner, "roundTripF"),
+        &[0x23, 0x45, 0x24, 0xae],
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&runner, "roundTripD"),
+        &[0x27, 0x4a, 0x29, 0xaf],
+    );
+    assert_eq!(code_max_locals(&runner, "chooseF"), 4);
+    assert_eq!(code_max_locals(&runner, "chooseD"), 6);
+    assert_eq!(code_max_locals(&runner, "mixed"), 7);
+    assert!(
+        stack_map_frames(&runner, "chooseF")
+            .iter()
+            .any(|frame| frame.stack == [StackMapVerificationType::Float])
+    );
+    assert!(
+        stack_map_frames(&runner, "chooseD")
+            .iter()
+            .any(|frame| frame.stack == [StackMapVerificationType::Double])
+    );
+    assert!(stack_map_frames(&runner, "loop").iter().any(|frame| {
+        frame.locals
+            == [
+                StackMapVerificationType::Object("Runner".to_owned()),
+                StackMapVerificationType::Integer,
+                StackMapVerificationType::Double,
+                StackMapVerificationType::Double,
+                StackMapVerificationType::Double,
+                StackMapVerificationType::Integer,
+            ]
+    }));
+    assert_method_reference(
+        &runner,
+        emitted_method_code(&runner, "forwardD"),
+        0xb6,
+        "NumericBox",
+        "getD",
+        "()D",
+    );
+    assert_method_reference(
+        &runner,
+        emitted_method_code(&runner, "construct"),
+        0xb7,
+        "NumericBox",
+        "<init>",
+        "(FD)V",
+    );
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let classpath = first_output.path().to_str().expect("UTF-8 output path");
+    for (class_name, expected_descriptors) in [
+        (
+            "NumericBox",
+            &["descriptor: (FD)V", "descriptor: ()F", "descriptor: ()D"][..],
+        ),
+        (
+            "NumericConstants",
+            &["descriptor: ()F", "descriptor: ()D"][..],
+        ),
+        (
+            "Runner",
+            &[
+                "descriptor: (ZFF)F",
+                "descriptor: (ZDD)D",
+                "descriptor: (IDD)D",
+                "descriptor: (FD)D",
+                "descriptor: (IFDJ)D",
+            ][..],
+        ),
+    ] {
+        let javap = Command::new("javap")
+            .args(["-v", "-c", "-classpath", classpath, class_name])
+            .output()
+            .expect("start javap");
+        assert!(
+            javap.status.success(),
+            "javap failed for {class_name}: {javap:?}"
+        );
+        let output = String::from_utf8_lossy(&javap.stdout);
+        assert!(
+            output.contains("major version: 65"),
+            "{class_name}: {output}"
+        );
+        for descriptor in expected_descriptors {
+            assert!(
+                output.contains(descriptor),
+                "{class_name} omitted {descriptor}: {output}"
+            );
+        }
+    }
+    let harness = first_output
+        .path()
+        .join("FloatingPointCategory2Harness.java");
+    fs::write(
+        &harness,
+        r#"public final class FloatingPointCategory2Harness {
+  private static void check(boolean ok, String label) {
+    if (!ok) throw new AssertionError(label);
+  }
+  public static void main(String[] args) {
+    Runner runner = new Runner();
+    check(Float.floatToRawIntBits(runner.floatValue()) == 0x3fc00000, "Float literal bits");
+    check(Double.doubleToRawLongBits(runner.doubleValue()) == 0x400c000000000000L, "Double literal bits");
+    NumericConstants constants = new NumericConstants();
+    check(constants.getF() == 1.5f && constants.getD() == 3.5d, "constant fields");
+
+    float[] floats = { 17.25f, -19.5f, Float.MIN_VALUE, -Float.MIN_VALUE,
+                       Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY,
+                       0.0f, -0.0f };
+    for (float value : floats) {
+      float actual = runner.roundTripF(value);
+      check(Float.floatToRawIntBits(actual) == Float.floatToRawIntBits(value), "Float round trip");
+    }
+    double[] doubles = { 17.25d, -19.5d, Double.MIN_VALUE, -Double.MIN_VALUE,
+                         Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY,
+                         0.0d, -0.0d };
+    for (double value : doubles) {
+      double actual = runner.roundTripD(value);
+      check(Double.doubleToRawLongBits(actual) == Double.doubleToRawLongBits(value), "Double round trip");
+    }
+    check(Float.isNaN(runner.roundTripF(Float.NaN)), "Float NaN classification");
+    check(Double.isNaN(runner.roundTripD(Double.NaN)), "Double NaN classification");
+    check(Float.floatToRawIntBits(runner.roundTripF(-0.0f)) == 0x80000000, "Float negative zero");
+    check(Double.doubleToRawLongBits(runner.replaceD(3.5d, -0.0d)) == 0x8000000000000000L, "Double negative zero assignment");
+
+    check(runner.chooseF(true, 1.25f, 2.5f) == 1.25f, "Float true branch");
+    check(runner.chooseF(false, 1.25f, 2.5f) == 2.5f, "Float false branch");
+    check(runner.chooseD(true, 1.25d, 2.5d) == 1.25d, "Double true branch");
+    check(runner.chooseD(false, 1.25d, 2.5d) == 2.5d, "Double false branch");
+    check(runner.loop(0, 11.0d, 22.0d) == 11.0d, "zero-iteration loop");
+    check(runner.loop(1, 11.0d, 22.0d) == 22.0d, "one-iteration loop");
+    check(runner.loop(3, 11.0d, 22.0d) == 22.0d, "multi-iteration loop");
+    check(runner.loop(-1, 11.0d, 22.0d) == 11.0d, "negative loop count");
+
+    NumericBox first = new NumericBox(1.5f, 3.5d);
+    NumericBox second = new NumericBox(-2.5f, -4.5d);
+    check(first.getF() == 1.5f && first.getD() == 3.5d, "constructor fields");
+    first.setF(-0.0f);
+    first.setD(-0.0d);
+    second.setF(8.5f);
+    second.setD(9.5d);
+    check(Float.floatToRawIntBits(first.getF()) == 0x80000000, "Float field signed zero");
+    check(Double.doubleToRawLongBits(first.getD()) == 0x8000000000000000L, "Double field signed zero");
+    check(second.getF() == 8.5f && second.getD() == 9.5d, "independent mutable instances");
+    second.setF(Float.NaN);
+    second.setD(Double.NaN);
+    check(Float.isNaN(second.getF()) && Double.isNaN(second.getD()), "NaN fields");
+    check(runner.forwardD(new NumericBox(2.0f, 7.25d)) == 7.25d, "forwarded getter call");
+    check(runner.construct(1.5f, 3.5d) == 3.5d, "mixed constructor call");
+    check(runner.mixed(7, 1.5f, 3.5d, 9000000000L) == 3.5d, "mixed category slots");
+  }
+}
+"#,
+    )
+    .expect("write FloatingPointCategory2Harness.java");
+    let javac = Command::new("javac")
+        .args(["-classpath", classpath, "-d", classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac");
+    assert!(
+        javac.status.success(),
+        "javac rejected acceptance harness: {javac:?}"
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            classpath,
+            "FloatingPointCategory2Harness",
+        ])
+        .output()
+        .expect("start JVM verifier");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected the complete Float/Double batch: {java:?}"
+    );
+}
+
+#[test]
 fn float_double_fields_and_primary_constructor_initialization_verify_and_execute() {
     let first_output = TestOutputDirectory::new("float-double-fields-first");
     let second_output = TestOutputDirectory::new("float-double-fields-second");
