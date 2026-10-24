@@ -137,3 +137,21 @@ plain constructor parameters have no setter. A Java harness invokes getters
 and mutates `var`s under `java -Xverify:all`. These JVM-only tests do not depend
 on Scala source call-site lowering. Rust-produced output passing the JVM
 verifier alone is not evidence of Scala ABI compatibility.
+
+The source-to-JVM acceptance regression
+`constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends`
+extends this proof through the test source assembler. It compiles
+`Measurement(val id: Int, var value: Double)`,
+`Mixed(first: Int, val count: Long, var enabled: Boolean)`, and a mutable
+`LongBox` in one genuine lexer/parser/namer/typer session, then repeats the
+entire batch in a fresh semantic session and compares ordered class names and
+all class bytes. Its source observer checks original class, field, and
+constructor-formal IDs, owner, source ordinal, mutability, visibility, and
+the absence of accessor metadata for the plain `first` formal. Decoded
+classfiles and `javap -c -v -p` verify class version, constructor descriptors
+and slots, private storage, exact getter/setter signatures, field references,
+and bytecode. A strict JDK 21 Java harness calls the generated methods under
+`java -Xverify:all`, mutates independent instances, checks `val` has no setter,
+and exercises Double, Long, and Boolean values. The emitted constructor calls
+`Object.<init>` before copying accessor values; this is the backend's verified
+initialization order, distinct from Scala's constructor instruction order.

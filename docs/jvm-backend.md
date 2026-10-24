@@ -1027,6 +1027,16 @@ planned reference type. Each setter loads its exact typed argument, writes the
 validated private field once, and returns JVM `void`; no source `Method`
 symbols are synthesized for either generated method.
 
+The root integration test
+`constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends`
+drives the real test lexer/parser/namer/typer assembler for `Measurement`,
+`Mixed`, and a mutable Long accessor. It checks canonical source-to-formal
+bindings in-session, ordered byte-identical output from two fresh sessions,
+decoded classfile metadata and instructions, `javap -c -v -p`, and direct Java
+getter/setter execution with JDK 21 `-Xverify:all`. Accessor copies are emitted
+after the verified direct-parent constructor call, as in the backend's
+initialized-`this` contract above.
+
 `JvmClassMetadata::constructor()` exposes the explicit constructor's canonical
 symbol, owner internal name, descriptor, access flags, and ordered
 `JvmParameterLocal` values. Semantic constructor results are class types; JVM
