@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 63183)
-Total output lines: 5736
-
 use dotty_classfile::access_flags::{ACC_FINAL, ACC_PRIVATE, ACC_PUBLIC, MethodAccessFlags};
 use dotty_classfile::class_file::ClassFileVersion;
 use dotty_classfile::class_file_builder::ClassFileBuilder;
@@ -1368,7 +1365,2980 @@ fn reference_fields_read_write_and_call_through_the_current_instance() {
 #[test]
 fn constructor_field_initializer_rejects_qualified_parameter_references() {
     with_source(
-        "class Qualified(start: Int) { private val value: Int = start…33183 tokens truncated…| {
+        "class Qualified(start: Int) { private val value: Int = start }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Qualified");
+            typer.complete_symbol(class).unwrap();
+            let class_tree = ast
+                .iter()
+                .find_map(|(tree, _node)| {
+                    (index.symbol_at(source, tree) == Some(class)).then_some(tree)
+                })
+                .unwrap();
+            let TreeKind::TypeDef(definition) = &ast.get(class_tree).kind else {
+                panic!("Qualified source declaration should be a TypeDef");
+            };
+            let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
+                panic!("Qualified declaration should have a template");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(constructor_def) = &ast.get(template.constructor).kind else {
+                panic!("primary constructor should be a DefDef");
+            };
+            let parameters = constructor_def.value_param_clauses[0]
+                .iter()
+                .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
+                .collect::<Vec<_>>();
+            typer.complete_symbol(constructor).unwrap();
+            let constructor_plan = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                parameters.clone(),
+                ast,
+                index,
+            )
+            .unwrap();
+            let (field, rhs) = template
+                .body
+                .iter()
+                .find_map(|tree| {
+                    let TreeKind::ValDef(definition) = &ast.get(*tree).kind else {
+                        return None;
+                    };
+                    Some((index.symbol_at(source, *tree)?, definition.rhs?))
+                })
+                .unwrap();
+            typer.complete_symbol(field).unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("field type should be complete");
+            };
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let typed_rhs = typer
+                .type_expression_expected(rhs, context, field_type)
+                .unwrap();
+            let typed_rhs_tree = typer.typed_ast().get(typed_rhs).clone();
+            assert!(matches!(typed_rhs_tree.kind, TreeKind::Ident(_)));
+
+            for missing_qualifier in [false, true] {
+                let mut typed_ast = AstArena::<Typed>::new();
+                for (_, tree) in typer.typed_ast().iter() {
+                    typed_ast.alloc(tree.clone());
+                }
+
+                let qualifier = if missing_qualifier {
+                    let checkpoint = typed_ast.checkpoint();
+                    typed_ast.alloc(typed_rhs_tree.clone());
+                    let missing = typed_ast.alloc(typed_rhs_tree.clone());
+                    typed_ast.rollback_to(checkpoint);
+                    missing
+                } else {
+                    typed_ast.alloc(Tree {
+                        kind: TreeKind::Apply(Apply {
+                            function: typed_rhs,
+                            args: Vec::new(),
+                            kind: ApplyKind::Regular,
+                        }),
+                        position: None,
+                        ty: typed_rhs_tree.ty,
+                    })
+                };
+                let initializer = typed_ast.alloc(Tree {
+                    kind: TreeKind::Select(Select {
+                        qualifier,
+                        name: typer.store().symbols.get(parameters[0]).name,
+                        backquoted: false,
+                    }),
+                    position: None,
+                    ty: typed_rhs_tree.ty,
+                });
+                if missing_qualifier {
+                    assert!(typed_ast.try_get(qualifier).is_none());
+                }
+
+                let unit = JvmCompilationUnit {
+                    store: typer.store(),
+                    typed_ast: &typed_ast,
+                    classes: vec![JvmClassPlan {
+                        class,
+                        methods: Vec::new(),
+                        fields: vec![JvmFieldPlan {
+                            field,
+                            source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                            initializer: Some(initializer),
+                        }],
+                        initialization: JvmClassInitializationPlan::PrimaryConstructor(
+                            constructor_plan.clone(),
+                        ),
+                    }],
+                };
+                assert!(matches!(
+                    unit.lower_constructor_field_initializers(class, definitions),
+                    Err(dotty_jvm::JvmCodegenError::UnsupportedConstructorFieldInitializer {
+                        field: found_field,
+                        tree,
+                        node: "qualified constructor parameter reference",
+                    }) if found_field == field && tree == initializer
+                ));
+            }
+        },
+    );
+}
+
+#[test]
+fn constructor_field_initializer_lowering_rejects_forward_field_reads() {
+    with_source(
+        "class Forward() { private val first: Int = second; private val second: Int = 2 }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Forward");
+            typer.complete_symbol(class).unwrap();
+            let class_tree = ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    (index.symbol_at(source, tree) == Some(class)).then_some((tree, node))
+                })
+                .unwrap()
+                .0;
+            let TreeKind::TypeDef(definition) = &ast.get(class_tree).kind else {
+                panic!("Forward source declaration should be a TypeDef");
+            };
+            let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
+                panic!("Forward declaration should have a template");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let constructor_plan = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                Vec::new(),
+                ast,
+                index,
+            )
+            .unwrap();
+
+            let mut fields = Vec::new();
+            for tree in &template.body {
+                let TreeKind::ValDef(field_def) = &ast.get(*tree).kind else {
+                    continue;
+                };
+                let Some(field) = index.symbol_at(source, *tree) else {
+                    continue;
+                };
+                let rhs = field_def.rhs.unwrap();
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let typed_rhs = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
+                fields.push(JvmFieldPlan {
+                    field,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(typed_rhs),
+                });
+            }
+            let first = fields[0].field;
+            let second = fields[1].field;
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: Vec::new(),
+                    fields,
+                    initialization: JvmClassInitializationPlan::PrimaryConstructor(
+                        constructor_plan,
+                    ),
+                }],
+            };
+            assert_eq!(
+                unit.lower_constructor_field_initializers(class, definitions),
+                Err(
+                    dotty_jvm::JvmCodegenError::FieldInitializerReadsUninitializedField {
+                        field: first,
+                        tree: unit.classes[0].fields[0].initializer.unwrap(),
+                        referenced_field: second,
+                    }
+                )
+            );
+        },
+    );
+}
+
+#[test]
+fn constructor_field_initializer_lowering_rejects_self_reads() {
+    with_source(
+        "class SelfRead() { private val value: Int = value }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "SelfRead");
+            typer.complete_symbol(class).unwrap();
+            let class_tree = ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    (index.symbol_at(source, tree) == Some(class)).then_some((tree, node))
+                })
+                .unwrap()
+                .0;
+            let TreeKind::TypeDef(definition) = &ast.get(class_tree).kind else {
+                panic!("SelfRead source declaration should be a TypeDef");
+            };
+            let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
+                panic!("SelfRead declaration should have a template");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let constructor_plan = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                Vec::new(),
+                ast,
+                index,
+            )
+            .unwrap();
+            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "value");
+            typer.complete_symbol(field).unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("field type should be complete");
+            };
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let typed_rhs = typer
+                .type_expression_expected(rhs, context, field_type)
+                .unwrap();
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: Vec::new(),
+                    fields: vec![JvmFieldPlan {
+                        field,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                        initializer: Some(typed_rhs),
+                    }],
+                    initialization: JvmClassInitializationPlan::PrimaryConstructor(
+                        constructor_plan,
+                    ),
+                }],
+            };
+            assert!(matches!(
+                unit.lower_constructor_field_initializers(class, definitions),
+                Err(dotty_jvm::JvmCodegenError::FieldInitializerReadsUninitializedField {
+                    field: found_field,
+                    referenced_field,
+                    ..
+                }) if found_field == field && referenced_field == field
+            ));
+        },
+    );
+}
+
+#[test]
+fn constructor_field_initializer_lowering_rejects_user_method_calls() {
+    with_source(
+        "class Calling() { private def value(): Int = 7; private val result: Int = value() }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Calling");
+            typer.complete_symbol(class).unwrap();
+            let class_tree = ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    (index.symbol_at(source, tree) == Some(class)).then_some((tree, node))
+                })
+                .unwrap()
+                .0;
+            let TreeKind::TypeDef(definition) = &ast.get(class_tree).kind else {
+                panic!("Calling source declaration should be a TypeDef");
+            };
+            let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
+                panic!("Calling declaration should have a template");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let constructor_plan = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                Vec::new(),
+                ast,
+                index,
+            )
+            .unwrap();
+            let (field, rhs) = template
+                .body
+                .iter()
+                .find_map(|tree| {
+                    let TreeKind::ValDef(definition) = &ast.get(*tree).kind else {
+                        return None;
+                    };
+                    Some((index.symbol_at(source, *tree)?, definition.rhs?))
+                })
+                .unwrap();
+            typer.complete_symbol(field).unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("field type should be complete");
+            };
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let typed_rhs = typer
+                .type_expression_expected(rhs, context, field_type)
+                .unwrap();
+            assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
+
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: Vec::new(),
+                    fields: vec![JvmFieldPlan {
+                        field,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                        initializer: Some(typed_rhs),
+                    }],
+                    initialization: JvmClassInitializationPlan::PrimaryConstructor(
+                        constructor_plan,
+                    ),
+                }],
+            };
+            assert!(matches!(
+                unit.lower_constructor_field_initializers(class, definitions),
+                Err(dotty_jvm::JvmCodegenError::UnsupportedConstructorFieldInitializer {
+                    field: found_field,
+                    tree,
+                    node: "non-approved constructor application",
+                }) if found_field == field && tree == typed_rhs
+            ));
+        },
+    );
+}
+
+#[test]
+fn primary_constructor_parameter_and_private_var_remain_separate_identities() {
+    with_source(
+        "class Counter(start: Long) { private var current: Long = start; def get(): Long = current }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Counter");
+            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "current");
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let method = symbol_named(ast, index, source, typer, "get");
+            let method_rhs = ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    let TreeKind::DefDef(definition) = &node.kind else {
+                        return None;
+                    };
+                    (index.symbol_at(source, tree) == Some(method))
+                        .then_some(definition.rhs)
+                        .flatten()
+                })
+                .expect("get method should have a source body");
+            assert_eq!(
+                template
+                    .body
+                    .iter()
+                    .filter_map(|tree| index.symbol_at(source, *tree))
+                    .collect::<Vec<_>>(),
+                vec![field, method]
+            );
+            let TreeKind::DefDef(constructor_def) = &ast.get(template.constructor).kind else {
+                panic!("primary constructor should be a DefDef");
+            };
+            assert_eq!(constructor_def.value_param_clauses.len(), 1);
+            assert_eq!(constructor_def.value_param_clauses[0].len(), 1);
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            assert_eq!(
+                typer.store().symbols.get(constructor).kind,
+                SymbolKind::Constructor
+            );
+            assert_eq!(typer.store().symbols.get(constructor).owner, Some(class));
+            assert_eq!(
+                typer.store().symbols.get(constructor).visibility,
+                Visibility::Public
+            );
+            let parameter_tree = constructor_def.value_param_clauses[0][0];
+            let canonical_parameter = index.symbol_at(source, parameter_tree).unwrap();
+            let constructor_parameter = index
+                .derived_symbol_at(constructor, source, parameter_tree)
+                .unwrap();
+
+            assert_eq!(
+                typer.store().symbols.get(canonical_parameter).kind,
+                SymbolKind::Parameter
+            );
+            assert_eq!(
+                typer.store().symbols.get(canonical_parameter).owner,
+                Some(class)
+            );
+            assert_eq!(
+                typer.store().symbols.get(canonical_parameter).visibility,
+                Visibility::Private
+            );
+            assert_eq!(
+                typer.store().symbols.get(constructor_parameter).visibility,
+                Visibility::Public
+            );
+            assert_eq!(typer.store().symbols.get(field).kind, SymbolKind::Field);
+            assert_eq!(typer.store().symbols.get(field).owner, Some(class));
+            assert!(
+                typer
+                    .store()
+                    .symbols
+                    .get(field)
+                    .flags
+                    .contains(SymbolFlags::MUTABLE)
+            );
+            assert_eq!(
+                typer.store().symbols.get(field).visibility,
+                Visibility::Private
+            );
+            assert_ne!(canonical_parameter, constructor_parameter);
+            assert_eq!(
+                typer.store().symbols.get(canonical_parameter).owner,
+                Some(class)
+            );
+            assert_eq!(
+                typer.store().symbols.get(constructor_parameter).kind,
+                SymbolKind::Parameter
+            );
+            assert_eq!(
+                typer.store().symbols.get(constructor_parameter).owner,
+                Some(constructor)
+            );
+            assert!(
+                !typer
+                    .store()
+                    .symbols
+                    .get(constructor_parameter)
+                    .flags
+                    .contains(SymbolFlags::MUTABLE)
+            );
+            assert_ne!(field, constructor_parameter);
+
+            typer.complete_symbol(constructor).unwrap();
+            typer.complete_symbol(class).unwrap();
+            let SymbolInfo::Complete(constructor_type) =
+                typer.store().symbols.get(constructor).info
+            else {
+                panic!("constructor signature should be complete");
+            };
+            let Type::Method(signature) = typer.store().types.get(constructor_type) else {
+                panic!("ordinary primary constructor should have one method clause");
+            };
+            assert_eq!(signature.params.len(), 1);
+            assert_eq!(signature.kind, dotty_core::MethodKind::Plain);
+            assert_eq!(signature.params[0].ty, definitions.long);
+            let constructor_parameter_type = signature.params[0].ty;
+            assert_eq!(
+                typer.store().types.get(signature.result).reference_symbol(),
+                Some(class)
+            );
+            assert!(matches!(
+                typer.store().symbols.get(class).info,
+                SymbolInfo::Complete(_)
+            ));
+
+            typer.complete_symbol(field).unwrap();
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let typed_rhs = typer
+                .type_expression_expected(rhs, context, constructor_parameter_type)
+                .unwrap();
+            assert_eq!(typer.type_expression(rhs, context).unwrap(), typed_rhs);
+            assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
+            assert!(matches!(
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(typed_rhs).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                    if *symbol == constructor_parameter
+            ));
+            assert_eq!(
+                typer.store().types.get(constructor_parameter_type),
+                typer.store().types.get(definitions.long)
+            );
+
+            typer.complete_symbol(method).unwrap();
+            let method_context = typer.expression_context_for(method).unwrap();
+            let typed_method_rhs = typer.type_expression(method_rhs, method_context).unwrap();
+            assert!(matches!(
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(typed_method_rhs).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                    if *symbol == field
+            ));
+
+            let constructor_plan = JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                vec![constructor_parameter],
+                ast,
+                index,
+            )
+            .unwrap();
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: vec![JvmMethodPlan {
+                        method,
+                        parameters: Vec::new(),
+                        locals: Vec::new(),
+                        body: Some(typed_method_rhs),
+                    }],
+                    fields: vec![JvmFieldPlan {
+                        field,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                        initializer: Some(typed_rhs),
+                    }],
+                    initialization: JvmClassInitializationPlan::PrimaryConstructor(
+                        constructor_plan,
+                    ),
+                }],
+            };
+            let metadata = unit.metadata(definitions).unwrap();
+            assert_eq!(metadata[0].fields()[0].descriptor(), "J");
+            assert_eq!(metadata[0].constructor().unwrap().parameters()[0].slot(), 1);
+            assert_eq!(
+                metadata[0].constructor().unwrap().parameters()[0].width(),
+                2
+            );
+            let initializer = unit
+                .lower_constructor_field_initializers(class, definitions)
+                .unwrap();
+            assert!(matches!(
+                initializer.fields()[0].instructions(),
+                [
+                    JvmConstructorInitializerInstruction::LoadThis,
+                    JvmConstructorInitializerInstruction::LoadParameter {
+                        symbol,
+                        slot: 1,
+                        value_type: dotty_jvm::JvmType::Long,
+                    },
+                    JvmConstructorInitializerInstruction::PutField {
+                        field: actual_field,
+                        descriptor,
+                        ..
+                    },
+                ] if *symbol == constructor_parameter
+                    && *actual_field == field
+                    && descriptor == "J"
+            ));
+        },
+    );
+}
+
+#[test]
+fn val_and_var_constructor_parameters_have_distinct_field_and_parameter_symbols() {
+    let source_text = "class Measurement(val id: Int, var value: Double); class Mixed(val enabled: Boolean, var count: Long); class Ref(val item: Measurement)";
+    with_source(source_text, |ast, source, index, definitions, typer| {
+        let mut class_plans = Vec::new();
+        for (class_name, fields) in [
+            (
+                "Measurement",
+                vec![
+                    ("id", Some(definitions.int), None, false),
+                    ("value", Some(definitions.double), None, true),
+                ],
+            ),
+            (
+                "Mixed",
+                vec![
+                    ("enabled", Some(definitions.boolean), None, false),
+                    ("count", Some(definitions.long), None, true),
+                ],
+            ),
+            (
+                "Ref",
+                vec![(
+                    "item",
+                    None,
+                    Some(symbol_named(ast, index, source, typer, "Measurement")),
+                    false,
+                )],
+            ),
+        ] {
+            let class = symbol_named(ast, index, source, typer, class_name);
+            typer.complete_symbol(class).unwrap();
+            let class_tree = ast
+                .iter()
+                .find_map(|(tree, _node)| {
+                    (index.symbol_at(source, tree) == Some(class)).then_some(tree)
+                })
+                .unwrap();
+            let TreeKind::TypeDef(class_definition) = &ast.get(class_tree).kind else {
+                panic!("class declaration should be a TypeDef");
+            };
+            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
+                panic!("class body should be a Template");
+            };
+            let TreeKind::DefDef(constructor_def) = &ast.get(template.constructor).kind else {
+                panic!("primary constructor should be a DefDef");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let parameter_trees = constructor_def.value_param_clauses[0].clone();
+            assert_eq!(parameter_trees.len(), fields.len());
+            let mut parameters = Vec::with_capacity(parameter_trees.len());
+            for (parameter_tree, (name, expected_type, expected_symbol, mutable)) in
+                parameter_trees.iter().copied().zip(fields)
+            {
+                let TreeKind::ValDef(parameter_definition) = &ast.get(parameter_tree).kind else {
+                    panic!("constructor parameter source node should be a ValDef");
+                };
+                let expected_modifiers = if mutable {
+                    vec![
+                        dotty_core::ast::Modifier::ParamAccessor,
+                        dotty_core::ast::Modifier::Var,
+                    ]
+                } else {
+                    vec![dotty_core::ast::Modifier::ParamAccessor]
+                };
+                assert_eq!(parameter_definition.metadata.modifiers, expected_modifiers);
+                assert!(parameter_definition.metadata.visibility.is_none());
+                assert_eq!(
+                    typer
+                        .store()
+                        .names
+                        .resolve(parameter_definition.name.as_name().text()),
+                    name,
+                    "{class_name} constructor parameter order"
+                );
+                let field = index.symbol_at(source, parameter_tree).unwrap();
+                let parameter = index
+                    .derived_symbol_at(constructor, source, parameter_tree)
+                    .unwrap();
+                parameters.push(parameter);
+
+                assert_ne!(field, parameter, "{class_name}.{name} identities");
+                assert_eq!(
+                    index.definition_of(field),
+                    Some(dotty_namer::SourceDefinition::Canonical {
+                        source,
+                        tree: parameter_tree,
+                    })
+                );
+                assert_eq!(
+                    index.definition_of(parameter),
+                    Some(dotty_namer::SourceDefinition::Derived {
+                        source,
+                        tree: parameter_tree,
+                    })
+                );
+                assert_eq!(ast.get(parameter_tree).position.unwrap().source(), source);
+                assert_eq!(typer.store().symbols.get(field).kind, SymbolKind::Field);
+                assert_eq!(typer.store().symbols.get(field).owner, Some(class));
+                assert_eq!(
+                    typer.store().symbols.get(field).visibility,
+                    Visibility::Public
+                );
+                assert_eq!(
+                    typer.store().symbols.get(parameter).kind,
+                    SymbolKind::Parameter
+                );
+                assert_eq!(
+                    typer.store().symbols.get(parameter).owner,
+                    Some(constructor)
+                );
+                assert!(
+                    !typer
+                        .store()
+                        .symbols
+                        .get(parameter)
+                        .flags
+                        .contains(SymbolFlags::MUTABLE)
+                );
+                assert_eq!(
+                    typer
+                        .store()
+                        .symbols
+                        .get(field)
+                        .flags
+                        .contains(SymbolFlags::MUTABLE),
+                    mutable,
+                    "{class_name}.{name} mutability belongs to the source field"
+                );
+                typer.complete_symbol(field).unwrap();
+                typer.complete_symbol(parameter).unwrap();
+                let field_ty = match typer.store().symbols.get(field).info {
+                    SymbolInfo::Complete(ty) => ty,
+                    _ => panic!("{class_name}.{name} field type should be complete"),
+                };
+                let parameter_ty = match typer.store().symbols.get(parameter).info {
+                    SymbolInfo::Complete(ty) => ty,
+                    _ => panic!("{class_name}.{name} parameter type should be complete"),
+                };
+                for (label, ty) in [("field", field_ty), ("derived parameter", parameter_ty)] {
+                    if let Some(expected_type) = expected_type {
+                        assert_eq!(
+                            typer.store().types.get(ty).reference_symbol(),
+                            typer.store().types.get(expected_type).reference_symbol(),
+                            "{class_name}.{name} {label} type"
+                        );
+                    }
+                    if let Some(expected_symbol) = expected_symbol {
+                        assert!(
+                            matches!(
+                                typer.store().types.get(ty),
+                                Type::TypeRef { target: dotty_core::types::TypeRefTarget::Symbol(actual), .. }
+                                    if *actual == expected_symbol
+                            ),
+                            "{class_name}.{name} {label} should retain its class type identity"
+                        );
+                    }
+                }
+            }
+            let proof = JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                parameters.clone(),
+                ast,
+                index,
+            )
+            .unwrap();
+            assert_eq!(proof.accessor_bindings().len(), parameter_trees.len());
+            for (ordinal, (binding, tree)) in proof
+                .accessor_bindings()
+                .iter()
+                .zip(&parameter_trees)
+                .enumerate()
+            {
+                assert_eq!(binding.class(), class);
+                assert_eq!(binding.constructor(), constructor);
+                assert_eq!(binding.source_id(), source);
+                assert_eq!(binding.source_parameter(), *tree);
+                assert_eq!(binding.field(), index.symbol_at(source, *tree).unwrap());
+                assert_eq!(
+                    binding.parameter(),
+                    index.derived_symbol_at(constructor, source, *tree).unwrap()
+                );
+                assert_eq!(binding.source_ordinal(), ordinal);
+                assert_eq!(binding.is_mutable(), ordinal == 1);
+            }
+            class_plans.push(JvmClassPlan {
+                class,
+                methods: Vec::new(),
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof.clone()),
+            });
+            typer.complete_symbol(constructor).unwrap();
+            if class_name != "Ref" {
+                let metadata = class_plans
+                    .last()
+                    .unwrap()
+                    .metadata(typer.store(), definitions)
+                    .unwrap();
+                assert_eq!(metadata.accessor_bindings(), proof.accessor_bindings());
+            }
+        }
+        let unit = JvmCompilationUnit {
+            store: typer.store(),
+            typed_ast: typer.typed_ast(),
+            classes: class_plans,
+        };
+        let metadata = unit.metadata(definitions).unwrap();
+        assert_eq!(metadata.len(), 3);
+        assert_eq!(
+            metadata
+                .iter()
+                .map(|class| class.accessor_bindings().len())
+                .collect::<Vec<_>>(),
+            [2, 2, 1],
+            "same-batch accessor metadata remains canonical"
+        );
+        for class_name in ["Measurement", "Mixed", "Ref"] {
+            let class = symbol_named(ast, index, source, typer, class_name);
+            let class_metadata = metadata
+                .iter()
+                .find(|metadata| metadata.identity().symbol() == class)
+                .unwrap();
+            assert!(class_metadata.methods().is_empty());
+            assert_eq!(
+                class_metadata.accessors().len(),
+                class_metadata.accessor_bindings().len()
+            );
+            for (ordinal, accessor) in class_metadata.accessors().iter().enumerate() {
+                assert_eq!(accessor.owner(), class);
+                assert_eq!(accessor.source_ordinal(), ordinal);
+                assert_eq!(accessor.source_field(), accessor.binding().field());
+                assert_eq!(
+                    accessor.constructor_parameter(),
+                    accessor.binding().parameter()
+                );
+                assert!(accessor.field_access_flags().contains(ACC_PRIVATE));
+                assert!(accessor.getter().access_flags().contains(ACC_PUBLIC));
+            }
+        }
+        let measurement = metadata
+            .iter()
+            .find(|metadata| {
+                metadata.identity().symbol()
+                    == symbol_named(ast, index, source, typer, "Measurement")
+            })
+            .unwrap();
+        let [id, value] = measurement.accessors() else {
+            panic!("Measurement should retain two accessor metadata records");
+        };
+        assert_eq!((id.field_name(), id.field_descriptor()), ("id", "I"));
+        assert!(id.field_access_flags().contains(ACC_FINAL));
+        assert_eq!(
+            (id.getter().name(), id.getter().descriptor().as_str()),
+            ("id", "()I")
+        );
+        assert!(id.setter().is_none(), "val must not have a JVM setter");
+        assert_eq!(
+            (value.field_name(), value.field_descriptor()),
+            ("value", "D")
+        );
+        assert!(!value.field_access_flags().contains(ACC_FINAL));
+        assert_eq!(
+            (value.getter().name(), value.getter().descriptor().as_str()),
+            ("value", "()D")
+        );
+        let setter = value.setter().unwrap();
+        assert_eq!(
+            (setter.name(), setter.descriptor().as_str()),
+            ("value_$eq", "(D)V")
+        );
+        assert!(setter.access_flags().contains(ACC_PUBLIC));
+        let mixed = metadata
+            .iter()
+            .find(|metadata| {
+                metadata.identity().symbol() == symbol_named(ast, index, source, typer, "Mixed")
+            })
+            .unwrap();
+        assert_eq!(
+            mixed
+                .accessors()
+                .iter()
+                .map(|accessor| (accessor.field_name(), accessor.field_descriptor()))
+                .collect::<Vec<_>>(),
+            [("enabled", "Z"), ("count", "J")]
+        );
+        assert_eq!(
+            mixed.accessors()[1].setter().unwrap().descriptor().as_str(),
+            "(J)V"
+        );
+        let reference = metadata
+            .iter()
+            .find(|metadata| {
+                metadata.identity().symbol() == symbol_named(ast, index, source, typer, "Ref")
+            })
+            .unwrap();
+        assert_eq!(reference.accessors()[0].field_descriptor(), "LMeasurement;");
+        assert_eq!(
+            reference.accessors()[0].getter().descriptor().as_str(),
+            "()LMeasurement;"
+        );
+    });
+}
+
+#[test]
+fn constructor_accessors_initialize_private_storage_from_exact_formal_slots() {
+    let source_text = "class Measurement(val id: Int, var value: Double) { private val copied: Int = 42 }; class Mixed(start: Int, val total: Long, var enabled: Boolean, var ratio: Float); class Ref(val item: Measurement)";
+    with_source(source_text, |ast, source, index, definitions, typer| {
+        let mut classes = Vec::new();
+        let mut class_symbols = Vec::new();
+        for class_name in ["Measurement", "Mixed", "Ref"] {
+            let class = symbol_named(ast, index, source, typer, class_name);
+            class_symbols.push(class);
+            typer.complete_symbol(class).unwrap();
+            let class_tree = ast
+                .iter()
+                .find_map(|(tree, _)| {
+                    (index.symbol_at(source, tree) == Some(class)).then_some(tree)
+                })
+                .unwrap();
+            let TreeKind::TypeDef(class_definition) = &ast.get(class_tree).kind else {
+                panic!("{class_name} source declaration should be a TypeDef");
+            };
+            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
+                panic!("{class_name} should have a template");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
+            else {
+                panic!("{class_name} primary constructor should be a DefDef");
+            };
+            let parameter_trees = constructor_definition
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            let parameters = parameter_trees
+                .iter()
+                .map(|tree| {
+                    let field_or_parameter = index.symbol_at(source, *tree).unwrap();
+                    let parameter = index.derived_symbol_at(constructor, source, *tree).unwrap();
+                    typer.complete_symbol(field_or_parameter).unwrap();
+                    typer.complete_symbol(parameter).unwrap();
+                    parameter
+                })
+                .collect::<Vec<_>>();
+            typer.complete_symbol(constructor).unwrap();
+            let proof = JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                parameters.clone(),
+                ast,
+                index,
+            )
+            .unwrap();
+            let mut field_plans = Vec::new();
+            for tree in &template.body {
+                let TreeKind::ValDef(field_definition) = &ast.get(*tree).kind else {
+                    continue;
+                };
+                let Some(field) = index.symbol_at(source, *tree) else {
+                    continue;
+                };
+                let rhs = field_definition.rhs.expect("body field has an initializer");
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("body field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let typed_rhs = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                field_plans.push(JvmFieldPlan {
+                    field,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(typed_rhs),
+                });
+            }
+            classes.push(JvmClassPlan {
+                class,
+                methods: Vec::new(),
+                fields: field_plans,
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+            });
+        }
+
+        let unit = JvmCompilationUnit {
+            store: typer.store(),
+            typed_ast: typer.typed_ast(),
+            classes,
+        };
+        let metadata = unit.metadata(definitions).unwrap();
+        let expected = [
+            (
+                "Measurement",
+                vec![("id", "I", 1, 1), ("value", "D", 2, 2)],
+                "(ID)V",
+            ),
+            (
+                "Mixed",
+                vec![
+                    ("total", "J", 2, 2),
+                    ("enabled", "Z", 4, 1),
+                    ("ratio", "F", 5, 1),
+                ],
+                "(IJZF)V",
+            ),
+            (
+                "Ref",
+                vec![("item", "LMeasurement;", 1, 1)],
+                "(LMeasurement;)V",
+            ),
+        ];
+        for (class_name, fields, constructor_descriptor) in expected {
+            let class = symbol_named(ast, index, source, typer, class_name);
+            let class_metadata = metadata
+                .iter()
+                .find(|metadata| metadata.identity().symbol() == class)
+                .unwrap();
+            let initializer_plan = unit
+                .lower_constructor_field_initializers(class, definitions)
+                .unwrap();
+            assert_eq!(initializer_plan.accessors().len(), fields.len());
+            assert_eq!(
+                initializer_plan.fields().len(),
+                usize::from(class_name == "Measurement"),
+                "ordinary private initializers remain in their existing plan"
+            );
+            for (initializer, (name, descriptor, slot, width)) in initializer_plan
+                .accessors()
+                .iter()
+                .zip(fields.iter().copied())
+            {
+                let accessor = class_metadata
+                    .accessors()
+                    .iter()
+                    .find(|accessor| accessor.source_field() == initializer.field())
+                    .unwrap();
+                assert_eq!(accessor.field_name(), name);
+                assert_eq!(accessor.field_descriptor(), descriptor);
+                assert_eq!(initializer.parameter(), accessor.constructor_parameter());
+                assert_eq!(initializer.source_ordinal(), accessor.source_ordinal());
+                assert_eq!(initializer.slot(), slot);
+                assert_eq!(initializer.width(), width);
+            }
+
+            let generated = emit_class(&unit, class, definitions).unwrap();
+            let repeated = emit_class(&unit, class, definitions).unwrap();
+            assert_eq!(
+                generated.bytes(),
+                repeated.bytes(),
+                "emission is deterministic"
+            );
+            let mut reader = Reader::new(generated.bytes());
+            let class_file = dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
+            class_file.validate_references().unwrap();
+            let emitted_fields = class_file
+                .fields
+                .iter()
+                .map(|field| {
+                    (
+                        class_file.constant_pool.utf8(field.name_index).unwrap(),
+                        class_file
+                            .constant_pool
+                            .utf8(field.descriptor_index)
+                            .unwrap(),
+                        field.access_flags,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let accessor_fields = fields
+                .iter()
+                .map(|(name, descriptor, _, _)| (*name, *descriptor))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                emitted_fields
+                    .iter()
+                    .take(accessor_fields.len())
+                    .map(|(name, descriptor, _)| (*name, *descriptor))
+                    .collect::<Vec<_>>(),
+                accessor_fields
+            );
+            assert_eq!(
+                emitted_fields
+                    .iter()
+                    .skip(accessor_fields.len())
+                    .map(|(name, descriptor, _)| (*name, *descriptor))
+                    .collect::<Vec<_>>(),
+                class_metadata
+                    .fields()
+                    .iter()
+                    .map(|field| (field.name(), field.descriptor()))
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                emitted_fields
+                    .iter()
+                    .all(|(_, _, flags)| flags.is_private())
+            );
+            let emitted_method_names = class_file
+                .methods
+                .iter()
+                .map(|method| class_file.constant_pool.utf8(method.name_index).unwrap())
+                .collect::<Vec<_>>();
+            let expected_method_names = std::iter::once("<init>")
+                .chain(
+                    class_metadata
+                        .accessors()
+                        .iter()
+                        .map(|accessor| accessor.getter().name()),
+                )
+                .collect::<Vec<_>>();
+            assert_eq!(emitted_method_names, expected_method_names);
+            let constructor = &class_file.methods[0];
+            assert_eq!(
+                class_file
+                    .constant_pool
+                    .utf8(constructor.name_index)
+                    .unwrap(),
+                "<init>"
+            );
+            assert_eq!(
+                class_file
+                    .constant_pool
+                    .utf8(constructor.descriptor_index)
+                    .unwrap(),
+                constructor_descriptor
+            );
+            let code = constructor
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    dotty_classfile::attribute::Attribute::Code(code) => Some(code),
+                    _ => None,
+                })
+                .unwrap();
+            let expected_stack = if fields.iter().any(|(_, _, _, width)| *width == 2) {
+                3
+            } else {
+                2
+            };
+            assert!(
+                code.max_stack >= expected_stack,
+                "accessor copies need {expected_stack} stack slots"
+            );
+            let expected_locals = initializer_plan
+                .constructor()
+                .parameters()
+                .last()
+                .map(|parameter| parameter.slot() + u16::from(parameter.width()))
+                .unwrap_or(1);
+            assert_eq!(code.max_locals, expected_locals);
+            let puts = code.code.iter().filter(|opcode| **opcode == 0xb5).count();
+            assert_eq!(
+                puts,
+                initializer_plan.accessors().len() + initializer_plan.fields().len(),
+                "each accessor and ordinary field is stored exactly once"
+            );
+            assert_eq!(code.code[0], 0x2a, "constructor starts by loading this");
+            assert_eq!(
+                code.code[1], 0xb7,
+                "direct-super initialization precedes stores"
+            );
+            let first_put = code.code.iter().position(|opcode| *opcode == 0xb5).unwrap();
+            assert!(
+                first_put > 1,
+                "no accessor store may use uninitialized this"
+            );
+            if class_name == "Measurement" {
+                let putfield_references = code
+                    .code
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, opcode)| **opcode == 0xb5)
+                    .map(|(offset, _)| {
+                        let index =
+                            u16::from_be_bytes([code.code[offset + 1], code.code[offset + 2]]);
+                        let dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+                            class_index,
+                            name_and_type_index,
+                        } = class_file
+                            .constant_pool
+                            .get(dotty_classfile::constant_pool::ConstantPoolIndex(index))
+                            .unwrap()
+                        else {
+                            panic!("putfield must use a Fieldref");
+                        };
+                        let owner = class_file.constant_pool.class_name(*class_index).unwrap();
+                        let (name, descriptor) = class_file
+                            .constant_pool
+                            .name_and_type(*name_and_type_index)
+                            .unwrap();
+                        (owner, name, descriptor)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    putfield_references,
+                    [
+                        ("Measurement", "id", "I"),
+                        ("Measurement", "value", "D"),
+                        ("Measurement", "copied", "I"),
+                    ]
+                );
+            }
+        }
+
+        if require_jdk21_or_skip() {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let output = std::env::temp_dir().join(format!(
+                "dotty-jvm-accessor-initializers-{}-{nonce}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&output).unwrap();
+            for class in class_symbols {
+                let generated = emit_class(&unit, class, definitions).unwrap();
+                fs::write(
+                    output.join(format!("{}.class", generated.internal_name())),
+                    generated.bytes(),
+                )
+                .unwrap();
+            }
+            let harness = output.join("AccessorInitializerHarness.java");
+            fs::write(
+                &harness,
+                "public final class AccessorInitializerHarness { private static java.lang.reflect.Field field(Class<?> type, String name) throws Exception { java.lang.reflect.Field field = type.getDeclaredField(name); field.setAccessible(true); return field; } public static void main(String[] args) throws Exception { Measurement first = new Measurement(7, 1.5d); Measurement second = new Measurement(-4, -2.25d); if (field(Measurement.class, \"id\").getInt(first) != 7 || field(Measurement.class, \"value\").getDouble(first) != 1.5d || field(Measurement.class, \"copied\").getInt(first) != 42) throw new AssertionError(\"Measurement first\"); if (field(Measurement.class, \"id\").getInt(second) != -4 || field(Measurement.class, \"value\").getDouble(second) != -2.25d || field(Measurement.class, \"copied\").getInt(second) != 42) throw new AssertionError(\"Measurement second\"); Mixed mixed = new Mixed(99, Long.MIN_VALUE + 17, true, 3.25f); if (field(Mixed.class, \"total\").getLong(mixed) != Long.MIN_VALUE + 17 || !field(Mixed.class, \"enabled\").getBoolean(mixed) || field(Mixed.class, \"ratio\").getFloat(mixed) != 3.25f) throw new AssertionError(\"Mixed\"); try { field(Mixed.class, \"start\"); throw new AssertionError(\"plain parameter must not become a field\"); } catch (NoSuchFieldException expected) { } Ref ref = new Ref(first); if (field(Ref.class, \"item\").get(ref) != first) throw new AssertionError(\"Ref\"); } }\n",
+            )
+            .unwrap();
+            let javac = Command::new("javac")
+                .args(["-classpath", output.to_str().unwrap(), "-d"])
+                .arg(output.to_str().unwrap())
+                .arg(&harness)
+                .output()
+                .unwrap();
+            assert!(
+                javac.status.success(),
+                "javac rejected accessor initialization harness\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&javac.stdout),
+                String::from_utf8_lossy(&javac.stderr)
+            );
+            let java = Command::new("java")
+                .args([
+                    "-Xverify:all",
+                    "-classpath",
+                    output.to_str().unwrap(),
+                    "AccessorInitializerHarness",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                java.status.success(),
+                "java -Xverify:all rejected accessor initialization\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&java.stdout),
+                String::from_utf8_lossy(&java.stderr)
+            );
+            fs::remove_dir_all(output).unwrap();
+        }
+    });
+}
+
+#[test]
+fn constructor_accessor_getters_emit_verified_abi_methods() {
+    let source_text = "class Measurement(val id: Int, var value: Double) { def marker(): Int = 9 }; class Mixed(val enabled: Boolean, val count: Long, val ratio: Float); class Ref(val item: Measurement); class Plain(start: Int)";
+    with_source(source_text, |ast, source, index, definitions, typer| {
+        let mut classes = Vec::new();
+        let mut class_symbols = Vec::new();
+        for class_name in ["Measurement", "Mixed", "Ref", "Plain"] {
+            let class = symbol_named(ast, index, source, typer, class_name);
+            class_symbols.push(class);
+            typer.complete_symbol(class).unwrap();
+            let class_tree = ast
+                .iter()
+                .find_map(|(tree, _)| {
+                    (index.symbol_at(source, tree) == Some(class)).then_some(tree)
+                })
+                .unwrap();
+            let TreeKind::TypeDef(class_definition) = &ast.get(class_tree).kind else {
+                panic!("{class_name} should be a type definition");
+            };
+            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
+                panic!("{class_name} should have a template");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
+            else {
+                panic!("{class_name} constructor should be a definition");
+            };
+            let parameters = constructor_definition
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .map(|tree| {
+                    let source_symbol = index.symbol_at(source, *tree).unwrap();
+                    typer.complete_symbol(source_symbol).unwrap();
+                    let parameter = index.derived_symbol_at(constructor, source, *tree).unwrap();
+                    typer.complete_symbol(parameter).unwrap();
+                    parameter
+                })
+                .collect::<Vec<_>>();
+            typer.complete_symbol(constructor).unwrap();
+            let constructor_plan =
+                JvmPrimaryConstructorPlan::from_source(class, constructor, parameters, ast, index)
+                    .unwrap();
+
+            let mut methods = Vec::new();
+            for tree in template.body.iter().copied() {
+                let TreeKind::DefDef(definition) = &ast.get(tree).kind else {
+                    continue;
+                };
+                let method = index.symbol_at(source, tree).unwrap();
+                typer.complete_symbol(method).unwrap();
+                let body = definition.rhs.unwrap();
+                let context = typer.expression_context_for(method).unwrap();
+                let typed_body = typer.type_expression(body, context).unwrap();
+                methods.push(JvmMethodPlan {
+                    method,
+                    parameters: definition
+                        .value_param_clauses
+                        .iter()
+                        .flatten()
+                        .map(|tree| index.symbol_at(source, *tree).unwrap())
+                        .collect(),
+                    locals: Vec::new(),
+                    body: Some(typed_body),
+                });
+            }
+            classes.push(JvmClassPlan {
+                class,
+                methods,
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(constructor_plan),
+            });
+        }
+
+        let unit = JvmCompilationUnit {
+            store: typer.store(),
+            typed_ast: typer.typed_ast(),
+            classes,
+        };
+        let metadata = unit.metadata(definitions).unwrap();
+        let expected = [
+            (
+                "Measurement",
+                vec![("id", "()I", 0xac), ("value", "()D", 0xaf)],
+                vec!["<init>", "id", "value", "marker"],
+            ),
+            (
+                "Mixed",
+                vec![
+                    ("enabled", "()Z", 0xac),
+                    ("count", "()J", 0xad),
+                    ("ratio", "()F", 0xae),
+                ],
+                vec!["<init>", "enabled", "count", "ratio"],
+            ),
+            (
+                "Ref",
+                vec![("item", "()LMeasurement;", 0xb0)],
+                vec!["<init>", "item"],
+            ),
+            ("Plain", vec![], vec!["<init>"]),
+        ];
+        let mut generated_classes = Vec::new();
+        for (class_name, getters, expected_methods) in expected {
+            let class = symbol_named(ast, index, source, typer, class_name);
+            let class_metadata = metadata
+                .iter()
+                .find(|metadata| metadata.identity().symbol() == class)
+                .unwrap();
+            let generated = emit_class(&unit, class, definitions).unwrap();
+            assert_eq!(
+                generated.bytes(),
+                emit_class(&unit, class, definitions).unwrap().bytes(),
+                "getter emission is deterministic for {class_name}"
+            );
+            let mut reader = Reader::new(generated.bytes());
+            let class_file = dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
+            class_file.validate_references().unwrap();
+            let method_names = class_file
+                .methods
+                .iter()
+                .map(|method| class_file.constant_pool.utf8(method.name_index).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                method_names, expected_methods,
+                "method order for {class_name}"
+            );
+            assert!(
+                !method_names.iter().any(|name| name.ends_with("_$eq")),
+                "this increment emits getters only"
+            );
+            for (accessor, (name, descriptor, return_opcode)) in class_metadata
+                .accessors()
+                .iter()
+                .zip(getters.iter().copied())
+            {
+                assert_eq!(accessor.getter().name(), name);
+                assert_eq!(accessor.getter().descriptor().as_str(), descriptor);
+                assert!(accessor.getter().access_flags().contains(ACC_PUBLIC));
+                let method = class_file
+                    .methods
+                    .iter()
+                    .find(|method| {
+                        class_file.constant_pool.utf8(method.name_index).unwrap() == name
+                            && class_file
+                                .constant_pool
+                                .utf8(method.descriptor_index)
+                                .unwrap()
+                                == descriptor
+                    })
+                    .unwrap();
+                assert!(method.access_flags.is_public());
+                let code = method
+                    .attributes
+                    .iter()
+                    .find_map(|attribute| match attribute {
+                        dotty_classfile::attribute::Attribute::Code(code) => Some(code),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(code.code.len(), 5);
+                assert_eq!(
+                    &code.code[..2],
+                    &[0x2a, 0xb4],
+                    "aload_0/getfield for {name}"
+                );
+                assert_eq!(code.code[4], return_opcode, "return opcode for {name}");
+                assert_eq!(code.max_locals, 1);
+                assert_eq!(
+                    code.max_stack,
+                    if matches!(
+                        accessor.value_type(),
+                        dotty_jvm::JvmType::Long | dotty_jvm::JvmType::Double
+                    ) {
+                        2
+                    } else {
+                        1
+                    },
+                    "getter stack bound for {name}"
+                );
+                let fieldref_index = u16::from_be_bytes([code.code[2], code.code[3]]);
+                let dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+                    class_index,
+                    name_and_type_index,
+                } = class_file
+                    .constant_pool
+                    .get(dotty_classfile::constant_pool::ConstantPoolIndex(
+                        fieldref_index,
+                    ))
+                    .unwrap()
+                else {
+                    panic!("getter must read a Fieldref");
+                };
+                assert_eq!(
+                    class_file.constant_pool.class_name(*class_index).unwrap(),
+                    class_metadata.identity().internal_name()
+                );
+                let (field_name, field_descriptor) = class_file
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .unwrap();
+                assert_eq!(field_name, accessor.field_name());
+                assert_eq!(field_descriptor, accessor.field_descriptor());
+            }
+            generated_classes.push((
+                generated.internal_name().to_owned(),
+                generated.bytes().to_vec(),
+            ));
+        }
+
+        if require_jdk21_or_skip() {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let output = std::env::temp_dir().join(format!(
+                "dotty-jvm-accessor-getters-{}-{nonce}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&output).unwrap();
+            for (internal_name, bytes) in generated_classes {
+                fs::write(output.join(format!("{internal_name}.class")), bytes).unwrap();
+            }
+            let harness = output.join("AccessorGetterHarness.java");
+            fs::write(
+                &harness,
+                "public final class AccessorGetterHarness { public static void main(String[] args) { Measurement first = new Measurement(7, 1.5d); Measurement second = new Measurement(-4, -2.25d); if (first.id() != 7 || first.value() != 1.5d || second.id() != -4 || second.value() != -2.25d || first.marker() != 9) throw new AssertionError(\"Measurement getters\"); Mixed mixed = new Mixed(true, Long.MIN_VALUE + 17, 3.25f); if (!mixed.enabled() || mixed.count() != Long.MIN_VALUE + 17 || mixed.ratio() != 3.25f) throw new AssertionError(\"Mixed getters\"); Ref ref = new Ref(first); if (ref.item() != first) throw new AssertionError(\"reference getter\"); new Plain(99); } }\n",
+            )
+            .unwrap();
+            let javac = Command::new("javac")
+                .args(["-classpath", output.to_str().unwrap(), "-d"])
+                .arg(output.to_str().unwrap())
+                .arg(&harness)
+                .output()
+                .unwrap();
+            assert!(
+                javac.status.success(),
+                "javac rejected accessor getter harness\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&javac.stdout),
+                String::from_utf8_lossy(&javac.stderr)
+            );
+            let java = Command::new("java")
+                .args([
+                    "-Xverify:all",
+                    "-classpath",
+                    output.to_str().unwrap(),
+                    "AccessorGetterHarness",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                java.status.success(),
+                "java -Xverify:all rejected accessor getter harness\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&java.stdout),
+                String::from_utf8_lossy(&java.stderr)
+            );
+            fs::remove_dir_all(output).unwrap();
+        }
+    });
+}
+
+#[test]
+fn constructor_accessor_source_selections_record_current_typer_boundary() {
+    let source_text = "class Measurement(val id: Int, var value: Double) { def externalId(m: Measurement): Int = m.id; def externalValue(m: Measurement): Double = m.value; def externalSet(m: Measurement): Unit = m.value = 42.0; def ownId: Int = this.id; def ownValue: Double = this.value; def forwarded(m: Measurement): Int = accept(m.id); def accept(value: Int): Int = value }";
+    with_source(source_text, |ast, source, index, _, typer| {
+        let class = symbol_named(ast, index, source, typer, "Measurement");
+        let methods = [
+            "externalId",
+            "externalValue",
+            "externalSet",
+            "ownId",
+            "ownValue",
+            "forwarded",
+        ];
+        for name in methods {
+            let (method, _, rhs) = method_tree_and_rhs(ast, index, source, typer, class, name);
+            typer.complete_symbol(method).unwrap();
+            let context = typer.expression_context_for(method).unwrap();
+            let typed = typer.type_expression(rhs, context).unwrap_or_else(|error| {
+                panic!("{name} should type through a source field: {error:?}")
+            });
+            assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed));
+        }
+
+        let source_accessor_methods = ast
+            .iter()
+            .filter_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                let symbol = index.symbol_at(source, tree)?;
+                (typer.store().symbols.get(symbol).owner == Some(class)
+                    && typer.store().symbols.get(symbol).kind == SymbolKind::Method
+                    && ["id", "value"].contains(
+                        &typer
+                            .store()
+                            .names
+                            .resolve(definition.name.as_name().text()),
+                    ))
+                .then_some(symbol)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            source_accessor_methods.is_empty(),
+            "JVM accessors must not be fabricated as source Method symbols"
+        );
+
+        let field_for = |name: &str| {
+            let source_tree = ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::ValDef(definition)
+                        if index.symbol_at(source, tree).is_some_and(|symbol| {
+                            typer.store().symbols.get(symbol).owner == Some(class)
+                                && typer.store().symbols.get(symbol).kind == SymbolKind::Field
+                                && typer
+                                    .store()
+                                    .names
+                                    .resolve(definition.name.as_name().text())
+                                    == name
+                        }) =>
+                    {
+                        Some(tree)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing source field {name}"));
+            index.symbol_at(source, source_tree).unwrap()
+        };
+        let expected_selections = [("id", 3), ("value", 3)];
+        for (name, expected_count) in expected_selections {
+            let expected_field = field_for(name);
+            let selections = ast
+                .iter()
+                .filter_map(|(tree, node)| match &node.kind {
+                    TreeKind::Select(selection)
+                        if typer.store().names.resolve(selection.name.text()) == name =>
+                    {
+                        Some(tree)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                selections.len(),
+                expected_count,
+                "source selection count for {name}"
+            );
+            for selection in selections {
+                let typed = typer
+                    .source_typed_index()
+                    .get(source, selection)
+                    .unwrap_or_else(|| {
+                        panic!("source selection {name} should have typed identity")
+                    });
+                assert!(
+                    matches!(
+                        typer.store().types.get(typer.typed_ast().get(typed).ty),
+                        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                            if *symbol == expected_field
+                    ),
+                    "source selection {name} must designate the canonical field symbol"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn mixed_plain_and_accessor_constructor_parameters_keep_source_ordinals() {
+    with_source(
+        "class Mixed(first: Int, val second: Long, var enabled: Boolean)",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Mixed");
+            typer.complete_symbol(class).unwrap();
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(definition) = &ast.get(template.constructor).kind else {
+                panic!("primary constructor should be a DefDef");
+            };
+            let parameter_trees = &definition.value_param_clauses[0];
+            assert_eq!(parameter_trees.len(), 3);
+            let parameters = parameter_trees
+                .iter()
+                .map(|tree| {
+                    let field_or_parameter = index.symbol_at(source, *tree).unwrap();
+                    let formal = index.derived_symbol_at(constructor, source, *tree).unwrap();
+                    typer.complete_symbol(field_or_parameter).unwrap();
+                    typer.complete_symbol(formal).unwrap();
+                    formal
+                })
+                .collect::<Vec<_>>();
+            typer.complete_symbol(constructor).unwrap();
+            let proof = JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                parameters.clone(),
+                ast,
+                index,
+            )
+            .unwrap();
+            assert_eq!(proof.parameters(), parameters);
+            assert_eq!(proof.accessor_bindings().len(), 2);
+            let [second, enabled] = proof.accessor_bindings() else {
+                panic!("the plain first parameter must not become an accessor");
+            };
+            assert_eq!(second.source_ordinal(), 1);
+            assert_eq!(
+                second.field(),
+                index.symbol_at(source, parameter_trees[1]).unwrap()
+            );
+            assert_eq!(second.parameter(), parameters[1]);
+            assert!(!second.is_mutable());
+            assert_eq!(enabled.source_ordinal(), 2);
+            assert_eq!(
+                enabled.field(),
+                index.symbol_at(source, parameter_trees[2]).unwrap()
+            );
+            assert_eq!(enabled.parameter(), parameters[2]);
+            assert!(enabled.is_mutable());
+            assert_eq!(
+                typer
+                    .store()
+                    .symbols
+                    .get(index.symbol_at(source, parameter_trees[0]).unwrap())
+                    .kind,
+                SymbolKind::Parameter,
+                "plain constructor input remains distinct from source accessor fields"
+            );
+
+            let metadata = JvmClassPlan {
+                class,
+                methods: Vec::new(),
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+            }
+            .metadata(typer.store(), definitions)
+            .unwrap();
+            assert_eq!(metadata.accessor_bindings().len(), 2);
+            let constructor_metadata = metadata.constructor().unwrap();
+            assert_eq!(
+                constructor_metadata
+                    .parameters()
+                    .iter()
+                    .map(|parameter| parameter.slot())
+                    .collect::<Vec<_>>(),
+                [1, 2, 4],
+                "JVM parameter slots still account for Long's two slots"
+            );
+        },
+    );
+}
+
+#[test]
+fn constructor_accessor_metadata_rejects_user_method_signature_collisions() {
+    with_source(
+        "class Collision(val id: Int) { def id(): Int = 1 }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Collision");
+            typer.complete_symbol(class).unwrap();
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
+            else {
+                panic!("primary constructor should be a DefDef");
+            };
+            let parameter_tree = constructor_definition.value_param_clauses[0][0];
+            let parameter = index
+                .derived_symbol_at(constructor, source, parameter_tree)
+                .unwrap();
+            typer
+                .complete_symbol(index.symbol_at(source, parameter_tree).unwrap())
+                .unwrap();
+            typer.complete_symbol(parameter).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let proof = JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                vec![parameter],
+                ast,
+                index,
+            )
+            .unwrap();
+
+            let (method, method_tree, rhs) =
+                method_tree_and_rhs(ast, index, source, typer, class, "id");
+            typer.complete_symbol(method).unwrap();
+            let context = typer.expression_context_for(method).unwrap();
+            let body = typer.type_expression(rhs, context).unwrap();
+            let result = JvmClassPlan {
+                class,
+                methods: vec![JvmMethodPlan {
+                    method,
+                    parameters: Vec::new(),
+                    locals: Vec::new(),
+                    body: Some(body),
+                }],
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+            }
+            .metadata(typer.store(), definitions);
+            let source_field = index.symbol_at(source, parameter_tree).unwrap();
+            assert!(matches!(
+                &result,
+                Err(dotty_jvm::JvmCodegenError::DuplicateJvmAccessorMethodIdentity {
+                    class: found_class,
+                    field,
+                    previous,
+                    name,
+                    descriptor,
+                }) if *found_class == class
+                    && *field == source_field
+                    && *previous == method
+                    && name == "id"
+                    && descriptor == "()I"
+            ));
+            assert!(ast.try_get(method_tree).is_some());
+        },
+    );
+}
+
+#[test]
+fn constructor_accessor_metadata_rejects_user_setter_signature_collisions() {
+    with_source(
+        "class Collision(var id: Int) { def id_=(value: Int): Unit = {} }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Collision");
+            typer.complete_symbol(class).unwrap();
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
+            else {
+                panic!("primary constructor should be a DefDef");
+            };
+            let parameter_tree = constructor_definition.value_param_clauses[0][0];
+            let parameter = index
+                .derived_symbol_at(constructor, source, parameter_tree)
+                .unwrap();
+            typer
+                .complete_symbol(index.symbol_at(source, parameter_tree).unwrap())
+                .unwrap();
+            typer.complete_symbol(parameter).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let proof = JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                vec![parameter],
+                ast,
+                index,
+            )
+            .unwrap();
+
+            let (method, method_tree, rhs) =
+                method_tree_and_rhs(ast, index, source, typer, class, "id_=");
+            let TreeKind::DefDef(method_definition) = &ast.get(method_tree).kind else {
+                panic!("user setter should be a DefDef");
+            };
+            let setter_parameter_tree = method_definition.value_param_clauses[0][0];
+            let setter_parameter = index.symbol_at(source, setter_parameter_tree).unwrap();
+            typer.complete_symbol(setter_parameter).unwrap();
+            typer.complete_symbol(method).unwrap();
+            let context = typer.expression_context_for(method).unwrap();
+            let body = typer.type_expression(rhs, context).unwrap();
+            let result = JvmClassPlan {
+                class,
+                methods: vec![JvmMethodPlan {
+                    method,
+                    parameters: vec![setter_parameter],
+                    locals: Vec::new(),
+                    body: Some(body),
+                }],
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+            }
+            .metadata(typer.store(), definitions);
+            let source_field = index.symbol_at(source, parameter_tree).unwrap();
+            assert!(
+                matches!(
+                    &result,
+                    Err(dotty_jvm::JvmCodegenError::DuplicateJvmAccessorMethodIdentity {
+                        class: found_class,
+                        field,
+                        previous,
+                        name,
+                        descriptor,
+                    }) if *found_class == class
+                        && *field == source_field
+                        && *previous == method
+                        && name == "id_$eq"
+                        && descriptor == "(I)V"
+                ),
+                "unexpected result: {result:?}"
+            );
+        },
+    );
+}
+
+#[test]
+fn accessor_bearing_subclass_is_rejected_before_inherited_method_validation() {
+    with_source(
+        "class Parent { final def id(): Int = 1 }\nclass Child(val id: Int) extends Parent",
+        |ast, source, index, definitions, typer| {
+            let parent = symbol_named(ast, index, source, typer, "Parent");
+            let child = symbol_named(ast, index, source, typer, "Child");
+            typer.complete_symbol(parent).unwrap();
+            typer.complete_symbol(child).unwrap();
+
+            let (parent_method, _, parent_rhs) =
+                method_tree_and_rhs(ast, index, source, typer, parent, "id");
+            typer.complete_symbol(parent_method).unwrap();
+            let context = typer.expression_context_for(parent_method).unwrap();
+            let parent_body = typer.type_expression(parent_rhs, context).unwrap();
+            let Some(dotty_namer::SourceDefinition::Canonical {
+                source: parent_source,
+                tree: parent_tree,
+            }) = index.definition_of(parent)
+            else {
+                panic!("Parent must have a canonical source definition");
+            };
+            let TreeKind::TypeDef(parent_definition) = &ast.get(parent_tree).kind else {
+                panic!("Parent source definition should be a TypeDef");
+            };
+            let TreeKind::Template(parent_template) = &ast.get(parent_definition.rhs).kind else {
+                panic!("Parent definition should contain a template");
+            };
+            let parent_constructor = index
+                .symbol_at(parent_source, parent_template.constructor)
+                .unwrap();
+            typer.complete_symbol(parent_constructor).unwrap();
+            let parent_proof = JvmPrimaryConstructorPlan::from_source(
+                parent,
+                parent_constructor,
+                Vec::new(),
+                ast,
+                index,
+            )
+            .unwrap();
+            let parent_plan = JvmClassPlan {
+                class: parent,
+                methods: vec![JvmMethodPlan {
+                    method: parent_method,
+                    parameters: Vec::new(),
+                    locals: Vec::new(),
+                    body: Some(parent_body),
+                }],
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(parent_proof),
+            };
+
+            let Some(dotty_namer::SourceDefinition::Canonical { source, tree }) =
+                index.definition_of(child)
+            else {
+                panic!("Child must have a canonical source definition");
+            };
+            let TreeKind::TypeDef(class_definition) = &ast.get(tree).kind else {
+                panic!("Child source definition should be a TypeDef");
+            };
+            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
+                panic!("Child definition should contain a template");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
+            else {
+                panic!("Child primary constructor should be a DefDef");
+            };
+            let parameter_tree = constructor_definition.value_param_clauses[0][0];
+            let field = index.symbol_at(source, parameter_tree).unwrap();
+            let parameter = index
+                .derived_symbol_at(constructor, source, parameter_tree)
+                .unwrap();
+            typer.complete_symbol(field).unwrap();
+            typer.complete_symbol(parameter).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let proof = JvmPrimaryConstructorPlan::from_source(
+                child,
+                constructor,
+                vec![parameter],
+                ast,
+                index,
+            )
+            .unwrap();
+            assert_eq!(proof.accessor_bindings().len(), 1);
+
+            let result = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![
+                    parent_plan,
+                    JvmClassPlan {
+                        class: child,
+                        methods: Vec::new(),
+                        fields: Vec::new(),
+                        initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+                    },
+                ],
+            }
+            .metadata(definitions);
+            assert!(
+                matches!(
+                    &result,
+                    Err(dotty_jvm::JvmCodegenError::UnsupportedJvmAccessorInheritance {
+                        class: found_class,
+                        parent: found_parent,
+                    }) if *found_class == child && *found_parent == parent
+                ),
+                "unexpected result: {result:?}"
+            );
+        },
+    );
+}
+
+#[test]
+fn wrong_typed_field_initializer_is_a_typer_error_and_rolls_back_mapping() {
+    with_source(
+        "class Broken { private val count: Int = true }",
+        |ast, source, index, definitions, typer| {
+            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "count");
+            typer.complete_symbol(field).unwrap();
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let store_checkpoint = typer.store().checkpoint();
+            let typed_checkpoint = typer.typed_ast().checkpoint();
+
+            let result = typer.type_expression_expected(rhs, context, definitions.int);
+            assert!(
+                matches!(
+                    result,
+                    Err(dotty_typer::TyperError::ExpectedExpressionTypeMismatch {
+                        source: actual_source,
+                        tree_index,
+                        expected,
+                        ..
+                    }) if actual_source == source && tree_index == rhs.index() && expected == definitions.int
+                ),
+                "unexpected typing result: {result:?}"
+            );
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+            assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
+            assert_eq!(typer.source_typed_index().get(source, rhs), None);
+
+            let unchecked = typer.type_expression(rhs, context).unwrap();
+            assert_eq!(typer.source_typed_index().get(source, rhs), Some(unchecked));
+            assert_eq!(
+                typer.store().types.get(typer.typed_ast().get(unchecked).ty),
+                &Type::Constant(dotty_core::Constant::Boolean(true))
+            );
+        },
+    );
+}
+
+#[test]
+fn duplicate_source_fields_are_not_yet_rejected_by_frontend() {
+    let source_text = "class Duplicate { val value: Int = 1; val value: Int = 2 }";
+    let source_id = SourceId::from_index(1);
+    let source = SourceText::new(source_text).unwrap();
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let mut store = SemanticStore::new();
+    let parsed = parse_compilation_unit(source, source_id, scanner, &mut store.names);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let outcome = name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "Duplicate.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let index = match outcome {
+        NamingOutcome::Named { index, diagnostics } => {
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            index
+        }
+        NamingOutcome::Rejected { diagnostics } => {
+            panic!("this audit expects to observe current namer behavior: {diagnostics:?}")
+        }
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(class_def) = &parsed.ast.get(package.stats[0]).kind else {
+        panic!("source declaration should be a class");
+    };
+    let class = index.symbol_at(source_id, package.stats[0]).unwrap();
+    let TreeKind::Template(template) = &parsed.ast.get(class_def.rhs).kind else {
+        panic!("class RHS should be a template");
+    };
+    let duplicate_fields = template
+        .body
+        .iter()
+        .filter_map(|tree| {
+            let symbol = index.symbol_at(source_id, *tree)?;
+            (store.symbols.get(symbol).kind == SymbolKind::Field).then_some(symbol)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(duplicate_fields.len(), 2);
+    assert_ne!(duplicate_fields[0], duplicate_fields[1]);
+    for field in duplicate_fields {
+        assert_eq!(store.symbols.get(field).owner, Some(class));
+        assert_eq!(
+            store.names.resolve(store.symbols.get(field).name.text()),
+            "value"
+        );
+    }
+}
+
+#[test]
+fn unsupported_constructor_forms_are_accepted_with_canonical_typer_signatures() {
+    with_source(
+        "class WithSecondary(value: Int) { def this() = this(0) }",
+        |ast, source, index, definitions, typer| {
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let primary = index.symbol_at(source, template.constructor).unwrap();
+            let secondary = template
+                .body
+                .iter()
+                .find_map(|tree| {
+                    let symbol = index.symbol_at(source, *tree)?;
+                    (symbol != primary
+                        && typer.store().symbols.get(symbol).kind == SymbolKind::Constructor)
+                        .then_some(symbol)
+                })
+                .expect("secondary constructor should have a source symbol");
+
+            for (constructor, parameter_count) in [(primary, 1), (secondary, 0)] {
+                typer.complete_symbol(constructor).unwrap();
+                let SymbolInfo::Complete(ty) = typer.store().symbols.get(constructor).info else {
+                    panic!("constructor signature should be complete");
+                };
+                let Type::Method(signature) = typer.store().types.get(ty) else {
+                    panic!("constructor should have a method signature");
+                };
+                assert_eq!(signature.params.len(), parameter_count);
+                assert_eq!(signature.kind, dotty_core::MethodKind::Plain);
+                if parameter_count == 1 {
+                    assert_eq!(signature.params[0].ty, definitions.int);
+                }
+            }
+        },
+    );
+
+    with_source(
+        "class WithUsing(using context: Int)",
+        |ast, source, index, definitions, typer| {
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let SymbolInfo::Complete(ty) = typer.store().symbols.get(constructor).info else {
+                panic!("using constructor signature should be complete");
+            };
+            let Type::Method(signature) = typer.store().types.get(ty) else {
+                panic!("using constructor should have a method signature");
+            };
+            assert_eq!(signature.params.len(), 1);
+            assert_eq!(signature.params[0].ty, definitions.int);
+            assert_eq!(signature.kind, dotty_core::MethodKind::Contextual);
+        },
+    );
+
+    with_source(
+        "class WithDefault(value: Int = 1)",
+        |ast, source, index, definitions, typer| {
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let SymbolInfo::Complete(ty) = typer.store().symbols.get(constructor).info else {
+                panic!("defaulted constructor signature should be complete");
+            };
+            let Type::Method(signature) = typer.store().types.get(ty) else {
+                panic!("defaulted constructor should have a method signature");
+            };
+            assert_eq!(signature.params.len(), 1);
+            assert_eq!(signature.params[0].ty, definitions.int);
+            assert_eq!(signature.kind, dotty_core::MethodKind::Plain);
+        },
+    );
+}
+
+#[test]
+fn non_private_visibility_forms_are_canonicalized_and_self_forward_reads_type() {
+    with_source(
+        "class Visibility { val publicField: Int = 1; protected val protectedField: Int = 2; private[this] val thisOnly: Int = 3 }",
+        |ast, source, index, _definitions, typer| {
+            for (name, visibility) in [
+                ("publicField", Visibility::Public),
+                ("protectedField", Visibility::Protected),
+                ("thisOnly", Visibility::Private),
+            ] {
+                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                assert_eq!(typer.store().symbols.get(field).visibility, visibility);
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(expected) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let typed = typer
+                    .type_expression_expected(rhs, context, expected)
+                    .unwrap();
+                assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed));
+            }
+        },
+    );
+
+    with_source(
+        "class Reads { private val self: Int = this.self; private val earlier: Int = 1; private val forward: Int = later; private val later: Int = 2 }",
+        |ast, source, index, _, typer| {
+            for (name, target_name) in [("self", "self"), ("forward", "later")] {
+                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                let target = field_tree_and_rhs(ast, index, source, typer, target_name).0;
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(expected) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let typed = typer
+                    .type_expression_expected(rhs, context, expected)
+                    .unwrap();
+                assert!(matches!(
+                    typer.store().types.get(typer.typed_ast().get(typed).ty),
+                    Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                        if *symbol == target
+                ));
+            }
+        },
+    );
+}
+
+#[test]
+fn real_source_private_primitive_fields_project_in_frontend_order() {
+    let snapshot = || {
+        with_source(
+            "class Fields { private val seed: Int = 42; private var enabled: Boolean = true; private val large: Long = 9000000000L; private val small: Float = 1.5f; private var precise: Double = 2.5 }",
+            |ast, source, index, definitions, typer| {
+                let class = symbol_named(ast, index, source, typer, "Fields");
+                typer.complete_symbol(class).unwrap();
+
+                let mut fields = Vec::new();
+                for name in ["seed", "enabled", "large", "small", "precise"] {
+                    let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                    typer.complete_symbol(field).unwrap();
+                    let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info
+                    else {
+                        panic!("field type should be complete");
+                    };
+                    let context = typer.field_initializer_context_for(field).unwrap();
+                    let initializer = typer
+                        .type_expression_expected(rhs, context, field_type)
+                        .unwrap();
+                    fields.push(JvmFieldPlan {
+                        field,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                        initializer: Some(initializer),
+                    });
+                }
+
+                let unit = JvmCompilationUnit {
+                    store: typer.store(),
+                    typed_ast: typer.typed_ast(),
+                    classes: vec![JvmClassPlan {
+                        class,
+                        methods: Vec::new(),
+                        fields,
+                        initialization: JvmClassInitializationPlan::Unsupported,
+                    }],
+                };
+                let metadata = unit.metadata(definitions).unwrap();
+                let projected = metadata[0].fields();
+                assert_eq!(projected.len(), 5);
+                assert_eq!(projected[0].name(), "seed");
+                assert_eq!(projected[0].descriptor(), "I");
+                assert!(projected[0].access_flags().is_private());
+                assert!(projected[0].access_flags().is_final());
+                assert_eq!(projected[1].name(), "enabled");
+                assert_eq!(projected[1].descriptor(), "Z");
+                assert!(projected[1].access_flags().is_private());
+                assert!(!projected[1].access_flags().is_final());
+                assert_eq!(projected[2].name(), "large");
+                assert_eq!(projected[2].descriptor(), "J");
+                assert!(projected[2].access_flags().is_private());
+                assert!(projected[2].access_flags().is_final());
+                assert_eq!(projected[3].name(), "small");
+                assert_eq!(projected[3].descriptor(), "F");
+                assert!(projected[3].access_flags().is_private());
+                assert!(projected[3].access_flags().is_final());
+                assert_eq!(projected[4].name(), "precise");
+                assert_eq!(projected[4].descriptor(), "D");
+                assert!(projected[4].access_flags().is_private());
+                assert!(!projected[4].access_flags().is_final());
+
+                assert_eq!(unit.metadata(definitions).unwrap(), metadata);
+                let snapshot = projected
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.name().to_owned(),
+                            field.descriptor().to_owned(),
+                            field.access_flags().0,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                let mut emission_plan = unit.classes[0].clone();
+                emission_plan.initialization = JvmClassInitializationPlan::ImplicitNoArg;
+                let emission_unit = JvmCompilationUnit {
+                    store: unit.store,
+                    typed_ast: unit.typed_ast,
+                    classes: vec![emission_plan],
+                };
+                assert!(matches!(
+                    emit_class(&emission_unit, class, definitions),
+                    Err(dotty_jvm::JvmCodegenError::FieldEmissionUnsupported {
+                        class: actual_class,
+                        field: actual_field,
+                    }) if actual_class == class && actual_field == projected[0].symbol()
+                ));
+                snapshot
+            },
+        )
+    };
+    assert_eq!(snapshot(), snapshot());
+
+    with_source(
+        "class Counter(start: Long) { private var current: Long = start }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Counter");
+            typer.complete_symbol(class).unwrap();
+            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "current");
+            typer.complete_symbol(field).unwrap();
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let TreeKind::DefDef(constructor_def) = &ast.get(template.constructor).kind else {
+                panic!("primary constructor should be a DefDef");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let source_parameter = constructor_def.value_param_clauses[0][0];
+            let constructor_parameter = index
+                .derived_symbol_at(constructor, source, source_parameter)
+                .unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("field type should be complete");
+            };
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let initializer = typer
+                .type_expression_expected(rhs, context, field_type)
+                .unwrap();
+            assert!(matches!(
+                typer.store().types.get(typer.typed_ast().get(initializer).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                    if *symbol == constructor_parameter
+            ));
+
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: Vec::new(),
+                    fields: vec![JvmFieldPlan {
+                        field,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                        initializer: Some(initializer),
+                    }],
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                }],
+            };
+            let metadata = unit.metadata(definitions).unwrap();
+            let field_metadata = &metadata[0].fields()[0];
+            assert_eq!(field_metadata.symbol(), field);
+            assert_eq!(field_metadata.descriptor(), "J");
+            assert!(field_metadata.access_flags().is_private());
+            assert!(!field_metadata.access_flags().is_final());
+        },
+    );
+}
+
+#[test]
+fn real_typed_current_instance_field_reads_lower_to_aload_getfield() {
+    with_source(
+        "class Current { private var current: Int = 5; private val flag: Boolean = true; def get(): Int = current; def getThis(): Int = this.current; def isEnabled(): Boolean = this.flag }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Current");
+            typer.complete_symbol(class).unwrap();
+
+            let mut fields = Vec::new();
+            for name in ["current", "flag"] {
+                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let initializer = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                fields.push(JvmFieldPlan {
+                    field,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(initializer),
+                });
+            }
+
+            let mut methods = Vec::new();
+            for name in ["get", "getThis", "isEnabled"] {
+                let (method, rhs) = ast
+                    .iter()
+                    .find_map(|(tree, node)| {
+                        let TreeKind::DefDef(definition) = &node.kind else {
+                            return None;
+                        };
+                        if typer
+                            .store()
+                            .names
+                            .resolve(definition.name.as_name().text())
+                            == name
+                        {
+                            Some((index.symbol_at(source, tree)?, definition.rhs?))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| panic!("missing method {name}"));
+                typer.complete_symbol(method).unwrap();
+                let context = typer.expression_context_for(method).unwrap();
+                let body = typer.type_expression(rhs, context).unwrap();
+                methods.push(JvmMethodPlan {
+                    method,
+                    parameters: Vec::new(),
+                    locals: Vec::new(),
+                    body: Some(body),
+                });
+            }
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods,
+                    fields,
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                }],
+            };
+
+            let lower_and_encode = |name: &str, descriptor: &str| {
+                let method = unit.classes[0]
+                    .methods
+                    .iter()
+                    .find(|method| {
+                        typer
+                            .store()
+                            .names
+                            .resolve(typer.store().symbols.get(method.method).name.text())
+                            == name
+                    })
+                    .unwrap()
+                    .method;
+                let code = unit.lower_method_body(class, method, definitions).unwrap();
+                let mut builder = ClassFileBuilder::new(
+                    "Current",
+                    ClassFileVersion {
+                        major: 65,
+                        minor: 0,
+                    },
+                )
+                .unwrap();
+                builder
+                    .add_prebuilt_code_method(name, descriptor, MethodAccessFlags(ACC_PUBLIC), code)
+                    .unwrap();
+                let bytes = builder.encode().unwrap();
+                let mut reader = Reader::new(&bytes);
+                let class_file =
+                    dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
+                let code = class_file.methods[0]
+                    .attributes
+                    .iter()
+                    .find_map(|attribute| match attribute {
+                        dotty_classfile::attribute::Attribute::Code(code) => {
+                            Some(code.code.to_vec())
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                let index = u16::from_be_bytes([code[2], code[3]]);
+                let dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+                    class_index,
+                    name_and_type_index,
+                } = class_file
+                    .constant_pool
+                    .get(dotty_classfile::constant_pool::ConstantPoolIndex(index))
+                    .unwrap()
+                else {
+                    panic!("getfield must reference Fieldref")
+                };
+                let owner = class_file
+                    .constant_pool
+                    .class_name(*class_index)
+                    .unwrap()
+                    .to_owned();
+                let (field, field_descriptor) = class_file
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .unwrap();
+                (code, owner, field.to_owned(), field_descriptor.to_owned())
+            };
+
+            let integer = lower_and_encode("get", "()I");
+            let explicit = lower_and_encode("getThis", "()I");
+            let boolean = lower_and_encode("isEnabled", "()Z");
+            for ((code, owner, field, descriptor), method, expected_field, expected_descriptor) in [
+                (&integer, "get", "current", "I"),
+                (&explicit, "getThis", "current", "I"),
+                (&boolean, "isEnabled", "flag", "Z"),
+            ] {
+                assert_eq!(&code[0..1], &[0x2a], "aload_0 for {method}");
+                assert_eq!(code[1], 0xb4, "getfield for {method}");
+                assert_eq!(code[4], 0xac, "ireturn for {method}");
+                assert_eq!(owner, "Current");
+                assert_eq!(field, expected_field);
+                assert_eq!(descriptor, expected_descriptor);
+            }
+        },
+    );
+}
+
+#[test]
+fn real_typed_mutable_field_assignments_lower_to_putfield_in_evaluation_order() {
+    with_source(
+        "class State { private var current: Int = 0; private var active: Boolean = false; private val fixed: Int = 1; def set(current: Int): Unit = { this.current = current }; def setUnqualified(value: Int): Unit = { current = value }; def setActive(value: Boolean): Unit = { this.active = value }; def increment(): Unit = { current = current + 1 }; def stop(): Unit = { current = { return } }; def localShadow(): Unit = { var current = 1; current = 2 }; def branch(flag: Boolean): Unit = if (flag) { current = 3 } else (); def loop(flag: Boolean): Unit = while (flag) { current = 4 }; def external(other: State): Unit = { other.current = 5 } }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "State");
+            typer.complete_symbol(class).unwrap();
+
+            let mut fields = Vec::new();
+            for name in ["current", "active", "fixed"] {
+                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let initializer = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                fields.push(JvmFieldPlan {
+                    field,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(initializer),
+                });
+            }
+
+            let method_names = [
+                "set",
+                "setUnqualified",
+                "setActive",
+                "increment",
+                "stop",
+                "localShadow",
+                "branch",
+                "loop",
+            ];
+            let mut methods = Vec::new();
+            let mut typed_bodies = Vec::new();
+            for name in method_names {
+                let (method, rhs, parameters) = ast
+                    .iter()
+                    .find_map(|(tree, node)| {
+                        let TreeKind::DefDef(definition) = &node.kind else {
+                            return None;
+                        };
+                        if typer
+                            .store()
+                            .names
+                            .resolve(definition.name.as_name().text())
+                            != name
+                        {
+                            return None;
+                        }
+                        let method = index.symbol_at(source, tree)?;
+                        if typer.store().symbols.get(method).owner != Some(class) {
+                            return None;
+                        }
+                        let rhs = definition.rhs?;
+                        let parameters = definition
+                            .value_param_clauses
+                            .iter()
+                            .flatten()
+                            .map(|parameter| index.symbol_at(source, *parameter))
+                            .collect::<Option<Vec<_>>>()?;
+                        Some((method, rhs, parameters))
+                    })
+                    .unwrap_or_else(|| panic!("missing source method {name}"));
+                typer.complete_symbol(method).unwrap();
+                let context = typer.expression_context_for(method).unwrap();
+                let body = typer.type_expression(rhs, context).unwrap();
+                let locals = if name == "localShadow" {
+                    let TreeKind::Block(block) = &ast.get(rhs).kind else {
+                        panic!("localShadow should have a block body");
+                    };
+                    let declaration = block
+                        .stats
+                        .iter()
+                        .copied()
+                        .find(|tree| matches!(ast.get(*tree).kind, TreeKind::ValDef(_)))
+                        .unwrap();
+                    let binding = typer
+                        .typed_local_binding_at(source, declaration)
+                        .expect("local shadow should have a canonical typed binding");
+                    vec![dotty_jvm::JvmLocalBinding {
+                        declaration: binding.declaration(),
+                        symbol: binding.symbol(),
+                        mutable: typer
+                            .store()
+                            .symbols
+                            .get(binding.symbol())
+                            .flags
+                            .contains(SymbolFlags::MUTABLE),
+                    }]
+                } else {
+                    Vec::new()
+                };
+                methods.push(JvmMethodPlan {
+                    method,
+                    parameters,
+                    locals,
+                    body: Some(body),
+                });
+                typed_bodies.push((name, method, body));
+            }
+
+            let (external_method, external_rhs) = ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    let TreeKind::DefDef(definition) = &node.kind else {
+                        return None;
+                    };
+                    (typer
+                        .store()
+                        .names
+                        .resolve(definition.name.as_name().text())
+                        == "external")
+                        .then_some((index.symbol_at(source, tree)?, definition.rhs?))
+                })
+                .expect("missing external receiver method");
+            typer.complete_symbol(external_method).unwrap();
+            let external_context = typer.expression_context_for(external_method).unwrap();
+            let external_body = typer
+                .type_expression(external_rhs, external_context)
+                .unwrap();
+
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods,
+                    fields: fields.clone(),
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                }],
+            };
+            let typed_body = |name: &str| {
+                typed_bodies
+                    .iter()
+                    .find(|(candidate, _, _)| *candidate == name)
+                    .copied()
+                    .unwrap()
+            };
+            let encode_body = |name: &str, descriptor: &str| {
+                let (_, method, _) = typed_body(name);
+                let code = unit.lower_method_body(class, method, definitions).unwrap();
+                let mut builder = ClassFileBuilder::new(
+                    "State",
+                    ClassFileVersion {
+                        major: 65,
+                        minor: 0,
+                    },
+                )
+                .unwrap();
+                builder
+                    .add_field(
+                        "current",
+                        "I",
+                        dotty_classfile::access_flags::FieldAccessFlags(
+                            dotty_classfile::access_flags::ACC_PRIVATE,
+                        ),
+                    )
+                    .unwrap();
+                builder
+                    .add_field(
+                        "active",
+                        "Z",
+                        dotty_classfile::access_flags::FieldAccessFlags(
+                            dotty_classfile::access_flags::ACC_PRIVATE,
+                        ),
+                    )
+                    .unwrap();
+                builder
+                    .add_field(
+                        "fixed",
+                        "I",
+                        dotty_classfile::access_flags::FieldAccessFlags(
+                            dotty_classfile::access_flags::ACC_PRIVATE
+                                | dotty_classfile::access_flags::ACC_FINAL,
+                        ),
+                    )
+                    .unwrap();
+                builder
+                    .add_prebuilt_code_method(name, descriptor, MethodAccessFlags(ACC_PUBLIC), code)
+                    .unwrap();
+                let mut constructor = dotty_classfile::bytecode::CodeBuilder::new();
+                constructor
+                    .aload(0)
+                    .and_then(|code| code.invokespecial("java/lang/Object", "<init>", "()V"))
+                    .and_then(|code| code.return_void())
+                    .unwrap();
+                builder
+                    .add_prebuilt_code_method(
+                        "<init>",
+                        "()V",
+                        MethodAccessFlags(ACC_PUBLIC),
+                        constructor,
+                    )
+                    .unwrap();
+                let bytes = builder.encode().unwrap();
+                let mut reader = Reader::new(&bytes);
+                let class_file =
+                    dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
+                let code = class_file.methods[0]
+                    .attributes
+                    .iter()
+                    .find_map(|attribute| match attribute {
+                        dotty_classfile::attribute::Attribute::Code(code) => {
+                            Some(code.code.to_vec())
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                let field_ref = code
+                    .iter()
+                    .position(|opcode| *opcode == 0xb5)
+                    .map(|putfield| {
+                        let index = u16::from_be_bytes([code[putfield + 1], code[putfield + 2]]);
+                        let dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+                            class_index,
+                            name_and_type_index,
+                        } = class_file
+                            .constant_pool
+                            .get(dotty_classfile::constant_pool::ConstantPoolIndex(index))
+                            .unwrap()
+                        else {
+                            panic!("putfield must reference Fieldref");
+                        };
+                        let (field, descriptor) = class_file
+                            .constant_pool
+                            .name_and_type(*name_and_type_index)
+                            .unwrap();
+                        (
+                            class_file
+                                .constant_pool
+                                .class_name(*class_index)
+                                .unwrap()
+                                .to_owned(),
+                            field.to_owned(),
+                            descriptor.to_owned(),
+                        )
+                    });
+                (code, field_ref, bytes)
+            };
+
+            for (name, descriptor, field, field_descriptor) in [
+                ("set", "(I)V", "current", "I"),
+                ("setUnqualified", "(I)V", "current", "I"),
+                ("setActive", "(Z)V", "active", "Z"),
+            ] {
+                let (code, field_ref, _) = encode_body(name, descriptor);
+                assert_eq!(
+                    code[0], 0x2a,
+                    "aload_0 evaluates the receiver first for {name}"
+                );
+                let rhs_load = code
+                    .iter()
+                    .position(|opcode| *opcode == 0x1b)
+                    .expect("parameter is loaded for the RHS");
+                let receiver_reload = code
+                    .iter()
+                    .rposition(|opcode| *opcode == 0x2c)
+                    .expect("saved receiver is reloaded after the RHS");
+                assert!(
+                    rhs_load < receiver_reload,
+                    "RHS follows receiver for {name}"
+                );
+                let putfield = code.iter().position(|opcode| *opcode == 0xb5).unwrap();
+                assert_eq!(code.iter().filter(|opcode| **opcode == 0xb5).count(), 1);
+                assert!(!code.contains(&0xb4), "LHS is not evaluated as a read");
+                assert_eq!(code[putfield + 3], 0xb1, "Unit return for {name}");
+                assert_eq!(
+                    field_ref,
+                    Some((
+                        "State".to_owned(),
+                        field.to_owned(),
+                        field_descriptor.to_owned()
+                    ))
+                );
+            }
+
+            let (increment_code, increment_field, _) = encode_body("increment", "()V");
+            assert_eq!(increment_code[0], 0x2a, "field receiver is loaded first");
+            assert!(
+                increment_code.contains(&0xb4),
+                "RHS reads the current field"
+            );
+            assert!(
+                increment_code.contains(&0x60),
+                "RHS adds one before storing"
+            );
+            assert!(
+                increment_code.contains(&0xb5),
+                "composite assignment stores once"
+            );
+            assert_eq!(
+                increment_code
+                    .iter()
+                    .filter(|opcode| **opcode == 0xb5)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                increment_field,
+                Some(("State".to_owned(), "current".to_owned(), "I".to_owned()))
+            );
+
+            let (local_code, local_field, _) = encode_body("localShadow", "()V");
+            assert!(!local_code.contains(&0xb5), "shadowing local uses istore");
+            assert!(
+                !local_code.contains(&0xb4),
+                "shadowing local does not read field"
+            );
+            assert!(local_code.contains(&0x3c), "local var stores to its slot");
+            assert!(local_field.is_none());
+
+            let (stop_code, stop_field, _) = encode_body("stop", "()V");
+            assert!(stop_code.contains(&0xb1), "local return is encoded");
+            assert!(!stop_code.contains(&0xb5), "diverging RHS does not store");
+            assert!(stop_field.is_none());
+
+            if require_jdk21_or_skip() {
+                for (name, descriptor, harness_body) in [
+                    (
+                        "set",
+                        "(I)V",
+                        "state.set(41); java.lang.reflect.Field field = State.class.getDeclaredField(\"current\"); field.setAccessible(true); if (field.getInt(state) != 41) throw new AssertionError(\"Int putfield\");",
+                    ),
+                    (
+                        "setActive",
+                        "(Z)V",
+                        "state.setActive(true); java.lang.reflect.Field field = State.class.getDeclaredField(\"active\"); field.setAccessible(true); if (!field.getBoolean(state)) throw new AssertionError(\"Boolean putfield\");",
+                    ),
+                    (
+                        "increment",
+                        "()V",
+                        "state.increment(); java.lang.reflect.Field field = State.class.getDeclaredField(\"current\"); field.setAccessible(true); if (field.getInt(state) != 1) throw new AssertionError(\"compound putfield\");",
+                    ),
+                ] {
+                    let (_, _, class_bytes) = encode_body(name, descriptor);
+                    let nonce = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos();
+                    let output = std::env::temp_dir().join(format!(
+                        "dotty-jvm-field-write-{}-{nonce}",
+                        std::process::id()
+                    ));
+                    fs::create_dir_all(&output).unwrap();
+                    fs::write(output.join("State.class"), class_bytes).unwrap();
+                    let harness = output.join("WriteHarness.java");
+                    fs::write(
+                        &harness,
+                        format!(
+                            "public final class WriteHarness {{ public static void main(String[] args) throws Exception {{ State state = new State(); {harness_body} }} }}\n"
+                        ),
+                    )
+                    .unwrap();
+                    let javac = Command::new("javac")
+                        .args(["-classpath", output.to_str().unwrap(), "-d"])
+                        .arg(output.to_str().unwrap())
+                        .arg(&harness)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        javac.status.success(),
+                        "javac rejected {name} harness\nstdout:\n{}\nstderr:\n{}",
+                        String::from_utf8_lossy(&javac.stdout),
+                        String::from_utf8_lossy(&javac.stderr)
+                    );
+                    let java = Command::new("java")
+                        .args([
+                            "-Xverify:all",
+                            "-classpath",
+                            output.to_str().unwrap(),
+                            "WriteHarness",
+                        ])
+                        .output()
+                        .unwrap();
+                    assert!(
+                        java.status.success(),
+                        "java -Xverify:all rejected {name}\nstdout:\n{}\nstderr:\n{}",
+                        String::from_utf8_lossy(&java.stdout),
+                        String::from_utf8_lossy(&java.stderr)
+                    );
+                    fs::remove_dir_all(output).unwrap();
+                }
+            }
+
+            let (_, branch_method, _) = typed_body("branch");
+            let branch_code = unit
+                .lower_method_body(class, branch_method, definitions)
+                .expect("current-instance field writes are supported in branches");
+            assert!(format!("{branch_code:?}").contains("operation: Put"));
+
+            let (_, loop_method, _) = typed_body("loop");
+            let loop_code = unit
+                .lower_method_body(class, loop_method, definitions)
+                .expect("current-instance field writes are supported in loops");
+            assert!(format!("{loop_code:?}").contains("operation: Put"));
+
+            let (_, setter_method, _) = typed_body("setUnqualified");
+            let mut no_fields = unit.classes[0].clone();
+            no_fields.fields.clear();
+            let unplanned = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![no_fields],
+            };
+            assert!(matches!(
+                unplanned.lower_method_body(class, setter_method, definitions),
+                Err(dotty_jvm::JvmCodegenError::FieldNotInJvmPlan { field, .. })
+                    if field == fields[0].field
+            ));
+
+            let mut external_method_plan = unit.classes[0].methods[1].clone();
+            external_method_plan.body = Some(external_body);
+            let mut external_class_plan = unit.classes[0].clone();
+            external_class_plan.methods = vec![external_method_plan];
+            let external = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![external_class_plan],
+            };
+            assert!(matches!(
+                external.lower_method_body(class, setter_method, definitions),
+                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmFieldReceiver { field, .. })
+                    if field == fields[0].field
+            ));
+        },
+    );
+}
+
+#[test]
+fn field_reads_follow_canonical_bindings_in_control_flow_and_fail_closed_elsewhere() {
+    with_source(
+        "class Current { private val current: Int = 5; private val hidden: Int = 6; private val flag: Boolean = true; def get(): Int = current; def shadow(current: Int): Int = current; def branch(flag: Boolean): Int = if (flag) current else 0; def shortCircuit(): Boolean = this.flag && true; def compared(): Boolean = this.current < 7; def select(other: Current): Int = other.current; def readHidden(): Int = hidden }\nclass Other { private val foreign: Int = 1; def read(): Int = this.foreign }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Current");
+            let other_class = symbol_named(ast, index, source, typer, "Other");
+            typer.complete_symbol(class).unwrap();
+            typer.complete_symbol(other_class).unwrap();
+
+            let mut fields = Vec::new();
+            for name in ["current", "hidden", "flag", "foreign"] {
+                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let initializer = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                fields.push(JvmFieldPlan {
+                    field,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(initializer),
+                });
+            }
+
+            let mut methods = Vec::new();
+            for (owner, name) in [
+                (class, "get"),
+                (class, "shadow"),
+                (class, "branch"),
+                (class, "shortCircuit"),
+                (class, "compared"),
+                (class, "select"),
+                (class, "readHidden"),
+                (other_class, "read"),
+            ] {
+                let (method, rhs, parameters) = ast
+                    .iter()
+                    .find_map(|(tree, node)| {
                         let TreeKind::DefDef(definition) = &node.kind else {
                             return None;
                         };
