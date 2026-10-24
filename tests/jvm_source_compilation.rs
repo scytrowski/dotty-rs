@@ -398,6 +398,39 @@ fn compile_source_batch_with_typer_failure_observer(
                 .map_err(PipelineFailure::Typer)?;
         }
     }
+    for class in &classes {
+        if !matches!(
+            class.initialization,
+            JvmClassInitializationPlan::PrimaryConstructor(_)
+        ) {
+            continue;
+        }
+        let constructor = index.symbol_at(source_id, class.constructor_tree).ok_or(
+            PipelineFailure::MissingSourceIdentity("primary constructor"),
+        )?;
+        let TreeKind::DefDef(definition) = &parsed.ast.get(class.constructor_tree).kind else {
+            return Err(PipelineFailure::UnexpectedSourceShape(
+                "primary constructor definition",
+            ));
+        };
+        for parameter_tree in definition.value_param_clauses.iter().flatten() {
+            let formal = index
+                .derived_symbol_at(constructor, source_id, *parameter_tree)
+                .ok_or(PipelineFailure::MissingSourceIdentity(
+                    "derived constructor formal",
+                ))?;
+            typer
+                .complete_symbol(formal)
+                .map_err(PipelineFailure::Typer)?;
+            if let Some(source_parameter) = index.symbol_at(source_id, *parameter_tree)
+                && typer.store().symbols.get(source_parameter).kind == SymbolKind::Field
+            {
+                typer
+                    .complete_symbol(source_parameter)
+                    .map_err(PipelineFailure::Typer)?;
+            }
+        }
+    }
     for class in &mut classes {
         let JvmClassInitializationPlan::PrimaryConstructor(constructor_plan) =
             &class.initialization
@@ -9711,6 +9744,641 @@ fn verify_with_jdk(output_directory: &Path) {
         String::from_utf8_lossy(&java.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "42\n10\n20");
+}
+
+#[test]
+fn constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends() {
+    let source = "class Measurement(val id: Int, var value: Double)\nclass Mixed(first: Int, val count: Long, var enabled: Boolean)\nclass LongBox(var count: Long)\n";
+    let first_output = TestOutputDirectory::new("constructor-accessor-source-first");
+    let second_output = TestOutputDirectory::new("constructor-accessor-source-second");
+    let source_id = SourceId::from_index(1559);
+    let mut checked_source_bindings = false;
+    let mut observe_source = |ast: &AstArena<Untyped>,
+                              index: &SourceSemanticIndex,
+                              unit: &mut JvmCompilationUnit<'_>,
+                              definitions: &Definitions| {
+        let metadata = unit
+            .metadata(definitions)
+            .expect("validated source metadata");
+        for (class_tree, node) in ast.iter() {
+            let TreeKind::TypeDef(class_definition) = &node.kind else {
+                continue;
+            };
+            let class = index
+                .symbol_at(source_id, class_tree)
+                .expect("canonical source class identity");
+            let class_name = unit
+                .store
+                .names
+                .resolve(class_definition.name.as_name().text());
+            if !matches!(class_name, "Measurement" | "Mixed" | "LongBox") {
+                continue;
+            }
+            let class_metadata = metadata
+                .iter()
+                .find(|entry| entry.identity().symbol() == class)
+                .expect("source class appears in the JVM compilation unit");
+            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
+                panic!("{class_name} has a source template");
+            };
+            let constructor = index
+                .symbol_at(source_id, template.constructor)
+                .expect("canonical primary constructor identity");
+            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
+            else {
+                panic!("{class_name} has a primary constructor definition");
+            };
+            let parameters = constructor_definition
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .enumerate()
+                .map(|(ordinal, parameter_tree)| {
+                    let TreeKind::ValDef(parameter_definition) = &ast.get(*parameter_tree).kind
+                    else {
+                        panic!("constructor parameter is represented by a ValDef");
+                    };
+                    let source_field = index
+                        .symbol_at(source_id, *parameter_tree)
+                        .expect("canonical source constructor parameter");
+                    let formal = index
+                        .derived_symbol_at(constructor, source_id, *parameter_tree)
+                        .expect("distinct constructor-owned formal identity");
+                    assert_eq!(unit.store.symbols.get(formal).owner, Some(constructor));
+                    let name = unit
+                        .store
+                        .names
+                        .resolve(parameter_definition.name.as_name().text());
+                    let accessor = class_metadata
+                        .accessors()
+                        .iter()
+                        .find(|accessor| accessor.constructor_parameter() == formal);
+                    if name == "first" {
+                        assert!(
+                            accessor.is_none(),
+                            "plain constructor formal has no accessor"
+                        );
+                        return (name, source_field, formal, ordinal, false);
+                    }
+
+                    let accessor = accessor.expect("val/var formal has an accessor binding");
+                    let field_symbol = unit.store.symbols.get(source_field);
+                    let mutable = field_symbol.flags.contains(SymbolFlags::MUTABLE);
+                    assert_eq!(
+                        mutable,
+                        matches!(
+                            (class_name, name),
+                            ("Measurement", "value") | ("Mixed", "enabled") | ("LongBox", "count")
+                        )
+                    );
+                    assert_eq!(accessor.source_field(), source_field);
+                    assert_eq!(accessor.constructor_parameter(), formal);
+                    assert_eq!(accessor.owner(), class);
+                    assert_eq!(accessor.source_ordinal(), ordinal);
+                    assert_eq!(accessor.is_mutable(), mutable);
+                    assert_eq!(field_symbol.kind, SymbolKind::Field);
+                    assert_eq!(field_symbol.owner, Some(class));
+                    assert_eq!(field_symbol.visibility, Visibility::Public);
+                    assert_eq!(field_symbol.flags.contains(SymbolFlags::MUTABLE), mutable);
+                    assert_eq!(
+                        accessor.field_access_flags().0,
+                        dotty_classfile::access_flags::ACC_PRIVATE
+                            | if mutable {
+                                0
+                            } else {
+                                dotty_classfile::access_flags::ACC_FINAL
+                            }
+                    );
+                    assert_eq!(
+                        accessor.getter().access_flags().0,
+                        dotty_classfile::access_flags::ACC_PUBLIC
+                    );
+                    assert_eq!(accessor.setter().is_some(), mutable);
+                    if let Some(setter) = accessor.setter() {
+                        assert_eq!(
+                            setter.access_flags().0,
+                            dotty_classfile::access_flags::ACC_PUBLIC
+                        );
+                    }
+                    (name, source_field, formal, ordinal, true)
+                })
+                .collect::<Vec<_>>();
+
+            if class_name == "Measurement" {
+                assert_eq!(
+                    parameters.iter().map(|entry| entry.0).collect::<Vec<_>>(),
+                    ["id", "value"]
+                );
+                assert_eq!(
+                    class_metadata
+                        .accessors()
+                        .iter()
+                        .map(|accessor| (
+                            accessor.getter().name(),
+                            accessor.getter().descriptor().as_str()
+                        ))
+                        .collect::<Vec<_>>(),
+                    [("id", "()I"), ("value", "()D")]
+                );
+            } else if class_name == "Mixed" {
+                assert_eq!(
+                    parameters.iter().map(|entry| entry.0).collect::<Vec<_>>(),
+                    ["first", "count", "enabled"]
+                );
+                assert_eq!(
+                    class_metadata
+                        .accessors()
+                        .iter()
+                        .map(|accessor| (
+                            accessor.getter().name(),
+                            accessor.getter().descriptor().as_str()
+                        ))
+                        .collect::<Vec<_>>(),
+                    [("count", "()J"), ("enabled", "()Z")]
+                );
+            } else {
+                assert_eq!(
+                    parameters.iter().map(|entry| entry.0).collect::<Vec<_>>(),
+                    ["count"]
+                );
+                assert_eq!(
+                    class_metadata
+                        .accessors()
+                        .iter()
+                        .map(|accessor| (
+                            accessor.getter().name(),
+                            accessor.getter().descriptor().as_str()
+                        ))
+                        .collect::<Vec<_>>(),
+                    [("count", "()J")]
+                );
+            }
+        }
+        checked_source_bindings = true;
+    };
+    let first = compile_source_batch_with_source_observer(
+        source,
+        "ConstructorAccessors.scala",
+        first_output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe_source,
+    )
+    .expect("real Scala source pipeline emits constructor accessor classes");
+    assert!(
+        checked_source_bindings,
+        "same-session canonical bindings inspected"
+    );
+    let second = compile_source_batch(
+        source,
+        "ConstructorAccessors.scala",
+        second_output.path(),
+        SourceId::from_index(1560),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("independent source session emits the same constructor accessor classes");
+    let ordered_bytes = |artifacts: &[EmittedArtifact]| {
+        artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Measurement", "Mixed", "LongBox"]
+    );
+    assert_eq!(ordered_bytes(&first), ordered_bytes(&second));
+    assert_eq!(
+        first_output.class_files(),
+        [
+            first_output.path().join("LongBox.class"),
+            first_output.path().join("Measurement.class"),
+            first_output.path().join("Mixed.class"),
+        ]
+    );
+    assert_eq!(
+        second_output.class_files(),
+        [
+            second_output.path().join("LongBox.class"),
+            second_output.path().join("Measurement.class"),
+            second_output.path().join("Mixed.class"),
+        ]
+    );
+
+    let measurement = decode_emitted_class(&first[0]);
+    let mixed = decode_emitted_class(&first[1]);
+    let long_box = decode_emitted_class(&first[2]);
+    let private_final =
+        dotty_classfile::access_flags::ACC_PRIVATE | dotty_classfile::access_flags::ACC_FINAL;
+    let fields = |class: &ClassFile<'_>| {
+        class
+            .fields
+            .iter()
+            .map(|field| {
+                (
+                    class
+                        .constant_pool
+                        .utf8(field.name_index)
+                        .unwrap()
+                        .to_owned(),
+                    class
+                        .constant_pool
+                        .utf8(field.descriptor_index)
+                        .unwrap()
+                        .to_owned(),
+                    field.access_flags.0,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        fields(&measurement),
+        [
+            ("id".to_owned(), "I".to_owned(), private_final),
+            (
+                "value".to_owned(),
+                "D".to_owned(),
+                dotty_classfile::access_flags::ACC_PRIVATE
+            )
+        ]
+    );
+    assert_eq!(
+        fields(&mixed),
+        [
+            ("count".to_owned(), "J".to_owned(), private_final),
+            (
+                "enabled".to_owned(),
+                "Z".to_owned(),
+                dotty_classfile::access_flags::ACC_PRIVATE
+            )
+        ]
+    );
+    assert_eq!(
+        methods_with_descriptors(&measurement),
+        [
+            ("<init>".into(), "(ID)V".into()),
+            ("id".into(), "()I".into()),
+            ("value".into(), "()D".into()),
+            ("value_$eq".into(), "(D)V".into())
+        ]
+    );
+    assert_eq!(
+        methods_with_descriptors(&mixed),
+        [
+            ("<init>".into(), "(IJZ)V".into()),
+            ("count".into(), "()J".into()),
+            ("enabled".into(), "()Z".into()),
+            ("enabled_$eq".into(), "(Z)V".into())
+        ]
+    );
+    assert_eq!(
+        fields(&long_box),
+        [(
+            "count".to_owned(),
+            "J".to_owned(),
+            dotty_classfile::access_flags::ACC_PRIVATE
+        )]
+    );
+    assert_eq!(
+        methods_with_descriptors(&long_box),
+        [
+            ("<init>".into(), "(J)V".into()),
+            ("count".into(), "()J".into()),
+            ("count_$eq".into(), "(J)V".into())
+        ]
+    );
+    for class in [&measurement, &mixed, &long_box] {
+        assert_eq!(
+            class.constant_pool.class_name(class.super_class.unwrap()),
+            Ok("java/lang/Object")
+        );
+        for method in &class.methods {
+            assert!(method.access_flags.is_public());
+        }
+    }
+
+    let measurement_constructor = emitted_method_code(&measurement, "<init>");
+    assert_opcode_sequence(
+        measurement_constructor,
+        &[0x2a, 0xb7, 0x2a, 0x1b, 0xb5, 0x2a, 0x28, 0xb5, 0xb1],
+    );
+    assert_invocation_sequence(
+        &measurement,
+        measurement_constructor,
+        &[(0xb7, "java/lang/Object", "<init>", "()V")],
+    );
+    assert_field_reference_sequence(
+        &measurement,
+        measurement_constructor,
+        &[
+            (0xb5, "Measurement", "id", "I"),
+            (0xb5, "Measurement", "value", "D"),
+        ],
+    );
+    assert_eq!(code_max_locals(&measurement, "<init>"), 4);
+    assert_eq!(code_max_stack(&measurement, "<init>"), 3);
+    let mixed_constructor = emitted_method_code(&mixed, "<init>");
+    assert_opcode_sequence(
+        mixed_constructor,
+        &[0x2a, 0xb7, 0x2a, 0x20, 0xb5, 0x2a, 0x15, 0xb5, 0xb1],
+    );
+    assert_eq!(
+        mixed_constructor[11], 4,
+        "Boolean constructor formal remains in slot four"
+    );
+    assert_invocation_sequence(
+        &mixed,
+        mixed_constructor,
+        &[(0xb7, "java/lang/Object", "<init>", "()V")],
+    );
+    assert_field_reference_sequence(
+        &mixed,
+        mixed_constructor,
+        &[
+            (0xb5, "Mixed", "count", "J"),
+            (0xb5, "Mixed", "enabled", "Z"),
+        ],
+    );
+    assert_eq!(code_max_locals(&mixed, "<init>"), 5);
+    assert_eq!(code_max_stack(&mixed, "<init>"), 3);
+
+    for (class, accessors) in [
+        (
+            &measurement,
+            [
+                ("id", "I", "()I", None),
+                ("value", "D", "()D", Some("(D)V")),
+            ]
+            .as_slice(),
+        ),
+        (
+            &mixed,
+            [
+                ("count", "J", "()J", None),
+                ("enabled", "Z", "()Z", Some("(Z)V")),
+            ]
+            .as_slice(),
+        ),
+        (&long_box, [("count", "J", "()J", Some("(J)V"))].as_slice()),
+    ] {
+        for (name, field_descriptor, getter_descriptor, setter_descriptor) in accessors {
+            assert!(
+                methods_with_descriptors(class)
+                    .contains(&((*name).to_owned(), (*getter_descriptor).to_owned()))
+            );
+            let getter = emitted_method_code(class, name);
+            let getter_return = match *field_descriptor {
+                "J" => 0xad,
+                "D" => 0xaf,
+                _ => 0xac,
+            };
+            assert_opcode_sequence(getter, &[0x2a, 0xb4, getter_return]);
+            assert_field_reference(
+                class,
+                getter,
+                0xb4,
+                class.constant_pool.class_name(class.this_class).unwrap(),
+                name,
+                field_descriptor,
+            );
+            assert_eq!(code_max_locals(class, name), 1);
+            assert_eq!(
+                code_max_stack(class, name),
+                if matches!(*field_descriptor, "J" | "D") {
+                    2
+                } else {
+                    1
+                }
+            );
+            if let Some(setter_descriptor) = setter_descriptor {
+                let setter_name = format!("{name}_$eq");
+                let setter = emitted_method_code(class, &setter_name);
+                let load = match *field_descriptor {
+                    "J" => 0x1f,
+                    "D" => 0x27,
+                    _ => 0x1b,
+                };
+                assert_opcode_sequence(setter, &[0x2a, load, 0xb5, 0xb1]);
+                assert_field_reference(
+                    class,
+                    setter,
+                    0xb5,
+                    class.constant_pool.class_name(class.this_class).unwrap(),
+                    name,
+                    field_descriptor,
+                );
+                assert_eq!(
+                    code_max_stack(class, &setter_name),
+                    if matches!(*field_descriptor, "J" | "D") {
+                        3
+                    } else {
+                        2
+                    }
+                );
+                assert_eq!(
+                    code_max_locals(class, &setter_name),
+                    if matches!(*field_descriptor, "J" | "D") {
+                        3
+                    } else {
+                        2
+                    }
+                );
+                assert!(
+                    methods_with_descriptors(class)
+                        .contains(&(setter_name, (*setter_descriptor).into()))
+                );
+            } else {
+                assert!(
+                    !methods_with_descriptors(class)
+                        .iter()
+                        .any(|(method, _)| method == &format!("{name}_$eq"))
+                );
+            }
+        }
+    }
+
+    if require_jdk_or_skip() {
+        for (class_name, expected_descriptors) in [
+            ("Measurement", &["(ID)V", "()I", "()D", "(D)V"][..]),
+            ("Mixed", &["(IJZ)V", "()J", "()Z", "(Z)V"][..]),
+            ("LongBox", &["(J)V", "()J", "(J)V"][..]),
+        ] {
+            let javap = Command::new("javap")
+                .args([
+                    "-c",
+                    "-v",
+                    "-p",
+                    "-classpath",
+                    first_output.path().to_str().unwrap(),
+                    class_name,
+                ])
+                .output()
+                .expect("start javap for constructor accessor acceptance class");
+            assert!(
+                javap.status.success(),
+                "javap failed for {class_name}: {javap:?}"
+            );
+            let output = String::from_utf8_lossy(&javap.stdout);
+            assert!(
+                output.contains("major version: 65"),
+                "{class_name}: {output}"
+            );
+            for descriptor in expected_descriptors {
+                assert!(
+                    output.contains(&format!("descriptor: {descriptor}")),
+                    "{class_name} omitted {descriptor}: {output}"
+                );
+            }
+            let instruction_checks: &[(&str, &[&str])] = match class_name {
+                "Measurement" => &[
+                    (
+                        "public Measurement(int, double);",
+                        &[
+                            "aload_0",
+                            "invokespecial",
+                            "aload_0",
+                            "iload_1",
+                            "putfield",
+                            "aload_0",
+                            "dload_2",
+                            "putfield",
+                            "return",
+                        ],
+                    ),
+                    ("public int id();", &["aload_0", "getfield", "ireturn"]),
+                    (
+                        "public double value();",
+                        &["aload_0", "getfield", "dreturn"],
+                    ),
+                    (
+                        "public void value_$eq(double);",
+                        &["aload_0", "dload_1", "putfield", "return"],
+                    ),
+                ],
+                "Mixed" => &[
+                    (
+                        "public Mixed(int, long, boolean);",
+                        &[
+                            "aload_0",
+                            "invokespecial",
+                            "aload_0",
+                            "lload_2",
+                            "putfield",
+                            "aload_0",
+                            "iload",
+                            "putfield",
+                            "return",
+                        ],
+                    ),
+                    ("public long count();", &["aload_0", "getfield", "lreturn"]),
+                    (
+                        "public boolean enabled();",
+                        &["aload_0", "getfield", "ireturn"],
+                    ),
+                    (
+                        "public void enabled_$eq(boolean);",
+                        &["aload_0", "iload_1", "putfield", "return"],
+                    ),
+                ],
+                "LongBox" => &[
+                    (
+                        "public LongBox(long);",
+                        &[
+                            "aload_0",
+                            "invokespecial",
+                            "aload_0",
+                            "lload_1",
+                            "putfield",
+                            "return",
+                        ],
+                    ),
+                    ("public long count();", &["aload_0", "getfield", "lreturn"]),
+                    (
+                        "public void count_$eq(long);",
+                        &["aload_0", "lload_1", "putfield", "return"],
+                    ),
+                ],
+                _ => unreachable!(),
+            };
+            for (method_header, instructions) in instruction_checks {
+                assert_javap_instruction_sequence(&output, method_header, instructions);
+            }
+        }
+        let harness = first_output.path().join("ConstructorAccessorsHarness.java");
+        fs::write(
+            &harness,
+            r#"public final class ConstructorAccessorsHarness {
+  private static void check(boolean value, String label) { if (!value) throw new AssertionError(label); }
+  public static void main(String[] args) {
+    Measurement first = new Measurement(7, 1.5d);
+    Measurement second = new Measurement(-4, -2.25d);
+    check(first.id() == 7 && first.value() == 1.5d, "Measurement constructor/getters");
+    check(second.id() == -4 && second.value() == -2.25d, "second Measurement");
+    first.value_$eq(4.75d);
+    check(first.value() == 4.75d && second.value() == -2.25d, "independent Double setter");
+    Mixed mixed = new Mixed(123, Long.MIN_VALUE + 17, true);
+    check(mixed.count() == Long.MIN_VALUE + 17 && mixed.enabled(), "Mixed constructor/getters");
+    mixed.enabled_$eq(false);
+    check(mixed.count() == Long.MIN_VALUE + 17 && !mixed.enabled(), "val and Boolean setter");
+    LongBox longBox = new LongBox(Long.MIN_VALUE + 17);
+    longBox.count_$eq(Long.MAX_VALUE - 9);
+    check(longBox.count() == Long.MAX_VALUE - 9, "Long setter");
+    check(first.id() == 7, "immutable val retains its constructor value");
+  }
+}
+"#,
+        )
+        .expect("write Java constructor accessor harness");
+        let classpath = first_output.path().to_str().unwrap();
+        let javac = Command::new("javac")
+            .args(["-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac for source-to-JVM accessor harness");
+        assert!(
+            javac.status.success(),
+            "javac rejected source accessor harness\n{}\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "ConstructorAccessorsHarness",
+            ])
+            .output()
+            .expect("start JDK 21 verifier for source accessor harness");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected source accessor classes\n{}\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+
+    let failed_output = TestOutputDirectory::new("constructor-accessor-failed-batch");
+    let failed = compile_source_batch(
+        "class Measurement(val id: Int, var value: Double)\nclass Broken { def +(): Int = 3 }\n",
+        "ConstructorAccessorFailure.scala",
+        failed_output.path(),
+        SourceId::from_index(1561),
+        SourceUnitCardinality::AtLeastTwo,
+    );
+    assert!(matches!(failed, Err(PipelineFailure::Codegen(_))));
+    assert!(
+        failed_output.class_files().is_empty(),
+        "a later batch failure publishes no accessor artifacts"
+    );
 }
 
 #[test]
