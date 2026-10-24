@@ -36,9 +36,10 @@ Float and Double source, constant-pool, descriptor, linear-analysis, CFG, and
 verifier boundaries are audited in [`jvm-floating-point.md`](jvm-floating-point.md).
 The bounded source backend now emits private Float/Double instance fields,
 primary-constructor literal/parameter initialization, exact field reads and
-mutable writes, and ordinary Float/Double method returns and parameters.
-Floating-point control flow, arithmetic, conversions, and calls remain outside
-this increment.
+mutable writes, method and constructor calls, Float/Double `If` results, and
+Double locals across supported `While` loops. These paths preserve exact
+descriptors, category widths, and verifier frame types. Floating-point
+arithmetic, comparisons, widening, and conversions remain outside the subset.
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,
@@ -449,7 +450,7 @@ lexer, parser, namer, typer, JVM backend, and JDK 21+ runtime. Its Java harness
 checks arithmetic overflow, signed comparison boundaries, divide-by-zero
 exceptions, and repeated `sumTo` loop execution with `java -Xverify:all`.
 General Scala library lowering, Long arithmetic/comparison outside the bounded
-call and control-flow subset, Float/Double fields, calls, and control flow, Java classpath loading,
+call and control-flow subset, bounded Float/Double fields, calls, and control flow, Java classpath loading,
 TASTy emission, the full Scala ABI, universal equality, and arbitrary
 reference-bearing calls remain outside this subset.
 

@@ -155,7 +155,6 @@ struct JvmLoweringContext<'a> {
     local_layout: Option<&'a JvmLocalLayout>,
     initialized_locals: HashSet<SymbolId>,
     reference_assignment_restricted_region_depth: usize,
-    floating_control_flow_depth: usize,
     call_context: Option<(
         &'a JvmCompilationUnit<'a>,
         &'a JvmClassMetadata,
@@ -180,7 +179,6 @@ impl<'a> JvmLoweringContext<'a> {
             local_layout: None,
             initialized_locals: HashSet::new(),
             reference_assignment_restricted_region_depth: 0,
-            floating_control_flow_depth: 0,
             call_context: None,
             expected_expression_type: None,
             node_visits: 0,
@@ -942,14 +940,6 @@ fn emit_expression_with_identity_context(
             node,
         }),
     }?;
-    if context.floating_control_flow_depth > 0
-        && matches!(flow, Flow::Value(JvmType::Float | JvmType::Double))
-    {
-        return Err(JvmCodegenError::UnsupportedTypedExpression {
-            tree: tree_id,
-            node: "floating-point control-flow lowering is deferred",
-        });
-    }
     Ok(flow)
 }
 
@@ -1032,6 +1022,12 @@ fn planned_value_type(
     }
     if is_same_symbol(ty, definitions.long) {
         return Ok(JvmType::Long);
+    }
+    if is_same_symbol(ty, definitions.float) {
+        return Ok(JvmType::Float);
+    }
+    if is_same_symbol(ty, definitions.double) {
+        return Ok(JvmType::Double);
     }
     match unit.reference_type(ty, definitions) {
         Err(JvmCodegenError::UnsupportedJvmReferenceType {
@@ -2510,7 +2506,9 @@ fn validate_constructor_argument(
             let primitive = match literal.value {
                 Constant::Int(_) => JvmType::Int,
                 Constant::Boolean(_) => JvmType::Boolean,
+                Constant::FloatBits(_) => JvmType::Float,
                 Constant::Long(_) => JvmType::Long,
+                Constant::DoubleBits(_) => JvmType::Double,
                 _ => return Err(unsupported()),
             };
             let typed_primitive = primitive_type(context.store, tree.ty, context.definitions);
@@ -2553,9 +2551,15 @@ fn validate_constructor_argument(
                         });
                     }
                     context.initialized_locals.contains(symbol)
-                        && (matches!(local.ty(), JvmType::Int | JvmType::Boolean)
-                            || matches!(local.ty(), JvmType::Long)
-                            || matches!(local.ty(), JvmType::Reference(_)))
+                        && matches!(
+                            local.ty(),
+                            JvmType::Int
+                                | JvmType::Boolean
+                                | JvmType::Float
+                                | JvmType::Long
+                                | JvmType::Double
+                                | JvmType::Reference(_)
+                        )
                 } else {
                     false
                 };
@@ -2721,6 +2725,7 @@ fn validate_constructor_argument(
                     constructor_call,
                     tree_id,
                     application,
+                    expected,
                     false,
                     depth,
                     budget,
@@ -2821,11 +2826,13 @@ fn is_approved_constructor_reference_field(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_constructor_reference_factory_call(
     context: &JvmLoweringContext<'_>,
     constructor_call: TreeId<Typed>,
     tree_id: TreeId<Typed>,
     application: &dotty_core::ast::Apply<Typed>,
+    expected: Option<JvmType>,
     allow_direct_nested_new: bool,
     depth: usize,
     budget: &mut usize,
@@ -2843,9 +2850,10 @@ fn validate_constructor_reference_factory_call(
         tree_id,
         context.definitions,
     )?;
-    if target.invocation_kind() != JvmInvocationKind::Virtual
-        || !matches!(target.result(), JvmReturnType::Value(JvmType::Reference(_)))
-    {
+    let JvmReturnType::Value(result) = target.result() else {
+        return Err(unsupported());
+    };
+    if target.invocation_kind() != JvmInvocationKind::Virtual || Some(result) != expected {
         return Err(unsupported());
     }
     if let Some(receiver) = target.receiver_tree()
@@ -3353,17 +3361,14 @@ fn emit_if(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    context.floating_control_flow_depth += 1;
-    let result = emit_if_body(
+    emit_if_body(
         context,
         tree_id,
         expected_type,
         identity_reference_context,
         code,
         depth,
-    );
-    context.floating_control_flow_depth -= 1;
-    result
+    )
 }
 
 fn emit_if_body(
@@ -3490,10 +3495,7 @@ fn emit_while(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    context.floating_control_flow_depth += 1;
-    let result = emit_while_body(context, tree_id, code, depth);
-    context.floating_control_flow_depth -= 1;
-    result
+    emit_while_body(context, tree_id, code, depth)
 }
 
 fn emit_while_body(
@@ -4007,7 +4009,11 @@ pub(super) fn validate_tree_type(
     }
 }
 
-fn primitive_type(store: &SemanticStore, ty: TypeId, definitions: &Definitions) -> Option<JvmType> {
+pub(super) fn primitive_type(
+    store: &SemanticStore,
+    ty: TypeId,
+    definitions: &Definitions,
+) -> Option<JvmType> {
     match store.types.try_get(ty)? {
         Type::Constant(Constant::Int(_)) => Some(JvmType::Int),
         Type::Constant(Constant::Boolean(_)) => Some(JvmType::Boolean),
@@ -4032,23 +4038,13 @@ fn primitive_type(store: &SemanticStore, ty: TypeId, definitions: &Definitions) 
             Some(JvmType::Long)
         }
         Type::TypeRef {
-            prefix,
             target: TypeRefTarget::Symbol(symbol),
-        } if *symbol == type_symbol(store, definitions.float)?
-            && *prefix == definitions.no_prefix
-            && matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) =>
-        {
-            Some(JvmType::Float)
-        }
+            ..
+        } if *symbol == type_symbol(store, definitions.float)? => Some(JvmType::Float),
         Type::TypeRef {
-            prefix,
             target: TypeRefTarget::Symbol(symbol),
-        } if *symbol == type_symbol(store, definitions.double)?
-            && *prefix == definitions.no_prefix
-            && matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) =>
-        {
-            Some(JvmType::Double)
-        }
+            ..
+        } if *symbol == type_symbol(store, definitions.double)? => Some(JvmType::Double),
         _ => None,
     }
 }

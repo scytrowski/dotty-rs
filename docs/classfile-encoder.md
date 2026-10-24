@@ -37,7 +37,7 @@ name index and payload.
 `ClassFileBuilder` creates new classes with owned names, descriptors, fields,
 and methods. Its raw `MethodBuilder::code` path remains available for callers
 that need to provide bytes and explicit `max_stack`/`max_locals`. For
-straight-line methods and the supported integer/reference branched subset,
+straight-line methods and the supported integer/reference/Float/Double branched subset,
 `add_static_method`, `add_instance_method`, and `add_code_method` accept a
 closure over `CodeBuilder`:
 
@@ -141,6 +141,7 @@ subsets:
 | `Box` | `aload`, `iload`, `invokespecial`, `putfield`, `getfield`, `return`, `ireturn` |
 | `Caller` | integer constants, `invokestatic`, `new`, `dup`, `iload`, `invokespecial`, `areturn`, `ireturn` |
 | `FloatingPointValues` | bit-preserving Float/Double constants, `ldc`/`ldc2_w`, parameter and local loads/stores, `freturn`/`dreturn`; verified and executed with JDK 21 |
+| `FloatDoubleCalls` | exact `(FD)` and `(IFDJ)` calls, constructor forwarding, Float/Double branch joins and Double loop frames; covered by source integration and the mandatory JDK gate |
 
 These integer instructions operate directly on JVM 32-bit values. Subtraction
 and multiplication wrap modulo 2^32; division truncates toward zero; remainder
@@ -198,15 +199,17 @@ so the structural round-trip suite does not depend on an installed JDK.
 The existing `assemble(&[Instruction], ...)` and linear analyzer remain
 straight-line APIs. Their typed instruction set includes bounded Float/Double
 constants, locals and returns; arithmetic, conversions and comparisons remain
-unsupported. The separate symbolic `CodeSequence` API supports labels
+unsupported. Class-aware CFG analysis also checks exact Float/Double field,
+method, and approved constructor transfers, including category widths and
+Float/Double stack-map entries. The separate symbolic `CodeSequence` API supports labels
 and `goto`, `goto_w`, `ifeq`, `ifne`, `if_icmp{eq,ne,lt,ge,gt,le}`,
 `if_acmpeq`, `if_acmpne`, `ifnull`, and `ifnonnull` branches.
 `assemble_labeled` returns complete bytes plus deterministic instruction and
 label byte offsets. It uses checked branch displacement and code-length
 arithmetic, and never widens a short branch automatically. The public typed
-`CodeBuilder` connects these pieces for the supported integer and initialized
-reference subset and emits `StackMapTable`; it rejects unreachable blocks and
-unsupported verifier states. Follow-up work can add switch instructions,
-exception edges, Float/Double flow states, and broader object initialization states. Frame compression
+`CodeBuilder` connects these pieces for the supported integer, Float/Double,
+and initialized-reference subset and emits `StackMapTable`; it rejects
+unreachable blocks and unsupported verifier states. Follow-up work can add
+switch instructions, exception edges, and broader object initialization states. Frame compression
 and general JVM verification remain out of scope. This does not add Scala
 compilation or a JVM backend.

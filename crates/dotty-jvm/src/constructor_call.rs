@@ -209,14 +209,6 @@ pub(super) fn resolve(
         definitions,
     )?;
 
-    if descriptor
-        .parameters()
-        .iter()
-        .any(|ty| matches!(ty, JvmType::Float | JvmType::Double))
-    {
-        return Err(unsupported(apply_tree, ShapeError::UnsupportedArgumentType));
-    }
-
     let expected_arguments = descriptor.parameters();
     if apply.args.len() != expected_arguments.len() {
         return Err(JvmCodegenError::JvmConstructorCallArityMismatch {
@@ -432,6 +424,8 @@ fn planned_argument_type(
         Type::Constant(Constant::Int(_)) => Some(JvmType::Int),
         Type::Constant(Constant::Boolean(_)) => Some(JvmType::Boolean),
         Type::Constant(Constant::Long(_)) => Some(JvmType::Long),
+        Type::Constant(Constant::FloatBits(_)) => Some(JvmType::Float),
+        Type::Constant(Constant::DoubleBits(_)) => Some(JvmType::Double),
         Type::TypeRef {
             prefix,
             target: TypeRefTarget::Symbol(symbol),
@@ -459,6 +453,14 @@ fn planned_argument_type(
         {
             Some(JvmType::Long)
         }
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } if Some(*symbol) == type_symbol(store, definitions.float) => Some(JvmType::Float),
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } if Some(*symbol) == type_symbol(store, definitions.double) => Some(JvmType::Double),
         Type::TypeRef { .. } if matches!(argument_tree.kind, TreeKind::Apply(_)) => {
             planned_constructor_application_type(
                 unit,
@@ -601,8 +603,19 @@ fn planned_reference_call_type(
     let target = unit
         .resolve_planned_instance_call(caller_class, caller_method.method, call, definitions)
         .ok()?;
-    let JvmReturnType::Value(JvmType::Reference(result)) = target.result() else {
+    let JvmReturnType::Value(result) = target.result() else {
         return None;
+    };
+    let result_matches = match result {
+        JvmType::Reference(class) => {
+            planned_result_class(unit, call_tree.ty, class, definitions) == Some(class)
+                && class_identities
+                    .iter()
+                    .any(|identity| identity.symbol() == class)
+        }
+        JvmType::Int | JvmType::Boolean | JvmType::Float | JvmType::Long | JvmType::Double => {
+            crate::expression::primitive_type(unit.store, call_tree.ty, definitions) == Some(result)
+        }
     };
     if target.invocation_kind() != crate::JvmInvocationKind::Virtual
         || target.receiver_tree().is_some_and(|receiver| {
@@ -611,14 +624,11 @@ fn planned_reference_call_type(
                 Some(TreeKind::This(dotty_core::ast::This { qual: None }))
             )
         })
-        || planned_result_class(unit, call_tree.ty, result, definitions) != Some(result)
-        || !class_identities
-            .iter()
-            .any(|identity| identity.symbol() == result)
+        || !result_matches
     {
         return None;
     }
-    Some(JvmType::Reference(result))
+    Some(result)
 }
 
 fn term_reference_type(

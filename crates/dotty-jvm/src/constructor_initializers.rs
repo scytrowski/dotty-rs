@@ -271,11 +271,9 @@ pub(crate) fn append_direct_super_constructor_call(
     enum EncodedArgument {
         IntConstant(i32),
         LongConstant(i64),
-        Parameter {
-            slot: u16,
-            value_type: JvmType,
-            tree: TreeId<Typed>,
-        },
+        FloatBits(u32),
+        DoubleBits(u64),
+        Parameter { slot: u16, value_type: JvmType },
     }
     let mut encoded_arguments = Vec::with_capacity(proof.arguments().len());
     for (binding, formal) in proof
@@ -321,6 +319,28 @@ pub(crate) fn append_direct_super_constructor_call(
                 }
                 encoded_arguments.push(EncodedArgument::LongConstant(*value));
             }
+            [JvmConstructorInitializerInstruction::FloatBits(bits)] => {
+                if found != JvmType::Float {
+                    return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
+                        tree: proof.typed_application(),
+                        argument: binding.typed,
+                        expected: formal.ty(),
+                        found: Some(found),
+                    });
+                }
+                encoded_arguments.push(EncodedArgument::FloatBits(*bits));
+            }
+            [JvmConstructorInitializerInstruction::DoubleBits(bits)] => {
+                if found != JvmType::Double {
+                    return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
+                        tree: proof.typed_application(),
+                        argument: binding.typed,
+                        expected: formal.ty(),
+                        found: Some(found),
+                    });
+                }
+                encoded_arguments.push(EncodedArgument::DoubleBits(*bits));
+            }
             [
                 JvmConstructorInitializerInstruction::LoadParameter {
                     slot, value_type, ..
@@ -337,7 +357,6 @@ pub(crate) fn append_direct_super_constructor_call(
                 encoded_arguments.push(EncodedArgument::Parameter {
                     slot: *slot,
                     value_type: *value_type,
-                    tree: binding.typed,
                 });
             }
             _ => {
@@ -355,20 +374,14 @@ pub(crate) fn append_direct_super_constructor_call(
         let result = match argument {
             EncodedArgument::IntConstant(value) => code.iconst(value),
             EncodedArgument::LongConstant(value) => code.lconst(value),
-            EncodedArgument::Parameter {
-                slot,
-                value_type,
-                tree,
-            } => match value_type {
+            EncodedArgument::FloatBits(bits) => code.fconst_bits(bits),
+            EncodedArgument::DoubleBits(bits) => code.dconst_bits(bits),
+            EncodedArgument::Parameter { slot, value_type } => match value_type {
                 JvmType::Int | JvmType::Boolean => code.iload(usize::from(slot)),
                 JvmType::Reference(_) => code.aload(usize::from(slot)),
                 JvmType::Long => code.lload(usize::from(slot)),
-                JvmType::Float | JvmType::Double => {
-                    return Err(JvmCodegenError::UnsupportedJvmConstructorArgument {
-                        tree: proof.typed_application(),
-                        argument: tree,
-                    });
-                }
+                JvmType::Float => code.fload(usize::from(slot)),
+                JvmType::Double => code.dload(usize::from(slot)),
             },
         };
         result.map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
