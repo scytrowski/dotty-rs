@@ -143,8 +143,9 @@ uses constructor accessor metadata for checked backing fields, stores,
 getters, and setters. #1581 also installs and initializes ordinary public
 class-body backing fields in source order, including through a validated
 implicit no-argument constructor. Issue #1582 emits one public getter per
-validated ordinary body accessor through the shared getter bytecode path.
-Body-field setter emission and source call lowering remain later increments.
+validated ordinary body accessor, and #1583 emits one public setter per
+validated mutable body accessor through the shared accessor bytecode path.
+Source call lowering remains a later increment.
 
 ## Scope matrix
 
@@ -155,7 +156,7 @@ Body-field setter emission and source call lowering remain later increments.
 | `Ref(val item: Measurement)` | Emits private-final planned reference storage, copies the exact reference formal after direct-super initialization, and emits `item()LMeasurement;`. |
 | Plain constructor parameter | Existing distinct class-owned and constructor-owned parameter identities remain; it does not gain an accessor by implication. |
 | Immutable `val` | Oracle confirms private-final storage and public getter with no setter. |
-| Ordinary class-body public `val`/`var` | Metadata projection is covered by #1580 using the #1578 Scala 3.9.0 ABI audit and #1579 exact source/RHS proof. Backing fields are private (final for `val`); #1581 stores the exact typed RHS after the direct-super call, and #1582 emits a public getter. Vars retain checked setter signatures for collision validation, while setter bytecode and source call lowering remain deferred. |
+| Ordinary class-body public `val`/`var` | Metadata projection is covered by #1580 using the #1578 Scala 3.9.0 ABI audit and #1579 exact source/RHS proof. Backing fields are private (final for `val`); #1581 stores the exact typed RHS after the direct-super call, #1582 emits a public getter, and #1583 emits a public `_$eq` setter for each mutable body field. Source call lowering remains deferred. |
 | `private[this]`, `lazy`, other visibility variants | Deferred; no ABI claim is made by this audit. |
 | Secondary, defaulted, multiple-clause, or `using` constructors | Deferred. |
 | Trait, case, generic, or externally compiled classes; inheritance bridges | Deferred. Accessor metadata is rejected on non-Object subclasses and across planned accessor-inheritance edges until generated signatures participate in override/bridge validation. |
