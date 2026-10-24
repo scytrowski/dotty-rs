@@ -26,7 +26,25 @@ pub struct JvmConstructorFieldInitializerPlan {
     class: SymbolId,
     constructor: JvmConstructorMetadata,
     owner_internal_name: String,
+    accessors: Vec<JvmConstructorAccessorInitializer>,
     fields: Vec<JvmConstructorFieldInitializer>,
+}
+
+/// Checked constructor parameter copy into one accessor's private JVM storage.
+///
+/// Unlike an ordinary field initializer, this has no source RHS tree. The
+/// exact constructor-owned formal and its validated local layout are retained
+/// directly from accessor metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmConstructorAccessorInitializer {
+    field: SymbolId,
+    parameter: SymbolId,
+    source_ordinal: usize,
+    slot: u16,
+    width: u8,
+    value_type: JvmType,
+    field_name: String,
+    field_descriptor: String,
 }
 
 /// One field initializer and its checked instruction sequence.
@@ -111,12 +129,45 @@ impl JvmConstructorFieldInitializerPlan {
         &self.fields
     }
 
+    /// Constructor accessors in source parameter order, before class-body
+    /// field initializers.
+    pub fn accessors(&self) -> &[JvmConstructorAccessorInitializer] {
+        &self.accessors
+    }
+
     /// Appends only the planned field initializer instructions to `code`.
     ///
     /// The caller is responsible for placing this sequence after the
     /// validated direct-parent constructor call and for adding a constructor
     /// return afterward. Whole-class emission performs both steps.
     pub fn append_to(&self, code: &mut CodeBuilder) -> Result<(), JvmCodegenError> {
+        for accessor in &self.accessors {
+            code.aload(0)
+                .map_err(|error| JvmCodegenError::ConstructorCodeBuilder {
+                    class: self.class,
+                    error,
+                })?;
+            let loaded = match accessor.value_type {
+                JvmType::Int | JvmType::Boolean => code.iload(usize::from(accessor.slot)),
+                JvmType::Long => code.lload(usize::from(accessor.slot)),
+                JvmType::Float => code.fload(usize::from(accessor.slot)),
+                JvmType::Double => code.dload(usize::from(accessor.slot)),
+                JvmType::Reference(_) => code.aload(usize::from(accessor.slot)),
+            };
+            loaded.map_err(|error| JvmCodegenError::ConstructorCodeBuilder {
+                class: self.class,
+                error,
+            })?;
+            code.putfield(
+                self.owner_internal_name.clone(),
+                accessor.field_name.clone(),
+                accessor.field_descriptor.clone(),
+            )
+            .map_err(|error| JvmCodegenError::ConstructorCodeBuilder {
+                class: self.class,
+                error,
+            })?;
+        }
         for field in &self.fields {
             for instruction in &field.instructions {
                 let result = match instruction {
@@ -194,6 +245,48 @@ impl JvmConstructorFieldInitializer {
     /// Checked instruction sequence, beginning with `LoadThis` and ending with `PutField`.
     pub fn instructions(&self) -> &[JvmConstructorInitializerInstruction] {
         &self.instructions
+    }
+}
+
+impl JvmConstructorAccessorInitializer {
+    /// Canonical source field that owns this backing storage.
+    pub const fn field(&self) -> SymbolId {
+        self.field
+    }
+
+    /// Exact constructor-owned formal copied into the backing field.
+    pub const fn parameter(&self) -> SymbolId {
+        self.parameter
+    }
+
+    /// Flattened source parameter ordinal, independent of JVM slot width.
+    pub const fn source_ordinal(&self) -> usize {
+        self.source_ordinal
+    }
+
+    /// First JVM local slot occupied by the formal.
+    pub const fn slot(&self) -> u16 {
+        self.slot
+    }
+
+    /// JVM local-slot width of the formal (one or two).
+    pub const fn width(&self) -> u8 {
+        self.width
+    }
+
+    /// Exact projected value type stored in the accessor backing field.
+    pub const fn value_type(&self) -> JvmType {
+        self.value_type
+    }
+
+    /// Validated private JVM backing field name.
+    pub fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
+    /// Validated JVM backing field descriptor.
+    pub fn field_descriptor(&self) -> &str {
+        &self.field_descriptor
     }
 }
 
@@ -452,6 +545,66 @@ pub(super) fn lower(
         current_field: class,
         node_visits: 0,
     };
+    let mut lowered_accessors = Vec::with_capacity(metadata.accessors().len());
+    let mut accessor_fields = HashSet::new();
+    let mut accessor_parameters = HashSet::new();
+    let mut previous_ordinal = None;
+    for accessor in metadata.accessors() {
+        let field = accessor.source_field();
+        let parameter = accessor.constructor_parameter();
+        let invalid = |issue| JvmCodegenError::InvalidJvmAccessorInitializer {
+            class,
+            field,
+            parameter,
+            issue,
+        };
+        if accessor.owner() != class
+            || accessor.binding().constructor() != constructor.symbol()
+            || !accessor_fields.insert(field)
+            || !accessor_parameters.insert(parameter)
+            || previous_ordinal.is_some_and(|ordinal| ordinal >= accessor.source_ordinal())
+        {
+            return Err(invalid(
+                crate::JvmAccessorInitializerIssue::DuplicateOrUnorderedBinding,
+            ));
+        }
+        previous_ordinal = Some(accessor.source_ordinal());
+
+        let local = constructor
+            .parameters()
+            .iter()
+            .find(|local| local.symbol() == parameter)
+            .ok_or_else(|| invalid(crate::JvmAccessorInitializerIssue::MissingParameter))?;
+        if constructor.parameters().get(accessor.source_ordinal()) != Some(local) {
+            return Err(invalid(
+                crate::JvmAccessorInitializerIssue::SourceOrdinalMismatch,
+            ));
+        }
+        if local.ty() != accessor.value_type() {
+            return Err(invalid(
+                crate::JvmAccessorInitializerIssue::ValueTypeMismatch,
+            ));
+        }
+        let expected_width = match accessor.value_type() {
+            JvmType::Long | JvmType::Double => 2,
+            JvmType::Int | JvmType::Boolean | JvmType::Float | JvmType::Reference(_) => 1,
+        };
+        if local.width() != expected_width {
+            return Err(invalid(
+                crate::JvmAccessorInitializerIssue::SlotWidthMismatch,
+            ));
+        }
+        lowered_accessors.push(JvmConstructorAccessorInitializer {
+            field,
+            parameter,
+            source_ordinal: accessor.source_ordinal(),
+            slot: local.slot(),
+            width: local.width(),
+            value_type: accessor.value_type(),
+            field_name: accessor.field_name().to_owned(),
+            field_descriptor: accessor.field_descriptor().to_owned(),
+        });
+    }
     let mut lowered_fields = Vec::with_capacity(metadata.fields().len());
     for field in metadata.fields() {
         let initializer = field.initializer();
@@ -485,6 +638,7 @@ pub(super) fn lower(
         class,
         constructor,
         owner_internal_name: metadata.identity().internal_name().to_owned(),
+        accessors: lowered_accessors,
         fields: lowered_fields,
     })
 }

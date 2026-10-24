@@ -105,6 +105,17 @@ pub(super) fn emit_class(
             .map_err(|error| class_file_error(class_symbol, None, error))?;
     }
 
+    for accessor in metadata.accessors() {
+        builder
+            .add_field(
+                accessor.field_name(),
+                accessor.field_descriptor(),
+                accessor.field_access_flags(),
+            )
+            .map_err(|error| {
+                class_file_error(class_symbol, Some(accessor.source_field()), error)
+            })?;
+    }
     for field in metadata.fields() {
         builder
             .add_field(field.name(), field.descriptor(), field.access_flags())
@@ -264,6 +275,12 @@ pub(super) fn validate_emittable_class(
         .fields()
         .iter()
         .map(|field| field.symbol())
+        .chain(
+            metadata
+                .accessors()
+                .iter()
+                .map(|accessor| accessor.source_field()),
+        )
         .collect();
     for method in &plan.methods {
         if !declared.contains(&method.method) {
@@ -278,6 +295,14 @@ pub(super) fn validate_emittable_class(
             return Err(JvmCodegenError::FieldEmissionUnsupported {
                 class: plan.class,
                 field: field.symbol(),
+            });
+        }
+    }
+    for accessor in metadata.accessors() {
+        if !declared.contains(&accessor.source_field()) || accessor.owner() != plan.class {
+            return Err(JvmCodegenError::FieldEmissionUnsupported {
+                class: plan.class,
+                field: accessor.source_field(),
             });
         }
     }
@@ -338,11 +363,20 @@ pub(super) fn validate_emittable_class(
     if matches!(
         &plan.initialization,
         JvmClassInitializationPlan::ImplicitNoArg
-    ) && let Some(field) = metadata.fields().first()
+    ) && let Some(field) = metadata
+        .fields()
+        .first()
+        .map(|field| field.symbol())
+        .or_else(|| {
+            metadata
+                .accessors()
+                .first()
+                .map(|accessor| accessor.source_field())
+        })
     {
         return Err(JvmCodegenError::FieldEmissionUnsupported {
             class: plan.class,
-            field: field.symbol(),
+            field,
         });
     }
     Ok(())
