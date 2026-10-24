@@ -66,11 +66,12 @@ pub const JVM_CLASSFILE_MAJOR_VERSION: u16 = 65;
 /// methods.
 pub const JVM_MAX_PARAMETER_SLOTS: usize = 255;
 
-/// A JVM value representation supported by the current projection slice.
+/// A JVM value representation supported by the current metadata projection.
 ///
 /// `Int` and `Boolean` have distinct descriptor letters (`I` and `Z`) but
-/// both use the JVM's int-like category-one operand representation. `Long`
-/// uses descriptor `J` and occupies two JVM slots. The current expression
+/// both use the JVM's int-like category-one operand representation. `Float`
+/// is a separate category-one value with descriptor `F`. `Long` and `Double`
+/// are distinct category-two values with descriptors `J` and `D`. The current expression
 /// subset supports Long literals, parameters, ordinary locals, assignments,
 /// returns, and private instance fields with primary-constructor
 /// initialization. Checked planned calls, Long constructor arguments,
@@ -84,8 +85,12 @@ pub const JVM_MAX_PARAMETER_SLOTS: usize = 255;
 pub enum JvmType {
     Int,
     Boolean,
+    /// A category-one JVM `float` value.
+    Float,
     /// A category-two JVM `long` value.
     Long,
+    /// A category-two JVM `double` value.
+    Double,
     /// A category-one reference to one exact class in a validated compilation unit.
     Reference(SymbolId),
 }
@@ -94,8 +99,12 @@ pub enum JvmType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmValueCategory {
     IntLike,
+    /// A JVM category-one `float` value, distinct from int-like values.
+    Float,
     /// A JVM category-two `long` value.
     Long,
+    /// A JVM category-two `double` value, distinct from `long`.
+    Double,
     /// A JVM object reference; it occupies one operand-stack/local slot.
     Reference,
 }
@@ -1463,6 +1472,8 @@ pub enum UnsupportedJvmCallShapeKind {
     RecursiveReceiver,
     /// The canonical term reference has a prefix outside this call subset.
     UnsupportedReceiverPrefix,
+    /// The target has a Float or Double argument/result before FP call lowering is added.
+    FloatingPointNotLowered,
     /// A super call is qualified or its qualifier is not the current `this`.
     UnsupportedSuperQualifier,
     /// The typed `SuperType` does not match the caller's proved direct parent.
@@ -1510,7 +1521,9 @@ pub enum UnsupportedJvmReferenceTypeKind {
 pub enum PrimitiveBuiltin {
     Int,
     Boolean,
+    Float,
     Long,
+    Double,
     Unit,
 }
 

@@ -4134,6 +4134,162 @@ fn projects_primitive_method_signatures_to_valid_descriptors() {
 }
 
 #[test]
+fn projects_float_double_method_descriptors_and_exact_value_categories() {
+    for (parameters, result, expected) in [
+        (vec![], dotty_core::Constant::FloatBits(0x7fc0_1234), "()F"),
+        (
+            vec![],
+            dotty_core::Constant::DoubleBits(0x7ff8_0000_0000_1234),
+            "()D",
+        ),
+    ] {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let constant = store.types.alloc(Type::Constant(result));
+        let fixture = SignatureFixture::from_store(
+            store,
+            definitions,
+            &parameters,
+            constant,
+            SymbolFlags::EMPTY,
+            MethodKind::Plain,
+        );
+        let descriptor = fixture.descriptor().unwrap();
+        assert_eq!(descriptor.as_str(), expected);
+        assert_eq!(descriptor.parameters(), []);
+    }
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let fixture = SignatureFixture::from_store(
+        store,
+        definitions,
+        &[
+            definitions.int,
+            definitions.float,
+            definitions.double,
+            definitions.long,
+        ],
+        definitions.double,
+        SymbolFlags::EMPTY,
+        MethodKind::Plain,
+    );
+    let mixed = fixture.descriptor().unwrap();
+    assert_eq!(mixed.as_str(), "(IFDJ)D");
+    assert_eq!(
+        mixed.parameters(),
+        [JvmType::Int, JvmType::Float, JvmType::Double, JvmType::Long]
+    );
+    assert_eq!(
+        mixed
+            .parameters()
+            .iter()
+            .map(|ty| ty.slot_width())
+            .collect::<Vec<_>>(),
+        [1, 1, 2, 2]
+    );
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let fixture = SignatureFixture::from_store(
+        store,
+        definitions,
+        &[
+            definitions.long,
+            definitions.double,
+            definitions.float,
+            definitions.boolean,
+        ],
+        definitions.unit,
+        SymbolFlags::EMPTY,
+        MethodKind::Plain,
+    );
+    assert_eq!(fixture.descriptor().unwrap().as_str(), "(JDFZ)V");
+
+    assert_eq!(JvmType::Float.descriptor_char(), Some('F'));
+    assert_eq!(JvmType::Float.category(), JvmValueCategory::Float);
+    assert_eq!(JvmType::Float.slot_width(), 1);
+    assert_eq!(JvmType::Double.descriptor_char(), Some('D'));
+    assert_eq!(JvmType::Double.category(), JvmValueCategory::Double);
+    assert_eq!(JvmType::Double.slot_width(), 2);
+    assert_eq!(JvmValueCategory::Float, JvmValueCategory::Float);
+    assert_ne!(JvmValueCategory::Float, JvmValueCategory::IntLike);
+    assert_ne!(JvmValueCategory::Double, JvmValueCategory::Long);
+    assert_eq!(FieldType::try_from(JvmType::Float), Ok(FieldType::Float));
+    assert_eq!(FieldType::try_from(JvmType::Double), Ok(FieldType::Double));
+}
+
+#[test]
+fn float_double_method_parameter_slots_follow_physical_widths() {
+    let mut fixture = SignatureFixture::new(4);
+    prepare_signature_class(&mut fixture, "Answer");
+    let method_type = fixture.store.types.alloc(Type::Method(MethodType {
+        params: [
+            fixture.definitions.int,
+            fixture.definitions.float,
+            fixture.definitions.double,
+            fixture.definitions.long,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, ty)| MethodParam {
+            name: TermName::new(fixture.store.names.intern(&format!("p{index}"))),
+            ty,
+            erased: false,
+            varargs: false,
+        })
+        .collect(),
+        result: fixture.definitions.double,
+        kind: MethodKind::Plain,
+    }));
+    fixture
+        .store
+        .symbols
+        .set_info(fixture.method, SymbolInfo::Complete(method_type));
+    for (parameter, ty) in fixture.parameters.iter().copied().zip([
+        fixture.definitions.int,
+        fixture.definitions.float,
+        fixture.definitions.double,
+        fixture.definitions.long,
+    ]) {
+        fixture
+            .store
+            .symbols
+            .set_info(parameter, SymbolInfo::Complete(ty));
+    }
+    let class_plan = JvmClassPlan {
+        class: fixture.class,
+        fields: Vec::new(),
+        methods: vec![fixture.plan.clone()],
+        initialization: JvmClassInitializationPlan::Unsupported,
+    };
+
+    let metadata = class_plan
+        .metadata(&fixture.store, &fixture.definitions)
+        .unwrap();
+    let method = &metadata.methods()[0];
+    assert_eq!(method.descriptor().as_str(), "(IFDJ)D");
+    assert_eq!(
+        method
+            .parameters()
+            .iter()
+            .map(|parameter| (
+                parameter.symbol(),
+                parameter.ty(),
+                parameter.slot(),
+                parameter.width()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (fixture.parameters[0], JvmType::Int, 1, 1),
+            (fixture.parameters[1], JvmType::Float, 2, 1),
+            (fixture.parameters[2], JvmType::Double, 3, 2),
+            (fixture.parameters[3], JvmType::Long, 5, 2),
+        ]
+    );
+}
+
+#[test]
 fn long_descriptor_projection_rejects_a_noncanonical_type_prefix() {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -4208,6 +4364,164 @@ fn long_descriptor_projection_rejects_invalid_builtin_symbols() {
             ),
             "corrupted Long builtin {corrupt_symbol} was accepted"
         );
+    }
+}
+
+#[test]
+fn float_double_descriptor_projection_rejects_malformed_canonical_builtins() {
+    for (is_double, corruption) in [
+        (false, "kind"),
+        (false, "owner"),
+        (false, "origin"),
+        (false, "info"),
+        (false, "name"),
+        (true, "kind"),
+        (true, "owner"),
+        (true, "origin"),
+        (true, "info"),
+        (true, "name"),
+    ] {
+        let mut fixture = SignatureFixture::new(0);
+        let (ty, builtin, expected_name) = if is_double {
+            (
+                fixture.definitions.double,
+                PrimitiveBuiltin::Double,
+                "Double",
+            )
+        } else {
+            (fixture.definitions.float, PrimitiveBuiltin::Float, "Float")
+        };
+        let symbol = fixture
+            .store
+            .types
+            .get(ty)
+            .reference_symbol()
+            .expect("canonical floating builtin points to a symbol");
+        match corruption {
+            "kind" => fixture.store.symbols.get_mut(symbol).kind = SymbolKind::Parameter,
+            "owner" => fixture.store.symbols.get_mut(symbol).owner = Some(fixture.class),
+            "origin" => {
+                fixture.store.symbols.get_mut(symbol).origin =
+                    SymbolOrigin::Source(dotty_core::SourceId::from_index(77));
+            }
+            "info" => fixture.store.symbols.set_info(symbol, SymbolInfo::Error),
+            "name" => {
+                let name = fixture.store.names.intern("NotTheBuiltin");
+                fixture.store.symbols.get_mut(symbol).name = Name::new(name, Namespace::Type);
+            }
+            _ => unreachable!(),
+        }
+
+        let result = fixture.descriptor();
+        assert!(
+            matches!(
+                result,
+                Err(JvmCodegenError::InvalidBuiltinDefinition { builtin: found, ty: found_ty })
+                    if found == builtin && found_ty == ty
+            ),
+            "malformed {expected_name} builtin {corruption} was accepted: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn float_double_descriptor_projection_rejects_wrong_prefixes_and_shadowing() {
+    for (is_double, builtin, expected) in [
+        (false, PrimitiveBuiltin::Float, JvmType::Float),
+        (true, PrimitiveBuiltin::Double, JvmType::Double),
+    ] {
+        let mut fixture = SignatureFixture::new(1);
+        let canonical = if is_double {
+            fixture.definitions.double
+        } else {
+            fixture.definitions.float
+        };
+        let symbol = fixture
+            .store
+            .types
+            .get(canonical)
+            .reference_symbol()
+            .unwrap();
+        let bad_prefix = fixture.store.types.alloc(Type::NoType);
+        let malformed = fixture
+            .store
+            .types
+            .alloc(Type::type_ref(bad_prefix, symbol));
+        let method_type = fixture.store.types.alloc(Type::Method(MethodType {
+            params: vec![MethodParam {
+                name: TermName::new(fixture.store.names.intern("value")),
+                ty: malformed,
+                erased: false,
+                varargs: false,
+            }],
+            result: malformed,
+            kind: MethodKind::Plain,
+        }));
+        fixture
+            .store
+            .symbols
+            .set_info(fixture.method, SymbolInfo::Complete(method_type));
+        fixture
+            .store
+            .symbols
+            .set_info(fixture.parameters[0], SymbolInfo::Complete(malformed));
+        assert!(matches!(
+            fixture.descriptor(),
+            Err(JvmCodegenError::InvalidPrimitiveTypePrefix {
+                symbol,
+                ty,
+                prefix,
+                builtin: found,
+            }) if symbol == fixture.parameters[0]
+                && ty == malformed
+                && prefix == bad_prefix
+                && found == builtin
+        ));
+        assert_eq!(expected.slot_width(), if is_double { 2 } else { 1 });
+        assert_eq!(
+            expected.category(),
+            if is_double {
+                JvmValueCategory::Double
+            } else {
+                JvmValueCategory::Float
+            }
+        );
+
+        let mut fixture = SignatureFixture::new(1);
+        let shadow = alloc_symbol_named(
+            &mut fixture.store,
+            if is_double { "Double" } else { "Float" },
+            Namespace::Type,
+            None,
+            SymbolKind::Class,
+            SymbolFlags::EMPTY,
+        );
+        let shadowed_type = fixture
+            .store
+            .types
+            .alloc(Type::type_ref(fixture.definitions.no_prefix, shadow));
+        let method_type = fixture.store.types.alloc(Type::Method(MethodType {
+            params: vec![MethodParam {
+                name: TermName::new(fixture.store.names.intern("value")),
+                ty: shadowed_type,
+                erased: false,
+                varargs: false,
+            }],
+            result: shadowed_type,
+            kind: MethodKind::Plain,
+        }));
+        fixture
+            .store
+            .symbols
+            .set_info(fixture.method, SymbolInfo::Complete(method_type));
+        fixture
+            .store
+            .symbols
+            .set_info(fixture.parameters[0], SymbolInfo::Complete(shadowed_type));
+        assert!(matches!(
+            fixture.descriptor(),
+            Err(JvmCodegenError::UnsupportedJvmType { .. })
+        ));
     }
 }
 
@@ -4688,6 +5002,127 @@ fn enforces_the_jvms_method_parameter_slot_limit_including_instance_receiver() {
             slots: 256,
         })
     );
+}
+
+#[test]
+fn float_double_parameter_units_enforce_255_and_256_limits_for_methods_and_constructors() {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let maximum_static_types = std::iter::repeat_n(definitions.double, 127)
+        .chain([definitions.float])
+        .collect::<Vec<_>>();
+    let maximum_static = SignatureFixture::from_store(
+        store,
+        definitions,
+        &maximum_static_types,
+        definitions.unit,
+        SymbolFlags::STATIC,
+        MethodKind::Plain,
+    );
+    assert_eq!(
+        maximum_static.descriptor().unwrap().as_str(),
+        &format!("({}F)V", "D".repeat(127))
+    );
+    assert_eq!(
+        maximum_static
+            .descriptor()
+            .unwrap()
+            .parameters()
+            .iter()
+            .map(|ty| usize::from(ty.slot_width()))
+            .sum::<usize>(),
+        255
+    );
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let too_many_static_types = std::iter::repeat_n(definitions.double, 127)
+        .chain([definitions.float, definitions.int])
+        .collect::<Vec<_>>();
+    let too_many_static = SignatureFixture::from_store(
+        store,
+        definitions,
+        &too_many_static_types,
+        definitions.unit,
+        SymbolFlags::STATIC,
+        MethodKind::Plain,
+    );
+    assert_eq!(
+        too_many_static.descriptor(),
+        Err(JvmCodegenError::TooManyParameterSlots {
+            method: too_many_static.method,
+            slots: 256,
+        })
+    );
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut maximum_constructor = SignatureFixture::from_store(
+        store,
+        definitions,
+        &vec![definitions.double; 127],
+        definitions.unit,
+        SymbolFlags::EMPTY,
+        MethodKind::Plain,
+    );
+    assert_eq!(
+        constructor_descriptor(&mut maximum_constructor)
+            .unwrap()
+            .as_str(),
+        &format!("({})V", "D".repeat(127))
+    );
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut too_many_constructor = SignatureFixture::from_store(
+        store,
+        definitions,
+        &std::iter::repeat_n(definitions.double, 127)
+            .chain([definitions.float])
+            .collect::<Vec<_>>(),
+        definitions.unit,
+        SymbolFlags::EMPTY,
+        MethodKind::Plain,
+    );
+    assert_eq!(
+        constructor_descriptor(&mut too_many_constructor),
+        Err(JvmCodegenError::TooManyParameterSlots {
+            method: too_many_constructor.method,
+            slots: 256,
+        })
+    );
+}
+
+fn constructor_descriptor(
+    fixture: &mut SignatureFixture,
+) -> Result<crate::JvmMethodDescriptor, JvmCodegenError> {
+    let class_type = fixture
+        .store
+        .types
+        .alloc(Type::type_ref(fixture.definitions.no_prefix, fixture.class));
+    let method_type = match fixture.store.symbols.info(fixture.method) {
+        SymbolInfo::Complete(ty) => match fixture.store.types.get(*ty) {
+            Type::Method(method) => method.clone(),
+            _ => unreachable!("signature fixture contains a method type"),
+        },
+        _ => unreachable!("signature fixture has completed method info"),
+    };
+    let constructor_type = fixture.store.types.alloc(Type::Method(MethodType {
+        result: class_type,
+        ..method_type
+    }));
+    fixture.store.symbols.get_mut(fixture.method).kind = SymbolKind::Constructor;
+    fixture
+        .store
+        .symbols
+        .set_info(fixture.method, SymbolInfo::Complete(constructor_type));
+    crate::descriptor::descriptor_for(
+        &fixture.plan,
+        &fixture.store,
+        fixture.class,
+        &fixture.definitions,
+        true,
+    )
 }
 
 struct EmissionFixture {
@@ -7350,7 +7785,9 @@ fn constructor_call_fixture(parameter_types: &[JvmType]) -> ConstructorCallFixtu
         .map(|ty| match ty {
             JvmType::Int => definitions.int,
             JvmType::Boolean => definitions.boolean,
+            JvmType::Float => definitions.float,
             JvmType::Long => definitions.long,
+            JvmType::Double => definitions.double,
             JvmType::Reference(_) => panic!("constructor fixture only accepts primitive types"),
         })
         .collect::<Vec<_>>();

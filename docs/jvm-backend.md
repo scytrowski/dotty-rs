@@ -34,8 +34,12 @@ focused positive and fail-closed coverage is mapped in
 
 Float and Double source, constant-pool, descriptor, linear-analysis, CFG, and
 verifier boundaries are audited in [`jvm-floating-point.md`](jvm-floating-point.md).
-Their source backend projection and CFG parameter state remain unsupported;
-the audit records the pinned Scala 3.9.0 oracle limitation and the ordered
+Canonical Float/Double types and literal constants project to JVM metadata,
+descriptors, field signatures, and parameter slots. Body lowering remains
+unsupported: expressions, loads/stores, returns, field writes, calls, and
+field reads fail with typed errors before instructions are emitted; calls and
+constructor arguments also fail before class artifacts are published. The
+audit records the pinned Scala 3.9.0 oracle limitation and the remaining
 follow-up issues without claiming Float/Double code generation.
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
@@ -182,12 +186,15 @@ receivers, arguments, and results. The audit and verifier contract are recorded 
 
 The unit-aware projection reads the method's completed `Type::Method` and the
 ordered parameter symbols from its plan. It supports one ordinary monomorphic
-parameter clause, `Definitions.int` (`I`), `Definitions.boolean` (`Z`), exact
-planned class references (`L<internal-name>;`), and result-only
-`Definitions.unit` (`V`). Integer and Boolean singleton constants widen to
-their corresponding primitive descriptor without changing the source type
-arena. Int and Boolean both use the JVM int-like category-one operand
-representation, while their descriptors remain distinct. The standalone
+parameter clause, `Definitions.int` (`I`), `Definitions.boolean` (`Z`),
+`Definitions.float` (`F`), `Definitions.double` (`D`), exact planned class
+references (`L<internal-name>;`), and result-only `Definitions.unit` (`V`).
+Integer, Boolean, Float, and Double singleton constants widen to their
+corresponding primitive descriptor without changing the source type arena.
+Int and Boolean both use the JVM int-like category-one operand representation;
+Float has a category-one slot and Double has a category-two pair. Parameter
+offsets include the receiver for instance methods, and signatures exceeding
+255 parameter units are rejected before artifacts. The standalone
 store-only `JvmMethodPlan::descriptor` remains primitive-only because it has no
 validated emission-unit context.
 
@@ -508,8 +515,8 @@ completed field type.
 
 Only plain-private, non-static, non-lazy, non-synthetic instance fields of
 ordinary classes whose sole parent is canonical `java.lang.Object` project to
-metadata. Exact `Int`, `Boolean`, and canonical `Long` types produce `I`, `Z`,
-and `J`. Immutable
+metadata. Exact `Int`, `Boolean`, `Float`, `Double`, and canonical `Long` types
+produce `I`, `Z`, `F`, `D`, and `J`. Immutable
 fields produce `ACC_PRIVATE | ACC_FINAL`; mutable fields produce
 `ACC_PRIVATE` without `ACC_FINAL`. Metadata preserves the caller's field plan
 order and rejects repeated field symbols and duplicate JVM field names. Whole

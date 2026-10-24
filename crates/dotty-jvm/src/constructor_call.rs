@@ -209,6 +209,14 @@ pub(super) fn resolve(
         definitions,
     )?;
 
+    if descriptor
+        .parameters()
+        .iter()
+        .any(|ty| matches!(ty, JvmType::Float | JvmType::Double))
+    {
+        return Err(unsupported(apply_tree, ShapeError::UnsupportedArgumentType));
+    }
+
     let expected_arguments = descriptor.parameters();
     if apply.args.len() != expected_arguments.len() {
         return Err(JvmCodegenError::JvmConstructorCallArityMismatch {

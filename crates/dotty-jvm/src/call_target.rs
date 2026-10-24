@@ -387,6 +387,21 @@ fn resolve_instance_call_body(
             class: method_owner,
             method,
         })?;
+    let descriptor = method_metadata.descriptor();
+    if descriptor
+        .parameters()
+        .iter()
+        .any(|ty| matches!(ty, JvmType::Float | JvmType::Double))
+        || matches!(
+            descriptor.result(),
+            JvmReturnType::Value(JvmType::Float | JvmType::Double)
+        )
+    {
+        return Err(unsupported_call(
+            call,
+            UnsupportedJvmCallShapeKind::FloatingPointNotLowered,
+        ));
+    }
     if method_owner != receiver_class && direct_super_parent.is_none() {
         let is_effective_inherited_method =
             receiver_metadata.dispatch_methods().iter().any(|entry| {
@@ -680,7 +695,11 @@ fn resolve_receiver_class(
                 }
                 return match found {
                     JvmType::Reference(class) => Ok(class),
-                    JvmType::Int | JvmType::Boolean | JvmType::Long => Err(unsupported_call(
+                    JvmType::Int
+                    | JvmType::Boolean
+                    | JvmType::Float
+                    | JvmType::Long
+                    | JvmType::Double => Err(unsupported_call(
                         receiver_id,
                         UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
                     )),
@@ -762,6 +781,7 @@ fn resolve_receiver_class(
             match target.result() {
                 JvmReturnType::Value(JvmType::Reference(class)) => Ok(class),
                 JvmReturnType::Value(JvmType::Int | JvmType::Boolean | JvmType::Long)
+                | JvmReturnType::Value(JvmType::Float | JvmType::Double)
                 | JvmReturnType::Void => Err(unsupported_call(
                     receiver_id,
                     UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
@@ -841,10 +861,12 @@ fn planned_current_field_receiver_class(
         })?;
     match field_metadata.value_type() {
         JvmType::Reference(class) => Ok(class),
-        JvmType::Int | JvmType::Boolean | JvmType::Long => Err(unsupported_call(
-            receiver,
-            UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
-        )),
+        JvmType::Int | JvmType::Boolean | JvmType::Float | JvmType::Long | JvmType::Double => {
+            Err(unsupported_call(
+                receiver,
+                UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
+            ))
+        }
     }
 }
 
@@ -933,7 +955,9 @@ fn project_result_type(
         {
             JvmType::Reference(class) => Some(JvmReturnType::Value(JvmType::Reference(class))),
             JvmType::Int | JvmType::Boolean => None,
+            JvmType::Float => Some(JvmReturnType::Value(JvmType::Float)),
             JvmType::Long => Some(JvmReturnType::Value(JvmType::Long)),
+            JvmType::Double => Some(JvmReturnType::Value(JvmType::Double)),
         },
         _ => None,
     }

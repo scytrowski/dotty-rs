@@ -67,7 +67,7 @@ an executable pinned compiler oracle.
 | Linear bytecode analysis | Typed `fconst`/`dconst`, Float `ldc`, Double `ldc2_w`, F/D locals, and F/D returns are modeled and analyzed. Descriptor-derived parameter/local sizes, stack slots, exact kinds, Double heads/tails, overlapping stores, and typed wrong-return errors have focused regression tests. |
 | CFG analysis | CFG states now keep Float separate from Integer and Double separate from Long. Tests cover `(ZFF)F` and `(ZDD)D` branch joins, exact parameter slots, Double pair-aware locals and overlaps, Float/Int and Double/Long stack rejection, and an Int-controlled Double local loop backedge. |
 | StackMapTable projection | Branch frames emit `Float_variable_info` for Float and one `Double_variable_info` for each Double head/tail pair. Regression checks preserve real Top holes and omit the Double tail; a JDK 21 gate verifies and executes generated branch/loop methods, including mixed Long/Double and Float/Int locals. |
-| JVM source backend | `JvmType` contains Int, Boolean, Long, and planned references, but not Float or Double. The source integration test checks each fixture shape below: it first fails during backend projection with `UnsupportedJvmReferenceType(ExternalClass)` and publishes no class files. |
+| JVM source backend | Canonical Float/Double types and bit-preserving literal constants project to `F`/`D` metadata, fields, method results, and parameter slots. The source integration test checks constructor `(FD)V`, methods `()F`, `()D`, `(IFDJ)D`, `(JDFZ)V`, and `(FDD)F`, including exact receiver-aware local slots. Float/Double bodies remain unsupported and fail with typed errors before artifacts are published. |
 
 The source integration test covers these isolated shapes so the current first
 failure is observable per shape rather than inferred from a partially emitted
@@ -75,20 +75,21 @@ class:
 
 | Source shape | Current first failure |
 | --- | --- |
-| Float and Double primary-constructor parameters | Backend projection: unsupported external JVM type; no class artifact |
-| Float and Double mutable instance fields | Backend projection: unsupported external JVM type; no class artifact |
-| Getter-shaped Float result/parameter and Double setter parameter | Backend projection: unsupported external JVM type; no class artifact |
-| Complete `NumericBox` fields, constructor, getters, and setter source batch | Backend projection of the class shape; no class artifact |
-| Float and Double literal return methods | Backend projection of the method signature; no class artifact |
-| Double parameter/local round trip | Backend projection of the method signature; no class artifact |
-| Float `if` join | Backend projection of the method signature; no class artifact |
-| Double mutable local across an Int-controlled loop | Backend projection of the method signature; no class artifact |
+| Float and Double primary-constructor parameters | Constructor descriptor metadata projects `(FD)V`; parameter slots include the receiver and Double width |
+| Float and Double mutable instance fields | Field metadata projects `F` and `D`; initializer bytecode remains unsupported |
+| Getter-shaped Float result/parameter and Double setter parameter | Method descriptors project `()F`, `(F)F`, and `(D)V`; body code generation remains unsupported |
+| Complete `NumericBox` fields, constructor, getters, and setter source batch | Metadata projects successfully; source emission stops with a typed unsupported-body error and no class artifact |
+| Float and Double literal return methods | Method signatures project; literal body lowering remains unsupported with no class artifact |
+| Double parameter/local round trip | Method signature projects; local load/return lowering remains unsupported with no class artifact |
+| Float `if` join | Method signature projects; Float CFG/source lowering remains unsupported with no class artifact |
+| Double mutable local across an Int-controlled loop | Method signature projects; Double local/loop lowering remains unsupported with no class artifact |
 
-The fixture matrix test does not inspect typed body output after the backend
-rejects the containing method. The separate Typer test checks only the six
-literal values and canonical widened types listed above. Together these tests
-pin current source literal semantics and the first backend failure stage, not
-successful Rust compilation of Float/Double body shapes.
+The fixture matrix checks metadata projection before confirming that actual
+Float/Double body operations fail without partial artifacts. The separate
+Typer test checks only the six literal values and canonical widened types
+listed above. Together these tests pin source literal semantics, canonical
+metadata identity, descriptors, and local slots without claiming successful
+Float/Double body code generation.
 
 ## JVMS 21 contract for follow-up implementation
 
@@ -183,17 +184,16 @@ and invocation transfers must check exact descriptor kinds. No fallback to
 
 | Boundary | Current/audit rejection to preserve |
 | --- | --- |
-| Source backend | Unsupported Float/Double type projection fails before artifact publication. |
+| Source backend | Canonical Float/Double metadata projection succeeds; unsupported body lowering fails before artifact publication. |
 | CFG | Float/Int and Double/Long stack joins fail with typed errors. Local category mismatches and maybe-initialized Double pairs become unusable `Top`; wrong Double tails and loads fail before frame publication. |
 | Instruction encoding/analysis | Arithmetic, conversions and comparisons remain unsupported. Wrong return kinds, wrong constant tags, and category mismatches fail with typed errors. |
 | Class-file pool | A category-one load rejects Double; `ldc2_w` rejects Float, Long and the reserved second slot. Float bits and Double bits (including NaN payloads) remain exact. |
 | Verifier shape | Linear and CFG analyzers reject category-one operations on Double, category-two operations on Float, Double tail reads, and overlapping stores that invalidate the whole Double local. CFG joins and backedges retain only exact Float values or complete Double pairs. |
 
-Planned follow-ups remain ordered: #1533 adds class-file FP opcodes, pool
-operand validation, and linear analysis; #1534 adds FP CFG states and
-StackMapTable projection (implemented by this issue); #1535 adds JVM metadata
-and slot projection after this audit and may proceed independently; #1536 adds
-literal/local/return lowering after #1533–#1535; #1537 adds fields and
-constructors after #1536; #1538 adds calls and control flow after #1536 (its
-end-to-end fixture also needs #1537); #1539 provides the final verified source
-acceptance batch. This issue does not include any of those production changes.
+Follow-ups: #1533 adds class-file FP opcodes, pool operand validation, and
+linear analysis; #1534 adds FP CFG states and StackMapTable projection; #1535
+adds JVM metadata and slot projection. #1536 can add literal/local/return
+lowering after #1533–#1535; #1537 adds fields and constructors after #1536;
+#1538 adds calls and control flow after #1536 (its end-to-end fixture also
+needs #1537); #1539 provides the final verified source acceptance batch. This
+metadata increment does not include Float/Double body code generation.
