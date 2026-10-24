@@ -1938,48 +1938,287 @@ fn primary_constructor_parameter_and_private_var_remain_separate_identities() {
 
 #[test]
 fn val_and_var_constructor_parameters_have_distinct_field_and_parameter_symbols() {
-    for source_text in ["class C(val x: Int)", "class C(var x: Int)"] {
-        with_source(source_text, |ast, source, index, _, typer| {
-            let class = symbol_named(ast, index, source, typer, "C");
-            let template = ast
+    let source_text = "class Measurement(val id: Int, var value: Double); class Mixed(val enabled: Boolean, var count: Long); class Ref(val item: Measurement)";
+    with_source(source_text, |ast, source, index, definitions, typer| {
+        for (class_name, fields) in [
+            (
+                "Measurement",
+                vec![
+                    ("id", Some(definitions.int), None, false),
+                    ("value", Some(definitions.double), None, true),
+                ],
+            ),
+            (
+                "Mixed",
+                vec![
+                    ("enabled", Some(definitions.boolean), None, false),
+                    ("count", Some(definitions.long), None, true),
+                ],
+            ),
+            (
+                "Ref",
+                vec![(
+                    "item",
+                    None,
+                    Some(symbol_named(ast, index, source, typer, "Measurement")),
+                    false,
+                )],
+            ),
+        ] {
+            let class = symbol_named(ast, index, source, typer, class_name);
+            typer.complete_symbol(class).unwrap();
+            let class_tree = ast
                 .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(template) => Some(template),
-                    _ => None,
+                .find_map(|(tree, _node)| {
+                    (index.symbol_at(source, tree) == Some(class)).then_some(tree)
                 })
                 .unwrap();
+            let TreeKind::TypeDef(class_definition) = &ast.get(class_tree).kind else {
+                panic!("class declaration should be a TypeDef");
+            };
+            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
+                panic!("class body should be a Template");
+            };
             let TreeKind::DefDef(constructor_def) = &ast.get(template.constructor).kind else {
                 panic!("primary constructor should be a DefDef");
             };
             let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let parameter_tree = constructor_def.value_param_clauses[0][0];
-            let field = index.symbol_at(source, parameter_tree).unwrap();
-            let parameter = index
-                .derived_symbol_at(constructor, source, parameter_tree)
-                .unwrap();
+            let parameter_trees = constructor_def.value_param_clauses[0].clone();
+            assert_eq!(parameter_trees.len(), fields.len());
+            let mut parameters = Vec::with_capacity(parameter_trees.len());
+            for (parameter_tree, (name, expected_type, expected_symbol, mutable)) in
+                parameter_trees.into_iter().zip(fields)
+            {
+                let TreeKind::ValDef(parameter_definition) = &ast.get(parameter_tree).kind else {
+                    panic!("constructor parameter source node should be a ValDef");
+                };
+                let expected_modifiers = if mutable {
+                    vec![
+                        dotty_core::ast::Modifier::ParamAccessor,
+                        dotty_core::ast::Modifier::Var,
+                    ]
+                } else {
+                    vec![dotty_core::ast::Modifier::ParamAccessor]
+                };
+                assert_eq!(parameter_definition.metadata.modifiers, expected_modifiers);
+                assert!(parameter_definition.metadata.visibility.is_none());
+                assert_eq!(
+                    typer
+                        .store()
+                        .names
+                        .resolve(parameter_definition.name.as_name().text()),
+                    name,
+                    "{class_name} constructor parameter order"
+                );
+                let field = index.symbol_at(source, parameter_tree).unwrap();
+                let parameter = index
+                    .derived_symbol_at(constructor, source, parameter_tree)
+                    .unwrap();
+                parameters.push(parameter);
 
-            assert_ne!(field, parameter);
-            assert_eq!(typer.store().symbols.get(field).kind, SymbolKind::Field);
-            assert_eq!(typer.store().symbols.get(field).owner, Some(class));
-            assert_eq!(
-                typer.store().symbols.get(parameter).kind,
-                SymbolKind::Parameter
+                assert_ne!(field, parameter, "{class_name}.{name} identities");
+                assert_eq!(
+                    index.definition_of(field),
+                    Some(dotty_namer::SourceDefinition::Canonical {
+                        source,
+                        tree: parameter_tree,
+                    })
+                );
+                assert_eq!(
+                    index.definition_of(parameter),
+                    Some(dotty_namer::SourceDefinition::Derived {
+                        source,
+                        tree: parameter_tree,
+                    })
+                );
+                assert_eq!(ast.get(parameter_tree).position.unwrap().source(), source);
+                assert_eq!(typer.store().symbols.get(field).kind, SymbolKind::Field);
+                assert_eq!(typer.store().symbols.get(field).owner, Some(class));
+                assert_eq!(
+                    typer.store().symbols.get(field).visibility,
+                    Visibility::Public
+                );
+                assert_eq!(
+                    typer.store().symbols.get(parameter).kind,
+                    SymbolKind::Parameter
+                );
+                assert_eq!(
+                    typer.store().symbols.get(parameter).owner,
+                    Some(constructor)
+                );
+                assert!(
+                    !typer
+                        .store()
+                        .symbols
+                        .get(parameter)
+                        .flags
+                        .contains(SymbolFlags::MUTABLE)
+                );
+                assert_eq!(
+                    typer
+                        .store()
+                        .symbols
+                        .get(field)
+                        .flags
+                        .contains(SymbolFlags::MUTABLE),
+                    mutable,
+                    "{class_name}.{name} mutability belongs to the source field"
+                );
+                typer.complete_symbol(field).unwrap();
+                typer.complete_symbol(parameter).unwrap();
+                let field_ty = match typer.store().symbols.get(field).info {
+                    SymbolInfo::Complete(ty) => ty,
+                    _ => panic!("{class_name}.{name} field type should be complete"),
+                };
+                let parameter_ty = match typer.store().symbols.get(parameter).info {
+                    SymbolInfo::Complete(ty) => ty,
+                    _ => panic!("{class_name}.{name} parameter type should be complete"),
+                };
+                for (label, ty) in [("field", field_ty), ("derived parameter", parameter_ty)] {
+                    if let Some(expected_type) = expected_type {
+                        assert_eq!(
+                            typer.store().types.get(ty).reference_symbol(),
+                            typer.store().types.get(expected_type).reference_symbol(),
+                            "{class_name}.{name} {label} type"
+                        );
+                    }
+                    if let Some(expected_symbol) = expected_symbol {
+                        assert!(
+                            matches!(
+                                typer.store().types.get(ty),
+                                Type::TypeRef { target: dotty_core::types::TypeRefTarget::Symbol(actual), .. }
+                                    if *actual == expected_symbol
+                            ),
+                            "{class_name}.{name} {label} should retain its class type identity"
+                        );
+                    }
+                }
+            }
+            assert!(
+                matches!(
+                    JvmPrimaryConstructorPlan::from_source(
+                        class,
+                        constructor,
+                        parameters,
+                        ast,
+                        index
+                    ),
+                    Err(dotty_jvm::JvmCodegenError::InvalidPrimaryConstructor {
+                        issue: dotty_jvm::JvmConstructorIssue::SourceShape,
+                        ..
+                    })
+                ),
+                "the current JVM constructor planner rejects public parameter accessors at source-shape validation"
             );
+        }
+    });
+}
+
+#[test]
+fn constructor_accessor_source_selections_record_current_typer_boundary() {
+    let source_text = "class Measurement(val id: Int, var value: Double) { def externalId(m: Measurement): Int = m.id; def externalValue(m: Measurement): Double = m.value; def externalSet(m: Measurement): Unit = m.value = 42.0; def ownId: Int = this.id; def ownValue: Double = this.value; def forwarded(m: Measurement): Int = accept(m.id); def accept(value: Int): Int = value }";
+    with_source(source_text, |ast, source, index, _, typer| {
+        let class = symbol_named(ast, index, source, typer, "Measurement");
+        let methods = [
+            "externalId",
+            "externalValue",
+            "externalSet",
+            "ownId",
+            "ownValue",
+            "forwarded",
+        ];
+        for name in methods {
+            let (method, _, rhs) = method_tree_and_rhs(ast, index, source, typer, class, name);
+            typer.complete_symbol(method).unwrap();
+            let context = typer.expression_context_for(method).unwrap();
+            let typed = typer.type_expression(rhs, context).unwrap_or_else(|error| {
+                panic!("{name} should type through a source field: {error:?}")
+            });
+            assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed));
+        }
+
+        let source_accessor_methods = ast
+            .iter()
+            .filter_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                let symbol = index.symbol_at(source, tree)?;
+                (typer.store().symbols.get(symbol).owner == Some(class)
+                    && typer.store().symbols.get(symbol).kind == SymbolKind::Method
+                    && ["id", "value"].contains(
+                        &typer
+                            .store()
+                            .names
+                            .resolve(definition.name.as_name().text()),
+                    ))
+                .then_some(symbol)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            source_accessor_methods.is_empty(),
+            "JVM accessors must not be fabricated as source Method symbols"
+        );
+
+        let field_for = |name: &str| {
+            let source_tree = ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::ValDef(definition)
+                        if index.symbol_at(source, tree).is_some_and(|symbol| {
+                            typer.store().symbols.get(symbol).owner == Some(class)
+                                && typer.store().symbols.get(symbol).kind == SymbolKind::Field
+                                && typer
+                                    .store()
+                                    .names
+                                    .resolve(definition.name.as_name().text())
+                                    == name
+                        }) =>
+                    {
+                        Some(tree)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing source field {name}"));
+            index.symbol_at(source, source_tree).unwrap()
+        };
+        let expected_selections = [("id", 3), ("value", 3)];
+        for (name, expected_count) in expected_selections {
+            let expected_field = field_for(name);
+            let selections = ast
+                .iter()
+                .filter_map(|(tree, node)| match &node.kind {
+                    TreeKind::Select(selection)
+                        if typer.store().names.resolve(selection.name.text()) == name =>
+                    {
+                        Some(tree)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
             assert_eq!(
-                typer.store().symbols.get(parameter).owner,
-                Some(constructor)
+                selections.len(),
+                expected_count,
+                "source selection count for {name}"
             );
-            assert_eq!(
-                typer
-                    .store()
-                    .symbols
-                    .get(field)
-                    .flags
-                    .contains(SymbolFlags::MUTABLE),
-                source_text.contains("var x")
-            );
-        });
-    }
+            for selection in selections {
+                let typed = typer
+                    .source_typed_index()
+                    .get(source, selection)
+                    .unwrap_or_else(|| {
+                        panic!("source selection {name} should have typed identity")
+                    });
+                assert!(
+                    matches!(
+                        typer.store().types.get(typer.typed_ast().get(typed).ty),
+                        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                            if *symbol == expected_field
+                    ),
+                    "source selection {name} must designate the canonical field symbol"
+                );
+            }
+        }
+    });
 }
 
 #[test]
