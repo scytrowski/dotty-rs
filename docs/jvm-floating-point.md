@@ -84,8 +84,18 @@ The current source backend boundary is:
 The field and value matrix is covered by `FloatDoubleFields.scala` and
 `FloatDoubleValues.scala`. #1538 adds `FloatDoubleCalls.scala` for virtual and
 constructor calls, direct-parent `(FD)V` forwarding, Float/Double `if` joins,
-and a Double local across an Int-controlled loop. Fresh frontend sessions must
-emit identical bytes, and the JDK 21 gate verifies and executes the fixtures.
+and a Double local across an Int-controlled loop. The #1539 acceptance fixture
+`FloatingPointCategory2.scala` brings `NumericBox`, `NumericConstants`, and
+`Runner` together in one real source session. Its integration test decodes all
+three major-version-65 classes, checks field/method descriptors, raw `1.5f` and
+`3.5` constant bits, category-specific loads, physical slots and verifier
+frames, then compares the complete ordered class batches from two independent
+frontend sessions. The mandatory JDK 21 gate runs `javap -v -c`, compiles a
+Java harness, and executes it with `java -Xverify:all` across finite values,
+subnormals, infinities, signed zero, NaN classification, branches, loops,
+mutable fields, constructors, and mixed calls. Arbitrary NaN payload fidelity
+remains a separate raw class-file constant-pool property tested by the
+classfile builder; the runtime test makes no payload-preservation promise.
 
 ## Bounded source lowering in #1536
 
@@ -231,10 +241,8 @@ and invocation transfers must check exact descriptor kinds. No fallback to
 | Class-file pool | A category-one load rejects Double; `ldc2_w` rejects Float, Long and the reserved second slot. Float bits and Double bits (including NaN payloads) remain exact. |
 | Verifier shape | Linear and CFG analyzers reject category-one operations on Double, category-two operations on Float, Double tail reads, and overlapping stores that invalidate the whole Double local. CFG joins and backedges retain only exact Float values or complete Double pairs. |
 
-Follow-ups: #1533 adds class-file FP opcodes, pool operand validation, and
-linear analysis; #1534 adds FP CFG states and StackMapTable projection; #1535
-adds JVM metadata and slot projection. #1536 can add literal/local/return
-lowering after #1533–#1535; #1537 adds fields and constructors after #1536;
-#1538 adds calls and control flow after #1536 (its end-to-end fixture also
-needs #1537); #1539 provides the final verified source acceptance batch. This
-metadata increment does not include Float/Double body code generation.
+The implementation increments #1533–#1538 provide the classfile, metadata,
+source-value, field, call, and control-flow support described above. Issue
+#1539 supplies the combined three-class acceptance fixture and strict JDK
+execution gate. The bounded implementation still excludes floating-point
+arithmetic, comparisons, conversions, widening, and Scala ABI/TASTy emission.

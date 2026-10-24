@@ -40,6 +40,13 @@ mutable writes, method and constructor calls, Float/Double `If` results, and
 Double locals across supported `While` loops. These paths preserve exact
 descriptors, category widths, and verifier frame types. Floating-point
 arithmetic, comparisons, widening, and conversions remain outside the subset.
+The combined `FloatingPointCategory2.scala` acceptance batch compiles
+`NumericBox`, `NumericConstants`, and `Runner` in one fresh frontend session;
+its integration test checks all three major-version-65 artifacts and repeats
+the compilation in a second session for byte-for-byte and publication-order
+determinism. Hosted JDK 21 CI verifies the emitted classes with `javap`,
+`javac`, and `java -Xverify:all`, including signed-zero, subnormal, infinity,
+NaN classification, fields, calls, branches, and loop paths.
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,

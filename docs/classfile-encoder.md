@@ -142,6 +142,7 @@ subsets:
 | `Caller` | integer constants, `invokestatic`, `new`, `dup`, `iload`, `invokespecial`, `areturn`, `ireturn` |
 | `FloatingPointValues` | bit-preserving Float/Double constants, `ldc`/`ldc2_w`, parameter and local loads/stores, `freturn`/`dreturn`; verified and executed with JDK 21 |
 | `FloatDoubleCalls` | exact `(FD)` and `(IFDJ)` calls, constructor forwarding, Float/Double branch joins and Double loop frames; covered by source integration and the mandatory JDK gate |
+| `FloatingPointCategory2.scala` source batch | `NumericBox`, `NumericConstants`, and `Runner` together; all three class files are decoded at major version 65, checked for exact descriptors/fields/raw literal bits/slots/frames, compared across independent sessions, then executed through `javac` and `java -Xverify:all` in the hosted JDK 21 gate |
 
 These integer instructions operate directly on JVM 32-bit values. Subtraction
 and multiplication wrap modulo 2^32; division truncates toward zero; remainder
