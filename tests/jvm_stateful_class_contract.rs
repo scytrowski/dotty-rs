@@ -4032,6 +4032,176 @@ fn unsupported_constructor_forms_are_accepted_with_canonical_typer_signatures() 
 }
 
 #[test]
+fn public_class_body_accessors_keep_canonical_symbols_and_typed_initializer_roots() {
+    with_source(
+        "class BodyOnly:\n  val seed: Int = 10\n  var active: Boolean = true\n  var reading: Double = 1.5\n\nclass Counter(val id: Int):\n  val initial: Int = 10\n  var current: Long = 0L\n  def snapshot(): Long = current\n\nclass Reader:\n  def read(c: Counter): Long = c.current\n  def write(c: Counter, n: Long): Unit = c.current = n\n",
+        |ast, source, index, definitions, typer| {
+            for (class_name, expected_fields) in [
+                ("BodyOnly", &["seed", "active", "reading"][..]),
+                ("Counter", &["initial", "current"][..]),
+            ] {
+                let class = symbol_named(ast, index, source, typer, class_name);
+                assert_eq!(typer.store().symbols.get(class).kind, SymbolKind::Class);
+                typer.complete_symbol(class).unwrap();
+                let info = complete_class_info(typer, class);
+                let scope = info.declarations;
+                let mut template_fields = Vec::new();
+                for (_, node) in ast.iter() {
+                    let TreeKind::Template(template) = &node.kind else {
+                        continue;
+                    };
+                    if index
+                        .symbol_at(source, template.constructor)
+                        .is_some_and(|constructor| {
+                            typer.store().symbols.get(constructor).owner == Some(class)
+                        })
+                    {
+                        template_fields = template
+                            .body
+                            .iter()
+                            .filter_map(|tree| {
+                                let TreeKind::ValDef(definition) = &ast.get(*tree).kind else {
+                                    return None;
+                                };
+                                let field = index.symbol_at(source, *tree)?;
+                                (typer.store().symbols.get(field).kind == SymbolKind::Field).then(
+                                    || {
+                                        typer
+                                            .store()
+                                            .names
+                                            .resolve(definition.name.as_name().text())
+                                            .to_owned()
+                                    },
+                                )
+                            })
+                            .collect();
+                        break;
+                    }
+                }
+                assert_eq!(template_fields, expected_fields);
+
+                for name in expected_fields {
+                    let (field, declaration, rhs) =
+                        field_tree_and_rhs(ast, index, source, typer, name);
+                    let symbol = typer.store().symbols.get(field);
+                    assert_eq!(symbol.kind, SymbolKind::Field);
+                    assert_eq!(symbol.owner, Some(class));
+                    assert_eq!(symbol.visibility, Visibility::Public);
+                    assert!(
+                        typer
+                            .store()
+                            .scopes
+                            .get(scope)
+                            .lookup_all(&symbol.name)
+                            .contains(&field)
+                    );
+                    let mutable = matches!(*name, "active" | "reading" | "current");
+                    assert_eq!(symbol.flags.contains(SymbolFlags::MUTABLE), mutable);
+                    let TreeKind::ValDef(definition) = &ast.get(declaration).kind else {
+                        panic!("body field source tree should be ValDef");
+                    };
+                    assert!(definition.metadata.visibility.is_none());
+
+                    typer.complete_symbol(field).unwrap();
+                    let dotty_core::SymbolInfo::Complete(field_type) =
+                        typer.store().symbols.get(field).info
+                    else {
+                        panic!("body field type should be complete");
+                    };
+                    let context = typer.field_initializer_context_for(field).unwrap();
+                    let typed_rhs = typer
+                        .type_expression_expected(rhs, context, field_type)
+                        .unwrap();
+                    assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
+                    assert!(typer.typed_ast().get(typed_rhs).position.is_some());
+                    assert!(matches!(
+                        typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
+                        Type::Constant(_)
+                    ));
+                }
+            }
+
+            let counter = symbol_named(ast, index, source, typer, "Counter");
+            let (snapshot, _, rhs) =
+                method_tree_and_rhs(ast, index, source, typer, counter, "snapshot");
+            let context = typer.expression_context_for(snapshot).unwrap();
+            let typed_rhs = typer.type_expression(rhs, context).unwrap();
+            let current = field_tree_and_rhs(ast, index, source, typer, "current").0;
+            assert!(matches!(
+                typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(target),
+                    ..
+                } if *target == current
+            ));
+
+            let reader = symbol_named(ast, index, source, typer, "Reader");
+            let (read, _, read_rhs) =
+                method_tree_and_rhs(ast, index, source, typer, reader, "read");
+            let read_context = typer.expression_context_for(read).unwrap();
+            let typed_read = typer.type_expression(read_rhs, read_context).unwrap();
+            assert!(matches!(
+                typer.store().types.get(typer.typed_ast().get(typed_read).ty),
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(target),
+                    ..
+                } if *target == current
+            ));
+
+            let (write, _, write_rhs) =
+                method_tree_and_rhs(ast, index, source, typer, reader, "write");
+            let write_context = typer.expression_context_for(write).unwrap();
+            let typed_write = typer.type_expression(write_rhs, write_context).unwrap();
+            let TreeKind::Assign(assignment) = &typer.typed_ast().get(typed_write).kind else {
+                panic!("Reader.write RHS should remain a typed assignment");
+            };
+            assert!(matches!(
+                typer.store().types.get(typer.typed_ast().get(assignment.lhs).ty),
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(target),
+                    ..
+                } if *target == current
+            ));
+            assert!(matches!(
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(assignment.rhs).ty),
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(_),
+                    ..
+                }
+            ));
+
+            let constructor = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template)
+                        if index.symbol_at(source, template.constructor).is_some_and(
+                            |symbol| typer.store().symbols.get(symbol).owner == Some(counter),
+                        ) =>
+                    {
+                        index.symbol_at(source, template.constructor)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let dotty_core::SymbolInfo::Complete(constructor_type) =
+                typer.store().symbols.get(constructor).info
+            else {
+                panic!("Counter constructor signature should complete");
+            };
+            let Type::Method(signature) = typer.store().types.get(constructor_type) else {
+                panic!("Counter constructor should have a method signature");
+            };
+            assert_eq!(signature.params.len(), 1);
+            assert_eq!(signature.params[0].ty, definitions.int);
+        },
+    );
+}
+
+#[test]
 fn non_private_visibility_forms_are_canonicalized_and_self_forward_reads_type() {
     with_source(
         "class Visibility { val publicField: Int = 1; protected val protectedField: Int = 2; private[this] val thisOnly: Int = 3 }",
