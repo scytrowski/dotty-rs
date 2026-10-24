@@ -1,0 +1,3 @@
+timing_mode	runs	mean_cargo_wall_ms	mean_child_cpu_user_s	mean_child_cpu_system_s	max_sampled_rss_bytes	method_count	match_probe_count
+full	3	12621.3	11.06	1.47	119517184	6	3
+full	3	10975.7	9.57	1.31	123084800	6	3

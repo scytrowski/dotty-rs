@@ -1,0 +1,4 @@
+run	jar_find_class_calls	zip_entry_reads	cache_hits	cache_misses	cache_evictions	cached_entries	cached_bytes
+1	28835	49522	0	0	0	0	0
+2	28835	49522	0	0	0	0	0
+3	28835	49522	0	0	0	0	0

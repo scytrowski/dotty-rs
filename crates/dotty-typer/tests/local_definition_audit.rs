@@ -14935,6 +14935,17 @@ fn print_classpath_resource_metrics(classpath: &SharedClassPath) {
         metrics.resource_bytes_returned,
         metrics.resource_inner_wall_ns / 1_000
     );
+    let archive_profile = classpath.0.inner.resource_profile();
+    println!(
+        "AUDIT_ARCHIVE_RESOURCES jar_find_class_calls={} zip_entry_reads={} cache_hits={} cache_misses={} cache_evictions={} cached_entries={} cached_bytes={}",
+        archive_profile.jar_find_class_calls,
+        archive_profile.zip_entry_reads,
+        archive_profile.cache_hits,
+        archive_profile.cache_misses,
+        archive_profile.cache_evictions,
+        archive_profile.cached_entries,
+        archive_profile.cached_bytes,
+    );
 }
 
 fn print_classload_profile_timings(profiles: &[DependencyObservation], match_file: Option<&str>) {
