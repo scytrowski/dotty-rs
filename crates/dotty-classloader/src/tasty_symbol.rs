@@ -2388,7 +2388,7 @@ fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, dep
             Ok(StructuredTree::Select(selection)) => {
                 // In TASTy, a term SELECT rooted in a package may name either
                 // a subpackage or an object. Admit only package paths
-                // independently covered by pinned Scala fixtures; do not
+                // independently covered by pinned Scala/JDK fixtures; do not
                 // infer arbitrary selected segments from the current package.
                 let selected_package = wire_name(file, selection.name).and_then(|name| {
                     let owner = parent_wire_path(file, &selection.qualifier, depth + 1)?;
@@ -2400,9 +2400,12 @@ fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, dep
                     })
                 });
                 selection.tag == dotty_tasty::tasty::SELECT_TAG
-                    && selected_package
-                        .as_deref()
-                        .is_some_and(|package| matches!(package, "scala" | "scala/annotation"))
+                    && selected_package.as_deref().is_some_and(|package| {
+                        matches!(
+                            package,
+                            "scala" | "scala/annotation" | "java/io" | "java/lang"
+                        )
+                    })
                     && is_package_qualifier(file, &selection.qualifier, depth + 1)
             }
             Ok(StructuredTree::Reference(reference)) => {
@@ -4506,6 +4509,22 @@ mod tests {
             TastyDecodeError::UnresolvedSupertype(parent)
                 if parent.parent_index == 1 && parent.shape == "selected-qualified"
         ));
+    }
+
+    #[test]
+    fn decodes_array_java_parents_from_selected_package_paths() {
+        let bytes = fixture_bytes("scala3-library/scala/Array.tasty");
+        let decoded = decode(&bytes, &BinaryName::from_internal("scala/Array"))
+            .expect("Array's selected-qualified java parent paths should resolve");
+
+        assert_eq!(decoded.super_class.as_internal(), "java/lang/Object");
+        assert_eq!(
+            decoded.interfaces,
+            vec![
+                BinaryName::from_internal("java/io/Serializable"),
+                BinaryName::from_internal("java/lang/Cloneable"),
+            ]
+        );
     }
 
     #[test]
