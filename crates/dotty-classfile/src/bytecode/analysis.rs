@@ -2042,27 +2042,31 @@ impl Frame {
             }
             Instruction::GetStatic(reference) => {
                 let ty = self.field_type(instruction_index, reference, pool)?;
-                if flow_current_class.is_some()
-                    && validate_flow_field_type(instruction_index, reference.index().get(), &ty)?
+                if flow_current_class.is_some() {
+                    if validate_flow_field_type(instruction_index, reference.index().get(), &ty)?
                         .is_some()
-                {
-                    return Err(AnalysisError::UnsupportedFlowFieldType {
-                        instruction: instruction_index,
-                        index: reference.index().get(),
-                    });
+                        || matches!(ty, FieldType::Float | FieldType::Double)
+                    {
+                        return Err(AnalysisError::UnsupportedFlowFieldType {
+                            instruction: instruction_index,
+                            index: reference.index().get(),
+                        });
+                    }
                 }
                 self.push(instruction_index, value_kind(&ty))?;
             }
             Instruction::PutStatic(reference) => {
                 let ty = self.field_type(instruction_index, reference, pool)?;
-                if flow_current_class.is_some()
-                    && validate_flow_field_type(instruction_index, reference.index().get(), &ty)?
+                if flow_current_class.is_some() {
+                    if validate_flow_field_type(instruction_index, reference.index().get(), &ty)?
                         .is_some()
-                {
-                    return Err(AnalysisError::UnsupportedFlowFieldType {
-                        instruction: instruction_index,
-                        index: reference.index().get(),
-                    });
+                        || matches!(ty, FieldType::Float | FieldType::Double)
+                    {
+                        return Err(AnalysisError::UnsupportedFlowFieldType {
+                            instruction: instruction_index,
+                            index: reference.index().get(),
+                        });
+                    }
                 }
                 self.pop_expected(instruction_index, value_kind(&ty))?;
             }
@@ -3538,8 +3542,8 @@ impl CfgCodeAnalyzer {
     ///
     /// The existing [`Self::analyze`] entry point retains its receiver
     /// placeholder behavior. This context enables exact initialized-reference
-    /// moves, `dup`/`pop`, `getfield`/`putfield` for `int`, `boolean`, and
-    /// `long` fields, and `invokevirtual` methods with exact object, int-like,
+    /// moves, `dup`/`pop`, `getfield`/`putfield` for `int`, `boolean`, `float`,
+    /// `double`, `long`, and reference fields, and `invokevirtual` methods with exact object, int-like,
     /// or Long parameters and exact object, int-like, Long, or void results.
     /// Constructor calls accept the same parameter categories. Long arguments
     /// and results use category-two stack transfer. Non-null reference arguments
@@ -4052,7 +4056,8 @@ fn validate_flow_field_type(
     ty: &FieldType,
 ) -> Result<Option<ClassIdentity>, AnalysisError> {
     match ty {
-        FieldType::Int | FieldType::Boolean | FieldType::Long => Ok(None),
+        FieldType::Int | FieldType::Boolean | FieldType::Float | FieldType::Long => Ok(None),
+        FieldType::Double => Ok(None),
         FieldType::Object(name) if is_valid_internal_name(name) => {
             Ok(Some(ClassIdentity(Arc::from(name.as_str()))))
         }
@@ -6354,6 +6359,174 @@ mod tests {
                 actual: ValueKind::Reference,
             })
         ));
+    }
+
+    #[test]
+    fn analyzes_float_double_instance_field_transfers_with_exact_categories() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/NumericBox").unwrap();
+        let float_field = builder.field_ref("example/NumericBox", "f", "F").unwrap();
+        let double_field = builder.field_ref("example/NumericBox", "d", "D").unwrap();
+        let pool = builder.finish().unwrap();
+
+        let mut read_float = CodeSequence::new();
+        read_float
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::GetField(FieldReference::new(operand(
+                float_field,
+            ))))
+            .instruction(Instruction::FReturn);
+        let read_float_graph = ControlFlowGraph::build(&read_float).unwrap();
+        let float_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &read_float_graph,
+            "getF",
+            "()F",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert_eq!(float_flow.max_stack, 1);
+        assert_eq!(float_flow.max_locals, 1);
+
+        let mut read_double = CodeSequence::new();
+        read_double
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::GetField(FieldReference::new(operand(
+                double_field,
+            ))))
+            .instruction(Instruction::DReturn);
+        let read_double_graph = ControlFlowGraph::build(&read_double).unwrap();
+        let double_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &read_double_graph,
+            "getD",
+            "()D",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert_eq!(double_flow.max_stack, 2);
+        assert_eq!(double_flow.max_locals, 1);
+
+        let mut write_float = CodeSequence::new();
+        write_float
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::FLoad(LocalIndex::new(1)))
+            .instruction(Instruction::PutField(FieldReference::new(operand(
+                float_field,
+            ))))
+            .instruction(Instruction::Return);
+        let write_float_graph = ControlFlowGraph::build(&write_float).unwrap();
+        let float_write_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &write_float_graph,
+            "setF",
+            "(F)V",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert_eq!(float_write_flow.max_stack, 2);
+        assert_eq!(float_write_flow.max_locals, 2);
+
+        let mut write_double = CodeSequence::new();
+        write_double
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::DLoad(LocalIndex::new(1)))
+            .instruction(Instruction::PutField(FieldReference::new(operand(
+                double_field,
+            ))))
+            .instruction(Instruction::Return);
+        let write_double_graph = ControlFlowGraph::build(&write_double).unwrap();
+        let double_write_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &write_double_graph,
+            "setD",
+            "(D)V",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert_eq!(double_write_flow.max_stack, 3);
+        assert_eq!(double_write_flow.max_locals, 3);
+
+        let mut wrong_float_store = CodeSequence::new();
+        wrong_float_store
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::DLoad(LocalIndex::new(1)))
+            .instruction(Instruction::PutField(FieldReference::new(operand(
+                float_field,
+            ))))
+            .instruction(Instruction::Return);
+        let wrong_float_store_graph = ControlFlowGraph::build(&wrong_float_store).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_float_store_graph,
+                "setWrongF",
+                "(D)V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::StackTypeMismatch {
+                instruction: 2,
+                expected: ValueKind::Float,
+                actual: ValueKind::Double,
+            })
+        );
+
+        let mut wrong_double_store = CodeSequence::new();
+        wrong_double_store
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::FLoad(LocalIndex::new(1)))
+            .instruction(Instruction::PutField(FieldReference::new(operand(
+                double_field,
+            ))))
+            .instruction(Instruction::Return);
+        let wrong_double_store_graph = ControlFlowGraph::build(&wrong_double_store).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_double_store_graph,
+                "setWrongD",
+                "(F)V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::StackTypeMismatch {
+                instruction: 2,
+                expected: ValueKind::Double,
+                actual: ValueKind::Float,
+            })
+        );
+
+        let mut static_float_read = CodeSequence::new();
+        static_float_read
+            .instruction(Instruction::GetStatic(FieldReference::new(operand(
+                float_field,
+            ))))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let static_float_read_graph = ControlFlowGraph::build(&static_float_read).unwrap();
+        let static_result = CfgCodeAnalyzer::analyze_with_current_class(
+            &static_float_read_graph,
+            "staticF",
+            "()V",
+            false,
+            &pool,
+            class_index,
+        );
+        assert!(
+            matches!(
+                static_result,
+                Err(AnalysisError::UnsupportedFlowInstruction {
+                    instruction: 0,
+                    kind: UnsupportedFlowInstructionKind::Reference,
+                })
+            ),
+            "unexpected static Float transfer result: {static_result:?}"
+        );
     }
 
     #[test]
