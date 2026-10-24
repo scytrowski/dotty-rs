@@ -210,6 +210,15 @@ deriving a reference type from `ValueKind` or opcode category alone.
 | Float/Double | Accept `fconst`/`dconst`, tag-checked `ldc`/`ldc2_w`, exact `fload`/`dload` and `fstore`/`dstore`, matching `freturn`/`dreturn`, exact instance field transfers, virtual/approved constructor calls, and same-kind `If`/`While` CFG values. Arithmetic and conversion remain unsupported. |
 | Returns | Preserve primitive/void checks; `freturn` and `dreturn` require their exact descriptor kinds; `areturn` requires an initialized reference assignable to the planned result class using the explicit hierarchy. |
 
+The combined source acceptance fixture `FloatingPointCategory2.scala` exercises
+the emitted Float/Double methods, fields, constructor, calls, branch joins, and
+loop backedge in one three-class batch. Its test inspects the actual
+`StackMapTable` entries and physical `max_locals`, compares full bytes across
+fresh frontend sessions, and runs under the mandatory JDK `-Xverify:all` gate.
+Raw negative-zero and distinct NaN payload preservation is asserted separately
+against classfile constant-pool bytes because JVM execution need not preserve
+arbitrary NaN payloads.
+
 Field and method constant-pool operands must be resolved to validated entry
 families, nested owner/class names, and parsed descriptors before transfer.
 The exact-owner restriction applies after resolving the `CONSTANT_Fieldref` or

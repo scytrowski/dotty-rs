@@ -28,6 +28,14 @@ and the exact typed RHS root exposed by `SourceTypedIndex`.
 | `class C(val x: Int)` | The constructor parameter source tree maps canonically to a class-owned `Field`; `derived_symbol_at(constructor, source, tree)` returns a distinct constructor-owned `Parameter`. | The parameter order comes from the source constructor clause. | Identity audit only; public accessor ABI is out of scope. |
 | `class C(var x: Int)` | The same two identities exist. `MUTABLE` is on the class-owned field only, not the derived constructor parameter. | Same clause ordering as `val`. | Identity audit only; public getter/setter ABI is out of scope. |
 
+The combined `FloatingPointCategory2.scala` acceptance batch contains both
+stateful classes and the calling `Runner` in one source session. It checks the
+`(FD)V` constructor's receiver/parameter slots and source-ordered field stores,
+the private mutable and immutable field flags, and deterministic bytes across
+fresh sessions. Its JDK 21 harness mutates two instances independently and
+checks Float/Double signed zero, NaN classification, getter forwarding, and
+constructor-call results under `-Xverify:all`.
+
 The combined [`LongCategory2.scala`](../tests/fixtures/jvm/LongCategory2.scala)
 fixture verifies these stateful shapes in the same three-class source batch as
 Long calls and control flow. Its test decodes all artifacts, checks exact field
