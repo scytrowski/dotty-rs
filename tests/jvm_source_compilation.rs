@@ -18309,6 +18309,31 @@ fn verify_private_fields_with_jdk(output_directory: &Path) {
 }
 
 #[test]
+fn public_class_body_fields_reach_codegen_but_are_rejected_without_artifacts() {
+    for (label, source) in [
+        (
+            "body-only-public-fields",
+            "class BodyOnly:\n  val seed: Int = 10\n  var active: Boolean = true\n  var reading: Double = 1.5",
+        ),
+        (
+            "explicit-empty-constructor-public-fields",
+            "class BodyOnlyParens():\n  val seed: Int = 10\n  var active: Boolean = true\n  var reading: Double = 1.5",
+        ),
+        (
+            "mixed-constructor-and-body-public-fields",
+            "class Counter(val id: Int):\n  val initial: Int = 10\n  var current: Long = 0L\n  def snapshot(): Long = current",
+        ),
+    ] {
+        assert_source_failure(label, source, |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmVisibility { .. })
+            )
+        });
+    }
+}
+
+#[test]
 fn public_primitive_field_storage_is_rejected_without_an_artifact() {
     assert_source_failure(
         "public-field",
