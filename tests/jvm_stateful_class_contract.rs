@@ -2442,16 +2442,11 @@ fn constructor_accessors_initialize_private_storage_from_exact_formal_slots() {
                 .map(|method| class_file.constant_pool.utf8(method.name_index).unwrap())
                 .collect::<Vec<_>>();
             let expected_method_names = std::iter::once("<init>")
-                .chain(
-                    class_metadata
-                        .accessors()
-                        .iter()
-                        .flat_map(|accessor| {
-                            std::iter::once(accessor.getter())
-                                .chain(accessor.setter())
-                                .map(|method| method.name())
-                        }),
-                )
+                .chain(class_metadata.accessors().iter().flat_map(|accessor| {
+                    std::iter::once(accessor.getter())
+                        .chain(accessor.setter())
+                        .map(|method| method.name())
+                }))
                 .collect::<Vec<_>>();
             assert_eq!(emitted_method_names, expected_method_names);
             let constructor = &class_file.methods[0];
