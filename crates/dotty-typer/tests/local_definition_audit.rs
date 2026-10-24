@@ -16614,7 +16614,7 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
     println!("  largest_top_level_loads:");
     for observation in largest.into_iter().take(10) {
         println!(
-            "    root={}::file={}::method={}::request={}::depth={}::distinct_classes={}::full_completions={}::shells_created={}::shells_reused={}::member_type_references={}::hierarchy_loads={}::completed_cache_hits={}::completed_classes=[{}]::classes=[{}]",
+            "    root={}::file={}::method={}::request={}::depth={}::distinct_classes={}::full_completions={}::shells_created={}::shells_reused={}::member_type_references={}::hierarchy_loads={}::completed_cache_hits={}::module_completion_calls={}::module_completion_successes={}::module_completion_errors={}::identity_shells=[{}]::completed_classes=[{}]::classes=[{}]::dependency_edges=[{}]",
             observation.profile.root,
             observation.file,
             observation.method,
@@ -16627,6 +16627,16 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
             observation.profile.member_type_references,
             observation.profile.hierarchy_loads,
             observation.profile.completed_cache_hits,
+            observation.profile.module_completion_calls,
+            observation.profile.module_completion_successes,
+            observation.profile.module_completion_errors,
+            observation
+                .profile
+                .identity_shells
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(","),
             observation
                 .profile
                 .completed_classes
@@ -16639,6 +16649,21 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
                 .classes
                 .iter()
                 .cloned()
+                .collect::<Vec<_>>()
+                .join(","),
+            observation
+                .profile
+                .dependency_edges
+                .iter()
+                .map(|edge| {
+                    let reason = match edge.reason {
+                        dotty_classloader::classloader::ClassLoadDependencyReason::Hierarchy => "hierarchy",
+                        dotty_classloader::classloader::ClassLoadDependencyReason::MemberTypeIdentity => "member_type_identity",
+                        dotty_classloader::classloader::ClassLoadDependencyReason::EnclosingOwnerIdentity => "enclosing_owner_identity",
+                        dotty_classloader::classloader::ClassLoadDependencyReason::EnclosingOwnerCompletion => "enclosing_owner_completion",
+                    };
+                    format!("{reason}:{}>{}:{}", edge.owner, edge.dependency, edge.requests)
+                })
                 .collect::<Vec<_>>()
                 .join(",")
         );
