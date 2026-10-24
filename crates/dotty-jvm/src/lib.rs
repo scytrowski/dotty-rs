@@ -395,6 +395,7 @@ impl JvmPublicBodyFieldSourceProof {
         ast: &AstArena<Untyped>,
         index: &dotty_core::SourceSemanticIndex,
         source_typed_index: &dotty_core::SourceTypedIndex,
+        typed_ast: &dotty_core::ast::TypedAst,
         store: &SemanticStore,
     ) -> Result<Self, JvmCodegenError> {
         let invalid = || JvmCodegenError::InvalidPublicBodyFieldSourceProof { field };
@@ -439,8 +440,14 @@ impl JvmPublicBodyFieldSourceProof {
         let Some(rhs) = definition.rhs else {
             return Err(JvmCodegenError::MissingFieldInitializer { field });
         };
+        let source_rhs = ast.try_get(rhs).ok_or_else(invalid)?;
+        let typed_rhs = typed_ast
+            .try_get(initializer)
+            .ok_or(JvmCodegenError::UnknownFieldInitializer { field, initializer })?;
         if definition.metadata.visibility.is_some()
             || source_typed_index.get(source, rhs) != Some(initializer)
+            || source_rhs.position.is_none()
+            || source_rhs.position != typed_rhs.position
         {
             return Err(invalid());
         }

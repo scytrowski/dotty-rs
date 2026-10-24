@@ -258,7 +258,9 @@ semantic index, typed index, and caller-owned store. It records mutability and
 template order; `JvmCompilationUnit` checks both against the canonical public
 `Field` plans and rejects reordered public body fields. Metadata projects
 private backing-field flags without adding body-field getter/setter metadata.
-The source adapter collects fields for both
+The proof also checks the typed RHS node's source position against the exact
+untyped RHS, so a caller-created source-to-typed map cannot substitute another
+initializer. The source adapter collects fields for both
 body-only/no-argument and parameterized primary-constructor shapes. Direct
 constructor-initializer lowering and class-file emission still return
 `FieldEmissionUnsupported` for `PlainPublic`; this increment does not change

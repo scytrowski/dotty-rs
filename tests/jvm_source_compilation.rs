@@ -587,6 +587,7 @@ fn compile_source_batch_with_typer_failure_observer(
                             &parsed.ast,
                             &index,
                             typer.source_typed_index(),
+                            typer.typed_ast(),
                             typer.store(),
                         )
                         .map_err(PipelineFailure::Codegen)?,
@@ -6716,6 +6717,7 @@ fn resolve_source_constructor_calls(source_text: &str) -> Result<Vec<String>, Pi
                         &parsed.ast,
                         &index,
                         typer.source_typed_index(),
+                        typer.typed_ast(),
                         typer.store(),
                     )
                     .map_err(PipelineFailure::Codegen)?,
@@ -18397,7 +18399,7 @@ fn verify_private_fields_with_jdk(output_directory: &Path) {
 
 #[test]
 fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
-    let source_text = "class PublicFields:\n  var enabled: Boolean = true\n  val ratio: Double = 1.5\n\nclass Counter(val id: Int):\n  val initial: Int = 10\n  var current: Long = 0L";
+    let source_text = "class PublicFields:\n  var enabled: Boolean = true\n  val marker: Boolean = false\n  val ratio: Double = 1.5\n\nclass Counter(val id: Int):\n  val initial: Int = 10\n  var current: Long = 0L";
     let output = TestOutputDirectory::new("public-body-field-plans");
     let mut observed = false;
     let mut observe = |ast: &AstArena<Untyped>,
@@ -18412,7 +18414,7 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
             .expect("the public fields project to checked private backing metadata");
 
         for (class_name, expected_fields, expected_accessors) in [
-            ("PublicFields", &["enabled", "ratio"][..], 0),
+            ("PublicFields", &["enabled", "marker", "ratio"][..], 0),
             ("Counter", &["initial", "current"][..], 1),
         ] {
             let class = audit_class_named(unit, class_name);
@@ -18512,6 +18514,7 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
                     .resolve(unit.store.symbols.get(field_plan.field).name.text())
                 {
                     "enabled" => "Z",
+                    "marker" => "Z",
                     "ratio" => "D",
                     "initial" => "I",
                     "current" => "J",
@@ -18565,6 +18568,66 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
                 unit.classes[class_index].fields.swap(0, 1);
                 unit.validate()
                     .expect("restoring source order restores the validated plan");
+            }
+
+            if class_name == "PublicFields" {
+                let current_plan = unit
+                    .classes
+                    .iter()
+                    .find(|candidate| candidate.class == class)
+                    .expect("source class has a plan after order validation");
+                let first_field = current_plan.fields[0];
+                let second_field = current_plan.fields[1];
+                let JvmFieldSourceVisibility::PlainPublic(first_proof) =
+                    first_field.source_visibility
+                else {
+                    panic!("the first public field carries checked source evidence");
+                };
+                let JvmFieldSourceVisibility::PlainPublic(second_proof) =
+                    second_field.source_visibility
+                else {
+                    panic!("the second public field carries checked source evidence");
+                };
+                let mut forged_index = dotty_core::SourceTypedIndex::new();
+                forged_index
+                    .insert(
+                        first_proof.source(),
+                        first_proof.rhs(),
+                        second_proof.initializer(),
+                    )
+                    .expect("the fresh source map can hold the fabricated binding");
+                assert!(matches!(
+                    JvmPublicBodyFieldSourceProof::from_source(
+                        class,
+                        first_field.field,
+                        first_proof.source(),
+                        first_proof.declaration(),
+                        second_proof.initializer(),
+                        ast,
+                        index,
+                        &forged_index,
+                        unit.typed_ast,
+                        unit.store,
+                    ),
+                    Err(JvmCodegenError::InvalidPublicBodyFieldSourceProof { field })
+                        if field == first_field.field
+                ));
+                assert!(matches!(
+                    JvmPublicBodyFieldSourceProof::from_source(
+                        class,
+                        first_field.field,
+                        first_proof.source(),
+                        first_proof.declaration(),
+                        first_proof.initializer(),
+                        ast,
+                        index,
+                        &dotty_core::SourceTypedIndex::new(),
+                        unit.typed_ast,
+                        unit.store,
+                    ),
+                    Err(JvmCodegenError::InvalidPublicBodyFieldSourceProof { field })
+                        if field == first_field.field
+                ));
             }
         }
     };
