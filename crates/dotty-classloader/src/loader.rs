@@ -33,6 +33,7 @@ use dotty_core::{
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Instant;
 
 const MAX_INHERITANCE_DEPTH: usize = 256;
 
@@ -332,6 +333,14 @@ pub struct ClassLoadProfile {
     pub member_type_references: usize,
     /// Eager superclass/interface load requests, including cache hits and failures.
     pub hierarchy_loads: usize,
+    /// Inclusive time spent querying the classpath for resources.
+    pub resource_lookup_ns: u128,
+    /// Time spent decoding class-file payloads; nested class loads are counted separately.
+    pub classfile_decode_ns: u128,
+    /// Time spent decoding TASTy payloads; nested class loads are counted separately.
+    pub tasty_decode_ns: u128,
+    /// Inclusive time in uncached loads, including decode, semantic projection, and dependencies.
+    pub load_uncached_inclusive_ns: u128,
 }
 
 #[derive(Default)]
@@ -349,6 +358,10 @@ struct ActiveLoadProfile {
     shells_reused: usize,
     member_type_references: usize,
     hierarchy_loads: usize,
+    resource_lookup_ns: u128,
+    classfile_decode_ns: u128,
+    tasty_decode_ns: u128,
+    load_uncached_inclusive_ns: u128,
 }
 
 /// Reconstructs a [`ClassTypeSignature`]'s binary name (JVMS §4.2.1): its
@@ -1572,6 +1585,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 shells_reused: profile.shells_reused,
                 member_type_references: profile.member_type_references,
                 hierarchy_loads: profile.hierarchy_loads,
+                resource_lookup_ns: profile.resource_lookup_ns,
+                classfile_decode_ns: profile.classfile_decode_ns,
+                tasty_decode_ns: profile.tasty_decode_ns,
+                load_uncached_inclusive_ns: profile.load_uncached_inclusive_ns,
             });
         }
         result
@@ -1582,9 +1599,22 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         name: &BinaryName,
         inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadFailure> {
-        let resource = match self.class_path.find_class(name) {
+        let uncached_started = self.collect_load_profiles.then(Instant::now);
+        let resource_lookup_started = self.collect_load_profiles.then(Instant::now);
+        let resource_result = self.class_path.find_class(name);
+        if let (Some(started), Some(profile)) =
+            (resource_lookup_started, self.active_load_profile.as_mut())
+        {
+            profile.resource_lookup_ns += started.elapsed().as_nanos();
+        }
+        let resource = match resource_result {
             Ok(Some(resource)) => resource,
             Ok(None) => {
+                if let (Some(started), Some(profile)) =
+                    (uncached_started, self.active_load_profile.as_mut())
+                {
+                    profile.load_uncached_inclusive_ns += started.elapsed().as_nanos();
+                }
                 return Err(ClassLoadFailure {
                     error: ClassLoadError::NotFound(name.clone()),
                     origin: None,
@@ -1592,6 +1622,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 });
             }
             Err(error) => {
+                if let (Some(started), Some(profile)) =
+                    (uncached_started, self.active_load_profile.as_mut())
+                {
+                    profile.load_uncached_inclusive_ns += started.elapsed().as_nanos();
+                }
                 return Err(ClassLoadFailure {
                     error: ClassLoadError::Io(name.clone(), Rc::new(error)),
                     origin: None,
@@ -1624,7 +1659,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         };
         self.loading_context.remove(name);
         let observed_context = self.dependency_failure_context.take();
-        result.map_err(|error| {
+        let result = result.map_err(|error| {
             let cause_name = error_binary_name(error.root_cause());
             let failure_is_for_another_name =
                 cause_name.is_some_and(|cause_name| cause_name != name);
@@ -1644,7 +1679,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 origin,
                 format,
             }
-        })
+        });
+        if let (Some(started), Some(profile)) =
+            (uncached_started, self.active_load_profile.as_mut())
+        {
+            profile.load_uncached_inclusive_ns += started.elapsed().as_nanos();
+        }
+        result
     }
 
     /// Allocates a class's stable `SymbolId`, and its declarations scope,
@@ -2317,6 +2358,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     ) -> Result<SymbolId, ClassLoadError> {
         let alias_error = RefCell::new(None);
         let class_path = &self.class_path;
+        let decode_started = self.collect_load_profiles.then(Instant::now);
         let decoded = tasty_symbol::decode_with_resolvers(
             bytes,
             name,
@@ -2339,6 +2381,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 }
             },
         );
+        if let (Some(started), Some(profile)) = (decode_started, self.active_load_profile.as_mut())
+        {
+            profile.tasty_decode_ns += started.elapsed().as_nanos();
+        }
         if let Some(error) = alias_error.into_inner() {
             let (error, context) = error.into_class_load_error();
             self.dependency_failure_context = context;
@@ -2500,7 +2546,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
         let mut reader = Reader::new(bytes);
-        let class_file = ClassFile::decode(&mut reader)
+        let decode_started = self.collect_load_profiles.then(Instant::now);
+        let decoded_class_file = ClassFile::decode(&mut reader);
+        if let (Some(started), Some(profile)) = (decode_started, self.active_load_profile.as_mut())
+        {
+            profile.classfile_decode_ns += started.elapsed().as_nanos();
+        }
+        let class_file = decoded_class_file
             .map_err(|error| ClassLoadError::InvalidClassFile(name.clone(), error))?;
 
         // Checked before any symbol allocation: a version this decoder
@@ -7295,6 +7347,10 @@ mod tests {
         assert_eq!(profile.hierarchy_loads, 2);
         assert_eq!(profile.shells_created, 0);
         assert_eq!(profile.max_dependency_depth, 1);
+        assert!(profile.resource_lookup_ns > 0);
+        assert!(profile.classfile_decode_ns > 0);
+        assert_eq!(profile.tasty_decode_ns, 0);
+        assert!(profile.load_uncached_inclusive_ns > 0);
     }
 
     #[test]
@@ -7397,6 +7453,25 @@ mod tests {
         assert_eq!(cached.shells_created, 0);
         assert_eq!(cached.shells_reused, 0);
         assert_eq!(calls.load(Ordering::Relaxed), 21);
+    }
+
+    #[test]
+    fn failed_resource_lookup_is_included_in_load_profile_timing() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        loader.set_load_profile_collection(true);
+
+        assert!(
+            loader
+                .load_class(&BinaryName::from_internal("missing/Type"))
+                .is_err()
+        );
+
+        let profile = loader.take_load_profiles().pop().unwrap();
+        assert!(profile.resource_lookup_ns > 0);
+        assert!(profile.load_uncached_inclusive_ns > 0);
+        assert_eq!(profile.classfile_decode_ns, 0);
+        assert_eq!(profile.tasty_decode_ns, 0);
     }
 
     #[test]
