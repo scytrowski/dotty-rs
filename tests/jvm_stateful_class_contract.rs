@@ -2122,14 +2122,14 @@ fn val_and_var_constructor_parameters_have_distinct_field_and_parameter_symbols(
                 assert_eq!(binding.source_ordinal(), ordinal);
                 assert_eq!(binding.is_mutable(), ordinal == 1);
             }
+            class_plans.push(JvmClassPlan {
+                class,
+                methods: Vec::new(),
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof.clone()),
+            });
+            typer.complete_symbol(constructor).unwrap();
             if class_name != "Ref" {
-                class_plans.push(JvmClassPlan {
-                    class,
-                    methods: Vec::new(),
-                    fields: Vec::new(),
-                    initialization: JvmClassInitializationPlan::PrimaryConstructor(proof.clone()),
-                });
-                typer.complete_symbol(constructor).unwrap();
                 let metadata = class_plans
                     .last()
                     .unwrap()
@@ -2144,14 +2144,98 @@ fn val_and_var_constructor_parameters_have_distinct_field_and_parameter_symbols(
             classes: class_plans,
         };
         let metadata = unit.metadata(definitions).unwrap();
-        assert_eq!(metadata.len(), 2);
+        assert_eq!(metadata.len(), 3);
         assert_eq!(
             metadata
                 .iter()
                 .map(|class| class.accessor_bindings().len())
                 .collect::<Vec<_>>(),
-            [2, 2],
-            "same-batch primitive accessor metadata remains canonical"
+            [2, 2, 1],
+            "same-batch accessor metadata remains canonical"
+        );
+        for class_name in ["Measurement", "Mixed", "Ref"] {
+            let class = symbol_named(ast, index, source, typer, class_name);
+            let class_metadata = metadata
+                .iter()
+                .find(|metadata| metadata.identity().symbol() == class)
+                .unwrap();
+            assert!(class_metadata.methods().is_empty());
+            assert_eq!(
+                class_metadata.accessors().len(),
+                class_metadata.accessor_bindings().len()
+            );
+            for (ordinal, accessor) in class_metadata.accessors().iter().enumerate() {
+                assert_eq!(accessor.owner(), class);
+                assert_eq!(accessor.source_ordinal(), ordinal);
+                assert_eq!(accessor.source_field(), accessor.binding().field());
+                assert_eq!(
+                    accessor.constructor_parameter(),
+                    accessor.binding().parameter()
+                );
+                assert!(accessor.field_access_flags().contains(ACC_PRIVATE));
+                assert!(accessor.getter().access_flags().contains(ACC_PUBLIC));
+            }
+        }
+        let measurement = metadata
+            .iter()
+            .find(|metadata| {
+                metadata.identity().symbol()
+                    == symbol_named(ast, index, source, typer, "Measurement")
+            })
+            .unwrap();
+        let [id, value] = measurement.accessors() else {
+            panic!("Measurement should retain two accessor metadata records");
+        };
+        assert_eq!((id.field_name(), id.field_descriptor()), ("id", "I"));
+        assert!(id.field_access_flags().contains(ACC_FINAL));
+        assert_eq!(
+            (id.getter().name(), id.getter().descriptor().as_str()),
+            ("id", "()I")
+        );
+        assert!(id.setter().is_none(), "val must not have a JVM setter");
+        assert_eq!(
+            (value.field_name(), value.field_descriptor()),
+            ("value", "D")
+        );
+        assert!(!value.field_access_flags().contains(ACC_FINAL));
+        assert_eq!(
+            (value.getter().name(), value.getter().descriptor().as_str()),
+            ("value", "()D")
+        );
+        let setter = value.setter().unwrap();
+        assert_eq!(
+            (setter.name(), setter.descriptor().as_str()),
+            ("value_$eq", "(D)V")
+        );
+        assert!(setter.access_flags().contains(ACC_PUBLIC));
+        let mixed = metadata
+            .iter()
+            .find(|metadata| {
+                metadata.identity().symbol() == symbol_named(ast, index, source, typer, "Mixed")
+            })
+            .unwrap();
+        assert_eq!(
+            mixed
+                .accessors()
+                .iter()
+                .map(|accessor| (accessor.field_name(), accessor.field_descriptor()))
+                .collect::<Vec<_>>(),
+            [("enabled", "Z"), ("count", "J")]
+        );
+        assert_eq!(
+            mixed.accessors()[1].setter().unwrap().descriptor().as_str(),
+            "(J)V"
+        );
+        let reference = metadata
+            .iter()
+            .find(|metadata| {
+                metadata.identity().symbol() == symbol_named(ast, index, source, typer, "Ref")
+            })
+            .unwrap();
+        assert_eq!(reference.accessors()[0].field_descriptor(), "LMeasurement;");
+        assert_eq!(
+            reference.accessors()[0].getter().descriptor().as_str(),
+            "()LMeasurement;"
         );
     });
 }
@@ -2349,6 +2433,162 @@ fn mixed_plain_and_accessor_constructor_parameters_keep_source_ordinals() {
                     .collect::<Vec<_>>(),
                 [1, 2, 4],
                 "JVM parameter slots still account for Long's two slots"
+            );
+        },
+    );
+}
+
+#[test]
+fn constructor_accessor_metadata_rejects_user_method_signature_collisions() {
+    with_source(
+        "class Collision(val id: Int) { def id(): Int = 1 }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Collision");
+            typer.complete_symbol(class).unwrap();
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
+            else {
+                panic!("primary constructor should be a DefDef");
+            };
+            let parameter_tree = constructor_definition.value_param_clauses[0][0];
+            let parameter = index
+                .derived_symbol_at(constructor, source, parameter_tree)
+                .unwrap();
+            typer
+                .complete_symbol(index.symbol_at(source, parameter_tree).unwrap())
+                .unwrap();
+            typer.complete_symbol(parameter).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let proof = JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                vec![parameter],
+                ast,
+                index,
+            )
+            .unwrap();
+
+            let (method, method_tree, rhs) =
+                method_tree_and_rhs(ast, index, source, typer, class, "id");
+            typer.complete_symbol(method).unwrap();
+            let context = typer.expression_context_for(method).unwrap();
+            let body = typer.type_expression(rhs, context).unwrap();
+            let result = JvmClassPlan {
+                class,
+                methods: vec![JvmMethodPlan {
+                    method,
+                    parameters: Vec::new(),
+                    locals: Vec::new(),
+                    body: Some(body),
+                }],
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+            }
+            .metadata(typer.store(), definitions);
+            let source_field = index.symbol_at(source, parameter_tree).unwrap();
+            assert!(matches!(
+                &result,
+                Err(dotty_jvm::JvmCodegenError::DuplicateJvmAccessorMethodIdentity {
+                    class: found_class,
+                    field,
+                    previous,
+                    name,
+                    descriptor,
+                }) if *found_class == class
+                    && *field == source_field
+                    && *previous == method
+                    && name == "id"
+                    && descriptor == "()I"
+            ));
+            assert!(ast.try_get(method_tree).is_some());
+        },
+    );
+}
+
+#[test]
+fn constructor_accessor_metadata_rejects_user_setter_signature_collisions() {
+    with_source(
+        "class Collision(var id: Int) { def id_=(value: Int): Unit = {} }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Collision");
+            typer.complete_symbol(class).unwrap();
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
+            else {
+                panic!("primary constructor should be a DefDef");
+            };
+            let parameter_tree = constructor_definition.value_param_clauses[0][0];
+            let parameter = index
+                .derived_symbol_at(constructor, source, parameter_tree)
+                .unwrap();
+            typer
+                .complete_symbol(index.symbol_at(source, parameter_tree).unwrap())
+                .unwrap();
+            typer.complete_symbol(parameter).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let proof = JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                vec![parameter],
+                ast,
+                index,
+            )
+            .unwrap();
+
+            let (method, method_tree, rhs) =
+                method_tree_and_rhs(ast, index, source, typer, class, "id_=");
+            let TreeKind::DefDef(method_definition) = &ast.get(method_tree).kind else {
+                panic!("user setter should be a DefDef");
+            };
+            let setter_parameter_tree = method_definition.value_param_clauses[0][0];
+            let setter_parameter = index.symbol_at(source, setter_parameter_tree).unwrap();
+            typer.complete_symbol(setter_parameter).unwrap();
+            typer.complete_symbol(method).unwrap();
+            let context = typer.expression_context_for(method).unwrap();
+            let body = typer.type_expression(rhs, context).unwrap();
+            let result = JvmClassPlan {
+                class,
+                methods: vec![JvmMethodPlan {
+                    method,
+                    parameters: vec![setter_parameter],
+                    locals: Vec::new(),
+                    body: Some(body),
+                }],
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+            }
+            .metadata(typer.store(), definitions);
+            let source_field = index.symbol_at(source, parameter_tree).unwrap();
+            assert!(
+                matches!(
+                    &result,
+                    Err(dotty_jvm::JvmCodegenError::DuplicateJvmAccessorMethodIdentity {
+                        class: found_class,
+                        field,
+                        previous,
+                        name,
+                        descriptor,
+                    }) if *found_class == class
+                        && *field == source_field
+                        && *previous == method
+                        && name == "id_$eq"
+                        && descriptor == "(I)V"
+                ),
+                "unexpected result: {result:?}"
             );
         },
     );

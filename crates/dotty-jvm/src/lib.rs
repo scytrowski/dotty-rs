@@ -335,6 +335,7 @@ pub struct JvmClassMetadata {
     fields: Vec<JvmFieldMetadata>,
     constructor: Option<JvmConstructorMetadata>,
     accessor_bindings: Vec<JvmConstructorAccessorBinding>,
+    accessors: Vec<JvmAccessorMetadata>,
     methods: Vec<JvmMethodMetadata>,
     dispatch_methods: Vec<JvmMethodDispatchMetadata>,
 }
@@ -371,6 +372,31 @@ pub struct JvmFieldMetadata {
     access_flags: dotty_classfile::access_flags::FieldAccessFlags,
     owner: SymbolId,
     initializer: TreeId<Typed>,
+}
+
+/// Checked JVM-only field and method signatures for one constructor accessor.
+///
+/// This projection is distinct from [`JvmFieldMetadata`]: accessor source
+/// fields have no typed initializer, and this metadata never treats a missing
+/// initializer as permission to plan an ordinary source field. It does not
+/// synthesize source symbols or emit class-file members.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmAccessorMetadata {
+    binding: JvmConstructorAccessorBinding,
+    value_type: JvmType,
+    field_name: String,
+    field_descriptor: String,
+    field_access_flags: dotty_classfile::access_flags::FieldAccessFlags,
+    getter: JvmAccessorMethodMetadata,
+    setter: Option<JvmAccessorMethodMetadata>,
+}
+
+/// JVM-only signature metadata for an accessor entrypoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmAccessorMethodMetadata {
+    name: String,
+    descriptor: JvmMethodDescriptor,
+    access_flags: dotty_classfile::access_flags::MethodAccessFlags,
 }
 
 /// Frontend evidence about class initialization for whole-class emission.
@@ -1256,6 +1282,15 @@ pub enum JvmCodegenError {
         name: String,
         descriptor: String,
     },
+    /// A generated accessor name and descriptor collide with an emitted or
+    /// generated method. `previous` is its method symbol or source field ID.
+    DuplicateJvmAccessorMethodIdentity {
+        class: SymbolId,
+        field: SymbolId,
+        previous: SymbolId,
+        name: String,
+        descriptor: String,
+    },
     /// Two class symbols in one compilation unit project to the same internal name.
     DuplicateJvmClassIdentity {
         class: SymbolId,
@@ -1607,6 +1642,12 @@ impl JvmClassMetadata {
     pub fn accessor_bindings(&self) -> &[JvmConstructorAccessorBinding] {
         &self.accessor_bindings
     }
+
+    /// JVM-only backing-field and accessor-method signatures, in source order.
+    /// These are metadata only; class-file emission remains a later increment.
+    pub fn accessors(&self) -> &[JvmAccessorMetadata] {
+        &self.accessors
+    }
     /// Class identity, preserving its canonical semantic symbol.
     pub const fn identity(&self) -> &JvmClassIdentity {
         &self.identity
@@ -1790,6 +1831,85 @@ impl JvmFieldMetadata {
     /// Exact typed initializer root validated for this field.
     pub const fn initializer(&self) -> TreeId<Typed> {
         self.initializer
+    }
+}
+
+impl JvmAccessorMetadata {
+    /// Canonical source-to-formal proof used to derive the JVM projection.
+    pub const fn binding(&self) -> JvmConstructorAccessorBinding {
+        self.binding
+    }
+
+    /// Source field identity; no synthetic field symbol is introduced.
+    pub const fn source_field(&self) -> SymbolId {
+        self.binding.field()
+    }
+
+    /// Constructor-owned derived formal identity.
+    pub const fn constructor_parameter(&self) -> SymbolId {
+        self.binding.parameter()
+    }
+
+    /// Canonical class that owns the source field and JVM backing storage.
+    pub const fn owner(&self) -> SymbolId {
+        self.binding.class()
+    }
+
+    /// Source parameter ordinal, preserved independently from JVM slot width.
+    pub const fn source_ordinal(&self) -> usize {
+        self.binding.source_ordinal()
+    }
+
+    /// Whether the source accessor is a mutable `var`.
+    pub const fn is_mutable(&self) -> bool {
+        self.binding.is_mutable()
+    }
+
+    /// Exact checked JVM value type shared by the field, getter and setter.
+    pub const fn value_type(&self) -> JvmType {
+        self.value_type
+    }
+
+    /// Source-name-derived JVM backing field name proven by the pinned oracle.
+    pub fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
+    /// JVM descriptor of the private backing field.
+    pub fn field_descriptor(&self) -> &str {
+        &self.field_descriptor
+    }
+
+    /// JVM-private flags, with `final` for immutable `val` storage.
+    pub const fn field_access_flags(&self) -> dotty_classfile::access_flags::FieldAccessFlags {
+        self.field_access_flags
+    }
+
+    /// Public getter signature for this accessor.
+    pub const fn getter(&self) -> &JvmAccessorMethodMetadata {
+        &self.getter
+    }
+
+    /// Public setter signature for a mutable `var`; absent for a `val`.
+    pub const fn setter(&self) -> Option<&JvmAccessorMethodMetadata> {
+        self.setter.as_ref()
+    }
+}
+
+impl JvmAccessorMethodMetadata {
+    /// Exact JVM member name from the pinned Scala 3.9.0 oracle.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Validated descriptor for the accessor method.
+    pub const fn descriptor(&self) -> &JvmMethodDescriptor {
+        &self.descriptor
+    }
+
+    /// Public JVM access flags observed in the pinned compiler output.
+    pub const fn access_flags(&self) -> dotty_classfile::access_flags::MethodAccessFlags {
+        self.access_flags
     }
 }
 

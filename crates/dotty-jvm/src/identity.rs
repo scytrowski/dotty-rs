@@ -13,9 +13,11 @@ use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, Visibility};
 use dotty_core::types::{Type, TypeRefTarget};
 
 use crate::{
-    InvalidJvmClassInfoKind, JvmClassIdentity, JvmClassMetadata, JvmCodegenError, JvmFieldMetadata,
-    JvmFieldPlan, JvmMethodDispatchMetadata, JvmMethodMetadata, JvmNameKind, JvmOverrideIssue,
-    JvmParameterLocal, UnsupportedJvmClassKind, UnsupportedJvmFieldFlag, UnsupportedJvmSymbolFlag,
+    InvalidJvmClassInfoKind, JvmAccessorMetadata, JvmAccessorMethodMetadata, JvmClassIdentity,
+    JvmClassMetadata, JvmCodegenError, JvmConstructorAccessorBinding, JvmFieldMetadata,
+    JvmFieldPlan, JvmMethodDescriptor, JvmMethodDispatchMetadata, JvmMethodMetadata, JvmNameKind,
+    JvmOverrideIssue, JvmParameterLocal, JvmReturnType, JvmType, UnsupportedJvmClassKind,
+    UnsupportedJvmFieldFlag, UnsupportedJvmSymbolFlag,
 };
 
 pub(super) fn class_identity(
@@ -528,34 +530,6 @@ pub(super) fn class_metadata(
         fields.push(field);
     }
 
-    let mut methods = Vec::with_capacity(plan.methods.len());
-    let mut identities = HashMap::<(String, String), dotty_core::SymbolId>::new();
-
-    for method_plan in &plan.methods {
-        let method = method_metadata(
-            method_plan,
-            store,
-            plan.class,
-            definitions,
-            descriptor_context,
-            unit,
-        )?;
-        let key = (
-            method.name().to_owned(),
-            method.descriptor().as_str().to_owned(),
-        );
-        if let Some(previous) = identities.insert(key.clone(), method.symbol()) {
-            return Err(JvmCodegenError::DuplicateJvmMethodIdentity {
-                class: plan.class,
-                method: method.symbol(),
-                previous,
-                name: key.0,
-                descriptor: key.1,
-            });
-        }
-        methods.push(method);
-    }
-
     let (constructor, accessor_bindings) = match &plan.initialization {
         crate::JvmClassInitializationPlan::PrimaryConstructor(constructor) => {
             let class_identities = descriptor_context.map(|(_, identities)| identities);
@@ -571,14 +545,238 @@ pub(super) fn class_metadata(
         }
         _ => (None, Vec::new()),
     };
+    let mut identities = HashMap::<(String, String), dotty_core::SymbolId>::new();
+    let mut accessors = Vec::with_capacity(accessor_bindings.len());
+    for binding in accessor_bindings.iter().copied() {
+        let accessor = accessor_metadata(
+            binding,
+            store,
+            definitions,
+            descriptor_context.map(|(_, identities)| identities),
+            unit,
+        )?;
+        if let Some(previous) =
+            field_names.insert(accessor.field_name().to_owned(), accessor.source_field())
+        {
+            return Err(JvmCodegenError::DuplicateJvmFieldName {
+                class: plan.class,
+                field: accessor.source_field(),
+                previous,
+                name: accessor.field_name().to_owned(),
+            });
+        }
+        for method in std::iter::once(accessor.getter()).chain(accessor.setter()) {
+            let key = (
+                method.name().to_owned(),
+                method.descriptor().as_str().to_owned(),
+            );
+            if let Some(previous) = identities.insert(key.clone(), accessor.source_field()) {
+                return Err(JvmCodegenError::DuplicateJvmAccessorMethodIdentity {
+                    class: plan.class,
+                    field: accessor.source_field(),
+                    previous,
+                    name: key.0,
+                    descriptor: key.1,
+                });
+            }
+        }
+        accessors.push(accessor);
+    }
+
+    let mut methods = Vec::with_capacity(plan.methods.len());
+    for method_plan in &plan.methods {
+        let planned_descriptor = match descriptor_context {
+            Some((descriptor_store, class_identities)) => {
+                crate::descriptor::method_descriptor_with_class_identities(
+                    method_plan,
+                    descriptor_store,
+                    plan.class,
+                    definitions,
+                    class_identities,
+                    unit,
+                )?
+            }
+            None => method_plan.descriptor(store, plan.class, definitions)?,
+        };
+        let source_method = store.symbols.get(method_plan.method);
+        if let Some(source_name) = store.names.try_resolve(source_method.name.text()) {
+            let encoded_name = encode_accessor_collision_name(source_name);
+            for accessor in &accessors {
+                for generated in std::iter::once(accessor.getter()).chain(accessor.setter()) {
+                    if generated.name() == encoded_name
+                        && generated.descriptor().as_str() == planned_descriptor.as_str()
+                    {
+                        return Err(JvmCodegenError::DuplicateJvmAccessorMethodIdentity {
+                            class: plan.class,
+                            field: accessor.source_field(),
+                            previous: method_plan.method,
+                            name: generated.name().to_owned(),
+                            descriptor: generated.descriptor().as_str().to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+        let method = method_metadata(
+            method_plan,
+            store,
+            plan.class,
+            definitions,
+            descriptor_context,
+            unit,
+        )?;
+        let key = (
+            method.name().to_owned(),
+            method.descriptor().as_str().to_owned(),
+        );
+        if let Some(previous) = identities.insert(key.clone(), method.symbol()) {
+            if let Some(accessor) = accessors
+                .iter()
+                .find(|accessor| accessor.source_field() == previous)
+            {
+                return Err(JvmCodegenError::DuplicateJvmAccessorMethodIdentity {
+                    class: plan.class,
+                    field: accessor.source_field(),
+                    previous: method.symbol(),
+                    name: key.0,
+                    descriptor: key.1,
+                });
+            }
+            return Err(JvmCodegenError::DuplicateJvmMethodIdentity {
+                class: plan.class,
+                method: method.symbol(),
+                previous,
+                name: key.0,
+                descriptor: key.1,
+            });
+        }
+        methods.push(method);
+    }
     Ok(JvmClassMetadata {
         constructor,
         accessor_bindings,
+        accessors,
         identity,
         superclass: superclass.cloned(),
         fields,
         methods,
         dispatch_methods: Vec::new(),
+    })
+}
+
+fn encode_accessor_collision_name(source_name: &str) -> String {
+    source_name
+        .strip_suffix("_=")
+        .map_or_else(|| source_name.to_owned(), |base| format!("{base}_$eq"))
+}
+
+fn accessor_metadata(
+    binding: JvmConstructorAccessorBinding,
+    store: &SemanticStore,
+    definitions: &Definitions,
+    class_identities: Option<&[JvmClassIdentity]>,
+    unit: Option<&crate::JvmCompilationUnit<'_>>,
+) -> Result<JvmAccessorMetadata, JvmCodegenError> {
+    let field = store
+        .symbols
+        .contains(binding.field())
+        .then(|| store.symbols.get(binding.field()))
+        .ok_or(JvmCodegenError::UnknownField {
+            field: binding.field(),
+        })?;
+    if field.kind != SymbolKind::Field || field.owner != Some(binding.class()) {
+        return Err(JvmCodegenError::InvalidPrimaryConstructor {
+            constructor: binding.constructor(),
+            issue: crate::JvmConstructorIssue::AccessorFieldIdentity,
+        });
+    }
+    let source_name = store
+        .names
+        .try_resolve(field.name.text())
+        .ok_or_else(|| invalid_name(binding.field(), JvmNameKind::Field, "<unresolved>"))?;
+    if field.name.namespace() != Namespace::Term || !is_simple_identifier(source_name) {
+        return Err(invalid_name(
+            binding.field(),
+            JvmNameKind::Field,
+            source_name.to_owned(),
+        ));
+    }
+    let field_type_id = match store.symbols.info(binding.field()) {
+        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+            return Err(JvmCodegenError::MissingSemanticInfo {
+                symbol: binding.field(),
+            });
+        }
+        SymbolInfo::Error => {
+            return Err(JvmCodegenError::ErrorSemanticInfo {
+                symbol: binding.field(),
+            });
+        }
+        SymbolInfo::Complete(ty) => *ty,
+    };
+    let value_type = project_field_value_type(
+        store,
+        definitions,
+        binding.field(),
+        field_type_id,
+        class_identities,
+        unit,
+    )?;
+    let field_descriptor =
+        field_descriptor(binding.field(), field_type_id, value_type, class_identities)?;
+    let field_access_flags =
+        FieldAccessFlags(ACC_PRIVATE | if binding.is_mutable() { 0 } else { ACC_FINAL });
+    let getter = JvmAccessorMethodMetadata {
+        name: source_name.to_owned(),
+        descriptor: accessor_method_descriptor(
+            binding.constructor(),
+            &format!("(){field_descriptor}"),
+            Vec::new(),
+            JvmReturnType::Value(value_type),
+        )?,
+        access_flags: MethodAccessFlags(ACC_PUBLIC),
+    };
+    let setter = if binding.is_mutable() {
+        Some(JvmAccessorMethodMetadata {
+            name: format!("{source_name}_$eq"),
+            descriptor: accessor_method_descriptor(
+                binding.constructor(),
+                &format!("({field_descriptor})V"),
+                vec![value_type],
+                JvmReturnType::Void,
+            )?,
+            access_flags: MethodAccessFlags(ACC_PUBLIC),
+        })
+    } else {
+        None
+    };
+    Ok(JvmAccessorMetadata {
+        binding,
+        value_type,
+        field_name: source_name.to_owned(),
+        field_descriptor,
+        field_access_flags,
+        getter,
+        setter,
+    })
+}
+
+fn accessor_method_descriptor(
+    constructor: dotty_core::SymbolId,
+    descriptor_text: &str,
+    parameters: Vec<JvmType>,
+    result: JvmReturnType,
+) -> Result<JvmMethodDescriptor, JvmCodegenError> {
+    let descriptor = dotty_classfile::descriptor::MethodDescriptor::parse(descriptor_text)
+        .map_err(|error| JvmCodegenError::InvalidGeneratedDescriptor {
+            method: constructor,
+            error,
+        })?;
+    Ok(JvmMethodDescriptor {
+        descriptor,
+        descriptor_text: descriptor_text.to_owned(),
+        parameters,
+        result,
     })
 }
 
