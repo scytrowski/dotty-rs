@@ -299,7 +299,7 @@ impl<'a> SourceTyper<'a> {
     ///
     /// Literal expressions preserve their exact `Type::Constant` type in the
     /// typed AST; consumers use this operation when they need the canonical
-    /// builtin value type. A member reference is adapted to its receiver view.
+    /// underlying value type. A member reference is adapted to its receiver view.
     /// Adapting a reference may complete source symbols and allocate semantic
     /// types; failures roll those changes back.
     pub fn widen_expression_type(&mut self, ty: TypeId) -> Result<TypeId, TyperError> {

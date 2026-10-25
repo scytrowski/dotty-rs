@@ -20475,6 +20475,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::TypeNormalization(..) => "TypeNormalization",
         TyperError::ConflictingTypedExpression { .. } => "ConflictingTypedExpression",
         TyperError::StringLiteralTypingDeferred { .. } => "StringLiteralTypingDeferred",
+        TyperError::StringTypeResolution { .. } => "StringTypeResolution",
         TyperError::NullLiteralTypingDeferred { .. } => "NullLiteralTypingDeferred",
         TyperError::IntegerLiteralOutOfRange { .. } => "IntegerLiteralOutOfRange",
         TyperError::FloatingLiteralInvalid { .. } => "FloatingLiteralInvalid",

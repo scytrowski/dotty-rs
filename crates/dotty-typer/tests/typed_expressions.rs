@@ -3,13 +3,13 @@
 use dotty_core::ast::{TreeKind, UntypedNode};
 use dotty_core::types::{ClassInfo, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
-    Definitions, MemberRequest, Name, Namespace, NoResolver, Packages, ResolutionError,
+    Constant, Definitions, MemberRequest, Name, Namespace, NoResolver, Packages, ResolutionError,
     ResolverCheckpoint, Scope, SemanticStore, SourceId, SourceText, Symbol, SymbolFlags,
     SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, SymbolResolver, TreeId, Untyped, Visibility,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
-use dotty_typer::{ExpressionContext, SourceTyper, TyperError};
+use dotty_typer::{ExpressionContext, SourceTyper, TypeRelationError, TyperError};
 
 const NULL_REFERENCE_IDENTITY_SOURCE: &str =
     include_str!("../../../tests/fixtures/jvm/NullReferenceIdentity.scala");
@@ -25,7 +25,7 @@ struct ScalaTypeResolver {
 struct JavaLangStringResolver {
     java_package: dotty_core::SymbolId,
     lang_package: dotty_core::SymbolId,
-    string_class: dotty_core::SymbolId,
+    string_class: Option<dotty_core::SymbolId>,
 }
 
 impl SymbolResolver for JavaLangStringResolver {
@@ -55,7 +55,7 @@ impl SymbolResolver for JavaLangStringResolver {
         Ok(if prefix == self.java_package && name == "lang" {
             Some(self.lang_package)
         } else if prefix == self.lang_package && name == "String" {
-            Some(self.string_class)
+            self.string_class
         } else {
             None
         })
@@ -142,7 +142,7 @@ fn string_concatenation_uses_the_canonical_java_string_operator_only() {
         "object StringConcatenation:\n",
         "  def concat(name: java.lang.String, desc: java.lang.String): java.lang.String = name + desc\n",
         "  def explicit(name: java.lang.String, desc: java.lang.String): java.lang.String = name.+(desc)\n",
-        "  def rollback(name: java.lang.String): java.lang.String = name + \"x\"\n",
+        "  def literal: java.lang.String = \"literal\"\n",
         "  def unrelated(left: Token, right: Token): Token = left + right\n",
     );
     let source = SourceId::from_index(0);
@@ -192,8 +192,6 @@ fn string_concatenation_uses_the_canonical_java_string_operator_only() {
         self_type: None,
     }));
     store.symbols.get_mut(string_class).info = SymbolInfo::Complete(class_info);
-    let plus_name = Name::new(store.names.intern("+"), Namespace::Term);
-
     let method_and_body = |wanted: &str| {
         parsed
             .ast
@@ -213,7 +211,7 @@ fn string_concatenation_uses_the_canonical_java_string_operator_only() {
     };
     let (concat_method, concat_body) = method_and_body("concat");
     let (explicit_method, explicit_body) = method_and_body("explicit");
-    let (rollback_method, rollback_body) = method_and_body("rollback");
+    let (literal_method, literal_body) = method_and_body("literal");
     let (unrelated_method, unrelated_body) = method_and_body("unrelated");
 
     let mut typer = SourceTyper::new(
@@ -227,29 +225,28 @@ fn string_concatenation_uses_the_canonical_java_string_operator_only() {
     .with_resolver(Box::new(JavaLangStringResolver {
         java_package,
         lang_package,
-        string_class,
+        string_class: Some(string_class),
     }));
-    typer.complete_symbol(rollback_method).unwrap();
-    let context = typer.expression_context_for(rollback_method).unwrap();
+
+    typer.complete_symbol(literal_method).unwrap();
+    let context = typer.expression_context_for(literal_method).unwrap();
+    let literal = typer
+        .type_expression(literal_body, context)
+        .expect("a string literal should use the canonical classfile-backed String type");
+    let literal_type = typer.typed_ast().get(literal).ty;
     assert!(matches!(
-        typer.type_expression(rollback_body, context),
-        Err(TyperError::StringLiteralTypingDeferred { .. })
+        typer.store().types.try_get(literal_type),
+        Some(Type::Constant(dotty_core::Constant::String(_)))
     ));
-    let declarations = match typer.store().symbols.get(string_class).info {
-        SymbolInfo::Complete(class_info) => match typer.store().types.get(class_info) {
-            Type::ClassInfo(info) => info.declarations,
-            _ => panic!("String should have class info"),
-        },
-        _ => panic!("String class should be complete"),
-    };
-    assert!(
-        typer
-            .store()
-            .scopes
-            .get(declarations)
-            .lookup_all(&plus_name)
-            .is_empty()
-    );
+    let widened_literal = typer.widen_expression_type(literal_type).unwrap();
+    assert!(matches!(
+        typer.store().types.try_get(widened_literal),
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        }) if *class == string_class
+    ));
+    assert!(typer.conforms(literal_type, widened_literal).unwrap());
 
     typer.complete_symbol(explicit_method).unwrap();
     let context = typer.expression_context_for(explicit_method).unwrap();
@@ -315,6 +312,65 @@ fn string_concatenation_uses_the_canonical_java_string_operator_only() {
         Err(TyperError::MemberNotFound { name, .. })
             if typer.store().names.resolve(name.text()) == "+"
     ));
+}
+
+#[test]
+fn unresolved_string_relation_rolls_back_package_prefix_and_utf16_constants_are_supported() {
+    let text = "class C { def answer: Int = 42 }";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut package_registry = Packages::new();
+    let package_chain =
+        package_registry.enter(&mut store, SymbolOrigin::Builtin, &["java", "lang"]);
+    let java_package = package_chain[0].symbol;
+    let lang_package = package_chain[1].symbol;
+    let packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "unresolved-string-relation.scala",
+        &mut store,
+        &mut package_registry,
+    )
+    .unwrap();
+    let constant_string = store.names.intern("literal");
+    let string_constant = store
+        .types
+        .alloc(Type::Constant(Constant::String(constant_string)));
+    let utf16_constant = store
+        .types
+        .alloc(Type::Constant(Constant::StringUtf16(vec![0xD800])));
+    let checkpoint = store.checkpoint();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(JavaLangStringResolver {
+        java_package,
+        lang_package,
+        string_class: None,
+    }));
+
+    assert!(matches!(
+        typer.conforms(string_constant, definitions.int),
+        Err(TypeRelationError::UnsupportedType { .. })
+    ));
+    assert_eq!(typer.store().checkpoint(), checkpoint);
+    assert!(typer.conforms(utf16_constant, utf16_constant).unwrap());
 }
 
 #[test]

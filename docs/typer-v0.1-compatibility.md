@@ -114,18 +114,20 @@ relation remains false. Constant alternatives also participate in the existing
 bounded union rules. Expression widening uses the same constant-to-builtin
 mapping as the relation.
 
-String constants support exact equality, but the current `Definitions` has no
-canonical String type, so string-to-String conformance remains unsupported.
-UTF-16-only strings and Class constants remain outside the supported relation
-subset and return `TypeRelationError::UnsupportedType`. `Class` constants are
-not treated as nominal class views. `require_stable_selection_prefix`
-continues to accept supported constant types as stable prefixes. TASTy decoding
-maps wire constant types to the same `Type::Constant` representation. Expected
-expression adaptation preserves an exact constant only when the normalized
-expected type contains a constant singleton, including a union alternative;
-all other expectations use normal expression widening before conformance.
-This is intentionally limited to literal constants and does not add general
-bidirectional typing.
+String constants support exact equality and resolve their underlying type
+through the canonical classfile-backed `java.lang.String` identity. If that
+class cannot be resolved or does not have the exact Java package owner chain,
+string literal typing remains deferred and String constant conformance remains
+unsupported. UTF-16-only strings share that underlying type, while Class
+constants remain outside the supported relation subset and return
+`TypeRelationError::UnsupportedType`. `Class` constants are not treated as
+nominal class views. `require_stable_selection_prefix` continues to accept
+supported constant types as stable prefixes. TASTy decoding maps wire constant
+types to the same `Type::Constant` representation. Expected expression
+adaptation preserves an exact constant only when the normalized expected type
+contains a constant singleton, including a union alternative; all other
+expectations use normal expression widening before conformance. This remains
+limited to literal constants and does not add general bidirectional typing.
 
 Source `null` expressions are represented by the canonical
 `Definitions.null_type` `TypeRef`, rather than `Type::Constant(Constant::Null)`.

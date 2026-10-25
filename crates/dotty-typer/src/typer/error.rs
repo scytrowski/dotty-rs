@@ -765,6 +765,10 @@ pub enum TyperError {
         tree_index: u32,
         error: ResolutionError,
     },
+    /// Resolving the canonical Java String type failed during type widening.
+    StringTypeResolution {
+        error: ResolutionError,
+    },
     /// The lexical scope exposes multiple possible type declarations.
     AmbiguousTypeName {
         source: SourceId,
