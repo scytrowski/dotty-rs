@@ -5802,6 +5802,8 @@ mod tests {
 
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let expected_any = loader.definitions.any_class;
+        let expected_nothing = loader.definitions.nothing_class;
         let apply_type =
             loader.lower_tasty_method(&BinaryName::from_internal("scala/Some$"), apply);
         drop(loader);
@@ -5815,6 +5817,17 @@ mod tests {
             "A"
         );
         assert_eq!(poly.params[0].declared_variance, None);
+        let Type::Bounds { low, high } = store.types.get(poly.params[0].bounds) else {
+            panic!("Some.apply's type parameter should retain its decoded bounds");
+        };
+        assert_eq!(
+            store.types.get(*low).reference_symbol(),
+            Some(expected_nothing)
+        );
+        assert_eq!(
+            store.types.get(*high).reference_symbol(),
+            Some(expected_any)
+        );
         let Type::Method(method) = store.types.get(poly.result) else {
             panic!("Some.apply's Poly result should be a method");
         };

@@ -233,8 +233,10 @@ behavior — each with a doc comment at its own definition site:
   address-based references to method-local type parameters. Other shapes
   (tuples, function types, refinements, dependent/path types, aliases, and
   higher-kinded bounds) remain explicit `Type::Error` values rather than
-  guesses. Unresolvable named dependencies also remain `Type::Error`; they
-  do not fail the class load.
+  guesses. A `scala.Any` method bound keeps the canonical Scala top type;
+  hierarchy-only reduction to `java.lang.Object` does not apply to member
+  types. Unresolvable named dependencies also remain `Type::Error`; they do
+  not fail the class load.
 - **Class-level `.tasty` type parameters are not reconstructed.** Method-local
   parameters use `Type::Poly`; their supported named/applied bounds are kept,
   and unsupported bounds become explicit error bounds. `.tasty`-backed

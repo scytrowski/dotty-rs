@@ -80,6 +80,14 @@ cannot soundly decide this relation from the current external class metadata.
 The updated row-level evidence is in
 [`typer-name-resolution-1566-tasty-generic-method-3.9.0.tsv`](typer-name-resolution-1566-tasty-generic-method-3.9.0.tsv).
 
+The deterministic 3-file / 31-method focused smoke cohort also changed after
+the fix that preserves `scala.Any` as the universal top type in TASTy bounds.
+`StringParsers.scala#tree=482` (`step`) advances from
+`ApplicationArgumentConformanceUnsupported` to `TermNameNotFound`; its resolver
+trace records an unresolved term lookup for `Int`. The two smoke runs matched
+byte-for-byte. No focused method became fully typed. The checked-in smoke
+baseline records this intentional first-blocker movement.
+
 This is blocker progress only. The #1566 goal of fully typing a real method
 remains unmet. The next bounded step is to address generic class hierarchy
 metadata or otherwise prove this class relation without guessing; weakening the
@@ -89,12 +97,12 @@ Reproduce the deterministic audit with the pinned Scala 3.9.0 checkout and
 cached dependencies:
 
 ```sh
-PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-tasty-generic-runs" \
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-tasty-generic-final-runs" \
 SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
 SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
 CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
 tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
-  --verify-determinism target/issue-1566-tasty-generic-after.md
+  --verify-determinism target/issue-1566-tasty-generic-final.md
 ```
 
 Reproduce the deterministic cohort comparison with:

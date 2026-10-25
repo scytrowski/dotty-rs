@@ -1810,6 +1810,15 @@ fn decode_tasty_member_type(
         });
     }
 
+    if let ReferenceResolution::Resolved(name) = resolve_reference_name(file, tree)
+        && name.as_internal() == "scala/Any"
+    {
+        // `Any` is the Scala top type, not the JVM superclass used when
+        // reducing `AnyRef`/`Object` in a class hierarchy. Preserve its
+        // canonical identity in value/member types such as Poly bounds.
+        return Some(DecodedTastyType::Named(name));
+    }
+
     resolve_parent_name_with_bare(file, tree, package, resolve_bare).map(DecodedTastyType::Named)
 }
 
@@ -5482,6 +5491,10 @@ mod tests {
         assert_eq!(apply.type_parameters.len(), 1);
         assert_eq!(apply.type_parameters[0].name, "A");
         assert!(apply.type_parameters[0].bounds_supported);
+        assert!(matches!(
+            apply.type_parameters[0].upper_bound.as_ref(),
+            Some(DecodedTastyType::Named(name)) if name.as_internal() == "scala/Any"
+        ));
         assert!(
             matches!(
                 apply.parameters[0].declared_type.as_ref(),
