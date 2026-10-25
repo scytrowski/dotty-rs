@@ -49,6 +49,12 @@ pub enum PairedPlanError {
     },
     /// A source unit cannot be represented by the bounded batch planner.
     BatchShape(&'static str),
+    /// A validation failure applies to the complete source batch rather than
+    /// to one class plan, so it cannot be attributed to a class receipt.
+    BatchUnit {
+        phase: &'static str,
+        reason: String,
+    },
 }
 
 impl fmt::Display for PairedPlanError {
@@ -917,6 +923,29 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         typed_ast: typer.typed_ast(),
         classes: drafts.iter().map(|draft| draft.jvm_plan.clone()).collect(),
     };
+    for (class_index, draft) in drafts.iter().enumerate() {
+        let class_unit = JvmCompilationUnit {
+            store: jvm_unit.store,
+            typed_ast: jvm_unit.typed_ast,
+            classes: vec![draft.jvm_plan.clone()],
+        };
+        let _metadata =
+            class_unit
+                .metadata(&definitions)
+                .map_err(|error| PairedPlanError::BatchClass {
+                    class_index,
+                    declaration_index: draft.source.tree.index() as usize,
+                    phase: "JVM class-plan validation",
+                    reason: format!("{error:?}"),
+                })?;
+    }
+    let _metadata =
+        jvm_unit
+            .metadata(&definitions)
+            .map_err(|error| PairedPlanError::BatchUnit {
+                phase: "complete JVM unit validation",
+                reason: format!("{error:?}"),
+            })?;
     let typed_bindings =
         |source, tree: TreeId<Untyped>| typer.source_typed_index().get(source, tree);
     let tasty_inputs = drafts
@@ -960,11 +989,17 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         .enumerate()
         .map(|(class_index, plan)| {
             dotty_jvm_tasty_contract::validate_jvm_tasty_class(&jvm_unit, plan).map_err(|error| {
-                PairedPlanError::BatchClass {
-                    class_index,
-                    declaration_index: drafts[class_index].source.tree.index() as usize,
-                    phase: "JVM/TASTy cross-contract validation",
-                    reason: format!("{error:?}"),
+                match error {
+                    JvmTastyContractError::JvmPlan(error) => PairedPlanError::BatchUnit {
+                        phase: "complete JVM unit validation",
+                        reason: format!("{error:?}"),
+                    },
+                    error => PairedPlanError::BatchClass {
+                        class_index,
+                        declaration_index: drafts[class_index].source.tree.index() as usize,
+                        phase: "JVM/TASTy cross-contract validation",
+                        reason: format!("{error:?}"),
+                    },
                 }
             })
         })

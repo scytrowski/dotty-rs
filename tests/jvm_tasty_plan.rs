@@ -420,6 +420,37 @@ fn a_bad_second_class_rejects_the_entire_batch_with_class_context() {
 }
 
 #[test]
+fn jvm_failure_in_second_class_is_attributed_to_that_source_class() {
+    let parameters = (0..256)
+        .map(|index| format!("p{index}: Int"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\nclass Gauge(start: Int):\n  private var reading: Int = start\n  def get({parameters}): Int = reading\n"
+    );
+    let error = with_paired_jvm_tasty_batch_plan(
+        &source,
+        "CounterGauge.scala",
+        SourceId::from_index(210),
+        |_| panic!("an invalid Gauge method must reject the whole batch"),
+    )
+    .expect_err("256 instance parameters exceed the JVM slot limit");
+    let PairedPlanError::BatchClass {
+        class_index,
+        declaration_index,
+        phase,
+        reason,
+    } = error
+    else {
+        panic!("expected a class-specific JVM validation error, got {error:?}");
+    };
+    assert_eq!(class_index, 1);
+    assert!(declaration_index > 0);
+    assert_eq!(phase, "JVM class-plan validation");
+    assert!(reason.contains("TooManyParameterSlots"));
+}
+
+#[test]
 fn independent_batch_sessions_have_distinct_arenas_and_same_ordered_intent() {
     let source = include_str!("fixtures/jvm_tasty_multiclass/CounterGauge.scala");
     with_paired_jvm_tasty_batch_plan(
