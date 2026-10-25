@@ -942,6 +942,8 @@ mod tests {
         include_str!("../../tests/fixtures/local-lazy-values/ExplicitSelf.scala");
     const LOCAL_LAZY_FORWARD_ORACLE_FIXTURE: &str =
         include_str!("../../tests/fixtures/local-lazy-values/Forward.scala");
+    const CLASS_LAZY_FIELDS_ORACLE_FIXTURE: &str =
+        include_str!("../../tests/fixtures/class-lazy-fields/ClassLazyFields.scala");
 
     struct ScriptedResolver {
         member: Option<SymbolId>,
@@ -22814,6 +22816,62 @@ mod tests {
     }
 
     #[test]
+    fn inferred_lazy_class_fields_support_forward_references_and_reject_cycles() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(CLASS_LAZY_FIELDS_ORACLE_FIXTURE);
+        let (first, first_tpt) = val_symbol(&parsed, &store, &index, source, "forwardFirst");
+        let (later, later_tpt) = val_symbol(&parsed, &store, &index, source, "forwardLater");
+        let explicit = val_symbol(&parsed, &store, &index, source, "typedValue").0;
+        let direct = val_symbol(&parsed, &store, &index, source, "selfValue").0;
+        let mutual_a = val_symbol(&parsed, &store, &index, source, "mutualFirst").0;
+        let mutual_b = val_symbol(&parsed, &store, &index, source, "mutualSecond").0;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert_eq!(typer.complete_symbol(first).unwrap(), definitions.int);
+        assert_eq!(typer.complete_symbol(later).unwrap(), definitions.int);
+        assert_eq!(typer.complete_symbol(explicit).unwrap(), definitions.int);
+        for (field, inferred_tpt) in [(first, first_tpt), (later, later_tpt)] {
+            assert_eq!(
+                typer.source_type_index().type_at(source, inferred_tpt),
+                Some(definitions.int)
+            );
+            assert!(
+                typer
+                    .store()
+                    .symbols
+                    .get(field)
+                    .flags
+                    .contains(SymbolFlags::LAZY)
+            );
+        }
+
+        for (field, expected_cycle) in
+            [(direct, direct), (mutual_a, mutual_a), (mutual_b, mutual_b)]
+        {
+            let checkpoint = typer.store().checkpoint();
+            let result = typer.complete_symbol(field);
+            assert!(
+                matches!(
+                    &result,
+                    Err(TyperError::RecursiveInferredFieldType { symbol, .. })
+                        if *symbol == expected_cycle
+                ),
+                "unexpected inferred lazy cycle result: {result:?}"
+            );
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert_eq!(typer.store().symbols.info(field), &SymbolInfo::Missing);
+        }
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+    }
+
+    #[test]
     fn inferred_mutable_class_fields_drive_reads_and_assignments() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C(parameter: Int) { var literal = 1; val sibling = 2; var fromParameter = parameter; var fromSibling = sibling; def read: Int = literal; def update: Unit = literal = 2; def mismatch: Unit = literal = true }",
@@ -23035,11 +23093,15 @@ mod tests {
     }
 
     #[test]
-    fn explicit_and_module_class_mutable_fields_keep_the_existing_boundary() {
-        let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("class C { var explicit: Int = notFound }; object O { var module = 1 }");
+    fn explicit_and_module_class_fields_keep_the_existing_boundary() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { var explicit: Int = notFound; lazy var invalid = 3 }; object O { var module = 1; lazy val moduleLazy = 2 }",
+        );
         let (explicit, explicit_tpt) = val_symbol(&parsed, &store, &index, source, "explicit");
         let (module, module_tpt) = val_symbol(&parsed, &store, &index, source, "module");
+        let (module_lazy, module_lazy_tpt) =
+            val_symbol(&parsed, &store, &index, source, "moduleLazy");
+        let invalid_lazy = val_symbol(&parsed, &store, &index, source, "invalid").0;
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -23070,6 +23132,34 @@ mod tests {
         ));
         assert_eq!(typer.source_type_index().type_at(source, module_tpt), None);
         assert_eq!(typer.store().symbols.info(module), &SymbolInfo::Missing);
+        assert!(matches!(
+            typer.complete_symbol(module_lazy),
+            Err(TyperError::MissingDeclaredType { .. })
+        ));
+        assert_eq!(
+            typer.source_type_index().type_at(source, module_lazy_tpt),
+            None
+        );
+        assert_eq!(
+            typer.store().symbols.info(module_lazy),
+            &SymbolInfo::Missing
+        );
+        assert!(
+            typer
+                .store()
+                .symbols
+                .get(invalid_lazy)
+                .flags
+                .contains(SymbolFlags::MUTABLE | SymbolFlags::LAZY)
+        );
+        assert!(matches!(
+            typer.complete_symbol(invalid_lazy),
+            Err(TyperError::MissingDeclaredType { .. })
+        ));
+        assert_eq!(
+            typer.store().symbols.info(invalid_lazy),
+            &SymbolInfo::Missing
+        );
     }
 
     #[test]
