@@ -56,6 +56,111 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _class_tasty_link(class_bytes: bytes) -> bytes | None:
+    """Read the class-level TASTY attribute from a bounded classfile."""
+    offset = 0
+
+    def take(length: int) -> bytes:
+        nonlocal offset
+        end = offset + length
+        if length < 0 or end > len(class_bytes):
+            raise RuntimeError("truncated classfile while reading TASTY link")
+        result = class_bytes[offset:end]
+        offset = end
+        return result
+
+    def u1() -> int:
+        return take(1)[0]
+
+    def u2() -> int:
+        return int.from_bytes(take(2), "big")
+
+    def u4() -> int:
+        return int.from_bytes(take(4), "big")
+
+    if take(4) != b"\xca\xfe\xba\xbe":
+        raise RuntimeError("invalid classfile magic while reading TASTY link")
+    take(4)  # minor and major version
+    cp_count = u2()
+    utf8: dict[int, bytes] = {}
+    index = 1
+    while index < cp_count:
+        tag = u1()
+        if tag == 1:
+            utf8[index] = take(u2())
+        elif tag in (3, 4):
+            take(4)
+        elif tag in (5, 6):
+            take(8)
+            index += 1
+        elif tag in (7, 8, 16, 19, 20):
+            take(2)
+        elif tag in (9, 10, 11, 12, 17, 18):
+            take(4)
+        elif tag == 15:
+            take(3)
+        else:
+            raise RuntimeError(f"unknown classfile constant-pool tag {tag}")
+        index += 1
+
+    take(6)  # access flags, this class, super class
+    for _ in range(u2()):
+        take(2)  # interfaces
+
+    def skip_members() -> None:
+        for _ in range(u2()):
+            take(6)  # access flags, name, descriptor
+            for _ in range(u2()):
+                take(2)
+                take(u4())
+
+    skip_members()  # fields
+    skip_members()  # methods
+    links = []
+    for _ in range(u2()):
+        name_index = u2()
+        payload = take(u4())
+        if utf8.get(name_index) == b"TASTY":
+            links.append(payload)
+    if offset != len(class_bytes):
+        raise RuntimeError("trailing bytes after classfile attributes")
+    if len(links) > 1:
+        raise RuntimeError("classfile has duplicate class-level TASTY attributes")
+    return links[0] if links else None
+
+
+def _tasty_header_uuid(tasty_bytes: bytes) -> bytes:
+    """Decode the pinned TASTy header fields needed to authenticate a link."""
+    offset = 0
+
+    def take(length: int) -> bytes:
+        nonlocal offset
+        end = offset + length
+        if length < 0 or end > len(tasty_bytes):
+            raise RuntimeError("truncated TASTy header")
+        value = tasty_bytes[offset:end]
+        offset = end
+        return value
+
+    def nat() -> int:
+        value = 0
+        while True:
+            byte = take(1)[0]
+            value = (value << 7) | (byte & 0x7f)
+            if byte & 0x80 != 0:
+                return value
+
+    if take(4) != bytes.fromhex("5ca1ab1f"):
+        raise RuntimeError("invalid TASTy magic")
+    major, minor, experimental = nat(), nat(), nat()
+    tooling_length = nat()
+    take(tooling_length)
+    uuid = take(16)
+    if major != 28 or minor != 9 or experimental != 0:
+        raise RuntimeError(f"unexpected TASTy header version {major}.{minor}.{experimental}")
+    return uuid
+
+
 def verify_provenance() -> None:
     pinned = json.loads((FIXTURES / "provenance.json").read_text())
     sources = {p.name: digest(p) for p in FIXTURES.glob("*.scala")}
@@ -942,6 +1047,7 @@ def consume_rust_pair(toolchain: Toolchain, pair_root: Path, tasty_link_uuid: st
         "with-tasty-no-get": ("example/Counter.class", "example/Counter.tasty"),
         "classfile-only-no-get": ("example/Counter.class",),
         "uuid-mismatch": ("example/Counter.class", "example/Counter.tasty"),
+        "unrecognized-link": ("example/Counter.class", "example/Counter.tasty"),
     }
     for name, files in expected.items():
         root = pair_root / name
@@ -963,8 +1069,27 @@ def consume_rust_pair(toolchain: Toolchain, pair_root: Path, tasty_link_uuid: st
     for pair in (first, second):
         class_bytes = (pair / "example/Counter.class").read_bytes()
         tasty_bytes = (pair / "example/Counter.tasty").read_bytes()
-        if class_bytes.count(link_bytes) != 1 or link_bytes not in tasty_bytes:
-            raise RuntimeError("Rust classfile link UUID differs from its TASTy header")
+        class_link = _class_tasty_link(class_bytes)
+        if class_link != link_bytes or _tasty_header_uuid(tasty_bytes) != class_link:
+            raise RuntimeError("Rust classfile TASTY link does not match its TASTy header UUID")
+
+    semantic_pair = pair_root / "with-tasty-no-get"
+    semantic_link = _class_tasty_link((semantic_pair / "example/Counter.class").read_bytes())
+    if semantic_link is None or _tasty_header_uuid(
+            (semantic_pair / "example/Counter.tasty").read_bytes()) != semantic_link:
+        raise RuntimeError("TASTy semantic control is missing a valid matching class-level link")
+
+    unrecognized = pair_root / "unrecognized-link"
+    try:
+        unrecognized_link = _class_tasty_link((unrecognized / "example/Counter.class").read_bytes())
+        if unrecognized_link is None or _tasty_header_uuid(
+                (unrecognized / "example/Counter.tasty").read_bytes()) != unrecognized_link:
+            raise RuntimeError("classfile is missing a matching recognized TASTY attribute")
+    except RuntimeError as error:
+        if "TASTY" not in str(error):
+            raise
+    else:
+        raise RuntimeError("unrecognized TASTY link negative control unexpectedly passed")
 
     consumer = """package consumer
 import example.Counter
@@ -1081,6 +1206,7 @@ object TastyProbe:
             "consumer_methodrefs": ["<init>(I)V", "set(I)V", "get()I"],
             "tasty_only_method_resolved": True,
             "classfile_only_control_rejected": True,
+            "unrecognized_link_control_rejected": True,
             "uuid_mismatch_control_rejected": True,
             "classfile_only_diagnostic": classfile_diagnostic,
             "uuid_mismatch_diagnostic": uuid_diagnostic,

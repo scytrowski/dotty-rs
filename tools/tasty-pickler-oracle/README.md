@@ -29,4 +29,7 @@ their pinned revisions/hashes, consumes two identical fresh Rust-emitted pairs,
 and runs the named-argument Scala client under JDK 21 `-Xverify:all`. The
 compile-only control removes `get` from the classfile but keeps its TASTy
 sidecar; Scala must still resolve it. The same classfile without its sidecar
-and a classfile with a mismatched link UUID must fail their controls.
+and a classfile with a mismatched link UUID must fail their controls. Before
+compilation, the harness decodes the class-level `TASTY` attribute and TASTy
+header and requires their UUIDs to match; renaming the attribute to `XASTY`
+must be rejected by the artifact-validation control.

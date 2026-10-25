@@ -372,6 +372,11 @@ generated client references `<init>(I)V`, `set(I)V`, and `get()I` on
 `example/Counter`, checks that scalac did not produce another `Counter.class`,
 and confirms the Rust class SHA-256 is unchanged. `java -Xverify:all` then runs
 the client against that same class and expects `13`.
+Before Scala runs, the harness decodes each classfile's class-level attributes
+and the TASTy 28.9 header, requiring exactly one recognized 16-byte `TASTY`
+link equal to the sidecar UUID. A negative control changes the attribute name
+to `XASTY` while preserving its payload and sidecar; artifact validation must
+reject it before the Java-compatible client can provide a false positive.
 
 Successful compilation of this Java-compatible ABI alone would not prove that
 Scala read TASTy. The harness therefore makes a compile-only TASTy control:

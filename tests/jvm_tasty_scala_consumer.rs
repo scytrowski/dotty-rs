@@ -55,6 +55,25 @@ fn pinned_scala_consumes_and_executes_the_rust_linked_counter_pair() {
         Some(first.tasty_path()),
         Some(first.tasty_bytes()),
     );
+    let mut unrecognized_link = first.classfile_bytes().to_vec();
+    let tasty_name = b"TASTY";
+    let positions = unrecognized_link
+        .windows(tasty_name.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == tasty_name).then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        positions.len(),
+        1,
+        "classfile has one TASTY constant-pool name"
+    );
+    unrecognized_link[positions[0]] = b'X';
+    write_artifacts(
+        &directory.path().join("unrecognized-link"),
+        &unrecognized_link,
+        Some(first.tasty_path()),
+        Some(first.tasty_bytes()),
+    );
 
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let script = manifest.join("tools/tasty-pickler-oracle/run.py");
@@ -91,6 +110,10 @@ fn pinned_scala_consumes_and_executes_the_rust_linked_counter_pair() {
     );
     assert!(
         report.contains("\"uuid_mismatch_control_rejected\": true"),
+        "{report}"
+    );
+    assert!(
+        report.contains("\"unrecognized_link_control_rejected\": true"),
         "{report}"
     );
     assert!(
