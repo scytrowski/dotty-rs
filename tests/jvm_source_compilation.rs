@@ -6020,6 +6020,377 @@ class Reader:
 }
 
 #[test]
+fn inherited_accessors_compose_across_parameterized_multilevel_hierarchy() {
+    let source = r#"
+class Base(val id: Int):
+  var current: Long = 0L
+  def doubled(): Int = id + id
+
+class Middle(seed: Int) extends Base(seed):
+  def read(): Long = current
+  def update(value: Long): Unit = current = value
+
+class Leaf(seed: Int) extends Middle(seed)
+
+class Runner:
+  def readAsBase(base: Base): Long = base.current
+  def readAsMiddle(middle: Middle): Long = middle.current
+  def readAsLeaf(leaf: Leaf): Long = leaf.current
+  def update(leaf: Leaf, value: Long): Unit = leaf.current = value
+"#;
+    let output = TestOutputDirectory::new("multilevel-inherited-accessors");
+    let second_output = TestOutputDirectory::new("multilevel-inherited-accessors-repeat");
+    let mut observed_metadata = None;
+    let artifacts = compile_source_batch_with_source_observer(
+        source,
+        "MultilevelInheritedAccessors.scala",
+        output.path(),
+        SourceId::from_index(1614),
+        SourceUnitCardinality::AtLeastTwo,
+        &mut |_, _, unit, definitions| {
+            let base_class = audit_class_named(unit, "Base");
+            let middle_class = audit_class_named(unit, "Middle");
+            let leaf_class = audit_class_named(unit, "Leaf");
+            let runner_class = audit_class_named(unit, "Runner");
+            assert_eq!(
+                audit_class_parent(unit, base_class),
+                definitions.object_class
+            );
+            assert_eq!(audit_class_parent(unit, middle_class), base_class);
+            assert_eq!(audit_class_parent(unit, leaf_class), middle_class);
+
+            let metadata = unit
+                .metadata(definitions)
+                .expect("metadata retains effective accessor views across two edges");
+            let base = metadata
+                .iter()
+                .find(|class| class.identity().symbol() == base_class)
+                .expect("Base metadata exists");
+            let id = base
+                .accessors()
+                .iter()
+                .find(|accessor| accessor.field_name() == "id")
+                .expect("Base.id is a canonical constructor accessor")
+                .source_field();
+            let current = base
+                .accessors()
+                .iter()
+                .find(|accessor| accessor.field_name() == "current")
+                .expect("Base.current is a canonical body accessor")
+                .source_field();
+            for (class, method_name, field, expected_references) in [
+                (middle_class, "read", current, 1),
+                (middle_class, "update", current, 1),
+                (runner_class, "readAsBase", current, 1),
+                (runner_class, "readAsMiddle", current, 1),
+                (runner_class, "readAsLeaf", current, 1),
+                (runner_class, "update", current, 1),
+                (base_class, "doubled", id, 2),
+            ] {
+                let method = audit_method_named(unit, class, method_name);
+                let body = method.body.expect("source method retains its typed body");
+                let mut targets = Vec::new();
+                walk_typed_subtree(unit, body, &mut |tree_id| {
+                    if term_type_target(unit, unit.typed_ast.get(tree_id).ty) == Some(field) {
+                        targets.push(tree_id);
+                    }
+                });
+                assert_eq!(
+                    targets.len(),
+                    expected_references,
+                    "{method_name} retains the canonical Base Field identity"
+                );
+            }
+            for (class, parent) in [(middle_class, base_class), (leaf_class, middle_class)] {
+                let plan = unit
+                    .classes
+                    .iter()
+                    .find(|plan| plan.class == class)
+                    .unwrap();
+                let JvmClassInitializationPlan::PrimaryConstructor(constructor) =
+                    &plan.initialization
+                else {
+                    panic!("parameterized source constructor remains in the unit plan");
+                };
+                assert_eq!(constructor.parameters().len(), 1);
+                let formal = constructor.parameters()[0];
+                assert_eq!(
+                    unit.store.symbols.get(formal).owner,
+                    Some(constructor.symbol())
+                );
+                let super_call = constructor
+                    .direct_super_constructor()
+                    .expect("constructor forwards to its exact direct parent");
+                assert_eq!(super_call.parent_class(), parent);
+                assert_eq!(
+                    unit.store
+                        .symbols
+                        .get(super_call.parent_constructor())
+                        .owner,
+                    Some(parent)
+                );
+            }
+            observed_metadata = Some(metadata);
+        },
+    )
+    .expect("real source accessors compose across Base-Middle-Leaf");
+    let second = compile_source_batch(
+        source,
+        "MultilevelInheritedAccessors.scala",
+        second_output.path(),
+        SourceId::from_index(1614),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("fresh source session emits the same full class batch");
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes()))
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes()))
+            .collect::<Vec<_>>(),
+        "independent sessions emit byte-identical class batches"
+    );
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Base", "Middle", "Leaf", "Runner"]
+    );
+
+    let metadata = observed_metadata.expect("observer captures JVM metadata");
+    let class_metadata = |name: &str| {
+        metadata
+            .iter()
+            .find(|class| class.identity().internal_name() == name)
+            .unwrap_or_else(|| panic!("missing metadata for {name}"))
+    };
+    let base = class_metadata("Base");
+    for receiver_name in ["Middle", "Leaf"] {
+        let receiver = class_metadata(receiver_name);
+        assert!(receiver.accessors().is_empty());
+        assert!(receiver.fields().is_empty());
+        for (field_name, role) in [
+            ("id", dotty_jvm::JvmAccessorDispatchRole::Getter),
+            ("current", dotty_jvm::JvmAccessorDispatchRole::Getter),
+            ("current", dotty_jvm::JvmAccessorDispatchRole::Setter),
+        ] {
+            let origin = base
+                .accessors()
+                .iter()
+                .find(|accessor| accessor.field_name() == field_name)
+                .expect("only Base declares accessor storage")
+                .source_field();
+            let inherited = receiver
+                .dispatch_accessors()
+                .iter()
+                .find(|entry| entry.field() == origin && entry.role() == role)
+                .unwrap_or_else(|| panic!("{receiver_name} inherits {field_name} {role:?}"));
+            assert_eq!(inherited.receiver_class(), receiver.identity().symbol());
+            assert_eq!(inherited.declaring_class(), base.identity().symbol());
+        }
+    }
+
+    let base = decode_emitted_class_named(&artifacts, "Base");
+    let middle = decode_emitted_class_named(&artifacts, "Middle");
+    let leaf = decode_emitted_class_named(&artifacts, "Leaf");
+    let runner = decode_emitted_class_named(&artifacts, "Runner");
+    assert_eq!(
+        base.fields.len(),
+        2,
+        "Base alone owns id and current storage"
+    );
+    let base_fields = base
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                base.constant_pool.utf8(field.name_index).unwrap(),
+                base.constant_pool.utf8(field.descriptor_index).unwrap(),
+                field.access_flags.is_private(),
+                field.access_flags.is_final(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        base_fields,
+        [("id", "I", true, true), ("current", "J", true, false)]
+    );
+    assert_eq!(
+        methods_with_descriptors(&base),
+        [
+            ("<init>".to_owned(), "(I)V".to_owned()),
+            ("id".to_owned(), "()I".to_owned()),
+            ("current".to_owned(), "()J".to_owned()),
+            ("current_$eq".to_owned(), "(J)V".to_owned()),
+            ("doubled".to_owned(), "()I".to_owned()),
+        ]
+    );
+    assert!(middle.fields.is_empty());
+    assert!(leaf.fields.is_empty());
+    for child in [&middle, &leaf] {
+        assert!(methods_with_descriptors(child).iter().all(|(name, _)| {
+            !["id", "current", "current_$eq", "doubled"].contains(&name.as_str())
+        }));
+    }
+    assert_invocation_sequence(
+        &middle,
+        emitted_method_code(&middle, "<init>"),
+        &[(0xb7, "Base", "<init>", "(I)V")],
+    );
+    assert_invocation_sequence(
+        &leaf,
+        emitted_method_code(&leaf, "<init>"),
+        &[(0xb7, "Middle", "<init>", "(I)V")],
+    );
+    let base_constructor = emitted_method_code(&base, "<init>");
+    assert_invocation_sequence(
+        &base,
+        base_constructor,
+        &[(0xb7, "java/lang/Object", "<init>", "()V")],
+    );
+    let base_constructor_instructions = decode_subset_instructions(base_constructor);
+    assert_eq!(
+        base_constructor_instructions
+            .iter()
+            .filter(|(_, opcode)| *opcode == 0xb5)
+            .count(),
+        2,
+        "Base initializes its id and current backing fields exactly once"
+    );
+    assert_field_reference_sequence(
+        &base,
+        base_constructor,
+        &[(0xb5, "Base", "id", "I"), (0xb5, "Base", "current", "J")],
+    );
+    assert_invocation_sequence(
+        &middle,
+        emitted_method_code(&middle, "read"),
+        &[(0xb6, "Middle", "current", "()J")],
+    );
+    assert_invocation_sequence(
+        &middle,
+        emitted_method_code(&middle, "update"),
+        &[(0xb6, "Middle", "current_$eq", "(J)V")],
+    );
+    for (method, owner) in [
+        ("readAsBase", "Base"),
+        ("readAsMiddle", "Middle"),
+        ("readAsLeaf", "Leaf"),
+    ] {
+        assert_invocation_sequence(
+            &runner,
+            emitted_method_code(&runner, method),
+            &[(0xb6, owner, "current", "()J")],
+        );
+    }
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "update"),
+        &[(0xb6, "Leaf", "current_$eq", "(J)V")],
+    );
+    assert_invocation_sequence(
+        &base,
+        emitted_method_code(&base, "doubled"),
+        &[(0xb6, "Base", "id", "()I"), (0xb6, "Base", "id", "()I")],
+    );
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let classpath = output.path().to_string_lossy().into_owned();
+    let javap = Command::new("javap")
+        .args([
+            "-c",
+            "-v",
+            "-classpath",
+            &classpath,
+            "Base",
+            "Middle",
+            "Leaf",
+            "Runner",
+        ])
+        .output()
+        .expect("start javap for multilevel inherited accessors");
+    assert!(
+        javap.status.success(),
+        "javap rejected multilevel inherited accessors\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    for expected in [
+        "Base.\"<init>\":(I)V",
+        "Middle.\"<init>\":(I)V",
+        "Middle.current:()J",
+        "Middle.current_$eq:(J)V",
+        "Leaf.current:()J",
+        "Leaf.current_$eq:(J)V",
+    ] {
+        assert!(javap_output.contains(expected), "javap omitted {expected}");
+    }
+    let harness = output
+        .path()
+        .join("MultilevelInheritedAccessorsHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class MultilevelInheritedAccessorsHarness {
+    public static void main(String[] args) {
+        Runner runner = new Runner();
+        Base base = new Base(7);
+        Middle middle = new Middle(9);
+        Leaf leaf = new Leaf(11);
+        if (base.id() != 7 || middle.id() != 9 || leaf.id() != 11) throw new AssertionError("id");
+        if (base.doubled() != 14 || middle.doubled() != 18 || leaf.doubled() != 22) throw new AssertionError("inherited ordinary method");
+        if (runner.readAsBase(leaf) != 0L || runner.readAsMiddle(middle) != 0L || runner.readAsLeaf(leaf) != 0L || middle.read() != 0L) throw new AssertionError("inherited getter");
+        middle.update(Long.MIN_VALUE);
+        runner.update(leaf, Long.MAX_VALUE);
+        if (runner.readAsBase(leaf) != Long.MAX_VALUE || runner.readAsLeaf(leaf) != Long.MAX_VALUE || middle.read() != Long.MIN_VALUE) throw new AssertionError("setter and independent instances");
+        System.out.println("multilevel inherited accessors verified");
+    }
+}
+"#,
+    )
+    .expect("write multilevel inherited accessor harness");
+    let javac = Command::new("javac")
+        .args([
+            "--release",
+            "21",
+            "-classpath",
+            &classpath,
+            "-d",
+            &classpath,
+        ])
+        .arg(&harness)
+        .output()
+        .expect("start javac for multilevel inherited accessors");
+    assert!(
+        javac.status.success(),
+        "javac rejected multilevel inherited accessors\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            &classpath,
+            "MultilevelInheritedAccessorsHarness",
+        ])
+        .output()
+        .expect("start java verifier for multilevel inherited accessors");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected multilevel inherited accessors\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+}
+
+#[test]
 fn inherited_accessor_hierarchy_rejects_new_child_storage_without_partial_output() {
     let output = TestOutputDirectory::new("inherited-accessor-child-storage-rejected");
     let source =

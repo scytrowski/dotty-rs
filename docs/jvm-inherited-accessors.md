@@ -110,6 +110,18 @@ call receiver and RHS, then reads the updated value through the inherited
 getter under `java -Xverify:all`. Assignments to inherited `val`s remain
 rejected by the Typer.
 
+`inherited_accessors_compose_across_parameterized_multilevel_hierarchy`
+composes the getter and setter paths across `Base → Middle → Leaf`. `Base`
+owns a constructor `val id`, a body `var current`, their physical fields, and
+the generated accessors. `Middle` and `Leaf` inherit the same canonical field
+identities without copied fields or accessor methods. `Middle.read/update` and
+`Runner` calls through Base-, Middle-, and Leaf-typed receivers use the
+receiver's static class as the symbolic `invokevirtual` owner, while the
+dispatch view retains `Base` as the physical declaration owner. The regression
+checks the immediate-parent constructor chain, Long setter behavior, separate
+instance state, ordinary `Base.doubled` dispatch, and byte-identical ordered
+class batches from two fresh source sessions with JDK 21 verification.
+
 When source assembly contains inherited accessors but no unsupported source
 selection, `JvmCompilationUnit::metadata` returns an effective accessor view
 for each planned receiver. Each getter or setter entry records the receiver,
@@ -173,4 +185,5 @@ child fields or methods to satisfy symbolic resolution. Descendants with new
 accessors, bridges, traits, external ancestors, inaccessible constructors, or
 malformed hierarchy edges remain rejected before publication. Qualified
 inherited getter and mutable setter lowering are implemented in #1612 and
-#1613. Runtime dispatch and JDK verification are covered by #1615.
+#1613. The composed Base-Middle-Leaf runtime slice is covered by #1614; #1615
+tracks the broader inherited-accessor end-to-end acceptance matrix.
