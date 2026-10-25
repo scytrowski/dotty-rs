@@ -357,6 +357,57 @@ after a forced staging failure. Multiple filesystem moves are best-effort;
 they are not atomic across process or machine crashes. Independent Scala
 consumer evidence remains #1638's responsibility.
 
+## Independent Scala consumer gate (#1638)
+
+`tests/jvm_tasty_scala_consumer.rs` exercises the production pair coordinator
+twice with different source IDs and requires byte-identical class/TASTy outputs.
+The opt-in test invokes `tools/tasty-pickler-oracle/run.py consume-pair`, which
+authenticates the pinned Scala source revision and all cached compiler JAR
+hashes before using Scala 3.9.0 and JDK 21.
+
+For each fresh pair, the harness stages only `example/Counter.class` and
+`example/Counter.tasty` under a new classpath root. It compiles a separate
+`Consumer.scala` with named constructor and method arguments, verifies the
+generated client references `<init>(I)V`, `set(I)V`, and `get()I` on
+`example/Counter`, checks that scalac did not produce another `Counter.class`,
+and confirms the Rust class SHA-256 is unchanged. `java -Xverify:all` then runs
+the client against that same class and expects `13`.
+
+Successful compilation of this Java-compatible ABI alone would not prove that
+Scala read TASTy. The harness therefore makes a compile-only TASTy control:
+it removes `get` from a copy of the Rust class file but retains its link and
+matching Rust TASTy. A separate Scala source calling `Counter.get()` compiles
+against that pair, proving the method came from TASTy. The matched classfile-only
+control removes the sidecar and must fail to compile the same source. A third
+control flips one byte of the class link UUID while retaining the sidecar and
+requires Scala's stale-link diagnostic to fail under `-Werror`. The deliberately
+inconsistent class is never executed.
+
+Run the strict gate after setting `SCALA39_ROOT`, `JAVA_HOME`, and
+`COURSIER_MAVEN_ROOT` as documented in [the oracle contract](tasty-pickler-oracle.md):
+
+```sh
+DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1 \
+  cargo test --test jvm_tasty_scala_consumer --locked -- --nocapture
+```
+
+Without `DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1`, ordinary Rust CI skips this
+opt-in external-tool gate. With the flag set, absent or mismatched Scala/JDK
+inputs, unexpected compiler success/failure, a changed class hash, missing
+method references, or an incorrect runtime value fail the test.
+
+The 2026-10-25 run passed with Scala 3.9.0 at revision
+`777528f19a58e794c9954a42f433373472ec57f8` and Temurin JDK `21.0.8+9`.
+Both independent Rust pairs were byte-identical; each client returned `13`
+under `-Xverify:all`, and the runtime class hash remained
+`086622661e477cd830f456161243cfed10b6d660ee74a008d79d9de0ef9ff26f`.
+The shared classfile/TASTy link UUID was
+`00e5acd1d044a9ac0000000000008193`.
+The TASTy-only `get` control compiled, while the classfile-only control failed
+with `value get is not a member of example.Counter`; the mismatched link failed
+under `-Werror` with Scala's stale TASTy UUID diagnostic. The original
+`-from-tasty` test also passed independently.
+
 ## Successor boundary
 
 Audit #1632 changed tests, a pinned oracle fixture, and this document only.
@@ -364,5 +415,6 @@ Issue #1633 adds the typed, Scala-independent classfile link representation
 and validation; issue #1634 provides source/JVM/TASTy semantic consistency;
 issue #1635 builds both producer plans from one source session; and #1637 now
 returns a linked, decoded-and-validated owned artifact pair with test-only
-staging. The remaining work follows #1638–#1639: prove independent Scala
-consumption, then run the full determinism/runtime gate.
+staging. Issue #1638 now proves independent Scala consumption with a TASTy-only
+member discriminator and unchanged Rust class execution; #1639 remains the
+final broader determinism/runtime gate.
