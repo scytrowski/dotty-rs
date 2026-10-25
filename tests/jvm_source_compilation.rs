@@ -38,6 +38,7 @@ type SourceSemanticObserver<'observer> = dyn for<'a> FnMut(
     ) + 'observer;
 type TyperFailureObserver<'observer> =
     dyn for<'a> FnMut(&AstArena<Untyped>, &SourceTyper<'a>, &TyperError) + 'observer;
+type SourceFailureExpectation = (&'static str, &'static str, fn(&PipelineFailure) -> bool);
 
 #[derive(Default)]
 struct SourceBatchObservers<'observer> {
@@ -11547,7 +11548,7 @@ fn body_field_initializer_failure_keeps_a_multi_class_batch_unpublished() {
 
 #[test]
 fn public_body_field_rejections_keep_source_batches_unpublished() {
-    let cases: [(&str, &str, fn(&PipelineFailure) -> bool); 11] = [
+    let cases: [SourceFailureExpectation; 11] = [
         (
             "public-body-missing-rhs",
             "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int }",
