@@ -81,12 +81,13 @@ impl Fixture {
     }
 }
 
-const OPERATORS: [(&str, &str, &str); 9] = [
+const OPERATORS: [(&str, &str, &str); 10] = [
     ("plus", "+", "Int"),
     ("minus", "-", "Int"),
     ("times", "*", "Int"),
     ("divide", "/", "Int"),
     ("remainder", "%", "Int"),
+    ("bitwise_and", "&", "Int"),
     ("less", "<", "Boolean"),
     ("less_equal", "<=", "Boolean"),
     ("greater", ">", "Boolean"),
@@ -182,7 +183,7 @@ fn assert_operator_typed(
 }
 
 #[test]
-fn nine_int_operators_type_for_parameters_and_local_vars_with_canonical_symbols() {
+fn ten_int_operators_type_for_parameters_and_local_vars_with_canonical_symbols() {
     let source = operator_source();
     let mut fixture = Fixture::new(&source);
     let int = fixture.definitions.int;
@@ -192,7 +193,7 @@ fn nine_int_operators_type_for_parameters_and_local_vars_with_canonical_symbols(
         .definitions
         .int_primitive_operator_symbols(&fixture.store)
         .unwrap()
-        .all();
+        .source_all();
     for (index, (method_name, _, result)) in OPERATORS.into_iter().enumerate() {
         let result = if result == "Int" {
             int
@@ -374,4 +375,50 @@ fn user_defined_plus_resolves_to_its_own_method_identity() {
         typer.store().types.get(qualifier_type),
         Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == class
     ));
+}
+
+#[test]
+fn real_inline_flags_bitwise_and_selects_the_canonical_int_method() {
+    let mut fixture = Fixture::new(include_str!("fixtures/int-bitwise-and/IntBitwiseAnd.scala"));
+    let operators = fixture
+        .definitions
+        .int_primitive_operator_symbols(&fixture.store)
+        .unwrap();
+    let int = fixture.definitions.int;
+    assert_operator_typed(&mut fixture, "mask", operators.bitwise_and, int);
+
+    let (method, rhs) = fixture.method("hasFinalFlag");
+    let boolean = fixture.definitions.boolean;
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+    assert_eq!(typer.typed_ast().get(typed).ty, boolean);
+    let selected_bitwise_operators = typer
+        .typed_ast()
+        .iter()
+        .filter_map(|(_, tree)| match typer.store().types.get(tree.ty) {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == operators.bitwise_and => Some(*symbol),
+            _ => None,
+        })
+        .count();
+    assert_eq!(selected_bitwise_operators, 1);
+}
+
+#[test]
+fn bitwise_and_does_not_accept_unrelated_reference_receivers() {
+    let mut fixture = Fixture::new(include_str!(
+        "fixtures/int-bitwise-and/IntBitwiseAndIncompatible.scala"
+    ));
+    let (method, rhs) = fixture.method("invalid");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let error = typer.type_expression(rhs, context).unwrap_err();
+    assert!(
+        matches!(error, TyperError::MemberNotFound { .. }),
+        "{error:?}"
+    );
+    assert!(typer.typed_ast().iter().next().is_none());
 }
