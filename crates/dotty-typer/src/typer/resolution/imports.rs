@@ -48,6 +48,18 @@ pub(in crate::typer) struct SourceImport {
 }
 
 impl SourceTyper<'_> {
+    fn member_allowed_for_import_qualifier(&self, qualifier: SymbolId, member: SymbolId) -> bool {
+        let qualifier = self.store.symbols.get(qualifier);
+        !matches!(qualifier.kind, SymbolKind::Class | SymbolKind::Trait)
+            || !qualifier.flags.contains(SymbolFlags::JAVA_DEFINED)
+            || self
+                .store
+                .symbols
+                .get(member)
+                .flags
+                .contains(SymbolFlags::STATIC)
+    }
+
     /// Enumerates canonical source package candidates from the source context
     /// chain, most specific first, then the canonical root package.
     ///
@@ -394,11 +406,9 @@ impl SourceTyper<'_> {
                 };
                 let mut candidates = Vec::new();
                 for scope in self.scopes_of(qualifier) {
-                    if let Some(symbol) =
-                        self.unique_scoped_symbol(scope, select.name, tree_index, position)?
-                    {
-                        candidates.push(symbol);
-                    }
+                    candidates.extend(self.scoped_symbols(scope, select.name).into_iter().filter(
+                        |symbol| self.member_allowed_for_import_qualifier(qualifier, *symbol),
+                    ));
                 }
                 candidates.sort_by_key(|symbol| symbol.index());
                 candidates.dedup();
@@ -429,8 +439,13 @@ impl SourceTyper<'_> {
                             tree_index,
                             error,
                         })?;
-                if term_member.is_some() || select.name.is_type() || !allow_type_member_fallback {
-                    return Ok(term_member);
+                if let Some(member) = term_member {
+                    return Ok(self
+                        .member_allowed_for_import_qualifier(qualifier, member)
+                        .then_some(member));
+                }
+                if select.name.is_type() || !allow_type_member_fallback {
+                    return Ok(None);
                 }
 
                 // Import qualifiers use Scala's any-selection shape: a
@@ -446,13 +461,16 @@ impl SourceTyper<'_> {
                     selector: MemberSelector::Unique,
                     space: MemberSpace::Prefix,
                 };
-                self.resolver
+                let type_member = self
+                    .resolver
                     .resolve_member(self.store, &type_request)
                     .map_err(|error| TyperError::SymbolResolution {
                         source: self.source,
                         tree_index,
                         error,
-                    })
+                    })?;
+                Ok(type_member
+                    .filter(|member| self.member_allowed_for_import_qualifier(qualifier, *member)))
             }
             _ => Err(TyperError::UnsupportedTypeTree {
                 source: self.source,

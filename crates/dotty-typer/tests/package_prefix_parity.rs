@@ -226,7 +226,7 @@ fn opcodes_class_file_stub() -> Vec<u8> {
     // One static constant and one instance field.
     bytes.extend_from_slice(&[0, 2]);
     bytes.extend_from_slice(&[0, 0x19, 0, 5, 0, 6, 0, 0]);
-    bytes.extend_from_slice(&[0, 1, 0, 7, 0, 6, 0, 0]);
+    bytes.extend_from_slice(&[0, 0x11, 0, 7, 0, 6, 0, 0]);
     // An abstract instance method exercises selective member imports.
     bytes.extend_from_slice(&[0, 1, 0x04, 0x01, 0, 8, 0, 9, 0, 0]);
     bytes.extend_from_slice(&[0, 0]);
@@ -618,6 +618,15 @@ fn package_qualified_classfile_selective_import_rejects_instance_methods() {
     assert!(matches!(
         type_opcodes_import(1626, source_text),
         Err(dotty_typer::TyperError::TermNameNotFound { .. })
+    ));
+}
+
+#[test]
+fn package_qualified_classfile_import_qualifier_rejects_instance_fields() {
+    let source_text = "package consumer\nobject Use { def first: Int = { import scala.tools.asm.Opcodes.INSTANCE_ONLY.*; 1 } }";
+    assert!(matches!(
+        type_opcodes_import(1627, source_text),
+        Err(dotty_typer::TyperError::ImportQualifierNotFound { .. })
     ));
 }
 

@@ -128,7 +128,7 @@ Implementation commit `502c4657b21a51af1d375c2bacb6a1422f90a337` keeps the
 existing term lookup first for import qualifiers, then retries a missing
 selection in the type namespace. This retry is enabled only for source import
 qualifier typing; other calls to the shared qualifier resolver retain their
-previous behavior. The regression uses a classfile-backed interface with a
+previous behavior. The regression uses a classfile-backed Java class with a
 `public static final int ICONST_0` field and types
 `import scala.tools.asm.Opcodes.*` followed by a use of `ICONST_0`.
 
@@ -143,6 +143,21 @@ request with canonical classfile-backed `scala.tools.asm.Opcodes` of kind
 block those method attempts, although no method is fully typed yet. The raw
 post-change audit is retained locally at
 `target/issue-1620-runs/backendutils-after-opcodes.md`.
+
+An independent review found that filtering only the final wildcard/selective
+member still allowed an instance field to serve as an intermediate import
+qualifier. The fix now applies the Java static-member rule at every selected
+segment of an import qualifier, including locally scoped and resolver-provided
+members. Regressions cover a non-static field and method in wildcard and
+selective imports, plus a `public final` instance field used as a chained
+qualifier; a static constant remains importable. The focused Scala audit was
+rerun after this correction (`target/issue-1620-runs/backendutils-after-static-filter.md`):
+the same two frozen roots still reach `StringLiteralTypingDeferred`, with zero
+fully typed methods. Both roots include the string argument
+`"lambdaDeserialize"` passed to `mv.visitInvokeDynamicInsn`; this points to
+the next narrow research question, how the session should provide the
+canonical `java.lang.String` type for ordinary string literals. It does not
+show that the `Opcodes` import remains a blocker.
 
 Reproduce the one-file audit (the manifest selects the file, then the audit
 intersects it with the frozen method roots):
