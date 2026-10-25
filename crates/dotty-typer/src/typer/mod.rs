@@ -20048,10 +20048,76 @@ mod tests {
     }
 
     #[test]
-    fn forward_local_lazy_references_remain_outside_the_bounded_scope() {
+    fn explicitly_typed_local_lazy_values_support_later_lazy_references() {
+        {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(LOCAL_LAZY_FORWARD_ORACLE_FIXTURE);
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, "explicitForward");
+            let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+                unreachable!();
+            };
+            let first_tree = block.stats[0];
+            let later_tree = block.stats[1];
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+
+            let typed = typer
+                .type_expression(rhs, context)
+                .expect("pinned Scala 3.9 accepts this later-lazy reference");
+            let first = typer.local_symbol_at(source, first_tree).unwrap();
+            let later = typer.local_symbol_at(source, later_tree).unwrap();
+            assert_eq!(
+                *typer.store().symbols.info(later),
+                SymbolInfo::Complete(definitions.int)
+            );
+            let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed).kind else {
+                unreachable!();
+            };
+            let TreeKind::ValDef(typed_first) = &typer.typed_ast().get(typed_block.stats[0]).kind
+            else {
+                unreachable!();
+            };
+            let first_rhs = typed_first.rhs.unwrap();
+            assert!(matches!(
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(first_rhs).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == later
+            ));
+            assert_ne!(first, later);
+        }
+
         for (source_text, method_name) in [
             (LOCAL_LAZY_RECURSION_ORACLE_FIXTURE, "inferredMutual"),
-            (LOCAL_LAZY_FORWARD_ORACLE_FIXTURE, "explicitForward"),
+            (
+                "class C { def use: Int = { val first: Int = later; lazy val later: Int = 1; first } }",
+                "use",
+            ),
+            (
+                "class C { def use: Int = { val first = later; lazy val later: Int = 1; first } }",
+                "use",
+            ),
+            (
+                "class C { def use: Int = { lazy val first: Int = later; val barrier: Int = 0; lazy val later: Int = 1; first } }",
+                "use",
+            ),
+            (
+                "class C { def use: Int = { lazy val first: Int = later; val later: Int = 1; first } }",
+                "use",
+            ),
+            (
+                "package lib { object Owner { val unrelated: Int = 1 } }; package app { object Use { def use: Int = { lazy val first: Int = later; import lib.Owner.*; lazy val later: Int = 1; first } } }",
+                "use",
+            ),
         ] {
             let (parsed, mut store, packages, definitions, index, source) =
                 parse_and_name(source_text);
@@ -20078,6 +20144,58 @@ mod tests {
             assert!(typer.local_symbol_at(source, first).is_none());
             assert!(typer.typed_ast().iter().next().is_none());
         }
+    }
+
+    #[test]
+    fn eager_local_initializer_can_use_nested_lazy_value_without_forward_reference() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def use: Int = { val first: Int = { lazy val later: Int = 1; later }; first } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(typer.type_expression(rhs, context).is_ok());
+    }
+
+    #[test]
+    fn failed_forward_local_lazy_typing_rolls_back_preindexed_symbols() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def use: Int = { lazy val first: Int = later; lazy val later: Boolean = true; first } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+            unreachable!();
+        };
+        let first = block.stats[0];
+        let later = block.stats[1];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::LocalValueTypeMismatch { expected, .. })
+                if expected == definitions.int
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.local_symbol_at(source, first).is_none());
+        assert!(typer.local_symbol_at(source, later).is_none());
+        assert!(typer.typed_ast().iter().next().is_none());
     }
 
     #[test]
