@@ -3,10 +3,9 @@
 This document records the bounded Scala 3.9.0 audit for inherited class-body
 and primary-constructor `val`/`var` accessors requested by
 [#1608](https://github.com/scytrowski/dotty-rs/issues/1608). The backend now
-projects inherited generated accessors into a read-only metadata view. Class
-emission still rejects accessor-bearing inheritance until the safe hierarchy
-gate in #1611 is complete. Unit metadata now validates inherited
-method/accessor collisions before returning that view.
+projects inherited generated accessors into a read-only metadata view and
+emits the proven Object-rooted subset in #1611. Unit metadata validates
+inherited method/accessor collisions before returning that view.
 
 ## Pinned oracle and fixtures
 
@@ -117,12 +116,17 @@ different parameter descriptors remain valid overloads. Ordinary
 method-to-method overrides continue through their existing validator;
 accessor overrides remain unsupported. Unplanned inherited final methods
 and other unplanned non-private source methods retain a conservative name-only
-check for generated child accessors and report no descriptors. Noncolliding
-inherited accessors remain available in metadata, while the class-file
-publication boundary still returns `UnsupportedJvmAccessorInheritance` and
-publishes no files. Constructor and body-field `var` tests also cover a
-two-edge `Parent → Child → Leaf` projection, `val Long` getter metadata, and
-unrelated same-spelled source fields.
+check for generated child accessors and report no descriptors. Emission accepts
+one or two planned user-class edges rooted at `java/lang/Object` when every
+edge has a validated accessible direct-parent constructor, collisions pass
+preflight, and descendants declare no new accessors. Parent backing fields and
+generated methods remain physically declared only in the parent; descendants
+carry the inherited identity only in `dispatch_accessors()`. The typed
+`UnsupportedJvmAccessorInheritance` error remains for descendants that add
+their own accessor storage above an inherited accessor. Constructor and
+body-field `var` tests cover the `Parent → Child → Leaf` projection,
+`TokenParent → TokenChild` with a checked constructor argument, `val Long`
+metadata, and unrelated same-spelled source fields.
 
 For this collision audit, a source method named `current_=` projects to the
 Scala 3 JVM setter name `current_$eq` before exact descriptor comparison. This
@@ -143,19 +147,11 @@ Keep three identities separate:
    its role: getter, or mutable setter. Its JVM name, descriptor, visibility,
    and origin remain in `dotty-jvm`.
 
-Future backend enablement must consume the already-supported qualified typed
-selections and the read-only effective accessor view without inserting
-generated source symbols. The still-unsupported unqualified lookup can remain
-outside a bounded backend increment. The backend must validate accessor
-collisions with user methods and inherited final methods; preserve
-immutable/mutable override rules; and reject unsupported bridges, traits,
-external ancestors, visibility forms, or malformed hierarchy edges before
-publishing artifacts. No child fields or methods should be copied merely to
-satisfy symbolic resolution.
-
-The current narrow candidate for a future emission increment is an Object-rooted
-planned class chain within the existing depth limit, with a validated
-immediate-parent constructor call and no accessor override or
-generated/user-member collision. Those restrictions remain gated until #1610
-and #1611 validate them. Source-call lowering and runtime verification are
-tracked separately in #1612–#1615.
+The current emission subset accepts an Object-rooted planned class chain within
+the existing depth limit, with a validated immediate-parent constructor call
+and no accessor override or generated/user-member collision. It does not copy
+child fields or methods to satisfy symbolic resolution. Descendants with new
+accessors, bridges, traits, external ancestors, inaccessible constructors, or
+malformed hierarchy edges remain rejected before publication. Qualified
+inherited accessor call lowering is tracked separately in #1612–#1613; runtime
+dispatch and JDK verification are covered by #1615.
