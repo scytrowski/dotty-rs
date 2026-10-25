@@ -781,6 +781,8 @@ pub enum JvmAccessorCallMetadataIssue {
     ReceiverClassMissing,
     EffectiveGetterMissing,
     EffectiveGetterMismatch,
+    EffectiveSetterMissing,
+    EffectiveSetterMismatch,
     BindingMissing,
     BodyFieldProofMismatch,
     ValueTypeMismatch,

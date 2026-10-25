@@ -5874,6 +5874,152 @@ class Reader:
 }
 
 #[test]
+fn inherited_mutable_assignments_lower_through_validated_setters() {
+    let source = r#"
+class Parent:
+  var current: Long = 1L
+  var enabled: Boolean = true
+
+class Child extends Parent:
+  def update(value: Long): Unit = current = value
+  def qualifiedUpdate(value: Long): Unit = this.current = value
+
+class Reader:
+  var receiverEvaluations: Int = 0
+  var rhsEvaluations: Int = 0
+  var evaluationOrder: Int = 0
+  var receiverOrder: Int = 0
+  var rhsOrder: Int = 0
+  def nextChild(): Child =
+    receiverEvaluations = receiverEvaluations + 1
+    evaluationOrder = evaluationOrder + 1
+    receiverOrder = evaluationOrder
+    new Child()
+  def evaluate(value: Long): Long =
+    rhsEvaluations = rhsEvaluations + 1
+    evaluationOrder = evaluationOrder + 1
+    rhsOrder = evaluationOrder
+    value
+  def updateChild(child: Child, value: Long): Unit = child.current = value
+  def setFlag(child: Child): Unit = child.enabled = false
+  def updateFresh(value: Long): Unit = nextChild().current = evaluate(value)
+"#;
+    let output = TestOutputDirectory::new("inherited-mutable-assignment-lowering");
+    let artifacts = compile_source_batch(
+        source,
+        "InheritedMutableAssignments.scala",
+        output.path(),
+        SourceId::from_index(1613),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("typed inherited mutable fields lower through their validated setters");
+
+    let parent = decode_emitted_class_named(&artifacts, "Parent");
+    let child = decode_emitted_class_named(&artifacts, "Child");
+    let reader = decode_emitted_class_named(&artifacts, "Reader");
+    assert_eq!(child.fields.len(), 0, "Child must not copy Parent storage");
+    assert!(
+        methods_with_descriptors(&child).iter().all(|(name, _)| ![
+            "current",
+            "enabled",
+            "current_$eq",
+            "enabled_$eq"
+        ]
+        .contains(&name.as_str())),
+        "Child must not copy generated Parent accessors"
+    );
+    assert_eq!(parent.fields.len(), 2);
+
+    for (class, method) in [(&child, "update"), (&child, "qualifiedUpdate")] {
+        let code = emitted_method_code(class, method);
+        assert_invocation_sequence(class, code, &[(0xb6, "Child", "current_$eq", "(J)V")]);
+        assert!(
+            decode_subset_instructions(code)
+                .iter()
+                .all(|(_, opcode)| ![0xb4, 0xb5].contains(opcode)),
+            "{method} must dispatch through the inherited setter, not Parent storage"
+        );
+    }
+    for (method, expected) in [
+        ("updateChild", vec![(0xb6, "Child", "current_$eq", "(J)V")]),
+        ("setFlag", vec![(0xb6, "Child", "enabled_$eq", "(Z)V")]),
+        (
+            "updateFresh",
+            vec![
+                (0xb6, "Reader", "nextChild", "()LChild;"),
+                (0xb6, "Reader", "evaluate", "(J)J"),
+                (0xb6, "Child", "current_$eq", "(J)V"),
+            ],
+        ),
+    ] {
+        let code = emitted_method_code(&reader, method);
+        assert_invocation_sequence(&reader, code, &expected);
+        assert!(
+            decode_subset_instructions(code)
+                .iter()
+                .all(|(_, opcode)| ![0xb4, 0xb5].contains(opcode)),
+            "{method} must not access inherited private backing storage"
+        );
+    }
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let harness = output.path().join("InheritedMutableAssignmentHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class InheritedMutableAssignmentHarness {
+    public static void main(String[] args) {
+        Child child = new Child();
+        child.update(5L);
+        if (child.current() != 5L) throw new AssertionError("unqualified Child setter");
+        child.qualifiedUpdate(7L);
+        if (child.current() != 7L) throw new AssertionError("qualified Child setter");
+        Reader reader = new Reader();
+        reader.updateChild(child, 11L);
+        if (child.current() != 11L) throw new AssertionError("Reader Child setter");
+        reader.setFlag(child);
+        if (child.enabled()) throw new AssertionError("Boolean setter");
+        reader.updateFresh(13L);
+        if (reader.receiverEvaluations() != 1 || reader.rhsEvaluations() != 1
+                || reader.receiverOrder() != 1
+                || reader.rhsOrder() != 2)
+            throw new AssertionError("receiver must evaluate once before RHS");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let classpath = output.path().to_string_lossy().into_owned();
+    let javac = Command::new("javac")
+        .args(["-classpath", &classpath, "-d", &classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for inherited mutable assignment harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected inherited mutable assignment harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            &classpath,
+            "InheritedMutableAssignmentHarness",
+        ])
+        .output()
+        .expect("start java for inherited mutable assignment harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected inherited mutable assignments\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+}
+
+#[test]
 fn inherited_accessor_hierarchy_rejects_new_child_storage_without_partial_output() {
     let output = TestOutputDirectory::new("inherited-accessor-child-storage-rejected");
     let source =
@@ -9995,6 +10141,20 @@ fn while_loops_reject_invalid_conditions_and_verify_calls_inside_control_flow() 
     )
     .expect("a planned same-class call is valid in an if branch");
     assert_eq!(branch.class.internal_name(), "IfCall");
+}
+
+#[test]
+fn inherited_val_assignment_remains_rejected_by_typer() {
+    assert_source_batch_failure(
+        "inherited-val-assignment",
+        "class Parent { val id: Int = 1 }\nclass Child extends Parent { def update(): Unit = id = 2 }\n",
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Typer(TyperError::AssignmentTargetImmutable { .. })
+            )
+        },
+    );
 }
 
 #[test]
