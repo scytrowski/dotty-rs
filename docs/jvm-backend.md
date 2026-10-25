@@ -836,6 +836,17 @@ JDK harness checks reference identity and loop edge cases with
 [`jvm-reference-signatures.md`](jvm-reference-signatures.md) for the fixture's
 precise coverage and remaining limits.
 
+`InheritedAccessorHierarchy.scala` verifies constructor and class-body
+accessors inherited across `Base → Middle → Leaf` from real Scala source.
+Canonical Base field identities remain intact, only Base declares backing
+storage and generated public accessors, and caller Methodrefs use the static
+receiver class. The test checks exact constructor chaining and ordinary
+inherited method dispatch, plus byte-identical ordered class files from two
+fresh sessions. Decoded major-65 output is inspected with `javap -c -v -p` and
+executed by a Java 21 harness under `-Xverify:all`. Accessor overrides,
+bridges, traits, external or generic parents, and full Scala/TASTy ABI
+compatibility remain deferred.
+
 `typed_super_method_calls_lower_to_checked_invokespecial` uses actual Scala
 source for `Base`, `Derived`, and `Runner` in two independent frontend
 sessions. It checks exact `Methodref` owners/descriptors for direct `super`

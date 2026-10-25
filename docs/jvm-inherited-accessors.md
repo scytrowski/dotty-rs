@@ -110,17 +110,21 @@ call receiver and RHS, then reads the updated value through the inherited
 getter under `java -Xverify:all`. Assignments to inherited `val`s remain
 rejected by the Typer.
 
-`inherited_accessors_compose_across_parameterized_multilevel_hierarchy`
-composes the getter and setter paths across `Base → Middle → Leaf`. `Base`
-owns a constructor `val id`, a body `var current`, their physical fields, and
+`full_inherited_accessor_hierarchy_verifies_end_to_end_on_jvm` composes the
+getter and setter paths across `Base → Middle → Leaf` from the checked-in
+`InheritedAccessorHierarchy.scala` source fixture. `Base` owns constructor
+`val id`, body `var current`, body `val enabled`, their physical fields, and
 the generated accessors. `Middle` and `Leaf` inherit the same canonical field
-identities without copied fields or accessor methods. `Middle.read/update` and
-`Runner` calls through Base-, Middle-, and Leaf-typed receivers use the
+identities without copied fields or accessor methods. `Middle.read/write` and
+`Reader` calls through Base-, Middle-, and Leaf-typed receivers use the
 receiver's static class as the symbolic `invokevirtual` owner, while the
 dispatch view retains `Base` as the physical declaration owner. The regression
-checks the immediate-parent constructor chain, Long setter behavior, separate
-instance state, ordinary `Base.doubled` dispatch, and byte-identical ordered
-class batches from two fresh source sessions with JDK 21 verification.
+checks source `Ident`/`Select`/`Assign` identity and Unit assignment type,
+public accessor ABI and private parent-only storage, the immediate-parent
+constructor chain, Long setter behavior, separate instance state, ordinary
+`Base.doubled` dispatch, class-file major version 65, and byte-identical
+ordered class batches from two fresh source sessions. Its mandatory JDK 21+
+gate inspects `javap -c -v -p` and runs a Java harness with `-Xverify:all`.
 
 When source assembly contains inherited accessors but no unsupported source
 selection, `JvmCompilationUnit::metadata` returns an effective accessor view
@@ -185,5 +189,8 @@ child fields or methods to satisfy symbolic resolution. Descendants with new
 accessors, bridges, traits, external ancestors, inaccessible constructors, or
 malformed hierarchy edges remain rejected before publication. Qualified
 inherited getter and mutable setter lowering are implemented in #1612 and
-#1613. The composed Base-Middle-Leaf runtime slice is covered by #1614; #1615
-tracks the broader inherited-accessor end-to-end acceptance matrix.
+#1613; composed metadata and runtime behavior are covered by #1614 and #1615.
+This is a bounded class-only source-to-Java proof, not a claim of full Scala
+class ABI or TASTy compatibility. Accessor overrides, bridge generation,
+traits, external or generic parents, and broader Scala ABI/TASTy behavior
+remain deferred.

@@ -30,6 +30,18 @@ deterministic independent sessions, `javap -c -v`, and the mandatory JDK 21+
 is 65. A fourth class on one ancestry path remains rejected; sibling
 subclasses and exact expected-`Base` sibling reference joins are covered below.
 
+The bounded inherited-accessor acceptance is covered by
+`full_inherited_accessor_hierarchy_verifies_end_to_end_on_jvm` and
+[`jvm-inherited-accessors.md`](jvm-inherited-accessors.md). It compiles real
+Scala 3.9 source for `Base → Middle → Leaf` plus `Reader` in two independent
+frontend sessions. Constructor and body accessors retain their canonical Base
+field identities; only Base declares backing fields and generated public
+getter/setter methods, while call-site `invokevirtual` references use each
+receiver's static class. The test checks constructor chaining, Java 21 class
+files, deterministic bytes, and a `javac --release 21` runtime harness under
+`java -Xverify:all`. Accessor overrides and bridges, traits, external or generic
+ancestors, and full Scala/TASTy ABI compatibility remain deferred.
+
 `SiblingConstructors.scala` adds a four-class batch with two direct children
 of `Base`. Each child has its own `(I)V` constructor and canonical `seed`
 parameter; both direct-super plans forward that child's parameter to the same
