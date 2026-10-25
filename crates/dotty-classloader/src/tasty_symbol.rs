@@ -3106,12 +3106,72 @@ fn resolve_parent_name_with_alias(
     resolve_alias: &mut impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
     resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
 ) -> Option<BinaryName> {
-    if let Some((owner, alias)) = unresolved_alias_reference(file, parent)
-        && matches!(owner.simple_name(), "package" | "package$")
-    {
-        return resolve_alias(&owner, &alias);
+    if let Some((owner, alias)) = unresolved_alias_reference(file, parent) {
+        if matches!(owner.simple_name(), "package" | "package$") {
+            return resolve_alias(&owner, &alias);
+        }
+        if parent_reference_shape(file, parent) == "selected-qualified"
+            && unresolved_alias_qualifier_is_package(file, parent, 0)
+            && unresolved_alias_package_prefix(file, parent)
+                .is_some_and(|package_owner| package_owner == owner.as_internal())
+        {
+            let package_object =
+                BinaryName::from_internal(format!("{}/package$", owner.as_internal()));
+            if let Some(resolved) = resolve_alias(&package_object, &alias) {
+                return Some(resolved);
+            }
+        }
     }
     resolve_parent_name_with_bare(file, parent, package, resolve_bare)
+}
+
+fn unresolved_alias_qualifier_is_package(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    depth: usize,
+) -> bool {
+    const MAX_ALIAS_TREE_DEPTH: usize = 128;
+    if depth >= MAX_ALIAS_TREE_DEPTH {
+        return false;
+    }
+    if let RawTree::LengthNode(node) = tree {
+        if matches!(node.tag, APPLIEDTPT_TAG | APPLIEDTYPE_TAG) {
+            let Ok(StructuredNode::AppliedType(applied)) = node.decode_structured() else {
+                return false;
+            };
+            return unresolved_alias_qualifier_is_package(file, &applied.tycon, depth + 1);
+        }
+        if node.tag == dotty_tasty::tasty::SELECTIN_TAG {
+            let Ok(StructuredNode::SelectIn(selection)) = node.decode_structured() else {
+                return false;
+            };
+            return parent_reference_shape(file, &selection.qualifier) == "package-qualified";
+        }
+    }
+    match tree.decode_structured().ok() {
+        Some(StructuredTree::Ident(ident)) => {
+            unresolved_alias_qualifier_is_package(file, &ident.type_tree, depth + 1)
+        }
+        Some(StructuredTree::Length(StructuredNode::Apply(apply))) => {
+            unresolved_alias_qualifier_is_package(file, &apply.function, depth + 1)
+        }
+        Some(StructuredTree::Reference(ReferenceNode { qualifier, .. }))
+        | Some(StructuredTree::Select(SelectNode { qualifier, .. })) => {
+            parent_reference_shape(file, &qualifier) == "package-qualified"
+        }
+        Some(StructuredTree::Length(StructuredNode::Typed(typed))) => {
+            unresolved_alias_qualifier_is_package(file, &typed.type_tree, depth + 1)
+                || unresolved_alias_qualifier_is_package(file, &typed.expression, depth + 1)
+        }
+        _ => false,
+    }
+}
+
+/// Returns the selected qualifier recorded by the bounded parent profiler.
+/// The caller uses it only for selected-qualified parents and still requires
+/// the exact package object's TASTy to resolve the named alias.
+fn unresolved_alias_package_prefix(file: &TastyFile<'_>, tree: &RawTree<'_>) -> Option<String> {
+    parent_reference_details(file, tree, 0).and_then(|details| details.prefix)
 }
 
 /// Extracts the owner and simple name of a reference that could not be
@@ -4698,11 +4758,23 @@ mod tests {
 
     #[test]
     fn keeps_object_owned_selected_parent_unresolved() {
-        let error = decode(
-            &fixture_bytes("scala3-parent-selected/review/OwnerBaseChild.tasty"),
+        let bytes = fixture_bytes("scala3-parent-selected/review/OwnerBaseChild.tasty");
+        let mut attempted_package_alias = false;
+        let error = decode_with_resolvers(
+            &bytes,
             &BinaryName::from_internal("review/Child"),
+            |_, _| {
+                attempted_package_alias = true;
+                None
+            },
+            |_, _| None,
         )
         .expect_err("an object-owned type path is not a package-qualified JVM name");
+
+        assert!(
+            !attempted_package_alias,
+            "object-owned type selections must not be reinterpreted as package aliases"
+        );
 
         assert!(matches!(
             &error,
@@ -4711,6 +4783,32 @@ mod tests {
                     && parent.shape == "selected-qualified"
                     && parent.reference_prefix.as_deref() == Some("Owner")
         ));
+    }
+
+    #[test]
+    fn does_not_resolve_object_owned_selected_parent_as_package_alias() {
+        let bytes = fixture_bytes("scala3-parent-selected/review/FullyQualifiedOwnerChild.tasty");
+        let mut attempted_package_alias = false;
+        let result = decode_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("review/FullyQualifiedOwnerChild"),
+            |owner, alias| {
+                attempted_package_alias = true;
+                assert_eq!(owner.as_internal(), "review/Owner/package$");
+                assert_eq!(alias, "Base");
+                Some(BinaryName::from_internal("review/Injected"))
+            },
+            |_, _| None,
+        );
+
+        assert!(
+            !attempted_package_alias,
+            "object-owned selections must not be reinterpreted as package aliases"
+        );
+        assert!(
+            result.is_err(),
+            "an object-owned parent must not resolve through a package alias"
+        );
     }
 
     #[test]
@@ -4771,6 +4869,32 @@ mod tests {
                 BinaryName::from_internal("java/io/Serializable"),
                 BinaryName::from_internal("java/lang/Cloneable"),
             ]
+        );
+    }
+
+    #[test]
+    fn resolves_a_package_qualified_type_alias_parent_through_package_tasty() {
+        let bytes = fixture_bytes("scala3-library/scala/collection/mutable/Cloneable.tasty");
+        let mut resolved_scala_alias = false;
+        let decoded = decode_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("scala/collection/mutable/Cloneable"),
+            |owner, alias| {
+                if owner.as_internal() == "scala/package$" && alias == "Cloneable" {
+                    resolved_scala_alias = true;
+                    Some(BinaryName::from_internal("java/lang/Cloneable"))
+                } else {
+                    None
+                }
+            },
+            |_, _| None,
+        )
+        .expect("pinned mutable.Cloneable TASTy should decode");
+
+        assert!(resolved_scala_alias);
+        assert_eq!(
+            decoded.interfaces,
+            vec![BinaryName::from_internal("java/lang/Cloneable")]
         );
     }
 

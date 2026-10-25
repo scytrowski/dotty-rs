@@ -8031,6 +8031,53 @@ mod tests {
     }
 
     #[test]
+    fn source_tuple_types_project_to_the_canonical_tuple_class() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { class Tuple2[A, B] }; package app { class Tuple2[A, B]; class C { val value: (Int, Boolean) = null } }",
+        );
+        let tuple_class = class_symbol(&parsed, &store, &index, source, "Tuple2");
+        let (value, tuple_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let context = index.declaration_context_of(value).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let tuple_type = typer.type_of_tpt(tuple_tree, context).unwrap();
+        let Type::Applied { tycon, args } = typer.store().types.get(tuple_type) else {
+            panic!("expected an applied canonical Tuple2 type");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), tuple_class);
+        assert_eq!(args.len(), 2);
+        assert_eq!(
+            typer.store().names.resolve(
+                typer
+                    .store()
+                    .symbols
+                    .get(type_symbol(typer.store(), args[0]))
+                    .name
+                    .text()
+            ),
+            "Int"
+        );
+        assert_eq!(
+            typer.store().names.resolve(
+                typer
+                    .store()
+                    .symbols
+                    .get(type_symbol(typer.store(), args[1]))
+                    .name
+                    .text()
+            ),
+            "Boolean"
+        );
+    }
+
+    #[test]
     fn source_union_types_compose_with_applied_qualified_and_alias_types() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class F[A]; class A; class B; object Outer { class Nested }; type Alias = Outer.Nested & A; val value: F[A | B] = null",

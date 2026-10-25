@@ -2,7 +2,72 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
-## Latest increment: type Scala's synthetic `String.+`
+## Latest bounded continuation: tuple type projection after Scala aliases
+
+This continuation starts from merged `main` at
+`826219e912f96249bc7655816ba6ee561ad974a4` (PR #1606). The classloader now
+resolves the explicit `scala.Cloneable` parent through the exact
+`scala/package.tasty` alias to `java.lang.Cloneable`. The implementation code
+for this measured candidate is commit
+`8940022a09c88eee422bcb27ccd769d0fc748d41`.
+Source tuple types such
+as `(String, Int)` now project to an applied canonical `scala.Tuple2` type;
+the type lookup is package-scoped, so a same-named local `Tuple2` does not
+shadow the language tuple class. The fixture regression asserts canonical
+symbol identity and both type arguments. Pinned Scala 3.9 positive and
+negative compiler cases are recorded in
+[`TupleTypes.oracle.md`](../crates/dotty-typer/tests/fixtures/tuple-types/TupleTypes.oracle.md).
+
+The deterministic `package-term` audit used the same pinned 60 files and 369
+methods in both runs. The normalized cohort sidecars matched byte-for-byte;
+there were no parser or namer failures and zero fully typed methods. All three
+frozen `InlineInfoAttribute.read` roots now load
+`scala.collection.mutable.TreeMap` after the Cloneable alias is resolved, then
+stop when loading canonical `scala.Tuple2`. The first-blocker category remains
+`SymbolResolution`; the failing classloader target moved from `TreeMap` to
+`Tuple2`. Pinned `Tuple2.tasty` reports an unresolved applied parent whose
+selected type is `*:` with arguments `Long` and `scala.collection.immutable.Tuple`.
+That parent projection is the next bounded classloader dependency. The
+main-to-candidate first-blocker histogram is unchanged (`SymbolResolution`
+97; all other frozen category counts unchanged), and the same 3 roots remain
+untyped. Within the two-step implementation, the rows advanced from
+`SymbolResolution` on `TreeMap`, through `UnsupportedTypeTree::Tuple`, to
+`SymbolResolution` on `Tuple2`; this is a real dependency-chain advance, not a
+fully typed result.
+
+The deterministic 3-file / 31-method smoke audit and 77-file / 576-method
+`object-module` cohort also matched their verification reruns. Neither had
+parser or namer failures, and both typed zero complete methods.
+
+The three-row exact reconciliation is in
+[`typer-name-resolution-1566-cloneable-tuple-3.9.0.tsv`](typer-name-resolution-1566-cloneable-tuple-3.9.0.tsv).
+The #1566 goal of fully typing a real method remains unmet.
+
+The independent review of PR #1618 found that a selected parent owned by an
+object could be mistaken for a package-qualified alias when the resolver
+returned a matching `package$` candidate. The classloader now requires the
+selected alias qualifier itself to carry a package-qualified TASTy reference
+before trying that fallback. A callback-aware regression supplies a candidate
+for `review.Owner.Base` and verifies that the package-alias resolver is never
+called; the positive `scala.collection.mutable.Cloneable` alias regression
+still passes. The `package-term` audit was rerun twice after this safeguard:
+both normalized sidecars have SHA-256
+`3539057b5a0394c545ece90444554492eeb3f17f66bf6562cf172b71bc5a3f27`, with
+the same 60 files, 369 methods, no parser/namer failures, and zero fully typed
+methods. Thus the review fix did not change the recorded #1566 cohort result.
+
+Reproduce the focused audit with the pinned Scala checkout and cached artifacts:
+
+```sh
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-tuple-runs" \
+SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
+SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
+  --verify-determinism target/issue-1566-tuple.md
+```
+
+## Earlier increment: type Scala's synthetic `String.+`
 
 This increment starts from merged `main` at
 `1b71f494fb6db882a42f31378a24ae6551986be0` (the tree is the reviewed #1601
