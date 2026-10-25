@@ -120,20 +120,26 @@ does not establish that an unmodified Rust class passes runtime verification.
 
 The Scala-generated ABI for this source is:
 
-| Source declaration | Scala TASTy meaning | Scala 3.9 JVM artifact |
-| --- | --- | --- |
-| `Counter(start: Int)` | class and primary constructor; constructor parameter `start` | public `<init>(I)V`; `MethodParameters` records `start` |
-| `private var current: Int` | class-owned private, mutable `VALDEF`; initialized from `start` | private field `current:I`; no public current getter/setter is emitted |
-| `get(): Int` | public source method, no parameters, result `scala.Int` | public `get()I`, bytecode reads the private field |
-| `set(value: Int): Unit` | public source method, parameter `value: scala.Int`, result `scala.Unit` | public `set(I)V`, bytecode writes the private field; `MethodParameters` records `value` |
+| Source declaration | Rust TASTy source shape | Rust JVM class | Scala 3.9 baseline class |
+| --- | --- | --- | --- |
+| `Counter(start: Int)` | class and primary constructor; separate template/constructor parameter identities for `start: scala.Int` | public `<init>(I)V` | public `<init>(I)V`; `MethodParameters` records `start` |
+| `private var current: Int` | class-owned private, mutable `VALDEF` of `scala.Int`, initialized from `start` | private field `current:I`; no public current getter/setter | private field `current:I`; no public current getter/setter |
+| `get(): Int` | public source `DEFDEF`, no parameters, result `scala.Int` | public `get()I`, bytecode reads the private field | public `get()I`, bytecode reads the private field |
+| `set(value: Int): Unit` | public source `DEFDEF`, parameter `value: scala.Int`, result `scala.Unit` | public `set(I)V`, bytecode writes the private field | public `set(I)V`, bytecode writes the private field; `MethodParameters` records `value` |
 
-The method order is constructor, `get`, `set` in the classfile. In the source
-tree/pickled shape, `Unit` is the Scala result type; in the post-Getters JVM
-method descriptor it is `V`. The private source var stays private storage in
-this case: it is not an accessor pair. This distinction is important for
-future public constructor `val`/`var` support, where TASTy declaration shape
-and post-Getters ABI can contain generated accessors that do not correspond to
-explicit source `DefDef` trees.
+For all three classfile outputs (Scala source, Rust TASTy recompiled by Scala,
+and Rust JVM), the exact member order is constructor `(I)V`, `get()I`,
+`set(I)V`; the field order is the single `current:I`. The Rust JVM class uses
+major 65, while the Scala baseline and `-from-tasty` class use major 61. The
+Rust class currently has no `TASTY` link attribute, so the source/TASTy/ABI
+agreement is characterized independently rather than as a loadable pair.
+
+In the source tree/pickled shape, `Unit` is the Scala result type; in the
+post-Getters JVM method descriptor it is `V`. The private source var stays
+private storage in this case: it is not an accessor pair. This distinction is
+important for future public constructor `val`/`var` support, where TASTy
+declaration shape and post-Getters ABI can contain generated accessors that do
+not correspond to explicit source `DefDef` trees.
 
 The exact same checked-in source now has independent characterization coverage
 through the current Rust pipelines:
@@ -142,12 +148,14 @@ through the current Rust pipelines:
   pickler results, asserts deterministic bytes, and parses them as TASTy 28.9.
   With `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`, it also stages only the
   Rust-produced `.tasty` and runs the pinned compiler's `-from-tasty` mode into
-  a separate empty output directory; the test asserts a fresh class appears
-  beside no input classfile.
+  a separate empty output directory; the test decodes that fresh class and
+  asserts its private field, exact constructor/method order, descriptors, and
+  public method access flags. No input classfile is staged.
 - `exact_tasty_linkage_counter_source_is_accepted_by_jvm_backend` sends that
   source through the actual source/JVM test adapter and confirms class
-  `example/Counter`, major 65, one field, and three methods. It also confirms
-  the emitted class does not yet have a `TASTY` link.
+  `example/Counter`, major 65, private `current:I`, public constructor `(I)V`,
+  public `get()I`, and public `set(I)V` in that order. It also confirms the
+  emitted class does not yet have a `TASTY` link.
 - `scala_390_counter_classfile_links_to_its_tasty_header` decodes the pinned
   Scala fixture with the Rust classfile and TASTy decoders and checks exact
   class path/name, field/method descriptors, class attributes, UUID equality,
@@ -198,17 +206,19 @@ test independently pins the original Scala fixture, so these mutated controls
 remain ephemeral and are not mistaken for Scala-generated baseline bytes.
 
 For a positive TASTy-consumption proof, the successor consumer test should add
-a deliberate **compile-only sentinel**: compile a Scala sentinel class/TASTy
-that declares one Scala source member absent from its classfile, then remove
-that method from the classfile while retaining the matching `TASTY` UUID and
-sidecar. A separate Scala client referencing only that sentinel member must
-compile against the pair. The same client must fail against the classfile with
-the sidecar removed. Do not run this intentionally inconsistent sentinel at
-runtime. Separately compile the ordinary `Consumer` against the real, matched
-Rust pair and execute it using only Rust's unchanged `Counter.class`; the
-source, Scala oracle classes, and `-from-tasty` regenerated classes must be
-absent from both client and runtime classpaths. That runtime check proves the
-real ABI works, while the sentinel proves Scala consumed TASTy.
+a deliberate **compile-only control built from Rust output**: start with the
+Rust-linked `Counter.class` + the matching Rust-produced `Counter.tasty`, then
+remove `get` from a copy of the classfile while preserving its `TASTY` payload
+and sidecar. A separate Scala client that calls `get()` must still compile
+against this control, because Rust TASTy declares `get`; the same client must
+fail against a classfile-only control with the sidecar/link removed. This
+proves Scala read the Rust-produced TASTy rather than resolving only the JVM
+member table. Do not run the intentionally inconsistent classfile at runtime.
+Separately compile the ordinary `Consumer` against the real, matched Rust pair
+and execute it using only Rust's unchanged `Counter.class`; the source, Scala
+oracle classes, and `-from-tasty` regenerated classes must be absent from both
+client and runtime classpaths. The matched run checks ABI, while the controlled
+Rust-TASTy copy proves semantic consumption.
 
 Keep these workflows distinct:
 
