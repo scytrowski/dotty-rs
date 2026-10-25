@@ -150,6 +150,17 @@ implicit no-argument constructor. Issue #1582 emits one public getter per
 validated ordinary body accessor, #1583 emits its mutable setter, and #1584
 lowers accepted typed body-field reads/writes through those checked methods.
 
+Issue #1585 adds the combined acceptance gate
+`class_body_accessor_acceptance_runs_body_only_and_parameterized_fixtures`.
+The real-source batch covers body-only `()V` construction, `Int`/`Boolean`/
+`Double` body storage, a parameterized constructor accessor beside body
+`val`/`var` and private storage, and cross-class Reader calls. It asserts the
+bounded public accessor ABI, source-ordered stores, no direct Reader
+`Fieldref` to Counter storage, byte-identical output across fresh sessions,
+and JDK 21 verification/execution. No generated method is inserted into the
+shared Scala source-symbol model, and these checks make no claim about Scala
+ABI/TASTy interoperability or unsupported visibility and inheritance forms.
+
 ## Scope matrix
 
 | Shape | Audit result / disposition |

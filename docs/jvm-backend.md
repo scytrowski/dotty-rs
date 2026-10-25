@@ -1135,7 +1135,12 @@ order before ordinary public and private body-field initializer fragments.
 plan and appends `return` afterward. `ImplicitNoArg` uses the same checked
 field plan after its validated no-argument parent call. Emission installs both
 validated accessor backing field_info entries and ordinary private field
-entries. It does not emit body-field getter/setter methods in this increment.
+entries. This paragraph records the #1581 initialization increment; the later
+#1582–#1584 increments add the public getter/setter ABI and lower accepted
+typed body-field reads and assignments through those methods. The integrated
+acceptance test is
+`class_body_accessor_acceptance_runs_body_only_and_parameterized_fixtures` in
+`jvm_source_compilation.rs`.
 The pinned Scala 3.9.0
 oracle stores simple constructor accessors before `Object.<init>`; this backend
 follows #1556's stricter initialized-`this` ordering, so constructor bytes are
@@ -1166,3 +1171,15 @@ unrelated/`Object`-only reference joins, nested allocation arguments, arbitrary
 effectful pre-super evaluation,
 branched constructors, qualified/trait super, and Scala ABI/TASTy emission also
 remain deferred.
+
+The #1585 class-body accessor acceptance batch combines a body-only no-argument
+class (`Int`, mutable `Boolean`, and mutable `Double`), a parameterized class
+with constructor `val`, body `val`/`var`, and a private field, plus a real
+source `Reader`. It checks source-order field stores, private backing flags,
+public JVM accessors and descriptors, cross-class `invokevirtual` calls with
+no backing-field references, two-slot Long/Double behavior, and byte-identical
+ordered class files from two fresh frontend sessions. Its JDK 21 harness runs
+with `java -Xverify:all`; earlier focused tests retain typed rejection and
+zero-partial-artifact checks for invalid batches. This does not add support for
+private cross-class access, accessor inheritance, traits, generics, or combined
+Scala ABI/TASTy output.
