@@ -27,6 +27,7 @@ use dotty_parser::{ParseDiagnostic, parse_compilation_unit};
 use dotty_typer::{SourceTyper, TyperError};
 
 const FIXTURE_DIRECTORY: &str = "tests/fixtures/jvm";
+const LINKAGE_COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
 
 type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
@@ -822,6 +823,27 @@ fn typed_tree_targets(unit: &JvmCompilationUnit<'_>, root: TreeId<Typed>) -> Vec
         }
     }
     targets
+}
+
+#[test]
+fn exact_tasty_linkage_counter_source_is_accepted_by_jvm_backend() {
+    let output = TestOutputDirectory::new("tasty-linkage-counter");
+    let emitted = compile_source(LINKAGE_COUNTER, "Counter.scala", output.path()).unwrap();
+    let mut reader = Reader::new(emitted.class.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+
+    assert_eq!(emitted.class.internal_name(), "example/Counter");
+    assert_eq!(class.version.major, JVM_CLASSFILE_MAJOR_VERSION);
+    assert_eq!(
+        class.constant_pool.class_name(class.this_class).unwrap(),
+        "example/Counter"
+    );
+    assert_eq!(class.fields.len(), 1);
+    assert_eq!(class.methods.len(), 3);
+    assert!(!class.attributes.iter().any(|attribute| match attribute {
+        Attribute::Other(raw) => class.constant_pool.utf8(raw.name_index).unwrap() == "TASTY",
+        _ => false,
+    }));
 }
 
 #[test]

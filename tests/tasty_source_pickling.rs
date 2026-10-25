@@ -19,6 +19,7 @@ const OPERATIONS: &str = include_str!("fixtures/tasty_pickler/Operations.scala")
 const DECISIONS: &str = include_str!("fixtures/tasty_pickler/Decisions.scala");
 const ALGORITHMS: &str = include_str!("fixtures/tasty_pickler/Algorithms.scala");
 const COUNTER: &str = include_str!("fixtures/tasty_pickler/Counter.scala");
+const LINKED_COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 struct CanonicalIntResolver {
@@ -117,13 +118,17 @@ struct Product {
 }
 
 fn compile_counter() -> PickledTasty {
+    compile_counter_source(COUNTER)
+}
+
+fn compile_counter_source(source_text: &str) -> PickledTasty {
     let source = SourceId::from_index(1396);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
-    let scanner = ContextualScanner::new(COUNTER).unwrap();
+    let scanner = ContextualScanner::new(source_text).unwrap();
     assert!(scanner.diagnostics().is_empty());
     let parsed = parse_compilation_unit(
-        SourceText::new(COUNTER).unwrap(),
+        SourceText::new(source_text).unwrap(),
         source,
         scanner,
         &mut store.names,
@@ -265,6 +270,98 @@ fn compile_counter() -> PickledTasty {
     .unwrap()
     .pickle()
     .unwrap()
+}
+
+#[test]
+fn exact_jvm_tasty_linkage_counter_source_is_accepted_by_pickler() {
+    let first = compile_counter_source(LINKED_COUNTER);
+    let second = compile_counter_source(LINKED_COUNTER);
+    assert_eq!(first.bytes(), second.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
+    assert_eq!(file.header().major_version, 28);
+    assert_eq!(file.header().minor_version, 9);
+    let addresses = file.ast_address_index().unwrap();
+    let declaration_name = |declaration: &SkeletonDeclaration| {
+        let node = addresses.get(declaration.address).unwrap();
+        let name = match node.tag {
+            DEFDEF_TAG => node.decode_defdef_body().unwrap().name,
+            VALDEF_TAG | TYPEDEF_TAG => match node.decode_definition_body().unwrap() {
+                DefinitionBody::ValDef { name, .. } | DefinitionBody::TypeDef { name, .. } => name,
+            },
+            tag => panic!("unexpected Counter declaration tag {tag}"),
+        };
+        file.render_name(name).unwrap()
+    };
+    let class = first
+        .declarations()
+        .iter()
+        .find(|declaration| {
+            addresses.get(declaration.address).unwrap().tag == TYPEDEF_TAG
+                && declaration_name(declaration) == "Counter"
+        })
+        .expect("exact source Counter class");
+    let members = first
+        .declarations()
+        .iter()
+        .filter(|declaration| {
+            declaration.owner == class.symbol
+                && matches!(
+                    addresses.get(declaration.address).unwrap().tag,
+                    DEFDEF_TAG | VALDEF_TAG
+                )
+        })
+        .map(declaration_name)
+        .collect::<Vec<_>>();
+    assert_eq!(members, ["<init>", "current", "get", "set"]);
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let scala_root = PathBuf::from(
+            std::env::var_os("SCALA39_ROOT").expect("pinned Scala root for explicit oracle"),
+        );
+        let temporary = std::env::temp_dir().join(format!(
+            "dotty-issue-1632-counter-oracle-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temporary);
+        let candidate = temporary.join("candidate/example/Counter.tasty");
+        let output = temporary.join("compiled");
+        fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        fs::create_dir_all(&output).unwrap();
+        fs::write(&candidate, first.bytes()).unwrap();
+        let revision = Command::new("git")
+            .arg("-C")
+            .arg(&scala_root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("read pinned Scala source revision");
+        assert!(revision.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&revision.stdout).trim(),
+            "777528f19a58e794c9954a42f433373472ec57f8"
+        );
+        let compiler = scala_root.join("dist/target/universal/stage/bin/scalac");
+        let version = Command::new(&compiler)
+            .arg("-version")
+            .output()
+            .expect("query pinned Scala compiler version");
+        assert!(version.status.success());
+        assert!(
+            String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"),
+            "unexpected pinned compiler version: {}",
+            String::from_utf8_lossy(&version.stdout)
+        );
+        let result = Command::new(compiler)
+            .arg("-from-tasty")
+            .arg("-d")
+            .arg(&output)
+            .arg(&candidate)
+            .status()
+            .expect("start pinned Scala 3.9 `-from-tasty` compiler");
+        assert!(result.success(), "exact Counter TASTy `-from-tasty` failed");
+        assert!(output.join("example/Counter.class").is_file());
+        assert!(!candidate.parent().unwrap().join("Counter.class").exists());
+        fs::remove_dir_all(temporary).unwrap();
+    }
 }
 
 #[test]
