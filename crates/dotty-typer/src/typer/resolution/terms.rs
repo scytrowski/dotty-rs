@@ -20,9 +20,16 @@ impl SourceTyper<'_> {
         context: ExpressionContext,
         tree_index: u32,
         position: Option<SourceSpan>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<SymbolId, TyperError> {
-        let candidates =
-            self.expression_term_candidates_inner(name, context, tree_index, position, true)?;
+        let candidates = self.expression_term_candidates_inner(
+            name,
+            context,
+            tree_index,
+            position,
+            true,
+            info_journal,
+        )?;
         self.unique_expression_term(&candidates, name, tree_index, position)
     }
 
@@ -37,7 +44,15 @@ impl SourceTyper<'_> {
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Vec<SymbolId>, TyperError> {
-        self.expression_term_candidates_inner(name, context, tree_index, position, false)
+        let mut info_journal = Vec::new();
+        self.expression_term_candidates_inner(
+            name,
+            context,
+            tree_index,
+            position,
+            false,
+            &mut info_journal,
+        )
     }
 
     fn expression_term_candidates_inner(
@@ -47,6 +62,7 @@ impl SourceTyper<'_> {
         tree_index: u32,
         position: Option<SourceSpan>,
         include_inherited_fields: bool,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<SymbolId>, TyperError> {
         self.validate_expression_scope_stack(context.local_scopes)?;
         let mut local_scope = context.local_scopes;
@@ -200,7 +216,7 @@ impl SourceTyper<'_> {
                     class: source_context.owner,
                 });
                 let inherited = self
-                    .lookup_members(this_type, name)
+                    .lookup_members_journaled(this_type, name, info_journal)
                     .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
                     .into_iter()
                     .filter(|candidate| candidate.inheritance_depth > 0)

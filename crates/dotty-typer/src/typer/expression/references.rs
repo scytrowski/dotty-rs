@@ -725,6 +725,7 @@ impl SourceTyper<'_> {
             context,
             tree.index(),
             position,
+            info_journal,
         )?;
         let declaration = self.store.symbols.get(symbol);
         if let Some(receiver) = self.uninitialized_parent_receiver

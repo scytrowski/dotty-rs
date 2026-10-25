@@ -23657,6 +23657,43 @@ mod tests {
     }
 
     #[test]
+    fn inherited_field_completion_rolls_back_with_failed_expression() {
+        let source_text = "class Parent { val value: Int }; class Child extends Parent { def use: Int = { value; missing } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let (method, body) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        assert!(matches!(store.symbols.info(parent), SymbolInfo::Missing));
+        assert!(matches!(store.symbols.info(child), SymbolInfo::Missing));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(body, context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert!(matches!(
+            typer.store().symbols.info(parent),
+            SymbolInfo::Missing
+        ));
+        assert!(matches!(
+            typer.store().symbols.info(child),
+            SymbolInfo::Missing
+        ));
+    }
+
+    #[test]
     fn nested_class_identifier_uses_enclosing_generic_this_prefix() {
         let source_text = "class Outer[A] { val value: A; class Inner { def use: A = value } }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
