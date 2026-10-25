@@ -9435,6 +9435,32 @@ mod tests {
     }
 
     #[test]
+    fn scala_cloneable_package_alias_resolves_to_the_java_class() {
+        let tasty = HashMap::from([(
+            BinaryName::from_internal("scala/package"),
+            dotty_tasty_fixture_bytes("scala3-library/scala/package.tasty"),
+        )]);
+        let classes = HashMap::from([(
+            BinaryName::from_internal("java/lang/Cloneable"),
+            synthetic_class("java/lang/Cloneable", None),
+        )]);
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(tasty)),
+            Box::new(InMemoryClassPath(classes)),
+        ]);
+
+        assert_eq!(
+            resolve_tasty_alias(
+                &class_path,
+                &BinaryName::from_internal("scala/package$"),
+                "Cloneable"
+            )
+            .unwrap(),
+            Some(BinaryName::from_internal("java/lang/Cloneable"))
+        );
+    }
+
+    #[test]
     fn follows_a_two_hop_package_alias_chain() {
         let first_owner = BinaryName::from_internal("scala/package$");
         let second_owner = BinaryName::from_internal("library/package$");
