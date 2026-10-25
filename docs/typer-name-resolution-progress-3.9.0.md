@@ -43,6 +43,19 @@ The three-row exact reconciliation is in
 [`typer-name-resolution-1566-cloneable-tuple-3.9.0.tsv`](typer-name-resolution-1566-cloneable-tuple-3.9.0.tsv).
 The #1566 goal of fully typing a real method remains unmet.
 
+The independent review of PR #1618 found that a selected parent owned by an
+object could be mistaken for a package-qualified alias when the resolver
+returned a matching `package$` candidate. The classloader now requires the
+selected alias qualifier itself to carry a package-qualified TASTy reference
+before trying that fallback. A callback-aware regression supplies a candidate
+for `review.Owner.Base` and verifies that the package-alias resolver is never
+called; the positive `scala.collection.mutable.Cloneable` alias regression
+still passes. The `package-term` audit was rerun twice after this safeguard:
+both normalized sidecars have SHA-256
+`3539057b5a0394c545ece90444554492eeb3f17f66bf6562cf172b71bc5a3f27`, with
+the same 60 files, 369 methods, no parser/namer failures, and zero fully typed
+methods. Thus the review fix did not change the recorded #1566 cohort result.
+
 Reproduce the focused audit with the pinned Scala checkout and cached artifacts:
 
 ```sh
