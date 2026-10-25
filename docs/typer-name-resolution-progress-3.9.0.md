@@ -159,6 +159,49 @@ the next narrow research question, how the session should provide the
 canonical `java.lang.String` type for ordinary string literals. It does not
 show that the `Opcodes` import remains a blocker.
 
+I reran the focused audit on the merged #1625 tree
+(`c2a6fcf09d27ca1c36ccafb8ca28c303b8ad3e6b`); its two rows and first blockers
+are unchanged. Inspection of the pinned Scala 3.9.0 source makes the remaining
+semantic gap concrete: `Constants.Constant.tpe` maps `StringTag` to
+`defn.StringType`, `Definitions.StringClass` is
+`requiredClass("java.lang.String")`, and `TypeAssigner` assigns ordinary
+literals a `ConstantType`. Here, `literal_type` still defers both UTF-8 and
+UTF-16 string constants, `Definitions` has no canonical String identity, and
+`constant_underlying_type` returns no widened type for them. The existing
+String concatenation regression loads a classfile-backed `java.lang.String`
+through its resolver but still expects a string literal to defer, so class
+availability alone is not sufficient.
+
+The classpath resolver does provide a safe route to that identity: resolve the
+`java.lang` package, then request its `String` member in the type namespace.
+The classloader enters loaded classes into their canonical package scope, and
+the existing type-member lookup already checks that scope before asking the
+resolver. The typer can validate the resulting class with the same structural
+checks used by its String concatenation intrinsic: `Class` kind, classfile
+origin, type namespace, and the exact `java.lang` → `java` → root package owner
+chain. This avoids name-only symbol discovery and does not require inventing a
+builtin String symbol.
+
+The remaining design issue is where to perform and retain that lookup. The
+current `literal_type` and `constant_underlying_type` helpers take `&self`,
+while resolver materialization is mutable and participates in paired resolver
+and semantic-store checkpoints. String literals are first represented as
+`Type::Constant`, so a narrow implementation must make the canonical String
+type available both for literal conformance and when that constant is widened
+or compared later, without keeping a stale arena ID across rollback. The
+focused audit fails on the `lambdaDeserialize` argument before it can say
+whether the varargs application itself is supported.
+
+The pinned `scala-asm` 9.9.0 classfile independently confirms `Opcodes` is a
+public interface (`ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT`) and its opcode
+fields are `ACC_PUBLIC | ACC_STATIC | ACC_FINAL`. This matches the import rule
+exercised by #1625. The next implementation slice must establish how the
+source session threads that exact classpath-backed String identity through
+constant conformance and widening; only then can the two `BackendUtils` roots
+reveal whether varargs application is another blocker. The post-merge focused
+output is retained locally at
+`target/issue-1620-runs/backendutils-after-merge.md`.
+
 Reproduce the one-file audit (the manifest selects the file, then the audit
 intersects it with the frozen method roots):
 
