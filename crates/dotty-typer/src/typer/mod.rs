@@ -2464,6 +2464,33 @@ mod tests {
     }
 
     #[test]
+    fn distinct_final_external_types_are_not_subtypes_without_class_info() {
+        let (arena, mut store, packages, definitions) = setup();
+        let final_class = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        store.symbols.get_mut(final_class).flags = SymbolFlags::FINAL;
+        let module_class = symbol(&mut store, SymbolKind::ModuleClass, SymbolInfo::Missing);
+        let final_applied =
+            applied_class_type(&mut store, definitions, final_class, &[definitions.int]);
+        let final_applied_other =
+            applied_class_type(&mut store, definitions, final_class, &[definitions.boolean]);
+        let module_type = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, module_class));
+        let index = SourceSemanticIndex::new();
+        let source = SourceId::from_index(0);
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert!(!typer.is_subtype(final_applied, module_type).unwrap());
+        assert!(!typer.is_subtype(module_type, final_applied).unwrap());
+        assert!(matches!(
+            typer.is_subtype(final_applied, final_applied_other),
+            Err(TypeRelationError::ExternalGenericInstantiationDeferred { class })
+                if class == final_class
+        ));
+    }
+
+    #[test]
     fn invariant_applied_types_reject_malformed_arity_explicitly() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class Box[A]");
@@ -9208,6 +9235,93 @@ mod tests {
         let projected = typer.complete_symbol(value).unwrap();
 
         assert_eq!(type_symbol(typer.store(), projected), local_class);
+    }
+
+    #[test]
+    fn plain_package_import_is_available_as_selected_type_qualifier() {
+        let source_text = "package sample.collection.mutable { class TreeMap }; package sample.client { import sample.collection.mutable; class Use { val value: mutable.TreeMap = null } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let tree_map = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "TreeMap" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("source package should contain TreeMap");
+        let context = index.declaration_context_of(value).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.type_of_tpt(type_tree, context).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), tree_map);
+    }
+
+    #[test]
+    fn imported_external_subpackage_qualifies_a_selected_type() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        let source_text = "import scala.collection.mutable; class Use { val value: mutable.TreeMap[Int, String] = null }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let context = index.declaration_context_of(value).unwrap();
+        let mutable_name = Name::new(store.names.intern("mutable"), Namespace::Term);
+        let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(library_root)),
+            Box::new(JavaObjectStubPath),
+        ]);
+        let resolver = ClasspathSymbolResolver::new(
+            class_path,
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let mutable = typer
+            .lookup_context_symbol(mutable_name, context, type_tree.index(), None)
+            .unwrap()
+            .expect("the explicit import should resolve the classpath subpackage");
+        assert_eq!(typer.store().symbols.get(mutable).kind, SymbolKind::Package);
+        assert_eq!(
+            typer.package_path(mutable),
+            ["scala", "collection", "mutable"]
+        );
+
+        let error = typer.type_of_tpt(type_tree, context).unwrap_err();
+        assert!(
+            matches!(error, TyperError::SymbolResolution { .. }),
+            "{error:?}"
+        );
+        assert!(
+            format!("{error:?}").contains("scala/Cloneable"),
+            "{error:?}"
+        );
+        // The checked-in library fixture omits scala.Cloneable. The test still
+        // proves package resolution before the incomplete TreeMap parent graph.
     }
 
     #[test]

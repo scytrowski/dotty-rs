@@ -115,21 +115,69 @@ trace records an unresolved term lookup for `Int`. The two smoke runs matched
 byte-for-byte. No focused method became fully typed. The checked-in smoke
 baseline records this intentional first-blocker movement.
 
-This is blocker progress only. The #1566 goal of fully typing a real method
-remains unmet. The next bounded step is to address generic class hierarchy
-metadata or otherwise prove this class relation without guessing; weakening the
-branch join to hide the deferred relation would be unsound.
+## Final-class branch comparison
+
+`Some[String]` and `None` have distinct final class identities: `Some` is
+declared final, and a Scala module class cannot be subclassed. The typer now
+answers these cross-class subtype queries as false from that identity alone.
+This keeps generic same-class comparisons deferred and does not approximate a
+generic parent substitution. A focused regression covers both directions and
+retains the deferred result for two different instantiations of the same
+external generic class.
+
+In the pinned `InlineInfoAttribute.read` attempt, the three frozen rows first
+advance from `IfBranchJoinUnsupported` to `TypeNameNotFound`. The next
+projection is `mutable.TreeMap[(String, String), MethodInlineInfo]`. See
+[`typer-name-resolution-1566-final-class-join-3.9.0.tsv`](typer-name-resolution-1566-final-class-join-3.9.0.tsv).
+
+## Explicit classpath subpackage imports
+
+Scala parses `import scala.collection.mutable` as the qualifier
+`scala.collection` plus an explicit `mutable` selector. When that selected name
+is a classpath package rather than a member in an already populated scope, the
+typer now resolves the child package path and checks package-object collisions
+before accepting it as a qualifier. This is limited to explicit imports and
+qualifier lookup; wildcard imports and ordinary term/type import semantics keep
+their existing paths.
+
+A regression uses the checked-in Scala library TASTy fixture and verifies that
+the imported name resolves to the canonical package
+`scala.collection.mutable`. The fixture does not include `scala.Cloneable`, so
+loading `TreeMap` then fails explicitly with a classpath `SymbolResolution` for
+that missing parent. In the pinned 60-file / 369-method `package-term` cohort,
+two normalized runs matched byte-for-byte. Ten rows advanced: three
+`InlineInfoAttribute.read` rows from `TypeNameNotFound` to `SymbolResolution`,
+five other rows from `ImportQualifierNotFound` to `SymbolResolution`, and two
+from `SymbolResolution` to `ApplicationArgumentConformanceUnsupported`. No
+method became fully typed; the cohort still has 0 of 369 fully typed methods.
+The row-level movements are in
+[`typer-name-resolution-1566-imported-subpackage-3.9.0.tsv`](typer-name-resolution-1566-imported-subpackage-3.9.0.tsv).
+The comparison starts from code commit
+`caeb3413e652fb07a0d84a3f1499878a5fb22530` and measures the imported-package
+implementation at `7218df7a35da4a095e46c58c1a4d8a3467092a4b`. Both descend
+from #1605's head `499c42f90f`; that PR was merged to `main` as
+`48d93bad25cd0d1895d9db08f68a4a9fedd62547`.
+
+The deterministic 3-file / 31-method focused smoke gate now records the new
+`scala.tools.asm` package and `Label` class observations and corresponding
+resolver counts. Its two runs matched the updated checked-in baseline; it still
+typed 0 of 31 methods.
+
+The #1566 goal of fully typing a real method remains unmet. The next bounded
+dependency is the Scala package alias `scala.Cloneable = java.lang.Cloneable`
+when completing external TASTy parent types; this is a classloader alias
+resolution blocker, not evidence that the package import remains unresolved.
 
 Reproduce the deterministic audit with the pinned Scala 3.9.0 checkout and
 cached dependencies:
 
 ```sh
-PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-tasty-generic-final-runs" \
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-imported-subpackage-runs" \
 SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
 SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
 CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
 tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
-  --verify-determinism target/issue-1566-tasty-generic-final.md
+  --verify-determinism target/issue-1566-imported-subpackage.md
 ```
 
 Reproduce the deterministic cohort comparison with:
@@ -146,13 +194,13 @@ tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
 The smoke and object-module audits used the same environment:
 
 ```sh
-PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-string-plus-smoke-runs" \
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-imported-smoke-runs" \
 SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
 SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
 CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
 tools/typer-classpath-corpus-audit/run \
   --focused-manifest docs/typer-focused-smoke-manifest-3.9.0.tsv \
-  --verify-determinism target/issue-1566-string-plus-smoke.md
+  --verify-determinism target/issue-1566-imported-smoke.md
 
 PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-string-plus-object-module-runs" \
 SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \

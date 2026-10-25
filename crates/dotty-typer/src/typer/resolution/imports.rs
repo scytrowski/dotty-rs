@@ -1158,6 +1158,58 @@ impl SourceTyper<'_> {
                 }
             }
             if !found_locally {
+                if !is_wildcard
+                    && !type_only
+                    && self.store.symbols.get(qualifier).kind == SymbolKind::Package
+                {
+                    let store_checkpoint = self.store.checkpoint();
+                    let resolver_checkpoint = self.resolver.checkpoint();
+                    let mut package_path = self.package_path(qualifier);
+                    package_path.push(self.store.names.resolve(name.text()).to_owned());
+                    let package =
+                        match self.resolve_external_package(&package_path, location.tree_index) {
+                            Ok(package) => package,
+                            Err(error) => {
+                                self.resolver.rollback_to(self.store, resolver_checkpoint);
+                                self.store.rollback_to(store_checkpoint);
+                                return Err(error);
+                            }
+                        };
+                    if let Some(package) = package {
+                        let collision = self
+                            .resolver
+                            .package_object_collision(self.store, qualifier, name);
+                        match collision {
+                            Ok(true) | Err(ResolutionError::Ambiguous { .. }) => {
+                                self.resolver.rollback_to(self.store, resolver_checkpoint);
+                                self.store.rollback_to(store_checkpoint);
+                                return Err(TyperError::AmbiguousTypeName {
+                                    source: self.source,
+                                    tree_index: location.tree_index,
+                                    name: wanted,
+                                    position: location.position,
+                                });
+                            }
+                            Ok(false) => {
+                                self.import_member_cache
+                                    .insert(ImportMemberCacheKey { qualifier, name }, package);
+                                matches.push(package);
+                                continue;
+                            }
+                            Err(error) => {
+                                self.resolver.rollback_to(self.store, resolver_checkpoint);
+                                self.store.rollback_to(store_checkpoint);
+                                return Err(TyperError::SymbolResolution {
+                                    source: self.source,
+                                    tree_index: location.tree_index,
+                                    error,
+                                });
+                            }
+                        }
+                    }
+                    self.resolver.rollback_to(self.store, resolver_checkpoint);
+                    self.store.rollback_to(store_checkpoint);
+                }
                 let cache_key = ImportMemberCacheKey { qualifier, name };
                 if let Some(symbol) = self.import_member_cache.get(&cache_key).copied() {
                     matches.push(symbol);
