@@ -53,10 +53,37 @@ deterministic `object-module` cohort covered 77 files and 576 methods, with no
 parser or namer failures; it typed zero complete methods. These focused results
 do not claim full-corpus compatibility.
 
-The next bounded investigation is the conformance failure after `String.+`
-inside `Some(name + desc)` in `read#tree=420`. Determine the actual and formal
-types at that application before changing inference or conformance; this audit
-does not establish that the failure is caused by String aliasing.
+## Next blocker diagnosis after PR #1602
+
+The post-merge deterministic `package-term` audit was run on code HEAD
+`15912366d5491117277c8749d0a7ceb4c08e77fc` (merged as
+`41c2c6803f7c9f31ac22672ae853fc719314d3aa`). Its two normalized cohort
+sidecars matched each other and the preceding String-plus run byte-for-byte.
+The three `InlineInfoAttribute.read` rows still stop at the `Some(name + desc)`
+application, now with `ApplicationArgumentConformanceUnsupported`.
+
+A temporary local trace of that application found an actual value type of the
+canonical classfile-backed `java.lang.String`; the formal parameter type is
+`Type::Error`, with message
+`unresolved .tasty member type: tasty_symbol::decode could not reduce the declared type tree to a name`.
+The relation error is `UnsupportedType` for that error type against String.
+Pinned Scala 3.9 accepts `Some(name + desc)`, whose generated `Some.apply` has a
+polymorphic value parameter `A` and result `Some[A]`. The classloader's
+`tasty_symbol::decode_members` currently skips method `TYPEPARAM` entries and
+reduces term parameter and result type trees to class names; it cannot retain
+this binder reference. This is a TASTy member-signature projection gap, not a
+reason to relax conformance or change String alias handling.
+
+The alternate `CommandLineParser.scala#tree=397` candidate was also inspected:
+its first local conformance failure is `ExternalGenericInstantiationDeferred`
+when checking the generic `Nil` initializer against `List[String]`. It does not
+provide a smaller typer-only route through the current generic classpath model.
+
+No open issue covered semantic generic-method projection in this classloader
+path; open #1569 profiles TASTy costs only. The coordination issue
+[#1603](https://github.com/scytrowski/dotty-rs/issues/1603) now tracks the
+bounded classloader/TASTy dependency. Keep #1566's fully-typed-real-method goal
+unmet until one of its frozen roots actually completes.
 
 Reproduce the deterministic cohort comparison with:
 
