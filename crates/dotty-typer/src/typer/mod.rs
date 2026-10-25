@@ -23629,9 +23629,6 @@ mod tests {
         let field = val_symbol(&parsed, &store, &index, source, "value").0;
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
         let lexical = index.declaration_context_of(method).unwrap();
-        let scope = index.source_context(lexical).lexical_scope;
-        let field_name = store.symbols.get(field).name;
-        store.scopes.get_mut(scope).enter(field_name, field);
         let context = ExpressionContext {
             lexical,
             owner: method,
@@ -23657,6 +23654,43 @@ mod tests {
             .widen_expression_type(typer.typed_ast().get(typed).ty)
             .unwrap();
         assert_eq!(widened, definitions.int);
+    }
+
+    #[test]
+    fn inherited_field_completion_rolls_back_with_failed_expression() {
+        let source_text = "class Parent { val value: Int }; class Child extends Parent { def use: Int = { value; missing } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let (method, body) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        assert!(matches!(store.symbols.info(parent), SymbolInfo::Missing));
+        assert!(matches!(store.symbols.info(child), SymbolInfo::Missing));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(body, context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert!(matches!(
+            typer.store().symbols.info(parent),
+            SymbolInfo::Missing
+        ));
+        assert!(matches!(
+            typer.store().symbols.info(child),
+            SymbolInfo::Missing
+        ));
     }
 
     #[test]
