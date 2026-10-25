@@ -30,9 +30,11 @@ The deterministic pinned `package-term` audit rechecked the same 60 files and
 (SHA-256 `e812c812be1c29723935fd4deb9e6b40386233f9f4fed952c162174dfbc44985`).
 Both passes had zero parser failures, zero namer failures, and zero fully typed
 methods. The report observed 292 target rows and 139 current
-`ImportQualifierNotFound` blockers. Of the 120 frozen rows whose failed
-qualifier is exactly `scala.jdk.CollectionConverters`, all 120 still stop at
-`ImportQualifierNotFound`; this increment did not move those corpus roots.
+`ImportQualifierNotFound` blockers. Among the 161 frozen rows whose failed
+qualifier is exactly `scala.jdk.CollectionConverters`, 120 still stop at
+`ImportQualifierNotFound` and 41 now have a later first blocker. The five-row
+reconciliation below samples the 120 unresolved rows; this increment did not
+move those corpus roots.
 The audit observed no materialized external ModuleClasses or module members,
 so the focused inherited-member path was not exercised by those method roots.
 Five exact affected roots and their current outcomes are recorded in
