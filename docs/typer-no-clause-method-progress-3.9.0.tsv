@@ -1,0 +1,5 @@
+path#tree	before_first_blocker	current_first_blocker	observed_transition
+compiler/src/dotty/tools/backend/jvm/opt/LocalOpt.scala#tree=2986	InvalidInferredLocalValueType	ApplicationArgumentConformanceUnsupported	The inferred ArrayBuffer.empty[Int] binding advances; addVar then reaches conformance with a Java no-clause method value.
+compiler/src/dotty/tools/backend/jvm/opt/InlinerHeuristics.scala#tree=1210	InvalidInferredLocalValueType	MemberLookup	The frozen local-value root advances in its enclosing method; the method remains incomplete.
+compiler/src/dotty/tools/backend/jvm/opt/InlinerHeuristics.scala#tree=1215	InvalidInferredLocalValueType	MemberLookup	The frozen local-value root advances in its enclosing method; the method remains incomplete.
+compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala#tree=1707	InvalidInferredLocalValueType	InvalidInferredLocalValueType	Java before.getPrevious still does not adapt from a zero-argument method to a value.

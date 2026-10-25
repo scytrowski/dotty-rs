@@ -160,15 +160,32 @@ method. A declaration with no clauses of either kind lowers as `Type::ByName`
 `Type::Method([])`. The existing `Both.tasty` loader assertion was updated to
 expect its no-clause `make` as an `ExprType`.
 
-After this change, the frozen 60-file / 369-method cohort still reports 292
-observed target rows, zero fully typed methods, and the same first blockers for
-the four focused local-value roots. Its first-pass sidecar SHA-256 is still
-`bb8888c938165fd2b143b50875d9c93452f29e75d6dfaddff8b22ef64f943d61`, matching
-the post-#1643 run. The deterministic second pass produced the same SHA-256.
-This confirms #1647 fixes the lost TASTy signature distinction but does not by
-itself advance the corpus. The next #1566 increment must adapt the TASTy
-`ExprType` for a no-clause method expression to its result type, without
-changing explicit-empty-clause calls or by-name parameter semantics.
+The review correction also decodes the `IDENTtpt` wrapper around a method
+type-parameter reference, preserving its address-based identity. The frozen
+60-file / 369-method cohort still has 292 observed target rows and zero fully
+typed methods, but the focused blockers moved. `LocalOpt.scala#tree=2986`
+advanced from `InvalidInferredLocalValueType` to
+`ApplicationArgumentConformanceUnsupported`; the two `InlinerHeuristics.scala`
+roots moved to `MemberLookup`; `ClosureOptimizer.scala#tree=1707` remains at
+`InvalidInferredLocalValueType`. Exact before/after rows are in
+[`typer-no-clause-method-progress-3.9.0.tsv`](typer-no-clause-method-progress-3.9.0.tsv).
+Both serial passes matched sidecar SHA-256
+`dcec82c0cf9577201fc172fdb1ef2a6d6742ca4af9dc2d7c1cff55579aec0152`.
+
+The new `LocalOpt.addVar` blocker shows the next concrete gap: Java
+zero-argument method selections such as `varIns.getOpcode` still have type
+`Method([], Int)` where a value of type `Int` is expected. The focused
+`ClosureOptimizer` case `before.getPrevious` has the same Java no-parentheses
+shape. Pinned Scala 3.9 controls accept a Java `f()` method as `f` in a value
+position, reject a Scala `def f()` without `()`, accept a Scala parameterless
+`def f` without `()`, and reject `def f` with `()`. So the next bounded Typer
+slice should investigate a Java-binary-only value adaptation, keeping TASTy
+`ExprType`, explicit Scala empty clauses, and by-name parameters distinct.
+
+The cohort result is progress in the focused roots, not corpus completion:
+zero of 369 selected methods are fully typed. A later blocker is credited only
+after the preceding operation's signature shape and source-oracle controls are
+shown correct.
 
 Validation for the local #1647 change passed `cargo fmt --all -- --check`,
 `python3 tools/check-frontend-boundaries.py`,
