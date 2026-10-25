@@ -183,6 +183,186 @@ fn method_tree_and_rhs(
         .unwrap_or_else(|| panic!("missing method {name} on owner {owner:?}"))
 }
 
+fn static_receiver_class(
+    typer: &SourceTyper<'_>,
+    receiver_type: dotty_core::TypeId,
+) -> Option<SymbolId> {
+    match typer.store().types.get(receiver_type) {
+        Type::ThisType { class } => Some(*class),
+        Type::TypeRef { target, .. } => target.symbol(),
+        Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        } => match typer.store().symbols.get(*symbol).info {
+            SymbolInfo::Complete(value_type) => {
+                typer.store().types.get(value_type).reference_symbol()
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+struct InheritedAccessorAudit<'a> {
+    ast: &'a dotty_core::AstArena<Untyped>,
+    source: SourceId,
+    index: &'a dotty_namer::SourceSemanticIndex,
+    definitions: &'a Definitions,
+}
+
+fn assert_method_selection_targets_field(
+    audit: &InheritedAccessorAudit<'_>,
+    typer: &mut SourceTyper<'_>,
+    owner: SymbolId,
+    method_name: &str,
+    field: SymbolId,
+    receiver_class: Option<SymbolId>,
+) {
+    let (method, _, rhs) = method_tree_and_rhs(
+        audit.ast,
+        audit.index,
+        audit.source,
+        typer,
+        owner,
+        method_name,
+    );
+    let source_selection_tree = match &audit.ast.get(rhs).kind {
+        TreeKind::Select(_) => rhs,
+        TreeKind::Block(block) => block.expr,
+        _ => panic!("{method_name} RHS should end in a source selection"),
+    };
+    let TreeKind::Select(source_selection) = &audit.ast.get(source_selection_tree).kind else {
+        panic!("{method_name} result should be a source selection");
+    };
+    typer.complete_symbol(method).unwrap();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer
+        .type_expression(rhs, context)
+        .unwrap_or_else(|error| panic!("{method_name} should type: {error:?}"));
+    assert_eq!(
+        typer.source_typed_index().get(audit.source, rhs),
+        Some(typed)
+    );
+    let Some(typed_receiver) = typer
+        .source_typed_index()
+        .get(audit.source, source_selection.qualifier)
+    else {
+        panic!("{method_name} receiver must retain its source-to-typed binding");
+    };
+    let typed_selection_tree = match &typer.typed_ast().get(typed).kind {
+        TreeKind::Select(_) => typed,
+        TreeKind::Block(block) => block.expr,
+        _ => panic!("{method_name} typed RHS should end in a Select or Block"),
+    };
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .get(audit.source, source_selection_tree),
+        Some(typed_selection_tree)
+    );
+    let TreeKind::Select(typed_selection) = &typer.typed_ast().get(typed_selection_tree).kind
+    else {
+        panic!("{method_name} should remain a typed Select");
+    };
+    assert_eq!(typed_selection.qualifier, typed_receiver);
+    let receiver_type = typer.typed_ast().get(typed_receiver).ty;
+    if let Some(receiver_class) = receiver_class {
+        assert_eq!(
+            static_receiver_class(typer, receiver_type),
+            Some(receiver_class),
+            "{method_name} should preserve its static receiver class"
+        );
+    }
+    assert!(
+        matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_selection_tree).ty),
+            Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(actual),
+            } if *prefix == receiver_type && *actual == field
+        ),
+        "{method_name} must retain its exact receiver type and declaring Field SymbolId"
+    );
+}
+
+fn assert_method_assignment_targets_field(
+    audit: &InheritedAccessorAudit<'_>,
+    typer: &mut SourceTyper<'_>,
+    owner: SymbolId,
+    method_name: &str,
+    field: SymbolId,
+    receiver_class: Option<SymbolId>,
+) {
+    let (method, _, rhs) = method_tree_and_rhs(
+        audit.ast,
+        audit.index,
+        audit.source,
+        typer,
+        owner,
+        method_name,
+    );
+    let TreeKind::Assign(source_assignment) = &audit.ast.get(rhs).kind else {
+        panic!("{method_name} RHS should be a source assignment");
+    };
+    let TreeKind::Select(source_selection) = &audit.ast.get(source_assignment.lhs).kind else {
+        panic!("{method_name} assignment target should be a source selection");
+    };
+    typer.complete_symbol(method).unwrap();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer
+        .type_expression(rhs, context)
+        .unwrap_or_else(|error| panic!("{method_name} should type: {error:?}"));
+    assert_eq!(
+        typer.source_typed_index().get(audit.source, rhs),
+        Some(typed)
+    );
+    assert_eq!(
+        typer.store().types.get(typer.typed_ast().get(typed).ty),
+        typer.store().types.get(audit.definitions.unit)
+    );
+    let TreeKind::Assign(typed_assignment) = &typer.typed_ast().get(typed).kind else {
+        panic!("{method_name} should remain a typed Assign");
+    };
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .get(audit.source, source_assignment.lhs),
+        Some(typed_assignment.lhs)
+    );
+    let Some(typed_receiver) = typer
+        .source_typed_index()
+        .get(audit.source, source_selection.qualifier)
+    else {
+        panic!("{method_name} receiver must retain its source-to-typed binding");
+    };
+    let TreeKind::Select(typed_selection) = &typer.typed_ast().get(typed_assignment.lhs).kind
+    else {
+        panic!("{method_name} assignment target should remain a typed Select");
+    };
+    assert_eq!(typed_selection.qualifier, typed_receiver);
+    let receiver_type = typer.typed_ast().get(typed_receiver).ty;
+    if let Some(receiver_class) = receiver_class {
+        assert_eq!(
+            static_receiver_class(typer, receiver_type),
+            Some(receiver_class),
+            "{method_name} should preserve its static receiver class"
+        );
+    }
+    assert!(
+        matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_assignment.lhs).ty),
+            Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(actual),
+            } if *prefix == receiver_type && *actual == field
+        ),
+        "{method_name} must target the canonical declaring Field SymbolId"
+    );
+}
+
 fn complete_class_info(typer: &SourceTyper<'_>, class: SymbolId) -> dotty_core::types::ClassInfo {
     let SymbolInfo::Complete(info_id) = typer.store().symbols.get(class).info else {
         panic!("class symbol should have complete ClassInfo")
@@ -3909,9 +4089,53 @@ fn inherited_accessor_sources_keep_declaring_identity_and_pin_typer_blocker() {
             assert!(leaf_info.parents.iter().any(|parent_type| {
                 typer.store().types.get(*parent_type).reference_symbol() == Some(child)
             }));
+            let audit = InheritedAccessorAudit {
+                ast,
+                source,
+                index,
+                definitions,
+            };
 
-            // This is the first source-pipeline blocker for the requested ABI audit:
-            // the current Typer does not resolve an inherited body-field accessor.
+            for (owner, method_name, receiver_class) in [
+                (child, "readThis", None),
+                (child, "readChild", Some(child)),
+                (child, "readParent", Some(parent)),
+                (reader, "readChild", Some(child)),
+                (reader, "readLeaf", Some(leaf)),
+                (reader, "readParent", Some(parent)),
+                (reader, "readLocal", Some(child)),
+            ] {
+                assert_method_selection_targets_field(
+                    &audit,
+                    typer,
+                    owner,
+                    method_name,
+                    current,
+                    receiver_class,
+                );
+            }
+
+            let (mutable_local_read, _, mutable_local_rhs) =
+                method_tree_and_rhs(ast, index, source, typer, reader, "readMutableLocal");
+            typer.complete_symbol(mutable_local_read).unwrap();
+            let context = typer.expression_context_for(mutable_local_read).unwrap();
+            let mutable_local_result = typer.type_expression(mutable_local_rhs, context);
+            let TreeKind::Block(mutable_local_block) = &ast.get(mutable_local_rhs).kind else {
+                panic!("mutable-local selection fixture should have a Block body");
+            };
+            assert!(
+                matches!(
+                    &mutable_local_result,
+                    Err(dotty_typer::TyperError::UnstableSelectionPrefix {
+                        source: actual_source,
+                        tree_index,
+                        ..
+                    }) if *actual_source == source && *tree_index == mutable_local_block.expr.index()
+                ),
+                "unexpected mutable-local selection result: {mutable_local_result:?}"
+            );
+
+            // An unqualified name is a separate Typer lookup form and remains unsupported.
             let (read, _, read_rhs) = method_tree_and_rhs(ast, index, source, typer, child, "read");
             typer.complete_symbol(read).unwrap();
             let context = typer.expression_context_for(read).unwrap();
@@ -3923,6 +4147,14 @@ fn inherited_accessor_sources_keep_declaring_identity_and_pin_typer_blocker() {
                     ..
                 }) if actual_source == source && tree_index == read_rhs.index()
             ));
+            assert_method_assignment_targets_field(
+                &audit,
+                typer,
+                child,
+                "writeThis",
+                current,
+                None,
+            );
 
             let Some(dotty_namer::SourceDefinition::Canonical {
                 source: accessor_source,
@@ -3976,6 +4208,37 @@ fn inherited_accessor_sources_keep_declaring_identity_and_pin_typer_blocker() {
                     .get(complete_class_info(typer, accessor_child).declarations)
                     .lookup_all(&typer.store().symbols.get(constructor_fields[0]).name)
                     .is_empty()
+            );
+            for (owner, method_name, field_index, receiver_class) in [
+                (accessor_child, "readToken", 0, None),
+                (accessor_child, "readCount", 1, None),
+                (reader, "readToken", 0, Some(accessor_child)),
+                (reader, "readCount", 1, Some(accessor_child)),
+            ] {
+                assert_method_selection_targets_field(
+                    &audit,
+                    typer,
+                    owner,
+                    method_name,
+                    constructor_fields[field_index],
+                    receiver_class,
+                );
+            }
+            assert_method_assignment_targets_field(
+                &audit,
+                typer,
+                accessor_child,
+                "writeCount",
+                constructor_fields[1],
+                None,
+            );
+            assert_method_assignment_targets_field(
+                &audit,
+                typer,
+                reader,
+                "writeCount",
+                constructor_fields[1],
+                Some(accessor_child),
             );
         },
     );

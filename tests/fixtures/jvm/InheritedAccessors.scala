@@ -15,14 +15,20 @@ class Leaf extends Child
 
 class AccessorParent(val token: Int, var count: Long)
 class AccessorChild extends AccessorParent(7, 9L):
-  def readToken(): Int = token
-  def readCount(): Long = count
-  def writeCount(value: Long): Unit = count = value
+  def readToken(): Int = this.token
+  def readCount(): Long = this.count
+  def writeCount(value: Long): Unit = this.count = value
 
 class Reader:
   def readChild(child: Child): Int = child.current
   def readLeaf(leaf: Leaf): Int = leaf.current
   def readParent(parent: Parent): Int = parent.current
+  def readLocal(child: Child): Int =
+    val receiver: Child = child
+    receiver.current
+  def readMutableLocal(child: Child): Int =
+    var receiver: Child = child
+    receiver.current
   def readToken(child: AccessorChild): Int = child.token
   def readCount(child: AccessorChild): Long = child.count
   def writeCount(child: AccessorChild, value: Long): Unit = child.count = value

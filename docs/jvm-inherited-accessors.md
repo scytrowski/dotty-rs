@@ -33,15 +33,18 @@ The issue's constructor example omitted the required `count` argument to
 | `Child extends Parent` | Zero fields; no copied getter or setter methods. Only its constructor and explicitly declared source methods are present. The constructor calls `Parent.<init>()V`. |
 | Body accessor source call with static receiver `Child`, `Leaf`, or `Parent` | `Reader` emits `invokevirtual Child.current:()I`, `Leaf.current:()I`, or `Parent.current:()I`, respectively. A `Child` method reading its own inherited `current` also uses symbolic owner `Child`; its setter uses `Child.current_$eq:(I)V`. The symbolic owner follows the typed receiver class, while the physical method remains declared in `Parent`. |
 | `AccessorParent(val token: Int, var count: Long)` | Private-final `token:I` and private `count:J` fields; public getters `token()I`, `count()J`, and setter `count_$eq(J)V`. The constructor descriptor is `(IJ)V`. |
-| `AccessorChild extends AccessorParent(7, 9L)` | Zero fields and only its constructor method. It invokes the immediate `AccessorParent.<init>(IJ)V`; no child accessor methods are copied. Reader call sites use symbolic owners `AccessorChild` for `token`, `count`, and `count_$eq`. |
+| `AccessorChild extends AccessorParent(7, 9L)` | Zero fields and four methods: its constructor plus the explicitly declared `readToken`, `readCount`, and `writeCount`. It invokes the immediate `AccessorParent.<init>(IJ)V`; no generated getter or setter is copied into the child. Reader call sites use symbolic owners `AccessorChild` for `token`, `count`, and `count_$eq`. |
 | `Leaf extends Child` | Zero fields and only its constructor. It invokes `Child.<init>()V`; inherited methods remain inherited through both edges. |
 
 The compiled oracle output was class-file major version 61 because no `-release`
 or target override was supplied. That is independent of this repository's
-backend target (major version 65). Scala's constructor bytecode initializes
-class-body fields before invoking `Object.<init>` in the observed fixture;
-that observation does not authorize changing the Rust backend's existing
-verified initialization policy.
+backend target (major version 65). In `Parent.<init>`, Scala invokes
+`Object.<init>` at bytecode offset 1, then stores `id` at offset 8 and `current`
+at offset 13. In `AccessorParent.<init>(IJ)V`, it stores `token` at offset 2
+and `count` at offset 7, then invokes `Object.<init>` at offset 11. These are
+distinct oracle sequences: class-body initialization follows the super call,
+while constructor-parameter accessor storage precedes it. They do not change
+the Rust backend's existing verified initialization policy.
 
 ## Override and boundary observations
 
@@ -66,21 +69,28 @@ descriptions are the compiler outcomes, not a proposed Rust acceptance policy.
 ## Rust source and backend boundary
 
 The focused source semantic regression
-`inherited_accessor_sources_keep_declaring_identity_and_pin_typer_blocker` verifies
-that body-field symbols are canonical `Field` symbols owned by `Parent`,
-constructor accessor fields are owned by `AccessorParent`, and constructor
-formals are distinct `Parameter` symbols owned by that class's constructor.
-The child class declaration scope contains no copied `current` or `token`
-field. These are session-local identities; their numeric arena slots are not
-part of the contract.
+`inherited_accessor_sources_keep_declaring_identity_and_pin_typer_blocker`
+verifies that body-field symbols are canonical `Field` symbols owned by
+`Parent`, constructor accessor fields are owned by `AccessorParent`, and
+constructor formals are distinct `Parameter` symbols owned by that class's
+constructor. The child class declaration scope contains no copied `current`
+or `token` field. These are session-local identities; their numeric arena
+slots are not part of the contract.
 
-The current Typer's first blocker is earlier than typed selection identity:
-typing `Child.read` for the inherited body field returns
-`TyperError::TermNameNotFound` at the source tree for `current`. The regression
-pins this exact typed error rather than manufacturing a `TermRef`. Therefore
-the required source-to-typed `TermRefTarget::Symbol(parent_field)` relation is
-not established by today's frontend. Constructor-accessor inherited reads
-remain similarly untyped. This issue does not change the Typer.
+For qualified selections, the current Typer already resolves `this.current`,
+`child.current`, and `parent.current` to a `TermRefTarget::Symbol` naming the
+canonical `Parent.current` field. It likewise resolves qualified
+`AccessorChild` and `Reader` reads/writes to the canonical
+`AccessorParent.token`/`count` fields. The regression checks the source-to-typed
+bindings for both the selection and receiver, that the typed selection keeps
+the exact receiver type as its prefix, and that setters remain `Unit`.
+An immutable local alias used as the receiver (`Reader.readLocal`) also keeps
+the inherited field identity. Selection through a mutable local (`readMutableLocal`)
+is separately pinned as `TyperError::UnstableSelectionPrefix`.
+Unqualified `Child.read` (`current`) remains a distinct unsupported lookup and
+returns `TyperError::TermNameNotFound`; the test pins that boundary without
+generalizing it to qualified selection forms. This issue does not change the
+Typer.
 
 When source assembly contains inherited accessors but no unsupported source
 selection, the batch reaches `JvmCompilationUnit::metadata` and fails with
@@ -106,10 +116,10 @@ Keep three identities separate:
    its role: getter, or mutable setter. Its JVM name, descriptor, visibility,
    and origin remain in `dotty-jvm`.
 
-Future enablement requires the Typer to resolve supported inherited member
-selections to the canonical declaring field while preserving source-to-typed
-bindings. The backend must then project effective accessor methods for each
-planned class without inserting generated source symbols. It must validate
+Future backend enablement must consume the already-supported qualified typed
+selections and project effective accessor methods for each planned class
+without inserting generated source symbols. The still-unsupported unqualified
+lookup can remain outside a bounded backend increment. The backend must validate
 exact JVM descriptors and receiver owners; detect getter/setter collisions
 with user methods and inherited final methods; preserve immutable/mutable
 override rules; and reject unsupported bridges, traits, external ancestors,
