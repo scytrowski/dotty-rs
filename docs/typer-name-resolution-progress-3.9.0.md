@@ -130,9 +130,12 @@ work rather than rewrite classloader internals in this slice; the focused
 classloader follow-up is [#1647](https://github.com/scytrowski/dotty-rs/issues/1647).
 
 That classloader fix is necessary but will not by itself make these local
-values infer. The TASTy unpickler represents the no-clause `ExprType` as
-`Type::ByName`, while the source Typer's completed signature for
-`def answer: Int` is the bare `Int` result. Today `widen_expression_type_journaled`
+values infer. For a declaration with no clauses of either kind, the TASTy
+unpickler represents `ExprType` as `Type::ByName`, while the source Typer's
+completed signature for `def answer: Int` is the bare `Int` result. A
+type-parameter-only method such as `def noClause[A]: A` instead keeps `A`
+directly under `Type::Poly`, matching the semantic unpickler. Today
+`widen_expression_type_journaled`
 unwraps `Type::ByName` only for by-name *parameters*; it does not adapt a
 selected method whose loaded signature carries the TASTy `ExprType` wrapper.
 Also, `is_valid_inferred_value_type` explicitly rejects `Type::ByName`. So
@@ -151,10 +154,11 @@ the cohort is fully typed yet.
 The classloader now records term-clause presence separately from its flattened
 parameter list. The pinned `Methods.tasty` regression checks a no-clause
 method, an explicit `()`, a one-parameter clause, and a polymorphic no-clause
-method. Lowering preserves no-clause methods as `Type::ByName` (TASTy
-`ExprType`), while explicit `()` stays `Type::Method([])`. The existing
-`Both.tasty` loader assertion was updated to expect its no-clause `make` as an
-`ExprType`.
+method. A declaration with no clauses of either kind lowers as `Type::ByName`
+(TASTy `ExprType`); a type-parameter-only method keeps its direct result under
+`Type::Poly`, matching the semantic unpickler; explicit `()` stays
+`Type::Method([])`. The existing `Both.tasty` loader assertion was updated to
+expect its no-clause `make` as an `ExprType`.
 
 After this change, the frozen 60-file / 369-method cohort still reports 292
 observed target rows, zero fully typed methods, and the same first blockers for

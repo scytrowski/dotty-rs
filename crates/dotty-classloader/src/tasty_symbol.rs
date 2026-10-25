@@ -8,8 +8,8 @@ use dotty_core::{SymbolFlags, SymbolKind};
 use dotty_tasty::tasty::{
     ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, ApplyNode,
     AstError, CASEACCESSOR_TAG, CONTRAVARIANT_TAG, COVARIANT_TAG, DEFDEF_TAG, DefDefBody,
-    DefinitionBody, DefinitionTail, EMPTYCLAUSE_TAG, FIELDACCESSOR_TAG, FINAL_TAG, IdentNode,
-    LOCAL_TAG, MUTABLE_TAG, OBJECT_TAG, PACKAGE_TAG, PRIVATE_TAG, PRIVATEQUALIFIED_TAG,
+    DefinitionBody, DefinitionTail, EMPTYCLAUSE_TAG, FIELDACCESSOR_TAG, FINAL_TAG, IDENTTPT_TAG,
+    IdentNode, LOCAL_TAG, MUTABLE_TAG, OBJECT_TAG, PACKAGE_TAG, PRIVATE_TAG, PRIVATEQUALIFIED_TAG,
     PROTECTED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree, Reader, ReferenceNode,
     RenderedSignedName, SELECTIN_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG, STABLE_TAG, STATIC_TAG,
     SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode, StructuredTree, TEMPLATE_TAG,
@@ -1758,6 +1758,19 @@ fn decode_tasty_member_type(
         return decode_tasty_member_type(
             file,
             &shared,
+            package,
+            type_parameters,
+            resolve_bare,
+            depth + 1,
+        );
+    }
+
+    if let Ok(StructuredTree::Ident(ident)) = tree.decode_structured()
+        && ident.tag == IDENTTPT_TAG
+    {
+        return decode_tasty_member_type(
+            file,
+            &ident.type_tree,
             package,
             type_parameters,
             resolve_bare,

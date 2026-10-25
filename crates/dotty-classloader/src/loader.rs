@@ -2796,8 +2796,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
     /// Lowers a [`tasty_symbol::DecodedTastyMethod`] into its semantic
     /// method shape, optionally wrapped in `Type::Poly`. A definition with
-    /// no term clause is represented as `Type::ByName` (TASTy's `ExprType`),
-    /// while an explicit empty clause remains an empty `Type::Method`.
+    /// no clauses of either kind is represented as `Type::ByName` (TASTy's
+    /// `ExprType`). A type-parameter-only definition keeps its direct result
+    /// under `Type::Poly`; an explicit empty term clause remains an empty
+    /// `Type::Method`.
     /// `<init>`'s result is always
     /// [`Definitions::unit`] rather than going through
     /// [`Self::lower_tasty_member_type`] — see the comment where
@@ -2894,6 +2896,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 result,
                 kind: MethodKind::Plain,
             }))
+        } else if !method.type_parameters.is_empty() {
+            result
         } else {
             self.store.types.alloc(Type::ByName { result })
         };
@@ -5900,10 +5904,14 @@ mod tests {
         let Type::Poly(type_only_poly) = store.types.get(type_only_type) else {
             panic!("typeOnly should retain its polymorphic wrapper");
         };
-        assert!(matches!(
-            store.types.get(type_only_poly.result),
-            Type::ByName { .. }
-        ));
+        let Type::ParamRef { binder, index } = store.types.get(type_only_poly.result) else {
+            panic!(
+                "typeOnly should retain its direct polymorphic result, got {:?}",
+                store.types.get(type_only_poly.result)
+            );
+        };
+        assert_eq!(*binder, type_only_type);
+        assert_eq!(*index, 0);
     }
 
     #[test]
