@@ -9475,7 +9475,7 @@ mod tests {
             ModuleResolutionProfile,
         };
 
-        let source_text = "package dotty.tools\npackage dotc\npackage core\nimport Contexts.*\nimport Contexts.withFreshTyperState\nclass Use";
+        let source_text = "package dotty.tools\npackage dotc\npackage core\nimport Contexts.withFreshTyperState\nclass Use";
         let (mut parsed, mut store, packages, definitions, index, source) =
             parse_and_name(source_text);
         let compiler_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -9490,7 +9490,7 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(imports.len(), 2);
+        assert_eq!(imports.len(), 1);
         let use_symbol = parsed
             .ast
             .iter()
@@ -9575,7 +9575,7 @@ mod tests {
         );
 
         let import_contexts = typer
-            .source_context_chain(declaration_context, imports[1].0.index())
+            .source_context_chain(declaration_context, imports[0].0.index())
             .expect("the declaration should retain its preceding imports");
         let imported_members = typer
             .lookup_import_candidates(
@@ -9584,8 +9584,8 @@ mod tests {
                 false,
                 ImportSelection::Explicit,
                 SourceTreeLocation {
-                    tree_index: imports[1].0.index(),
-                    position: parsed.ast.get(imports[1].0).position,
+                    tree_index: imports[0].0.index(),
+                    position: parsed.ast.get(imports[0].0).position,
                 },
             )
             .expect("the qualified import selector should resolve on Contexts");
@@ -9624,6 +9624,167 @@ mod tests {
             1,
             "the later selected member is counted separately from qualifier successes"
         );
+    }
+
+    #[test]
+    fn scala39_object_wildcard_import_finds_an_inherited_implicit_class() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package app\nimport scala.jdk.CollectionConverters.*\nclass Use");
+        let import = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Import(import) => Some((tree, import)),
+                _ => None,
+            })
+            .expect("the fixture source contains the wildcard import");
+        let use_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Use" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("the fixture source declares Use");
+        let declaration_context = index.declaration_context_of(use_symbol).unwrap();
+        let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(library_root)),
+            Box::new(JavaObjectStubPath),
+        ]);
+        let resolver = ClasspathSymbolResolver::new(
+            class_path,
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        );
+        let imported_name = Name::new(store.names.intern("IteratorHasAsScala"), Namespace::Term);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let import_contexts = typer
+            .source_context_chain(declaration_context, import.0.index())
+            .expect("Use should retain its preceding wildcard import");
+        let qualifier_context = index
+            .source_context(declaration_context)
+            .parent
+            .expect("Use should be declared in the app package");
+        let object = typer
+            .import_qualifier_symbol(import.1.expr, qualifier_context, import.0.index(), None)
+            .expect("the real Scala library object should resolve")
+            .expect("CollectionConverters is a package-owned Object");
+        let module_class = typer
+            .resolver
+            .module_class_of_object(typer.store(), object)
+            .expect("the resolver should retain the canonical module identity")
+            .expect("CollectionConverters has a validated ModuleClass");
+        assert_eq!(
+            typer.store().symbols.get(module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            typer.store().symbols.info(module_class),
+            &SymbolInfo::Missing
+        );
+
+        let resolver_checkpoint = typer.resolver.checkpoint();
+        let absent_conversion = Name::new(typer.store.names.intern("asScala"), Namespace::Term);
+        assert!(
+            typer
+                .lookup_import_candidates(
+                    &import_contexts,
+                    absent_conversion,
+                    false,
+                    ImportSelection::Wildcard,
+                    SourceTreeLocation {
+                        tree_index: import.0.index(),
+                        position: parsed.ast.get(import.0).position,
+                    },
+                )
+                .expect("asScala is not a direct CollectionConverters member")
+                .is_empty()
+        );
+        let completed_resolver_checkpoint = typer.resolver.checkpoint();
+        assert_ne!(completed_resolver_checkpoint, resolver_checkpoint);
+        assert_ne!(
+            typer.store().symbols.info(module_class),
+            &SymbolInfo::Missing,
+            "a successful hierarchy completion remains cached when a name is absent"
+        );
+
+        let missing_name = Name::new(
+            typer.store.names.intern("MissingConversion"),
+            Namespace::Term,
+        );
+        assert!(
+            typer
+                .lookup_import_candidates(
+                    &import_contexts,
+                    missing_name,
+                    false,
+                    ImportSelection::Wildcard,
+                    SourceTreeLocation {
+                        tree_index: import.0.index(),
+                        position: parsed.ast.get(import.0).position,
+                    },
+                )
+                .expect("a missing member should stay unresolved")
+                .is_empty()
+        );
+        assert_eq!(typer.resolver.checkpoint(), completed_resolver_checkpoint);
+
+        let imported_members = typer
+            .lookup_import_candidates(
+                &import_contexts,
+                imported_name,
+                false,
+                ImportSelection::Wildcard,
+                SourceTreeLocation {
+                    tree_index: import.0.index(),
+                    position: parsed.ast.get(import.0).position,
+                },
+            )
+            .expect("the wildcard import should resolve its inherited implicit class");
+        assert_eq!(imported_members.len(), 1);
+        let implicit_class = imported_members[0];
+        assert_eq!(
+            typer.store().symbols.get(implicit_class).kind,
+            SymbolKind::Method
+        );
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(implicit_class).name.text()),
+            "IteratorHasAsScala"
+        );
+        let declaring_parent = typer.store().symbols.get(implicit_class).owner.unwrap();
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(declaring_parent).name.text()),
+            "AsScalaExtensions"
+        );
+        assert!(matches!(
+            typer.store().symbols.get(implicit_class).origin,
+            SymbolOrigin::Tasty(_)
+        ));
     }
 
     #[test]

@@ -1158,6 +1158,38 @@ impl SourceTyper<'_> {
                 }
             }
             if !found_locally {
+                let qualifier_symbol = self.store.symbols.get(qualifier);
+                if is_wildcard
+                    && qualifier_symbol.kind == SymbolKind::Object
+                    && matches!(qualifier_symbol.origin, SymbolOrigin::Tasty(_))
+                {
+                    let store_checkpoint = self.store.checkpoint();
+                    let resolver_checkpoint = self.resolver.checkpoint();
+                    let type_checkpoint = self.type_index.checkpoint();
+                    let inherited = self
+                        .type_prefix_for_qualifier(qualifier)
+                        .and_then(|prefix| {
+                            self.lookup_members(prefix, name)
+                                .map_err(|error| TyperError::MemberLookup(Box::new(error)))
+                        });
+                    match inherited {
+                        Ok(candidates) => {
+                            // A completed hierarchy remains valid even when
+                            // this particular name is absent. Keep its
+                            // resolver cache so later wildcard members do not
+                            // reload the same ModuleClass parents.
+                            matches
+                                .extend(candidates.into_iter().map(|candidate| candidate.symbol));
+                            continue;
+                        }
+                        Err(error) => {
+                            self.resolver.rollback_to(self.store, resolver_checkpoint);
+                            self.store.rollback_to(store_checkpoint);
+                            self.type_index.restore(type_checkpoint);
+                            return Err(error);
+                        }
+                    }
+                }
                 if !is_wildcard
                     && !type_only
                     && self.store.symbols.get(qualifier).kind == SymbolKind::Package

@@ -2,6 +2,66 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
+## Bounded continuation: inherited members of external object wildcard imports
+
+Issue [#1620](https://github.com/scytrowski/dotty-rs/issues/1620) starts from
+the merged #1618 baseline `ad3268b6132ac04d80bf628ec4d9483f4f5ff1f6`.
+When a wildcard import qualifier is an external TASTy-backed Object and its
+local scope has no requested name, the Typer now asks its existing inherited
+member lookup to inspect the canonical ModuleClass hierarchy. It returns the
+canonical declaration symbol and owner. An absent name remains absent; a
+successfully completed hierarchy stays cached on that miss, while completion
+or lookup errors still roll back store, resolver and type-index state. This is
+needed because repeatedly rolling back a successful completion caused the
+same parent hierarchy to be loaded again for each imported name.
+
+The focused regression uses the real Scala 3.9 library fixture and verifies
+that `CollectionConverters.*` exposes the inherited TASTy Method
+`IteratorHasAsScala`, owned by `AsScalaExtensions`. It also checks that
+`asScala` is not invented as a direct member of `CollectionConverters`, that
+an unrelated missing member stays unresolved, and that the first successful
+hierarchy completion is reused. The pinned Scala positive and negative source
+oracle is documented in
+[`InheritedObjectWildcard.oracle.md`](../crates/dotty-typer/tests/fixtures/inherited-object-wildcard/InheritedObjectWildcard.oracle.md).
+Implicit conversion application remains a separate Typer capability.
+
+The deterministic pinned `package-term` audit rechecked the same 60 files and
+369 methods twice. Its normalized cohort sidecars matched byte-for-byte
+(SHA-256 `e812c812be1c29723935fd4deb9e6b40386233f9f4fed952c162174dfbc44985`).
+Both passes had zero parser failures, zero namer failures, and zero fully typed
+methods. The report observed 292 target rows and 139 current
+`ImportQualifierNotFound` blockers. Among the 161 frozen rows whose failed
+qualifier is exactly `scala.jdk.CollectionConverters`, 120 still stop at
+`ImportQualifierNotFound` and 41 now have a later first blocker. The five-row
+reconciliation below samples the 120 unresolved rows; this increment did not
+move those corpus roots.
+The audit observed no materialized external ModuleClasses or module members,
+so the focused inherited-member path was not exercised by those method roots.
+Five exact affected roots and their current outcomes are recorded in
+[`typer-name-resolution-1566-inherited-object-wildcard-3.9.0.tsv`](typer-name-resolution-1566-inherited-object-wildcard-3.9.0.tsv).
+This is a bounded symbol-lookup result, not a claim that the #1566 method
+cohort advanced or that `asScala` calls now type.
+
+The CI focused smoke audit provides a separate signal: 17 of its 31 methods
+move from `SymbolResolution` to the later `MemberLookup` blocker, and member
+lookup errors fall from 15 to 0. No method becomes fully typed. The exact
+deterministic output is recorded in
+[`typer-focused-smoke-baseline-3.9.0.txt`](typer-focused-smoke-baseline-3.9.0.txt).
+This shows that the new hierarchy lookup advances some real typer paths, while
+the broader #1566 target methods remain blocked at the missing
+`CollectionConverters` qualifier.
+
+Reproduce the cohort audit with the pinned Scala checkout and cached artifacts:
+
+```sh
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1620-runs" \
+SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
+SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
+  --verify-determinism target/issue-1620-package-term.md
+```
+
 ## Latest bounded continuation: tuple type projection after Scala aliases
 
 This continuation starts from merged `main` at

@@ -12,23 +12,23 @@ selected_paths:
   library/src/scala/annotation/compileTimeOnly.scala
   library/src/scala/collection/StringParsers.scala
 method_outcomes:
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1744::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:427:genLoadQualUnlessElidable::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2055::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1749::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:430:receiverClass::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2055::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4855::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1264:loop::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4870::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4945::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1294:inStaticMethod::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4987::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5784::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1539:useCmpG::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5945::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1563:useCmpG::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6130::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1600:isNull::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6151::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1604:ifOneIsNull::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6219::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1598:genComparisonOp::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6234::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1620:loadAndTestBoolean::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6315::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1635:genZandOrZor::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6559::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1704:isMaybeBoxed::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6811::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6593::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1714:isNull::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6811::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6614::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1718:isNonNullExpr::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6811::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7087::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1816:boxInstantiated::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7246::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7172::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1848:flagIf::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7246::blocker=SymbolResolution::typed=false
-  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=969::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:244:hasUnitBranch::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1052::blocker=SymbolResolution::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1744::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:427:genLoadQualUnlessElidable::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2055::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1749::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:430:receiverClass::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2055::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4855::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1264:loop::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4870::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4945::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1294:inStaticMethod::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4987::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5784::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1539:useCmpG::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5945::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1563:useCmpG::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6130::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1600:isNull::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6151::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1604:ifOneIsNull::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6219::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1598:genComparisonOp::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6234::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1620:loadAndTestBoolean::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6315::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1635:genZandOrZor::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6559::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1704:isMaybeBoxed::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6811::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6593::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1714:isNull::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6811::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6614::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1718:isNonNullExpr::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6811::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7087::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1816:boxInstantiated::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7246::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7172::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:1848:flagIf::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7246::blocker=MemberLookup::typed=false
+  method=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=969::site=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala:244:hasUnitBranch::attempt=compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1052::blocker=MemberLookup::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=1007::site=library/src/scala/collection/StringParsers.scala:243:isExp::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=1058::site=library/src/scala/collection/StringParsers.scala:245:expOK::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=1175::site=library/src/scala/collection/StringParsers.scala:240:isDecFloatLiteral::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
@@ -55,7 +55,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1052	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1052	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1052	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1052	prefix=dotty.tools.dotc.ast.tpd$::namespace=type::name=If::space=Prefix	error	classloader error	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1217	dotty.tools.backend.jvm.dotty::resolved-prefix=dotty.tools.backend.jvm::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1217	prefix=dotty.tools.backend.jvm::namespace=term::name=dotty::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1217	dotty.tools.backend.dotty::resolved-prefix=dotty.tools.backend::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
@@ -66,7 +65,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1217	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1217	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1217	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=1217	prefix=dotty.tools.dotc.ast.tpd$::namespace=type::name=unchecked::space=Prefix	error	classloader error	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2055	dotty.tools.backend.jvm.dotty::resolved-prefix=dotty.tools.backend.jvm::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2055	prefix=dotty.tools.backend.jvm::namespace=term::name=dotty::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2055	dotty.tools.backend.dotty::resolved-prefix=dotty.tools.backend::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
@@ -77,7 +75,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2055	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2055	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2055	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2055	prefix=dotty.tools.dotc.ast.tpd$::namespace=type::name=BType::space=Prefix	error	classloader error	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2682	dotty.tools.backend.jvm.dotty::resolved-prefix=dotty.tools.backend.jvm::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2682	prefix=dotty.tools.backend.jvm::namespace=term::name=dotty::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2682	dotty.tools.backend.dotty::resolved-prefix=dotty.tools.backend::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
@@ -88,7 +85,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2682	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2682	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2682	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=2682	prefix=dotty.tools.dotc.ast.tpd$::namespace=type::name=Tree::space=Prefix	error	classloader error	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=3669	dotty.tools.backend.jvm.dotty::resolved-prefix=dotty.tools.backend.jvm::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=3669	prefix=dotty.tools.backend.jvm::namespace=term::name=dotty::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=3669	dotty.tools.backend.dotty::resolved-prefix=dotty.tools.backend::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
@@ -99,7 +95,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=3669	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=3669	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=3669	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=3669	prefix=dotty.tools.dotc.ast.tpd$::namespace=type::name=BType::space=Prefix	error	classloader error	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4572	dotty.tools.backend.jvm.dotty::resolved-prefix=dotty.tools.backend.jvm::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4572	prefix=dotty.tools.backend.jvm::namespace=term::name=dotty::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4572	dotty.tools.backend.dotty::resolved-prefix=dotty.tools.backend::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
@@ -110,7 +105,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4572	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4572	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4572	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4572	prefix=dotty.tools.dotc.ast.tpd$::namespace=type::name=Match::space=Prefix	error	classloader error	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4870	dotty.tools.backend.jvm.dotty::resolved-prefix=dotty.tools.backend.jvm::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4870	prefix=dotty.tools.backend.jvm::namespace=term::name=dotty::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4870	dotty.tools.backend.dotty::resolved-prefix=dotty.tools.backend::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
@@ -121,7 +115,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4870	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4870	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4870	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4870	prefix=dotty.tools.dotc.ast.tpd$::namespace=type::name=List::space=Prefix	error	classloader error	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=494	dotty.tools.backend.jvm.dotty::resolved-prefix=dotty.tools.backend.jvm::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=494	prefix=dotty.tools.backend.jvm::namespace=term::name=dotty::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=494	dotty.tools.backend.dotty::resolved-prefix=dotty.tools.backend::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
@@ -132,7 +125,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=494	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=494	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=494	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=494	prefix=dotty.tools.dotc.ast.tpd$::namespace=term::name=lineNumber::space=Prefix	error	classloader error	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4987	dotty.tools.backend.jvm.dotty::resolved-prefix=dotty.tools.backend.jvm::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4987	prefix=dotty.tools.backend.jvm::namespace=term::name=dotty::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4987	dotty.tools.backend.dotty::resolved-prefix=dotty.tools.backend::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
@@ -143,7 +135,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4987	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4987	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4987	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=4987	prefix=dotty.tools.dotc.ast.tpd$::namespace=term::name=methSymbol::space=Prefix	error	classloader error	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	dotty.tools.backend.jvm.scala::resolved-prefix=dotty.tools.backend.jvm::first-missing=scala	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	prefix=dotty.tools.backend.jvm::namespace=term::name=scala::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	dotty.tools.backend.scala::resolved-prefix=dotty.tools.backend::first-missing=scala	package unresolved	truly unresolved next segment	-	-
@@ -182,7 +173,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=5850	prefix=dotty.tools.dotc.ast.tpd$::namespace=type::name=TestOp::space=Prefix	error	classloader error	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	dotty.tools.backend.jvm.scala::resolved-prefix=dotty.tools.backend.jvm::first-missing=scala	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	prefix=dotty.tools.backend.jvm::namespace=term::name=scala::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	dotty.tools.backend.scala::resolved-prefix=dotty.tools.backend::first-missing=scala	package unresolved	truly unresolved next segment	-	-
@@ -221,7 +211,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6026	prefix=dotty.tools.dotc.ast.tpd$::namespace=type::name=TestOp::space=Prefix	error	classloader error	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483	dotty.tools.backend.jvm.dotty::resolved-prefix=dotty.tools.backend.jvm::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483	prefix=dotty.tools.backend.jvm::namespace=term::name=dotty::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483	dotty.tools.backend.dotty::resolved-prefix=dotty.tools.backend::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
@@ -232,7 +221,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6483	prefix=dotty.tools.dotc.ast.tpd$::namespace=type::name=Tree::space=Prefix	error	classloader error	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6811	dotty.tools.backend.jvm.dotty::resolved-prefix=dotty.tools.backend.jvm::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6811	prefix=dotty.tools.backend.jvm::namespace=term::name=dotty::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6811	dotty.tools.backend.dotty::resolved-prefix=dotty.tools.backend::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
@@ -243,7 +231,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6811	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6811	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6811	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=6811	prefix=dotty.tools.dotc.ast.tpd$::namespace=type::name=Boolean::space=Prefix	error	classloader error	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7246	dotty.tools.backend.jvm.dotty::resolved-prefix=dotty.tools.backend.jvm::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7246	prefix=dotty.tools.backend.jvm::namespace=term::name=dotty::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7246	dotty.tools.backend.dotty::resolved-prefix=dotty.tools.backend::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
@@ -254,7 +241,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7246	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7246	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7246	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=7246	prefix=dotty.tools.dotc.ast.tpd$::namespace=term::name=java::space=Prefix	error	classloader error	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=892	dotty.tools.backend.jvm.dotty::resolved-prefix=dotty.tools.backend.jvm::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=892	prefix=dotty.tools.backend.jvm::namespace=term::name=dotty::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=892	dotty.tools.backend.dotty::resolved-prefix=dotty.tools.backend::first-missing=dotty	package unresolved	truly unresolved next segment	-	-
@@ -265,7 +251,6 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=892	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=892	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=892	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
-  compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=892	prefix=dotty.tools.dotc.ast.tpd$::namespace=type::name=Tree::space=Prefix	error	classloader error	-	-
   library/src/scala/collection/StringParsers.scala#tree=129	prefix=scala::namespace=type::name=Option::space=Prefix	external class success	-	-	kind=Class::origin=tasty::path=scala.Option
   library/src/scala/collection/StringParsers.scala#tree=129	prefix=scala::namespace=term::name=None::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=scala.None
   library/src/scala/collection/StringParsers.scala#tree=1361	prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
@@ -291,18 +276,17 @@ resolver_observations:
   library/src/scala/collection/StringParsers.scala#tree=710	prefix=scala::namespace=type::name=Option::space=Prefix	external class success	-	-	kind=Class::origin=tasty::path=scala.Option
 blocker_counts:
   ApplicationCalleeNotMethod: count=11, files=1
-  MemberLookup: count=2, files=1
-  SymbolResolution: count=17, files=1
+  MemberLookup: count=19, files=2
   TermNameNotFound: count=1, files=1
 resolver_metrics:
   package_requests=128
   package_successes=47
   package_unresolved=81
   package_errors=0
-  member_requests=116
+  member_requests=101
   member_successes=30
   member_unresolved=71
-  member_errors=15
+  member_errors=0
   class_symbol_successes=30
 materialized_packages:
   dotty.tools.dotc
