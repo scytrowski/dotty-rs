@@ -335,6 +335,36 @@ pub enum JvmAccessorDispatchRole {
     Setter,
 }
 
+/// Canonical source identity behind a JVM method-shaped declaration.
+///
+/// Ordinary source methods retain their `Method` symbol; generated accessors
+/// retain the source `Field` and whether the entry is its getter or setter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmBinaryMethodOrigin {
+    /// A declared Scala method.
+    Method(SymbolId),
+    /// A generated method derived from a source field.
+    Accessor {
+        /// Canonical source field that owns this accessor.
+        field: SymbolId,
+        /// Whether this is the getter or mutable setter entrypoint.
+        role: JvmAccessorDispatchRole,
+    },
+}
+
+/// Which accessor-related inherited binary declaration collision occurred.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmAccessorCollisionKind {
+    /// A child source method occupies an inherited generated accessor slot.
+    SourceMethodRedefinesInheritedAccessor,
+    /// A child generated getter or setter occupies an inherited source method slot.
+    GeneratedAccessorRedefinesInheritedMethod,
+    /// A child generated getter or setter occupies an inherited final method slot.
+    GeneratedAccessorRedefinesInheritedFinalMethod,
+    /// A child generated getter or setter occupies an inherited accessor slot.
+    GeneratedAccessorRedefinesInheritedAccessor,
+}
+
 /// Read-only effective dispatch identity for one generated accessor method.
 ///
 /// Accessors retain their canonical source field as provenance instead of
@@ -1557,8 +1587,21 @@ pub enum JvmCodegenError {
         name: String,
         descriptor: String,
     },
-    /// Constructor accessor signatures cannot yet participate in inherited
-    /// method collision and override validation.
+    /// A declared method and an inherited accessor, or a declared accessor
+    /// and inherited method/accessor, share one exact JVM method identity.
+    /// The descriptor is absent only for a conservative same-name check
+    /// against an unplanned source method.
+    InheritedJvmAccessorCollision {
+        class: SymbolId,
+        kind: JvmAccessorCollisionKind,
+        origin: JvmBinaryMethodOrigin,
+        parent: SymbolId,
+        parent_origin: JvmBinaryMethodOrigin,
+        name: String,
+        descriptor: Option<String>,
+    },
+    /// Accessor-bearing inheritance still cannot cross the class-file
+    /// publication boundary after metadata collision validation succeeds.
     UnsupportedJvmAccessorInheritance { class: SymbolId, parent: SymbolId },
     /// Two class symbols in one compilation unit project to the same internal name.
     DuplicateJvmClassIdentity {
