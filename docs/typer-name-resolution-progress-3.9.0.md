@@ -96,9 +96,83 @@ blocker transition: `LocalOpt.scala#tree=2986` (selected method, attempt
 blocker and typed status. The compact per-method reconciliation is in
 [`typer-name-resolution-1566-after-package-context-3.9.0.tsv`](typer-name-resolution-1566-after-package-context-3.9.0.tsv).
 
-The next narrow candidate is adaptation of this parameterless generic method
-result to a value type. It needs its own method-signature evidence and negative
-controls before implementation.
+### Follow-up research: empty `MethodType` results
+
+The same deterministic cohort has four rows in
+`InvalidInferredLocalValueType` across three files. The two
+`InlinerHeuristics.scala` rows are nested helpers in one `parse` attempt. A
+focused three-file replay with temporary type tracing found the same immediate
+shape at each failed local value: `MethodType([], result)` with `Plain` kind.
+The corresponding source expressions are:
+
+| Source location | Inferred expression | Origin |
+| --- | --- | --- |
+| `LocalOpt.scala:939` | `collection.mutable.ArrayBuffer.empty[Int]` | Scala 3.9 parameterless generic method |
+| `InlinerHeuristics.scala:305` | `List.empty[Entry]` | Scala 3.9 parameterless generic method |
+| `ClosureOptimizer.scala:498` | `before.getPrevious` | Java zero-argument method selected without `()` |
+
+The pinned Scala 3.9 oracle accepts the first two forms without an argument
+clause. A separate control accepts `def noClause[A]: List[A]` as
+`F.noClause[Int]` and `def emptyClause[A](): List[A]` as
+`F.emptyClause[Int]()`, while the opposite call shapes fail. So adapting every
+empty `MethodType` would be incorrect. A trace inside `type_type_application`
+shows that for both generic methods the `PolyType` already has
+`MethodType([], result)` before type arguments are instantiated; substitution
+does not introduce the empty method clause.
+
+The owning classloader path is now identified. Its `DecodedTastyMethod`
+flattens all term clauses into `parameters`, and `lower_tasty_method` always
+wraps that list in `Type::Method`, including when the TASTy declaration had no
+term clause. This erases the distinction needed by the Typer and is the
+upstream cause for both Scala generic methods; it is not a Typer-only
+adaptation bug. #1566 explicitly says to coordinate with the separate TASTy
+work rather than rewrite classloader internals in this slice; the focused
+classloader follow-up is [#1647](https://github.com/scytrowski/dotty-rs/issues/1647).
+
+That classloader fix is necessary but will not by itself make these local
+values infer. The TASTy unpickler represents the no-clause `ExprType` as
+`Type::ByName`, while the source Typer's completed signature for
+`def answer: Int` is the bare `Int` result. Today `widen_expression_type_journaled`
+unwraps `Type::ByName` only for by-name *parameters*; it does not adapt a
+selected method whose loaded signature carries the TASTy `ExprType` wrapper.
+Also, `is_valid_inferred_value_type` explicitly rejects `Type::ByName`. So
+after preserving the TASTy clause distinction, the next step must reconcile
+that external method shape with the source Typer's result-type view, while
+keeping a by-name parameter lazy and `def f(): T` inapplicable without `()`.
+This identifies the immediate Typer-side blocker; it does not justify
+unwrapping every `ByName` type globally.
+
+The Java `getPrevious` case is also a zero-argument method, but its
+no-parentheses adaptation remains a separate form until proven. No method in
+the cohort is fully typed yet.
+
+### Local implementation of classloader follow-up #1647
+
+The classloader now records term-clause presence separately from its flattened
+parameter list. The pinned `Methods.tasty` regression checks a no-clause
+method, an explicit `()`, a one-parameter clause, and a polymorphic no-clause
+method. Lowering preserves no-clause methods as `Type::ByName` (TASTy
+`ExprType`), while explicit `()` stays `Type::Method([])`. The existing
+`Both.tasty` loader assertion was updated to expect its no-clause `make` as an
+`ExprType`.
+
+After this change, the frozen 60-file / 369-method cohort still reports 292
+observed target rows, zero fully typed methods, and the same first blockers for
+the four focused local-value roots. Its first-pass sidecar SHA-256 is still
+`bb8888c938165fd2b143b50875d9c93452f29e75d6dfaddff8b22ef64f943d61`, matching
+the post-#1643 run. The deterministic second pass produced the same SHA-256.
+This confirms #1647 fixes the lost TASTy signature distinction but does not by
+itself advance the corpus. The next #1566 increment must adapt the TASTy
+`ExprType` for a no-clause method expression to its result type, without
+changing explicit-empty-clause calls or by-name parameter semantics.
+
+Validation for the local #1647 change passed `cargo fmt --all -- --check`,
+`python3 tools/check-frontend-boundaries.py`,
+`cargo test -p dotty-classloader --all-targets --locked`,
+`cargo test -p dotty-tasty-unpickler --test methods --locked`,
+`cargo test -p dotty --all-targets --locked`, classloader Clippy and rustdoc,
+and `git diff --check`. The frozen cohort audit ran twice serially and matched
+as above.
 
 `InlineInfoAttribute.scala#tree=420` remains a separate case. Its per-file
 audit cannot see the source declaration `InlineInfo` in sibling
