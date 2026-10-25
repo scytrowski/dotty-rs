@@ -6,9 +6,14 @@ use dotty_jvm::emit_class;
 use dotty_jvm_tasty_contract::validate_classfile_tasty_link;
 use dotty_tasty::tasty::TastyFile;
 
-use dotty::jvm_tasty_artifacts::{PairedArtifactError, emit_paired_jvm_tasty_class};
+use dotty::jvm_tasty_artifacts::{
+    PairedArtifactError, PairedBatchArtifactError, emit_paired_jvm_tasty_batch,
+    emit_paired_jvm_tasty_class,
+};
+use dotty::jvm_tasty_plan::PairedPlanError;
 
 const COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
+const COUNTER_GAUGE: &str = include_str!("fixtures/jvm_tasty_multiclass/CounterGauge.scala");
 
 #[test]
 fn counter_emits_complete_class_and_tasty_with_the_same_real_header_uuid() {
@@ -123,6 +128,109 @@ fn fresh_source_sessions_produce_byte_identical_linked_pairs() {
     assert_eq!(first.tasty_bytes(), second.tasty_bytes());
     assert_eq!(first.tasty_link_id(), second.tasty_link_id());
     assert_eq!(first.source_member_order(), second.source_member_order());
+}
+
+#[test]
+fn batch_emits_the_complete_ordered_class_and_tasty_manifest() {
+    let batch = emit_paired_jvm_tasty_batch(
+        COUNTER_GAUGE,
+        "CounterGauge.scala",
+        SourceId::from_index(319),
+    )
+    .unwrap();
+
+    assert_eq!(batch.source_id(), SourceId::from_index(319));
+    assert_eq!(batch.classes().len(), 2);
+    let expected = [
+        (
+            "example/Counter",
+            "example/Counter.class",
+            "example/Counter.tasty",
+        ),
+        (
+            "example/Gauge",
+            "example/Gauge.class",
+            "example/Gauge.tasty",
+        ),
+    ];
+    for (class, (internal_name, classfile_path, tasty_path)) in batch.classes().iter().zip(expected)
+    {
+        let pair = class;
+        assert_eq!(pair.classfile_path(), classfile_path);
+        assert_eq!(pair.tasty_path(), tasty_path);
+        assert_eq!(pair.source_id(), batch.source_id());
+
+        let tasty = TastyFile::parse_and_validate_scala_3_9(pair.tasty_bytes()).unwrap();
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version,
+            ),
+            (28, 9, 0)
+        );
+        assert_eq!(
+            pair.tasty_link_id(),
+            TastyLinkId::from_bytes(tasty.header().uuid)
+        );
+
+        let mut reader = Reader::new(pair.classfile_bytes());
+        let class_file = ClassFile::decode(&mut reader).unwrap();
+        assert!(reader.is_at_end());
+        assert_eq!(
+            (class_file.version.major, class_file.version.minor),
+            (65, 0)
+        );
+        assert_eq!(
+            class_file
+                .constant_pool
+                .class_name(class_file.this_class)
+                .unwrap(),
+            internal_name
+        );
+        assert_eq!(
+            class_file.tasty_link_id().unwrap(),
+            Some(pair.tasty_link_id())
+        );
+        validate_classfile_tasty_link(&class_file, pair.tasty_bytes()).unwrap();
+    }
+}
+
+#[test]
+fn fresh_batch_sessions_produce_byte_identical_complete_manifests() {
+    let first = emit_paired_jvm_tasty_batch(
+        COUNTER_GAUGE,
+        "CounterGauge.scala",
+        SourceId::from_index(320),
+    )
+    .unwrap();
+    let second = emit_paired_jvm_tasty_batch(
+        COUNTER_GAUGE,
+        "CounterGauge.scala",
+        SourceId::from_index(321),
+    )
+    .unwrap();
+
+    assert_ne!(first.source_id(), second.source_id());
+    assert_eq!(first.classes().len(), second.classes().len());
+    for (left, right) in first.classes().iter().zip(second.classes()) {
+        assert_eq!(left.classfile_path(), right.classfile_path());
+        assert_eq!(left.classfile_bytes(), right.classfile_bytes());
+        assert_eq!(left.tasty_path(), right.tasty_path());
+        assert_eq!(left.tasty_bytes(), right.tasty_bytes());
+        assert_eq!(left.tasty_link_id(), right.tasty_link_id());
+    }
+}
+
+#[test]
+fn unsupported_second_class_rejects_the_entire_batch() {
+    let source = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass Gauge(start: Int):\n  private var reading: Int = start\n  def get(): Int = reading\n  def set(value: Int): Unit = while reading < value do reading = reading + 1\n";
+    assert!(matches!(
+        emit_paired_jvm_tasty_batch(source, "CounterGauge.scala", SourceId::from_index(322)),
+        Err(PairedBatchArtifactError::Plan(
+            PairedPlanError::BatchClass { class_index: 1, .. }
+        ))
+    ));
 }
 
 #[test]

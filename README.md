@@ -35,16 +35,17 @@ APIs and supported language subsets are still evolving.
 
 The source-to-class-file pipeline is exercised in
 [`tests/jvm_source_compilation.rs`](tests/jvm_source_compilation.rs), with JVM
-verification and execution in CI. The root `dotty::jvm_tasty_plan` library
-module now coordinates the audited single-class Counter overlap from one
-frontend session and exposes both validated borrowed plans within a callback.
-The opt-in `dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_class` path
-returns an owned, decoded-and-validated Counter `.class`/`.tasty` pair linked
-by the TASTy producer's exact header UUID. A pinned Scala 3.9.0 consumer gate
-compiles against two fresh deterministic Rust pairs, verifies TASTy-dependent
-member lookup and executes the unchanged Rust class under JDK 21. The gate is
-limited to the audited Counter source shape; this is not a compiler driver/CLI
-or general Scala ABI support. See the [binary interoperability record](docs/jvm-tasty-binary-interop.md).
+verification and execution in CI. The opt-in root `dotty::jvm_tasty_artifacts`
+library module emits an owned, decoded-and-validated Counter `.class`/`.tasty`
+pair or a complete in-memory batch for the audited two-class Counter/Gauge
+source shape. Batch emission uses one frontend session, links each class to
+the exact UUID from its TASTy header, and returns nothing unless every artifact
+passes whole-batch validation. A pinned Scala 3.9.0 consumer gate verifies
+TASTy-dependent lookup and executes the unchanged single-class Rust output
+under JDK 21. Multi-class external consumption and filesystem publication are
+separate follow-up work; these bounded library paths are not a compiler
+driver/CLI or general Scala ABI support. See the [binary interoperability
+record](docs/jvm-tasty-binary-interop.md) and [multi-class audit](docs/jvm-tasty-multiclass.md).
 
 Compatibility targets Scala **3.9.0**, pinned to source revision
 `777528f19a58e794c9954a42f433373472ec57f8`. The semantic pickler emits TASTy
