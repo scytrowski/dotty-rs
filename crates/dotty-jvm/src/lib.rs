@@ -2543,6 +2543,22 @@ pub fn emit_class(
     emission::emit_class(unit, class_symbol, definitions)
 }
 
+/// Emits one selected class with an explicit Scala 3 TASTy sidecar link.
+///
+/// This opt-in path writes the supplied, already validated link identifier as
+/// the class-level `TASTY` attribute. It does not produce or validate the
+/// sidecar itself; callers coordinating a pair must validate the encoded
+/// TASTy header and class bytes together. [`emit_class`] remains unchanged and
+/// emits no Scala metadata.
+pub fn emit_class_with_tasty_link(
+    unit: &JvmCompilationUnit<'_>,
+    class_symbol: SymbolId,
+    definitions: &Definitions,
+    tasty_link: dotty_classfile::tasty_link::TastyLinkId,
+) -> Result<GeneratedClass, JvmCodegenError> {
+    emission::emit_class_with_tasty_link(unit, class_symbol, definitions, tasty_link)
+}
+
 impl JvmParameterLocal {
     /// Canonical parameter symbol supplied by the class plan.
     pub const fn symbol(self) -> SymbolId {
