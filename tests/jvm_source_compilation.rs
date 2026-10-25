@@ -11546,6 +11546,142 @@ fn body_field_initializer_failure_keeps_a_multi_class_batch_unpublished() {
 }
 
 #[test]
+fn public_body_field_rejections_keep_source_batches_unpublished() {
+    let cases: [(&str, &str, fn(&PipelineFailure) -> bool); 11] = [
+        (
+            "public-body-missing-rhs",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(JvmCodegenError::MissingFieldInitializer { .. })
+                )
+            },
+        ),
+        (
+            "public-body-wrong-rhs",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = true }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Typer(TyperError::ExpectedExpressionTypeMismatch { .. })
+                )
+            },
+        ),
+        (
+            "public-body-duplicate-field",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = 1; var value: Int = 2 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(JvmCodegenError::DuplicateJvmFieldName { .. })
+                )
+            },
+        ),
+        (
+            "public-body-getter-collision",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = 1; def value(): Int = 2 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(
+                        JvmCodegenError::DuplicateJvmAccessorMethodIdentity { .. }
+                    )
+                )
+            },
+        ),
+        (
+            "public-body-setter-collision",
+            "class Ready { def id(): Int = 1 }\nclass Broken { var value: Int = 1; def value_=(next: Int): Unit = {} }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(
+                        JvmCodegenError::DuplicateJvmAccessorMethodIdentity { .. }
+                    )
+                )
+            },
+        ),
+        (
+            "public-body-immutable-assignment",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = 1; def update(): Unit = value = 2 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Typer(TyperError::AssignmentTargetImmutable { .. })
+                )
+            },
+        ),
+        (
+            "public-body-invalid-receiver",
+            "class Ready { def id(): Int = 1 }\nclass Broken { def read(value: Int): Int = value.amount }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Typer(TyperError::MemberNotFound { .. })
+                )
+            },
+        ),
+        (
+            "public-body-field-called-as-method",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = 1; def read(): Int = value() }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Typer(TyperError::ApplicationCalleeNotMethod { .. })
+                )
+            },
+        ),
+        (
+            "public-body-unsupported-protected-field",
+            "class Ready { def id(): Int = 1 }\nclass Broken { protected val value: Int = 1 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmVisibility { .. })
+                )
+            },
+        ),
+        (
+            "public-body-unsupported-private-this-field",
+            "class Ready { def id(): Int = 1 }\nclass Broken { private[this] val value: Int = 1 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(
+                        JvmCodegenError::UnsupportedJvmFieldSourceVisibility { .. }
+                    )
+                )
+            },
+        ),
+        (
+            "public-body-unsupported-lazy-field",
+            "class Ready { def id(): Int = 1 }\nclass Broken { lazy val value: Int = 1 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmFieldFlag { .. })
+                )
+            },
+        ),
+    ];
+
+    for (label, source, expected_failure) in cases {
+        let output = TestOutputDirectory::new(label);
+        let failure = compile_source_classes(source, &format!("{label}.scala"), output.path())
+            .expect_err("invalid public-body source batch must fail before publication");
+        assert!(
+            expected_failure(&failure),
+            "{label} failed at an unexpected first pipeline stage: {failure:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label} failure must not publish an earlier valid class"
+        );
+    }
+}
+
+#[test]
 fn real_counter_objects_source_emits_two_deterministic_verified_classes() {
     let first_output = TestOutputDirectory::new("counter-objects-first");
     let second_output = TestOutputDirectory::new("counter-objects-second");
