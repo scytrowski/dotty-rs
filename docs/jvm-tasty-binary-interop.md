@@ -81,8 +81,10 @@ Observed class-level attributes, in this fixture's order, are:
 compilation artifact lacking embedded Scala tree data. `Scala3InlineInfo` is
 present in this fixture; this audit does not establish it as mandatory for all
 classes. The Rust `dotty-classfile` model currently preserves unknown
-class-level attributes losslessly as `Attribute::Other`, but has no typed
-`TASTY` attribute contract yet.
+class-level attributes losslessly as `Attribute::Other`. Its typed
+`TastyLinkId` builder/accessor contract writes or validates only the audited
+16-byte class-level link; it does not inspect TASTy contents or establish that
+the link matches a sidecar.
 
 The sidecar belongs next to the class at the same classpath package path:
 `example/Counter.class` and `example/Counter.tasty`. Scala's TASTy loader checks
@@ -242,12 +244,12 @@ artifact becomes visible.
 | Missing sidecar for class with `TASTY` | Scala classfile/TASTy discovery reports missing `.tasty`; publisher preflight must reject an incomplete pair. |
 | Class has no `TASTY`, explicit `-from-tasty` | Scala rejects it in `ReadTasty`; future linked publisher must reject before writing. |
 | UUID mismatch | Scala warns and still loads sidecar; `-Werror` fails. Rust preflight should reject mismatch as a pair-integrity error, before staging. |
-| `TASTY` payload length other than 16 | Pinned UUID parser reports an error; typed classfile attribute validation should reject it. |
+| `TASTY` payload length other than 16 | Pinned UUID parser reports an error; `ClassFile::tasty_link_id()` rejects it with `InvalidPayloadLength`. |
 | Wrong TASTy format version | Rust TASTy 3.9 validation rejects at TASTy validation; publisher must not attach a UUID from an unsupported payload. |
 | Package path / internal class name mismatch | Not characterized as a Scala diagnostic here. Shared-output validation must compare the canonical package path and internal name before encoding/publication. |
 | Source method, constructor, field, descriptor, or visibility disagreement | Must be rejected by the source/JVM/TASTy cross-artifact validator before either artifact is published; do not infer equivalence from matching names. |
 | Scala-private source field represented as public JVM accessor | The fixture has no generated accessor. The future validator must model source-vs-post-Getters rules explicitly and reject an unproven mismatch. |
-| Duplicate class-level `TASTY` attributes | Not characterized as a Scala rejection. The future typed classfile validator should reject duplicates before encoding to avoid ambiguous readers. |
+| Duplicate class-level `TASTY` attributes | Not characterized as a Scala rejection. `ClassFile::tasty_link_id()` and `ClassFileBuilder::tasty_link()` reject duplicates to avoid ambiguous readers. |
 | Same simple class name in distinct packages | Use package-qualified identity and sidecar paths; include a two-package regression test before supporting batch output. |
 | Unsupported producer shape | Reject during plan validation before writing either artifact; do not emit just the class or just TASTy. |
 
@@ -257,10 +259,10 @@ classfile-only JVM linkage does not establish source/TASTy parity.
 
 ## Successor boundary
 
-This issue changed tests, a pinned oracle fixture, and this document only. It
-did not change classfile encoding, the JVM backend, the TASTy format/pickler,
-Typer, production dependencies, or add a compiler driver. The next work can be
-split along the dependency sequence already described by #1633–#1639: typed
-classfile link representation; source/ABI validation; same-session paired
-plans; atomic pair staging; the independent Scala consumer; then the full
-determinism/runtime gate.
+Audit #1632 changed tests, a pinned oracle fixture, and this document only.
+Issue #1633 adds the typed, Scala-independent classfile link representation
+and validation; it does not change the JVM backend, TASTy format/pickler,
+Typer, production dependencies, or add a compiler driver. The remaining work
+can proceed along the dependency sequence described by #1634–#1639:
+source/ABI validation; same-session paired plans; atomic pair staging; the
+independent Scala consumer; then the full determinism/runtime gate.
