@@ -811,13 +811,17 @@ later lazy value compiles. This Typer increment conservatively returns
 `RecursiveLazyLocalValueInitializer` for direct self-reference in either type
 form because it does not model Scala's cycle inference or warning analysis.
 Forward references from an earlier local initializer to a later lazy
-declaration also remain unsupported; the Typer keeps the existing
-declaration-order scope and reports `TermNameNotFound`.
+declaration are supported when the target lazy value has an explicit type and
+the containing block has no local imports. The Typer pre-enters only those
+typed lazy declarations, so an ordinary later `val` remains unavailable to an
+earlier initializer. Inferred lazy forward references and blocks with local
+imports retain declaration-order behavior and can report `TermNameNotFound`.
 
 Contextual search, contextual argument insertion, implicit conversions, and
 summon remain unsupported. `inline val` declarations and lazy pattern
-definitions remain deferred. Recursive lazy initializers and forward
-references to later lazy declarations remain unsupported as described above.
+definitions remain deferred. Recursive inferred lazy initializers and
+forward references to later inferred lazy declarations remain unsupported as
+described above.
 Unsupported modifiers, duplicate modifiers, and unsupported or inconsistent
 modifier sets return `LocalValueModifierDeferred` with the source tree and
 complete modifier set.
