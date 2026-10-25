@@ -233,6 +233,9 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
 
         let found_view = self.class_view(found)?;
         let expected_view = self.class_view(expected)?;
+        if found_view.class != expected_view.class && self.is_final_class(expected_view.class) {
+            return Ok(false);
+        }
         self.reject_unmodeled_external_generic(&found_view)?;
         self.reject_unmodeled_external_generic(&expected_view)?;
         self.check_view_arity(&found_view, &expected_view, found, expected)?;
@@ -258,6 +261,15 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             });
         }
         Ok(())
+    }
+
+    fn is_final_class(&self, symbol: SymbolId) -> bool {
+        if !self.typer.store.symbols.contains(symbol) {
+            return false;
+        }
+        let declaration = self.typer.store.symbols.get(symbol);
+        declaration.kind == SymbolKind::ModuleClass
+            || declaration.flags.contains(dotty_core::SymbolFlags::FINAL)
     }
 
     fn is_builtin_class(&self, ty: TypeId) -> bool {

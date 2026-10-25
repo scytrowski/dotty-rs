@@ -2464,6 +2464,33 @@ mod tests {
     }
 
     #[test]
+    fn distinct_final_external_types_are_not_subtypes_without_class_info() {
+        let (arena, mut store, packages, definitions) = setup();
+        let final_class = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        store.symbols.get_mut(final_class).flags = SymbolFlags::FINAL;
+        let module_class = symbol(&mut store, SymbolKind::ModuleClass, SymbolInfo::Missing);
+        let final_applied =
+            applied_class_type(&mut store, definitions, final_class, &[definitions.int]);
+        let final_applied_other =
+            applied_class_type(&mut store, definitions, final_class, &[definitions.boolean]);
+        let module_type = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, module_class));
+        let index = SourceSemanticIndex::new();
+        let source = SourceId::from_index(0);
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert!(!typer.is_subtype(final_applied, module_type).unwrap());
+        assert!(!typer.is_subtype(module_type, final_applied).unwrap());
+        assert!(matches!(
+            typer.is_subtype(final_applied, final_applied_other),
+            Err(TypeRelationError::ExternalGenericInstantiationDeferred { class })
+                if class == final_class
+        ));
+    }
+
+    #[test]
     fn invariant_applied_types_reject_malformed_arity_explicitly() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class Box[A]");
