@@ -2,7 +2,88 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
-## Latest increment: select a module's unique `apply` method
+## Latest increment: type Scala's synthetic `String.+`
+
+This increment starts from merged `main` at
+`1b71f494fb6db882a42f31378a24ae6551986be0` (the tree is the reviewed #1601
+state, `78e77011f6cdbdc08dc024dcad27ab926fdea7e4`). Scala 3.9.0's pinned
+compiler source declares `Definitions.String_+` as a final synthetic member of
+`java.lang.String` with parameter `Any` and result `String`; it is not in the
+JDK classfile member table. The typer now supplies that member only when
+ordinary lookup finds no `+` and the receiver is the exact classfile-backed
+`java.lang.String` package path. A source/TASTy class with the same short name
+does not qualify, and an existing declaration is not shadowed. The selected
+symbol is owned by that canonical String class and has the compiler-declared
+`Any => String` method shape.
+
+The focused regression checks symbol ownership/signature, an unrelated source
+class negative control, and rollback when typing the right operand fails
+before a successful retry. The pinned positive/negative Scala oracle and
+reproduction command are in
+[`StringPlus.oracle.md`](../crates/dotty-typer/tests/fixtures/string-plus/StringPlus.oracle.md).
+
+The deterministic `package-term` audit compared the same 60 files and 369
+methods at baseline `78e77011f6cdbdc08dc024dcad27ab926fdea7e4` and implementation
+`41f55521412e8ea7250967e6a03ececc84146d33`. Both runs matched exactly, with no
+parser or namer failures and zero fully typed methods. Exactly three frozen
+rows advanced, from `MemberNotFound` to
+`ApplicationArgumentConformanceUnsupported` while typing the enclosing
+`InlineInfoAttribute.read#tree=420` attempt:
+
+| Frozen row | New first blocker | Fully typed |
+| --- | --- | --- |
+| `InlineInfoAttribute.scala#tree=212` (`nextByte`) | `ApplicationArgumentConformanceUnsupported` | no |
+| `InlineInfoAttribute.scala#tree=226` (`nextUTF8`) | `ApplicationArgumentConformanceUnsupported` | no |
+| `InlineInfoAttribute.scala#tree=239` (`nextShort`) | `ApplicationArgumentConformanceUnsupported` | no |
+
+The only aggregate movement was `MemberNotFound` 6 → 3 and
+`ApplicationArgumentConformanceUnsupported` 1 → 4. This records blocker
+progress only; the #1566 goal of fully typing a real method remains unmet. The
+three row-level transitions are in
+[`typer-name-resolution-1566-string-plus-3.9.0.tsv`](typer-name-resolution-1566-string-plus-3.9.0.tsv).
+
+The deterministic 3-file / 31-method smoke audit matched its checked-in
+baseline exactly, including every method row and blocker count. The separate
+deterministic `object-module` cohort covered 77 files and 576 methods, with no
+parser or namer failures; it typed zero complete methods. These focused results
+do not claim full-corpus compatibility.
+
+The next bounded investigation is the conformance failure after `String.+`
+inside `Some(name + desc)` in `read#tree=420`. Determine the actual and formal
+types at that application before changing inference or conformance; this audit
+does not establish that the failure is caused by String aliasing.
+
+Reproduce the deterministic cohort comparison with:
+
+```sh
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-string-plus-final-runs" \
+SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
+SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
+  --verify-determinism target/issue-1566-string-plus-final.md
+```
+
+The smoke and object-module audits used the same environment:
+
+```sh
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-string-plus-smoke-runs" \
+SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
+SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+tools/typer-classpath-corpus-audit/run \
+  --focused-manifest docs/typer-focused-smoke-manifest-3.9.0.tsv \
+  --verify-determinism target/issue-1566-string-plus-smoke.md
+
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-string-plus-object-module-runs" \
+SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
+SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+tools/typer-classpath-corpus-audit/run --focused-cohort object-module \
+  --verify-determinism target/issue-1566-string-plus-object-module.md
+```
+
+## Previous increment: select a module's unique `apply` method
 
 This increment starts from merged `main` at
 `7d6c3ed3502d80efb235f994e551792fd2b4bdbb`, after #1600. In the pinned Scala
@@ -56,9 +137,10 @@ tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
   --verify-determinism target/issue-1566-some-apply.md
 ```
 
-The next bounded investigation is the `MemberNotFound` reached from
-`name + desc` in `InlineInfoAttribute.read#tree=420`; identify the exact
-receiver and canonical `+` member before choosing a fix.
+The `MemberNotFound` for `name + desc` recorded by this increment was addressed
+by the synthetic `java.lang.String.+` support above; the next investigation is
+the resulting `ApplicationArgumentConformanceUnsupported` at the enclosing
+`Some(name + desc)` application.
 
 ## Latest increment: adapt `if` expressions without `else` to `Unit`
 
