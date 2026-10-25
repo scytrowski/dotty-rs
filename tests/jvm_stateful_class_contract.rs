@@ -4048,7 +4048,7 @@ fn accessor_getter_remains_separate_from_an_inherited_final_source_method() {
 }
 
 #[test]
-fn inherited_accessor_sources_keep_declaring_identity_and_pin_typer_blocker() {
+fn inherited_accessor_sources_keep_declaring_identity_through_unqualified_typer_lookup() {
     with_source(
         include_str!("fixtures/jvm/InheritedAccessors.scala"),
         |ast, source, index, definitions, typer| {
@@ -4150,17 +4150,25 @@ fn inherited_accessor_sources_keep_declaring_identity_and_pin_typer_blocker() {
                 "unexpected mutable-local selection result: {mutable_local_result:?}"
             );
 
-            // An unqualified name is a separate Typer lookup form and remains unsupported.
+            // An unqualified inherited name retains the declaring Field while
+            // using the current Child instance as its typed prefix.
             let (read, _, read_rhs) = method_tree_and_rhs(ast, index, source, typer, child, "read");
             typer.complete_symbol(read).unwrap();
             let context = typer.expression_context_for(read).unwrap();
+            let typed = typer
+                .type_expression(read_rhs, context)
+                .expect("an unqualified inherited field resolves in the child class");
+            assert_eq!(
+                typer.source_typed_index().get(source, read_rhs),
+                Some(typed)
+            );
             assert!(matches!(
-                typer.type_expression(read_rhs, context),
-                Err(dotty_typer::TyperError::TermNameNotFound {
-                    source: actual_source,
-                    tree_index,
-                    ..
-                }) if actual_source == source && tree_index == read_rhs.index()
+                typer.store().types.get(typer.typed_ast().get(typed).ty),
+                Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(actual),
+                } if matches!(typer.store().types.get(*prefix), Type::ThisType { class: actual_class } if *actual_class == child)
+                    && *actual == current
             ));
             assert_method_assignment_targets_field(
                 &audit,
