@@ -24,6 +24,18 @@ fn pinned_scala_consumes_and_executes_the_rust_linked_counter_pair() {
     let second = emit_paired_jvm_tasty_class(COUNTER, "Counter.scala", SourceId::from_index(1639))
         .expect("emit the second fresh Rust Counter pair");
     assert_ne!(first.source_id(), second.source_id());
+    assert_eq!(first.classfile_path(), "example/Counter.class");
+    assert_eq!(first.tasty_path(), "example/Counter.tasty");
+    assert_eq!(first.source_member_order().len(), 3);
+    println!(
+        "Counter MVP sessions: first source={:?}, class={:?}, members={:?}; second source={:?}, class={:?}, members={:?}",
+        first.source_id(),
+        first.class(),
+        first.source_member_order(),
+        second.source_id(),
+        second.class(),
+        second.source_member_order(),
+    );
     assert_eq!(first.classfile_path(), second.classfile_path());
     assert_eq!(first.tasty_path(), second.tasty_path());
     assert_eq!(first.classfile_bytes(), second.classfile_bytes());
@@ -121,7 +133,13 @@ fn pinned_scala_consumes_and_executes_the_rust_linked_counter_pair() {
         "{report}"
     );
     assert!(
-        report.contains("\"fresh_runtime_outputs\": [\n    \"13\",\n    \"13\"\n  ]"),
+        report.contains(
+            "\"fresh_runtime_outputs\": [\n    \"13\",\n    \"-42\",\n    \"-42\",\n    \"-42\",\n    \"13\",\n    \"-42\",\n    \"-42\",\n    \"-42\"\n  ]"
+        ),
+        "{report}"
+    );
+    assert!(
+        report.contains("\"counter_source_sha256\": \"79cd8926b6385dfafa39e766d80402643deeab673e526ba1abc67e3f67524a3e\""),
         "{report}"
     );
 }
