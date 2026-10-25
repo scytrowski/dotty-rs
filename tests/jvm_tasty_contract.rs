@@ -1,19 +1,24 @@
+use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 use dotty_classfile::access_flags::{ACC_FINAL, ACC_PRIVATE};
 use dotty_classfile::classfile::{
     ClassFile, ClassFileBuilder, ClassFileVersion, Reader, TastyLinkId,
 };
 use dotty_core::ast::TreeKind;
 use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolKind};
+use dotty_jvm::emit_class_with_tasty_link;
 use dotty_jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmFieldPlan,
     JvmFieldSourceVisibility, JvmMethodPlan, JvmPrimaryConstructorPlan,
 };
 use dotty_jvm_tasty_contract::{
-    JvmTastyContractError, validate_classfile_tasty_link, validate_jvm_tasty_class,
+    JvmTastyBatchArtifacts, JvmTastyClassFileArtifact, JvmTastyContractError,
+    JvmTastySidecarArtifact, validate_classfile_tasty_link, validate_jvm_tasty_batch,
+    validate_jvm_tasty_batch_artifacts, validate_jvm_tasty_class,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
+use dotty_tasty::tasty::TastyFile;
 use dotty_tasty_pickler::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, PrimaryConstructorInputPlan,
     SourceMetadata,
@@ -21,6 +26,244 @@ use dotty_tasty_pickler::{
 use dotty_typer::SourceTyper;
 
 const COUNTER: &str = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n";
+const COUNTER_GAUGE: &str = include_str!("fixtures/jvm_tasty_multiclass/CounterGauge.scala");
+
+#[test]
+fn whole_batch_proves_distinct_class_abi_and_rejects_partial_or_swapped_artifacts() {
+    with_paired_jvm_tasty_batch_plan(
+        COUNTER_GAUGE,
+        "CounterGauge.scala",
+        SourceId::from_index(70),
+        |source_batch| {
+            let tasty_plans = source_batch
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let batch = validate_jvm_tasty_batch(source_batch.jvm_unit, &tasty_plans).unwrap();
+            assert_eq!(batch.source_id(), source_batch.source_id);
+            assert_eq!(
+                batch
+                    .classes()
+                    .iter()
+                    .map(|class| class.proof().internal_name())
+                    .collect::<Vec<_>>(),
+                ["example/Counter", "example/Gauge"]
+            );
+            assert_eq!(
+                batch
+                    .classes()
+                    .iter()
+                    .map(|class| class.classfile_path())
+                    .collect::<Vec<_>>(),
+                ["example/Counter.class", "example/Gauge.class"]
+            );
+
+            let artifacts = encode_batch_for_contract_test(&source_batch);
+            let mut reversed = artifacts.clone();
+            reversed.classfiles.reverse();
+            reversed.sidecars.reverse();
+            validate_jvm_tasty_batch_artifacts(&batch, reversed.clone()).unwrap();
+
+            let mut missing = reversed.clone();
+            missing.classfiles.pop();
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&batch, missing),
+                Err(JvmTastyContractError::BatchArtifactPaths {
+                    reason: "missing expected class-file path",
+                    ..
+                })
+            ));
+
+            let mut missing_sidecar = reversed.clone();
+            missing_sidecar.sidecars.pop();
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&batch, missing_sidecar),
+                Err(JvmTastyContractError::BatchArtifactPaths {
+                    reason: "missing expected TASTy sidecar path",
+                    ..
+                })
+            ));
+
+            let mut duplicate = reversed.clone();
+            duplicate.classfiles.push(duplicate.classfiles[0].clone());
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&batch, duplicate),
+                Err(JvmTastyContractError::BatchArtifactPaths {
+                    reason: "duplicate artifact path",
+                    ..
+                })
+            ));
+
+            let mut swapped = artifacts;
+            let tasty0 = swapped.sidecars[0].tasty_bytes.clone();
+            swapped.sidecars[0].tasty_bytes = swapped.sidecars[1].tasty_bytes.clone();
+            swapped.sidecars[1].tasty_bytes = tasty0;
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&batch, swapped),
+                Err(JvmTastyContractError::BatchArtifact {
+                    phase: "class-file/TASTy link",
+                    ..
+                })
+            ));
+
+            let mut wrong_package_path = reversed.clone();
+            wrong_package_path.classfiles[0].classfile_path = "wrong/Gauge.class".into();
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&batch, wrong_package_path),
+                Err(JvmTastyContractError::BatchArtifactPaths {
+                    reason: "missing expected class-file path",
+                    ..
+                })
+            ));
+
+            let mut truncated_sidecar = reversed.clone();
+            truncated_sidecar.sidecars[0].tasty_bytes.truncate(5);
+            assert!(validate_jvm_tasty_batch_artifacts(&batch, truncated_sidecar).is_err());
+
+            let mut bad_second_class = reversed.clone();
+            let second = bad_second_class
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/Gauge.class")
+                .unwrap();
+            second.classfile_bytes.truncate(7);
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&batch, bad_second_class),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "class-file decode",
+                    ..
+                })
+            ));
+
+            let mut wrong_version = reversed.clone();
+            let counter = wrong_version
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/Counter.class")
+                .unwrap();
+            counter.classfile_bytes[6..8].copy_from_slice(&61u16.to_be_bytes());
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&batch, wrong_version),
+                Err(JvmTastyContractError::BatchArtifact {
+                    phase: "class-file version",
+                    ..
+                })
+            ));
+
+            let mut wrong_field_flags = reversed.clone();
+            let counter = wrong_field_flags
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/Counter.class")
+                .unwrap();
+            let mut reader = Reader::new(&counter.classfile_bytes);
+            let mut classfile = ClassFile::decode(&mut reader).unwrap();
+            classfile.fields[0].access_flags.0 |= ACC_FINAL;
+            counter.classfile_bytes = classfile.encode().unwrap();
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&batch, wrong_field_flags),
+                Err(JvmTastyContractError::BatchArtifact {
+                    phase: "member ABI",
+                    ..
+                })
+            ));
+
+            let mut extra = reversed.clone();
+            let mut unexpected = extra.classfiles[0].clone();
+            unexpected.classfile_path = "example/Unexpected.class".into();
+            extra.classfiles.push(unexpected);
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&batch, extra),
+                Err(JvmTastyContractError::BatchArtifactPaths {
+                    reason: "unexpected extra class file",
+                    ..
+                })
+            ));
+
+            let mut orphan = reversed.clone();
+            let mut extra_sidecar = orphan.sidecars[0].clone();
+            extra_sidecar.tasty_path = "example/Unexpected.tasty".into();
+            orphan.sidecars.push(extra_sidecar);
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&batch, orphan),
+                Err(JvmTastyContractError::BatchArtifactPaths {
+                    reason: "unexpected extra TASTy sidecar",
+                    ..
+                })
+            ));
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn whole_batch_rejects_wrong_tasty_order_and_duplicate_source_plan() {
+    with_paired_jvm_tasty_batch_plan(
+        COUNTER_GAUGE,
+        "CounterGauge.scala",
+        SourceId::from_index(71),
+        |source_batch| {
+            let plans = source_batch
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let swapped = [plans[1], plans[0]];
+            assert!(matches!(
+                validate_jvm_tasty_batch(source_batch.jvm_unit, &swapped),
+                Err(JvmTastyContractError::BatchShape(
+                    "TASTy class order differs from the complete JVM unit"
+                ))
+            ));
+            let duplicate = [plans[0], plans[0]];
+            assert!(matches!(
+                validate_jvm_tasty_batch(source_batch.jvm_unit, &duplicate),
+                Err(JvmTastyContractError::BatchShape(
+                    "TASTy class order differs from the complete JVM unit"
+                ))
+            ));
+        },
+    )
+    .unwrap();
+}
+
+fn encode_batch_for_contract_test(
+    source_batch: &dotty::jvm_tasty_plan::PairedJvmTastyBatchPlan<'_>,
+) -> JvmTastyBatchArtifacts {
+    let entries = source_batch
+        .classes
+        .iter()
+        .map(|class| {
+            let pickled = class.tasty_plan.pickle().unwrap();
+            let tasty_file = TastyFile::parse_and_validate_scala_3_9(pickled.bytes()).unwrap();
+            let link = TastyLinkId::from_bytes(tasty_file.header().uuid);
+            let generated = emit_class_with_tasty_link(
+                source_batch.jvm_unit,
+                class.class,
+                class.tasty_plan.plan().definitions,
+                link,
+            )
+            .unwrap();
+            (
+                JvmTastyClassFileArtifact {
+                    classfile_path: class.classfile_path.clone(),
+                    classfile_bytes: generated.into_bytes(),
+                },
+                JvmTastySidecarArtifact {
+                    tasty_path: class.tasty_path.clone(),
+                    tasty_bytes: pickled.bytes().to_vec(),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let (classfiles, sidecars) = entries.into_iter().unzip();
+    JvmTastyBatchArtifacts {
+        classfiles,
+        sidecars,
+    }
+}
 
 #[test]
 fn one_session_counter_proves_source_tasty_and_jvm_abi_agreement() {

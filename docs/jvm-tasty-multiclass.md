@@ -72,6 +72,54 @@ The existing `with_paired_jvm_tasty_class_plan` remains one-class-only. The upda
 
 Cross-class source calls/fields and inheritance between these siblings, objects/companions, nested classes, traits, generics, overloaded/default methods, external JDK classes, `String`, public constructor accessors, and other unsupported pickler forms remain outside this audit and the bounded successor fixture.
 
+## Whole-batch consistency contract (#1654)
+
+`dotty-jvm-tasty-contract::validate_jvm_tasty_batch` consumes the complete
+ordered `JvmCompilationUnit` from #1653 and one validated class-state TASTy
+plan for each class (2–32 classes, matching #1653's planner bound). It returns a read-only receipt only after every class has
+passed the existing canonical ABI proof. The receipt preserves source order,
+the common `SourceId`, each original class `SymbolId`, and its exact
+package-qualified `.class` and `.tasty` paths. Validation checks that both
+plans borrow the same store, source AST/index, definitions, typed AST, and
+source ID; class order and count agree with the JVM unit; package ownership,
+class names, source member/formal identities, typed RHS bindings, and ABI
+descriptors agree; and no class, binary name, path, or original symbol is
+represented twice. A failing later class rejects the receipt for the entire
+batch.
+
+The separate `validate_jvm_tasty_batch_artifacts` function consumes owned,
+independently keyed classfile and TASTy sidecar maps. Input order is immaterial:
+it sorts both path sets, rejects duplicate/cross-colliding paths, then checks
+the expected pair set in source order. Each pair must use the exact planned
+paths, decode without trailing classfile
+bytes, identify the expected package-qualified class, target classfile 65.0,
+match the checked class/member/access-flag ABI and superclass, carry a
+classfile `TASTY` identifier equal to its sidecar header, and parse as TASTy
+28.9.0. The complete sidecar bytes must also equal the bytes produced by that
+class's validated TASTy plan. There is one sidecar per class for this audited
+fixture. The validator does not require UUIDs to be globally unique; the
+classfile-to-sidecar link is checked pairwise against the actual header.
+Nothing is published by either API.
+
+The first-error taxonomy is deterministic and contextual:
+
+- `BatchShape` rejects incomplete counts, duplicate class plans, and source
+  order disagreement before returning any proofs.
+- `BatchClass { class_index, class, error }` wraps the first semantic or
+  per-class ABI failure in source declaration order.
+- `BatchArtifactPaths { reason, path }` reports the first duplicate, missing,
+  orphan, or extra package-relative path after deterministic path sorting.
+- `BatchArtifact { class_index, class, phase, reason }` reports decode,
+  version, identity, class/member ABI, TASTy, or link failures in source order.
+
+The semantic receipt uses original `SymbolId`s and source/index bindings; equal
+names or equal numeric arena slots do not substitute for source ownership.
+Numeric IDs alone cannot authenticate a foreign same-slot arena, so callers
+must preserve the one-session ownership invariant when constructing both the
+JVM unit and TASTy plans. The batch validator checks pointer identity for the
+shared semantic stores and arenas it receives, but it is not a cryptographic
+session token. The official Scala consumer remains the separate #1657 proof.
+
 ## Reproduction
 
 From the repository root, with the pinned Scala source checkout and JDK available:
