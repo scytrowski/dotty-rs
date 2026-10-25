@@ -88,9 +88,10 @@ view. Each entry retains the source `Field` symbol and a getter/setter role,
 along with the receiver, declaring class, JVM name, descriptor, and flags.
 Keeping these entries separate preserves `dispatch_methods()` compatibility
 and leaves same-signature collisions visible without inventing source method
-symbols or treating an accessor as an override. This metadata view does not
-enable accessor-bearing class emission; that remains blocked until the
-accessor collision and hierarchy gates are validated.
+symbols or treating an accessor as an override. Emission now accepts the
+validated Object-rooted hierarchy subset when descendants add no new accessors;
+the parent keeps physical storage and getter/setter methods while descendants
+retain inherited entries only in effective dispatch metadata.
 
 The JVM adapter accepts a canonical Object root and up to two same-unit edges
 between public ordinary classes, so a planned `Base → Middle → Leaf` chain is

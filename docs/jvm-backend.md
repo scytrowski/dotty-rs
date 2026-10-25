@@ -1021,10 +1021,12 @@ getter signature, and a public `$eq` setter signature for `var` only. This
 projection uses the exact Scala 3.9.0 oracle evidence recorded in
 [`jvm-scala-accessors.md`](jvm-scala-accessors.md), preserves source order and
 canonical source IDs, and rejects field or binary method-signature collisions
-against planned fields and methods. Accessor-bearing inheritance edges are
-rejected with `UnsupportedJvmAccessorInheritance` until generated signatures
-participate in override and final-method validation. The projection does not
-add semantic symbols or ordinary source field initializers. Whole-class
+against planned fields and methods. Accessor inheritance is admitted for the
+bounded Object-rooted same-unit hierarchy after generated and ordinary method
+signatures pass collision and final-method validation. Descendants in that
+hierarchy cannot declare additional accessors yet; those edges return
+`UnsupportedJvmAccessorInheritance`. The projection does not add semantic
+symbols or ordinary source field initializers. Whole-class
 emission writes the checked private backing fields and constructor stores,
 then emits public getters and, for mutable accessors, public setters in
 constructor accessor order before explicitly planned source methods. Each
@@ -1042,8 +1044,9 @@ constructor binding or exact class-body source proof, field type, mutability,
 backing-field flags, and getter/setter signatures at each use. Ordinary
 private source fields retain their same-class `getfield`/`putfield` path;
 accessor call sites never reference another class's private backing field.
-Mutable local `var` receivers and accessor-bearing inheritance remain
-unsupported.
+Inherited accessor call-site lowering and mutable local `var` receivers remain
+unsupported, while the inherited classes themselves can be emitted in the
+validated subset.
 
 The root integration test
 `real_source_accessor_calls_dispatch_through_validated_getters_and_setters`
@@ -1181,5 +1184,6 @@ no backing-field references, two-slot Long/Double behavior, and byte-identical
 ordered class files from two fresh frontend sessions. Its JDK 21 harness runs
 with `java -Xverify:all`; earlier focused tests retain typed rejection and
 zero-partial-artifact checks for invalid batches. This does not add support for
-private cross-class access, accessor inheritance, traits, generics, or combined
-Scala ABI/TASTy output.
+private cross-class access, inherited accessor call-site lowering,
+child-declared accessors above an accessor-bearing parent, traits, generics, or
+combined Scala ABI/TASTy output.
