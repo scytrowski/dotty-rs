@@ -1,6 +1,6 @@
 # JVM classfile and TASTy binary linkage audit
 
-This is an audit-only record for [issue #1632](https://github.com/scytrowski/dotty-rs/issues/1632). It freezes the observed Scala 3.9.0 contract and the current Rust producer overlap. It does not add a combined-output API or claim that Rust currently emits a Scala-loadable class/TASTy pair.
+This document records the audit for [issue #1632](https://github.com/scytrowski/dotty-rs/issues/1632) and the follow-up planning increments. It freezes the observed Scala 3.9.0 contract and the current Rust producer overlap. It does not claim that Rust currently emits a Scala-loadable class/TASTy pair.
 
 ## Pinned oracle and reproducibility
 
@@ -163,14 +163,31 @@ through the current Rust pipelines:
   class path/name, field/method descriptors, class attributes, UUID equality,
   and the pinned UUID bytes.
 
-These tests show that both producers accept the source shape independently.
-They do not yet prove that the separate outputs have matching identities,
-descriptors, method order, or link metadata. Existing pipeline helpers create
-separate sessions. An output-pair implementation must carry the canonical
-source `Class SymbolId`, constructor `SymbolId`, explicit method `SymbolId`s,
-source field `SymbolId`, true typed RHS roots, package path, and both validated
-plans from **one** `SemanticStore`/frontend session. It must not reconstruct
-identity from simple names, allocation order, or generated class bytes.
+### One-session paired planning (#1635)
+
+The root `dotty::jvm_tasty_plan::with_paired_jvm_tasty_class_plan` coordinator
+now runs the source frontend once for the audited one-class shape, then builds
+both a `JvmCompilationUnit` and a complete `ValidatedClassStatePlan` from the
+same `SemanticStore`, source AST/index, typed AST/index, class, constructor,
+field, methods and typed RHS roots. It invokes the #1634 consistency proof
+before calling the consumer closure. The `PairedJvmTastyClassPlan` exposes the
+validated producer plans, compatibility proof, canonical declaration IDs,
+source member order, and intended relative `.class`/`.tasty` paths.
+
+The receipt is callback-scoped because these producer plans borrow one session;
+the callback cannot retain arena IDs after that session is dropped. The
+coordinator rejects multi-class units and any source shape rejected by either
+producer or the consistency proof. It is a narrow library planning boundary:
+it emits no bytes, writes no files, and does not provide a compiler driver or
+CLI. Artifact construction and Scala consumer proof remain assigned to later
+issues.
+
+The independent producer tests show that each producer accepts the source
+shape on its own. The paired-planning regression additionally asserts shared
+session identity, source member order, constructor formal identity, exact
+field/method typed roots, and package paths before returning a plan. No class
+or TASTy bytes are emitted by that check, so it does not establish byte-level
+linkage or Scala consumer behavior.
 
 ## Consumer proof and controls for the successor gate
 
