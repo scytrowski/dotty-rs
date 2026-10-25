@@ -42,6 +42,15 @@ Five exact affected roots and their current outcomes are recorded in
 This is a bounded symbol-lookup result, not a claim that the #1566 method
 cohort advanced or that `asScala` calls now type.
 
+The CI focused smoke audit provides a separate signal: 17 of its 31 methods
+move from `SymbolResolution` to the later `MemberLookup` blocker, and member
+lookup errors fall from 15 to 0. No method becomes fully typed. The exact
+deterministic output is recorded in
+[`typer-focused-smoke-baseline-3.9.0.txt`](typer-focused-smoke-baseline-3.9.0.txt).
+This shows that the new hierarchy lookup advances some real typer paths, while
+the broader #1566 target methods remain blocked at the missing
+`CollectionConverters` qualifier.
+
 Reproduce the cohort audit with the pinned Scala checkout and cached artifacts:
 
 ```sh

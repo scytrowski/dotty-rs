@@ -9475,7 +9475,7 @@ mod tests {
             ModuleResolutionProfile,
         };
 
-        let source_text = "package dotty.tools\npackage dotc\npackage core\nimport Contexts.*\nimport Contexts.withFreshTyperState\nclass Use";
+        let source_text = "package dotty.tools\npackage dotc\npackage core\nimport Contexts.withFreshTyperState\nclass Use";
         let (mut parsed, mut store, packages, definitions, index, source) =
             parse_and_name(source_text);
         let compiler_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -9490,7 +9490,7 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(imports.len(), 2);
+        assert_eq!(imports.len(), 1);
         let use_symbol = parsed
             .ast
             .iter()
@@ -9575,7 +9575,7 @@ mod tests {
         );
 
         let import_contexts = typer
-            .source_context_chain(declaration_context, imports[1].0.index())
+            .source_context_chain(declaration_context, imports[0].0.index())
             .expect("the declaration should retain its preceding imports");
         let imported_members = typer
             .lookup_import_candidates(
@@ -9584,8 +9584,8 @@ mod tests {
                 false,
                 ImportSelection::Explicit,
                 SourceTreeLocation {
-                    tree_index: imports[1].0.index(),
-                    position: parsed.ast.get(imports[1].0).position,
+                    tree_index: imports[0].0.index(),
+                    position: parsed.ast.get(imports[0].0).position,
                 },
             )
             .expect("the qualified import selector should resolve on Contexts");

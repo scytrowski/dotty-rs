@@ -1159,7 +1159,8 @@ impl SourceTyper<'_> {
             }
             if !found_locally {
                 let qualifier_symbol = self.store.symbols.get(qualifier);
-                if qualifier_symbol.kind == SymbolKind::Object
+                if is_wildcard
+                    && qualifier_symbol.kind == SymbolKind::Object
                     && matches!(qualifier_symbol.origin, SymbolOrigin::Tasty(_))
                 {
                     let store_checkpoint = self.store.checkpoint();
