@@ -172,7 +172,39 @@ fn method_input(
     Ok((method, local_values))
 }
 
+pub(crate) fn validate_class_state_method_bodies(
+    p: &crate::ClassStatePicklePlan<'_>,
+) -> Result<(), PickleError> {
+    let method_inputs = p
+        .members
+        .iter()
+        .filter_map(|member| match *member {
+            ClassMemberPicklePlan::Method {
+                symbol,
+                source_tree,
+            } => Some((symbol, source_tree)),
+            ClassMemberPicklePlan::Field(_) => None,
+        })
+        .map(|(symbol, source_tree)| method_input(p, symbol, source_tree))
+        .collect::<Result<Vec<_>, _>>()?;
+    let methods = method_inputs
+        .iter()
+        .map(|(method, _)| method.clone())
+        .collect::<Vec<_>>();
+    let local_values = method_inputs
+        .iter()
+        .flat_map(|(_, locals)| locals.iter().copied())
+        .collect::<Vec<_>>();
+    crate::plan::validate_class_state_method(p, &methods, &local_values)
+}
+
 impl ValidatedClassStatePlan<'_, '_> {
+    /// Validate every method's source and typed body against the complete
+    /// class-state TASTy subset without emitting bytes.
+    pub fn validate_method_bodies(&self) -> Result<(), PickleError> {
+        validate_class_state_method_bodies(self.plan())
+    }
+
     /// Emit complete Scala 3.9 TASTy for the validated private primitive fields.
     pub fn pickle(&self) -> Result<PickledTasty, PickleError> {
         self.pickle_with_limits(PickleLimits::default())

@@ -192,6 +192,10 @@ pub fn validate_jvm_tasty_class<'proof, 'unit, 'plan, 'session>(
         return Err(JvmTastyContractError::DifferentSession("typed AST"));
     }
 
+    tasty_plan
+        .validate_method_bodies()
+        .map_err(JvmTastyContractError::TastyPlan)?;
+
     jvm_unit
         .validate()
         .map_err(JvmTastyContractError::JvmPlan)?;

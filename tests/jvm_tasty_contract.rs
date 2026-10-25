@@ -49,6 +49,22 @@ fn one_session_counter_proves_source_tasty_and_jvm_abi_agreement() {
 }
 
 #[test]
+fn unsupported_tasty_method_body_is_rejected_before_pair_proof() {
+    let counter_with_loop = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n\n  def get(): Int = current\n  def set(value: Int): Unit = while current < value do current = current + 1\n";
+    with_counter_pair(
+        counter_with_loop,
+        SourceId::from_index(46),
+        |unit, tasty| {
+            assert!(tasty.pickle().is_err());
+            assert!(matches!(
+                validate_jvm_tasty_class(unit, tasty),
+                Err(JvmTastyContractError::TastyPlan(_))
+            ));
+        },
+    );
+}
+
+#[test]
 fn independent_numeric_arena_ids_do_not_prove_shared_session_provenance() {
     with_counter_pair(COUNTER, SourceId::from_index(41), |first_unit, _| {
         with_counter_pair(COUNTER, SourceId::from_index(41), |_, second_tasty| {
