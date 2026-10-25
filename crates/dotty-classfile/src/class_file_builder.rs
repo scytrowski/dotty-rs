@@ -53,6 +53,7 @@ use crate::encode_error::EncodeError;
 use crate::field::FieldInfo;
 use crate::method::MethodInfo;
 use crate::signature::{ClassSignature, FieldSignature, MethodSignature, SignatureError};
+use crate::tasty_link::TastyLinkId;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -139,6 +140,8 @@ pub enum ClassFileBuildError {
     /// A class, field, or method already has the requested singleton
     /// attribute.
     DuplicateAttribute,
+    /// The class already has a Scala `TASTY` link attribute.
+    DuplicateTastyLink,
     /// Abstract or native methods cannot contain a Code attribute.
     CodeNotAllowed,
     /// A method already has raw code attached.
@@ -219,6 +222,9 @@ impl fmt::Display for ClassFileBuildError {
                 formatter.write_str("class initializer must be static with descriptor ()V")
             }
             Self::DuplicateAttribute => formatter.write_str("duplicate singleton attribute"),
+            Self::DuplicateTastyLink => {
+                formatter.write_str("duplicate class-level TASTY attribute")
+            }
             Self::CodeNotAllowed => {
                 formatter.write_str("abstract and native methods cannot have Code")
             }
@@ -300,6 +306,7 @@ struct OwnedCodeAttribute {
 enum OwnedClassAttribute {
     SourceFile(String),
     Signature(String),
+    TastyLink(TastyLinkId),
 }
 
 /// An owned builder for a new class file.
@@ -436,6 +443,23 @@ impl ClassFileBuilder {
         }
         self.attributes
             .push(OwnedClassAttribute::SourceFile(file_name.into()));
+        Ok(self)
+    }
+
+    /// Adds the Scala 3 class-level `TASTY` link attribute.
+    ///
+    /// The supplied identifier must come from the TASTy bytes produced for
+    /// this class. The classfile crate writes the exact 16-byte payload but
+    /// does not generate or validate TASTy contents.
+    pub fn tasty_link(&mut self, id: TastyLinkId) -> Result<&mut Self, ClassFileBuildError> {
+        if self
+            .attributes
+            .iter()
+            .any(|attribute| matches!(attribute, OwnedClassAttribute::TastyLink(_)))
+        {
+            return Err(ClassFileBuildError::DuplicateTastyLink);
+        }
+        self.attributes.push(OwnedClassAttribute::TastyLink(id));
         Ok(self)
     }
 
@@ -824,6 +848,13 @@ impl ClassFileBuilder {
         if self
             .attributes
             .iter()
+            .any(|attribute| matches!(attribute, OwnedClassAttribute::TastyLink(_)))
+        {
+            pool_builder.utf8("TASTY")?;
+        }
+        if self
+            .attributes
+            .iter()
             .any(|attribute| matches!(attribute, OwnedClassAttribute::Signature(_)))
             || fields.iter().any(|field| field.signature.is_some())
             || methods.iter().any(|method| method.signature.is_some())
@@ -840,6 +871,13 @@ impl ClassFileBuilder {
                 }
                 OwnedClassAttribute::Signature(signature) => {
                     pool_builder.utf8(signature).map(Attribute::Signature)
+                }
+                OwnedClassAttribute::TastyLink(id) => {
+                    let name_index = pool_builder.utf8("TASTY")?;
+                    Ok(Attribute::Other(RawAttribute {
+                        name_index,
+                        bytes: id.as_bytes(),
+                    }))
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;

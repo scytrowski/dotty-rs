@@ -11,6 +11,7 @@ use crate::encode_error::EncodeError;
 use crate::field::FieldInfo;
 use crate::method::MethodInfo;
 use crate::reader::{ReadError, Reader};
+use crate::tasty_link::{TastyLinkError, TastyLinkId, TastyLinkLocation};
 use crate::writer::Writer;
 use std::fmt;
 
@@ -264,6 +265,42 @@ impl From<AttributeError> for ClassFileError {
 }
 
 impl<'a> ClassFile<'a> {
+    /// Returns the class-level Scala 3 TASTy link after validating its
+    /// cardinality, payload width, and placement.
+    ///
+    /// The decoder intentionally retains `TASTY` as `Attribute::Other` so
+    /// generic unknown-attribute round trips remain lossless. This accessor
+    /// interprets only the audited class-level form.
+    pub fn tasty_link_id(&self) -> Result<Option<TastyLinkId>, TastyLinkError> {
+        let mut payload = None;
+        for attribute in &self.attributes {
+            if let Some(bytes) = tasty_link_payload(attribute, &self.constant_pool)? {
+                if payload.is_some() {
+                    return Err(TastyLinkError::DuplicateClassAttribute);
+                }
+                payload = Some(bytes);
+            }
+            validate_nested_tasty_link(attribute, &self.constant_pool)?;
+        }
+
+        for field in &self.fields {
+            validate_misplaced_tasty_link(
+                &field.attributes,
+                &self.constant_pool,
+                TastyLinkLocation::Field,
+            )?;
+        }
+        for method in &self.methods {
+            validate_misplaced_tasty_link(
+                &method.attributes,
+                &self.constant_pool,
+                TastyLinkLocation::Method,
+            )?;
+        }
+
+        payload.map(TastyLinkId::try_from_bytes).transpose()
+    }
+
     /// Encodes a complete class file in JVMS §4.1 order.
     ///
     /// This structural serializer preserves constant-pool slots, duplicate
@@ -878,6 +915,57 @@ fn encode_pool_ref_error(error: PoolRefError, constant_pool_count: usize) -> Enc
         },
         PoolRefError::TooDeeplyNestedAttribute => EncodeError::TooDeeplyNestedAttribute,
         PoolRefError::TooDeeplyNestedAnnotation => EncodeError::TooDeeplyNestedAnnotation,
+    }
+}
+
+fn tasty_link_payload<'a>(
+    attribute: &'a Attribute<'_>,
+    pool: &ConstantPool,
+) -> Result<Option<&'a [u8]>, TastyLinkError> {
+    let Attribute::Other(raw) = attribute else {
+        return Ok(None);
+    };
+    let name = pool
+        .utf8(raw.name_index)
+        .map_err(|_| TastyLinkError::InvalidNameIndex {
+            name_index: raw.name_index,
+        })?;
+    Ok((name == "TASTY").then_some(raw.bytes))
+}
+
+fn validate_misplaced_tasty_link(
+    attributes: &[Attribute<'_>],
+    pool: &ConstantPool,
+    location: TastyLinkLocation,
+) -> Result<(), TastyLinkError> {
+    for attribute in attributes {
+        if tasty_link_payload(attribute, pool)?.is_some() {
+            return Err(TastyLinkError::MisplacedAttribute { location });
+        }
+        validate_nested_tasty_link(attribute, pool)?;
+    }
+    Ok(())
+}
+
+fn validate_nested_tasty_link(
+    attribute: &Attribute<'_>,
+    pool: &ConstantPool,
+) -> Result<(), TastyLinkError> {
+    match attribute {
+        Attribute::Code(code) => {
+            validate_misplaced_tasty_link(&code.attributes, pool, TastyLinkLocation::Nested)
+        }
+        Attribute::Record(components) => {
+            for component in components {
+                validate_misplaced_tasty_link(
+                    &component.attributes,
+                    pool,
+                    TastyLinkLocation::Nested,
+                )?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
