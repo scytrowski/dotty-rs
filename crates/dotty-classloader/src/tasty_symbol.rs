@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 57949)
-Total output lines: 5746
-
 use crate::binary_name::BinaryName;
 use crate::error::ClassLoadCategory;
 use dotty_classfile::access_flags::{
@@ -76,7 +73,8 @@ pub(crate) struct DecodedTastyModuleIdentity {
     pub companion_class_kind: Option<SymbolKind>,
     /// Visibility declared on nested type definitions in the module class's
     /// TASTy template. JVM `InnerClasses` access flags can be less restrictive.
-    pub nested_type_visibilities: HashMap<String, DeclaredVisibility>,
+    /// The map includes default-public declarations with a `None` value.
+    pub nested_type_visibilities: HashMap<String, Option<DeclaredVisibility>>,
 }
 
 /// Stable detail for a TASTy parent whose binary identity could not be
@@ -793,9 +791,8 @@ pub(crate) fn decode_module_identity(
                                 continue;
                             };
                             if let Some(name) = wire_name(&file, name) {
-                                if let Some(visibility) = decode_visibility(&file, &tail) {
-                                    nested_type_visibilities.insert(name, visibility);
-                                }
+                                nested_type_visibilities
+                                    .insert(name, decode_visibility(&file, &tail));
                             }
                         }
                     }
@@ -2465,7 +2462,769 @@ enum ReferenceResolution {
     /// Definitely a real, post-typecheck reference, but this decoder cannot
     /// name its target — classpath-aware alias lookup may resolve
     /// package-object aliases, but general scope/import resolution is still
- …7949 tokens truncated…0).and_then(|details| details.prefix)
+    /// outside this best-effort decoder (see [`resolve_reference_prefix`]'s
+    /// doc comment for exactly which prefix shapes it does understand).
+    Unresolved,
+    /// Not a reference shape this function recognizes at all — the caller
+    /// should fall back to its own heuristic exactly as if this function
+    /// did not exist.
+    NotAReference,
+}
+
+/// Resolves a real, post-typecheck `TYPEREF`/`TERMREF` node — or one
+/// nested inside the elaborated `IDENTTPT` pretty-print form a `.tasty`
+/// `extends` clause's own reference tree wraps it in — into a fully
+/// qualified [`BinaryName`], using [`resolve_reference_prefix`]'s
+/// prefix/name-table semantics instead of [`resolve_parent_name_with_bare`]'s
+/// flatten-and-guess fallback.
+///
+/// Returns [`ReferenceResolution::Unresolved`] — never a bare,
+/// unqualified name — when the simple name resolves but its prefix does
+/// not. `TERMREFsymbol`/`TYPEREFsymbol` carry AST addresses rather than
+/// name-table references; their target is resolved through the AST owner
+/// chain, using the current package when the owner chain has no package
+/// node. Other unreadable references stay unresolved so the caller does not
+/// turn them into a same-package guess.
+fn resolve_reference_name(file: &TastyFile<'_>, tree: &RawTree<'_>) -> ReferenceResolution {
+    resolve_reference_name_in_package(file, tree, None)
+}
+
+fn resolve_reference_name_in_package(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    current_package: Option<&str>,
+) -> ReferenceResolution {
+    resolve_reference_name_at_depth(file, tree, current_package, 0)
+}
+
+fn resolve_reference_name_at_depth(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    current_package: Option<&str>,
+    depth: usize,
+) -> ReferenceResolution {
+    const MAX_REFERENCE_DEPTH: usize = 256;
+    if depth >= MAX_REFERENCE_DEPTH {
+        return ReferenceResolution::Unresolved;
+    }
+    if let RawTree::Leaf(term) = tree
+        && matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG)
+    {
+        let Some(reference) = term.ast_ref() else {
+            return ReferenceResolution::Unresolved;
+        };
+        let Some(shared) = decode_shared_tree(file, reference.address) else {
+            return ReferenceResolution::Unresolved;
+        };
+        return resolve_reference_name_at_depth(file, &shared, current_package, depth + 1);
+    }
+    let Ok(structured) = tree.decode_structured() else {
+        return ReferenceResolution::NotAReference;
+    };
+    match structured {
+        StructuredTree::Reference(ReferenceNode {
+            tag: TERMREF_TAG | TYPEREF_TAG,
+            reference,
+            qualifier,
+        }) => {
+            let Some(simple_name) = resolve_qualified_name(file, reference) else {
+                return ReferenceResolution::Unresolved;
+            };
+            let prefix = match current_package {
+                Some(_) => resolve_reference_prefix_in_package(file, &qualifier, current_package),
+                None => resolve_reference_prefix(file, &qualifier),
+            };
+            match prefix {
+                Some(package) => {
+                    let package = package.trim_matches('/');
+                    let name = if package.is_empty() {
+                        simple_name
+                    } else {
+                        format!("{package}/{simple_name}")
+                    };
+                    ReferenceResolution::Resolved(BinaryName::from_internal(name))
+                }
+                None => ReferenceResolution::Unresolved,
+            }
+        }
+        StructuredTree::Reference(ReferenceNode {
+            tag: TERMREFSYMBOL_TAG | TYPEREFSYMBOL_TAG,
+            reference,
+            ..
+        }) => {
+            let resolved = resolve_symbol_address(file, reference);
+            resolved
+                .map(|name| {
+                    ReferenceResolution::Resolved(BinaryName::from_internal(
+                        qualify_symbol_address(name, current_package),
+                    ))
+                })
+                .unwrap_or(ReferenceResolution::Unresolved)
+        }
+        StructuredTree::Length(StructuredNode::SelectIn(selection)) => {
+            let Some(member) = render_member_name(file, selection.name) else {
+                return ReferenceResolution::Unresolved;
+            };
+            if !member.chars().all(is_binary_name_character) {
+                return ReferenceResolution::Unresolved;
+            }
+            if let ReferenceResolution::Resolved(name) = resolve_reference_name_at_depth(
+                file,
+                &selection.underlying_type,
+                current_package,
+                depth + 1,
+            ) {
+                return ReferenceResolution::Resolved(name);
+            }
+            let Some(name) = render_member_name(file, selection.name) else {
+                return ReferenceResolution::Unresolved;
+            };
+            let resolution = resolve_reference_prefix_at_depth(
+                file,
+                &selection.qualifier,
+                current_package,
+                depth + 1,
+            )
+            .and_then(|prefix| {
+                let prefix = prefix.trim_matches('/');
+                if matches!(prefix, "scala/package" | "scala/package$") {
+                    return None;
+                }
+                let selected_name = name.rsplit('/').next().unwrap_or(&name);
+                if selected_name == "<init>"
+                    && matches!(selection.qualifier, RawTree::Ast { .. })
+                    && !prefix.is_empty()
+                {
+                    Some(ReferenceResolution::Resolved(BinaryName::from_internal(
+                        prefix.to_owned(),
+                    )))
+                } else if prefix.is_empty() || prefix == "_root_" {
+                    Some(ReferenceResolution::Resolved(BinaryName::from_internal(
+                        name,
+                    )))
+                } else if matches!(selection.qualifier, RawTree::Ast { .. })
+                    && prefix.rsplit('/').next().is_some_and(|segment| {
+                        segment == selected_name
+                            || segment
+                                .strip_suffix(selected_name)
+                                .is_some_and(|owner| owner.ends_with('$'))
+                    })
+                {
+                    Some(ReferenceResolution::Resolved(BinaryName::from_internal(
+                        prefix.to_owned(),
+                    )))
+                } else {
+                    Some(ReferenceResolution::Resolved(BinaryName::from_internal(
+                        format!("{prefix}/{name}"),
+                    )))
+                }
+            });
+            resolution.unwrap_or(ReferenceResolution::Unresolved)
+        }
+        StructuredTree::Select(_) => {
+            let Some(name) = parent_wire_path(file, tree, depth + 1)
+                .map(|name| name.strip_prefix("_root_/").unwrap_or(&name).to_owned())
+                .filter(|name| name.contains('/') && !name.starts_with('/'))
+            else {
+                return ReferenceResolution::Unresolved;
+            };
+            if !has_one_terminal_type_selection(file, tree, depth + 1) {
+                return ReferenceResolution::Unresolved;
+            }
+            ReferenceResolution::Resolved(BinaryName::from_internal(name))
+        }
+        StructuredTree::Ident(IdentNode { type_tree, .. }) => {
+            resolve_reference_name_at_depth(file, &type_tree, current_package, depth + 1)
+        }
+        StructuredTree::Length(StructuredNode::TypeApply(TypeApplyNode { function, .. }))
+        | StructuredTree::Length(StructuredNode::Apply(ApplyNode { function, .. })) => {
+            resolve_reference_name_at_depth(file, &function, current_package, depth + 1)
+        }
+        StructuredTree::Length(StructuredNode::AppliedType(AppliedTypeNode { tycon, .. })) => {
+            resolve_reference_name_at_depth(file, &tycon, current_package, depth + 1)
+        }
+        StructuredTree::AstChild(child) => {
+            resolve_reference_name_at_depth(file, &child.child, current_package, depth + 1)
+        }
+        _ => ReferenceResolution::NotAReference,
+    }
+}
+
+/// Returns true only when this is one terminal type selection whose qualifier
+/// is a chain of package references. Term references and selections can name
+/// objects or nested types; joining those names with `/` would lose the JVM
+/// `$` owner boundary.
+fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> bool {
+    fn is_package_qualifier(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> bool {
+        const MAX_SELECTION_DEPTH: usize = 256;
+        if depth >= MAX_SELECTION_DEPTH {
+            return false;
+        }
+        if let RawTree::Leaf(term) = tree
+            && matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG)
+        {
+            let Some(reference) = term.ast_ref() else {
+                return false;
+            };
+            let Some(target) = decode_shared_tree(file, reference.address) else {
+                return false;
+            };
+            return is_package_qualifier(file, &target, depth + 1);
+        }
+        if let RawTree::Leaf(term) = tree {
+            return matches!(term.tag, TERMREFPKG_TAG | TYPEREFPKG_TAG)
+                && term
+                    .name_ref()
+                    .and_then(|name| resolve_qualified_name(file, name))
+                    .is_some();
+        }
+        match tree.decode_structured() {
+            Ok(StructuredTree::AstChild(child)) => {
+                is_package_qualifier(file, &child.child, depth + 1)
+            }
+            Ok(StructuredTree::Ident(ident)) => {
+                is_package_qualifier(file, &ident.type_tree, depth + 1)
+            }
+            Ok(StructuredTree::Select(selection)) => {
+                // In TASTy, a term SELECT rooted in a package may name either
+                // a subpackage or an object. Admit only package paths
+                // independently covered by pinned Scala/JDK fixtures; do not
+                // infer arbitrary selected segments from the current package.
+                let selected_package = wire_name(file, selection.name).and_then(|name| {
+                    let owner = parent_wire_path(file, &selection.qualifier, depth + 1)?;
+                    let owner = owner.strip_prefix("_root_/").unwrap_or(&owner);
+                    Some(if owner.is_empty() || owner == "_root_" {
+                        name
+                    } else {
+                        format!("{owner}/{name}")
+                    })
+                });
+                selection.tag == dotty_tasty::tasty::SELECT_TAG
+                    && selected_package.as_deref().is_some_and(|package| {
+                        matches!(
+                            package,
+                            "scala" | "scala/annotation" | "java/io" | "java/lang"
+                        )
+                    })
+                    && is_package_qualifier(file, &selection.qualifier, depth + 1)
+            }
+            Ok(StructuredTree::Reference(reference)) => {
+                matches!(reference.tag, TERMREFPKG_TAG | TYPEREFPKG_TAG)
+                    && is_package_qualifier(file, &reference.qualifier, depth + 1)
+            }
+            _ => false,
+        }
+    }
+
+    let Ok(StructuredTree::Select(selection)) = tree.decode_structured() else {
+        return false;
+    };
+    selection.tag == dotty_tasty::tasty::SELECTTPT_TAG
+        && is_package_qualifier(file, &selection.qualifier, depth + 1)
+}
+
+/// Resolves a TASTy-local symbol address through its defining tree and owner
+/// chain. The address is an AST address, never a name-table index. Only
+/// visible type definitions inside a package owner chain produce a binary
+/// name; malformed, cyclic, or unsupported shapes stay unresolved.
+fn resolve_symbol_address(file: &TastyFile<'_>, address: u32) -> Option<String> {
+    const MAX_OWNER_DEPTH: usize = 256;
+
+    let index = file.ast_address_index().ok()?;
+    let definition = index.get(address)?;
+    if definition.tag != TYPEDEF_TAG {
+        return None;
+    }
+    let StructuredNode::TypeDef(DefinitionBody::TypeDef { name, .. }) =
+        definition.decode_structured().ok()?
+    else {
+        return None;
+    };
+    let mut names = vec![file.render_name(name).ok()?];
+    let mut package = None;
+    let mut parent = index.parent_of(address);
+    let mut visited = HashSet::new();
+    for _ in 0..MAX_OWNER_DEPTH {
+        let Some(node) = parent else {
+            break;
+        };
+        let parent_address = u32::try_from(node.offset).ok()?;
+        if !visited.insert(parent_address) {
+            return None;
+        }
+        if node.tag == TYPEDEF_TAG {
+            let owner = index.get(parent_address)?;
+            if let Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef { name, .. })) =
+                owner.decode_structured()
+            {
+                names.push(file.render_name(name).ok()?);
+            }
+        } else if node.tag == dotty_tasty::tasty::PACKAGE_TAG {
+            let package_node = index.get(parent_address)?;
+            if let Ok(StructuredNode::Package(package_node)) = package_node.decode_structured() {
+                package = package_node
+                    .path
+                    .decode_structured()
+                    .ok()
+                    .and_then(|path| match path {
+                        StructuredTree::Reference(ReferenceNode {
+                            tag: TERMREFPKG_TAG,
+                            reference,
+                            ..
+                        }) => resolve_qualified_name(file, reference),
+                        _ => None,
+                    });
+            }
+            parent = None;
+            break;
+        }
+        parent = index.parent_of(parent_address);
+    }
+    if parent.is_some() {
+        return None;
+    }
+    names.reverse();
+    let mut nested_name = names.first().cloned().unwrap_or_default();
+    for name in names.iter().skip(1) {
+        let name = name.trim_start_matches('$');
+        if !nested_name.ends_with('$') {
+            nested_name.push('$');
+        }
+        nested_name.push_str(name);
+    }
+    let internal = format!(
+        "{}{}",
+        package
+            .map(|package| format!("{package}/"))
+            .unwrap_or_default(),
+        nested_name
+    );
+    Some(internal)
+}
+
+/// Reconstructs a supertype parent's referenced [`BinaryName`], or
+/// `None` when it can't be — either because the parent carries no name
+/// reference at all (the implicit `Object`/`AnyRef` superclass
+/// constructor call, which `.tasty` encodes without any name-table
+/// entry, JVMS §4.1's implicit interface superclass follows the same
+/// shape), or because every name reference it does carry fails to
+/// render as a plain name.
+///
+/// Tried first, before any of the flatten-based heuristic below: a real
+/// `TYPEREF`/`TERMREF`'s own prefix/name-table semantics
+/// ([`resolve_reference_name`]) — this is what an ordinary post-typecheck
+/// member type (`Point.x: Int`) and an implicit-import parent reference
+/// (`Source`'s `Closeable`, resolved via its `java.io` `TERMREFpkg`
+/// prefix, not the current package) both actually are on the wire, and
+/// the heuristic below cannot see either correctly: `Int`'s own `TYPEREF`
+/// name is invisible to [`RawTree::name_refs`] (`TYPEREF_TAG` is not one
+/// of the tags it visits), and `Closeable`'s bare `IDENTTPT` name has no
+/// way to know it means `java.io.Closeable` rather than the current
+/// package's own `Closeable`.
+///
+/// [`RawTree::name_refs`] returns every name-table reference visible in
+/// a parent tree in source order; empirically (see this crate's
+/// Milestone 9 plan), a same-package mixin (`class Dog extends Animal`)
+/// carries exactly one directly-named reference (`"Animal"`) followed by
+/// an unrelated symbol reference with no direct UTF-8 name, while a
+/// cross-package mixin (`case class Point`'s implicit `Product`/
+/// `Serializable`) carries a fully-named, reversed qualification chain
+/// — sometimes rooted with a leading synthetic `_root_` marker (e.g.
+/// `["Product", "scala", "_root_"]`), sometimes not (`Serializable`'s
+/// own chain is just `["Serializable", "scala"]`, no `_root_`) — so
+/// "already fully qualified" is decided by chain *length* (more than
+/// one name-table reference), not by `_root_`'s presence, which is only
+/// ever stripped, never load-bearing for the decision. Filtering to
+/// only the references that do resolve to a direct name, in order,
+/// handles both shapes uniformly: reverse them, and either join a
+/// multi-element chain as-is (dropping a leading `_root_` marker first,
+/// if present) or, for a single bare name, qualify it with `package` —
+/// `.tasty` never repeats the enclosing class's own package for a
+/// reference resolved directly in scope, unlike a cross-package
+/// reference, which always carries its full chain (see [`decode`]'s doc
+/// comment for where `package` comes from).
+///
+/// This is still best-effort, not full scope resolution: a name that's
+/// bare because it comes from an implicit import (`scala._`,
+/// `java.lang._`) rather than genuinely being in the same package (an
+/// import this decoder does not track) is indistinguishable, from the
+/// name table alone, from a genuine same-package reference, and is
+/// qualified with `package` the same way — which is wrong for that
+/// case, exactly as bare (unqualified) resolution was wrong for it
+/// before this fix. Only real symbol resolution can disambiguate the
+/// two.
+fn resolve_parent_name_with_bare(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+    resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
+) -> Option<BinaryName> {
+    resolve_parent_name_in_package_with_bare(file, parent, package, Some(package), resolve_bare)
+}
+
+fn resolve_parent_name_in_package(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+    package_scope: Option<&str>,
+) -> Option<BinaryName> {
+    resolve_parent_name_in_package_with_bare(file, parent, package, package_scope, &mut |_, _| None)
+}
+
+fn resolve_parent_name_in_package_with_bare(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+    package_scope: Option<&str>,
+    resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
+) -> Option<BinaryName> {
+    resolve_parent_name_in_package_with_bare_at_depth(
+        file,
+        parent,
+        package,
+        package_scope,
+        resolve_bare,
+        0,
+    )
+    .filter(|name| name.simple_name().chars().all(is_binary_name_character))
+}
+
+fn resolve_parent_name_in_package_with_bare_at_depth(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+    package_scope: Option<&str>,
+    resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
+    depth: usize,
+) -> Option<BinaryName> {
+    const MAX_PARENT_TREE_DEPTH: usize = 256;
+    if depth >= MAX_PARENT_TREE_DEPTH {
+        return None;
+    }
+    if let Some(selection) = find_select_in_reference(parent, 0) {
+        let (selected_member, nested_owner) = match selection.decode_structured().ok()? {
+            StructuredTree::Length(StructuredNode::SelectIn(selection)) => (
+                render_member_name(file, selection.name)?,
+                contains_nested_ast_child(&selection.underlying_type, 0),
+            ),
+            _ => return None,
+        };
+        // Operator names require Scala's name mangling before they can be
+        // used as JVM binary names. Keep them unresolved until that encoding
+        // is available instead of treating source spelling as a path.
+        if !selected_member.chars().all(is_binary_name_character) {
+            return None;
+        }
+        // A nested AST owner needs a verified JVM nested name. Otherwise a
+        // package path guess can turn `Phases.Phase` into `Phases/Phase`.
+        if nested_owner {
+            return match resolve_reference_name_in_package(file, &selection, package_scope) {
+                ReferenceResolution::Resolved(name)
+                    if name.simple_name().contains('$') && name.is_path_safe() =>
+                {
+                    Some(name)
+                }
+                _ => None,
+            };
+        }
+        match resolve_reference_name_in_package(file, &selection, package_scope) {
+            ReferenceResolution::Resolved(name) => return Some(name),
+            ReferenceResolution::Unresolved => return None,
+            ReferenceResolution::NotAReference => {}
+        }
+    }
+    if let Ok(StructuredTree::Length(StructuredNode::Apply(ApplyNode { function, .. }))) =
+        parent.decode_structured()
+    {
+        return resolve_parent_name_in_package_with_bare_at_depth(
+            file,
+            &function,
+            package,
+            package_scope,
+            resolve_bare,
+            depth + 1,
+        );
+    }
+    let reference = match package_scope {
+        Some(_) => resolve_reference_name_in_package(file, parent, package_scope),
+        None => resolve_reference_name(file, parent),
+    };
+    match reference {
+        ReferenceResolution::Resolved(resolved) => {
+            if !resolved.simple_name().chars().all(is_binary_name_character) {
+                return None;
+            }
+            if matches!(
+                resolved.as_internal(),
+                "scala/Any" | "scala/AnyRef" | "scala/Object"
+            ) {
+                return Some(BinaryName::from_internal("java/lang/Object"));
+            }
+            return Some(resolved);
+        }
+        // A real semantic reference this decoder cannot fully qualify must
+        // not fall through to the package/implicit-import heuristic and come
+        // back out as a misleading same-package guess. The narrow package-
+        // object alias lookup already ran in `resolve_parent_name_with_alias`.
+        ReferenceResolution::Unresolved => {
+            let simple_name = unresolved_semantic_reference_name(file, parent)?;
+            // Scala 3.9 represents AnyRef as the JVM Object superclass in
+            // emitted class hierarchies. This is a compiler-known identity,
+            // not a fallback for arbitrary unreadable symbol addresses.
+            if matches!(
+                simple_name.as_str(),
+                "Any" | "AnyRef" | "Object" | "java/lang/Object"
+            ) {
+                return Some(BinaryName::from_internal("java/lang/Object"));
+            }
+            return None;
+        }
+        ReferenceResolution::NotAReference => {}
+    }
+
+    let mut names: Vec<String> = parent
+        .name_refs()
+        .into_iter()
+        .filter_map(|reference| wire_name(file, reference))
+        .collect();
+
+    if names.iter().any(|name| {
+        name.split('/')
+            .any(|segment| !segment.chars().all(is_binary_name_character))
+    }) {
+        return None;
+    }
+
+    if names.is_empty() {
+        return match package_scope {
+            Some(_) => {
+                let RawTree::LengthNode(node) = parent else {
+                    return None;
+                };
+                if !matches!(node.tag, APPLIEDTPT_TAG | APPLIEDTYPE_TAG) {
+                    return None;
+                }
+                let StructuredNode::AppliedType(AppliedTypeNode { tycon, .. }) =
+                    node.decode_structured().ok()?
+                else {
+                    return None;
+                };
+                resolve_parent_name_in_package_with_bare_at_depth(
+                    file,
+                    &tycon,
+                    package,
+                    package_scope,
+                    resolve_bare,
+                    depth + 1,
+                )
+            }
+            None => resolve_applied_type_name(file, parent, package),
+        };
+    }
+
+    names.reverse();
+    let already_qualified = names.len() > 1;
+    if names.first().map(String::as_str) == Some("_root_") {
+        names.remove(0);
+    }
+    if names.is_empty() {
+        return None;
+    }
+
+    if !already_qualified {
+        return resolve_bare(package, &names[0]);
+    }
+
+    let joined = names.join("/");
+    let qualified = if already_qualified || package.is_empty() {
+        joined
+    } else {
+        format!("{package}/{joined}")
+    };
+    Some(BinaryName::from_internal(qualified))
+}
+
+fn find_select_in_reference<'a>(tree: &RawTree<'a>, depth: usize) -> Option<RawTree<'a>> {
+    const MAX_DEPTH: usize = 128;
+    if depth >= MAX_DEPTH {
+        return None;
+    }
+    if let RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } = tree {
+        return find_select_in_reference(child, depth + 1);
+    }
+    if let RawTree::LengthNode(node) = tree {
+        if node.tag == dotty_tasty::tasty::SELECTIN_TAG {
+            return Some(tree.clone());
+        }
+        return match node.decode_structured().ok()? {
+            StructuredNode::Apply(apply) => find_select_in_reference(&apply.function, depth + 1),
+            StructuredNode::TypeApply(apply) => {
+                find_select_in_reference(&apply.function, depth + 1)
+            }
+            StructuredNode::AppliedType(applied) => {
+                find_select_in_reference(&applied.tycon, depth + 1)
+            }
+            _ => None,
+        };
+    }
+    match tree.decode_structured().ok()? {
+        StructuredTree::AstChild(child) => find_select_in_reference(&child.child, depth + 1),
+        StructuredTree::Ident(IdentNode { type_tree, .. }) => {
+            find_select_in_reference(&type_tree, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+fn is_binary_name_character(character: char) -> bool {
+    unicode_ident::is_xid_continue(character) || matches!(character, '$' | '<' | '>')
+}
+
+fn contains_nested_ast_child(tree: &RawTree<'_>, depth: usize) -> bool {
+    const MAX_DEPTH: usize = 128;
+    if depth >= MAX_DEPTH {
+        return true;
+    }
+    if matches!(tree, RawTree::Ast { .. }) {
+        return true;
+    }
+    if let RawTree::NatAst { child, .. } = tree {
+        return contains_nested_ast_child(child, depth + 1);
+    }
+    match tree.decode_structured() {
+        Ok(StructuredTree::AstChild(child)) => contains_nested_ast_child(&child.child, depth + 1),
+        Ok(StructuredTree::Length(StructuredNode::Apply(ApplyNode { function, .. }))) => {
+            contains_nested_ast_child(&function, depth + 1)
+        }
+        Ok(StructuredTree::Length(StructuredNode::AppliedType(AppliedTypeNode {
+            tycon, ..
+        }))) => contains_nested_ast_child(&tycon, depth + 1),
+        Ok(StructuredTree::Ident(IdentNode { type_tree, .. })) => {
+            contains_nested_ast_child(&type_tree, depth + 1)
+        }
+        _ => false,
+    }
+}
+
+/// Returns the simple name only for an unresolved named TYPEREF/TERMREF,
+/// following wrappers used by extends and applied types. Direct symbol refs
+/// intentionally return `None`: if their AST address or owner chain is bad,
+/// textual name guessing would hide malformed semantic identity.
+fn unresolved_semantic_reference_name(file: &TastyFile<'_>, tree: &RawTree<'_>) -> Option<String> {
+    unresolved_semantic_reference_name_at_depth(file, tree, 0)
+}
+
+fn unresolved_semantic_reference_name_at_depth(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    depth: usize,
+) -> Option<String> {
+    const MAX_DEPTH: usize = 128;
+    if depth >= MAX_DEPTH {
+        return None;
+    }
+    if let RawTree::LengthNode(node) = tree
+        && matches!(node.tag, APPLIEDTPT_TAG | APPLIEDTYPE_TAG)
+    {
+        let StructuredNode::AppliedType(AppliedTypeNode { tycon, .. }) =
+            node.decode_structured().ok()?
+        else {
+            return None;
+        };
+        return unresolved_semantic_reference_name_at_depth(file, &tycon, depth + 1);
+    }
+    match tree.decode_structured().ok()? {
+        StructuredTree::Ident(IdentNode { type_tree, .. }) => {
+            unresolved_semantic_reference_name_at_depth(file, &type_tree, depth + 1)
+        }
+        StructuredTree::Length(StructuredNode::SelectIn(selection)) => {
+            render_tree_name(file, selection.name)
+        }
+        StructuredTree::Length(StructuredNode::Apply(ApplyNode { function, .. })) => {
+            unresolved_semantic_reference_name_at_depth(file, &function, depth + 1)
+        }
+        StructuredTree::Reference(ReferenceNode {
+            tag: TERMREF_TAG | TYPEREF_TAG,
+            reference,
+            ..
+        }) => resolve_qualified_name(file, reference),
+        _ => None,
+    }
+}
+
+fn resolve_parent_name_with_alias(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+    resolve_alias: &mut impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
+    resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
+) -> Option<BinaryName> {
+    if let Some((owner, alias)) = unresolved_alias_reference(file, parent) {
+        if matches!(owner.simple_name(), "package" | "package$") {
+            return resolve_alias(&owner, &alias);
+        }
+        if parent_reference_shape(file, parent) == "selected-qualified"
+            && unresolved_alias_qualifier_is_package(file, parent, 0)
+            && unresolved_alias_package_prefix(file, parent)
+                .is_some_and(|package_owner| package_owner == owner.as_internal())
+        {
+            let package_object =
+                BinaryName::from_internal(format!("{}/package$", owner.as_internal()));
+            if let Some(resolved) = resolve_alias(&package_object, &alias) {
+                return Some(resolved);
+            }
+        }
+    }
+    resolve_parent_name_with_bare(file, parent, package, resolve_bare)
+}
+
+fn unresolved_alias_qualifier_is_package(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    depth: usize,
+) -> bool {
+    const MAX_ALIAS_TREE_DEPTH: usize = 128;
+    if depth >= MAX_ALIAS_TREE_DEPTH {
+        return false;
+    }
+    if let RawTree::LengthNode(node) = tree {
+        if matches!(node.tag, APPLIEDTPT_TAG | APPLIEDTYPE_TAG) {
+            let Ok(StructuredNode::AppliedType(applied)) = node.decode_structured() else {
+                return false;
+            };
+            return unresolved_alias_qualifier_is_package(file, &applied.tycon, depth + 1);
+        }
+        if node.tag == dotty_tasty::tasty::SELECTIN_TAG {
+            let Ok(StructuredNode::SelectIn(selection)) = node.decode_structured() else {
+                return false;
+            };
+            return parent_reference_shape(file, &selection.qualifier) == "package-qualified";
+        }
+    }
+    match tree.decode_structured().ok() {
+        Some(StructuredTree::Ident(ident)) => {
+            unresolved_alias_qualifier_is_package(file, &ident.type_tree, depth + 1)
+        }
+        Some(StructuredTree::Length(StructuredNode::Apply(apply))) => {
+            unresolved_alias_qualifier_is_package(file, &apply.function, depth + 1)
+        }
+        Some(StructuredTree::Reference(ReferenceNode { qualifier, .. }))
+        | Some(StructuredTree::Select(SelectNode { qualifier, .. })) => {
+            parent_reference_shape(file, &qualifier) == "package-qualified"
+        }
+        Some(StructuredTree::Length(StructuredNode::Typed(typed))) => {
+            unresolved_alias_qualifier_is_package(file, &typed.type_tree, depth + 1)
+                || unresolved_alias_qualifier_is_package(file, &typed.expression, depth + 1)
+        }
+        _ => false,
+    }
+}
+
+/// Returns the selected qualifier recorded by the bounded parent profiler.
+/// The caller uses it only for selected-qualified parents and still requires
+/// the exact package object's TASTy to resolve the named alias.
+fn unresolved_alias_package_prefix(file: &TastyFile<'_>, tree: &RawTree<'_>) -> Option<String> {
+    parent_reference_details(file, tree, 0).and_then(|details| details.prefix)
 }
 
 /// Extracts the owner and simple name of a reference that could not be
