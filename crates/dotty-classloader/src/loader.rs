@@ -3416,12 +3416,27 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         &outer,
                         ClassLoadDependencyReason::EnclosingOwnerIdentity,
                     );
-                    self.ensure_class_identity(&outer).map_err(|source| {
-                        ClassLoadError::DependencyFailure {
-                            owner: name.clone(),
-                            dependency: outer,
-                            source: Rc::new(source),
-                        }
+                    let owner = match self.ensure_class_identity(&outer) {
+                        Ok(owner) => Ok(owner),
+                        // Scala nested classes in a top-level object can
+                        // record the object's static forwarder class as the
+                        // JVM `InnerClasses` owner. That name has TASTy for
+                        // the object, but no class `TypeDef`; use the
+                        // TASTy-proven module identity only for this exact
+                        // missing-class case. A `$` in the binary name is
+                        // not sufficient evidence by itself.
+                        Err(ClassLoadError::InvalidTastyFile(
+                            _,
+                            tasty_symbol::TastyDecodeError::MissingTypeDef,
+                        )) => self
+                            .ensure_module_identity(&outer)
+                            .map(|identity| identity.module_class),
+                        Err(error) => Err(error),
+                    };
+                    owner.map_err(|source| ClassLoadError::DependencyFailure {
+                        owner: name.clone(),
+                        dependency: outer,
+                        source: Rc::new(source),
                     })
                 }
             })

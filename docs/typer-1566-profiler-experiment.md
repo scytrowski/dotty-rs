@@ -72,3 +72,34 @@ for `Profiler.scala#tree=1667`, using the pinned Scala 3.9.0 and JDK 21 inputs.
 The focused output for this run reports `methods_attempted=1`,
 `methods_typed=0`, and `blocker=MemberNotFound`. The generated audit output is
 not checked in.
+
+## Follow-up: nested class identity experiment
+
+I added a classloader/resolver experiment for the missing source member
+`Symbols.Symbol`. The fixture uses Scala 3.9.0 output for
+`object Holder { class InProtected }`, containing `Holder.tasty` and
+`Holder$InProtected.class`. It verifies that the module identity comes from
+TASTy, the nested JVM class is accepted only when its `InnerClasses` entry
+names the requested source member and facade owner, and the resulting class
+symbol has the canonical module class as semantic owner. An absent nested name
+still resolves to `None` and rolls back the semantic store.
+
+The focused classloader suite passes (440 unit tests, 13 directory classpath
+tests, 1 JDK classpath test, 2 visibility tests, and 18 TASTy-loading tests;
+4 tests ignored because they require optional JDK tooling).
+
+The same one-method Scala 3.9 audit still reports **0/1 typed**. The first
+blocker is now `SymbolResolution`, with the failing request
+`Symbols$.Symbol`; class loading fails through the nested hierarchy. A direct
+reproduction against the pinned Scala compiler jars shows the chain reaches
+nested classes such as `Trees$Tree`, `Types$Type`, and `Texts$Text`, whose
+classfile outer names point at top-level object facades (`Trees`, `Types`,
+`Texts`) that have module TASTy but no class `TypeDef`. The checked-in fixture
+proves the narrow `Holder` case, but the target compiler hierarchy still
+exposes another classloader path that does not use the new owner fallback.
+
+Therefore this change does **not** make `RealProfiler.completionName` type.
+It isolates the supported nested-member evidence and preserves the negative
+result; a follow-up must locate and fix the transitive class dependency path
+before claiming progress on #1566. The generated focused audit output remains
+local and is not checked in.
