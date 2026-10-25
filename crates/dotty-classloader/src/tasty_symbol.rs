@@ -7,16 +7,17 @@ use dotty_classfile::access_flags::{
 use dotty_core::{SymbolFlags, SymbolKind};
 use dotty_tasty::tasty::{
     ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, ApplyNode,
-    AstError, CASEACCESSOR_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionTail,
-    FIELDACCESSOR_TAG, FINAL_TAG, IdentNode, LOCAL_TAG, MUTABLE_TAG, OBJECT_TAG, PACKAGE_TAG,
-    PRIVATE_TAG, PRIVATEQUALIFIED_TAG, PROTECTED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode,
-    RawName, RawTree, Reader, ReferenceNode, RenderedSignedName, SELECTIN_TAG, SHAREDTERM_TAG,
-    SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode,
-    StructuredTree, TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG,
-    TYPEDEF_TAG, TYPEREF_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError,
-    TermValue, TypeApplyNode, VALDEF_TAG,
+    AstError, CASEACCESSOR_TAG, CONTRAVARIANT_TAG, COVARIANT_TAG, DEFDEF_TAG, DefDefBody,
+    DefinitionBody, DefinitionTail, FIELDACCESSOR_TAG, FINAL_TAG, IdentNode, LOCAL_TAG,
+    MUTABLE_TAG, OBJECT_TAG, PACKAGE_TAG, PRIVATE_TAG, PRIVATEQUALIFIED_TAG, PROTECTED_TAG,
+    PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree, Reader, ReferenceNode,
+    RenderedSignedName, SELECTIN_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG, STABLE_TAG, STATIC_TAG,
+    SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode, StructuredTree, TEMPLATE_TAG,
+    TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG, TYPEREF_TAG,
+    TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError, TermValue,
+    TypeApplyNode, VALDEF_TAG,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// The class-level facts reconstructable from a `.tasty` file without full
@@ -27,14 +28,14 @@ use std::fmt;
 /// `fields`/`methods` cover ordinary `ValDef`/`DefDef` template members;
 /// each member's own declared type resolves to a name the same
 /// best-effort way a supertype does (see `resolve_parent_name_with_bare`) — a
-/// type shape this decoder does not recognize (anything past a plain or
-/// generic class reference: tuples, function types, refinements,
-/// dependent/path types, ...) is simply `None`, not a decode failure, so
-/// the member itself is still reconstructed with an unknown type rather
-/// than dropped or aborting the whole class. A member's own type
-/// parameters (a generic method or a class's own type/val parameters
-/// beyond a plain reference) are not modeled — see
-/// [`decode_members`]'s doc comment. `signature`/`nest_host`/etc. (JVM
+/// type shape this decoder does not recognize (anything past named/applied
+/// types and method type-parameter references: tuples, function types,
+/// refinements, dependent/path types, ...) is simply `None`, not a decode
+/// failure, so the member itself is still reconstructed with an unknown type
+/// rather than dropped or aborting the whole class. Generic methods preserve
+/// their type-parameter order and address-based references for the supported
+/// subset; unsupported bounds remain explicit. Class type parameters are not
+/// modeled. `signature`/`nest_host`/etc. (JVM
 /// classfile-only concepts) are not reconstructed from `.tasty` at all,
 /// so a `.tasty`-backed symbol still gets no [`crate::symbol::ClassfileMetadata`]
 /// entry.
@@ -171,12 +172,15 @@ pub(crate) struct DecodedTastyField {
 pub(crate) struct DecodedTastyMethod {
     pub name: String,
     pub flags: MethodAccessFlags,
+    /// Method-local type parameters, in their TASTy header order. Type
+    /// references in the signature point back to these entries by AST
+    /// address and are represented as indexed references, never by spelling.
+    pub type_parameters: Vec<DecodedTastyTypeParameter>,
     /// Every term parameter across every clause, flattened into one list
     /// — real Scala erasure already compiles a curried method
     /// (`def f(x: Int)(y: Int)`) down to one JVM method with every
     /// parameter concatenated, so this matches what a `.class`-loaded
-    /// version of the same method would show. A parameter clause's own
-    /// type parameters are skipped (generics are not modeled yet).
+    /// version of the same method would show.
     pub parameters: Vec<DecodedTastyParameter>,
     /// `.tasty` always encodes an explicit return type tree, even for a
     /// `Unit`-returning method (`Unit` is an ordinary class reference in
@@ -185,14 +189,39 @@ pub(crate) struct DecodedTastyMethod {
     /// decoder could not reduce the tree to a name", per
     /// [`DecodedTastyClass`]'s doc comment, exactly like an unresolvable
     /// field/parameter type; it is never a stand-in for `Unit`.
-    pub return_type: Option<BinaryName>,
+    pub return_type: Option<DecodedTastyType>,
+}
+
+/// A TASTy type shape retained for a bounded subset of generic member
+/// signatures. Unsupported shapes remain `None` at the member boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DecodedTastyType {
+    Named(BinaryName),
+    ParamRef(u32),
+    Applied {
+        tycon: Box<DecodedTastyType>,
+        arguments: Vec<DecodedTastyType>,
+    },
+}
+
+/// One method-local TASTy type parameter and its decoded bounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DecodedTastyTypeParameter {
+    pub name: String,
+    pub lower_bound: Option<DecodedTastyType>,
+    pub upper_bound: Option<DecodedTastyType>,
+    pub variance: Option<u8>,
+    /// False means the wire bound shape could not be represented. The loader
+    /// keeps the method and lowers an explicit error bound instead of
+    /// dropping or widening the generic signature.
+    pub bounds_supported: bool,
 }
 
 /// One term parameter of a [`DecodedTastyMethod`].
 #[derive(Debug, Clone)]
 pub(crate) struct DecodedTastyParameter {
     pub name: String,
-    pub declared_type: Option<BinaryName>,
+    pub declared_type: Option<DecodedTastyType>,
 }
 
 /// Why decoding a `.tasty` file into a `DecodedTastyClass` failed.
@@ -1702,6 +1731,169 @@ fn is_member_parameter(tail: &[DefinitionTail<'_>]) -> bool {
     has(FIELDACCESSOR_TAG) || has(CASEACCESSOR_TAG) || !(has(PRIVATE_TAG) && has(LOCAL_TAG))
 }
 
+/// Decodes the supported subset of a TASTy member type while retaining
+/// references to the enclosing method's exact type-parameter AST nodes.
+fn decode_tasty_member_type(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    package: &str,
+    type_parameters: &HashMap<u32, u32>,
+    resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
+    depth: usize,
+) -> Option<DecodedTastyType> {
+    const MAX_MEMBER_TYPE_DEPTH: usize = 128;
+    if depth >= MAX_MEMBER_TYPE_DEPTH {
+        return None;
+    }
+
+    if let RawTree::Leaf(term) = tree
+        && matches!(term.tag, SHAREDTYPE_TAG | SHAREDTERM_TAG)
+    {
+        let reference = term.ast_ref()?;
+        let shared = decode_shared_tree(file, reference.address)?;
+        return decode_tasty_member_type(
+            file,
+            &shared,
+            package,
+            type_parameters,
+            resolve_bare,
+            depth + 1,
+        );
+    }
+
+    if let RawTree::Leaf(term) = tree
+        && term.tag == TYPEREFDIRECT_TAG
+        && let Some(reference) = term.ast_ref()
+        && let Some(&index) = type_parameters.get(&reference.address)
+    {
+        return Some(DecodedTastyType::ParamRef(index));
+    }
+
+    if let Ok(StructuredTree::Reference(ReferenceNode {
+        tag: TYPEREFSYMBOL_TAG,
+        reference,
+        ..
+    })) = tree.decode_structured()
+        && let Some(&index) = type_parameters.get(&reference)
+    {
+        return Some(DecodedTastyType::ParamRef(index));
+    }
+
+    if let Ok(StructuredTree::Length(StructuredNode::AppliedType(applied))) =
+        tree.decode_structured()
+    {
+        let tycon = decode_tasty_member_type(
+            file,
+            &applied.tycon,
+            package,
+            type_parameters,
+            resolve_bare,
+            depth + 1,
+        )?;
+        let arguments = applied
+            .arguments
+            .iter()
+            .map(|argument| {
+                decode_tasty_member_type(
+                    file,
+                    argument,
+                    package,
+                    type_parameters,
+                    resolve_bare,
+                    depth + 1,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
+        return Some(DecodedTastyType::Applied {
+            tycon: Box::new(tycon),
+            arguments,
+        });
+    }
+
+    if let ReferenceResolution::Resolved(name) = resolve_reference_name(file, tree)
+        && name.as_internal() == "scala/Any"
+    {
+        // `Any` is the Scala top type, not the JVM superclass used when
+        // reducing `AnyRef`/`Object` in a class hierarchy. Preserve its
+        // canonical identity in value/member types such as Poly bounds.
+        return Some(DecodedTastyType::Named(name));
+    }
+
+    resolve_parent_name_with_bare(file, tree, package, resolve_bare).map(DecodedTastyType::Named)
+}
+
+fn decode_tasty_type_parameter(
+    file: &TastyFile<'_>,
+    parameter: &ParameterNode<'_>,
+    package: &str,
+    type_parameters: &HashMap<u32, u32>,
+    resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
+) -> Option<DecodedTastyTypeParameter> {
+    let ParameterNode::TypeParam { name, .. } = parameter else {
+        return None;
+    };
+    let parameter_name = wire_name(file, *name)?;
+    let mut decoded = DecodedTastyTypeParameter {
+        name: parameter_name,
+        lower_bound: None,
+        upper_bound: None,
+        variance: None,
+        bounds_supported: false,
+    };
+    let Some(body) = parameter.decode_body().ok() else {
+        return Some(decoded);
+    };
+    let shared_type_tree = match &body.type_tree {
+        RawTree::Leaf(term) if matches!(term.tag, SHAREDTYPE_TAG | SHAREDTERM_TAG) => term
+            .ast_ref()
+            .and_then(|reference| decode_shared_tree(file, reference.address)),
+        _ => None,
+    };
+    let type_tree = shared_type_tree.as_ref().unwrap_or(&body.type_tree);
+    let Ok(StructuredTree::Length(StructuredNode::TypeBounds(bounds))) =
+        type_tree.decode_structured()
+    else {
+        return Some(decoded);
+    };
+    if bounds.alias.is_some() {
+        return Some(decoded);
+    }
+
+    let lower_bound = decode_tasty_member_type(
+        file,
+        &bounds.low_or_alias,
+        package,
+        type_parameters,
+        resolve_bare,
+        0,
+    );
+    let upper_bound = bounds.high.as_ref().map(|high| {
+        decode_tasty_member_type(file, high, package, type_parameters, resolve_bare, 0)
+    });
+    if let Some(lower_bound) = lower_bound {
+        match upper_bound {
+            Some(Some(upper_bound)) => {
+                decoded.upper_bound = Some(upper_bound);
+                decoded.bounds_supported = true;
+            }
+            None => decoded.bounds_supported = true,
+            Some(None) => {}
+        }
+        if decoded.bounds_supported {
+            decoded.lower_bound = Some(lower_bound);
+            decoded.variance = body.tail.iter().find_map(|item| match item {
+                DefinitionTail::Modifier(tag)
+                    if matches!(*tag, COVARIANT_TAG | CONTRAVARIANT_TAG | STABLE_TAG) =>
+                {
+                    Some(*tag)
+                }
+                _ => None,
+            });
+        }
+    }
+    Some(decoded)
+}
+
 /// Reconstructs every `ValDef`/`DefDef` directly in `stats` (a class's
 /// `Template.stats`) into a [`DecodedTastyField`]/[`DecodedTastyMethod`].
 ///
@@ -1712,11 +1904,10 @@ fn is_member_parameter(tail: &[DefinitionTail<'_>]) -> bool {
 /// (or another file entirely) and is loaded separately, on demand, the
 /// same way `.class` never eagerly loads an `InnerClasses` entry either.
 ///
-/// A `DefDef`/`ValDef`'s own type parameters (a generic method, or a
-/// `TypeParam` entry in its parameter list) are not modeled — every
-/// `ParameterNode::TypeParam` is skipped, matching `.class` loading not
-/// yet lowering `.tasty` generics onto `Type::Poly`/`Type::TypeLambda`
-/// the way a JVM `Signature` attribute is (`docs/classloader.md` §9).
+/// Generic method signatures preserve method-local type parameters and
+/// address-based references for the supported named/applied type shapes.
+/// Higher-kinded, aliased, dependent, and other unrecognized bound/type
+/// shapes remain unresolved rather than being guessed.
 fn decode_members(
     file: &TastyFile<'_>,
     stats: &[RawTree<'_>],
@@ -1725,6 +1916,7 @@ fn decode_members(
 ) -> Result<(Vec<DecodedTastyField>, Vec<DecodedTastyMethod>), TastyDecodeError> {
     let mut fields = Vec::new();
     let mut methods = Vec::new();
+    let address_index = file.ast_address_index()?;
 
     for stat in stats {
         let RawTree::LengthNode(node) = stat else {
@@ -1771,6 +1963,46 @@ fn decode_members(
                     continue;
                 };
 
+                let type_parameter_addresses = parameters
+                    .iter()
+                    .filter(|parameter| matches!(parameter, ParameterNode::TypeParam { .. }))
+                    .map(|parameter| {
+                        let payload = parameter.payload();
+                        address_index
+                            .iter()
+                            .find(|indexed| {
+                                indexed.tag == dotty_tasty::tasty::TYPEPARAM_TAG
+                                    && indexed.payload.len() == payload.len()
+                                    && indexed.payload.as_ptr() == payload.as_ptr()
+                            })
+                            .and_then(|indexed| u32::try_from(indexed.offset).ok())
+                    })
+                    .collect::<Vec<_>>();
+                let type_parameters_by_address = type_parameter_addresses
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, address)| {
+                        let address = (*address)?;
+                        Some((address, u32::try_from(index).ok()?))
+                    })
+                    .collect::<HashMap<_, _>>();
+                let type_parameters = parameters
+                    .iter()
+                    .filter(|parameter| matches!(parameter, ParameterNode::TypeParam { .. }))
+                    .map(|parameter| {
+                        decode_tasty_type_parameter(
+                            file,
+                            parameter,
+                            package,
+                            &type_parameters_by_address,
+                            resolve_bare,
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>();
+                let Some(type_parameters) = type_parameters else {
+                    continue;
+                };
+
                 let mut decoded_parameters = Vec::with_capacity(parameters.len());
                 for parameter in &parameters {
                     let ParameterNode::TermParam {
@@ -1784,7 +2016,14 @@ fn decode_members(
                         continue;
                     };
                     let declared_type = parameter.decode_body().ok().and_then(|body| {
-                        resolve_parent_name_with_bare(file, &body.type_tree, package, resolve_bare)
+                        decode_tasty_member_type(
+                            file,
+                            &body.type_tree,
+                            package,
+                            &type_parameters_by_address,
+                            resolve_bare,
+                            0,
+                        )
                     });
                     decoded_parameters.push(DecodedTastyParameter {
                         name: parameter_name,
@@ -1801,12 +2040,20 @@ fn decode_members(
                 let return_type = if method_name == "<init>" {
                     None
                 } else {
-                    resolve_parent_name_with_bare(file, &return_type, package, resolve_bare)
+                    decode_tasty_member_type(
+                        file,
+                        &return_type,
+                        package,
+                        &type_parameters_by_address,
+                        resolve_bare,
+                        0,
+                    )
                 };
 
                 methods.push(DecodedTastyMethod {
                     name: method_name,
                     flags: decode_method_flags(&tail),
+                    type_parameters,
                     parameters: decoded_parameters,
                     return_type,
                 });
@@ -5211,5 +5458,57 @@ mod tests {
             .expect("copy should be decoded");
         assert!(copy.flags.is_synthetic());
         assert_eq!(copy.parameters.len(), 2);
+    }
+
+    #[test]
+    fn decodes_scala39_some_apply_with_address_based_type_parameter_refs() {
+        let decoded = decode_module_class_with_resolvers(
+            &fixture_bytes("scala3-library/scala/Some.tasty"),
+            &BinaryName::from_internal("scala/Some$"),
+            |_, _| None,
+            |package, simple_name| {
+                Some(BinaryName::from_internal(format!(
+                    "{package}/{simple_name}"
+                )))
+            },
+        )
+        .expect("pinned Scala 3.9 Some TASTy should decode");
+        let apply = decoded
+            .methods
+            .iter()
+            .find(|method| method.name == "apply")
+            .unwrap_or_else(|| {
+                panic!(
+                    "Some.apply should be decoded; methods: {:?}",
+                    decoded
+                        .methods
+                        .iter()
+                        .map(|method| &method.name)
+                        .collect::<Vec<_>>()
+                )
+            });
+
+        assert_eq!(apply.type_parameters.len(), 1);
+        assert_eq!(apply.type_parameters[0].name, "A");
+        assert!(apply.type_parameters[0].bounds_supported);
+        assert!(matches!(
+            apply.type_parameters[0].upper_bound.as_ref(),
+            Some(DecodedTastyType::Named(name)) if name.as_internal() == "scala/Any"
+        ));
+        assert!(
+            matches!(
+                apply.parameters[0].declared_type.as_ref(),
+                Some(DecodedTastyType::ParamRef(0))
+            ),
+            "unexpected Some.apply parameter type: {:?}",
+            apply.parameters[0]
+        );
+        assert!(matches!(
+            apply.return_type.as_ref(),
+            Some(DecodedTastyType::Applied { tycon, arguments })
+                if matches!(tycon.as_ref(), DecodedTastyType::Named(name)
+                    if name.as_internal() == "scala/Some")
+                    && matches!(arguments.as_slice(), [DecodedTastyType::ParamRef(0)])
+        ));
     }
 }
