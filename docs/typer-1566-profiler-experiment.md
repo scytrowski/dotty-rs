@@ -2,7 +2,7 @@
 
 ## Question
 
-Can resolving the missing `Symbol.owner` selection make the focused method
+Does resolving the `root.owner` selection make the focused method
 `completionName` type successfully?
 
 ## Scope and setup
@@ -24,46 +24,51 @@ coverage metric.
 
 ## Result
 
-The root is still not typed: **0/1**. Parsing and naming succeed. Its first
-blocker is `MemberNotFound` for selecting `owner` on the `Symbol` receiver.
-The rerun reported the same method tree, source site, and blocker as the prior
-focused run. The current `main` changes after this baseline do not touch the
-typer member-selection implementation used by this root (the intervening typer
-change is Java nullary value adaptation).
+The root is still not typed: **0/1**. Parsing and naming succeed. The reported
+first blocker is `MemberNotFound` for `owner`.
 
-The pinned Scala implementation explains the source-level behavior:
+However, inspecting the captured receiver changes the interpretation of that
+error. The receiver symbol has `SymbolFlags(16386)` and two parent types; the
+audit also materializes `scala.Symbol`. In pinned Scala source,
+`dotty.tools.dotc.core.Symbols.Symbol` is a non-final class extending three
+traits (`ParamInfo`, `SrcPos`, and `Showable`). The measured receiver therefore
+matches `scala.Symbol`, not the source-level `dotty.tools.dotc.core.Symbols.Symbol`.
+The resolver trace also reports that the `Symbol` type member under
+`dotty.tools.dotc.core.Symbols` has no available class member scope because the
+`Symbols` class info is incomplete.
 
-- `Symbols.scala` defines `implicit def toDenot(sym: Symbol)(using Context)`.
-- `SymDenotations.scala` defines `SymDenotation.owner`.
-- `completionName` is inside `RealProfiler`, whose constructor has a contextual
-  `Context` parameter.
-
-So `root.owner` is accepted by Scala through an implicit conversion and
-contextual argument insertion. It is not an inherited-member lookup on
-`Symbol`.
+The source-level Scala behavior is still relevant context: `Symbols.scala`
+defines `implicit def toDenot(sym: Symbol)(using Context)`, and
+`SymDenotations.scala` defines `SymDenotation.owner`. `RealProfiler` has a
+contextual `Context` constructor parameter. This explains how the pinned Scala
+compiler can accept the source expression, but the current audit has not
+reached a correctly resolved receiver on which to test that conversion path.
 
 ## Conclusion
 
-This experiment does **not** show that a small member-lookup fix would make the
-method type. The typer currently lacks the complete adaptation needed here:
-find an eligible implicit conversion through the receiver's implicit scope,
-check its source and result types, resolve the contextual `Context` argument,
-and construct the corresponding typed application before selecting `owner`.
-A special case keyed by the spelling `owner`, `Symbol`, or `toDenot` would not
-be a sound implementation of those semantics, so this PR does not add one.
+This experiment does **not** establish that implicit-conversion adaptation is
+the current typer blocker, nor does it test whether adding that adaptation
+would make the method type. The earlier diagnosis attributed the numeric
+receiver ID to the nested Dotty `Symbol` type; that attribution was incorrect.
+The measured `MemberNotFound` is on a receiver that appears to be `scala.Symbol`,
+while resolution of the source-level nested Dotty type is incomplete.
 
-The method therefore **does not start typing** in this change. The concrete
-next step, if continuing this path, is a separately tested, bounded implicit-
-conversion adaptation increment. Its first acceptance test should cover this
-expression and verify the exact converted receiver and selected `owner`
-symbol; a full `completionName` audit is required to establish whether later
-expressions introduce another blocker.
+The next bounded step is to determine why the external nested class
+`dotty.tools.dotc.core.Symbols.Symbol` is not materialized from the available
+TASTy/classpath metadata, and make the audit report the canonical receiver
+identity. Rerun this exact root after that is fixed. Only if it then fails on
+`owner` for the correctly resolved Dotty `Symbol` should implicit-conversion
+search and contextual `Context` insertion be tested as the next change.
+
+No typer behavior is changed by this experiment. The method does **not** start
+typing in this PR; the next experiment has to resolve the source receiver type
+before it can answer whether the `toDenot` adaptation is sufficient.
 
 ## Reproduction
 
 Run `tools/typer-classpath-corpus-audit/run` with a focused manifest containing
 `compiler/src/dotty/tools/dotc/profile/Profiler.scala` and a method selector
 for `Profiler.scala#tree=1667`, using the pinned Scala 3.9.0 and JDK 21 inputs.
-The focused output for this run is retained as a generated audit artifact, not
-checked in; it reports `methods_attempted=1`, `methods_typed=0`, and
-`blocker=MemberNotFound`.
+The focused output for this run reports `methods_attempted=1`,
+`methods_typed=0`, and `blocker=MemberNotFound`. The generated audit output is
+not checked in.
