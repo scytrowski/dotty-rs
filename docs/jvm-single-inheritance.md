@@ -72,6 +72,15 @@ parent's method symbol and declaring class, while an exact override points to
 the child's distinct symbol. This metadata does not copy method bodies or
 change JVM `invokevirtual` selection.
 
+Generated accessor methods use a separate read-only `dispatch_accessors()`
+view. Each entry retains the source `Field` symbol and a getter/setter role,
+along with the receiver, declaring class, JVM name, descriptor, and flags.
+Keeping these entries separate preserves `dispatch_methods()` compatibility
+and leaves same-signature collisions visible without inventing source method
+symbols or treating an accessor as an override. This metadata view does not
+enable accessor-bearing class emission; that remains blocked until the
+accessor collision and hierarchy gates are validated.
+
 The JVM adapter accepts a canonical Object root and up to two same-unit edges
 between public ordinary classes, so a planned `Base → Middle → Leaf` chain is
 validated without admitting a fourth class in the ancestry. Each edge is
