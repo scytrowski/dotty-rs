@@ -8,9 +8,9 @@ use dotty_core::{SymbolFlags, SymbolKind};
 use dotty_tasty::tasty::{
     ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, ApplyNode,
     AstError, CASEACCESSOR_TAG, CONTRAVARIANT_TAG, COVARIANT_TAG, DEFDEF_TAG, DefDefBody,
-    DefinitionBody, DefinitionTail, FIELDACCESSOR_TAG, FINAL_TAG, IdentNode, LOCAL_TAG,
-    MUTABLE_TAG, OBJECT_TAG, PACKAGE_TAG, PRIVATE_TAG, PRIVATEQUALIFIED_TAG, PROTECTED_TAG,
-    PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree, Reader, ReferenceNode,
+    DefinitionBody, DefinitionTail, EMPTYCLAUSE_TAG, FIELDACCESSOR_TAG, FINAL_TAG, IDENTTPT_TAG,
+    IdentNode, LOCAL_TAG, MUTABLE_TAG, OBJECT_TAG, PACKAGE_TAG, PRIVATE_TAG, PRIVATEQUALIFIED_TAG,
+    PROTECTED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree, Reader, ReferenceNode,
     RenderedSignedName, SELECTIN_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG, STABLE_TAG, STATIC_TAG,
     SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode, StructuredTree, TEMPLATE_TAG,
     TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG, TYPEREF_TAG,
@@ -182,6 +182,10 @@ pub(crate) struct DecodedTastyMethod {
     /// parameter concatenated, so this matches what a `.class`-loaded
     /// version of the same method would show.
     pub parameters: Vec<DecodedTastyParameter>,
+    /// Whether the declaration has a term parameter clause. An explicit
+    /// empty `()` clause has no parameters, so this is kept separately from
+    /// `parameters` to distinguish it from a parameterless definition.
+    pub has_term_clause: bool,
     /// `.tasty` always encodes an explicit return type tree, even for a
     /// `Unit`-returning method (`Unit` is an ordinary class reference in
     /// Scala's type system, not a separate "void" encoding the way a
@@ -1761,6 +1765,19 @@ fn decode_tasty_member_type(
         );
     }
 
+    if let Ok(StructuredTree::Ident(ident)) = tree.decode_structured()
+        && ident.tag == IDENTTPT_TAG
+    {
+        return decode_tasty_member_type(
+            file,
+            &ident.type_tree,
+            package,
+            type_parameters,
+            resolve_bare,
+            depth + 1,
+        );
+    }
+
     if let RawTree::Leaf(term) = tree
         && term.tag == TYPEREFDIRECT_TAG
         && let Some(reference) = term.ast_ref()
@@ -1952,6 +1969,7 @@ fn decode_members(
                 let StructuredNode::DefDef(DefDefBody {
                     name,
                     parameters,
+                    clauses,
                     return_type,
                     tail,
                     ..
@@ -2049,12 +2067,17 @@ fn decode_members(
                         0,
                     )
                 };
+                let has_term_clause = parameters
+                    .iter()
+                    .any(|parameter| matches!(parameter, ParameterNode::TermParam { .. }))
+                    || clauses.contains(&EMPTYCLAUSE_TAG);
 
                 methods.push(DecodedTastyMethod {
                     name: method_name,
                     flags: decode_method_flags(&tail),
                     type_parameters,
                     parameters: decoded_parameters,
+                    has_term_clause,
                     return_type,
                 });
             }

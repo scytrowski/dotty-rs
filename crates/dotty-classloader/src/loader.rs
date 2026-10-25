@@ -2794,9 +2794,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
     }
 
-    /// Lowers a [`tasty_symbol::DecodedTastyMethod`] into a `Type::Method`
-    /// or a `Type::Poly` wrapping that method, the `.tasty` counterpart of
-    /// [`Self::lower_method_descriptor`]. `<init>`'s result is always
+    /// Lowers a [`tasty_symbol::DecodedTastyMethod`] into its semantic
+    /// method shape, optionally wrapped in `Type::Poly`. A definition with
+    /// no clauses of either kind is represented as `Type::ByName` (TASTy's
+    /// `ExprType`). A type-parameter-only definition keeps its direct result
+    /// under `Type::Poly`; an explicit empty term clause remains an empty
+    /// `Type::Method`.
+    /// `<init>`'s result is always
     /// [`Definitions::unit`] rather than going through
     /// [`Self::lower_tasty_member_type`] — see the comment where
     /// `tasty_symbol::decode` gives it a `None` return type for why its
@@ -2886,11 +2890,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             self.lower_tasty_type(owner, method.return_type.as_ref(), &type_parameter_refs)
         };
 
-        let method_type = self.store.types.alloc(Type::Method(MethodType {
-            params,
-            result,
-            kind: MethodKind::Plain,
-        }));
+        let method_type = if method.has_term_clause || method.name == "<init>" {
+            self.store.types.alloc(Type::Method(MethodType {
+                params,
+                result,
+                kind: MethodKind::Plain,
+            }))
+        } else if !method.type_parameters.is_empty() {
+            result
+        } else {
+            self.store.types.alloc(Type::ByName { result })
+        };
 
         match poly_binder {
             Some(binder) => self.store.types.fill(
@@ -5844,6 +5854,67 @@ mod tests {
     }
 
     #[test]
+    fn lowers_scala39_tasty_methods_with_absent_and_empty_term_clauses_distinctly() {
+        let bytes = semantic_unpickler_fixture_bytes("Methods.tasty");
+        let owner = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Methods");
+        let decoded = tasty_symbol::decode_with_resolvers(
+            &bytes,
+            &owner,
+            |_, _| None,
+            |package, simple_name| {
+                Some(BinaryName::from_internal(format!(
+                    "{package}/{simple_name}"
+                )))
+            },
+        )
+        .expect("pinned Scala 3.9 Methods TASTy should decode");
+        let method = |name: &str| {
+            decoded
+                .methods
+                .iter()
+                .find(|method| method.name == name)
+                .unwrap_or_else(|| panic!("Methods.{name} should be present"))
+        };
+        let nullary = method("nullary");
+        let empty = method("empty");
+        let one = method("one");
+        let type_only = method("typeOnly");
+        assert!(!nullary.has_term_clause);
+        assert!(empty.has_term_clause);
+        assert!(one.has_term_clause);
+        assert!(!type_only.has_term_clause);
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let nullary_type = loader.lower_tasty_method(&owner, nullary);
+        let empty_type = loader.lower_tasty_method(&owner, empty);
+        let one_type = loader.lower_tasty_method(&owner, one);
+        let type_only_type = loader.lower_tasty_method(&owner, type_only);
+        drop(loader);
+
+        assert!(matches!(store.types.get(nullary_type), Type::ByName { .. }));
+        let Type::Method(empty_method) = store.types.get(empty_type) else {
+            panic!("an explicit empty clause should remain a method type");
+        };
+        assert!(empty_method.params.is_empty());
+        let Type::Method(one_method) = store.types.get(one_type) else {
+            panic!("a non-empty term clause should remain a method type");
+        };
+        assert_eq!(one_method.params.len(), 1);
+        let Type::Poly(type_only_poly) = store.types.get(type_only_type) else {
+            panic!("typeOnly should retain its polymorphic wrapper");
+        };
+        let Type::ParamRef { binder, index } = store.types.get(type_only_poly.result) else {
+            panic!(
+                "typeOnly should retain its direct polymorphic result, got {:?}",
+                store.types.get(type_only_poly.result)
+            );
+        };
+        assert_eq!(*binder, type_only_type);
+        assert_eq!(*index, 0);
+    }
+
+    #[test]
     fn lowers_unsupported_tasty_method_bounds_to_explicit_errors() {
         let bytes = std::fs::read(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -7063,15 +7134,11 @@ mod tests {
         let SymbolInfo::Complete(make_info) = loader.store.symbols.get(make[0]).info else {
             panic!("method declaration should carry its decoded signature");
         };
-        let Type::Method(make_signature) = loader.store.types.get(make_info) else {
-            panic!("make should have a method type");
+        let Type::ByName { result } = loader.store.types.get(make_info) else {
+            panic!("a TASTy no-clause method should have an ExprType");
         };
         assert_eq!(
-            loader
-                .store
-                .types
-                .get(make_signature.result)
-                .reference_symbol(),
+            loader.store.types.get(*result).reference_symbol(),
             Some(class_identity)
         );
         assert!(

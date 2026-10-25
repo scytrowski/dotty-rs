@@ -465,6 +465,14 @@ never duplicates them there. See §3's "known gaps" for what's
 deliberately not reconstructed from `.tasty` yet (class type parameters,
 unsupported member type shapes, annotations).
 
+For `DefDef` methods, TASTy clause presence is retained independently of the
+flattened JVM parameter list. A definition with no clauses of either kind
+lowers as `Type::ByName` (TASTy's `ExprType`); a type-parameter-only
+definition keeps its direct result under `Type::Poly`, matching the semantic
+unpickler; an explicit empty `()` clause remains `Type::Method` with no
+parameters. A `.class` descriptor cannot distinguish those source forms and
+continues to lower a zero-argument method as an empty `Type::Method`.
+
 Parent-name recovery follows the compiled TASTy reference tree. Qualified,
 root-qualified, applied, shared, and direct symbol references retain the
 package or owner encoded by that tree; an applied parent's binary identity is
