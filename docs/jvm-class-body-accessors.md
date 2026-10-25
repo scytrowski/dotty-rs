@@ -245,9 +245,10 @@ of `c.current = n` all resolve to the canonical body `Field` symbol; the
 source-to-typed map retains the original RHS and assignment-left identities.
 Assignment to immutable `c.seed` fails with `AssignmentTargetImmutable`
 and publishes no typed RHS. A separate test types earlier, self, and forward
-body-field initializer references to their exact field symbols. These are
-Typer facts only; they do not implement Scala's generated getter/setter calls
-or prove runtime initialization safety.
+body-field initializer references to their exact field symbols. These rows
+describe Typer behavior; the backend call lowering and runtime verification
+are covered separately below, and do not change Typer semantics or prove
+runtime initialization safety for unsupported forward reads.
 
 [`jvm_source_compilation.rs`](../tests/jvm_source_compilation.rs) builds
 `PlainPublic` plans only from unqualified `ValDef`s in the exact source
@@ -288,6 +289,18 @@ needed. Existing characterization is in
 `non_private_visibility_forms_are_canonicalized_and_self_forward_reads_type`
 and `field_metadata_distinguishes_private_this_from_plain_private` in the
 stateful contract test.
+
+The #1585 acceptance regression
+`class_body_accessor_acceptance_runs_body_only_and_parameterized_fixtures`
+joins those component checks in one real source batch. It decodes the complete
+`BodyOnly`, `Counter`, and `Reader` class files, checks major version 65,
+private storage and source-ordered initialization, the getter/setter names and
+descriptors, and the absence of Reader-to-Counter backing-field references.
+It also verifies independent-session byte determinism and executes a JDK 21
+`javac` harness with `java -Xverify:all`, including Boolean, Double signed
+zero, Long extrema, independent instances, and a private field observed only
+through declared same-class methods. The existing invalid-batch regressions
+continue to assert typed failures and no partially published classes.
 
 ## Scope and follow-up
 

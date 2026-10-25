@@ -38,6 +38,7 @@ type SourceSemanticObserver<'observer> = dyn for<'a> FnMut(
     ) + 'observer;
 type TyperFailureObserver<'observer> =
     dyn for<'a> FnMut(&AstArena<Untyped>, &SourceTyper<'a>, &TyperError) + 'observer;
+type SourceFailureExpectation = (&'static str, &'static str, fn(&PipelineFailure) -> bool);
 
 #[derive(Default)]
 struct SourceBatchObservers<'observer> {
@@ -10303,6 +10304,409 @@ class Reader {
 }
 
 #[test]
+fn class_body_accessor_acceptance_runs_body_only_and_parameterized_fixtures() {
+    let source = r#"
+class BodyOnly:
+  val seed: Int = 10
+  var enabled: Boolean = true
+  var ratio: Double = 1.5
+
+class Counter(val id: Int):
+  val initial: Int = 10
+  var current: Long = 0L
+  private var internal: Boolean = false
+  def snapshot(): Long = current
+  def updateInternal(value: Boolean): Unit = internal = value
+  def internalState(): Boolean = internal
+
+class Reader:
+  def read(c: Counter): Long = c.current
+  def initial(c: Counter): Int = c.initial
+  def write(c: Counter, next: Long): Unit = c.current = next
+  def readCurrent(c: Counter): Long =
+    val stable = c
+    stable.current
+"#;
+    let first_output = TestOutputDirectory::new("body-accessor-acceptance-first");
+    let second_output = TestOutputDirectory::new("body-accessor-acceptance-second");
+    let first = compile_source_batch(
+        source,
+        "BodyAccessorAcceptance.scala",
+        first_output.path(),
+        SourceId::from_index(1585),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("the complete class-body accessor acceptance batch compiles from real source");
+    let second = compile_source_batch(
+        source,
+        "BodyAccessorAcceptance.scala",
+        second_output.path(),
+        SourceId::from_index(1586),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("a fresh frontend session compiles the same acceptance batch");
+    let names = first
+        .iter()
+        .map(|artifact| artifact.class.internal_name())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["BodyOnly", "Counter", "Reader"]);
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| (
+                artifact.class.internal_name().to_owned(),
+                artifact.class.bytes().to_vec(),
+            ))
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| (
+                artifact.class.internal_name().to_owned(),
+                artifact.class.bytes().to_vec(),
+            ))
+            .collect::<Vec<_>>(),
+        "ordered complete classfile bytes are deterministic across fresh sessions"
+    );
+
+    let body_only = decode_emitted_class_named(&first, "BodyOnly");
+    let counter = decode_emitted_class_named(&first, "Counter");
+    let reader = decode_emitted_class_named(&first, "Reader");
+    let field_shapes = |class: &ClassFile<'_>| {
+        class
+            .fields
+            .iter()
+            .map(|field| {
+                (
+                    class
+                        .constant_pool
+                        .utf8(field.name_index)
+                        .unwrap()
+                        .to_owned(),
+                    class
+                        .constant_pool
+                        .utf8(field.descriptor_index)
+                        .unwrap()
+                        .to_owned(),
+                    field.access_flags,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let body_fields = field_shapes(&body_only);
+    assert_eq!(
+        body_fields
+            .iter()
+            .map(|(name, descriptor, _)| (name.as_str(), descriptor.as_str()))
+            .collect::<Vec<_>>(),
+        [("seed", "I"), ("enabled", "Z"), ("ratio", "D")]
+    );
+    assert!(body_fields[0].2.0 & 0x0002 != 0 && body_fields[0].2.0 & 0x0010 != 0);
+    assert!(
+        body_fields[1..]
+            .iter()
+            .all(|(_, _, flags)| flags.0 & 0x0002 != 0)
+    );
+    assert!(
+        body_fields[1..]
+            .iter()
+            .all(|(_, _, flags)| flags.0 & 0x0010 == 0)
+    );
+    let counter_fields = field_shapes(&counter);
+    assert_eq!(
+        counter_fields
+            .iter()
+            .map(|(name, descriptor, _)| (name.as_str(), descriptor.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("id", "I"),
+            ("initial", "I"),
+            ("current", "J"),
+            ("internal", "Z")
+        ]
+    );
+    assert!(counter_fields[0].2.0 & 0x0002 != 0 && counter_fields[0].2.0 & 0x0010 != 0);
+    assert!(counter_fields[1].2.0 & 0x0002 != 0 && counter_fields[1].2.0 & 0x0010 != 0);
+    assert!(
+        counter_fields[2..]
+            .iter()
+            .all(|(_, _, flags)| flags.0 & 0x0002 != 0)
+    );
+    assert!(
+        counter_fields[2..]
+            .iter()
+            .all(|(_, _, flags)| flags.0 & 0x0010 == 0)
+    );
+
+    let body_methods = methods_with_descriptors(&body_only);
+    assert!(
+        body_methods
+            .iter()
+            .any(|(name, descriptor)| name == "<init>" && descriptor == "()V")
+    );
+    for accessor in [
+        ("seed", "()I"),
+        ("enabled", "()Z"),
+        ("enabled_$eq", "(Z)V"),
+        ("ratio", "()D"),
+        ("ratio_$eq", "(D)V"),
+    ] {
+        assert!(
+            body_methods
+                .iter()
+                .any(|(name, descriptor)| (name.as_str(), descriptor.as_str()) == accessor)
+        );
+    }
+    assert!(!body_methods.iter().any(|(name, _)| name == "seed_$eq"));
+    let counter_methods = methods_with_descriptors(&counter);
+    for accessor in [
+        ("<init>", "(I)V"),
+        ("id", "()I"),
+        ("initial", "()I"),
+        ("current", "()J"),
+        ("current_$eq", "(J)V"),
+        ("snapshot", "()J"),
+        ("updateInternal", "(Z)V"),
+        ("internalState", "()Z"),
+    ] {
+        assert!(
+            counter_methods
+                .iter()
+                .any(|(name, descriptor)| (name.as_str(), descriptor.as_str()) == accessor)
+        );
+    }
+    for immutable in ["id_$eq", "initial_$eq", "internal", "internal_$eq"] {
+        assert!(!counter_methods.iter().any(|(name, _)| name == immutable));
+    }
+    assert!(
+        !counter_methods
+            .iter()
+            .any(|(name, descriptor)| { name == "<init>" && descriptor == "()V" })
+    );
+    for (class, public_methods) in [
+        (
+            &body_only,
+            [
+                ("<init>", "()V"),
+                ("seed", "()I"),
+                ("enabled", "()Z"),
+                ("enabled_$eq", "(Z)V"),
+                ("ratio", "()D"),
+                ("ratio_$eq", "(D)V"),
+            ]
+            .as_slice(),
+        ),
+        (
+            &counter,
+            [
+                ("<init>", "(I)V"),
+                ("id", "()I"),
+                ("initial", "()I"),
+                ("current", "()J"),
+                ("current_$eq", "(J)V"),
+            ]
+            .as_slice(),
+        ),
+    ] {
+        for (expected_name, expected_descriptor) in public_methods {
+            assert!(class.methods.iter().any(|method| {
+                class.constant_pool.utf8(method.name_index).unwrap() == *expected_name
+                    && class.constant_pool.utf8(method.descriptor_index).unwrap()
+                        == *expected_descriptor
+                    && method.access_flags.0 & 0x0001 != 0
+            }));
+        }
+    }
+
+    assert_field_reference_sequence(
+        &body_only,
+        emitted_method_code(&body_only, "<init>"),
+        &[
+            (0xb5, "BodyOnly", "seed", "I"),
+            (0xb5, "BodyOnly", "enabled", "Z"),
+            (0xb5, "BodyOnly", "ratio", "D"),
+        ],
+    );
+    for (method, opcode, field, descriptor) in [
+        ("seed", 0xb4, "seed", "I"),
+        ("enabled", 0xb4, "enabled", "Z"),
+        ("enabled_$eq", 0xb5, "enabled", "Z"),
+        ("ratio", 0xb4, "ratio", "D"),
+        ("ratio_$eq", 0xb5, "ratio", "D"),
+    ] {
+        assert_field_reference(
+            &body_only,
+            emitted_method_code(&body_only, method),
+            opcode,
+            "BodyOnly",
+            field,
+            descriptor,
+        );
+    }
+    assert_invocation_sequence(
+        &body_only,
+        emitted_method_code(&body_only, "<init>"),
+        &[(0xb7, "java/lang/Object", "<init>", "()V")],
+    );
+    assert_field_reference_sequence(
+        &counter,
+        emitted_method_code(&counter, "<init>"),
+        &[
+            (0xb5, "Counter", "id", "I"),
+            (0xb5, "Counter", "initial", "I"),
+            (0xb5, "Counter", "current", "J"),
+            (0xb5, "Counter", "internal", "Z"),
+        ],
+    );
+    for (method, opcode, field, descriptor) in [
+        ("id", 0xb4, "id", "I"),
+        ("initial", 0xb4, "initial", "I"),
+        ("current", 0xb4, "current", "J"),
+        ("current_$eq", 0xb5, "current", "J"),
+    ] {
+        assert_field_reference(
+            &counter,
+            emitted_method_code(&counter, method),
+            opcode,
+            "Counter",
+            field,
+            descriptor,
+        );
+    }
+    assert_invocation_sequence(
+        &counter,
+        emitted_method_code(&counter, "<init>"),
+        &[(0xb7, "java/lang/Object", "<init>", "()V")],
+    );
+    assert_invocation_sequence(
+        &counter,
+        emitted_method_code(&counter, "snapshot"),
+        &[(0xb6, "Counter", "current", "()J")],
+    );
+    assert_field_reference(
+        &counter,
+        emitted_method_code(&counter, "updateInternal"),
+        0xb5,
+        "Counter",
+        "internal",
+        "Z",
+    );
+    assert_field_reference(
+        &counter,
+        emitted_method_code(&counter, "internalState"),
+        0xb4,
+        "Counter",
+        "internal",
+        "Z",
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "read"),
+        &[(0xb6, "Counter", "current", "()J")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "initial"),
+        &[(0xb6, "Counter", "initial", "()I")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "write"),
+        &[(0xb6, "Counter", "current_$eq", "(J)V")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "readCurrent"),
+        &[(0xb6, "Counter", "current", "()J")],
+    );
+    for method in ["read", "initial", "write", "readCurrent"] {
+        assert_no_field_reference_to_owner(
+            &reader,
+            emitted_method_code(&reader, method),
+            "Counter",
+        );
+    }
+
+    if require_jdk_or_skip() {
+        for class_name in ["BodyOnly", "Counter", "Reader"] {
+            let javap = Command::new("javap")
+                .args([
+                    "-c",
+                    "-v",
+                    "-p",
+                    "-classpath",
+                    first_output.path().to_str().unwrap(),
+                    class_name,
+                ])
+                .output()
+                .expect("start javap for class-body accessor acceptance");
+            assert!(
+                javap.status.success(),
+                "javap rejected {class_name}: {}",
+                String::from_utf8_lossy(&javap.stderr)
+            );
+            assert!(String::from_utf8_lossy(&javap.stdout).contains("major version: 65"));
+        }
+
+        let harness = first_output
+            .path()
+            .join("BodyAccessorAcceptanceHarness.java");
+        fs::write(
+            &harness,
+            r#"public final class BodyAccessorAcceptanceHarness {
+  private static void check(boolean condition, String label) { if (!condition) throw new AssertionError(label); }
+  public static void main(String[] args) {
+    BodyOnly body = new BodyOnly();
+    check(body.seed() == 10 && body.enabled() && body.ratio() == 1.5, "body-only getters");
+    body.enabled_$eq(false);
+    body.ratio_$eq(-0.0d);
+    check(!body.enabled() && Double.doubleToRawLongBits(body.ratio()) == Double.doubleToRawLongBits(-0.0d), "Boolean and Double setters");
+    Counter first = new Counter(7);
+    Counter second = new Counter(-3);
+    Reader reader = new Reader();
+    check(first.id() == 7 && first.initial() == 10 && first.current() == 0L, "constructor and body getters");
+    check(reader.read(first) == 0L && reader.initial(first) == 10 && reader.readCurrent(first) == 0L, "cross-class getters");
+    reader.write(first, Long.MIN_VALUE);
+    check(first.current() == Long.MIN_VALUE && reader.readCurrent(first) == Long.MIN_VALUE, "Long minimum setter");
+    reader.write(first, Long.MAX_VALUE);
+    check(first.current() == Long.MAX_VALUE && second.current() == 0L, "Long maximum and instance isolation");
+    first.updateInternal(true);
+    check(first.internalState() && !second.internalState(), "private field stays behind declared methods");
+  }
+}
+"#,
+        )
+        .expect("write Java 21 class-body accessor acceptance harness");
+        let classpath = first_output.path().to_str().expect("UTF-8 classpath");
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac for class-body accessor acceptance harness");
+        assert!(
+            javac.status.success(),
+            "javac rejected the acceptance harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "BodyAccessorAcceptanceHarness",
+            ])
+            .output()
+            .expect("start Java 21 verifier for class-body accessor acceptance");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected the acceptance classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
+
+#[test]
 fn constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends() {
     let source = "class Measurement(val id: Int, var value: Double)\nclass Mixed(first: Int, val count: Long, var enabled: Boolean)\nclass LongBox(var count: Long)\n";
     let first_output = TestOutputDirectory::new("constructor-accessor-source-first");
@@ -11140,6 +11544,142 @@ fn body_field_initializer_failure_keeps_a_multi_class_batch_unpublished() {
         output.class_files().is_empty(),
         "a later body initialization error must not publish the earlier valid class"
     );
+}
+
+#[test]
+fn public_body_field_rejections_keep_source_batches_unpublished() {
+    let cases: [SourceFailureExpectation; 11] = [
+        (
+            "public-body-missing-rhs",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(JvmCodegenError::MissingFieldInitializer { .. })
+                )
+            },
+        ),
+        (
+            "public-body-wrong-rhs",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = true }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Typer(TyperError::ExpectedExpressionTypeMismatch { .. })
+                )
+            },
+        ),
+        (
+            "public-body-duplicate-field",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = 1; var value: Int = 2 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(JvmCodegenError::DuplicateJvmFieldName { .. })
+                )
+            },
+        ),
+        (
+            "public-body-getter-collision",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = 1; def value(): Int = 2 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(
+                        JvmCodegenError::DuplicateJvmAccessorMethodIdentity { .. }
+                    )
+                )
+            },
+        ),
+        (
+            "public-body-setter-collision",
+            "class Ready { def id(): Int = 1 }\nclass Broken { var value: Int = 1; def value_=(next: Int): Unit = {} }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(
+                        JvmCodegenError::DuplicateJvmAccessorMethodIdentity { .. }
+                    )
+                )
+            },
+        ),
+        (
+            "public-body-immutable-assignment",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = 1; def update(): Unit = value = 2 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Typer(TyperError::AssignmentTargetImmutable { .. })
+                )
+            },
+        ),
+        (
+            "public-body-invalid-receiver",
+            "class Ready { def id(): Int = 1 }\nclass Broken { def read(value: Int): Int = value.amount }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Typer(TyperError::MemberNotFound { .. })
+                )
+            },
+        ),
+        (
+            "public-body-field-called-as-method",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = 1; def read(): Int = value() }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Typer(TyperError::ApplicationCalleeNotMethod { .. })
+                )
+            },
+        ),
+        (
+            "public-body-unsupported-protected-field",
+            "class Ready { def id(): Int = 1 }\nclass Broken { protected val value: Int = 1 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmVisibility { .. })
+                )
+            },
+        ),
+        (
+            "public-body-unsupported-private-this-field",
+            "class Ready { def id(): Int = 1 }\nclass Broken { private[this] val value: Int = 1 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(
+                        JvmCodegenError::UnsupportedJvmFieldSourceVisibility { .. }
+                    )
+                )
+            },
+        ),
+        (
+            "public-body-unsupported-lazy-field",
+            "class Ready { def id(): Int = 1 }\nclass Broken { lazy val value: Int = 1 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmFieldFlag { .. })
+                )
+            },
+        ),
+    ];
+
+    for (label, source, expected_failure) in cases {
+        let output = TestOutputDirectory::new(label);
+        let failure = compile_source_classes(source, &format!("{label}.scala"), output.path())
+            .expect_err("invalid public-body source batch must fail before publication");
+        assert!(
+            expected_failure(&failure),
+            "{label} failed at an unexpected first pipeline stage: {failure:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label} failure must not publish an earlier valid class"
+        );
+    }
 }
 
 #[test]
