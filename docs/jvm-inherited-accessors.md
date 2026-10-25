@@ -76,20 +76,26 @@ constructor. The child class declaration scope contains no copied `current`
 or `token` field. These are session-local identities; their numeric arena
 slots are not part of the contract.
 
-For qualified selections, the current Typer already resolves `this.current`,
-`child.current`, and `parent.current` to a `TermRefTarget::Symbol` naming the
-canonical `Parent.current` field. It likewise resolves qualified
-`AccessorChild` and `Reader` reads/writes to the canonical
-`AccessorParent.token`/`count` fields. The regression checks the source-to-typed
-bindings for both the selection and receiver, that the typed selection keeps
-the exact receiver type as its prefix, and that setters remain `Unit`.
-An immutable local alias used as the receiver (`Reader.readLocal`) also keeps
-the inherited field identity. Selection through a mutable local (`readMutableLocal`)
-is separately pinned as `TyperError::UnstableSelectionPrefix`.
-Unqualified `Child.read` (`current`) remains a distinct unsupported lookup and
-returns `TyperError::TermNameNotFound`; the test pins that boundary without
-generalizing it to qualified selection forms. This issue does not change the
-Typer.
+The Typer resolves unqualified inherited public body fields as well as
+`this.current`, `child.current`, and `parent.current` to a
+`TermRefTarget::Symbol` naming the canonical `Parent.current` field. The
+unqualified form carries the enclosing `Child` `ThisType` prefix, while an
+explicit selection retains the exact receiver type as its prefix. The narrow
+Typer fallback runs after direct lexical declarations and before imports, so
+local declarations keep precedence. It uses the existing bounded member
+lookup and does not copy fields into child scopes. Qualified constructor and
+body accessor selections retain their existing canonical
+`AccessorParent.token`/`count` identities; mutable receiver instability and
+setter typing remain governed by the existing checks.
+
+The source-to-class regression covers `current`, `this.current`, and `id` in
+`Child`, plus `child.current`, `child.id`, and `parent.current` in `Reader`.
+Getter calls use the canonical field's validated getter metadata and the
+effective dispatch entry for the static receiver: `Child.current:()I`,
+`Child.id:()J`, or `Parent.current:()I`. The emitted bodies contain no direct
+backing-field reads, and `Child` receives neither copied fields nor generated
+getter methods. A Java harness exercises the inherited reads and setter with
+JDK 21 `-Xverify:all`.
 
 When source assembly contains inherited accessors but no unsupported source
 selection, `JvmCompilationUnit::metadata` returns an effective accessor view
@@ -153,5 +159,6 @@ and no accessor override or generated/user-member collision. It does not copy
 child fields or methods to satisfy symbolic resolution. Descendants with new
 accessors, bridges, traits, external ancestors, inaccessible constructors, or
 malformed hierarchy edges remain rejected before publication. Qualified
-inherited accessor call lowering is tracked separately in #1612–#1613; runtime
-dispatch and JDK verification are covered by #1615.
+inherited getter call lowering is implemented in #1612. Inherited setter call
+lowering remains tracked separately in #1613; runtime dispatch and JDK
+verification are covered by #1615.

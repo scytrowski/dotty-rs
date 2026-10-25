@@ -5747,6 +5747,133 @@ class TokenChild extends TokenParent(7)
 }
 
 #[test]
+fn inherited_getter_selections_use_the_static_receiver_owner_and_verify_on_jvm() {
+    let source = r#"
+class Parent:
+  var current: Int = 1
+  val id: Long = 42L
+
+class Child extends Parent:
+  def own(): Int = current
+  def qualified(): Int = this.current
+  def readId(): Long = id
+
+class Reader:
+  def sourceChild(): Child = new Child()
+  def read(child: Child): Int = child.current
+  def readId(child: Child): Long = child.id
+  def readAsParent(parent: Parent): Int = parent.current
+  def readFresh(): Int = sourceChild().current
+"#;
+    let output = TestOutputDirectory::new("inherited-getter-selection-lowering");
+    let artifacts = compile_source_batch(
+        source,
+        "InheritedGetterSelections.scala",
+        output.path(),
+        SourceId::from_index(1612),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("typed inherited field selections lower through validated getters");
+
+    let child = decode_emitted_class_named(&artifacts, "Child");
+    let reader = decode_emitted_class_named(&artifacts, "Reader");
+    assert!(
+        child.fields.is_empty(),
+        "Child must not copy Parent storage"
+    );
+    assert!(
+        methods_with_descriptors(&child)
+            .iter()
+            .all(|(name, _)| !["current", "id"].contains(&name.as_str())),
+        "Child must not declare generated getter methods"
+    );
+    for (class, method, expected) in [
+        (&child, "own", vec![(0xb6, "Child", "current", "()I")]),
+        (&child, "qualified", vec![(0xb6, "Child", "current", "()I")]),
+        (&child, "readId", vec![(0xb6, "Child", "id", "()J")]),
+        (&reader, "read", vec![(0xb6, "Child", "current", "()I")]),
+        (&reader, "readId", vec![(0xb6, "Child", "id", "()J")]),
+        (
+            &reader,
+            "readAsParent",
+            vec![(0xb6, "Parent", "current", "()I")],
+        ),
+        (
+            &reader,
+            "readFresh",
+            vec![
+                (0xb6, "Reader", "sourceChild", "()LChild;"),
+                (0xb6, "Child", "current", "()I"),
+            ],
+        ),
+    ] {
+        let code = emitted_method_code(class, method);
+        assert!(
+            decode_subset_instructions(code)
+                .iter()
+                .all(|(_, opcode)| *opcode != 0xb4),
+            "{method} must call the inherited getter instead of reading backing storage"
+        );
+        assert_invocation_sequence(class, code, &expected);
+    }
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let harness = output.path().join("InheritedGetterSelectionHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class InheritedGetterSelectionHarness {
+    public static void main(String[] args) {
+        Child child = new Child();
+        Reader reader = new Reader();
+        if (child.own() != 1 || child.qualified() != 1 || child.readId() != 42L)
+            throw new AssertionError("inherited reads in Child");
+        if (reader.read(child) != 1 || reader.readId(child) != 42L)
+            throw new AssertionError("Child receiver reads");
+        if (reader.readFresh() != 1)
+            throw new AssertionError("single evaluation of call receiver");
+        Parent parent = child;
+        if (reader.readAsParent(parent) != 1)
+            throw new AssertionError("Parent receiver read");
+        child.current_$eq(9);
+        if (reader.read(child) != 9)
+            throw new AssertionError("inherited setter remains dispatched");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let classpath = output.path().to_string_lossy().into_owned();
+    let javac = Command::new("javac")
+        .args(["-classpath", &classpath, "-d", &classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for inherited getter selection harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected inherited getter selection harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            &classpath,
+            "InheritedGetterSelectionHarness",
+        ])
+        .output()
+        .expect("start java for inherited getter selection harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected inherited getter selections\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+}
+
+#[test]
 fn inherited_accessor_hierarchy_rejects_new_child_storage_without_partial_output() {
     let output = TestOutputDirectory::new("inherited-accessor-child-storage-rejected");
     let source =

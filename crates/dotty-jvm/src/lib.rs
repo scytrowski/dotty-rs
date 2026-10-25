@@ -778,6 +778,9 @@ pub enum InvalidJvmClassInfoKind {
 pub enum JvmAccessorCallMetadataIssue {
     DuplicateField,
     OwnerMismatch,
+    ReceiverClassMissing,
+    EffectiveGetterMissing,
+    EffectiveGetterMismatch,
     BindingMissing,
     BodyFieldProofMismatch,
     ValueTypeMismatch,
