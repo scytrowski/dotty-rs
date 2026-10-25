@@ -145,33 +145,6 @@ impl SourceTyper<'_> {
             if !candidates.is_empty() {
                 return Ok(candidates);
             }
-            if enclosing_class == Some(source_context.owner) {
-                let this_type = self.store.types.alloc(Type::ThisType {
-                    class: source_context.owner,
-                });
-                let inherited = self
-                    .lookup_members(this_type, name)
-                    .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
-                    .into_iter()
-                    .filter(|candidate| candidate.inheritance_depth > 0)
-                    .filter(|candidate| {
-                        self.store.symbols.contains(candidate.symbol)
-                            && self.store.symbols.get(candidate.symbol).kind == SymbolKind::Field
-                            && self.store.symbols.get(candidate.symbol).visibility
-                                == dotty_core::symbols::Visibility::Public
-                            && !self
-                                .store
-                                .symbols
-                                .get(candidate.symbol)
-                                .flags
-                                .contains(SymbolFlags::STATIC)
-                    })
-                    .map(|candidate| candidate.symbol)
-                    .collect::<Vec<_>>();
-                if !inherited.is_empty() {
-                    return Ok(inherited);
-                }
-            }
             // Top-level source methods are owned by their synthetic package
             // module class, while their recorded lexical context is the
             // package wrapper. Check those same-unit members before imports,
@@ -197,6 +170,70 @@ impl SourceTyper<'_> {
                 )?;
                 if !candidates.is_empty() {
                     return Ok(candidates);
+                }
+            }
+            let source_parent_has_field = if enclosing_class == Some(source_context.owner) {
+                let parents = match self.store.symbols.info(source_context.owner) {
+                    SymbolInfo::Complete(info) => match self.store.types.try_get(*info) {
+                        Some(Type::ClassInfo(info)) => Some(info.parents.as_slice()),
+                        _ => None,
+                    },
+                    SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => None,
+                };
+                parents.is_some_and(|parents| {
+                    parents.iter().any(|parent| {
+                        let Some(parent) = self.store.types.get(*parent).reference_symbol() else {
+                            return false;
+                        };
+                        if !self.store.symbols.contains(parent)
+                            || !matches!(
+                                self.store.symbols.get(parent).origin,
+                                SymbolOrigin::Source(_)
+                            )
+                        {
+                            return false;
+                        }
+                        self.index.scope_of(parent).is_some_and(|scope| {
+                            self.store
+                                .scopes
+                                .get(scope)
+                                .lookup_all(&name)
+                                .iter()
+                                .any(|symbol| {
+                                    self.store.symbols.contains(*symbol)
+                                        && self.store.symbols.get(*symbol).kind == SymbolKind::Field
+                                })
+                        })
+                    })
+                })
+            } else {
+                false
+            };
+            if source_parent_has_field {
+                let this_type = self.store.types.alloc(Type::ThisType {
+                    class: source_context.owner,
+                });
+                let inherited = self
+                    .lookup_members(this_type, name)
+                    .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
+                    .into_iter()
+                    .filter(|candidate| candidate.inheritance_depth > 0)
+                    .filter(|candidate| {
+                        self.store.symbols.contains(candidate.symbol)
+                            && self.store.symbols.get(candidate.symbol).kind == SymbolKind::Field
+                            && self.store.symbols.get(candidate.symbol).visibility
+                                == dotty_core::symbols::Visibility::Public
+                            && !self
+                                .store
+                                .symbols
+                                .get(candidate.symbol)
+                                .flags
+                                .contains(SymbolFlags::STATIC)
+                    })
+                    .map(|candidate| candidate.symbol)
+                    .collect::<Vec<_>>();
+                if !inherited.is_empty() {
+                    return Ok(inherited);
                 }
             }
         }
