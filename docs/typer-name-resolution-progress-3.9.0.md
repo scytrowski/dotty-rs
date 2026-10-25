@@ -58,6 +58,45 @@ inside `Some(name + desc)` in `read#tree=420`. Determine the actual and formal
 types at that application before changing inference or conformance; this audit
 does not establish that the failure is caused by String aliasing.
 
+## Generic TASTy method signatures
+
+The follow-up investigation found that `scala.Some.apply` is generic in the
+pinned Scala 3.9.0 TASTy, while the classloader discarded method type
+parameters and reduced declared method types to names. The classloader now
+preserves supported method type parameters and address-based parameter
+references, including the applied result `Some[A]`; unsupported bounds remain
+explicit. Decoder and loader regressions use the checked-in `scala/Some.tasty`
+fixture and verify the same binder identity in the method argument and result.
+
+The deterministic `package-term` audit was rerun twice over the same 60 files
+and 369 methods. Both runs matched, with no parser or namer failures and zero
+fully typed methods. The three `InlineInfoAttribute.read` cohort rows advanced
+from `ApplicationArgumentConformanceUnsupported` to
+`IfBranchJoinUnsupported` at `read#tree=420`; they remain untyped. The join
+compares the `None` and `Some[String]` branches. Its relation error is
+`ExternalGenericInstantiationDeferred` for `scala.Some`: TASTy class type
+parameters and their parent substitutions are not modeled yet. The typer
+cannot soundly decide this relation from the current external class metadata.
+The updated row-level evidence is in
+[`typer-name-resolution-1566-tasty-generic-method-3.9.0.tsv`](typer-name-resolution-1566-tasty-generic-method-3.9.0.tsv).
+
+This is blocker progress only. The #1566 goal of fully typing a real method
+remains unmet. The next bounded step is to address generic class hierarchy
+metadata or otherwise prove this class relation without guessing; weakening the
+branch join to hide the deferred relation would be unsound.
+
+Reproduce the deterministic audit with the pinned Scala 3.9.0 checkout and
+cached dependencies:
+
+```sh
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-tasty-generic-runs" \
+SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
+SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
+  --verify-determinism target/issue-1566-tasty-generic-after.md
+```
+
 Reproduce the deterministic cohort comparison with:
 
 ```sh

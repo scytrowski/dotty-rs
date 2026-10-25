@@ -2794,8 +2794,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
     }
 
-    /// Lowers a [`tasty_symbol::DecodedTastyMethod`] into a `Type::Method`'s
-    /// `TypeId`, the `.tasty` counterpart of
+    /// Lowers a [`tasty_symbol::DecodedTastyMethod`] into a `Type::Method`
+    /// or a `Type::Poly` wrapping that method, the `.tasty` counterpart of
     /// [`Self::lower_method_descriptor`]. `<init>`'s result is always
     /// [`Definitions::unit`] rather than going through
     /// [`Self::lower_tasty_member_type`] — see the comment where
@@ -2811,9 +2811,66 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         owner: &BinaryName,
         method: &tasty_symbol::DecodedTastyMethod,
     ) -> TypeId {
+        let poly_binder = (!method.type_parameters.is_empty()).then(|| self.store.types.reserve());
+        let type_parameter_refs = poly_binder
+            .as_ref()
+            .map(|binder| {
+                (0..method.type_parameters.len())
+                    .map(|index| {
+                        self.store.types.alloc(Type::ParamRef {
+                            binder: binder.id(),
+                            index: index as u32,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let type_parameters = method
+            .type_parameters
+            .iter()
+            .map(|parameter| {
+                let (low, high) = if parameter.bounds_supported {
+                    let low = self.lower_tasty_type(
+                        owner,
+                        parameter.lower_bound.as_ref(),
+                        &type_parameter_refs,
+                    );
+                    let high = parameter
+                        .upper_bound
+                        .as_ref()
+                        .map_or(self.definitions.any_type, |ty| {
+                            self.lower_tasty_type(owner, Some(ty), &type_parameter_refs)
+                        });
+                    (low, high)
+                } else {
+                    let error =
+                        self.unresolved_tasty_type("unsupported method type parameter bounds");
+                    (error, error)
+                };
+                let bounds = self.store.types.alloc(Type::Bounds { low, high });
+                let text = self.store.names.intern(&parameter.name);
+                let declared_variance = match parameter.variance {
+                    Some(28) => Some(dotty_core::Variance::Covariant),
+                    Some(29) => Some(dotty_core::Variance::Contravariant),
+                    Some(32) => Some(dotty_core::Variance::Invariant),
+                    _ => None,
+                };
+                TypeParam {
+                    name: TypeName::new(text),
+                    bounds,
+                    declared_variance,
+                }
+            })
+            .collect::<Vec<_>>();
+
         let mut params = Vec::with_capacity(method.parameters.len());
         for parameter in &method.parameters {
-            let ty = self.lower_tasty_member_type(owner, parameter.declared_type.as_ref());
+            let ty = self.lower_tasty_type(
+                owner,
+                parameter.declared_type.as_ref(),
+                &type_parameter_refs,
+            );
             let text = self.store.names.intern(&parameter.name);
             params.push(MethodParam {
                 name: TermName::new(text),
@@ -2826,14 +2883,59 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let result = if method.name == "<init>" {
             self.definitions.unit
         } else {
-            self.lower_tasty_member_type(owner, method.return_type.as_ref())
+            self.lower_tasty_type(owner, method.return_type.as_ref(), &type_parameter_refs)
         };
 
-        self.store.types.alloc(Type::Method(MethodType {
+        let method_type = self.store.types.alloc(Type::Method(MethodType {
             params,
             result,
             kind: MethodKind::Plain,
-        }))
+        }));
+
+        match poly_binder {
+            Some(binder) => self.store.types.fill(
+                binder,
+                Type::Poly(PolyType {
+                    params: type_parameters,
+                    result: method_type,
+                }),
+            ),
+            None => method_type,
+        }
+    }
+
+    fn lower_tasty_type(
+        &mut self,
+        owner: &BinaryName,
+        declared_type: Option<&tasty_symbol::DecodedTastyType>,
+        type_parameters: &[TypeId],
+    ) -> TypeId {
+        match declared_type {
+            Some(tasty_symbol::DecodedTastyType::Named(name)) => {
+                self.lower_tasty_member_type(owner, Some(name))
+            }
+            Some(tasty_symbol::DecodedTastyType::ParamRef(index)) => type_parameters
+                .get(*index as usize)
+                .copied()
+                .unwrap_or_else(|| {
+                    self.unresolved_tasty_type("type parameter reference is out of range")
+                }),
+            Some(tasty_symbol::DecodedTastyType::Applied { tycon, arguments }) => {
+                let tycon = self.lower_tasty_type(owner, Some(tycon), type_parameters);
+                let args = arguments
+                    .iter()
+                    .map(|argument| self.lower_tasty_type(owner, Some(argument), type_parameters))
+                    .collect();
+                self.store.types.alloc(Type::Applied { tycon, args })
+            }
+            None => self.lower_tasty_member_type(owner, None),
+        }
+    }
+
+    fn unresolved_tasty_type(&mut self, reason: &str) -> TypeId {
+        let text = format!("unresolved .tasty member type: {reason}");
+        let message = self.store.names.intern(&text);
+        self.store.types.alloc(Type::Error(ErrorType { message }))
     }
 
     fn load_uncached_class(
@@ -5672,6 +5774,60 @@ mod tests {
         };
         assert_eq!(store.types.get(method.result), &expected);
         assert_eq!(store.types.get(method.params[0].ty), &expected);
+    }
+
+    #[test]
+    fn lowers_scala39_some_apply_to_a_poly_method_with_exact_param_refs() {
+        let bytes = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library/scala/Some.tasty"),
+        )
+        .expect("pinned Some.tasty fixture should exist");
+        let decoded = tasty_symbol::decode_module_class_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("scala/Some$"),
+            |_, _| None,
+            |package, simple_name| {
+                Some(BinaryName::from_internal(format!(
+                    "{package}/{simple_name}"
+                )))
+            },
+        )
+        .expect("pinned Some module class should decode");
+        let apply = decoded
+            .methods
+            .iter()
+            .find(|method| method.name == "apply")
+            .expect("Some.apply should be present after generic decoding");
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let apply_type =
+            loader.lower_tasty_method(&BinaryName::from_internal("scala/Some$"), apply);
+        drop(loader);
+
+        let Type::Poly(poly) = store.types.get(apply_type) else {
+            panic!("Some.apply should lower to a Poly type");
+        };
+        assert_eq!(poly.params.len(), 1);
+        assert_eq!(
+            store.names.resolve(poly.params[0].name.as_name().text()),
+            "A"
+        );
+        assert_eq!(poly.params[0].declared_variance, None);
+        let Type::Method(method) = store.types.get(poly.result) else {
+            panic!("Some.apply's Poly result should be a method");
+        };
+        let expected = Type::ParamRef {
+            binder: apply_type,
+            index: 0,
+        };
+        assert_eq!(store.types.get(method.params[0].ty), &expected);
+        let Type::Applied { args, .. } = store.types.get(method.result) else {
+            panic!("Some.apply should retain the applied result type");
+        };
+        assert_eq!(args.len(), 1);
+        assert_eq!(store.types.get(args[0]), &expected);
     }
 
     #[test]

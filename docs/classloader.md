@@ -228,21 +228,18 @@ the JVMS-adjacent ones at the codec layer.)
 ### Known, deliberately scoped gaps
 These are documented, honest simplifications — not silently missing
 behavior — each with a doc comment at its own definition site:
-- **`.tasty` member types are best-effort, not exact.** JVM descriptors
-  are always complete and exact; a `.tasty` value type is reduced to a
-  name via `tasty_symbol::resolve_parent_name`, which only recognizes
-  the pre-typecheck syntax-tree reference shapes `extends` clauses use
-  (`IDENT_TAG`/`SELECT_TAG`/...). Ordinary field/parameter/return types
-  are post-typecheck `TYPEREF_TAG`/`TERMREF_TAG` nodes, a different,
-  currently-unhandled shape — see `tasty_symbol.rs`'s module doc comment.
-  `ClassLoader::lower_tasty_member_type` falls back to `Type::Error`
-  whenever a name can't be reduced *or* the reduced name fails to load,
-  rather than ever hard-failing the class load over it.
-- **No `.tasty` generics.** A `.tasty`-backed method/class's own type
-  parameters are not reconstructed (unlike `.class`'s `Signature`-based
-  `Type::Poly`/`SymbolKind::TypeParameter` handling, §4.4).
-  `.tasty`-backed `varargs` is always `false` for the same reason
-  (`T*` uses a distinct type-tree shape this decoder doesn't model yet).
+- **`.tasty` member types remain a bounded subset.** The classloader
+  lowers named and applied method parameter/result types, including exact
+  address-based references to method-local type parameters. Other shapes
+  (tuples, function types, refinements, dependent/path types, aliases, and
+  higher-kinded bounds) remain explicit `Type::Error` values rather than
+  guesses. Unresolvable named dependencies also remain `Type::Error`; they
+  do not fail the class load.
+- **Class-level `.tasty` type parameters are not reconstructed.** Method-local
+  parameters use `Type::Poly`; their supported named/applied bounds are kept,
+  and unsupported bounds become explicit error bounds. `.tasty`-backed
+  `varargs` is always `false` because `T*` uses a distinct type-tree shape
+  this decoder doesn't model yet.
 - **No `.tasty` annotations.** `.tasty`-backed symbols always get an
   empty `Symbol::annotations`; annotation decoding exists only for
   `.class` (`annotation.rs`, `ClassLoader::resolve_annotations`/
@@ -463,8 +460,8 @@ Case-class constructor `val`/`var` parameters are extracted from the
 primary constructor's own `term_params` (tagged `CASEACCESSOR_TAG`/
 `FIELDACCESSOR_TAG`) rather than `Template.stats`, since Scala's pickler
 never duplicates them there. See §3's "known gaps" for what's
-deliberately not reconstructed from `.tasty` yet (precise member types,
-generics, annotations).
+deliberately not reconstructed from `.tasty` yet (class type parameters,
+unsupported member type shapes, annotations).
 
 Parent-name recovery follows the compiled TASTy reference tree. Qualified,
 root-qualified, applied, shared, and direct symbol references retain the
@@ -826,7 +823,7 @@ All done unless noted otherwise.
 5. Generic-signature-based semantic types, built from the `Signature`
    grammar `dotty-classfile` already parses — including class-level and
    method-level type parameters (`Type::Poly` for the latter). **Done**
-   for `.class`; not yet built for `.tasty` (§3).
+   for `.class`; `.tasty` supports a bounded method-generic subset (§3).
 6. Lazy reference resolution for member types: reusing an in-progress
    `Loading` shell for a *legitimate* mutual reference, not just
    detecting a cycle (`resolve_member_class`). **Done.**
@@ -840,13 +837,13 @@ All done unless noted otherwise.
    Milestone 2).
 9. `.tasty`-backed loading, converging on the same symbol model as
    `.class` loading. **Done** for name/flags/superclass/interfaces/
-   fields/methods (§4.4); member types/generics/annotations remain
-   best-effort or unbuilt for `.tasty` specifically (§3's "known gaps").
+   fields/methods (§4.4); method generics and named/applied method types
+   are supported for a bounded subset, while class type parameters,
+   unsupported member shapes, and annotations remain unbuilt (§3).
 
 ### Open work (not milestone-numbered — tracked here instead)
-- Precise `.tasty` member type resolution (the `TYPEREF_TAG`/
-  `TERMREF_TAG` decoder gap, §3).
-- `.tasty` generics and annotations.
+- Broader `.tasty` member type resolution beyond the named/applied method
+  subset, including class type parameters and annotations.
 - Explicit field/method/interface-method overload resolution (JVMS
   §5.4.3.2-5.4.3.4) as an API distinct from class loading.
 
