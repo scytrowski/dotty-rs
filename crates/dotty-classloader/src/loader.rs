@@ -820,7 +820,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// Class files and TASTy are decoded only far enough to determine the
     /// class kind and visibility. For nested JVM classes the enclosing
     /// class identity is also established from class-file metadata; `$` in
-    /// a name alone is never treated as evidence of nesting.
+    /// a name alone is never treated as evidence of nesting. If a Scala
+    /// object's forwarder facade has no class `TypeDef` in its TASTy, the
+    /// module-class identity is used only when that TASTy proves the object.
     pub fn ensure_class_identity(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadError> {
         self.dependency_failure_context = None;
         let store_checkpoint = self.store.checkpoint();
@@ -1556,7 +1558,20 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     &owner,
                     ClassLoadDependencyReason::EnclosingOwnerIdentity,
                 );
-                self.ensure_class_identity_inner(&owner, ancestry)
+                match self.ensure_class_identity_inner(&owner, ancestry) {
+                    Ok(owner) => Ok(owner),
+                    // Identity-only loading must recognize the same Scala
+                    // object facade as full class loading does in
+                    // `resolve_semantic_owner`: its TASTy proves a module,
+                    // but has no class TypeDef for the facade.
+                    Err(ClassLoadError::InvalidTastyFile(
+                        _,
+                        tasty_symbol::TastyDecodeError::MissingTypeDef,
+                    )) => self
+                        .ensure_module_identity(&owner)
+                        .map(|identity| identity.module_class),
+                    Err(error) => Err(error),
+                }
             })
             .transpose()?;
         let package = self.session.packages.resolve(self.store, name);

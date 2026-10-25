@@ -6844,6 +6844,67 @@ mod tests {
     }
 
     #[test]
+    fn identity_only_nested_class_load_uses_the_proven_module_owner() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(fixture_path(
+                "tests/fixtures/tasty_visibility",
+            ))),
+            Box::new(SyntheticTastyJdk),
+        ]);
+        let mut loader = crate::loader::ClassLoader::with_definitions(
+            class_path,
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let nested_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Holder$InProtected");
+
+        let identity = loader
+            .ensure_class_identity(&nested_name)
+            .expect("identity-only loading should use Holder's TASTy-proven module owner");
+        let module = loader
+            .ensure_module_identity(&BinaryName::from_internal(
+                "me/cytrowski/tastyfixtures/visibility/Holder",
+            ))
+            .expect("Holder should have one canonical module identity");
+        let (class_path, session) = loader.into_parts();
+        assert_eq!(store.symbols.get(identity).owner, Some(module.module_class));
+        assert_eq!(store.symbols.get(identity).info, SymbolInfo::Missing);
+
+        let mut loader = crate::loader::ClassLoader::with_definitions(
+            class_path,
+            &mut store,
+            definitions,
+            session,
+        );
+        let loaded = loader
+            .load_class(&nested_name)
+            .expect("the identity shell should still complete through class loading");
+        drop(loader);
+
+        assert_eq!(store.symbols.get(identity).owner, Some(module.module_class));
+        assert_eq!(
+            loaded, identity,
+            "completion must preserve canonical identity"
+        );
+        let SymbolInfo::Complete(info) = store.symbols.get(loaded).info else {
+            panic!("nested class should have complete class info");
+        };
+        let Type::ClassInfo(class_info) = store.types.get(info) else {
+            panic!("nested class completion should produce ClassInfo");
+        };
+        assert_eq!(class_info.class, loaded);
+        assert!(store.scopes.contains(class_info.declarations));
+        assert_eq!(
+            store.scopes.get(class_info.declarations).owner,
+            Some(loaded)
+        );
+    }
+
+    #[test]
     fn nested_type_visibility_updates_rollback_with_the_resolver_session() {
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);

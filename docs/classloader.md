@@ -357,6 +357,13 @@ nested class is visible package-wide, not only from within its
 enclosing class. `.tasty` files carry neither attribute, so a
 `.tasty`-backed nested class's owner is still just its package (§4.4).
 
+For a classfile-backed nested class inside a top-level Scala object, the
+`InnerClasses` entry can name the object's static forwarder class as the
+enclosing class. If that facade's TASTy has no matching class `TypeDef`, both
+identity-only loading and full class loading use the module-class identity
+only when the same TASTy proves the top-level object. A `$` in the binary
+name is not sufficient evidence.
+
 ### 4.5 Shared-store symbol resolver
 
 `ClasspathSymbolResolver<E>` is the classloader implementation of
