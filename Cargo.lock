@@ -25,6 +25,7 @@ dependencies = [
  "dotty-classloader",
  "dotty-core",
  "dotty-jvm",
+ "dotty-jvm-tasty-contract",
  "dotty-lexer",
  "dotty-namer",
  "dotty-parser",
@@ -61,6 +62,17 @@ version = "0.1.0"
 dependencies = [
  "dotty-classfile",
  "dotty-core",
+]
+
+[[package]]
+name = "dotty-jvm-tasty-contract"
+version = "0.1.0"
+dependencies = [
+ "dotty-classfile",
+ "dotty-core",
+ "dotty-jvm",
+ "dotty-tasty",
+ "dotty-tasty-pickler",
 ]
 
 [[package]]

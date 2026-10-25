@@ -35,7 +35,7 @@ fn complete_type(
     }
 }
 
-fn package_path(
+pub(crate) fn package_path(
     store: &dotty_core::SemanticStore,
     package: SymbolId,
     max_depth: usize,
@@ -93,6 +93,33 @@ fn package_path(
     }
     components.reverse();
     Ok(components.join("/"))
+}
+
+pub(crate) fn intended_class_tasty_path(
+    p: &crate::ClassStatePicklePlan<'_>,
+    max_owner_depth: usize,
+) -> Result<String, PickleError> {
+    if !p.store.symbols.contains(p.class) {
+        return Err(PickleError::InvalidSymbol { symbol: p.class });
+    }
+    let class = p.store.symbols.get(p.class);
+    let package = class.owner.ok_or(PickleError::Owner {
+        symbol: p.class,
+        expected: None,
+        actual: None,
+    })?;
+    let package_text = package_path(p.store, package, max_owner_depth)?;
+    let class_text =
+        p.store
+            .names
+            .try_resolve(class.name.text())
+            .ok_or(PickleError::InvalidName {
+                name: class.name.text(),
+            })?;
+    Ok(format!(
+        "{package_text}/{}.tasty",
+        crate::artifact_name::encode_component(class_text)
+    ))
 }
 
 fn method_input(
@@ -738,17 +765,10 @@ impl ValidatedClassStatePlan<'_, '_> {
                 limit: limits.max_file_bytes,
             });
         }
-        let package_text = package_path(p.store, package, limits.projection.max_owner_depth)?;
-        let class_text = p.store.names.try_resolve(class_record.name.text()).ok_or(
-            PickleError::InvalidName {
-                name: class_record.name.text(),
-            },
+        let intended_tasty_path = crate::class_state_output::intended_class_tasty_path(
+            p,
+            limits.projection.max_owner_depth,
         )?;
-        let intended_tasty_path = format!(
-            "{}/{}.tasty",
-            package_text,
-            crate::artifact_name::encode_component(class_text)
-        );
         Ok(Assembly {
             bytes,
             source: p.source.clone(),
