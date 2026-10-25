@@ -211,10 +211,11 @@ class Toolchain:
             raise RuntimeError(f"expected Scala 3.9.0 compiler, got: {version}")
 
     def compiler(self, args: list[str | Path], *, decompile: bool = False,
-                 cwd: Path = ROOT) -> str:
+                 classpath: str | None = None, cwd: Path = ROOT) -> str:
         main = "dotty.tools.dotc.decompiler.Main" if decompile else "dotty.tools.dotc.Main"
+        compile_classpath = self.classpath if classpath is None else classpath
         return execute([self.java, "-XX:-UsePerfData", "-cp", self.classpath, main,
-                        "-classpath", self.classpath, "-color:never", *args], cwd=cwd)
+                        "-classpath", compile_classpath, "-color:never", *args], cwd=cwd)
 
 
 def inspector() -> Path:
@@ -1246,6 +1247,13 @@ def consume_rust_batch(toolchain: Toolchain, batch_root: Path) -> dict:
         roots[f"uuid-mismatch-{class_name}"] = relative_paths
         roots[f"classfile-only-{class_name}"] = relative_paths - {tasty_file}
         roots[f"missing-sidecar-{class_name}"] = relative_paths - {tasty_file}
+        roots[f"xasty-{class_name}"] = relative_paths - {tasty_file}
+        roots[f"missing-marker-{class_name}"] = relative_paths - {tasty_file}
+        roots[f"missing-classfile-{class_name}"] = relative_paths - {class_file}
+        roots[f"wrong-path-{class_name}"] = (
+            relative_paths - {tasty_file} | {f"misplaced/{class_name}.tasty"}
+        )
+        roots[f"corrupt-sidecar-{class_name}"] = relative_paths
 
     for name, expected in roots.items():
         root = batch_root / name
@@ -1300,6 +1308,7 @@ object GaugeTastyProbe:
                 raise RuntimeError(f"Scala compiler/runtime dependency contains {class_name}.class: {jar}")
 
     runtime_outputs: list[str] = []
+    negative_control_diagnostics: dict[str, str] = {}
     rust_hashes_before = {
         f"{root.name}/{relative}": digest(root / relative)
         for root in (first, second)
@@ -1313,8 +1322,8 @@ object GaugeTastyProbe:
         for index, pair_root in enumerate((first, second)):
             client = work / f"client-{index}"
             client.mkdir()
-            toolchain.compiler(["-d", client, "-classpath", os.pathsep.join(
-                (str(pair_root), toolchain.classpath)), client_source])
+            toolchain.compiler(["-d", client, client_source],
+                               classpath=os.pathsep.join((str(pair_root), toolchain.classpath)))
             classfiles = sorted(
                 path.relative_to(client).as_posix()
                 for path in client.rglob("*.class")
@@ -1360,8 +1369,8 @@ object GaugeTastyProbe:
             output = work / f"probe-{class_name}"
             output.mkdir()
             tasty_only = batch_root / f"tasty-only-{class_name}"
-            toolchain.compiler(["-d", output, "-classpath", os.pathsep.join(
-                (str(tasty_only), toolchain.classpath)), probe])
+            toolchain.compiler(["-d", output, probe],
+                               classpath=os.pathsep.join((str(tasty_only), toolchain.classpath)))
             generated = output / f"consumer/{class_name}TastyProbe$.class"
             if not generated.is_file():
                 raise RuntimeError(f"{class_name} TASTy-only semantic probe emitted no class")
@@ -1369,32 +1378,43 @@ object GaugeTastyProbe:
             classfile_output = work / f"classfile-only-{class_name}-output"
             classfile_output.mkdir()
             try:
-                toolchain.compiler(["-d", classfile_output, "-classpath", os.pathsep.join(
-                    (str(batch_root / f"classfile-only-{class_name}"), toolchain.classpath)), probe])
+                toolchain.compiler(["-d", classfile_output, probe],
+                                   classpath=os.pathsep.join((
+                                       str(batch_root / f"classfile-only-{class_name}"),
+                                       toolchain.classpath,
+                                   )))
             except CommandFailure as error:
                 classfile_failure = error.output
             else:
                 raise RuntimeError(f"{class_name} classfile-only control resolved get()")
             if not re.search(r"(?i)(get.*(not found|not a member)|no member.*get)", classfile_failure):
                 raise RuntimeError(f"{class_name} classfile-only control failed for another reason: {classfile_failure}")
+            negative_control_diagnostics[f"{class_name}.classfile_only"] = classfile_failure.strip()
 
             missing_output = work / f"missing-sidecar-{class_name}-output"
             missing_output.mkdir()
             try:
-                toolchain.compiler(["-Werror", "-d", missing_output, "-classpath", os.pathsep.join(
-                    (str(batch_root / f"missing-sidecar-{class_name}"), toolchain.classpath)), probe])
+                toolchain.compiler(["-Werror", "-d", missing_output, probe],
+                                   classpath=os.pathsep.join((
+                                       str(batch_root / f"missing-sidecar-{class_name}"),
+                                       toolchain.classpath,
+                                   )))
             except CommandFailure as error:
                 missing_failure = error.output
             else:
                 raise RuntimeError(f"{class_name} missing-sidecar control unexpectedly compiled")
             if not re.search(r"(?i)(tasty.*missing|missing.*tasty|tasty.*not found)", missing_failure):
                 raise RuntimeError(f"{class_name} missing-sidecar control failed for another reason: {missing_failure}")
+            negative_control_diagnostics[f"{class_name}.missing_sidecar"] = missing_failure.strip()
 
             mismatch_output = work / f"uuid-mismatch-{class_name}-output"
             mismatch_output.mkdir()
             try:
-                toolchain.compiler(["-Werror", "-d", mismatch_output, "-classpath", os.pathsep.join(
-                    (str(batch_root / f"uuid-mismatch-{class_name}"), toolchain.classpath)), probe])
+                toolchain.compiler(["-Werror", "-d", mismatch_output, probe],
+                                   classpath=os.pathsep.join((
+                                       str(batch_root / f"uuid-mismatch-{class_name}"),
+                                       toolchain.classpath,
+                                   )))
             except CommandFailure as error:
                 mismatch_failure = error.output
             else:
@@ -1404,6 +1424,73 @@ object GaugeTastyProbe:
                 mismatch_failure,
             ):
                 raise RuntimeError(f"{class_name} UUID control failed for another reason: {mismatch_failure}")
+            negative_control_diagnostics[f"{class_name}.uuid_mismatch"] = mismatch_failure.strip()
+
+            for marker_kind in ("xasty", "missing-marker"):
+                marker_output = work / f"{marker_kind}-{class_name}-output"
+                marker_output.mkdir()
+                marker_root = batch_root / f"{marker_kind}-{class_name}"
+                try:
+                    toolchain.compiler(["-Werror", "-d", marker_output, probe],
+                                       classpath=os.pathsep.join((str(marker_root), toolchain.classpath)))
+                except CommandFailure as error:
+                    marker_failure = error.output
+                else:
+                    raise RuntimeError(f"{class_name} {marker_kind} control unexpectedly resolved get()")
+                if not re.search(r"(?i)(get.*(not found|not a member)|no member.*get)", marker_failure):
+                    raise RuntimeError(f"{class_name} {marker_kind} control failed for another reason: {marker_failure}")
+                negative_control_diagnostics[f"{class_name}.{marker_kind}"] = marker_failure.strip()
+
+            wrong_path_output = work / f"wrong-path-{class_name}-output"
+            wrong_path_output.mkdir()
+            wrong_path_root = batch_root / f"wrong-path-{class_name}"
+            try:
+                toolchain.compiler(["-Werror", "-d", wrong_path_output, probe],
+                                   classpath=os.pathsep.join((str(wrong_path_root), toolchain.classpath)))
+            except CommandFailure as error:
+                wrong_path_failure = error.output
+            else:
+                raise RuntimeError(f"{class_name} wrong-path sidecar control unexpectedly compiled")
+            if not re.search(r"(?i)(tasty.*missing|missing.*tasty|tasty.*not found)", wrong_path_failure):
+                raise RuntimeError(f"{class_name} wrong-path control failed for another reason: {wrong_path_failure}")
+            negative_control_diagnostics[f"{class_name}.wrong_path"] = wrong_path_failure.strip()
+
+            corrupt_output = work / f"corrupt-sidecar-{class_name}-output"
+            corrupt_output.mkdir()
+            corrupt_root = batch_root / f"corrupt-sidecar-{class_name}"
+            try:
+                toolchain.compiler(["-Werror", "-d", corrupt_output, probe],
+                                   classpath=os.pathsep.join((str(corrupt_root), toolchain.classpath)))
+            except CommandFailure as error:
+                corrupt_failure = error.output
+            else:
+                raise RuntimeError(f"{class_name} corrupt-sidecar control unexpectedly compiled")
+            if not re.search(r"(?i)(tasty|malformed|magic|invalid)", corrupt_failure):
+                raise RuntimeError(f"{class_name} corrupt sidecar failed for another reason: {corrupt_failure}")
+            negative_control_diagnostics[f"{class_name}.corrupt_sidecar"] = corrupt_failure.strip()
+
+            missing_class_root = batch_root / f"missing-classfile-{class_name}"
+            missing_class_client = work / f"missing-classfile-{class_name}-client"
+            missing_class_client.mkdir()
+            toolchain.compiler(["-d", missing_class_client, client_source],
+                               classpath=os.pathsep.join((str(missing_class_root), toolchain.classpath)))
+            missing_class_runtime = [toolchain.java, "-Xverify:all", "-XX:-UsePerfData", "-classpath",
+                                     os.pathsep.join((str(missing_class_root), str(missing_class_client),
+                                                      toolchain.classpath)), "consumer.Consumer"]
+            try:
+                execute(missing_class_runtime)
+            except CommandFailure as error:
+                missing_class_failure = error.output
+            else:
+                raise RuntimeError(f"{class_name} missing-classfile control unexpectedly executed")
+            if not re.search(
+                rf"(?i)(NoClassDefFoundError|ClassNotFoundException).*example[/.]{class_name}",
+                missing_class_failure,
+            ):
+                raise RuntimeError(
+                    f"{class_name} missing-classfile control failed for another reason: {missing_class_failure}"
+                )
+            negative_control_diagnostics[f"{class_name}.missing_classfile"] = missing_class_failure.strip()
 
     rust_hashes_after = {
         f"{root.name}/{relative}": digest(root / relative)
@@ -1428,6 +1515,17 @@ object GaugeTastyProbe:
         "gauge_missing_sidecar_control_rejected": True,
         "counter_uuid_mismatch_control_rejected": True,
         "gauge_uuid_mismatch_control_rejected": True,
+        "counter_xasty_marker_control_rejected": True,
+        "gauge_xasty_marker_control_rejected": True,
+        "counter_missing_marker_control_rejected": True,
+        "gauge_missing_marker_control_rejected": True,
+        "counter_missing_classfile_control_rejected": True,
+        "gauge_missing_classfile_control_rejected": True,
+        "counter_wrong_path_control_rejected": True,
+        "gauge_wrong_path_control_rejected": True,
+        "counter_corrupt_sidecar_control_rejected": True,
+        "gauge_corrupt_sidecar_control_rejected": True,
+        "negative_control_diagnostics": negative_control_diagnostics,
         "rust_classfiles_unchanged_after_compile_and_run": True,
         "consumer_classes": ["consumer/Consumer$.class", "consumer/Consumer.class"],
         "consumer_methodrefs": [

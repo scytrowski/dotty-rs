@@ -151,7 +151,26 @@ probe demonstrates that the Scala typer resolved `get` from that class's TASTy
 semantics. The corresponding classfile-only copy must fail because `get` is
 absent. Separate missing-sidecar and stale-UUID copies must fail with the
 expected TASTy diagnostics under `-Werror`. Each control has a fresh output
-directory, and an unexpected compiler failure reason fails the gate.
+directory, preserves the sibling class artifacts, and an unexpected failure
+layer or diagnostic fails the gate. The classfile-only read-bytecode fallback
+is checked for each class by renaming its marker to `XASTY` and by removing the
+marker entirely while withholding its sidecar; neither copy may resolve the
+deliberately removed `get` method. The missing-classfile controls compile from
+the TASTy sidecar and then require runtime `NoClassDefFoundError` for that exact
+class. A misplaced sidecar must be reported as missing, and a sidecar with a
+damaged TASTy magic must be rejected as unreadable.
+
+The observed first failure for both classes is class-specific: missing class
+files fail at JVM loading with `NoClassDefFoundError: example/Counter` or
+`example/Gauge`; missing and misplaced sidecars report that the linked Scala
+binary should have been loaded from `.tasty` but that file is missing; damaged
+sidecars report `not a TASTy file`; stale UUID warnings contain `out of sync
+with its TASTy file` and become errors under `-Werror`; and XASTY/missing-marker
+probes report `value get is not a member` because their classfile lacks that
+method and no valid sidecar is available. These diagnostics are also emitted
+in the test's JSON report alongside the class names. The separate consumer
+checks a second instance of each class after mutating the first, so constructor
+state remains independent.
 
 To reproduce this strict gate from the repository root, use the Scala source
 checkout at the pinned revision and the cached Maven artifacts whose SHA-256
@@ -172,7 +191,29 @@ from revision `777528f19a58e794c9954a42f433373472ec57f8` on Corretto JDK
 hashes, fixture hash, per-class artifact hashes and link UUIDs, method
 references, control results, and both `1329` runtime outputs as JSON. The
 repository's separate mandatory JVM CI gate continues to validate JDK 21 class
-file verification and execution.
+file verification and execution. For each clean batch the compiler receives
+only `-classpath <Rust batch>:<pinned Scala jars> -d <empty client output>` and
+the separate consumer source; execution uses
+`java -Xverify:all -classpath <Rust batch>:<client output>:<pinned Scala jars>
+consumer.Consumer`.
+
+The strict Rust producer run emitted these identical artifacts in both fresh
+sessions (distinct generated UUIDs are shown separately):
+
+| Rust artifact | SHA-256 |
+| --- | --- |
+| `example/Counter.class` | `c3620a88edbc9759ecaff244f7a9144c36ac70a5128ff9803aa08471a2c4dd81` |
+| `example/Counter.tasty` | `f0ad78c019e349b7496556164d02d8c5e5252194b02e39c1cb5cded2f2f1c219` |
+| `example/Gauge.class` | `24fb39b52f1342ab15bcaa9bbafab57f8f4a542c142c6750f87aa476d0a47bdc` |
+| `example/Gauge.tasty` | `ddd954ac371e08f2c7c6644c8041ea04b99081467cd5e60013f17a7a0b907e98` |
+
+Counter's class/TASTy UUID is `00ce38125fe1b1ac0000000000008193`; Gauge's is
+`000dc09f21d551ac0000000000008193`. The compiler reported both class-specific
+`1329` runtime outputs. The JSON diagnostics preserve the first compiler or
+JVM failure output for each class/control combination, including the missing
+classfile `NoClassDefFoundError`, missing/wrong-path sidecar message, invalid
+TASTy magic message, stale-link warning promoted by `-Werror`, and absent-get
+method errors for classfile-only/XASTY/no-marker controls.
 
 ## Successor boundaries
 

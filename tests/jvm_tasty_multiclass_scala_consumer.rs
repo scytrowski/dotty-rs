@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_batch;
-use dotty_classfile::classfile::{ClassFile, Reader};
+use dotty_classfile::classfile::{Attribute, ClassFile, Reader};
 use dotty_core::SourceId;
 use dotty_jvm_tasty_contract::validate_classfile_tasty_link;
 use dotty_tasty::tasty::TastyFile;
@@ -122,6 +122,49 @@ fn pinned_scala_consumes_both_rust_tasty_classes_and_executes_the_original_batch
         copy_tree(&fresh_a, &uuid_mismatch);
         let mismatched = mismatch_link_identifier(pair.classfile_bytes(), pair.tasty_link_id());
         std::fs::write(uuid_mismatch.join(pair.classfile_path()), mismatched).unwrap();
+
+        let xasty = directory.path().join(format!("xasty-{class_name}"));
+        copy_tree(&tasty_only, &xasty);
+        std::fs::write(
+            xasty.join(pair.classfile_path()),
+            rename_tasty_marker(&no_get, "XASTY"),
+        )
+        .unwrap();
+        std::fs::remove_file(xasty.join(pair.tasty_path())).unwrap();
+
+        let missing_marker = directory
+            .path()
+            .join(format!("missing-marker-{class_name}"));
+        copy_tree(&tasty_only, &missing_marker);
+        std::fs::write(
+            missing_marker.join(pair.classfile_path()),
+            remove_tasty_marker(&no_get),
+        )
+        .unwrap();
+        std::fs::remove_file(missing_marker.join(pair.tasty_path())).unwrap();
+
+        let missing_classfile = directory
+            .path()
+            .join(format!("missing-classfile-{class_name}"));
+        copy_tree(&fresh_a, &missing_classfile);
+        std::fs::remove_file(missing_classfile.join(pair.classfile_path())).unwrap();
+
+        let wrong_path = directory.path().join(format!("wrong-path-{class_name}"));
+        copy_tree(&fresh_a, &wrong_path);
+        let misplaced = wrong_path
+            .join("misplaced")
+            .join(format!("{class_name}.tasty"));
+        std::fs::create_dir_all(misplaced.parent().unwrap()).unwrap();
+        std::fs::rename(wrong_path.join(pair.tasty_path()), misplaced).unwrap();
+
+        let corrupt_sidecar = directory
+            .path()
+            .join(format!("corrupt-sidecar-{class_name}"));
+        copy_tree(&fresh_a, &corrupt_sidecar);
+        let corrupt_path = corrupt_sidecar.join(pair.tasty_path());
+        let mut corrupt = std::fs::read(&corrupt_path).unwrap();
+        corrupt[0] ^= 0xff;
+        std::fs::write(corrupt_path, corrupt).unwrap();
     }
 
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -152,6 +195,16 @@ fn pinned_scala_consumes_both_rust_tasty_classes_and_executes_the_original_batch
         "\"gauge_missing_sidecar_control_rejected\": true",
         "\"counter_uuid_mismatch_control_rejected\": true",
         "\"gauge_uuid_mismatch_control_rejected\": true",
+        "\"counter_xasty_marker_control_rejected\": true",
+        "\"gauge_xasty_marker_control_rejected\": true",
+        "\"counter_missing_marker_control_rejected\": true",
+        "\"gauge_missing_marker_control_rejected\": true",
+        "\"counter_missing_classfile_control_rejected\": true",
+        "\"gauge_missing_classfile_control_rejected\": true",
+        "\"counter_wrong_path_control_rejected\": true",
+        "\"gauge_wrong_path_control_rejected\": true",
+        "\"counter_corrupt_sidecar_control_rejected\": true",
+        "\"gauge_corrupt_sidecar_control_rejected\": true",
         "\"rust_classfiles_unchanged_after_compile_and_run\": true",
     ] {
         assert!(report.contains(evidence), "missing {evidence} in {report}");
@@ -177,6 +230,46 @@ fn remove_get_method(class_bytes: &[u8], class_name: &str) -> Vec<u8> {
         "{class_name}.get must exist once"
     );
     class.encode().expect("encode TASTy-only semantic control")
+}
+
+fn rename_tasty_marker(class_bytes: &[u8], replacement: &str) -> Vec<u8> {
+    assert_eq!(replacement.len(), 5);
+    let mut bytes = class_bytes.to_vec();
+    let matches = bytes
+        .windows(5)
+        .enumerate()
+        .filter_map(|(index, window)| (window == b"TASTY").then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matches.len(),
+        1,
+        "classfile should contain one TASTY marker name"
+    );
+    bytes[matches[0]..matches[0] + 5].copy_from_slice(replacement.as_bytes());
+    bytes
+}
+
+fn remove_tasty_marker(class_bytes: &[u8]) -> Vec<u8> {
+    let mut reader = Reader::new(class_bytes);
+    let mut class = ClassFile::decode(&mut reader).expect("decode emitted class");
+    assert!(reader.is_at_end());
+    let before = class.attributes.len();
+    class.attributes.retain(|attribute| match attribute {
+        Attribute::Other(raw) => {
+            class
+                .constant_pool
+                .utf8(raw.name_index)
+                .expect("attribute name resolves")
+                != "TASTY"
+        }
+        _ => true,
+    });
+    assert_eq!(
+        class.attributes.len() + 1,
+        before,
+        "class has one TASTY marker"
+    );
+    class.encode().expect("encode class without TASTY marker")
 }
 
 fn mismatch_link_identifier(
