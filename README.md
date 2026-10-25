@@ -40,12 +40,15 @@ library module emits an owned, decoded-and-validated Counter `.class`/`.tasty`
 pair or a complete in-memory batch for the audited two-class Counter/Gauge
 source shape. Batch emission uses one frontend session, links each class to
 the exact UUID from its TASTy header, and returns nothing unless every artifact
-passes whole-batch validation. A pinned Scala 3.9.0 consumer gate verifies
-TASTy-dependent lookup and executes the unchanged single-class Rust output
-under JDK 21. Multi-class external consumption and filesystem publication are
-separate follow-up work; these bounded library paths are not a compiler
-driver/CLI or general Scala ABI support. See the [binary interoperability
-record](docs/jvm-tasty-binary-interop.md) and [multi-class audit](docs/jvm-tasty-multiclass.md).
+passes whole-batch validation. Test-only publication stages complete batches
+with handled-error cleanup. Strict pinned Scala 3.9.0 gates verify both
+single-class and two-class TASTy-dependent lookup; the two-class gate compares
+all artifact bytes across fresh sessions and executes the unchanged Rust
+classes under `java -Xverify:all`. These bounded library and fixture paths are
+not a compiler driver/CLI or general Scala ABI support. See the
+[binary interoperability record](docs/jvm-tasty-binary-interop.md) and
+[multi-class audit](docs/jvm-tasty-multiclass.md) for exact versions, hashes,
+controls, and reproduction commands.
 
 Compatibility targets Scala **3.9.0**, pinned to source revision
 `777528f19a58e794c9954a42f433373472ec57f8`. The semantic pickler emits TASTy

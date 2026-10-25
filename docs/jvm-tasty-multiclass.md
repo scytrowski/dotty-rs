@@ -215,6 +215,65 @@ classfile `NoClassDefFoundError`, missing/wrong-path sidecar message, invalid
 TASTy magic message, stale-link warning promoted by `-Werror`, and absent-get
 method errors for classfile-only/XASTY/no-marker controls.
 
+## Release gate (#1658)
+
+The release gate composes the already focused batch, consumer, pickler, and
+JDK tests. The multi-class consumer test performs both complete fresh-session
+emissions and checks every relative path, `.class` byte, `.tasty` byte, and
+link UUID before and after Scala compilation and execution. Its strict mode
+requires the pinned Scala checkout and cached compiler dependencies; it runs
+the per-class TASTy-only semantic probes, all negative controls described
+above, and the independent consumer twice. Both runs print `1329`. The
+single-class Scala consumer remains a separate preservation gate for the
+legacy Counter pair. The pickler oracle separately proves that Scala 3.9.0
+can compile the Rust-produced Counter sidecar with `-from-tasty`.
+
+Run these required interoperability gates from the repository root with the
+pinned Scala checkout, authenticated cached Maven artifacts, and a JDK on
+`PATH`:
+
+```sh
+DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER=1 cargo test -p dotty \
+  --test jvm_tasty_multiclass_scala_consumer --locked -- --nocapture
+DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1 cargo test -p dotty \
+  --test jvm_tasty_scala_consumer --locked -- --nocapture
+DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 cargo test -p dotty \
+  --test tasty_source_pickling --locked -- --nocapture
+JAVA_HOME=/path/to/jdk-21 PATH=/path/to/jdk-21/bin:$PATH \
+  DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib -p dotty --test jvm_source_compilation \
+  --test jvm_stateful_class_contract --locked -- --nocapture
+```
+
+The consumer gate was recorded with Scala `3.9.0-bin-SNAPSHOT-git-777528f`
+at revision `777528f19a58e794c9954a42f433373472ec57f8` on Corretto JDK
+`25.0.4`. The harness verified these cached dependency hashes:
+
+| Scala dependency | SHA-256 |
+| --- | --- |
+| `compiler-interface-1.12.0.jar` | `92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3` |
+| `scala-asm-9.9.0-scala-1.jar` | `75ac366e8ecb691e06a7e85041eed0f67919a646e5262fa0901225698c104375` |
+| `scala-library-3.9.0.jar` | `b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd` |
+| `scala3-compiler_3-3.9.0.jar` | `3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a` |
+| `scala3-interfaces-3.9.0.jar` | `64dfde1d2c6309d65a01c5f3ea836137eb84338dcadeb16f85764561ef4e10db` |
+| `scala3-library_3-3.9.0.jar` | `9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba` |
+| `tasty-core_3-3.9.0.jar` | `66e12dda98bb23e864f3a31f8527c8338bf47bce9b85cc380b368c69c1ba8d0f` |
+| `util-interface-1.11.5.jar` | `1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af` |
+
+The Rust classfiles target major version 65 and the sidecars validate as TASTy
+28.9.0. The exact four artifact hashes and per-class UUIDs are listed above.
+The mandatory backend gate also passed locally with Temurin `21.0.8+9`
+(`java`, `javac`, and `javap` 21.0.8). The Scala consumer used Corretto JDK
+`25.0.4`; passing it does not replace the JDK 21 verification and execution
+gate.
+
+The gate is deliberately scoped to two independent top-level classes in one
+source file. It does not establish arbitrary multi-class Scala ABI support,
+cross-class calls or inheritance, a public compilation driver, or crash-safe
+filesystem transactions. Publication tests cover handled errors and best-
+effort cleanup only.
+
 ## Successor boundaries
 
 - **#1653** adds one-session whole-unit planning while preserving both independent classes, all member IDs, typed roots, and source order.
@@ -223,7 +282,11 @@ method errors for classfile-only/XASTY/no-marker controls.
 - **#1656** stages and publishes the complete artifact set in a test-only
   adapter, with handled-error rollback and explicit filesystem limits.
 - **#1657** uses the strict Scala consumer gate above to test TASTy source semantics for each class separately, reject classfile-only/missing-sidecar/stale-link controls, and execute the separate client against unchanged Rust classfiles.
-- **#1658** is the strict fresh-session deterministic release gate. It must compare all class and TASTy bytes and paths, not only decoded shapes.
+- **#1658** closes the bounded release gate by running the fresh-session
+  byte/path comparison, the pinned Scala consumer and negative controls, the
+  `-from-tasty` pickler oracle, and the mandatory JDK backend gate together.
+  It records the exact versions, fixture and artifact hashes, and runtime
+  outputs below; this is evidence for the Counter/Gauge fixture only.
 
 Cross-class source calls/fields and inheritance between these siblings, objects/companions, nested classes, traits, generics, overloaded/default methods, external JDK classes, `String`, public constructor accessors, and other unsupported pickler forms remain outside this audit and the bounded successor fixture.
 
