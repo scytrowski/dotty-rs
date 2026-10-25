@@ -1,0 +1,4 @@
+path#tree	method	baseline_first_blocker	before_generic_method_support	current_first_blocker	fully_typed	attempt
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=212	nextByte	MemberNotFound	ApplicationArgumentConformanceUnsupported	IfBranchJoinUnsupported	false	compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=420
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=226	nextUTF8	MemberNotFound	ApplicationArgumentConformanceUnsupported	IfBranchJoinUnsupported	false	compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=420
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=239	nextShort	MemberNotFound	ApplicationArgumentConformanceUnsupported	IfBranchJoinUnsupported	false	compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=420

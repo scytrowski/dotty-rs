@@ -2,8 +2,8 @@
 
 This document records the current bounded Parser → Namer → Typer → JVM
 contract for private primitive fields (`Int`, `Boolean`, `Long`, `Float`, and
-`Double`) and
-primary constructors. It targets the
+`Double`), primary constructors, and signature-only accessor metadata for
+ordinary public class-body `val`/`var`. It targets the
 pinned Scala 3.9.0 reference at revision
 [`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8).
 It covers the real-source `Counter`, `PrivateFields`, and bounded constructor
@@ -28,6 +28,7 @@ and the exact typed RHS root exposed by `SourceTypedIndex`.
 | `class NumericConstants { private val f: Float = 1.5f; private val d: Double = 3.5 }` | Both values remain canonical private immutable fields. | Typed literal roots preserve the Float/Double bit patterns and lower through `fconst_bits`/`dconst_bits` before exact `putfield` instructions. | The fixture verifies the `CONSTANT_Float` and `CONSTANT_Double` values and executes both getters under JDK 21. |
 | `class C(val x: Int)` | The constructor parameter source tree maps canonically to a class-owned `Field`; `derived_symbol_at(constructor, source, tree)` returns a distinct constructor-owned `Parameter`. | The source ordinal and exact JVM local slot are preserved in a checked accessor initializer. | Emission creates private-final `x:I` storage, copies the exact formal after the verified direct-super call, and emits public `x()I` from that field. No source Method symbol is added. |
 | `class C(var x: Int)` | The same two identities exist. `MUTABLE` is on the class-owned field only, not the derived constructor parameter. | Same source ordering as `val`; the binding records mutability and local width. | Emission creates private `x:I` storage, initializes it from the exact formal, emits public `x()I` and `x_$eq(I)V`, and does not add a source Method symbol. |
+| `class Counter(val id: Int) { val initial: Int = 10; var current: Long = 0L }` | `id`, `initial`, and `current` remain canonical class-owned `Field` symbols. Body fields retain the exact `ValDef`, template position, source RHS, typed RHS, and source mutability proof. | Constructor `id` retains its derived formal binding; body declarations do not have or fabricate one. | `JvmClassMetadata::accessors()` projects both origins into one metadata list: private-final `id:I` / `initial:I`, private mutable `current:J`, public getter/setter signatures. The constructor plan copies `id`, then initializes `initial` and `current` from their exact typed roots in source order. Issues #1582–#1584 emit the accessors and lower accepted source calls; #1585 exercises the combined source-to-JDK path. |
 
 The `constructor_accessor_getters_and_setters_emit_verified_abi_methods` regression also
 decodes `Measurement`, `Mixed`, `Ref`, and `Plain` output. It checks public
@@ -36,6 +37,14 @@ load/read/write/return bytecode, stack/local bounds, source accessor order, and
 deterministic bytes. Its Java 21 harness invokes getters and mutates primitive
 and planned-reference `var`s under `java -Xverify:all`; a `val` has no setter,
 and a plain constructor parameter has no generated field or accessor method.
+
+The `public_body_fields_project_to_origin_aware_accessor_metadata` regression
+checks the combined constructor/body shape, including distinct origin proofs,
+body template order, exact `I`/`J`/`D` descriptors, private backing flags,
+public getters, and the mutable Long setter. `JvmClassMetadata::fields()` does
+not also expose those public body accessors as direct fields. No constructor
+store, getter/setter bytecode, or source `Method` symbol is introduced for
+those body fields by this metadata increment.
 
 The separate
 [`jvm_source_compilation.rs`](../tests/jvm_source_compilation.rs)
@@ -105,7 +114,9 @@ one-clause `Counter(start)` case, instance receiver occupies local slot 0 and
 `start` occupies slot 1. That parameter layout is exposed by
 `JvmConstructorMetadata`. The class emitter retains the exact declared
 constructor descriptor and emits the validated accessor and ordinary private
-field_info entries. Generated accessor methods remain outside this increment.
+field_info entries. This describes the #1581 initialization increment;
+#1582–#1584 subsequently emit the generated accessor methods and lower
+validated source call sites without changing Typer symbols.
 The accessor assignment order intentionally follows the backend's strict
 initialized-`this` rule after direct-super construction; the pinned Scala 3.9.0
 oracle observed its simple constructor accessor stores before
@@ -160,7 +171,7 @@ generic/reference-valued members, or secondary constructors.
 | Inferred direct or mutual field cycle | `complete_symbol` returns `RecursiveInferredFieldType`; recursion state and symbol completion roll back. | Reject before class artifact publication. |
 | `object` / `trait` field or non-field symbol | Typer context validation returns `FieldInitializerContextInvalid` with the actual owner/symbol kind. | This contract only covers top-level ordinary classes. |
 | Plain `private` visibility on an instance field | Namer records `Visibility::Private`; real-source integration projects this visibility to JVM `ACC_PRIVATE`. | Field metadata validates visibility from the canonical symbol. |
-| Public, `protected`, or `private[this]` instance field | Parser and Namer accept these source forms. The integration characterization observes `Visibility::Public`, `Visibility::Protected`, and `Visibility::Private` respectively; the shared visibility value does not preserve the `private[this]` qualifier. | Public and protected fail the canonical visibility check. The frontend must label object-private plans explicitly, and metadata rejects `PrivateThis` while accepting only plain `private`. |
+| Public, `protected`, or `private[this]` instance field | Parser and Namer accept these source forms. A source adapter marks an ordinary unqualified class-body declaration with `PlainPublic` only when its exact `Template.body` `ValDef` maps to the canonical class-owned field and a typed RHS. `Visibility::Public` alone is insufficient. The shared visibility value does not preserve the `private[this]` qualifier. | Public body fields validate to private backing-field metadata, but constructor-initializer lowering and class emission still reject them with `FieldEmissionUnsupported` until the initialization increment. Protected fields fail canonical visibility validation; metadata rejects `PrivateThis` while accepting only plain `private`. |
 | Qualified-private, lazy, static, or synthetic field | Not covered by the current source integration characterization; acceptance and exact canonical representation remain unclaimed here. | Reject with a contextual plan error until an explicit ABI contract covers the form. |
 | `val`/`var` constructor parameter | Namer retains separate class field and constructor parameter identities. | Keep both canonical identities; emit private backing storage and one exact post-super store from the constructor-owned formal. Emit the audited public getter and, for `var`, the public JVM setter from validated metadata; no source Method symbols are added. |
 | Duplicate same-named field declarations | Parser and Namer currently accept both declarations without diagnostics and create distinct class-owned `Field` IDs with the same name. This is a recorded frontend gap, not valid backend input. | Metadata rejects repeated field IDs and duplicate JVM field names with structured errors. |
@@ -176,8 +187,9 @@ The negative evidence remains executable: Typer tests
 integration tests for initializer conformance and rollback, constructor forms,
 visibility, self/forward references, duplicate fields, and the real-source JVM
 metadata boundary. Field metadata rejects wrong owners, non-field IDs,
-incomplete types, missing/mismatched initializers, public/lazy fields,
-references, duplicate symbols, and duplicate JVM names. The
+incomplete types, missing/mismatched initializers, public fields without the
+source-specific `PlainPublic` plan, lazy fields, references, duplicate symbols,
+and duplicate JVM names. The
 duplicate-field result is intentionally marked as an unresolved Namer gap;
 the backend must not treat the current absence of a diagnostic as evidence of
 a valid field plan.
@@ -189,12 +201,14 @@ Field plans and explicit primary-constructor metadata are implemented in
 The constructor plan
 retains private source evidence checked by `JvmPrimaryConstructorPlan::from_source`
 against the shared AST/index. Its inputs include the exact constructor and
-ordered derived parameter IDs. The field shape below remains unchanged:
+ordered derived parameter IDs. The field plan now distinguishes ordinary
+public class-body declarations from existing private fields:
 
 ```rust
 enum JvmFieldSourceVisibility {
     PlainPrivate,
     PrivateThis,
+    PlainPublic(JvmPublicBodyFieldSourceProof),
 }
 
 struct JvmFieldPlan {
@@ -214,10 +228,23 @@ and constructor shape. The class artifact must only be returned after every
 field, method, constructor, and class-file structure validates successfully.
 
 `JvmClassInitializationPlan::PrimaryConstructor` authorizes emission of its
-exact constructor descriptor/access and source-ordered private primitive field
-initializers, including Long descriptor `J` and category-two parameter slots.
-`ImplicitNoArg` is reserved for the empty no-argument class
-subset and never implies fields or constructor parameters.
+exact constructor descriptor/access, constructor accessor copies, and
+source-ordered private and public-body field initializers, including Long
+descriptor `J` and category-two parameter slots. A `PlainPublic` body field
+keeps its immutable source/RHS proof in accessor metadata and is not duplicated
+in direct `fields()` metadata. Its checked RHS initializes the accessor's
+private backing storage after the constructor accessor copies. The field plan
+order comes from `Template.body`; a field read is accepted only after that
+field's store. Constructor accessor metadata retains its distinct
+derived-formal proof. #1584 validates each origin against its own proof and
+does not represent a body field as a constructor binding.
+`ImplicitNoArg` supports the bounded source shape with a validated direct
+no-argument parent, no explicit initialization expression, and only supported
+field initializers. It emits the direct parent call followed by the same
+source-ordered body stores, without inventing constructor formals. Generated
+body-field getter/setter methods and call-site lowering are implemented in
+#1582–#1584; #1585 covers the combined JDK 21 acceptance fixture and fresh
+session byte determinism.
 
 The constructor metadata regressions in `jvm_stateful_class_contract.rs` cover
 `()V`, `(I)V`, `(ZI)V`, private access, canonical identity order, and the

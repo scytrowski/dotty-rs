@@ -111,6 +111,7 @@ pub struct SourceTyper<'a> {
     source_type_projection_depth: usize,
     signature_parameter_in_progress: Option<SymbolId>,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
+    inferred_local_lazy_values: HashMap<SymbolId, (TreeId<Untyped>, ExpressionContext)>,
     local_scopes: HashMap<(SourceId, TreeId<Untyped>), ScopeId>,
     patdef_expansions: expression::blocks::PatDefExpansionIndex,
     patdef_typing_attempts: HashMap<(SourceId, TreeId<Untyped>), Result<(), String>>,
@@ -120,6 +121,7 @@ pub struct SourceTyper<'a> {
     active_local_import_scopes: Vec<(SourceContextId, Option<ExpressionScopeId>)>,
     active_local_type_binders: Vec<(TypeId, Vec<SymbolId>)>,
     initializing_local_symbols: HashSet<SymbolId>,
+    inferred_local_lazy_types_in_progress: HashSet<SymbolId>,
     inferred_field_types_in_progress: HashSet<SymbolId>,
     inferred_method_results_in_progress: HashSet<SymbolId>,
     uninitialized_parent_receiver: Option<SymbolId>,
@@ -132,6 +134,7 @@ pub struct SourceTyper<'a> {
     expression_scopes: Vec<ExpressionScopeFrame>,
     expression_scope_owner: u64,
     synthetic_package_entries: Vec<(ScopeId, SymbolId)>,
+    synthetic_class_member_entries: Vec<(ScopeId, SymbolId)>,
 }
 
 /// Canonical identity for one successfully typed ordinary local value.
@@ -222,6 +225,7 @@ impl<'a> SourceTyper<'a> {
             source_type_projection_depth: 0,
             signature_parameter_in_progress: None,
             local_symbols: HashMap::new(),
+            inferred_local_lazy_values: HashMap::new(),
             local_scopes: HashMap::new(),
             patdef_expansions: expression::blocks::PatDefExpansionIndex::default(),
             patdef_typing_attempts: HashMap::new(),
@@ -231,6 +235,7 @@ impl<'a> SourceTyper<'a> {
             active_local_import_scopes: Vec::new(),
             active_local_type_binders: Vec::new(),
             initializing_local_symbols: HashSet::new(),
+            inferred_local_lazy_types_in_progress: HashSet::new(),
             inferred_field_types_in_progress: HashSet::new(),
             inferred_method_results_in_progress: HashSet::new(),
             uninitialized_parent_receiver: None,
@@ -243,6 +248,7 @@ impl<'a> SourceTyper<'a> {
             expression_scopes: Vec::new(),
             expression_scope_owner: next_expression_scope_owner(),
             synthetic_package_entries: Vec::new(),
+            synthetic_class_member_entries: Vec::new(),
         }
     }
 
@@ -297,13 +303,14 @@ impl<'a> SourceTyper<'a> {
     ///
     /// Literal expressions preserve their exact `Type::Constant` type in the
     /// typed AST; consumers use this operation when they need the canonical
-    /// builtin value type. A member reference is adapted to its receiver view.
+    /// underlying value type. A member reference is adapted to its receiver view.
     /// Adapting a reference may complete source symbols and allocate semantic
     /// types; failures roll those changes back.
     pub fn widen_expression_type(&mut self, ty: TypeId) -> Result<TypeId, TyperError> {
         let store_checkpoint = self.store.checkpoint();
         let resolver_checkpoint = self.resolver.checkpoint();
         let package_entry_checkpoint = self.synthetic_package_entries.len();
+        let class_member_entry_checkpoint = self.synthetic_class_member_entries.len();
         let type_index_checkpoint = self.type_index.checkpoint();
         let inferred_field_types_checkpoint = self.inferred_field_types_in_progress.clone();
         let mut info_journal = Vec::new();
@@ -315,6 +322,7 @@ impl<'a> SourceTyper<'a> {
                 }
             }
             self.rollback_synthetic_package_entries(package_entry_checkpoint);
+            self.rollback_synthetic_class_member_entries(class_member_entry_checkpoint);
             self.resolver.rollback_to(self.store, resolver_checkpoint);
             self.store.rollback_to(store_checkpoint);
             self.type_index.restore(type_index_checkpoint);
@@ -938,6 +946,8 @@ mod tests {
         include_str!("../../tests/fixtures/local-lazy-values/ExplicitSelf.scala");
     const LOCAL_LAZY_FORWARD_ORACLE_FIXTURE: &str =
         include_str!("../../tests/fixtures/local-lazy-values/Forward.scala");
+    const CLASS_LAZY_FIELDS_ORACLE_FIXTURE: &str =
+        include_str!("../../tests/fixtures/class-lazy-fields/ClassLazyFields.scala");
 
     struct ScriptedResolver {
         member: Option<SymbolId>,
@@ -2329,6 +2339,120 @@ mod tests {
     }
 
     #[test]
+    fn canonical_scala_array_conforms_to_java_array_with_invariant_elements() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package scala; class Array[A]");
+        let array_class = class_symbol(&parsed, &store, &index, source, "Array");
+        let scala_package = packages.symbol(&["scala"]).unwrap();
+        assert_eq!(store.symbols.get(array_class).owner, Some(scala_package));
+
+        let char_array =
+            applied_class_type(&mut store, definitions, array_class, &[definitions.char]);
+        let byte_array =
+            applied_class_type(&mut store, definitions, array_class, &[definitions.byte]);
+        let java_char_array = store.types.alloc(Type::JavaArray {
+            element: definitions.char,
+        });
+        let java_byte_array = store.types.alloc(Type::JavaArray {
+            element: definitions.byte,
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(typer.conforms(char_array, java_char_array).unwrap());
+        assert!(!typer.conforms(char_array, java_byte_array).unwrap());
+        assert!(!typer.conforms(byte_array, java_char_array).unwrap());
+    }
+
+    #[test]
+    fn scala_array_keeps_its_nominal_supertype_conformance() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package scala; class Array[A] extends Object");
+        let array_class = class_symbol(&parsed, &store, &index, source, "Array");
+        let char_array =
+            applied_class_type(&mut store, definitions, array_class, &[definitions.char]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.complete_symbol(array_class).unwrap();
+        assert!(
+            typer
+                .is_subtype(char_array, definitions.object_type)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_same_named_array_outside_scala_does_not_conform_to_a_java_array() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package custom; class Array[A]");
+        let array_class = class_symbol(&parsed, &store, &index, source, "Array");
+        let array_type =
+            applied_class_type(&mut store, definitions, array_class, &[definitions.char]);
+        let java_char_array = store.types.alloc(Type::JavaArray {
+            element: definitions.char,
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(!typer.conforms(array_type, java_char_array).unwrap());
+    }
+
+    #[test]
+    fn malformed_package_prefix_does_not_make_scala_array_a_java_array() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package scala { class Array[A] }; package other { class Marker }");
+        let array_class = class_symbol(&parsed, &store, &index, source, "Array");
+        let other_package = packages.symbol(&["other"]).unwrap();
+        let incorrect_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, other_package));
+        let malformed_array = applied_class_type_with_prefix(
+            &mut store,
+            array_class,
+            incorrect_prefix,
+            &[definitions.char],
+        );
+        let canonical_array =
+            applied_class_type(&mut store, definitions, array_class, &[definitions.char]);
+        let java_char_array = store.types.alloc(Type::JavaArray {
+            element: definitions.char,
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(!typer.conforms(malformed_array, canonical_array).unwrap());
+        assert!(matches!(
+            typer.conforms(java_char_array, malformed_array),
+            Err(TypeRelationError::UnsupportedType { .. })
+        ));
+    }
+
+    #[test]
     fn external_applied_generic_subtyping_is_explicitly_deferred() {
         let (arena, mut store, packages, definitions) = setup();
         let external = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
@@ -2342,6 +2466,33 @@ mod tests {
             typer.is_subtype(applied, definitions.int),
             Err(TypeRelationError::ExternalGenericInstantiationDeferred { class })
                 if class == external
+        ));
+    }
+
+    #[test]
+    fn distinct_final_external_types_are_not_subtypes_without_class_info() {
+        let (arena, mut store, packages, definitions) = setup();
+        let final_class = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        store.symbols.get_mut(final_class).flags = SymbolFlags::FINAL;
+        let module_class = symbol(&mut store, SymbolKind::ModuleClass, SymbolInfo::Missing);
+        let final_applied =
+            applied_class_type(&mut store, definitions, final_class, &[definitions.int]);
+        let final_applied_other =
+            applied_class_type(&mut store, definitions, final_class, &[definitions.boolean]);
+        let module_type = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, module_class));
+        let index = SourceSemanticIndex::new();
+        let source = SourceId::from_index(0);
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert!(!typer.is_subtype(final_applied, module_type).unwrap());
+        assert!(!typer.is_subtype(module_type, final_applied).unwrap());
+        assert!(matches!(
+            typer.is_subtype(final_applied, final_applied_other),
+            Err(TypeRelationError::ExternalGenericInstantiationDeferred { class })
+                if class == final_class
         ));
     }
 
@@ -7886,6 +8037,53 @@ mod tests {
     }
 
     #[test]
+    fn source_tuple_types_project_to_the_canonical_tuple_class() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { class Tuple2[A, B] }; package app { class Tuple2[A, B]; class C { val value: (Int, Boolean) = null } }",
+        );
+        let tuple_class = class_symbol(&parsed, &store, &index, source, "Tuple2");
+        let (value, tuple_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let context = index.declaration_context_of(value).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let tuple_type = typer.type_of_tpt(tuple_tree, context).unwrap();
+        let Type::Applied { tycon, args } = typer.store().types.get(tuple_type) else {
+            panic!("expected an applied canonical Tuple2 type");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), tuple_class);
+        assert_eq!(args.len(), 2);
+        assert_eq!(
+            typer.store().names.resolve(
+                typer
+                    .store()
+                    .symbols
+                    .get(type_symbol(typer.store(), args[0]))
+                    .name
+                    .text()
+            ),
+            "Int"
+        );
+        assert_eq!(
+            typer.store().names.resolve(
+                typer
+                    .store()
+                    .symbols
+                    .get(type_symbol(typer.store(), args[1]))
+                    .name
+                    .text()
+            ),
+            "Boolean"
+        );
+    }
+
+    #[test]
     fn source_union_types_compose_with_applied_qualified_and_alias_types() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class F[A]; class A; class B; object Outer { class Nested }; type Alias = Outer.Nested & A; val value: F[A | B] = null",
@@ -8976,6 +9174,69 @@ mod tests {
     }
 
     #[test]
+    fn package_selection_qualifier_uses_the_imported_package_context() {
+        let source_text = r#"
+            package scala {
+                package collection {
+                    package mutable {
+                        object ArrayBuffer { def empty[A]: Int = 0 }
+                    }
+                }
+            }
+            package dotty.tools {
+                package backend.jvm {
+                    package opt {
+                        import scala.collection.mutable
+                        object Use {
+                            def run: Int = collection.mutable.ArrayBuffer.empty[Int]
+                            def absent: Int = collection.noSuchPackage.ArrayBuffer.empty[Int]
+                        }
+                    }
+                }
+            }
+        "#;
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let method = |wanted: &str| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == wanted =>
+                    {
+                        Some((
+                            index.symbol_at(source, tree).unwrap(),
+                            definition.rhs.unwrap(),
+                        ))
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let (run, run_rhs) = method("run");
+        let (absent, absent_rhs) = method("absent");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let run_context = typer.expression_context_for(run).unwrap();
+        let result = typer.type_expression(run_rhs, run_context);
+        assert!(result.is_ok(), "{result:?}");
+        let absent_context = typer.expression_context_for(absent).unwrap();
+        assert!(matches!(
+            typer.type_expression(absent_rhs, absent_context),
+            Err(TyperError::MemberNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "noSuchPackage"
+        ));
+    }
+
+    #[test]
     fn current_package_binding_does_not_fall_back_to_root_after_missing_member() {
         let source_text = "package b { object Local { class Root } }; package a.consumer.b { object Local { class Other } }; package a.consumer { import b.Local.Root; class Use { val value: Root = new Root } }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
@@ -9093,6 +9354,93 @@ mod tests {
     }
 
     #[test]
+    fn plain_package_import_is_available_as_selected_type_qualifier() {
+        let source_text = "package sample.collection.mutable { class TreeMap }; package sample.client { import sample.collection.mutable; class Use { val value: mutable.TreeMap = null } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let tree_map = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "TreeMap" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("source package should contain TreeMap");
+        let context = index.declaration_context_of(value).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.type_of_tpt(type_tree, context).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), tree_map);
+    }
+
+    #[test]
+    fn imported_external_subpackage_qualifies_a_selected_type() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        let source_text = "import scala.collection.mutable; class Use { val value: mutable.TreeMap[Int, String] = null }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let context = index.declaration_context_of(value).unwrap();
+        let mutable_name = Name::new(store.names.intern("mutable"), Namespace::Term);
+        let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(library_root)),
+            Box::new(JavaObjectStubPath),
+        ]);
+        let resolver = ClasspathSymbolResolver::new(
+            class_path,
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let mutable = typer
+            .lookup_context_symbol(mutable_name, context, type_tree.index(), None)
+            .unwrap()
+            .expect("the explicit import should resolve the classpath subpackage");
+        assert_eq!(typer.store().symbols.get(mutable).kind, SymbolKind::Package);
+        assert_eq!(
+            typer.package_path(mutable),
+            ["scala", "collection", "mutable"]
+        );
+
+        let error = typer.type_of_tpt(type_tree, context).unwrap_err();
+        assert!(
+            matches!(error, TyperError::SymbolResolution { .. }),
+            "{error:?}"
+        );
+        assert!(
+            format!("{error:?}").contains("scala/Cloneable"),
+            "{error:?}"
+        );
+        // The checked-in library fixture omits scala.Cloneable. The test still
+        // proves package resolution before the incomplete TreeMap parent graph.
+    }
+
+    #[test]
     fn object_member_import_uses_a_current_package_relative_prefix() {
         let source_text = "package a.consumer.b { object Local { val member: Int = 1 } }; package a.consumer { import b.Local.member; def use: Int = member }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
@@ -9196,7 +9544,7 @@ mod tests {
             ModuleResolutionProfile,
         };
 
-        let source_text = "package dotty.tools\npackage dotc\npackage core\nimport Contexts.*\nimport Contexts.withFreshTyperState\nclass Use";
+        let source_text = "package dotty.tools\npackage dotc\npackage core\nimport Contexts.withFreshTyperState\nclass Use";
         let (mut parsed, mut store, packages, definitions, index, source) =
             parse_and_name(source_text);
         let compiler_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -9211,7 +9559,7 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(imports.len(), 2);
+        assert_eq!(imports.len(), 1);
         let use_symbol = parsed
             .ast
             .iter()
@@ -9296,7 +9644,7 @@ mod tests {
         );
 
         let import_contexts = typer
-            .source_context_chain(declaration_context, imports[1].0.index())
+            .source_context_chain(declaration_context, imports[0].0.index())
             .expect("the declaration should retain its preceding imports");
         let imported_members = typer
             .lookup_import_candidates(
@@ -9305,8 +9653,8 @@ mod tests {
                 false,
                 ImportSelection::Explicit,
                 SourceTreeLocation {
-                    tree_index: imports[1].0.index(),
-                    position: parsed.ast.get(imports[1].0).position,
+                    tree_index: imports[0].0.index(),
+                    position: parsed.ast.get(imports[0].0).position,
                 },
             )
             .expect("the qualified import selector should resolve on Contexts");
@@ -9345,6 +9693,167 @@ mod tests {
             1,
             "the later selected member is counted separately from qualifier successes"
         );
+    }
+
+    #[test]
+    fn scala39_object_wildcard_import_finds_an_inherited_implicit_class() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package app\nimport scala.jdk.CollectionConverters.*\nclass Use");
+        let import = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Import(import) => Some((tree, import)),
+                _ => None,
+            })
+            .expect("the fixture source contains the wildcard import");
+        let use_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Use" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("the fixture source declares Use");
+        let declaration_context = index.declaration_context_of(use_symbol).unwrap();
+        let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(library_root)),
+            Box::new(JavaObjectStubPath),
+        ]);
+        let resolver = ClasspathSymbolResolver::new(
+            class_path,
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        );
+        let imported_name = Name::new(store.names.intern("IteratorHasAsScala"), Namespace::Term);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let import_contexts = typer
+            .source_context_chain(declaration_context, import.0.index())
+            .expect("Use should retain its preceding wildcard import");
+        let qualifier_context = index
+            .source_context(declaration_context)
+            .parent
+            .expect("Use should be declared in the app package");
+        let object = typer
+            .import_qualifier_symbol(import.1.expr, qualifier_context, import.0.index(), None)
+            .expect("the real Scala library object should resolve")
+            .expect("CollectionConverters is a package-owned Object");
+        let module_class = typer
+            .resolver
+            .module_class_of_object(typer.store(), object)
+            .expect("the resolver should retain the canonical module identity")
+            .expect("CollectionConverters has a validated ModuleClass");
+        assert_eq!(
+            typer.store().symbols.get(module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            typer.store().symbols.info(module_class),
+            &SymbolInfo::Missing
+        );
+
+        let resolver_checkpoint = typer.resolver.checkpoint();
+        let absent_conversion = Name::new(typer.store.names.intern("asScala"), Namespace::Term);
+        assert!(
+            typer
+                .lookup_import_candidates(
+                    &import_contexts,
+                    absent_conversion,
+                    false,
+                    ImportSelection::Wildcard,
+                    SourceTreeLocation {
+                        tree_index: import.0.index(),
+                        position: parsed.ast.get(import.0).position,
+                    },
+                )
+                .expect("asScala is not a direct CollectionConverters member")
+                .is_empty()
+        );
+        let completed_resolver_checkpoint = typer.resolver.checkpoint();
+        assert_ne!(completed_resolver_checkpoint, resolver_checkpoint);
+        assert_ne!(
+            typer.store().symbols.info(module_class),
+            &SymbolInfo::Missing,
+            "a successful hierarchy completion remains cached when a name is absent"
+        );
+
+        let missing_name = Name::new(
+            typer.store.names.intern("MissingConversion"),
+            Namespace::Term,
+        );
+        assert!(
+            typer
+                .lookup_import_candidates(
+                    &import_contexts,
+                    missing_name,
+                    false,
+                    ImportSelection::Wildcard,
+                    SourceTreeLocation {
+                        tree_index: import.0.index(),
+                        position: parsed.ast.get(import.0).position,
+                    },
+                )
+                .expect("a missing member should stay unresolved")
+                .is_empty()
+        );
+        assert_eq!(typer.resolver.checkpoint(), completed_resolver_checkpoint);
+
+        let imported_members = typer
+            .lookup_import_candidates(
+                &import_contexts,
+                imported_name,
+                false,
+                ImportSelection::Wildcard,
+                SourceTreeLocation {
+                    tree_index: import.0.index(),
+                    position: parsed.ast.get(import.0).position,
+                },
+            )
+            .expect("the wildcard import should resolve its inherited implicit class");
+        assert_eq!(imported_members.len(), 1);
+        let implicit_class = imported_members[0];
+        assert_eq!(
+            typer.store().symbols.get(implicit_class).kind,
+            SymbolKind::Method
+        );
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(implicit_class).name.text()),
+            "IteratorHasAsScala"
+        );
+        let declaring_parent = typer.store().symbols.get(implicit_class).owner.unwrap();
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(declaring_parent).name.text()),
+            "AsScalaExtensions"
+        );
+        assert!(matches!(
+            typer.store().symbols.get(implicit_class).origin,
+            SymbolOrigin::Tasty(_)
+        ));
     }
 
     #[test]
@@ -19606,10 +20115,118 @@ mod tests {
     }
 
     #[test]
-    fn forward_local_lazy_references_remain_outside_the_bounded_scope() {
+    fn explicitly_typed_local_lazy_values_support_later_lazy_references() {
+        {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(LOCAL_LAZY_FORWARD_ORACLE_FIXTURE);
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, "explicitForward");
+            let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+                unreachable!();
+            };
+            let first_tree = block.stats[0];
+            let later_tree = block.stats[1];
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+
+            let typed = typer
+                .type_expression(rhs, context)
+                .expect("pinned Scala 3.9 accepts this later-lazy reference");
+            let first = typer.local_symbol_at(source, first_tree).unwrap();
+            let later = typer.local_symbol_at(source, later_tree).unwrap();
+            assert_eq!(
+                *typer.store().symbols.info(later),
+                SymbolInfo::Complete(definitions.int)
+            );
+            let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed).kind else {
+                unreachable!();
+            };
+            let TreeKind::ValDef(typed_first) = &typer.typed_ast().get(typed_block.stats[0]).kind
+            else {
+                unreachable!();
+            };
+            let first_rhs = typed_first.rhs.unwrap();
+            assert!(matches!(
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(first_rhs).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == later
+            ));
+            assert_ne!(first, later);
+        }
+
+        for (source_text, method_name, expected_locals) in [
+            (
+                "class C { def use: Int = { lazy val first: Int = later; lazy val later = 1; first } }",
+                "use",
+                2,
+            ),
+            (
+                "class C { def use: Int = { lazy val first: Int = second; lazy val second = third; lazy val third = 1; first } }",
+                "use",
+                3,
+            ),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, method_name);
+            let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+                unreachable!();
+            };
+            let local_trees = block.stats.clone();
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+
+            typer
+                .type_expression(rhs, context)
+                .expect("acyclic forward references to inferred lazy values are supported");
+            assert_eq!(local_trees.len(), expected_locals);
+            for local_tree in local_trees {
+                let symbol = typer.local_symbol_at(source, local_tree).unwrap();
+                assert!(matches!(
+                    typer.store().symbols.info(symbol),
+                    SymbolInfo::Complete(ty) if *ty == definitions.int
+                ));
+            }
+        }
+
         for (source_text, method_name) in [
-            (LOCAL_LAZY_RECURSION_ORACLE_FIXTURE, "inferredMutual"),
-            (LOCAL_LAZY_FORWARD_ORACLE_FIXTURE, "explicitForward"),
+            (
+                "class C { def use: Int = { val first: Int = later; lazy val later: Int = 1; first } }",
+                "use",
+            ),
+            (
+                "class C { def use: Int = { val first = later; lazy val later: Int = 1; first } }",
+                "use",
+            ),
+            (
+                "class C { def use: Int = { lazy val first: Int = later; val barrier: Int = 0; lazy val later: Int = 1; first } }",
+                "use",
+            ),
+            (
+                "class C { def use: Int = { lazy val first: Int = later; val later: Int = 1; first } }",
+                "use",
+            ),
+            (
+                "package lib { object Owner { val unrelated: Int = 1 } }; package app { object Use { def use: Int = { lazy val first: Int = later; import lib.Owner.*; lazy val later: Int = 1; first } } }",
+                "use",
+            ),
         ] {
             let (parsed, mut store, packages, definitions, index, source) =
                 parse_and_name(source_text);
@@ -19636,6 +20253,145 @@ mod tests {
             assert!(typer.local_symbol_at(source, first).is_none());
             assert!(typer.typed_ast().iter().next().is_none());
         }
+    }
+
+    #[test]
+    fn inferred_mutual_local_lazy_cycle_is_reported_and_rolled_back() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(LOCAL_LAZY_RECURSION_ORACLE_FIXTURE);
+        let (method, rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "inferredMutual");
+        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+            unreachable!();
+        };
+        let first = block.stats[0];
+        let second = block.stats[1];
+        let TreeKind::ValDef(second_definition) = &parsed.ast.get(second).kind else {
+            unreachable!();
+        };
+        let recursive_reference = second_definition.rhs.unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::RecursiveLazyLocalValueInitializer {
+                source: actual_source,
+                tree_index,
+                ..
+            }) if actual_source == source && tree_index == recursive_reference.index()
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.local_symbol_at(source, first).is_none());
+        assert!(typer.local_symbol_at(source, second).is_none());
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.initializing_local_symbols.is_empty());
+        assert!(typer.inferred_local_lazy_types_in_progress.is_empty());
+    }
+
+    #[test]
+    fn inferred_local_lazy_forward_chain_has_a_completion_depth_limit() {
+        let mut declarations = (0..66)
+            .map(|index| {
+                if index == 65 {
+                    "lazy val value65 = 1".to_owned()
+                } else {
+                    format!("lazy val value{index} = value{}", index + 1)
+                }
+            })
+            .collect::<Vec<_>>();
+        declarations.push("value0".to_owned());
+        let source_text = format!(
+            "class C {{ def use: Int = {{ {} }} }}",
+            declarations.join("; ")
+        );
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(&source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::InferredLocalLazyTypeDepthExceeded {
+                source: actual_source,
+                max_depth: 64,
+                ..
+            }) if actual_source == source
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.local_symbols.is_empty());
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.initializing_local_symbols.is_empty());
+        assert!(typer.inferred_local_lazy_types_in_progress.is_empty());
+    }
+
+    #[test]
+    fn eager_local_initializer_can_use_nested_lazy_value_without_forward_reference() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def use: Int = { val first: Int = { lazy val later: Int = 1; later }; first } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(typer.type_expression(rhs, context).is_ok());
+    }
+
+    #[test]
+    fn failed_forward_local_lazy_typing_rolls_back_preindexed_symbols() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def use: Int = { lazy val first: Int = later; lazy val later: Boolean = true; first } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+            unreachable!();
+        };
+        let first = block.stats[0];
+        let later = block.stats[1];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::LocalValueTypeMismatch { expected, .. })
+                if expected == definitions.int
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.local_symbol_at(source, first).is_none());
+        assert!(typer.local_symbol_at(source, later).is_none());
+        assert!(typer.typed_ast().iter().next().is_none());
     }
 
     #[test]
@@ -22374,6 +23130,62 @@ mod tests {
     }
 
     #[test]
+    fn inferred_lazy_class_fields_support_forward_references_and_reject_cycles() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(CLASS_LAZY_FIELDS_ORACLE_FIXTURE);
+        let (first, first_tpt) = val_symbol(&parsed, &store, &index, source, "forwardFirst");
+        let (later, later_tpt) = val_symbol(&parsed, &store, &index, source, "forwardLater");
+        let explicit = val_symbol(&parsed, &store, &index, source, "typedValue").0;
+        let direct = val_symbol(&parsed, &store, &index, source, "selfValue").0;
+        let mutual_a = val_symbol(&parsed, &store, &index, source, "mutualFirst").0;
+        let mutual_b = val_symbol(&parsed, &store, &index, source, "mutualSecond").0;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert_eq!(typer.complete_symbol(first).unwrap(), definitions.int);
+        assert_eq!(typer.complete_symbol(later).unwrap(), definitions.int);
+        assert_eq!(typer.complete_symbol(explicit).unwrap(), definitions.int);
+        for (field, inferred_tpt) in [(first, first_tpt), (later, later_tpt)] {
+            assert_eq!(
+                typer.source_type_index().type_at(source, inferred_tpt),
+                Some(definitions.int)
+            );
+            assert!(
+                typer
+                    .store()
+                    .symbols
+                    .get(field)
+                    .flags
+                    .contains(SymbolFlags::LAZY)
+            );
+        }
+
+        for (field, expected_cycle) in
+            [(direct, direct), (mutual_a, mutual_a), (mutual_b, mutual_b)]
+        {
+            let checkpoint = typer.store().checkpoint();
+            let result = typer.complete_symbol(field);
+            assert!(
+                matches!(
+                    &result,
+                    Err(TyperError::RecursiveInferredFieldType { symbol, .. })
+                        if *symbol == expected_cycle
+                ),
+                "unexpected inferred lazy cycle result: {result:?}"
+            );
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert_eq!(typer.store().symbols.info(field), &SymbolInfo::Missing);
+        }
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+    }
+
+    #[test]
     fn inferred_mutable_class_fields_drive_reads_and_assignments() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C(parameter: Int) { var literal = 1; val sibling = 2; var fromParameter = parameter; var fromSibling = sibling; def read: Int = literal; def update: Unit = literal = 2; def mismatch: Unit = literal = true }",
@@ -22595,11 +23407,15 @@ mod tests {
     }
 
     #[test]
-    fn explicit_and_module_class_mutable_fields_keep_the_existing_boundary() {
-        let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("class C { var explicit: Int = notFound }; object O { var module = 1 }");
+    fn explicit_and_module_class_fields_keep_the_existing_boundary() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { var explicit: Int = notFound; lazy var invalid = 3 }; object O { var module = 1; lazy val moduleLazy = 2 }",
+        );
         let (explicit, explicit_tpt) = val_symbol(&parsed, &store, &index, source, "explicit");
         let (module, module_tpt) = val_symbol(&parsed, &store, &index, source, "module");
+        let (module_lazy, module_lazy_tpt) =
+            val_symbol(&parsed, &store, &index, source, "moduleLazy");
+        let invalid_lazy = val_symbol(&parsed, &store, &index, source, "invalid").0;
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -22630,6 +23446,34 @@ mod tests {
         ));
         assert_eq!(typer.source_type_index().type_at(source, module_tpt), None);
         assert_eq!(typer.store().symbols.info(module), &SymbolInfo::Missing);
+        assert!(matches!(
+            typer.complete_symbol(module_lazy),
+            Err(TyperError::MissingDeclaredType { .. })
+        ));
+        assert_eq!(
+            typer.source_type_index().type_at(source, module_lazy_tpt),
+            None
+        );
+        assert_eq!(
+            typer.store().symbols.info(module_lazy),
+            &SymbolInfo::Missing
+        );
+        assert!(
+            typer
+                .store()
+                .symbols
+                .get(invalid_lazy)
+                .flags
+                .contains(SymbolFlags::MUTABLE | SymbolFlags::LAZY)
+        );
+        assert!(matches!(
+            typer.complete_symbol(invalid_lazy),
+            Err(TyperError::MissingDeclaredType { .. })
+        ));
+        assert_eq!(
+            typer.store().symbols.info(invalid_lazy),
+            &SymbolInfo::Missing
+        );
     }
 
     #[test]
@@ -23189,9 +24033,6 @@ mod tests {
         let field = val_symbol(&parsed, &store, &index, source, "value").0;
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
         let lexical = index.declaration_context_of(method).unwrap();
-        let scope = index.source_context(lexical).lexical_scope;
-        let field_name = store.symbols.get(field).name;
-        store.scopes.get_mut(scope).enter(field_name, field);
         let context = ExpressionContext {
             lexical,
             owner: method,
@@ -23217,6 +24058,43 @@ mod tests {
             .widen_expression_type(typer.typed_ast().get(typed).ty)
             .unwrap();
         assert_eq!(widened, definitions.int);
+    }
+
+    #[test]
+    fn inherited_field_completion_rolls_back_with_failed_expression() {
+        let source_text = "class Parent { val value: Int }; class Child extends Parent { def use: Int = { value; missing } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let (method, body) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        assert!(matches!(store.symbols.info(parent), SymbolInfo::Missing));
+        assert!(matches!(store.symbols.info(child), SymbolInfo::Missing));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(body, context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert!(matches!(
+            typer.store().symbols.info(parent),
+            SymbolInfo::Missing
+        ));
+        assert!(matches!(
+            typer.store().symbols.info(child),
+            SymbolInfo::Missing
+        ));
     }
 
     #[test]
@@ -28790,6 +29668,82 @@ mod tests {
     }
 
     #[test]
+    fn integer_plus_assign_falls_back_to_addition_for_a_mutable_local() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Unit = { var value = 1; value += 2 } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.unit);
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed).kind else {
+            panic!("method body should remain a block");
+        };
+        let TreeKind::Assign(assignment) = &typer.typed_ast().get(block.expr).kind else {
+            panic!("integer `+=` should lower to assignment after `+`");
+        };
+        let target = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(assignment.lhs).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected a direct local reference, got {other:?}"),
+        };
+        let target_symbol = typer.store().symbols.get(target);
+        assert_eq!(target_symbol.kind, SymbolKind::Local);
+        assert!(target_symbol.flags.contains(SymbolFlags::MUTABLE));
+        let TreeKind::Apply(addition) = &typer.typed_ast().get(assignment.rhs).kind else {
+            panic!("compound assignment RHS should be a typed addition");
+        };
+        let TreeKind::Select(selection) = &typer.typed_ast().get(addition.function).kind else {
+            panic!("addition should select the canonical integer member");
+        };
+        assert_eq!(typer.store().names.resolve(selection.name.text()), "+");
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(selection.qualifier).ty)
+                .unwrap(),
+            definitions.int
+        );
+    }
+
+    #[test]
+    fn integer_plus_assign_does_not_skip_a_lexical_extension() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def use: Unit = { var value = 1; extension (receiver: Int) { def +=(delta: Int): Int = receiver }; value += 2 } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::MemberNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "+="
+        ));
+    }
+
+    #[test]
     fn assignment_rejects_immutable_local_and_parameter() {
         for (source_text, assigned_name) in [
             (
@@ -29236,12 +30190,16 @@ mod tests {
     #[test]
     fn if_expression_types_block_branches_and_synthetic_unit_else() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "def choose(flag: Boolean) = if flag then { val result = 1; result } else { val result = 2; result }; def partial(flag: Boolean) = if flag then 1",
+            "def choose(flag: Boolean) = if flag then { val result = 1; result } else { val result = 2; result }; def partial(flag: Boolean) = if flag then 1; def partialChain(flag: Boolean, innerFlag: Boolean) = if flag then 1 else if innerFlag then 2; def explicitUnit(flag: Boolean) = if flag then 1 else ()",
         );
         let (choose, choose_rhs) =
             method_definition_and_rhs(&parsed, &store, &index, source, "choose");
         let (partial, partial_rhs) =
             method_definition_and_rhs(&parsed, &store, &index, source, "partial");
+        let (partial_chain, partial_chain_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "partialChain");
+        let (explicit_unit, explicit_unit_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "explicitUnit");
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -29277,12 +30235,111 @@ mod tests {
                 .get(typer.typed_ast().get(partial_if.else_branch).ty),
             Type::Constant(dotty_core::Constant::Unit)
         ));
+        assert_eq!(typer.typed_ast().get(partial_tree).ty, definitions.unit);
+        let TreeKind::Block(discarded_then) = &typer.typed_ast().get(partial_if.then_branch).kind
+        else {
+            panic!("expected a Unit-adapted then branch");
+        };
+        assert_eq!(discarded_then.stats.len(), 1);
+        assert!(matches!(
+            typer.typed_ast().get(discarded_then.stats[0]).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Int(1)
+            })
+        ));
+        assert_eq!(
+            typer.typed_ast().get(discarded_then.expr).ty,
+            definitions.unit
+        );
+
+        let partial_chain_context = typer.expression_context_for(partial_chain).unwrap();
+        let partial_chain_tree = typer
+            .type_expression(partial_chain_rhs, partial_chain_context)
+            .unwrap();
+        assert_eq!(
+            typer.typed_ast().get(partial_chain_tree).ty,
+            definitions.unit
+        );
+
+        let explicit_unit_context = typer.expression_context_for(explicit_unit).unwrap();
+        let explicit_unit_tree = typer
+            .type_expression(explicit_unit_rhs, explicit_unit_context)
+            .unwrap();
         assert!(matches!(
             typer
                 .store()
                 .types
-                .get(typer.typed_ast().get(partial_tree).ty),
+                .get(typer.typed_ast().get(explicit_unit_tree).ty),
             Type::Or { .. }
+        ));
+    }
+
+    #[test]
+    fn application_of_a_module_value_selects_its_unique_apply_method() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "object Factory { def apply[A](value: A): A = value }; object NotCallable {}; object PrivateFactory { private def apply(value: Int): Int = value; def sameOwner(value: Int): Int = PrivateFactory(value) }; object ProtectedFactory { protected def apply(value: Int): Int = value }; object Use { def create(value: Int): Int = Factory(value); def invalid = NotCallable(); def privateInvalid(value: Int): Int = PrivateFactory(value); def protectedInvalid(value: Int): Int = ProtectedFactory(value) }",
+        );
+        let (factory_apply, _) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "apply");
+        let (create, create_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "create");
+        let (same_owner, same_owner_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "sameOwner");
+        let (invalid, invalid_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "invalid");
+        let (private_invalid, private_invalid_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "privateInvalid");
+        let (protected_invalid, protected_invalid_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "protectedInvalid");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let create_context = typer.expression_context_for(create).unwrap();
+        let typed_create = typer.type_expression(create_rhs, create_context).unwrap();
+        assert_eq!(typer.typed_ast().get(typed_create).ty, definitions.int);
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_create).kind else {
+            panic!("module application should remain an Apply")
+        };
+        let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind else {
+            panic!("module application should select its apply method")
+        };
+        assert_eq!(typer.store().names.resolve(selection.name.text()), "apply");
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == factory_apply
+        ));
+
+        let same_owner_context = typer.expression_context_for(same_owner).unwrap();
+        let typed_same_owner = typer
+            .type_expression(same_owner_rhs, same_owner_context)
+            .unwrap();
+        assert_eq!(typer.typed_ast().get(typed_same_owner).ty, definitions.int);
+
+        let invalid_context = typer.expression_context_for(invalid).unwrap();
+        assert!(matches!(
+            typer.type_expression(invalid_rhs, invalid_context),
+            Err(TyperError::ApplicationCalleeNotMethod { .. })
+        ));
+
+        let private_context = typer.expression_context_for(private_invalid).unwrap();
+        assert!(matches!(
+            typer.type_expression(private_invalid_rhs, private_context),
+            Err(TyperError::ApplicationCalleeNotMethod { .. })
+        ));
+
+        let protected_context = typer.expression_context_for(protected_invalid).unwrap();
+        assert!(matches!(
+            typer.type_expression(protected_invalid_rhs, protected_context),
+            Err(TyperError::ApplicationCalleeNotMethod { .. })
         ));
     }
 

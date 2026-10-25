@@ -1,0 +1,12 @@
+[package]
+name = "dotty-jvm-tasty-contract"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+dotty-core = { path = "../dotty-core" }
+dotty-classfile = { path = "../dotty-classfile" }
+dotty-jvm = { path = "../dotty-jvm" }
+dotty-tasty-pickler = { path = "../dotty-tasty-pickler" }
+dotty-tasty = { path = "../dotty-tasty" }

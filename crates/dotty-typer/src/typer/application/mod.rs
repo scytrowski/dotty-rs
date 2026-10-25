@@ -1,5 +1,7 @@
 //! Method and constructor application, overload resolution, and inference.
 
+use dotty_core::names::Namespace;
+
 use super::*;
 
 pub(super) mod constructors;
@@ -160,6 +162,8 @@ impl SourceTyper<'_> {
                 let function_type = self.typed_arena.get(function).ty;
                 let callable =
                     self.widen_expression_type_journaled(function_type, info_journal, 0)?;
+                let (function, callable) =
+                    self.resolve_module_apply_function(function, callable, request, info_journal)?;
                 (function, callable, None, None)
             };
         self.type_resolved_application(
@@ -177,6 +181,108 @@ impl SourceTyper<'_> {
             },
             info_journal,
             new_mappings,
+        )
+    }
+
+    fn resolve_module_apply_function(
+        &mut self,
+        function: TreeId<Typed>,
+        callable: TypeId,
+        request: ApplicationRequest<'_>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(TreeId<Typed>, TypeId), TyperError> {
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(module_class),
+            ..
+        }) = self.store.types.try_get(callable)
+        else {
+            return Ok((function, callable));
+        };
+        if self.store.symbols.get(*module_class).kind != SymbolKind::ModuleClass {
+            return Ok((function, callable));
+        }
+
+        let receiver = self.this_type_receiver_view(callable)?;
+        let apply_name = Name::new(self.store.names.intern("apply"), Namespace::Term);
+        let candidates = self
+            .lookup_members_journaled(receiver, apply_name, info_journal)
+            .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+        let [candidate] = candidates.as_slice() else {
+            return if candidates.is_empty() {
+                Ok((function, callable))
+            } else {
+                Err(TyperError::OverloadedSelectionDeferred {
+                    source: self.source,
+                    tree_index: request.tree_index,
+                    name: apply_name,
+                })
+            };
+        };
+        if self.store.symbols.get(candidate.symbol).kind != SymbolKind::Method {
+            return Ok((function, callable));
+        }
+        let declaration = self.store.symbols.get(candidate.symbol);
+        let accessible = match declaration.visibility {
+            Visibility::Public => true,
+            Visibility::Private => {
+                let same_owner = match self.enclosing_this_owner(
+                    None,
+                    request.context.owner,
+                    request.tree_index,
+                ) {
+                    Ok(current_class) => candidate.declaring_class == current_class,
+                    Err(TyperError::ThisOwnerNotEnclosing { .. }) => false,
+                    Err(error) => return Err(error),
+                };
+                same_owner && self.is_plain_private_source_method(candidate.symbol)
+            }
+            Visibility::Protected
+            | Visibility::Package(_)
+            | Visibility::PrivateWithin(_)
+            | Visibility::ProtectedWithin(_) => false,
+        };
+        if !accessible {
+            return Ok((function, callable));
+        }
+
+        let member_type = self.member_type_on_journaled(candidate, info_journal)?;
+        let is_callable_method = match self.store.types.try_get(member_type) {
+            Some(Type::Method(_)) => true,
+            Some(Type::Poly(poly)) => {
+                matches!(self.store.types.try_get(poly.result), Some(Type::Method(_)))
+            }
+            _ => false,
+        };
+        if !is_callable_method {
+            return Ok((function, callable));
+        }
+
+        let position = self
+            .arena
+            .try_get(request.function_tree)
+            .and_then(|tree| tree.position);
+        let selected_type = self.store.types.alloc(Type::TermRef {
+            prefix: receiver,
+            target: TermRefTarget::Symbol(candidate.symbol),
+        });
+        let selected_function = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .select(function, apply_name, false, selected_type, position);
+        Ok((selected_function, member_type))
+    }
+
+    fn is_plain_private_source_method(&self, symbol: SymbolId) -> bool {
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(symbol)
+        else {
+            return false;
+        };
+        if source != self.source {
+            return false;
+        }
+        matches!(
+            self.arena.try_get(tree).map(|node| &node.kind),
+            Some(TreeKind::DefDef(definition))
+                if definition.metadata.visibility
+                    == Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
         )
     }
 

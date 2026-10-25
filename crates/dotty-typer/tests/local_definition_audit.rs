@@ -6713,6 +6713,8 @@ fn local_value_baseline_outcome_classification(
         "residual local-value declaration blocker"
     } else if blocker == "RecursiveLazyLocalValueInitializer" {
         "intentional local lazy recursion deferral"
+    } else if blocker == "InferredLocalLazyTypeDepthExceeded" {
+        "intentional local lazy inference depth bound"
     } else if blocker == "UsingApplicationDeferred"
         || blocker == "ApplicationMethodKindMismatch"
         || blocker == "ApplicationCalleeNotMethod"
@@ -20475,6 +20477,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::TypeNormalization(..) => "TypeNormalization",
         TyperError::ConflictingTypedExpression { .. } => "ConflictingTypedExpression",
         TyperError::StringLiteralTypingDeferred { .. } => "StringLiteralTypingDeferred",
+        TyperError::StringTypeResolution { .. } => "StringTypeResolution",
         TyperError::NullLiteralTypingDeferred { .. } => "NullLiteralTypingDeferred",
         TyperError::IntegerLiteralOutOfRange { .. } => "IntegerLiteralOutOfRange",
         TyperError::FloatingLiteralInvalid { .. } => "FloatingLiteralInvalid",
@@ -20488,6 +20491,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::ObjectModuleClassResolution { .. } => "ObjectModuleClassResolution",
         TyperError::UnsupportedTermReference { .. } => "UnsupportedTermReference",
         TyperError::MemberNotFound { .. } => "MemberNotFound",
+        TyperError::IncompatibleEqualityOperands { .. } => "IncompatibleEqualityOperands",
         TyperError::OverloadedSelectionDeferred { .. } => "OverloadedSelectionDeferred",
         TyperError::ApplicationCalleeNotMethod { .. } => "ApplicationCalleeNotMethod",
         TyperError::UnconstrainedTypeParameter { .. } => "UnconstrainedTypeParameter",
@@ -20663,6 +20667,9 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::RecursiveLocalValueInitializer { .. } => "RecursiveLocalValueInitializer",
         TyperError::RecursiveLazyLocalValueInitializer { .. } => {
             "RecursiveLazyLocalValueInitializer"
+        }
+        TyperError::InferredLocalLazyTypeDepthExceeded { .. } => {
+            "InferredLocalLazyTypeDepthExceeded"
         }
         TyperError::LocalValueOutsideBlock { .. } => "LocalValueOutsideBlock",
         TyperError::DuplicateLocalValue { .. } => "DuplicateLocalValue",

@@ -48,6 +48,18 @@ pub(in crate::typer) struct SourceImport {
 }
 
 impl SourceTyper<'_> {
+    fn member_allowed_for_import_qualifier(&self, qualifier: SymbolId, member: SymbolId) -> bool {
+        let qualifier = self.store.symbols.get(qualifier);
+        !matches!(qualifier.kind, SymbolKind::Class | SymbolKind::Trait)
+            || !qualifier.flags.contains(SymbolFlags::JAVA_DEFINED)
+            || self
+                .store
+                .symbols
+                .get(member)
+                .flags
+                .contains(SymbolFlags::STATIC)
+    }
+
     /// Enumerates canonical source package candidates from the source context
     /// chain, most specific first, then the canonical root package.
     ///
@@ -323,7 +335,24 @@ impl SourceTyper<'_> {
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
         self.resolve_qualifier_symbol_with_expression_context(
-            tree, context, None, tree_index, position,
+            tree, context, None, false, tree_index, position,
+        )
+    }
+
+    pub(in crate::typer) fn resolve_expression_qualifier_symbol(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        self.resolve_qualifier_symbol_with_expression_context(
+            tree,
+            context.lexical,
+            Some(context),
+            false,
+            tree_index,
+            position,
         )
     }
 
@@ -332,6 +361,7 @@ impl SourceTyper<'_> {
         tree: TreeId<Untyped>,
         context: SourceContextId,
         expression_context: Option<ExpressionContext>,
+        allow_type_member_fallback: bool,
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
@@ -384,6 +414,7 @@ impl SourceTyper<'_> {
                     select.qualifier,
                     context,
                     expression_context,
+                    allow_type_member_fallback,
                     tree_index,
                     position,
                 )?
@@ -392,11 +423,9 @@ impl SourceTyper<'_> {
                 };
                 let mut candidates = Vec::new();
                 for scope in self.scopes_of(qualifier) {
-                    if let Some(symbol) =
-                        self.unique_scoped_symbol(scope, select.name, tree_index, position)?
-                    {
-                        candidates.push(symbol);
-                    }
+                    candidates.extend(self.scoped_symbols(scope, select.name).into_iter().filter(
+                        |symbol| self.member_allowed_for_import_qualifier(qualifier, *symbol),
+                    ));
                 }
                 candidates.sort_by_key(|symbol| symbol.index());
                 candidates.dedup();
@@ -419,13 +448,46 @@ impl SourceTyper<'_> {
                     selector: MemberSelector::Unique,
                     space: MemberSpace::Prefix,
                 };
-                self.resolver
-                    .resolve_member(self.store, &request)
+                let term_member =
+                    self.resolver
+                        .resolve_member(self.store, &request)
+                        .map_err(|error| TyperError::SymbolResolution {
+                            source: self.source,
+                            tree_index,
+                            error,
+                        })?;
+                if let Some(member) = term_member {
+                    return Ok(self
+                        .member_allowed_for_import_qualifier(qualifier, member)
+                        .then_some(member));
+                }
+                if select.name.is_type() || !allow_type_member_fallback {
+                    return Ok(None);
+                }
+
+                // Import qualifiers use Scala's any-selection shape: a
+                // package-qualified class can be the prefix even when no
+                // same-named term (such as an Object) exists. Keep term
+                // lookup first, then ask the resolver for the type namespace
+                // only after that lookup misses.
+                let type_name =
+                    dotty_core::Name::new(select.name.text(), dotty_core::Namespace::Type);
+                let type_request = MemberRequest {
+                    prefix,
+                    name: type_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                };
+                let type_member = self
+                    .resolver
+                    .resolve_member(self.store, &type_request)
                     .map_err(|error| TyperError::SymbolResolution {
                         source: self.source,
                         tree_index,
                         error,
-                    })
+                    })?;
+                Ok(type_member
+                    .filter(|member| self.member_allowed_for_import_qualifier(qualifier, *member)))
             }
             _ => Err(TyperError::UnsupportedTypeTree {
                 source: self.source,
@@ -1101,6 +1163,7 @@ impl SourceTyper<'_> {
                 import.expr,
                 qualifier_context,
                 Some(expression_context),
+                true,
                 source_import.tree.index(),
                 location.position,
             );
@@ -1132,6 +1195,11 @@ impl SourceTyper<'_> {
             });
         };
         let scopes = self.scopes_of(qualifier);
+        let qualifier_symbol = self.store.symbols.get(qualifier);
+        let qualifier_kind = qualifier_symbol.kind;
+        let qualifier_is_tasty = matches!(qualifier_symbol.origin, SymbolOrigin::Tasty(_));
+        let java_class_qualifier = matches!(qualifier_kind, SymbolKind::Class | SymbolKind::Trait)
+            && qualifier_symbol.flags.contains(SymbolFlags::JAVA_DEFINED);
         let mut matches = Vec::new();
         for (imported, is_wildcard) in relevant {
             let name = if is_wildcard {
@@ -1154,13 +1222,107 @@ impl SourceTyper<'_> {
                     // Object import into a type reference).
                     let candidates = self.store.scopes.get(*scope).lookup_all(&name);
                     found_locally |= !candidates.is_empty();
-                    matches.extend_from_slice(candidates);
+                    matches.extend(candidates.iter().copied().filter(|candidate| {
+                        !java_class_qualifier
+                            || self
+                                .store
+                                .symbols
+                                .get(*candidate)
+                                .flags
+                                .contains(SymbolFlags::STATIC)
+                    }));
                 }
             }
             if !found_locally {
+                if is_wildcard && qualifier_kind == SymbolKind::Object && qualifier_is_tasty {
+                    let store_checkpoint = self.store.checkpoint();
+                    let resolver_checkpoint = self.resolver.checkpoint();
+                    let type_checkpoint = self.type_index.checkpoint();
+                    let inherited = self
+                        .type_prefix_for_qualifier(qualifier)
+                        .and_then(|prefix| {
+                            self.lookup_members(prefix, name)
+                                .map_err(|error| TyperError::MemberLookup(Box::new(error)))
+                        });
+                    match inherited {
+                        Ok(candidates) => {
+                            // A completed hierarchy remains valid even when
+                            // this particular name is absent. Keep its
+                            // resolver cache so later wildcard members do not
+                            // reload the same ModuleClass parents.
+                            matches
+                                .extend(candidates.into_iter().map(|candidate| candidate.symbol));
+                            continue;
+                        }
+                        Err(error) => {
+                            self.resolver.rollback_to(self.store, resolver_checkpoint);
+                            self.store.rollback_to(store_checkpoint);
+                            self.type_index.restore(type_checkpoint);
+                            return Err(error);
+                        }
+                    }
+                }
+                if !is_wildcard && !type_only && qualifier_kind == SymbolKind::Package {
+                    let store_checkpoint = self.store.checkpoint();
+                    let resolver_checkpoint = self.resolver.checkpoint();
+                    let mut package_path = self.package_path(qualifier);
+                    package_path.push(self.store.names.resolve(name.text()).to_owned());
+                    let package =
+                        match self.resolve_external_package(&package_path, location.tree_index) {
+                            Ok(package) => package,
+                            Err(error) => {
+                                self.resolver.rollback_to(self.store, resolver_checkpoint);
+                                self.store.rollback_to(store_checkpoint);
+                                return Err(error);
+                            }
+                        };
+                    if let Some(package) = package {
+                        let collision = self
+                            .resolver
+                            .package_object_collision(self.store, qualifier, name);
+                        match collision {
+                            Ok(true) | Err(ResolutionError::Ambiguous { .. }) => {
+                                self.resolver.rollback_to(self.store, resolver_checkpoint);
+                                self.store.rollback_to(store_checkpoint);
+                                return Err(TyperError::AmbiguousTypeName {
+                                    source: self.source,
+                                    tree_index: location.tree_index,
+                                    name: wanted,
+                                    position: location.position,
+                                });
+                            }
+                            Ok(false) => {
+                                self.import_member_cache
+                                    .insert(ImportMemberCacheKey { qualifier, name }, package);
+                                matches.push(package);
+                                continue;
+                            }
+                            Err(error) => {
+                                self.resolver.rollback_to(self.store, resolver_checkpoint);
+                                self.store.rollback_to(store_checkpoint);
+                                return Err(TyperError::SymbolResolution {
+                                    source: self.source,
+                                    tree_index: location.tree_index,
+                                    error,
+                                });
+                            }
+                        }
+                    }
+                    self.resolver.rollback_to(self.store, resolver_checkpoint);
+                    self.store.rollback_to(store_checkpoint);
+                }
                 let cache_key = ImportMemberCacheKey { qualifier, name };
                 if let Some(symbol) = self.import_member_cache.get(&cache_key).copied() {
-                    matches.push(symbol);
+                    if !java_class_qualifier
+                        || self
+                            .store
+                            .symbols
+                            .get(symbol)
+                            .flags
+                            .contains(SymbolFlags::STATIC)
+                    {
+                        matches.push(symbol);
+                    }
                     continue;
                 }
                 let prefix = self.type_prefix_for_qualifier(qualifier)?;
@@ -1183,7 +1345,16 @@ impl SourceTyper<'_> {
                         return Err(TyperError::UnknownSymbol { symbol });
                     }
                     self.import_member_cache.insert(cache_key, symbol);
-                    matches.push(symbol);
+                    if !java_class_qualifier
+                        || self
+                            .store
+                            .symbols
+                            .get(symbol)
+                            .flags
+                            .contains(SymbolFlags::STATIC)
+                    {
+                        matches.push(symbol);
+                    }
                 }
             }
         }
@@ -1295,6 +1466,7 @@ impl SourceTyper<'_> {
                 tree,
                 context.lexical,
                 Some(context),
+                true,
                 import_tree_index,
                 source_node.position,
             )?
@@ -1456,7 +1628,14 @@ impl SourceTyper<'_> {
         import_tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
-        self.resolve_qualifier_symbol(qualifier, context, import_tree_index, position)
+        self.resolve_qualifier_symbol_with_expression_context(
+            qualifier,
+            context,
+            None,
+            true,
+            import_tree_index,
+            position,
+        )
     }
 
     pub(in crate::typer) fn lookup_context_symbol(

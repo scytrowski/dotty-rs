@@ -30,6 +30,18 @@ deterministic independent sessions, `javap -c -v`, and the mandatory JDK 21+
 is 65. A fourth class on one ancestry path remains rejected; sibling
 subclasses and exact expected-`Base` sibling reference joins are covered below.
 
+The bounded inherited-accessor acceptance is covered by
+`full_inherited_accessor_hierarchy_verifies_end_to_end_on_jvm` and
+[`jvm-inherited-accessors.md`](jvm-inherited-accessors.md). It compiles real
+Scala 3.9 source for `Base → Middle → Leaf` plus `Reader` in two independent
+frontend sessions. Constructor and body accessors retain their canonical Base
+field identities; only Base declares backing fields and generated public
+getter/setter methods, while call-site `invokevirtual` references use each
+receiver's static class. The test checks constructor chaining, Java 21 class
+files, deterministic bytes, and a `javac --release 21` runtime harness under
+`java -Xverify:all`. Accessor overrides and bridges, traits, external or generic
+ancestors, and full Scala/TASTy ABI compatibility remain deferred.
+
 `SiblingConstructors.scala` adds a four-class batch with two direct children
 of `Base`. Each child has its own `(I)V` constructor and canonical `seed`
 parameter; both direct-super plans forward that child's parameter to the same
@@ -65,12 +77,33 @@ narrowed overrides return contextual typed errors. Final-method checks cover
 every validated ancestor and remain conservative when a final declaration is
 not planned.
 
+Unit metadata also validates every inherited method-shaped accessor against
+declared source methods and generated getter/setter entries across the full
+planned ancestry. An exact JVM name-and-descriptor collision involving an
+accessor returns `InheritedJvmAccessorCollision`, preserving the canonical
+method symbol or source field plus getter/setter role on both sides. Equal
+parameter descriptors with incompatible result descriptors are also rejected;
+different parameter descriptors remain overloads. Ordinary method-to-method
+overrides retain their existing rules. Accessor overrides remain unsupported,
+and unplanned non-private inherited methods use a conservative same-name
+rejection for generated accessors.
+
 `JvmClassMetadata::methods()` continues to contain only methods declared in
 that class's plan. Its read-only `dispatch_methods()` view carries effective
 public method identities for the receiver: an inherited entry keeps the
 parent's method symbol and declaring class, while an exact override points to
 the child's distinct symbol. This metadata does not copy method bodies or
 change JVM `invokevirtual` selection.
+
+Generated accessor methods use a separate read-only `dispatch_accessors()`
+view. Each entry retains the source `Field` symbol and a getter/setter role,
+along with the receiver, declaring class, JVM name, descriptor, and flags.
+Keeping these entries separate preserves `dispatch_methods()` compatibility
+and leaves same-signature collisions visible without inventing source method
+symbols or treating an accessor as an override. Emission now accepts the
+validated Object-rooted hierarchy subset when descendants add no new accessors;
+the parent keeps physical storage and getter/setter methods while descendants
+retain inherited entries only in effective dispatch metadata.
 
 The JVM adapter accepts a canonical Object root and up to two same-unit edges
 between public ordinary classes, so a planned `Base → Middle → Leaf` chain is

@@ -43,6 +43,7 @@ pub mod method;
 pub mod modified_utf8;
 pub mod reader;
 pub mod signature;
+pub mod tasty_link;
 pub mod writer;
 
 /// JVM class file binary and structural APIs.
@@ -61,5 +62,6 @@ pub mod classfile {
     pub use super::modified_utf8::*;
     pub use super::reader::*;
     pub use super::signature::*;
+    pub use super::tasty_link::*;
     pub use super::writer::*;
 }

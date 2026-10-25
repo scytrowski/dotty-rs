@@ -1,0 +1,284 @@
+use dotty::jvm_tasty_plan::with_paired_jvm_tasty_class_plan;
+use dotty_classfile::classfile::{ClassFile, Reader};
+use dotty_classfile::tasty_link::TastyLinkId;
+use dotty_core::SourceId;
+use dotty_jvm::emit_class;
+use dotty_jvm_tasty_contract::validate_classfile_tasty_link;
+use dotty_tasty::tasty::TastyFile;
+
+use dotty::jvm_tasty_artifacts::{PairedArtifactError, emit_paired_jvm_tasty_class};
+
+const COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
+
+#[test]
+fn counter_emits_complete_class_and_tasty_with_the_same_real_header_uuid() {
+    let pair =
+        emit_paired_jvm_tasty_class(COUNTER, "Counter.scala", SourceId::from_index(310)).unwrap();
+
+    assert_eq!(pair.classfile_path(), "example/Counter.class");
+    assert_eq!(pair.tasty_path(), "example/Counter.tasty");
+    assert_eq!(pair.source_member_order().len(), 3);
+
+    let tasty = TastyFile::parse_and_validate_scala_3_9(pair.tasty_bytes()).unwrap();
+    assert_eq!(
+        (
+            tasty.header().major_version,
+            tasty.header().minor_version,
+            tasty.header().experimental_version,
+        ),
+        (28, 9, 0)
+    );
+    assert_eq!(
+        pair.tasty_link_id(),
+        TastyLinkId::from_bytes(tasty.header().uuid)
+    );
+
+    let mut reader = Reader::new(pair.classfile_bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    assert!(reader.is_at_end());
+    assert_eq!((class.version.major, class.version.minor), (65, 0));
+    assert_eq!(
+        class.constant_pool.class_name(class.this_class).unwrap(),
+        "example/Counter"
+    );
+    assert_eq!(class.tasty_link_id().unwrap(), Some(pair.tasty_link_id()));
+    validate_classfile_tasty_link(&class, pair.tasty_bytes()).unwrap();
+
+    let fields = class
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                class.constant_pool.utf8(field.name_index).unwrap(),
+                class.constant_pool.utf8(field.descriptor_index).unwrap(),
+                field.access_flags,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fields.len(), 1);
+    assert_eq!((fields[0].0, fields[0].1), ("current", "I"));
+    assert!(
+        fields[0]
+            .2
+            .contains(dotty_classfile::access_flags::ACC_PRIVATE)
+    );
+    assert!(
+        !fields[0]
+            .2
+            .contains(dotty_classfile::access_flags::ACC_FINAL)
+    );
+
+    let mut methods = class
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                class.constant_pool.utf8(method.name_index).unwrap(),
+                class.constant_pool.utf8(method.descriptor_index).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    methods.sort();
+    assert_eq!(
+        methods,
+        [("<init>", "(I)V"), ("get", "()I"), ("set", "(I)V")]
+    );
+}
+
+#[test]
+fn standalone_jvm_emission_remains_unlinked() {
+    let class_bytes = with_paired_jvm_tasty_class_plan(
+        COUNTER,
+        "Counter.scala",
+        SourceId::from_index(318),
+        |plan| {
+            emit_class(
+                plan.jvm_unit,
+                plan.class,
+                plan.tasty_plan.plan().definitions,
+            )
+            .unwrap()
+            .into_bytes()
+        },
+    )
+    .unwrap();
+    let mut reader = Reader::new(&class_bytes);
+    let class = ClassFile::decode(&mut reader).unwrap();
+
+    assert_eq!(class.tasty_link_id().unwrap(), None);
+    assert!(reader.is_at_end());
+}
+
+#[test]
+fn fresh_source_sessions_produce_byte_identical_linked_pairs() {
+    let first =
+        emit_paired_jvm_tasty_class(COUNTER, "Counter.scala", SourceId::from_index(311)).unwrap();
+    let second =
+        emit_paired_jvm_tasty_class(COUNTER, "Counter.scala", SourceId::from_index(312)).unwrap();
+
+    assert_ne!(first.source_id(), second.source_id());
+    assert_eq!(first.classfile_path(), second.classfile_path());
+    assert_eq!(first.tasty_path(), second.tasty_path());
+    assert_eq!(first.classfile_bytes(), second.classfile_bytes());
+    assert_eq!(first.tasty_bytes(), second.tasty_bytes());
+    assert_eq!(first.tasty_link_id(), second.tasty_link_id());
+    assert_eq!(first.source_member_order(), second.source_member_order());
+}
+
+#[test]
+fn unsupported_method_body_rejects_before_returning_either_artifact() {
+    let source = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = while current < value do current = current + 1\n";
+    assert!(matches!(
+        emit_paired_jvm_tasty_class(source, "Counter.scala", SourceId::from_index(313)),
+        Err(PairedArtifactError::Plan(_))
+    ));
+}
+
+#[test]
+fn pair_publisher_stages_both_artifacts_before_exposing_them() {
+    let pair =
+        emit_paired_jvm_tasty_class(COUNTER, "Counter.scala", SourceId::from_index(314)).unwrap();
+    let output = TestDirectory::new("publish-success");
+    publish_pair(output.path(), &pair, None).unwrap();
+
+    assert_eq!(
+        std::fs::read(output.path().join(pair.classfile_path())).unwrap(),
+        pair.classfile_bytes()
+    );
+    assert_eq!(
+        std::fs::read(output.path().join(pair.tasty_path())).unwrap(),
+        pair.tasty_bytes()
+    );
+    assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn pair_publisher_cleans_staging_after_failure_following_first_staged_artifact() {
+    let pair =
+        emit_paired_jvm_tasty_class(COUNTER, "Counter.scala", SourceId::from_index(315)).unwrap();
+    let output = TestDirectory::new("publish-failure");
+
+    assert!(publish_pair(output.path(), &pair, Some(1)).is_err());
+    assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn equal_simple_names_in_different_packages_keep_distinct_pair_paths() {
+    let left = COUNTER.replace("package example", "package left");
+    let right = COUNTER.replace("package example", "package right");
+    let left =
+        emit_paired_jvm_tasty_class(&left, "Counter.scala", SourceId::from_index(316)).unwrap();
+    let right =
+        emit_paired_jvm_tasty_class(&right, "Counter.scala", SourceId::from_index(317)).unwrap();
+
+    assert_eq!(left.classfile_path(), "left/Counter.class");
+    assert_eq!(left.tasty_path(), "left/Counter.tasty");
+    assert_eq!(right.classfile_path(), "right/Counter.class");
+    assert_eq!(right.tasty_path(), "right/Counter.tasty");
+}
+
+struct TestDirectory(std::path::PathBuf);
+
+impl TestDirectory {
+    fn new(label: &str) -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+        let path = std::env::temp_dir().join(format!(
+            "dotty-jvm-tasty-pair-{}-{label}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn publish_pair(
+    output: &std::path::Path,
+    pair: &dotty::jvm_tasty_artifacts::PairedJvmTastyArtifacts,
+    fail_after_staged_files: Option<usize>,
+) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT_STAGING_ID: AtomicUsize = AtomicUsize::new(0);
+
+    if std::fs::read_dir(output)?.next().is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "paired output directory must be empty",
+        ));
+    }
+    let staging = output.join(format!(
+        ".dotty-jvm-tasty-pair-{}-{}",
+        std::process::id(),
+        NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&staging)?;
+
+    let artifacts = [
+        (pair.classfile_path(), pair.classfile_bytes()),
+        (pair.tasty_path(), pair.tasty_bytes()),
+    ];
+    let stage_result = (|| {
+        for (index, (relative, bytes)) in artifacts.iter().enumerate() {
+            let relative = std::path::Path::new(relative);
+            if relative.as_os_str().is_empty()
+                || !relative
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "unsafe paired artifact path",
+                ));
+            }
+            let staged = staging.join("new").join(relative);
+            if let Some(parent) = staged.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(staged, bytes)?;
+            if fail_after_staged_files == Some(index + 1) {
+                return Err(std::io::Error::other("injected staging write failure"));
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = stage_result {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+
+    let mut published = Vec::new();
+    let publish_result = (|| {
+        for (relative, _) in artifacts {
+            let relative = std::path::Path::new(relative);
+            let destination = output.join(relative);
+            let staged = staging.join("new").join(relative);
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(staged, &destination)?;
+            published.push(destination);
+        }
+        Ok(())
+    })();
+    if let Err(error) = publish_result {
+        for path in published {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    let _ = std::fs::remove_dir_all(staging);
+    Ok(())
+}

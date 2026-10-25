@@ -14,6 +14,25 @@ impl SourceTyper<'_> {
         self.unique_expression_term(&candidates, name, tree_index, position)
     }
 
+    pub(in crate::typer) fn resolve_expression_term_with_inherited(
+        &mut self,
+        name: dotty_core::Name,
+        context: ExpressionContext,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<SymbolId, TyperError> {
+        let candidates = self.expression_term_candidates_inner(
+            name,
+            context,
+            tree_index,
+            position,
+            true,
+            info_journal,
+        )?;
+        self.unique_expression_term(&candidates, name, tree_index, position)
+    }
+
     /// Resolves the highest-precedence lexical/import bucket without choosing
     /// among method overloads. Ordinary expression references continue to use
     /// `resolve_expression_term` and defer when that bucket has several
@@ -24,6 +43,26 @@ impl SourceTyper<'_> {
         context: ExpressionContext,
         tree_index: u32,
         position: Option<SourceSpan>,
+    ) -> Result<Vec<SymbolId>, TyperError> {
+        let mut info_journal = Vec::new();
+        self.expression_term_candidates_inner(
+            name,
+            context,
+            tree_index,
+            position,
+            false,
+            &mut info_journal,
+        )
+    }
+
+    fn expression_term_candidates_inner(
+        &mut self,
+        name: dotty_core::Name,
+        context: ExpressionContext,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+        include_inherited_fields: bool,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<SymbolId>, TyperError> {
         self.validate_expression_scope_stack(context.local_scopes)?;
         let mut local_scope = context.local_scopes;
@@ -99,6 +138,21 @@ impl SourceTyper<'_> {
         }
 
         let contexts = self.source_context_chain(context.lexical, tree_index)?;
+        let enclosing_class = self
+            .store
+            .symbols
+            .contains(context.owner)
+            .then(|| self.store.symbols.get(context.owner))
+            .and_then(|owner| match owner.kind {
+                SymbolKind::Class | SymbolKind::Trait => Some(context.owner),
+                _ => owner.owner.filter(|symbol| {
+                    self.store.symbols.contains(*symbol)
+                        && matches!(
+                            self.store.symbols.get(*symbol).kind,
+                            SymbolKind::Class | SymbolKind::Trait
+                        )
+                }),
+            });
         let fallback_scope = self
             .store
             .symbols
@@ -155,6 +209,33 @@ impl SourceTyper<'_> {
                 )?;
                 if !candidates.is_empty() {
                     return Ok(candidates);
+                }
+            }
+            if include_inherited_fields && enclosing_class == Some(source_context.owner) {
+                let this_type = self.store.types.alloc(Type::ThisType {
+                    class: source_context.owner,
+                });
+                let inherited = self
+                    .lookup_members_journaled(this_type, name, info_journal)
+                    .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
+                    .into_iter()
+                    .filter(|candidate| candidate.inheritance_depth > 0)
+                    .filter(|candidate| {
+                        self.store.symbols.contains(candidate.symbol)
+                            && self.store.symbols.get(candidate.symbol).kind == SymbolKind::Field
+                            && self.store.symbols.get(candidate.symbol).visibility
+                                == dotty_core::symbols::Visibility::Public
+                            && !self
+                                .store
+                                .symbols
+                                .get(candidate.symbol)
+                                .flags
+                                .contains(SymbolFlags::STATIC)
+                    })
+                    .map(|candidate| candidate.symbol)
+                    .collect::<Vec<_>>();
+                if !inherited.is_empty() {
+                    return Ok(inherited);
                 }
             }
         }

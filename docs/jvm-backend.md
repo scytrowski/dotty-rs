@@ -526,9 +526,10 @@ produce `I`, `Z`, `F`, `D`, and `J`. Immutable
 fields produce `ACC_PRIVATE | ACC_FINAL`; mutable fields produce
 `ACC_PRIVATE` without `ACC_FINAL`. Metadata preserves the caller's field plan
 order and rejects repeated field symbols and duplicate JVM field names. Whole
-class emission installs these fields only when a validated primary constructor
-plan proves their initialization. `ImplicitNoArg` remains restricted to
-empty-field classes and preserves the previous public `<init>()V` shape.
+class emission installs these fields only when a validated constructor plan
+proves their initialization. `ImplicitNoArg` may initialize supported ordered
+body fields after its checked direct-parent call and preserves the public
+`<init>()V` shape.
 
 Method-body lowering accepts assignments to planned mutable primitive and
 exact-reference fields
@@ -699,14 +700,42 @@ forms must be handled by a separate contract before they can be emitted.
 `JVM_CLASSFILE_MAJOR_VERSION` (65). The artifact contains an ordinary class
 with the direct parent from its validated unit proof, validated fields in
 frontend source order, one constructor, and planned instance methods in plan
-order. `ImplicitNoArg` emits the public `<init>()V` and accepts no fields.
-`PrimaryConstructor` emits the exact validated descriptor and public/private
-access from canonical constructor metadata. Both constructor forms begin with
-one `aload_0; invokespecial <direct-parent>.<init>()V`; primary constructors
-then append each source-ordered field initializer and return. No parameterized
-class gets an extra `()V`. Method bodies use the same typed lowering path as
+order. `ImplicitNoArg` emits the validated public `<init>()V` followed by
+approved source-ordered field initializers. `PrimaryConstructor` emits the
+exact validated descriptor and public/private access from canonical
+constructor metadata. Both constructor forms begin with one
+`aload_0; invokespecial <direct-parent>.<init>()V`; primary constructors then
+store constructor accessors in parameter order, followed by source-ordered
+private and public-body fields. No parameterized class gets an extra `()V`.
+Body accessor backing fields are emitted with one public getter per validated
+body accessor and one public setter per validated mutable body accessor,
+through the same accessor bytecode path as constructor accessors. Immutable
+body fields have no setter. Method bodies use the same typed lowering path as
 before. The file is encoded into an owned `GeneratedClass` only after every
 method and class-file structure has been built successfully.
+
+### Opt-in linked TASTy emission
+
+`dotty-jvm::emit_class_with_tasty_link` is an opt-in variant that accepts a
+typed `TastyLinkId` and adds only the audited class-level `TASTY` attribute.
+It does not depend on the TASTy producer and does not validate or create a
+sidecar. The standalone `emit_class` path continues to omit Scala metadata.
+
+The root `dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_class` coordinator
+is the bounded source integration for the audited Counter class. It uses the
+single-session plans from `jvm_tasty_plan`, serializes the complete TASTy
+first, validates its Scala 3.9.0 header, passes that producer-owned UUID to
+the opt-in JVM path, then decodes the class file and checks its version,
+internal name, member descriptors and access flags. It also verifies the
+class-level link against the exact TASTy bytes and returns both owned byte
+arrays with package-qualified relative paths. Any producer or validation
+failure returns an error before either artifact is exposed. It writes no files;
+the staged filesystem test adapter does not claim crash-atomic publication.
+
+This output is limited to source shapes accepted by the paired Counter
+contract. It does not add a production compiler driver, a general artifact
+publisher, or independent Scala-consumer interoperability; those boundaries
+remain in #1638 and later work.
 
 The frontend must set `JvmClassInitializationPlan::ImplicitNoArg` only after
 proving the source class has no constructor parameters or body, superclass
@@ -829,6 +858,17 @@ JDK harness checks reference identity and loop edge cases with
 `java -Xverify:all`. See
 [`jvm-reference-signatures.md`](jvm-reference-signatures.md) for the fixture's
 precise coverage and remaining limits.
+
+`InheritedAccessorHierarchy.scala` verifies constructor and class-body
+accessors inherited across `Base → Middle → Leaf` from real Scala source.
+Canonical Base field identities remain intact, only Base declares backing
+storage and generated public accessors, and caller Methodrefs use the static
+receiver class. The test checks exact constructor chaining and ordinary
+inherited method dispatch, plus byte-identical ordered class files from two
+fresh sessions. Decoded major-65 output is inspected with `javap -c -v -p` and
+executed by a Java 21 harness under `-Xverify:all`. Accessor overrides,
+bridges, traits, external or generic parents, and full Scala/TASTy ABI
+compatibility remain deferred.
 
 `typed_super_method_calls_lower_to_checked_invokespecial` uses actual Scala
 source for `Base`, `Derived`, and `Runner` in two independent frontend
@@ -1015,10 +1055,12 @@ getter signature, and a public `$eq` setter signature for `var` only. This
 projection uses the exact Scala 3.9.0 oracle evidence recorded in
 [`jvm-scala-accessors.md`](jvm-scala-accessors.md), preserves source order and
 canonical source IDs, and rejects field or binary method-signature collisions
-against planned fields and methods. Accessor-bearing inheritance edges are
-rejected with `UnsupportedJvmAccessorInheritance` until generated signatures
-participate in override and final-method validation. The projection does not
-add semantic symbols or ordinary source field initializers. Whole-class
+against planned fields and methods. Accessor inheritance is admitted for the
+bounded Object-rooted same-unit hierarchy after generated and ordinary method
+signatures pass collision and final-method validation. Descendants in that
+hierarchy cannot declare additional accessors yet; those edges return
+`UnsupportedJvmAccessorInheritance`. The projection does not add semantic
+symbols or ordinary source field initializers. Whole-class
 emission writes the checked private backing fields and constructor stores,
 then emits public getters and, for mutable accessors, public setters in
 constructor accessor order before explicitly planned source methods. Each
@@ -1026,6 +1068,25 @@ getter reads its validated private field and returns its exact primitive or
 planned reference type. Each setter loads its exact typed argument, writes the
 validated private field once, and returns JVM `void`; no source `Method`
 symbols are synthesized for either generated method.
+
+Typed reads and writes of constructor and ordinary public class-body accessor
+fields lower to `invokevirtual` calls using the checked owner, name, and
+descriptor above. Supported source receivers are the current instance, a
+parameter, or a stable local `val`; an assignment evaluates that receiver once
+before evaluating its right-hand side once. The backend validates the
+constructor binding or exact class-body source proof, field type, mutability,
+backing-field flags, and getter/setter signatures at each use. Ordinary
+private source fields retain their same-class `getfield`/`putfield` path;
+accessor call sites never reference another class's private backing field.
+Inherited accessor call-site lowering and mutable local `var` receivers remain
+unsupported, while the inherited classes themselves can be emitted in the
+validated subset.
+
+The root integration test
+`real_source_accessor_calls_dispatch_through_validated_getters_and_setters`
+checks exact call owners and descriptors, absence of external accessor
+`Fieldref`s, ordinary private-field access, deterministic output, evaluation
+order, and JDK 21 verification and execution with Long values.
 
 The root integration test
 `constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends`
@@ -1078,8 +1139,8 @@ rejected.
 ### Constructor field initializer fragments
 
 `JvmCompilationUnit::lower_constructor_field_initializers` consumes the
-validated `PrimaryConstructor` metadata, accessor metadata, and ordered
-`JvmFieldPlan` list.
+validated constructor plan (or proven `ImplicitNoArg` shape), accessor
+metadata, and ordered `JvmFieldPlan` list.
 The frontend obtains each field's source RHS from its canonical source
 declaration, calls `field_initializer_context_for(field)`, types that RHS once,
 and supplies the exact `TreeId<Typed>` retained in `SourceTypedIndex`. It
@@ -1088,17 +1149,17 @@ collects fields by source template order and constructor parameters through
 not substitute one identity for another.
 
 The result is a checked instruction plan, not a complete constructor. Each
-field fragment starts with `aload_0`, lowers one value, and ends with `putfield`
-for that canonical field. Supported RHS forms are Int/Boolean/Long literals,
-constructor-owned primitive parameters (including two-slot Long parameters),
-an exact planned-reference constructor parameter, canonical `Int.+`,
-canonical Boolean negation, empty-statement blocks, and reads of earlier
-initialized primitive fields. The reference
-parameter is matched by its canonical `SymbolId`, constructor owner, exact
-class identity, and validated local slot; its load uses `aload`. Self and
-forward field reads, reference field reads, user method calls, `this` escape,
-control-flow expressions, and other unsupported typed nodes fail with
-contextual `JvmCodegenError`s.
+source-ordered field fragment starts with `aload_0`, lowers one value, and ends
+with `putfield` for that canonical field. Supported RHS forms include
+Int/Boolean/Long/Float/Double literals, constructor-owned primitive parameters
+(including two-slot Long/Double parameters), approved planned-reference
+constructor parameters and direct allocations, canonical `Int.+`, canonical
+Boolean negation, empty-statement blocks, and reads of earlier initialized
+primitive or planned-reference fields. A body accessor field uses its exact
+class-body source proof and typed RHS; it never borrows a constructor formal.
+Self and forward field reads, user method calls, `this` escape, control-flow
+expressions, and other unsupported typed nodes fail with contextual
+`JvmCodegenError`s.
 
 The plan stores constructor accessor copies separately as
 `JvmConstructorAccessorInitializer` records because they have no source RHS.
@@ -1106,11 +1167,18 @@ Each record retains the canonical source field and constructor-owned parameter
 IDs, source ordinal, exact local slot/width, type, field name, and descriptor.
 Lowering matches the formal by identity and ordinal, then checks type and
 category width. `append_to` emits accessor stores in constructor parameter
-order before ordinary class-body field initializer fragments. `emit_class`
-emits `aload_0; invokespecial <direct-parent>.<init>()V` before the plan and
-appends `return` afterward. It installs both validated accessor backing
-field_info entries and ordinary private field entries and uses the exact
-constructor descriptor and access flags from metadata. The pinned Scala 3.9.0
+order before ordinary public and private body-field initializer fragments.
+`emit_class` emits `aload_0; invokespecial <direct-parent>.<init>()V` before the
+plan and appends `return` afterward. `ImplicitNoArg` uses the same checked
+field plan after its validated no-argument parent call. Emission installs both
+validated accessor backing field_info entries and ordinary private field
+entries. This paragraph records the #1581 initialization increment; the later
+#1582–#1584 increments add the public getter/setter ABI and lower accepted
+typed body-field reads and assignments through those methods. The integrated
+acceptance test is
+`class_body_accessor_acceptance_runs_body_only_and_parameterized_fixtures` in
+`jvm_source_compilation.rs`.
+The pinned Scala 3.9.0
 oracle stores simple constructor accessors before `Object.<init>`; this backend
 follows #1556's stricter initialized-`this` ordering, so constructor bytes are
 not identical to the oracle's instruction order.
@@ -1138,5 +1206,19 @@ lookup, direct-parent `super` selection, and two-edge reference assignability
 through the bounded chain. Sibling joins without explicit checked context,
 unrelated/`Object`-only reference joins, nested allocation arguments, arbitrary
 effectful pre-super evaluation,
-branched constructors, qualified/trait super, and Scala ABI/TASTy emission also
-remain deferred.
+branched constructors, qualified/trait super, and general Scala ABI/TASTy
+emission remain deferred; the separate audited Counter pair path is documented
+above.
+
+The #1585 class-body accessor acceptance batch combines a body-only no-argument
+class (`Int`, mutable `Boolean`, and mutable `Double`), a parameterized class
+with constructor `val`, body `val`/`var`, and a private field, plus a real
+source `Reader`. It checks source-order field stores, private backing flags,
+public JVM accessors and descriptors, cross-class `invokevirtual` calls with
+no backing-field references, two-slot Long/Double behavior, and byte-identical
+ordered class files from two fresh frontend sessions. Its JDK 21 harness runs
+with `java -Xverify:all`; earlier focused tests retain typed rejection and
+zero-partial-artifact checks for invalid batches. This does not add support for
+private cross-class access, inherited accessor call-site lowering,
+child-declared accessors above an accessor-bearing parent, traits, generics, or
+general combined Scala ABI/TASTy output outside the audited Counter pair path.

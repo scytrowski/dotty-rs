@@ -12,9 +12,9 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
-use dotty_core::ast::{Tree, TreeKind, Typed, TypedAst};
+use dotty_core::ast::{AstArena, Tree, TreeKind, Typed, TypedAst, Untyped};
 use dotty_core::definitions::Definitions;
-use dotty_core::ids::{SymbolId, TreeId, TypeId};
+use dotty_core::ids::{SourceId, SymbolId, TreeId, TypeId};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
@@ -31,7 +31,8 @@ pub use constructor::{
 };
 pub use constructor_initializers::{
     JvmConstructorAccessorInitializer, JvmConstructorFieldInitializer,
-    JvmConstructorFieldInitializerPlan, JvmConstructorInitializerInstruction,
+    JvmConstructorFieldInitializerOrigin, JvmConstructorFieldInitializerPlan,
+    JvmConstructorInitializerInstruction,
 };
 mod emission;
 mod expression;
@@ -325,6 +326,65 @@ pub struct JvmMethodDispatchMetadata {
     descriptor: JvmMethodDescriptor,
 }
 
+/// Getter or setter role of an effective JVM accessor method.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum JvmAccessorDispatchRole {
+    /// Public generated getter for a Scala `val` or `var`.
+    Getter,
+    /// Public generated setter for a Scala `var`.
+    Setter,
+}
+
+/// Canonical source identity behind a JVM method-shaped declaration.
+///
+/// Ordinary source methods retain their `Method` symbol; generated accessors
+/// retain the source `Field` and whether the entry is its getter or setter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmBinaryMethodOrigin {
+    /// A declared Scala method.
+    Method(SymbolId),
+    /// A generated method derived from a source field.
+    Accessor {
+        /// Canonical source field that owns this accessor.
+        field: SymbolId,
+        /// Whether this is the getter or mutable setter entrypoint.
+        role: JvmAccessorDispatchRole,
+    },
+}
+
+/// Which accessor-related inherited binary declaration collision occurred.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmAccessorCollisionKind {
+    /// A child source method occupies an inherited generated accessor slot.
+    SourceMethodRedefinesInheritedAccessor,
+    /// A child generated getter or setter occupies an inherited source method slot.
+    GeneratedAccessorRedefinesInheritedMethod,
+    /// A child generated getter or setter occupies an inherited final method slot.
+    GeneratedAccessorRedefinesInheritedFinalMethod,
+    /// A child generated getter or setter occupies an inherited accessor slot.
+    GeneratedAccessorRedefinesInheritedAccessor,
+    /// An accessor-related declaration has the inherited JVM parameter shape
+    /// but an incompatible result descriptor.
+    IncompatibleInheritedAccessorResult,
+}
+
+/// Read-only effective dispatch identity for one generated accessor method.
+///
+/// Accessors retain their canonical source field as provenance instead of
+/// inventing a source method symbol. Conflicting declarations remain separate
+/// entries so later validation can inspect the collision without treating it
+/// as an override.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmAccessorDispatchMetadata {
+    receiver_class: SymbolId,
+    declaring_class: SymbolId,
+    field: SymbolId,
+    role: JvmAccessorDispatchRole,
+    name: String,
+    descriptor: JvmMethodDescriptor,
+    access_flags: dotty_classfile::access_flags::MethodAccessFlags,
+}
+
 /// Class identity paired with declared method metadata and an effective
 /// dispatch view. `methods` remains in class-plan order and excludes inherited
 /// declarations; unit-aware projections populate `dispatch_methods`.
@@ -338,6 +398,7 @@ pub struct JvmClassMetadata {
     accessors: Vec<JvmAccessorMetadata>,
     methods: Vec<JvmMethodMetadata>,
     dispatch_methods: Vec<JvmMethodDispatchMetadata>,
+    dispatch_accessors: Vec<JvmAccessorDispatchMetadata>,
 }
 
 /// A frontend-issued binding from one canonical field to its exact typed
@@ -352,14 +413,206 @@ pub struct JvmFieldPlan {
     pub initializer: Option<TreeId<Typed>>,
 }
 
-/// Private source visibility distinctions needed by the JVM field subset.
+/// Source visibility distinctions needed by the JVM field subset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmFieldSourceVisibility {
-    /// Unqualified `private`, the only currently supported field form.
+    /// Unqualified `private`, which retains the existing emitted field path.
     PlainPrivate,
     /// Object-private `private[this]`, which shares `Visibility::Private` in
     /// the semantic store but has a distinct Scala accessor/storage contract.
     PrivateThis,
+    /// An ordinary class-body declaration with no explicit visibility
+    /// modifier, paired with checked source and typed-RHS provenance.
+    PlainPublic(JvmPublicBodyFieldSourceProof),
+}
+
+/// Checked immutable provenance for an ordinary public class-body field.
+///
+/// Construct this record from the exact source AST, semantic index, typed
+/// index, and store used by the compilation unit. Its private fields prevent a
+/// caller from changing the canonical declaration or RHS after validation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JvmPublicBodyFieldSourceProof {
+    class: SymbolId,
+    field: SymbolId,
+    source: SourceId,
+    declaration: TreeId<Untyped>,
+    template_position: usize,
+    mutable: bool,
+    rhs: TreeId<Untyped>,
+    initializer: TreeId<Typed>,
+}
+
+impl JvmPublicBodyFieldSourceProof {
+    /// Validates that `declaration` is the canonical unqualified class-body
+    /// field and that `initializer` is the typed image of its exact RHS.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_source(
+        class: SymbolId,
+        field: SymbolId,
+        source: SourceId,
+        declaration: TreeId<Untyped>,
+        initializer: TreeId<Typed>,
+        ast: &AstArena<Untyped>,
+        index: &dotty_core::SourceSemanticIndex,
+        source_typed_index: &dotty_core::SourceTypedIndex,
+        typed_ast: &dotty_core::ast::TypedAst,
+        store: &SemanticStore,
+    ) -> Result<Self, JvmCodegenError> {
+        let invalid = || JvmCodegenError::InvalidPublicBodyFieldSourceProof { field };
+        let class_symbol = store
+            .symbols
+            .contains(class)
+            .then(|| store.symbols.get(class))
+            .ok_or(JvmCodegenError::UnknownClass { class })?;
+        if class_symbol.kind != SymbolKind::Class {
+            return Err(JvmCodegenError::UnsupportedSymbolKind {
+                symbol: class,
+                expected: SymbolRole::Class,
+                found: class_symbol.kind,
+            });
+        }
+        let field_symbol = store
+            .symbols
+            .contains(field)
+            .then(|| store.symbols.get(field))
+            .ok_or(JvmCodegenError::UnknownField { field })?;
+        if field_symbol.kind != SymbolKind::Field {
+            return Err(JvmCodegenError::UnsupportedSymbolKind {
+                symbol: field,
+                expected: SymbolRole::Field,
+                found: field_symbol.kind,
+            });
+        }
+        if field_symbol.origin != dotty_core::SymbolOrigin::Source(source) {
+            return Err(invalid());
+        }
+        if field_symbol.owner != Some(class) {
+            return Err(JvmCodegenError::WrongOwner {
+                symbol: field,
+                expected: class,
+                actual: field_symbol.owner,
+            });
+        }
+        if field_symbol.visibility != dotty_core::symbols::Visibility::Public {
+            return Err(JvmCodegenError::UnsupportedJvmVisibility {
+                symbol: field,
+                visibility: field_symbol.visibility,
+            });
+        }
+        if index.symbol_at(source, declaration) != Some(field)
+            || index.definition_of(field)
+                != Some(dotty_core::SourceDefinition::Canonical {
+                    source,
+                    tree: declaration,
+                })
+        {
+            return Err(invalid());
+        }
+        let TreeKind::ValDef(definition) = &ast.try_get(declaration).ok_or_else(invalid)?.kind
+        else {
+            return Err(invalid());
+        };
+        let Some(rhs) = definition.rhs else {
+            return Err(JvmCodegenError::MissingFieldInitializer { field });
+        };
+        let source_rhs = ast.try_get(rhs).ok_or_else(invalid)?;
+        let typed_rhs = typed_ast
+            .try_get(initializer)
+            .ok_or(JvmCodegenError::UnknownFieldInitializer { field, initializer })?;
+        if definition.metadata.visibility.is_some()
+            || source_typed_index.get(source, rhs) != Some(initializer)
+            || source_rhs.position.is_none()
+            || source_rhs.position != typed_rhs.position
+        {
+            return Err(invalid());
+        }
+        let mutable = definition
+            .metadata
+            .modifiers
+            .contains(&dotty_core::ast::Modifier::Var);
+        if field_symbol.flags.contains(SymbolFlags::MUTABLE) != mutable {
+            return Err(invalid());
+        }
+        let Some(dotty_core::SourceDefinition::Canonical {
+            source: class_source,
+            tree: class_tree,
+        }) = index.definition_of(class)
+        else {
+            return Err(invalid());
+        };
+        if class_symbol.origin != dotty_core::SymbolOrigin::Source(source) {
+            return Err(invalid());
+        }
+        let TreeKind::TypeDef(class_definition) =
+            &ast.try_get(class_tree).ok_or_else(invalid)?.kind
+        else {
+            return Err(invalid());
+        };
+        let TreeKind::Template(template) =
+            &ast.try_get(class_definition.rhs).ok_or_else(invalid)?.kind
+        else {
+            return Err(invalid());
+        };
+        if class_source != source || !template.body.contains(&declaration) {
+            return Err(invalid());
+        }
+        let template_position = template
+            .body
+            .iter()
+            .position(|tree| *tree == declaration)
+            .ok_or_else(invalid)?;
+        Ok(Self {
+            class,
+            field,
+            source,
+            declaration,
+            template_position,
+            mutable,
+            rhs,
+            initializer,
+        })
+    }
+
+    /// Canonical owning class symbol.
+    pub const fn class(self) -> SymbolId {
+        self.class
+    }
+
+    /// Canonical source field symbol.
+    pub const fn field(self) -> SymbolId {
+        self.field
+    }
+
+    /// Source compilation unit containing the declaration.
+    pub const fn source(self) -> SourceId {
+        self.source
+    }
+
+    /// Exact source `ValDef` declaration tree.
+    pub const fn declaration(self) -> TreeId<Untyped> {
+        self.declaration
+    }
+
+    /// Zero-based source order within the containing template body.
+    pub const fn template_position(self) -> usize {
+        self.template_position
+    }
+
+    /// Whether the source declaration is `var` rather than `val`.
+    pub const fn mutable(self) -> bool {
+        self.mutable
+    }
+
+    /// Exact source RHS tree.
+    pub const fn rhs(self) -> TreeId<Untyped> {
+        self.rhs
+    }
+
+    /// Exact typed initializer root bound to the source RHS.
+    pub const fn initializer(self) -> TreeId<Typed> {
+        self.initializer
+    }
 }
 
 /// Validated JVM metadata for one private primitive or exact-reference instance field.
@@ -374,15 +627,22 @@ pub struct JvmFieldMetadata {
     initializer: TreeId<Typed>,
 }
 
-/// Checked JVM-only field and method signatures for one constructor accessor.
-///
-/// This projection is distinct from [`JvmFieldMetadata`]: accessor source
-/// fields have no typed initializer, and this metadata never treats a missing
-/// initializer as permission to plan an ordinary source field. It does not
-/// synthesize source symbols or emit class-file members.
+/// Audited source origin of one JVM accessor projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmAccessorOrigin {
+    /// A class-owned field derived from the exact primary-constructor formal.
+    ConstructorParameter(JvmConstructorAccessorBinding),
+    /// An ordinary class-body field with its exact source and typed RHS proof.
+    ClassBodyField(JvmPublicBodyFieldSourceProof),
+}
+
+/// Checked JVM-only backing-field and method signatures for one source
+/// accessor. The origin retains the distinct proof required by constructor
+/// parameters and class-body fields. This projection does not synthesize
+/// source symbols or emit class-file members.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmAccessorMetadata {
-    binding: JvmConstructorAccessorBinding,
+    origin: JvmAccessorOrigin,
     value_type: JvmType,
     field_name: String,
     field_descriptor: String,
@@ -403,12 +663,13 @@ pub struct JvmAccessorMethodMetadata {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JvmClassInitializationPlan {
     /// Validated source constructor proof used to emit its exact primary
-    /// constructor and the planned primitive fields.
+    /// constructor and source-ordered checked field initializers.
     PrimaryConstructor(JvmPrimaryConstructorPlan),
-    /// The frontend proved that an empty no-argument constructor is
-    /// equivalent to the source class: no constructor parameters or body,
-    /// parent arguments, fields, or template initializers are present. The
-    /// unit hierarchy supplies the validated direct-parent constructor call.
+    /// The frontend proved that a synthesized public no-argument constructor
+    /// is equivalent to the source class: no constructor parameters/body,
+    /// parent arguments, or non-field template initializers are present.
+    /// Planned field initializers remain separately source-ordered, and the
+    /// unit hierarchy supplies the validated direct-parent call.
     ImplicitNoArg,
     /// Constructor or class initialization is explicit or cannot be proven
     /// safe by the supplied compilation plan.
@@ -510,6 +771,24 @@ pub enum InvalidJvmClassInfoKind {
     MissingDeclarationScope,
     WrongDeclarationScopeOwner,
     InvalidDeclaration,
+}
+
+/// Why accessor call-site metadata no longer agrees with its source field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmAccessorCallMetadataIssue {
+    DuplicateField,
+    OwnerMismatch,
+    ReceiverClassMissing,
+    EffectiveGetterMissing,
+    EffectiveGetterMismatch,
+    EffectiveSetterMissing,
+    EffectiveSetterMismatch,
+    BindingMissing,
+    BodyFieldProofMismatch,
+    ValueTypeMismatch,
+    BackingFieldFlagsMismatch,
+    GetterSignatureMismatch,
+    SetterSignatureMismatch,
 }
 
 /// Borrowed input for validating one or more class plans.
@@ -658,6 +937,16 @@ pub enum JvmCodegenError {
     MethodNotInJvmPlanForBody { class: SymbolId, method: SymbolId },
     /// The field ID is outside the supplied symbol table.
     UnknownField { field: SymbolId },
+    /// A public-body field plan lacks matching immutable source evidence.
+    InvalidPublicBodyFieldSourceProof { field: SymbolId },
+    /// Public-body field plans do not retain source template order.
+    OutOfOrderPublicBodyFieldPlan { class: SymbolId, field: SymbolId },
+    /// Field plans do not retain initializer source order across visibility forms.
+    OutOfOrderFieldPlan { class: SymbolId, field: SymbolId },
+    /// A planned field initializer has no source position for order validation.
+    FieldInitializerSourcePositionUnavailable { field: SymbolId },
+    /// Planned field initializers come from different source files.
+    FieldInitializersFromDifferentSources { class: SymbolId, field: SymbolId },
     /// The parameter ID is outside the supplied symbol table.
     UnknownParameter { parameter: SymbolId },
     /// A local symbol ID is outside the supplied symbol table.
@@ -833,6 +1122,13 @@ pub enum JvmCodegenError {
     UnsupportedJvmFieldReceiver {
         tree: TreeId<Typed>,
         field: SymbolId,
+    },
+    /// Validated constructor-accessor ABI metadata disagrees with the source field.
+    InvalidJvmAccessorCallMetadata {
+        tree: TreeId<Typed>,
+        field: SymbolId,
+        owner: SymbolId,
+        issue: JvmAccessorCallMetadataIssue,
     },
     /// A field read is outside the currently modeled CFG stack flow.
     JvmFieldReadInUnsupportedControlFlow {
@@ -1299,8 +1595,23 @@ pub enum JvmCodegenError {
         name: String,
         descriptor: String,
     },
-    /// Constructor accessor signatures cannot yet participate in inherited
-    /// method collision and override validation.
+    /// A declared method and an inherited accessor, or a declared accessor
+    /// and inherited method/accessor, share one exact JVM method identity.
+    /// The descriptor is absent only for a conservative same-name check
+    /// against an unplanned source method.
+    InheritedJvmAccessorCollision {
+        class: SymbolId,
+        kind: JvmAccessorCollisionKind,
+        origin: JvmBinaryMethodOrigin,
+        parent: SymbolId,
+        parent_origin: JvmBinaryMethodOrigin,
+        name: String,
+        descriptor: Option<String>,
+        /// Inherited descriptor when checking a result-only mismatch.
+        parent_descriptor: Option<String>,
+    },
+    /// A descendant cannot add new generated accessor storage above inherited
+    /// accessors in the currently supported emission subset.
     UnsupportedJvmAccessorInheritance { class: SymbolId, parent: SymbolId },
     /// Two class symbols in one compilation unit project to the same internal name.
     DuplicateJvmClassIdentity {
@@ -1676,7 +1987,8 @@ impl JvmClassMetadata {
     }
 
     /// JVM-only backing-field and accessor-method signatures, in source order.
-    /// These are metadata only; class-file emission remains a later increment.
+    /// Emission uses these own-class entries only after validating the bounded
+    /// hierarchy and constructor proofs.
     pub fn accessors(&self) -> &[JvmAccessorMetadata] {
         &self.accessors
     }
@@ -1703,6 +2015,16 @@ impl JvmClassMetadata {
     /// so its dispatch view is empty.
     pub fn dispatch_methods(&self) -> &[JvmMethodDispatchMetadata] {
         &self.dispatch_methods
+    }
+
+    /// Effective generated getter/setter methods reachable on this receiver.
+    ///
+    /// Entries retain the declaring class and canonical source field. Getter
+    /// and setter roles are distinct, inherited entries are never copied into
+    /// [`Self::accessors`]. The view supplies evidence to the bounded emission
+    /// gate; it does not independently authorize class-file emission.
+    pub fn dispatch_accessors(&self) -> &[JvmAccessorDispatchMetadata] {
+        &self.dispatch_accessors
     }
 
     /// Validated instance field metadata in the class plan's source order.
@@ -1867,34 +2189,57 @@ impl JvmFieldMetadata {
 }
 
 impl JvmAccessorMetadata {
-    /// Canonical source-to-formal proof used to derive the JVM projection.
-    pub const fn binding(&self) -> JvmConstructorAccessorBinding {
-        self.binding
+    /// Audited provenance used to derive the JVM projection.
+    pub const fn origin(&self) -> JvmAccessorOrigin {
+        self.origin
+    }
+
+    /// Constructor binding, present only for a primary-constructor accessor.
+    pub const fn binding(&self) -> Option<JvmConstructorAccessorBinding> {
+        match self.origin {
+            JvmAccessorOrigin::ConstructorParameter(binding) => Some(binding),
+            JvmAccessorOrigin::ClassBodyField(_) => None,
+        }
     }
 
     /// Source field identity; no synthetic field symbol is introduced.
     pub const fn source_field(&self) -> SymbolId {
-        self.binding.field()
+        match self.origin {
+            JvmAccessorOrigin::ConstructorParameter(binding) => binding.field(),
+            JvmAccessorOrigin::ClassBodyField(proof) => proof.field(),
+        }
     }
 
-    /// Constructor-owned derived formal identity.
-    pub const fn constructor_parameter(&self) -> SymbolId {
-        self.binding.parameter()
+    /// Constructor-owned derived formal identity, absent for body fields.
+    pub const fn constructor_parameter(&self) -> Option<SymbolId> {
+        match self.origin {
+            JvmAccessorOrigin::ConstructorParameter(binding) => Some(binding.parameter()),
+            JvmAccessorOrigin::ClassBodyField(_) => None,
+        }
     }
 
     /// Canonical class that owns the source field and JVM backing storage.
     pub const fn owner(&self) -> SymbolId {
-        self.binding.class()
+        match self.origin {
+            JvmAccessorOrigin::ConstructorParameter(binding) => binding.class(),
+            JvmAccessorOrigin::ClassBodyField(proof) => proof.class(),
+        }
     }
 
-    /// Source parameter ordinal, preserved independently from JVM slot width.
+    /// Source ordinal: constructor parameter order or template-body position.
     pub const fn source_ordinal(&self) -> usize {
-        self.binding.source_ordinal()
+        match self.origin {
+            JvmAccessorOrigin::ConstructorParameter(binding) => binding.source_ordinal(),
+            JvmAccessorOrigin::ClassBodyField(proof) => proof.template_position(),
+        }
     }
 
     /// Whether the source accessor is a mutable `var`.
     pub const fn is_mutable(&self) -> bool {
-        self.binding.is_mutable()
+        match self.origin {
+            JvmAccessorOrigin::ConstructorParameter(binding) => binding.is_mutable(),
+            JvmAccessorOrigin::ClassBodyField(proof) => proof.mutable(),
+        }
     }
 
     /// Exact checked JVM value type shared by the field, getter and setter.
@@ -2083,6 +2428,43 @@ impl JvmMethodDispatchMetadata {
     }
 }
 
+impl JvmAccessorDispatchMetadata {
+    /// Receiver class whose effective accessor view contains this entry.
+    pub const fn receiver_class(&self) -> SymbolId {
+        self.receiver_class
+    }
+
+    /// Class that declares the source field and generated accessor method.
+    pub const fn declaring_class(&self) -> SymbolId {
+        self.declaring_class
+    }
+
+    /// Canonical source field symbol; no source method symbol is fabricated.
+    pub const fn field(&self) -> SymbolId {
+        self.field
+    }
+
+    /// Whether the entry denotes the getter or setter role.
+    pub const fn role(&self) -> JvmAccessorDispatchRole {
+        self.role
+    }
+
+    /// JVM-safe generated accessor method name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Exact JVM method descriptor.
+    pub const fn descriptor(&self) -> &JvmMethodDescriptor {
+        &self.descriptor
+    }
+
+    /// Validated method access flags.
+    pub const fn access_flags(&self) -> dotty_classfile::access_flags::MethodAccessFlags {
+        self.access_flags
+    }
+}
+
 /// Lowers the supported value-producing leaves from the supplied typed AST.
 ///
 /// Int, Boolean, and Long literals become category-correct constant
@@ -2151,14 +2533,30 @@ pub fn lower_method_body(
 /// The class must have an explicit [`JvmClassPlan`] in `unit`. Its
 /// initialization plan must prove an implicit no-argument constructor is
 /// equivalent to the source class. The output is pinned to class-file version
-/// 65 and contains only the planned public instance methods, a minimal public
-/// constructor, and no TASTy or other Scala ABI metadata.
+/// 65 and contains only the planned public instance methods, the validated
+/// constructor, checked backing fields, and no TASTy or other Scala ABI metadata.
 pub fn emit_class(
     unit: &JvmCompilationUnit<'_>,
     class_symbol: SymbolId,
     definitions: &Definitions,
 ) -> Result<GeneratedClass, JvmCodegenError> {
     emission::emit_class(unit, class_symbol, definitions)
+}
+
+/// Emits one selected class with an explicit Scala 3 TASTy sidecar link.
+///
+/// This opt-in path writes the supplied, already validated link identifier as
+/// the class-level `TASTY` attribute. It does not produce or validate the
+/// sidecar itself; callers coordinating a pair must validate the encoded
+/// TASTy header and class bytes together. [`emit_class`] remains unchanged and
+/// emits no Scala metadata.
+pub fn emit_class_with_tasty_link(
+    unit: &JvmCompilationUnit<'_>,
+    class_symbol: SymbolId,
+    definitions: &Definitions,
+    tasty_link: dotty_classfile::tasty_link::TastyLinkId,
+) -> Result<GeneratedClass, JvmCodegenError> {
+    emission::emit_class_with_tasty_link(unit, class_symbol, definitions, tasty_link)
 }
 
 impl JvmParameterLocal {
@@ -2410,16 +2808,17 @@ impl JvmCompilationUnit<'_> {
         expression::lower_planned_method_body(self, metadata, definitions, method_metadata, body)
     }
 
-    /// Lowers planned primitive field initializers into source-ordered
-    /// constructor fragments using the validated primary-constructor slots.
+    /// Lowers checked private and public-body field initializers into
+    /// source-ordered constructor fragments. Primary-constructor parameter
+    /// reads use the validated constructor slots; an implicit no-arg plan has
+    /// no fabricated constructor metadata.
     ///
     /// The returned plan excludes the superclass constructor call and final
     /// `return`; callers must place its instructions after the validated
     /// direct-parent `<init>()V` call.
-    /// It supports primitive literals, canonical constructor parameters,
-    /// approved `Int` addition and Boolean negation, and reads of fields that
-    /// were initialized earlier in this plan. Unsupported expressions and
-    /// self/forward field reads return typed errors without modifying the unit.
+    /// It supports the bounded literal, parameter, intrinsic, planned-reference
+    /// and prior-field-read subset. Unsupported expressions and self/forward
+    /// field reads return typed errors without modifying the unit.
     pub fn lower_constructor_field_initializers(
         &self,
         class: SymbolId,
@@ -2605,6 +3004,19 @@ impl JvmCompilationUnit<'_> {
             }
 
             let mut class_field_symbols = HashSet::new();
+            let mut last_public_body_position = None;
+            let mut last_field_source_position: Option<(SourceId, u32)> = None;
+            let mixed_visibility_fields = class_plan.fields.iter().any(|field| {
+                matches!(
+                    field.source_visibility,
+                    JvmFieldSourceVisibility::PlainPublic(_)
+                )
+            }) && class_plan.fields.iter().any(|field| {
+                matches!(
+                    field.source_visibility,
+                    JvmFieldSourceVisibility::PlainPrivate
+                )
+            });
             for field_plan in &class_plan.fields {
                 if !class_field_symbols.insert(field_plan.field)
                     || !seen_fields.insert(field_plan.field)
@@ -2635,17 +3047,54 @@ impl JvmCompilationUnit<'_> {
                         actual: field.owner,
                     });
                 }
-                if field.visibility != dotty_core::symbols::Visibility::Private {
+                let expected_visibility = match field_plan.source_visibility {
+                    JvmFieldSourceVisibility::PlainPrivate
+                    | JvmFieldSourceVisibility::PrivateThis => {
+                        dotty_core::symbols::Visibility::Private
+                    }
+                    JvmFieldSourceVisibility::PlainPublic(_) => {
+                        dotty_core::symbols::Visibility::Public
+                    }
+                };
+                if field.visibility != expected_visibility {
                     return Err(JvmCodegenError::UnsupportedJvmVisibility {
                         symbol: field_plan.field,
                         visibility: field.visibility,
                     });
                 }
-                if field_plan.source_visibility != JvmFieldSourceVisibility::PlainPrivate {
-                    return Err(JvmCodegenError::UnsupportedJvmFieldSourceVisibility {
-                        field: field_plan.field,
-                        visibility: field_plan.source_visibility,
-                    });
+                match field_plan.source_visibility {
+                    JvmFieldSourceVisibility::PlainPrivate => {}
+                    JvmFieldSourceVisibility::PrivateThis => {
+                        return Err(JvmCodegenError::UnsupportedJvmFieldSourceVisibility {
+                            field: field_plan.field,
+                            visibility: field_plan.source_visibility,
+                        });
+                    }
+                    JvmFieldSourceVisibility::PlainPublic(proof)
+                        if proof.class != class_plan.class
+                            || proof.field != field_plan.field
+                            || Some(proof.initializer) != field_plan.initializer =>
+                    {
+                        return Err(JvmCodegenError::InvalidPublicBodyFieldSourceProof {
+                            field: field_plan.field,
+                        });
+                    }
+                    JvmFieldSourceVisibility::PlainPublic(proof) => {
+                        if proof.mutable != field.flags.contains(SymbolFlags::MUTABLE) {
+                            return Err(JvmCodegenError::InvalidPublicBodyFieldSourceProof {
+                                field: field_plan.field,
+                            });
+                        }
+                        if last_public_body_position
+                            .is_some_and(|position| position >= proof.template_position)
+                        {
+                            return Err(JvmCodegenError::OutOfOrderPublicBodyFieldPlan {
+                                class: class_plan.class,
+                                field: field_plan.field,
+                            });
+                        }
+                        last_public_body_position = Some(proof.template_position);
+                    }
                 }
                 identity::validate_field_flags(field_plan.field, field.flags)?;
                 let class_info = identity::class_info(self.store, class_plan.class)?;
@@ -2674,6 +3123,29 @@ impl JvmCompilationUnit<'_> {
                         initializer,
                     },
                 )?;
+                if mixed_visibility_fields {
+                    let source_position = initializer_tree
+                        .position
+                        .map(|position| (position.source(), position.span().range().start()))
+                        .ok_or(JvmCodegenError::FieldInitializerSourcePositionUnavailable {
+                            field: field_plan.field,
+                        })?;
+                    if let Some((previous_source, previous_start)) = last_field_source_position {
+                        if previous_source != source_position.0 {
+                            return Err(JvmCodegenError::FieldInitializersFromDifferentSources {
+                                class: class_plan.class,
+                                field: field_plan.field,
+                            });
+                        }
+                        if previous_start >= source_position.1 {
+                            return Err(JvmCodegenError::OutOfOrderFieldPlan {
+                                class: class_plan.class,
+                                field: field_plan.field,
+                            });
+                        }
+                    }
+                    last_field_source_position = Some(source_position);
+                }
                 validate_tree_type(self.store, initializer, initializer_tree)?;
             }
 

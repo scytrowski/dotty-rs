@@ -1,7 +1,7 @@
 //! Audit Boolean operator source typing without adding Boolean intrinsics.
 
 use dotty_core::ast::{AstArena, TreeKind, Untyped, UntypedNode};
-use dotty_core::types::{MethodKind, TermRefTarget, Type, TypeRefTarget};
+use dotty_core::types::{MethodKind, TermRefTarget, Type};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SourceText, SymbolId,
     SymbolInfo, SymbolKind, TreeId,
@@ -94,19 +94,10 @@ impl Fixture {
     }
 }
 
-fn class_symbol(fixture: &Fixture, ty: dotty_core::TypeId) -> SymbolId {
-    let Type::TypeRef {
-        target: TypeRefTarget::Symbol(symbol),
-        ..
-    } = fixture.store.types.get(ty)
-    else {
-        panic!("builtin type should have a canonical class symbol");
-    };
-    *symbol
-}
-
 const SOURCE_OPERATORS: &str = r#"
 class BooleanOperators {
+  type IntAlias = Int
+  type AnyAlias = Any
   def notLiteral(): Boolean = !true
   def andLiteral(): Boolean = true && false
   def notParameter(a: Boolean): Boolean = !a
@@ -117,6 +108,16 @@ class BooleanOperators {
   def xorParameter(a: Boolean, b: Boolean): Boolean = a ^ b
   def equalBoolean(a: Boolean, b: Boolean): Boolean = a == b
   def notEqualBoolean(a: Boolean, b: Boolean): Boolean = a != b
+  def equalInt(a: Int): Boolean = a == 1
+  def notEqualInt(a: Int): Boolean = a != 1
+  def equalWidenedNumeric(a: Int, b: Long): Boolean = a == b
+  def equalAlias(a: IntAlias, b: Int): Boolean = a == b
+  def equalAliasSecond(a: Int, b: IntAlias): Boolean = a == b
+  def equalAnyAliasReceiver(a: AnyAlias, b: Int): Boolean = a == b
+  def incompatibleAliasReference(a: IntAlias, b: IncompatibleReference): Boolean = a == b
+  def equalAnyAndInt(a: Any, b: Int): Boolean = a == b
+  def incompatibleIntReference(a: Int, b: IncompatibleReference): Boolean = a == b
+  def incompatibleReferenceInt(a: IncompatibleReference, b: Int): Boolean = a != b
   def equalAny(a: Any, b: Any): Boolean = a == b
   def notEqualAny(a: Any, b: Any): Boolean = a != b
   def andLocal(): Boolean = { val a = false; val b = true; a && b }
@@ -126,6 +127,24 @@ class BooleanOperators {
   def shortCircuitOrEffect(): Boolean = true || (1 / 0 > 0)
   def eagerAndEffect(): Boolean = false & (1 / 0 > 0)
   def eagerOrEffect(): Boolean = true | (1 / 0 > 0)
+}
+class EqualityReference {
+  def ==(value: Int): Boolean = true
+  def !=(value: Int): Boolean = false
+}
+class EqualityAliasParameter {
+  type IntAlias = Int
+  def ==(value: IntAlias): Boolean = true
+}
+class IncompatibleReference {}
+class EqualityUse {
+  type IntAlias = Int
+  def narrowEqualInt(b: Int): Boolean = (new EqualityReference) == b
+  def narrowEqualReference(): Boolean = (new EqualityReference) == (new EqualityReference)
+  def narrowEqualAliasArgument(b: IntAlias): Boolean = (new EqualityReference) == b
+  def narrowEqualAliasParameter(b: Int): Boolean = (new EqualityAliasParameter) == b
+  def narrowNotEqualInt(b: Int): Boolean = (new EqualityReference) != b
+  def narrowNotEqualReference(): Boolean = (new EqualityReference) != (new EqualityReference)
 }
 "#;
 
@@ -207,10 +226,14 @@ fn assert_selected_boolean_operator(
     let TreeKind::Select(_) = &typer.typed_ast().get(function).kind else {
         panic!("Boolean operator should select its canonical member");
     };
-    assert!(matches!(
-        typer.store().types.get(typer.typed_ast().get(function).ty),
-        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == expected
-    ));
+    assert!(
+        matches!(
+            typer.store().types.get(typer.typed_ast().get(function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == expected
+        ),
+        "actual function type {:?}, expected symbol {expected:?}",
+        typer.store().types.get(typer.typed_ast().get(function).ty)
+    );
 }
 
 #[test]
@@ -290,29 +313,113 @@ fn boolean_operators_type_through_the_canonical_method_symbols() {
 }
 
 #[test]
-fn boolean_equality_and_universal_equality_have_distinct_current_blockers() {
+fn boolean_and_universal_equality_use_their_canonical_symbols() {
     let mut fixture = Fixture::new(SOURCE_OPERATORS);
-    let expected_any = class_symbol(&fixture, fixture.definitions.any_type);
-    for method_name in ["equalAny", "notEqualAny"] {
+    let any = fixture
+        .definitions
+        .any_equality_operator_symbols(&fixture.store)
+        .unwrap();
+    let boolean = fixture.definitions.boolean;
+    for (method_name, expected) in [
+        ("equalAny", any.equal),
+        ("notEqualAny", any.not_equal),
+        ("equalInt", any.equal),
+        ("notEqualInt", any.not_equal),
+    ] {
+        let (method, rhs) = fixture.method(method_name);
+        let mut typer = fixture.typer();
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed).ty)
+                .unwrap(),
+            boolean,
+            "{method_name}"
+        );
+        assert_selected_boolean_operator(&typer, typed, expected, true);
+    }
+}
+
+#[test]
+fn universal_equality_checks_scala_39_operand_compatibility() {
+    let mut fixture = Fixture::new(SOURCE_OPERATORS);
+    let boolean = fixture.definitions.boolean;
+    let equality = fixture
+        .definitions
+        .any_equality_operator_symbols(&fixture.store)
+        .unwrap();
+
+    for (method_name, expected_symbol) in [
+        ("equalWidenedNumeric", equality.equal),
+        ("equalAlias", equality.equal),
+        ("equalAliasSecond", equality.equal),
+        ("equalAnyAliasReceiver", equality.equal),
+        ("equalAnyAndInt", equality.equal),
+    ] {
+        let (method, rhs) = fixture.method(method_name);
+        let mut typer = fixture.typer();
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert_eq!(typer.typed_ast().get(typed).ty, boolean, "{method_name}");
+        assert_selected_boolean_operator(&typer, typed, expected_symbol, true);
+    }
+
+    for method_name in [
+        "incompatibleIntReference",
+        "incompatibleReferenceInt",
+        "incompatibleAliasReference",
+    ] {
         let (method, rhs) = fixture.method(method_name);
         let mut typer = fixture.typer();
         let context = typer.expression_context_for(method).unwrap();
         let error = typer.type_expression(rhs, context).unwrap_err();
         assert!(
-            matches!(
-                error,
-                TyperError::MemberLookup(ref error)
-                    if matches!(
-                        **error,
-                        dotty_typer::MemberLookupError::ClassInfoUnavailable {
-                            symbol,
-                            state: dotty_typer::SymbolInfoState::Missing,
-                        } if symbol == expected_any
-                    )
-            ),
-            "{method_name} should stop at missing canonical Any ClassInfo; got {error:?}"
+            matches!(error, TyperError::IncompatibleEqualityOperands { .. }),
+            "{method_name}: {error:?}"
         );
-        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(
+            typer.typed_ast().iter().next().is_none(),
+            "{method_name} failure must roll back typed operands"
+        );
+    }
+
+    let narrow_equal = fixture.method_named_symbol("==");
+    let narrow_not_equal = fixture.method_named_symbol("!=");
+    for (method_name, expected_symbol) in [
+        ("narrowEqualInt", narrow_equal),
+        ("narrowEqualReference", equality.equal),
+        ("narrowNotEqualInt", narrow_not_equal),
+        ("narrowNotEqualReference", equality.not_equal),
+    ] {
+        let (method, rhs) = fixture.method(method_name);
+        let mut typer = fixture.typer();
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer
+            .type_expression(rhs, context)
+            .unwrap_or_else(|error| panic!("{method_name}: {error:?}"));
+        assert_eq!(typer.typed_ast().get(typed).ty, boolean, "{method_name}");
+        assert_selected_boolean_operator(&typer, typed, expected_symbol, true);
+    }
+
+    for method_name in ["narrowEqualAliasArgument", "narrowEqualAliasParameter"] {
+        let (method, rhs) = fixture.method(method_name);
+        let mut typer = fixture.typer();
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer
+            .type_expression(rhs, context)
+            .unwrap_or_else(|error| panic!("{method_name}: {error:?}"));
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("{method_name} should type as an application");
+        };
+        assert!(
+            matches!(
+                typer.store().types.get(typer.typed_ast().get(application.function).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                    if *symbol != equality.equal
+            ),
+            "{method_name} should select a source equality overload"
+        );
     }
 }
 

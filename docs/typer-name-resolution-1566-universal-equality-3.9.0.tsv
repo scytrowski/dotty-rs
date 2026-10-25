@@ -1,0 +1,4 @@
+path#tree	attempt	before_expression	after_expression	before_first_blocker	after_first_blocker	fully_typed
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=212	compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=420::dotty.tools.backend.jvm.opt.InlineInfoAttribute.read	version == 1	flags & 1	MemberNotFound	MemberNotFound	false
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=226	compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=420::dotty.tools.backend.jvm.opt.InlineInfoAttribute.read	version == 1	flags & 1	MemberNotFound	MemberNotFound	false
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=239	compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=420::dotty.tools.backend.jvm.opt.InlineInfoAttribute.read	version == 1	flags & 1	MemberNotFound	MemberNotFound	false

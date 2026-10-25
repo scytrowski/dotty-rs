@@ -30,17 +30,21 @@ impl SourceTyper<'_> {
         let checkpoint = self.store.checkpoint();
         let resolver_checkpoint = self.resolver.checkpoint();
         let package_entry_checkpoint = self.synthetic_package_entries.len();
+        let class_member_entry_checkpoint = self.synthetic_class_member_entries.len();
         let cache_checkpoint = self.type_index.checkpoint();
         let annotation_checkpoint = self.source_annotations.clone();
         let typed_ast_checkpoint = self.typed_arena.checkpoint();
         let typed_index_checkpoint = self.typed_index.clone();
         let function_literals_checkpoint = self.function_literals.clone();
         let local_symbols_checkpoint = self.local_symbols.clone();
+        let inferred_local_lazy_values_checkpoint = self.inferred_local_lazy_values.clone();
         let local_scopes_checkpoint = self.local_scopes.clone();
         let patdef_expansions_checkpoint = self.patdef_expansions.clone();
         let pattern_bindings_checkpoint = self.pattern_bindings.clone();
         let local_methods_checkpoint = self.local_methods.clone();
         let initializing_local_symbols_checkpoint = self.initializing_local_symbols.clone();
+        let inferred_local_lazy_types_checkpoint =
+            self.inferred_local_lazy_types_in_progress.clone();
         let inferred_field_types_checkpoint = self.inferred_field_types_in_progress.clone();
         let inferred_method_results_checkpoint = self.inferred_method_results_in_progress.clone();
         let expression_scope_checkpoint = self.expression_scopes.clone();
@@ -54,6 +58,7 @@ impl SourceTyper<'_> {
                 }
             }
             self.rollback_synthetic_package_entries(package_entry_checkpoint);
+            self.rollback_synthetic_class_member_entries(class_member_entry_checkpoint);
             self.resolver.rollback_to(self.store, resolver_checkpoint);
             self.store.rollback_to(checkpoint);
             self.type_index.restore(cache_checkpoint);
@@ -62,11 +67,13 @@ impl SourceTyper<'_> {
             self.typed_index = typed_index_checkpoint;
             self.function_literals = function_literals_checkpoint;
             self.local_symbols = local_symbols_checkpoint;
+            self.inferred_local_lazy_values = inferred_local_lazy_values_checkpoint;
             self.local_scopes = local_scopes_checkpoint;
             self.patdef_expansions = patdef_expansions_checkpoint;
             self.pattern_bindings = pattern_bindings_checkpoint;
             self.local_methods = local_methods_checkpoint;
             self.initializing_local_symbols = initializing_local_symbols_checkpoint;
+            self.inferred_local_lazy_types_in_progress = inferred_local_lazy_types_checkpoint;
             self.inferred_field_types_in_progress = inferred_field_types_checkpoint;
             self.inferred_method_results_in_progress = inferred_method_results_checkpoint;
             self.expression_scopes = expression_scope_checkpoint;
@@ -90,14 +97,18 @@ impl SourceTyper<'_> {
         let store_checkpoint = self.store.checkpoint();
         let resolver_checkpoint = self.resolver.checkpoint();
         let package_entry_checkpoint = self.synthetic_package_entries.len();
+        let class_member_entry_checkpoint = self.synthetic_class_member_entries.len();
         let type_index_checkpoint = self.type_index.checkpoint();
         let annotation_checkpoint = self.source_annotations.clone();
         let local_symbols_checkpoint = self.local_symbols.clone();
+        let inferred_local_lazy_values_checkpoint = self.inferred_local_lazy_values.clone();
         let local_scopes_checkpoint = self.local_scopes.clone();
         let patdef_expansions_checkpoint = self.patdef_expansions.clone();
         let pattern_bindings_checkpoint = self.pattern_bindings.clone();
         let local_methods_checkpoint = self.local_methods.clone();
         let initializing_local_symbols_checkpoint = self.initializing_local_symbols.clone();
+        let inferred_local_lazy_types_checkpoint =
+            self.inferred_local_lazy_types_in_progress.clone();
         let inferred_field_types_checkpoint = self.inferred_field_types_in_progress.clone();
         let expression_scope_checkpoint = self.expression_scopes.clone();
         let mut info_journal = Vec::new();
@@ -114,16 +125,19 @@ impl SourceTyper<'_> {
                 }
                 self.typed_arena.rollback_to(ast_checkpoint);
                 self.rollback_synthetic_package_entries(package_entry_checkpoint);
+                self.rollback_synthetic_class_member_entries(class_member_entry_checkpoint);
                 self.resolver.rollback_to(self.store, resolver_checkpoint);
                 self.store.rollback_to(store_checkpoint);
                 self.type_index.restore(type_index_checkpoint);
                 self.source_annotations = annotation_checkpoint;
                 self.local_symbols = local_symbols_checkpoint;
+                self.inferred_local_lazy_values = inferred_local_lazy_values_checkpoint;
                 self.local_scopes = local_scopes_checkpoint;
                 self.patdef_expansions = patdef_expansions_checkpoint;
                 self.pattern_bindings = pattern_bindings_checkpoint;
                 self.local_methods = local_methods_checkpoint;
                 self.initializing_local_symbols = initializing_local_symbols_checkpoint;
+                self.inferred_local_lazy_types_in_progress = inferred_local_lazy_types_checkpoint;
                 self.inferred_field_types_in_progress = inferred_field_types_checkpoint;
                 self.expression_scopes = expression_scope_checkpoint;
                 // Nested completion can type an inferred method body with its
@@ -145,6 +159,18 @@ impl SourceTyper<'_> {
                 .synthetic_package_entries
                 .pop()
                 .expect("length checked");
+            if self.store.scopes.contains(scope) {
+                self.store.scopes.get_mut(scope).remove(symbol);
+            }
+        }
+    }
+
+    pub(super) fn rollback_synthetic_class_member_entries(&mut self, checkpoint: usize) {
+        while self.synthetic_class_member_entries.len() > checkpoint {
+            let (scope, symbol) = self
+                .synthetic_class_member_entries
+                .pop()
+                .expect("the class member entry list was checked before popping");
             if self.store.scopes.contains(scope) {
                 self.store.scopes.get_mut(scope).remove(symbol);
             }

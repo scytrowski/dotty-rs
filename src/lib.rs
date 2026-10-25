@@ -26,3 +26,9 @@ pub use dotty_classloader::classloader;
 
 /// Semantic unpickling of TASTy into the shared `dotty-core` model.
 pub use dotty_tasty_unpickler::tasty_unpickler;
+
+/// One-session planning for the audited JVM and Scala 3 TASTy class overlap.
+pub mod jvm_tasty_plan;
+
+/// Opt-in emission of a linked `.class` and complete `.tasty` pair.
+pub mod jvm_tasty_artifacts;

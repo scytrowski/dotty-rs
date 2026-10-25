@@ -6,6 +6,9 @@ use dotty_core::ast::*;
 use dotty_core::types::*;
 use dotty_core::*;
 use std::collections::HashMap;
+use std::collections::HashSet;
+
+const MAX_INFERRED_LOCAL_LAZY_TYPE_COMPLETION_DEPTH: usize = 64;
 
 const LOCAL_VALUE_SEMANTICS_DEFERRED: SymbolFlags = SymbolFlags::GIVEN
     .union(SymbolFlags::IMPLICIT)
@@ -1241,7 +1244,12 @@ impl SourceTyper<'_> {
                 "anonymous given has no local term identity",
             ));
         }
-        if !self.store.scopes.get(scope).lookup_all(&name).is_empty() {
+        let preindexed_symbol = self.local_symbols.get(&(self.source, tree)).copied();
+        let existing_symbols = self.store.scopes.get(scope).lookup_all(&name);
+        if existing_symbols
+            .iter()
+            .any(|existing| Some(*existing) != preindexed_symbol)
+        {
             return Err(TyperError::DuplicateLocalValue {
                 source: self.source,
                 tree_index: tree.index(),
@@ -1275,21 +1283,27 @@ impl SourceTyper<'_> {
         // Ordinary explicitly typed vals and lazy vals enter before their
         // initializer and use the recursion guard. Contextual locals instead
         // enter the block scope after their initializer succeeds.
-        let symbol = self.store.symbols.alloc(dotty_core::Symbol {
-            name,
-            owner: Some(context.owner),
-            kind: SymbolKind::Local,
-            flags: symbol_flags,
-            visibility: dotty_core::Visibility::Public,
-            info: SymbolInfo::Missing,
-            origin: SymbolOrigin::Source(self.source),
-            annotations: Vec::new(),
-            position,
-            links: dotty_core::SymbolLinks::default(),
-        });
+        let symbol = if let Some(symbol) = preindexed_symbol {
+            symbol
+        } else {
+            self.store.symbols.alloc(dotty_core::Symbol {
+                name,
+                owner: Some(context.owner),
+                kind: SymbolKind::Local,
+                flags: symbol_flags,
+                visibility: dotty_core::Visibility::Public,
+                info: SymbolInfo::Missing,
+                origin: SymbolOrigin::Source(self.source),
+                annotations: Vec::new(),
+                position,
+                links: dotty_core::SymbolLinks::default(),
+            })
+        };
         let enter_before_initializer = (!inferred && !contextual) || lazy_value;
         if enter_before_initializer {
-            self.store.scopes.get_mut(scope).enter(name, symbol);
+            if preindexed_symbol.is_none() {
+                self.store.scopes.get_mut(scope).enter(name, symbol);
+            }
             self.initializing_local_symbols.insert(symbol);
         }
         let typed_rhs_result =
@@ -1968,6 +1982,154 @@ impl SourceTyper<'_> {
         Ok(TypedStatExpansion::one(typed))
     }
 
+    /// Pre-enters local lazy values only when every direct block statement is
+    /// one of those declarations. Explicit types are available immediately;
+    /// inferred values are completed on demand when an earlier initializer
+    /// references them. The all-lazy shape avoids exposing later declarations
+    /// across eager initialization barriers.
+    fn preindex_local_lazy_values(
+        &mut self,
+        stats: &[TreeId<Untyped>],
+        context: ExpressionContext,
+        block_scope: ScopeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        let mut candidates = Vec::new();
+        let mut names = HashSet::new();
+        for stat in stats {
+            let Some(node) = self.arena.try_get(*stat) else {
+                return Err(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: stat.index(),
+                });
+            };
+            let TreeKind::ValDef(definition) = &node.kind else {
+                return Ok(());
+            };
+            if definition.metadata.modifiers.as_slice() != [Modifier::Lazy]
+                || definition.rhs.is_none()
+            {
+                return Ok(());
+            }
+            let Some(tpt) = self.arena.try_get(definition.tpt) else {
+                return Ok(());
+            };
+            let inferred = matches!(tpt.kind, TreeKind::TypeTree(_));
+            let name = *definition.name.as_name();
+            if !names.insert(name)
+                || !self
+                    .store
+                    .scopes
+                    .get(block_scope)
+                    .lookup_all(&name)
+                    .is_empty()
+            {
+                // Leave duplicate declarations to the ordinary ordered path,
+                // which reports them at the declaration that introduces the
+                // conflict.
+                return Ok(());
+            }
+            candidates.push((*stat, definition.clone(), node.position, inferred));
+        }
+
+        for (tree, definition, position, inferred) in candidates {
+            let name = *definition.name.as_name();
+            let Some(local_scopes) = context.local_scopes else {
+                return Err(TyperError::ExpressionLocalScopeStackMissing {
+                    stack: ExpressionScopeId::new(
+                        self.expression_scope_owner,
+                        self.expression_scopes.len(),
+                    ),
+                });
+            };
+            let declared_type = if inferred {
+                None
+            } else {
+                self.active_local_import_scopes
+                    .push((context.lexical, Some(local_scopes)));
+                let declared_type =
+                    self.type_of_tpt_inner_journaled(definition.tpt, context.lexical, info_journal);
+                self.active_local_import_scopes.pop();
+                Some(declared_type?)
+            };
+            let symbol = self.store.symbols.alloc(dotty_core::Symbol {
+                name,
+                owner: Some(context.owner),
+                kind: SymbolKind::Local,
+                flags: SymbolFlags::LAZY,
+                visibility: dotty_core::Visibility::Public,
+                info: declared_type.map_or(SymbolInfo::Missing, SymbolInfo::Complete),
+                origin: SymbolOrigin::Source(self.source),
+                annotations: Vec::new(),
+                position,
+                links: dotty_core::SymbolLinks::default(),
+            });
+            self.store.scopes.get_mut(block_scope).enter(name, symbol);
+            self.local_symbols.insert((self.source, tree), symbol);
+            self.local_scopes.insert((self.source, tree), block_scope);
+            if inferred {
+                self.inferred_local_lazy_values.insert(
+                    symbol,
+                    (definition.rhs.expect("candidate has an RHS"), context),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(in crate::typer) fn complete_inferred_local_lazy_value_type(
+        &mut self,
+        symbol: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let Some((rhs, context)) = self.inferred_local_lazy_values.get(&symbol).copied() else {
+            return Err(TyperError::UnsupportedSymbolCompletion {
+                symbol,
+                kind: SymbolKind::Local,
+            });
+        };
+        if self.initializing_local_symbols.contains(&symbol) {
+            return Err(TyperError::RecursiveLazyLocalValueInitializer {
+                source: self.source,
+                tree_index: rhs.index(),
+                symbol,
+            });
+        }
+        if self.inferred_local_lazy_types_in_progress.len()
+            >= MAX_INFERRED_LOCAL_LAZY_TYPE_COMPLETION_DEPTH
+        {
+            return Err(TyperError::InferredLocalLazyTypeDepthExceeded {
+                source: self.source,
+                tree_index: rhs.index(),
+                symbol,
+                max_depth: MAX_INFERRED_LOCAL_LAZY_TYPE_COMPLETION_DEPTH,
+            });
+        }
+        self.initializing_local_symbols.insert(symbol);
+        self.inferred_local_lazy_types_in_progress.insert(symbol);
+        let result = (|| {
+            self.active_local_import_scopes
+                .push((context.lexical, context.local_scopes));
+            let mut new_mappings = Vec::new();
+            let typed_rhs =
+                self.type_value_expression_inner(rhs, context, info_journal, &mut new_mappings);
+            self.active_local_import_scopes.pop();
+            let typed_rhs = typed_rhs?;
+            let rhs_type = self.typed_arena.get(typed_rhs).ty;
+            let inferred = self.widen_expression_type_journaled(rhs_type, info_journal, 0)?;
+            self.validate_inferred_local_value_type(inferred, rhs.index())?;
+            let previous = *self.store.symbols.info(symbol);
+            info_journal.push((symbol, previous));
+            self.store
+                .symbols
+                .set_info(symbol, SymbolInfo::Complete(inferred));
+            Ok(inferred)
+        })();
+        self.initializing_local_symbols.remove(&symbol);
+        self.inferred_local_lazy_types_in_progress.remove(&symbol);
+        result
+    }
+
     pub(in crate::typer) fn type_block_expression(
         &mut self,
         tree: TreeId<Untyped>,
@@ -1997,6 +2159,7 @@ impl SourceTyper<'_> {
             frame.is_block_scope = true;
         }
         self.preindex_local_methods(&block.stats, block_context, block_scope)?;
+        self.preindex_local_lazy_values(&block.stats, block_context, block_scope, info_journal)?;
         let mut stats = Vec::with_capacity(block.stats.len());
         for stat in block.stats {
             self.type_block_stat_expansion(stat, block_context, info_journal, new_mappings)?

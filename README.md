@@ -33,12 +33,18 @@ APIs and supported language subsets are still evolving.
   joins, nested construction, reference field initialization, and chained call
   receivers. These are bounded features, not arbitrary Scala/JVM code generation.
 
-The source-to-class-file pipeline is assembled in
+The source-to-class-file pipeline is exercised in
 [`tests/jvm_source_compilation.rs`](tests/jvm_source_compilation.rs), with JVM
-verification and execution in CI. This test adapter is not a public compiler
-session API. The JVM backend and semantic TASTy pickler are separate output
-paths; the project does not yet provide a general combined `.class`/`.tasty`
-compiler pipeline.
+verification and execution in CI. The root `dotty::jvm_tasty_plan` library
+module now coordinates the audited single-class Counter overlap from one
+frontend session and exposes both validated borrowed plans within a callback.
+The opt-in `dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_class` path
+returns an owned, decoded-and-validated Counter `.class`/`.tasty` pair linked
+by the TASTy producer's exact header UUID. A pinned Scala 3.9.0 consumer gate
+compiles against two fresh deterministic Rust pairs, verifies TASTy-dependent
+member lookup and executes the unchanged Rust class under JDK 21. The gate is
+limited to the audited Counter source shape; this is not a compiler driver/CLI
+or general Scala ABI support. See the [binary interoperability record](docs/jvm-tasty-binary-interop.md).
 
 Compatibility targets Scala **3.9.0**, pinned to source revision
 `777528f19a58e794c9954a42f433373472ec57f8`. The semantic pickler emits TASTy
@@ -62,7 +68,7 @@ revisions and are not measurements of the current checkout.
 | `dotty-classfile` | JVM class-file codec and bytecode builder |
 | `dotty-classloader` | Classpath discovery and binary loading |
 | `dotty-jvm` | Typed-semantic plans to JVM class files |
-| `dotty` (root) | Selected public re-exports and cross-component integration tests |
+| `dotty` (root) | Selected public re-exports, the bounded paired-plan/artifact coordinator, and integration tests |
 
 The root facade does not re-export every workspace crate: use crates such as
 `dotty-lexer`, `dotty-namer`, `dotty-jvm`, and `dotty-tasty-pickler` directly when

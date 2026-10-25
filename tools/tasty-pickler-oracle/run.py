@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -32,6 +33,10 @@ ARTIFACTS = [
 class CommandFailure(RuntimeError):
     """A command ran and failed, distinct from unavailable tools/configuration."""
 
+    def __init__(self, message: str, output: str = "") -> None:
+        super().__init__(message)
+        self.output = output
+
 
 def execute(args: list[str | Path], *, cwd: Path = ROOT) -> str:
     try:
@@ -42,12 +47,118 @@ def execute(args: list[str | Path], *, cwd: Path = ROOT) -> str:
         # A timeout is a harness failure, never an expected reader rejection.
         raise RuntimeError(f"command timed out after 180 seconds: {args}") from error
     if result.returncode:
-        raise CommandFailure(f"command failed ({result.returncode}): {args}\n{result.stdout}")
+        raise CommandFailure(f"command failed ({result.returncode}): {args}\n{result.stdout}",
+                             result.stdout)
     return result.stdout
 
 
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _class_tasty_link(class_bytes: bytes) -> bytes | None:
+    """Read the class-level TASTY attribute from a bounded classfile."""
+    offset = 0
+
+    def take(length: int) -> bytes:
+        nonlocal offset
+        end = offset + length
+        if length < 0 or end > len(class_bytes):
+            raise RuntimeError("truncated classfile while reading TASTY link")
+        result = class_bytes[offset:end]
+        offset = end
+        return result
+
+    def u1() -> int:
+        return take(1)[0]
+
+    def u2() -> int:
+        return int.from_bytes(take(2), "big")
+
+    def u4() -> int:
+        return int.from_bytes(take(4), "big")
+
+    if take(4) != b"\xca\xfe\xba\xbe":
+        raise RuntimeError("invalid classfile magic while reading TASTY link")
+    take(4)  # minor and major version
+    cp_count = u2()
+    utf8: dict[int, bytes] = {}
+    index = 1
+    while index < cp_count:
+        tag = u1()
+        if tag == 1:
+            utf8[index] = take(u2())
+        elif tag in (3, 4):
+            take(4)
+        elif tag in (5, 6):
+            take(8)
+            index += 1
+        elif tag in (7, 8, 16, 19, 20):
+            take(2)
+        elif tag in (9, 10, 11, 12, 17, 18):
+            take(4)
+        elif tag == 15:
+            take(3)
+        else:
+            raise RuntimeError(f"unknown classfile constant-pool tag {tag}")
+        index += 1
+
+    take(6)  # access flags, this class, super class
+    for _ in range(u2()):
+        take(2)  # interfaces
+
+    def skip_members() -> None:
+        for _ in range(u2()):
+            take(6)  # access flags, name, descriptor
+            for _ in range(u2()):
+                take(2)
+                take(u4())
+
+    skip_members()  # fields
+    skip_members()  # methods
+    links = []
+    for _ in range(u2()):
+        name_index = u2()
+        payload = take(u4())
+        if utf8.get(name_index) == b"TASTY":
+            links.append(payload)
+    if offset != len(class_bytes):
+        raise RuntimeError("trailing bytes after classfile attributes")
+    if len(links) > 1:
+        raise RuntimeError("classfile has duplicate class-level TASTY attributes")
+    return links[0] if links else None
+
+
+def _tasty_header_uuid(tasty_bytes: bytes) -> bytes:
+    """Decode the pinned TASTy header fields needed to authenticate a link."""
+    offset = 0
+
+    def take(length: int) -> bytes:
+        nonlocal offset
+        end = offset + length
+        if length < 0 or end > len(tasty_bytes):
+            raise RuntimeError("truncated TASTy header")
+        value = tasty_bytes[offset:end]
+        offset = end
+        return value
+
+    def nat() -> int:
+        value = 0
+        while True:
+            byte = take(1)[0]
+            value = (value << 7) | (byte & 0x7f)
+            if byte & 0x80 != 0:
+                return value
+
+    if take(4) != bytes.fromhex("5ca1ab1f"):
+        raise RuntimeError("invalid TASTy magic")
+    major, minor, experimental = nat(), nat(), nat()
+    tooling_length = nat()
+    take(tooling_length)
+    uuid = take(16)
+    if major != 28 or minor != 9 or experimental != 0:
+        raise RuntimeError(f"unexpected TASTy header version {major}.{minor}.{experimental}")
+    return uuid
 
 
 def verify_provenance() -> None:
@@ -928,6 +1039,197 @@ def check_oracle(toolchain: Toolchain, binary: Path, directory: Path) -> list[di
     return results
 
 
+def consume_rust_pair(toolchain: Toolchain, pair_root: Path, tasty_link_uuid: str) -> dict:
+    """Compile a Scala client against a Rust linked pair and prove TASTy lookup."""
+    expected = {
+        "fresh-a": ("example/Counter.class", "example/Counter.tasty"),
+        "fresh-b": ("example/Counter.class", "example/Counter.tasty"),
+        "with-tasty-no-get": ("example/Counter.class", "example/Counter.tasty"),
+        "classfile-only-no-get": ("example/Counter.class",),
+        "uuid-mismatch": ("example/Counter.class", "example/Counter.tasty"),
+        "unrecognized-link": ("example/Counter.class", "example/Counter.tasty"),
+    }
+    for name, files in expected.items():
+        root = pair_root / name
+        actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+        if actual != set(files):
+            raise RuntimeError(f"{name} artifact inventory differs: {sorted(actual)}")
+
+    first = pair_root / "fresh-a"
+    second = pair_root / "fresh-b"
+    try:
+        link_bytes = bytes.fromhex(tasty_link_uuid)
+    except ValueError as error:
+        raise RuntimeError("TASTy link UUID must be 32 hexadecimal characters") from error
+    if len(link_bytes) != 16:
+        raise RuntimeError("TASTy link UUID must be 32 hexadecimal characters")
+    for relative in expected["fresh-a"]:
+        if digest(first / relative) != digest(second / relative):
+            raise RuntimeError(f"fresh Rust pair bytes differ: {relative}")
+    for pair in (first, second):
+        class_bytes = (pair / "example/Counter.class").read_bytes()
+        tasty_bytes = (pair / "example/Counter.tasty").read_bytes()
+        class_link = _class_tasty_link(class_bytes)
+        if class_link != link_bytes or _tasty_header_uuid(tasty_bytes) != class_link:
+            raise RuntimeError("Rust classfile TASTY link does not match its TASTy header UUID")
+
+    semantic_pair = pair_root / "with-tasty-no-get"
+    semantic_link = _class_tasty_link((semantic_pair / "example/Counter.class").read_bytes())
+    if semantic_link is None or _tasty_header_uuid(
+            (semantic_pair / "example/Counter.tasty").read_bytes()) != semantic_link:
+        raise RuntimeError("TASTy semantic control is missing a valid matching class-level link")
+
+    unrecognized = pair_root / "unrecognized-link"
+    try:
+        unrecognized_link = _class_tasty_link((unrecognized / "example/Counter.class").read_bytes())
+        if unrecognized_link is None or _tasty_header_uuid(
+                (unrecognized / "example/Counter.tasty").read_bytes()) != unrecognized_link:
+            raise RuntimeError("classfile is missing a matching recognized TASTY attribute")
+    except RuntimeError as error:
+        if "TASTY" not in str(error):
+            raise
+    else:
+        raise RuntimeError("unrecognized TASTY link negative control unexpectedly passed")
+
+    consumer = """package consumer
+import example.Counter
+
+object Consumer:
+  def main(args: Array[String]): Unit = run()
+  def run(): Unit =
+    val first = new Counter(start = 7)
+    val second = new Counter(start = 2)
+    println(first.get())
+    println(second.get())
+    first.set(value = 13)
+    second.set(value = -42)
+    println(first.get())
+    println(second.get())
+    first.set(value = -42)
+    println(first.get())
+    println(second.get())
+"""
+    probe = """package consumer
+import example.Counter
+
+object TastyProbe:
+  def read(counter: Counter): Int = counter.get()
+"""
+    with tempfile.TemporaryDirectory(prefix="dotty-scala-consumer-") as temporary:
+        work = Path(temporary)
+        source = work / "src/Consumer.scala"
+        source.parent.mkdir()
+        source.write_text(consumer)
+        probe_source = work / "src/TastyProbe.scala"
+        probe_source.write_text(probe)
+
+        for jar in (Path(path) for path in toolchain.classpath.split(os.pathsep)):
+            with zipfile.ZipFile(jar) as archive:
+                if "example/Counter.class" in archive.namelist():
+                    raise RuntimeError(f"Scala compiler/runtime dependency contains Counter.class: {jar}")
+
+        fresh_runtime_outputs = []
+        artifact_hashes = {}
+        for index, pair in enumerate((first, second)):
+            client = work / f"client-{index}"
+            client.mkdir()
+            class_before = digest(pair / "example/Counter.class")
+            artifact_hashes[pair.name] = {
+                "class_sha256": class_before,
+                "tasty_sha256": digest(pair / "example/Counter.tasty"),
+            }
+            toolchain.compiler(["-d", client, "-classpath", os.pathsep.join(
+                (str(pair), toolchain.classpath)), source])
+            consumer_class = client / "consumer/Consumer.class"
+            consumer_module = client / "consumer/Consumer$.class"
+            if not consumer_class.is_file() or not consumer_module.is_file():
+                raise RuntimeError("Scala consumer compilation produced no expected client classes")
+            if list(client.rglob("Counter.class")):
+                raise RuntimeError("Scala compiler emitted or copied Counter.class into client output")
+            if digest(pair / "example/Counter.class") != class_before:
+                raise RuntimeError("Scala consumer compilation changed the staged Rust Counter.class")
+
+            javap = execute([toolchain.javap, "-classpath",
+                             os.pathsep.join((str(client), str(pair))), "-verbose",
+                             "consumer.Consumer$"])
+            for reference in ('example/Counter."<init>":(I)V', "example/Counter.set:(I)V",
+                              "example/Counter.get:()I"):
+                if reference not in javap:
+                    raise RuntimeError(f"consumer bytecode lacks Methodref {reference}: {javap}")
+
+            runtime = execute([toolchain.java, "-Xverify:all", "-XX:-UsePerfData", "-classpath",
+                               os.pathsep.join((str(pair), str(client), toolchain.classpath)),
+                               "consumer.Consumer"])
+            result = [line for line in runtime.strip().splitlines()
+                      if not line.startswith("Picked up JAVA_TOOL_OPTIONS:")]
+            if result != ["7", "2", "13", "-42", "-42", "-42"]:
+                raise RuntimeError(f"Scala consumer returned an unexpected runtime result: {runtime}")
+            if digest(pair / "example/Counter.class") != class_before:
+                raise RuntimeError("runtime did not use the unchanged Rust Counter.class")
+            fresh_runtime_outputs.extend(result)
+
+        semantic_output = work / "tasty-probe-output"
+        semantic_output.mkdir()
+        semantic = pair_root / "with-tasty-no-get"
+        toolchain.compiler(["-d", semantic_output, "-classpath", os.pathsep.join(
+            (str(semantic), toolchain.classpath)), probe_source])
+        if not (semantic_output / "consumer/TastyProbe$.class").is_file():
+            raise RuntimeError("TASTy semantic control produced no probe class")
+
+        classfile_only_output = work / "classfile-only-output"
+        classfile_only_output.mkdir()
+        try:
+            toolchain.compiler(["-d", classfile_only_output, "-classpath", os.pathsep.join(
+                (str(pair_root / "classfile-only-no-get"), toolchain.classpath)), probe_source])
+        except CommandFailure as error:
+            classfile_only_failure = error.output
+        else:
+            raise RuntimeError("classfile-only control unexpectedly resolved the TASTy-only get method")
+        if not re.search(r"(?i)(get.*(not found|not a member)|no member.*get)",
+                         classfile_only_failure):
+            raise RuntimeError(f"classfile-only control failed for an unrelated reason: {classfile_only_failure}")
+
+        mismatch_output = work / "uuid-mismatch-output"
+        mismatch_output.mkdir()
+        try:
+            toolchain.compiler(["-Werror", "-d", mismatch_output, "-classpath", os.pathsep.join(
+                (str(pair_root / "uuid-mismatch"), toolchain.classpath)), probe_source])
+        except CommandFailure as error:
+            mismatch_failure = error.output
+        else:
+            raise RuntimeError("Scala compiler accepted the mismatched TASTy UUID with -Werror")
+        if not re.search(r"(?i)(tasty.*(uuid|identifier)|(uuid|identifier).*tasty)", mismatch_failure):
+            raise RuntimeError(f"UUID control failed for an unrelated reason: {mismatch_failure}")
+
+        classfile_diagnostic = next(
+            line.strip() for line in classfile_only_failure.splitlines()
+            if re.search(r"(?i)(get.*(not found|not a member)|no member.*get)", line)
+        )
+        uuid_diagnostic = next(
+            line.strip() for line in mismatch_failure.splitlines()
+            if re.search(r"(?i)(tasty.*(uuid|identifier)|(uuid|identifier).*tasty)", line)
+        )
+
+        return {
+            "scala_consumer": True,
+            "fresh_runtime_outputs": fresh_runtime_outputs,
+            "fresh_pair_hashes": artifact_hashes,
+            "counter_source_sha256": digest(ROOT / "tests/fixtures/jvm_tasty_interop/Counter.scala"),
+            "rust_class_sha256": class_before,
+            "fresh_pair_byte_identical": True,
+            "tasty_link_uuid": tasty_link_uuid,
+            "consumer_methodrefs": ["<init>(I)V", "set(I)V", "get()I"],
+            "tasty_only_method_resolved": True,
+            "classfile_only_control_rejected": True,
+            "unrecognized_link_control_rejected": True,
+            "uuid_mismatch_control_rejected": True,
+            "classfile_only_diagnostic": classfile_diagnostic,
+            "uuid_mismatch_diagnostic": uuid_diagnostic,
+            "java_version": toolchain.jdk_release["JAVA_VERSION"],
+            "compiler_artifacts_sha256": toolchain.artifacts,
+        }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -937,8 +1239,16 @@ def main() -> None:
     verify.add_argument("candidate", type=Path)
     verify.add_argument("--runtime", action="store_true",
                         help="inspect, decompile, compile, and execute a supported fresh fixture class")
+    consume = subcommands.add_parser("consume-pair", help="compile and run a Scala client against a Rust linked pair")
+    consume.add_argument("pair_root", type=Path)
+    consume.add_argument("--tasty-link-uuid", required=True)
     subcommands.add_parser("check", help="regenerate/check fixtures, compile originals/reduced Answer, run negative controls")
     args = parser.parse_args()
+    if args.command == "consume-pair":
+        toolchain = Toolchain()
+        print(json.dumps(consume_rust_pair(toolchain, args.pair_root, args.tasty_link_uuid),
+                         indent=2, sort_keys=True))
+        return
     binary = inspector()
     structure = snapshot(binary, args.candidate) if args.command == "verify" else None
     toolchain = Toolchain()

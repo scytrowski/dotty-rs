@@ -59,6 +59,30 @@ let bytes = class.encode()?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+The builder's `tasty_link(TastyLinkId)` method emits the Scala 3 class-level
+`TASTY` attribute with exactly the supplied 16 identifier bytes. The caller
+must pass the identifier owned by the producer of the associated TASTy file;
+the classfile crate does not parse TASTy, generate an identifier, or verify a
+sidecar. `TastyLinkId::try_from_bytes` rejects payloads whose length is not 16.
+Adding the link twice returns `ClassFileBuildError::DuplicateTastyLink`.
+
+`ClassFile::decode` continues to retain `TASTY` as
+`Attribute::Other(RawAttribute)`, preserving its original constant-pool name
+index and payload. `ClassFile::tasty_link_id()` is the opt-in typed validator:
+it returns `None` when no link is present and rejects duplicate class links,
+non-16-byte payloads, invalid name indices, and links on fields, methods, or
+nested attributes. The attribute remains unknown to generic encoding and
+round-trips losslessly. Ordinary builder output without `tasty_link` adds no
+constant-pool entries or attributes and retains its prior byte layout.
+
+The pinned Scala 3.9.0 `Counter.class` fixture uses the case-sensitive name
+`TASTY` and the 16 bytes `00 9d 71 1b cc 01 99 e8 00 ce 94 0d d0 72 1c 1b`.
+The focused link test compares the builder payload and typed accessor against
+that fixture. The JDK 21 gate checks `javap -v -p` output and executes a linked
+trivial class with `java -Xverify:all`; this establishes classfile/JVM
+acceptance only, not Scala TASTy consumption. See
+`docs/jvm-tasty-binary-interop.md` for the Scala oracle and sidecar contract.
+
 Symbolic class, field, and method references are interned into the shared pool
 before it is finalized. The builder assembles the typed instructions and uses
 the method descriptor and static flag to compute `max_stack` and `max_locals`.

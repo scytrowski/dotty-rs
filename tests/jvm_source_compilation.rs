@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use dotty_classfile::access_flags::{ACC_PRIVATE, ACC_PUBLIC};
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
@@ -15,18 +16,19 @@ use dotty_core::{
 use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
     JvmCodegenError, JvmCompilationUnit, JvmFieldPlan, JvmFieldSourceVisibility, JvmLocalBinding,
-    JvmMethodPlan, JvmNameKind, JvmOverrideIssue, JvmPrimaryConstructorPlan, JvmReturnType,
-    JvmType, emit_class,
+    JvmMethodPlan, JvmNameKind, JvmOverrideIssue, JvmPrimaryConstructorPlan,
+    JvmPublicBodyFieldSourceProof, JvmReturnType, JvmType, emit_class,
 };
 use dotty_lexer::{ContextualScanner, LexerDiagnostic};
 use dotty_namer::{
-    NamerDiagnostic, NamerError, NamingOutcome, SourceParseStatus, SourceSemanticIndex,
-    name_compilation_unit_with_diagnostics,
+    NamerDiagnostic, NamerError, NamingOutcome, SourceDefinition, SourceParseStatus,
+    SourceSemanticIndex, name_compilation_unit_with_diagnostics,
 };
 use dotty_parser::{ParseDiagnostic, parse_compilation_unit};
 use dotty_typer::{SourceTyper, TyperError};
 
 const FIXTURE_DIRECTORY: &str = "tests/fixtures/jvm";
+const LINKAGE_COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
 
 type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
@@ -38,6 +40,7 @@ type SourceSemanticObserver<'observer> = dyn for<'a> FnMut(
     ) + 'observer;
 type TyperFailureObserver<'observer> =
     dyn for<'a> FnMut(&AstArena<Untyped>, &SourceTyper<'a>, &TyperError) + 'observer;
+type SourceFailureExpectation = (&'static str, &'static str, fn(&PipelineFailure) -> bool);
 
 #[derive(Default)]
 struct SourceBatchObservers<'observer> {
@@ -493,12 +496,6 @@ fn compile_source_batch_with_typer_failure_observer(
         class.initialization = JvmClassInitializationPlan::PrimaryConstructor(constructor_plan);
     }
     for class in &classes {
-        if !matches!(
-            class.initialization,
-            JvmClassInitializationPlan::PrimaryConstructor(_)
-        ) {
-            continue;
-        }
         let TreeKind::Template(template) = &parsed.ast.get(class.template_tree).kind else {
             return Err(PipelineFailure::UnexpectedSourceShape("class template"));
         };
@@ -529,52 +526,91 @@ fn compile_source_batch_with_typer_failure_observer(
     let mut fields_by_class = Vec::with_capacity(classes.len());
     for class in &classes {
         let mut fields = Vec::new();
-        if matches!(
-            class.initialization,
-            JvmClassInitializationPlan::PrimaryConstructor(_)
-        ) {
-            let TreeKind::Template(template) = &parsed.ast.get(class.template_tree).kind else {
-                return Err(PipelineFailure::UnexpectedSourceShape("class template"));
+        let TreeKind::Template(template) = &parsed.ast.get(class.template_tree).kind else {
+            return Err(PipelineFailure::UnexpectedSourceShape("class template"));
+        };
+        for tree in &template.body {
+            let TreeKind::ValDef(definition) = &parsed.ast.get(*tree).kind else {
+                continue;
             };
-            for tree in &template.body {
-                let TreeKind::ValDef(definition) = &parsed.ast.get(*tree).kind else {
-                    continue;
-                };
-                let Some(field) = index.symbol_at(source_id, *tree) else {
-                    continue;
-                };
-                if typer.store().symbols.get(field).kind != SymbolKind::Field {
-                    continue;
-                }
-                let initializer = match definition.rhs {
-                    Some(rhs) => {
-                        let ty = match typer.store().symbols.get(field).info {
-                            dotty_core::SymbolInfo::Complete(ty) => ty,
-                            _ => return Err(PipelineFailure::UnexpectedSourceShape("field type")),
-                        };
-                        let context = typer
-                            .field_initializer_context_for(field)
-                            .map_err(PipelineFailure::Typer)?;
-                        Some(
-                            typer
-                                .type_expression_expected(rhs, context, ty)
-                                .map_err(PipelineFailure::Typer)?,
-                        )
-                    }
-                    None => None,
-                };
-                let source_visibility = match &definition.metadata.visibility {
-                    Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: Some(_) }) => {
-                        JvmFieldSourceVisibility::PrivateThis
-                    }
-                    _ => JvmFieldSourceVisibility::PlainPrivate,
-                };
-                fields.push(JvmFieldPlan {
-                    field,
-                    source_visibility,
-                    initializer,
-                });
+            let Some(field) = index.symbol_at(source_id, *tree) else {
+                continue;
+            };
+            if typer.store().symbols.get(field).kind != SymbolKind::Field {
+                continue;
             }
+            if index.definition_of(field)
+                != Some(SourceDefinition::Canonical {
+                    source: source_id,
+                    tree: *tree,
+                })
+            {
+                return Err(PipelineFailure::MissingSourceIdentity(
+                    "canonical class-body field definition",
+                ));
+            }
+            if typer.store().symbols.get(field).owner != Some(class.class) {
+                return Err(PipelineFailure::UnexpectedSourceShape(
+                    "class-owned body field",
+                ));
+            }
+            let initializer = match definition.rhs {
+                Some(rhs) => {
+                    let ty = match typer.store().symbols.get(field).info {
+                        dotty_core::SymbolInfo::Complete(ty) => ty,
+                        _ => return Err(PipelineFailure::UnexpectedSourceShape("field type")),
+                    };
+                    let context = typer
+                        .field_initializer_context_for(field)
+                        .map_err(PipelineFailure::Typer)?;
+                    let typed_rhs = typer
+                        .type_expression_expected(rhs, context, ty)
+                        .map_err(PipelineFailure::Typer)?;
+                    if typer.source_typed_index().get(source_id, rhs) != Some(typed_rhs) {
+                        return Err(PipelineFailure::UnexpectedSourceShape(
+                            "source-to-typed field initializer binding",
+                        ));
+                    }
+                    Some(typed_rhs)
+                }
+                None => None,
+            };
+            let source_visibility = match definition.metadata.visibility {
+                None => {
+                    let initializer = initializer.ok_or(PipelineFailure::Codegen(
+                        JvmCodegenError::MissingFieldInitializer { field },
+                    ))?;
+                    JvmFieldSourceVisibility::PlainPublic(
+                        JvmPublicBodyFieldSourceProof::from_source(
+                            class.class,
+                            field,
+                            source_id,
+                            *tree,
+                            initializer,
+                            &parsed.ast,
+                            &index,
+                            typer.source_typed_index(),
+                            typer.typed_ast(),
+                            typer.store(),
+                        )
+                        .map_err(PipelineFailure::Codegen)?,
+                    )
+                }
+                Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None }) => {
+                    JvmFieldSourceVisibility::PlainPrivate
+                }
+                Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: Some(_) }) => {
+                    JvmFieldSourceVisibility::PrivateThis
+                }
+                Some(dotty_core::ast::VisibilitySyntax::Protected { .. }) => {
+                    JvmFieldSourceVisibility::PlainPrivate
+                }
+            };
+            fields.push(JvmFieldPlan {
+                field,
+                source_visibility,
+                initializer,
+            });
         }
         fields_by_class.push(fields);
     }
@@ -788,6 +824,56 @@ fn typed_tree_targets(unit: &JvmCompilationUnit<'_>, root: TreeId<Typed>) -> Vec
         }
     }
     targets
+}
+
+#[test]
+fn exact_tasty_linkage_counter_source_is_accepted_by_jvm_backend() {
+    let output = TestOutputDirectory::new("tasty-linkage-counter");
+    let emitted = compile_source(LINKAGE_COUNTER, "Counter.scala", output.path()).unwrap();
+    let mut reader = Reader::new(emitted.class.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+
+    assert_eq!(emitted.class.internal_name(), "example/Counter");
+    assert_eq!(class.version.major, JVM_CLASSFILE_MAJOR_VERSION);
+    assert_eq!(
+        class.constant_pool.class_name(class.this_class).unwrap(),
+        "example/Counter"
+    );
+    assert_eq!(class.fields.len(), 1);
+    assert_eq!(class.methods.len(), 3);
+    let field = &class.fields[0];
+    assert_eq!(
+        class.constant_pool.utf8(field.name_index).unwrap(),
+        "current"
+    );
+    assert_eq!(
+        class.constant_pool.utf8(field.descriptor_index).unwrap(),
+        "I"
+    );
+    assert!(field.access_flags.contains(ACC_PRIVATE));
+    let methods = class
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                class.constant_pool.utf8(method.name_index).unwrap(),
+                class.constant_pool.utf8(method.descriptor_index).unwrap(),
+                method.access_flags.0,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        methods
+            .iter()
+            .map(|method| (method.0, method.1))
+            .collect::<Vec<_>>(),
+        [("<init>", "(I)V"), ("get", "()I"), ("set", "(I)V")]
+    );
+    assert!(methods.iter().all(|method| method.2 & ACC_PUBLIC != 0));
+    assert!(!class.attributes.iter().any(|attribute| match attribute {
+        Attribute::Other(raw) => class.constant_pool.utf8(raw.name_index).unwrap() == "TASTY",
+        _ => false,
+    }));
 }
 
 #[test]
@@ -5522,6 +5608,1151 @@ fn object_graph_unsupported_deep_allocation_publishes_no_fixture_classes() {
 }
 
 #[test]
+fn inherited_accessors_emit_without_copying_parent_storage_and_verify_on_jvm() {
+    let source = r#"
+class Parent:
+  val id: Int = 1
+  var current: Int = 2
+
+class Child extends Parent
+class Leaf extends Child
+
+class TokenParent(val token: Int)
+class TokenChild extends TokenParent(7)
+"#;
+    let output = TestOutputDirectory::new("inherited-accessors-emission");
+    let second_output = TestOutputDirectory::new("inherited-accessors-emission-repeat");
+    let mut observed_metadata = None;
+    let artifacts = compile_source_batch_with_source_observer(
+        source,
+        "InheritedAccessorEmission.scala",
+        output.path(),
+        SourceId::from_index(1611),
+        SourceUnitCardinality::AtLeastTwo,
+        &mut |_, _, unit, definitions| {
+            observed_metadata = Some(
+                unit.metadata(definitions)
+                    .expect("validated hierarchy metadata retains effective accessors"),
+            );
+        },
+    )
+    .expect("safe accessor-bearing hierarchies emit as one complete batch");
+    let second_artifacts = compile_source_batch(
+        source,
+        "InheritedAccessorEmission.scala",
+        second_output.path(),
+        SourceId::from_index(1611),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("an independent frontend emits the same bounded hierarchy");
+    assert_eq!(artifacts.len(), 5);
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes()))
+            .collect::<Vec<_>>(),
+        second_artifacts
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes()))
+            .collect::<Vec<_>>(),
+        "two fresh source sessions emit byte-identical classes in source order"
+    );
+
+    let metadata = observed_metadata.expect("source observer captures unit metadata");
+    let class_metadata = |name: &str| {
+        metadata
+            .iter()
+            .find(|class| class.identity().internal_name() == name)
+            .unwrap_or_else(|| panic!("missing metadata for {name}"))
+    };
+    for (receiver_name, accessor_owner, field_name) in [
+        ("Child", "Parent", "id"),
+        ("Leaf", "Parent", "id"),
+        ("Child", "Parent", "current"),
+        ("Leaf", "Parent", "current"),
+        ("TokenChild", "TokenParent", "token"),
+    ] {
+        let receiver = class_metadata(receiver_name);
+        let owner = class_metadata(accessor_owner);
+        let field = owner
+            .accessors()
+            .iter()
+            .find(|accessor| accessor.field_name() == field_name)
+            .expect("only the declaring class owns the accessor metadata");
+        let inherited = receiver
+            .dispatch_accessors()
+            .iter()
+            .find(|accessor| {
+                accessor.field() == field.source_field()
+                    && accessor.role() == dotty_jvm::JvmAccessorDispatchRole::Getter
+            })
+            .expect("effective receiver metadata retains the inherited getter");
+        assert_eq!(inherited.receiver_class(), receiver.identity().symbol());
+        assert_eq!(inherited.declaring_class(), owner.identity().symbol());
+        assert_eq!(inherited.name(), field_name);
+        assert!(receiver.accessors().is_empty());
+        assert!(receiver.fields().is_empty());
+        assert!(receiver.methods().is_empty());
+    }
+
+    let parent = decode_emitted_class_named(&artifacts, "Parent");
+    let child = decode_emitted_class_named(&artifacts, "Child");
+    let leaf = decode_emitted_class_named(&artifacts, "Leaf");
+    let token_parent = decode_emitted_class_named(&artifacts, "TokenParent");
+    let token_child = decode_emitted_class_named(&artifacts, "TokenChild");
+    let parent_name = |class: &ClassFile<'_>| {
+        class
+            .super_class
+            .and_then(|index| class.constant_pool.class_name(index).ok())
+            .map(str::to_owned)
+    };
+    assert_eq!(parent_name(&parent).as_deref(), Some("java/lang/Object"));
+    assert_eq!(parent_name(&child).as_deref(), Some("Parent"));
+    assert_eq!(parent_name(&leaf).as_deref(), Some("Child"));
+    assert_eq!(
+        parent_name(&token_parent).as_deref(),
+        Some("java/lang/Object")
+    );
+    assert_eq!(parent_name(&token_child).as_deref(), Some("TokenParent"));
+
+    assert_eq!(
+        parent
+            .fields
+            .iter()
+            .map(|field| parent.constant_pool.utf8(field.name_index).unwrap())
+            .collect::<Vec<_>>(),
+        ["id", "current"]
+    );
+    assert_eq!(child.fields.len(), 0);
+    assert_eq!(leaf.fields.len(), 0);
+    assert_eq!(token_parent.fields.len(), 1);
+    assert_eq!(token_child.fields.len(), 0);
+    assert_eq!(
+        methods_with_descriptors(&child),
+        [("<init>".to_owned(), "()V".to_owned())]
+    );
+    assert_eq!(
+        methods_with_descriptors(&leaf),
+        [("<init>".to_owned(), "()V".to_owned())]
+    );
+    assert_invocation_sequence(
+        &child,
+        emitted_method_code(&child, "<init>"),
+        &[(0xb7, "Parent", "<init>", "()V")],
+    );
+    assert_invocation_sequence(
+        &leaf,
+        emitted_method_code(&leaf, "<init>"),
+        &[(0xb7, "Child", "<init>", "()V")],
+    );
+    assert_invocation_sequence(
+        &token_child,
+        emitted_method_code(&token_child, "<init>"),
+        &[(0xb7, "TokenParent", "<init>", "(I)V")],
+    );
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let harness = output.path().join("InheritedAccessorHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class InheritedAccessorHarness {
+    public static void main(String[] args) {
+        Leaf leaf = new Leaf();
+        if (leaf.id() != 1 || leaf.current() != 2) throw new AssertionError("body accessors");
+        leaf.current_$eq(9);
+        if (leaf.current() != 9) throw new AssertionError("inherited setter");
+        if (new TokenChild().token() != 7) throw new AssertionError("constructor accessor");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let classpath = output.path().to_string_lossy().into_owned();
+    let javac = Command::new("javac")
+        .args(["-classpath", &classpath, "-d", &classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for inherited accessor harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected the inherited accessor harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            &classpath,
+            "InheritedAccessorHarness",
+        ])
+        .output()
+        .expect("start java for inherited accessor harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected inherited accessor classes\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+}
+
+#[test]
+fn inherited_getter_selections_use_the_static_receiver_owner_and_verify_on_jvm() {
+    let source = r#"
+class Parent:
+  var current: Int = 1
+  val id: Long = 42L
+
+class Child extends Parent:
+  def own(): Int = current
+  def qualified(): Int = this.current
+  def readId(): Long = id
+
+class Reader:
+  def sourceChild(): Child = new Child()
+  def read(child: Child): Int = child.current
+  def readId(child: Child): Long = child.id
+  def readAsParent(parent: Parent): Int = parent.current
+  def readFresh(): Int = sourceChild().current
+"#;
+    let output = TestOutputDirectory::new("inherited-getter-selection-lowering");
+    let artifacts = compile_source_batch(
+        source,
+        "InheritedGetterSelections.scala",
+        output.path(),
+        SourceId::from_index(1612),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("typed inherited field selections lower through validated getters");
+
+    let child = decode_emitted_class_named(&artifacts, "Child");
+    let reader = decode_emitted_class_named(&artifacts, "Reader");
+    assert!(
+        child.fields.is_empty(),
+        "Child must not copy Parent storage"
+    );
+    assert!(
+        methods_with_descriptors(&child)
+            .iter()
+            .all(|(name, _)| !["current", "id"].contains(&name.as_str())),
+        "Child must not declare generated getter methods"
+    );
+    for (class, method, expected) in [
+        (&child, "own", vec![(0xb6, "Child", "current", "()I")]),
+        (&child, "qualified", vec![(0xb6, "Child", "current", "()I")]),
+        (&child, "readId", vec![(0xb6, "Child", "id", "()J")]),
+        (&reader, "read", vec![(0xb6, "Child", "current", "()I")]),
+        (&reader, "readId", vec![(0xb6, "Child", "id", "()J")]),
+        (
+            &reader,
+            "readAsParent",
+            vec![(0xb6, "Parent", "current", "()I")],
+        ),
+        (
+            &reader,
+            "readFresh",
+            vec![
+                (0xb6, "Reader", "sourceChild", "()LChild;"),
+                (0xb6, "Child", "current", "()I"),
+            ],
+        ),
+    ] {
+        let code = emitted_method_code(class, method);
+        assert!(
+            decode_subset_instructions(code)
+                .iter()
+                .all(|(_, opcode)| *opcode != 0xb4),
+            "{method} must call the inherited getter instead of reading backing storage"
+        );
+        assert_invocation_sequence(class, code, &expected);
+    }
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let harness = output.path().join("InheritedGetterSelectionHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class InheritedGetterSelectionHarness {
+    public static void main(String[] args) {
+        Child child = new Child();
+        Reader reader = new Reader();
+        if (child.own() != 1 || child.qualified() != 1 || child.readId() != 42L)
+            throw new AssertionError("inherited reads in Child");
+        if (reader.read(child) != 1 || reader.readId(child) != 42L)
+            throw new AssertionError("Child receiver reads");
+        if (reader.readFresh() != 1)
+            throw new AssertionError("single evaluation of call receiver");
+        Parent parent = child;
+        if (reader.readAsParent(parent) != 1)
+            throw new AssertionError("Parent receiver read");
+        child.current_$eq(9);
+        if (reader.read(child) != 9)
+            throw new AssertionError("inherited setter remains dispatched");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let classpath = output.path().to_string_lossy().into_owned();
+    let javac = Command::new("javac")
+        .args(["-classpath", &classpath, "-d", &classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for inherited getter selection harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected inherited getter selection harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            &classpath,
+            "InheritedGetterSelectionHarness",
+        ])
+        .output()
+        .expect("start java for inherited getter selection harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected inherited getter selections\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+}
+
+#[test]
+fn inherited_mutable_assignments_lower_through_validated_setters() {
+    let source = r#"
+class Parent:
+  var current: Long = 1L
+  var enabled: Boolean = true
+
+class Child extends Parent:
+  def update(value: Long): Unit = current = value
+  def qualifiedUpdate(value: Long): Unit = this.current = value
+
+class Reader:
+  var receiverEvaluations: Int = 0
+  var rhsEvaluations: Int = 0
+  var evaluationOrder: Int = 0
+  var receiverOrder: Int = 0
+  var rhsOrder: Int = 0
+  def nextChild(): Child =
+    receiverEvaluations = receiverEvaluations + 1
+    evaluationOrder = evaluationOrder + 1
+    receiverOrder = evaluationOrder
+    new Child()
+  def evaluate(value: Long): Long =
+    rhsEvaluations = rhsEvaluations + 1
+    evaluationOrder = evaluationOrder + 1
+    rhsOrder = evaluationOrder
+    value
+  def updateChild(child: Child, value: Long): Unit = child.current = value
+  def setFlag(child: Child): Unit = child.enabled = false
+  def updateFresh(value: Long): Unit = nextChild().current = evaluate(value)
+"#;
+    let output = TestOutputDirectory::new("inherited-mutable-assignment-lowering");
+    let artifacts = compile_source_batch(
+        source,
+        "InheritedMutableAssignments.scala",
+        output.path(),
+        SourceId::from_index(1613),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("typed inherited mutable fields lower through their validated setters");
+
+    let parent = decode_emitted_class_named(&artifacts, "Parent");
+    let child = decode_emitted_class_named(&artifacts, "Child");
+    let reader = decode_emitted_class_named(&artifacts, "Reader");
+    assert_eq!(child.fields.len(), 0, "Child must not copy Parent storage");
+    assert!(
+        methods_with_descriptors(&child).iter().all(|(name, _)| ![
+            "current",
+            "enabled",
+            "current_$eq",
+            "enabled_$eq"
+        ]
+        .contains(&name.as_str())),
+        "Child must not copy generated Parent accessors"
+    );
+    assert_eq!(parent.fields.len(), 2);
+
+    for (class, method) in [(&child, "update"), (&child, "qualifiedUpdate")] {
+        let code = emitted_method_code(class, method);
+        assert_invocation_sequence(class, code, &[(0xb6, "Child", "current_$eq", "(J)V")]);
+        assert!(
+            decode_subset_instructions(code)
+                .iter()
+                .all(|(_, opcode)| ![0xb4, 0xb5].contains(opcode)),
+            "{method} must dispatch through the inherited setter, not Parent storage"
+        );
+    }
+    for (method, expected) in [
+        ("updateChild", vec![(0xb6, "Child", "current_$eq", "(J)V")]),
+        ("setFlag", vec![(0xb6, "Child", "enabled_$eq", "(Z)V")]),
+        (
+            "updateFresh",
+            vec![
+                (0xb6, "Reader", "nextChild", "()LChild;"),
+                (0xb6, "Reader", "evaluate", "(J)J"),
+                (0xb6, "Child", "current_$eq", "(J)V"),
+            ],
+        ),
+    ] {
+        let code = emitted_method_code(&reader, method);
+        assert_invocation_sequence(&reader, code, &expected);
+        assert!(
+            decode_subset_instructions(code)
+                .iter()
+                .all(|(_, opcode)| ![0xb4, 0xb5].contains(opcode)),
+            "{method} must not access inherited private backing storage"
+        );
+    }
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let harness = output.path().join("InheritedMutableAssignmentHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class InheritedMutableAssignmentHarness {
+    public static void main(String[] args) {
+        Child child = new Child();
+        child.update(5L);
+        if (child.current() != 5L) throw new AssertionError("unqualified Child setter");
+        child.qualifiedUpdate(7L);
+        if (child.current() != 7L) throw new AssertionError("qualified Child setter");
+        Reader reader = new Reader();
+        reader.updateChild(child, 11L);
+        if (child.current() != 11L) throw new AssertionError("Reader Child setter");
+        reader.setFlag(child);
+        if (child.enabled()) throw new AssertionError("Boolean setter");
+        reader.updateFresh(13L);
+        if (reader.receiverEvaluations() != 1 || reader.rhsEvaluations() != 1
+                || reader.receiverOrder() != 1
+                || reader.rhsOrder() != 2)
+            throw new AssertionError("receiver must evaluate once before RHS");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let classpath = output.path().to_string_lossy().into_owned();
+    let javac = Command::new("javac")
+        .args(["-classpath", &classpath, "-d", &classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for inherited mutable assignment harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected inherited mutable assignment harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            &classpath,
+            "InheritedMutableAssignmentHarness",
+        ])
+        .output()
+        .expect("start java for inherited mutable assignment harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected inherited mutable assignments\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+}
+
+#[test]
+fn full_inherited_accessor_hierarchy_verifies_end_to_end_on_jvm() {
+    let source = fs::read_to_string(fixture_path("InheritedAccessorHierarchy.scala"))
+        .expect("read the Scala 3.9.0 inherited accessor hierarchy fixture");
+    let output = TestOutputDirectory::new("inherited-accessor-hierarchy-e2e");
+    let second_output = TestOutputDirectory::new("inherited-accessor-hierarchy-e2e-repeat");
+    let mut observed_metadata = None;
+    let artifacts = compile_source_batch_with_source_observer(
+        &source,
+        "InheritedAccessorHierarchy.scala",
+        output.path(),
+        SourceId::from_index(1615),
+        SourceUnitCardinality::AtLeastTwo,
+        &mut |_, _, unit, definitions| {
+            let base_class = audit_class_named(unit, "Base");
+            let middle_class = audit_class_named(unit, "Middle");
+            let leaf_class = audit_class_named(unit, "Leaf");
+            let reader_class = audit_class_named(unit, "Reader");
+            assert_eq!(
+                audit_class_parent(unit, base_class),
+                definitions.object_class
+            );
+            assert_eq!(audit_class_parent(unit, middle_class), base_class);
+            assert_eq!(audit_class_parent(unit, leaf_class), middle_class);
+
+            let metadata = unit
+                .metadata(definitions)
+                .expect("metadata retains effective accessor views across two edges");
+            let base = metadata
+                .iter()
+                .find(|class| class.identity().symbol() == base_class)
+                .expect("Base metadata exists");
+            let id = base
+                .accessors()
+                .iter()
+                .find(|accessor| accessor.field_name() == "id")
+                .expect("Base.id is a canonical constructor accessor")
+                .source_field();
+            let current = base
+                .accessors()
+                .iter()
+                .find(|accessor| accessor.field_name() == "current")
+                .expect("Base.current is a canonical body accessor")
+                .source_field();
+            let enabled = base
+                .accessors()
+                .iter()
+                .find(|accessor| accessor.field_name() == "enabled")
+                .expect("Base.enabled is a canonical body val")
+                .source_field();
+            for (class, method_name, field, expected_references) in [
+                (middle_class, "read", current, 1),
+                (middle_class, "write", current, 1),
+                (reader_class, "fromBase", current, 1),
+                (reader_class, "fromMiddle", current, 1),
+                (reader_class, "fromLeaf", current, 1),
+                (reader_class, "change", current, 1),
+                (base_class, "doubled", id, 2),
+                (reader_class, "id", id, 1),
+                (reader_class, "isEnabled", enabled, 1),
+            ] {
+                let method = audit_method_named(unit, class, method_name);
+                let body = method.body.expect("source method retains its typed body");
+                let mut targets = Vec::new();
+                walk_typed_subtree(unit, body, &mut |tree_id| {
+                    if term_type_target(unit, unit.typed_ast.get(tree_id).ty) == Some(field) {
+                        targets.push(tree_id);
+                    }
+                });
+                assert_eq!(
+                    targets.len(),
+                    expected_references,
+                    "{method_name} retains the canonical Base Field identity"
+                );
+                assert!(
+                    targets.iter().all(|tree_id| matches!(
+                        unit.typed_ast.get(*tree_id).kind,
+                        TreeKind::Ident(_) | TreeKind::Select(_)
+                    )),
+                    "{method_name} retains genuine typed identifier/selection nodes"
+                );
+            }
+            let change = audit_method_named(unit, reader_class, "change");
+            let change_body = change.body.expect("change retains its typed body");
+            let mut assignments = Vec::new();
+            walk_typed_subtree(unit, change_body, &mut |tree_id| {
+                let tree = unit.typed_ast.get(tree_id);
+                if let TreeKind::Assign(assignment) = tree.kind
+                    && term_type_target(unit, unit.typed_ast.get(assignment.lhs).ty)
+                        == Some(current)
+                {
+                    assignments.push((tree_id, assignment));
+                }
+            });
+            assert_eq!(assignments.len(), 1);
+            assert!(
+                matches!(
+                    unit.typed_ast.get(assignments[0].1.lhs).kind,
+                    TreeKind::Select(_)
+                ),
+                "Reader.change retains a typed selected field on the Leaf receiver"
+            );
+            assert_eq!(
+                unit.typed_ast.get(assignments[0].0).ty,
+                definitions.unit,
+                "source setter assignment retains its Unit result"
+            );
+            for (class, parent) in [(middle_class, base_class), (leaf_class, middle_class)] {
+                let plan = unit
+                    .classes
+                    .iter()
+                    .find(|plan| plan.class == class)
+                    .unwrap();
+                let JvmClassInitializationPlan::PrimaryConstructor(constructor) =
+                    &plan.initialization
+                else {
+                    panic!("parameterized source constructor remains in the unit plan");
+                };
+                assert_eq!(constructor.parameters().len(), 1);
+                let formal = constructor.parameters()[0];
+                assert_eq!(
+                    unit.store.symbols.get(formal).owner,
+                    Some(constructor.symbol())
+                );
+                let super_call = constructor
+                    .direct_super_constructor()
+                    .expect("constructor forwards to its exact direct parent");
+                assert_eq!(super_call.parent_class(), parent);
+                assert_eq!(
+                    unit.store
+                        .symbols
+                        .get(super_call.parent_constructor())
+                        .owner,
+                    Some(parent)
+                );
+            }
+            observed_metadata = Some(metadata);
+        },
+    )
+    .expect("real source accessors compose across Base-Middle-Leaf");
+    let second = compile_source_batch(
+        &source,
+        "InheritedAccessorHierarchy.scala",
+        second_output.path(),
+        SourceId::from_index(1615),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("fresh source session emits the same full class batch");
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes()))
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes()))
+            .collect::<Vec<_>>(),
+        "independent sessions emit byte-identical class batches"
+    );
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Base", "Middle", "Leaf", "Reader"]
+    );
+
+    let metadata = observed_metadata.expect("observer captures JVM metadata");
+    let class_metadata = |name: &str| {
+        metadata
+            .iter()
+            .find(|class| class.identity().internal_name() == name)
+            .unwrap_or_else(|| panic!("missing metadata for {name}"))
+    };
+    let base = class_metadata("Base");
+    for receiver_name in ["Middle", "Leaf"] {
+        let receiver = class_metadata(receiver_name);
+        assert!(receiver.accessors().is_empty());
+        assert!(receiver.fields().is_empty());
+        for (field_name, role) in [
+            ("id", dotty_jvm::JvmAccessorDispatchRole::Getter),
+            ("current", dotty_jvm::JvmAccessorDispatchRole::Getter),
+            ("current", dotty_jvm::JvmAccessorDispatchRole::Setter),
+            ("enabled", dotty_jvm::JvmAccessorDispatchRole::Getter),
+        ] {
+            let origin = base
+                .accessors()
+                .iter()
+                .find(|accessor| accessor.field_name() == field_name)
+                .expect("only Base declares accessor storage")
+                .source_field();
+            let inherited = receiver
+                .dispatch_accessors()
+                .iter()
+                .find(|entry| entry.field() == origin && entry.role() == role)
+                .unwrap_or_else(|| panic!("{receiver_name} inherits {field_name} {role:?}"));
+            assert_eq!(inherited.receiver_class(), receiver.identity().symbol());
+            assert_eq!(inherited.declaring_class(), base.identity().symbol());
+        }
+    }
+
+    let base = decode_emitted_class_named(&artifacts, "Base");
+    let middle = decode_emitted_class_named(&artifacts, "Middle");
+    let leaf = decode_emitted_class_named(&artifacts, "Leaf");
+    let reader = decode_emitted_class_named(&artifacts, "Reader");
+    for class in [&base, &middle, &leaf, &reader] {
+        assert_eq!(
+            class.version.major, 65,
+            "all emitted classes target Java 21"
+        );
+        assert!(class.access_flags.is_public());
+    }
+    assert_eq!(
+        base.constant_pool
+            .class_name(base.super_class.unwrap())
+            .unwrap(),
+        "java/lang/Object"
+    );
+    assert_eq!(
+        middle
+            .constant_pool
+            .class_name(middle.super_class.unwrap())
+            .unwrap(),
+        "Base"
+    );
+    assert_eq!(
+        leaf.constant_pool
+            .class_name(leaf.super_class.unwrap())
+            .unwrap(),
+        "Middle"
+    );
+    assert_eq!(
+        base.fields.len(),
+        3,
+        "Base alone owns id, current, and enabled storage"
+    );
+    let base_fields = base
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                base.constant_pool.utf8(field.name_index).unwrap(),
+                base.constant_pool.utf8(field.descriptor_index).unwrap(),
+                field.access_flags.is_private(),
+                field.access_flags.is_final(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        base_fields,
+        [
+            ("id", "I", true, true),
+            ("current", "J", true, false),
+            ("enabled", "Z", true, true),
+        ]
+    );
+    assert_eq!(
+        methods_with_descriptors(&base),
+        [
+            ("<init>".to_owned(), "(I)V".to_owned()),
+            ("id".to_owned(), "()I".to_owned()),
+            ("current".to_owned(), "()J".to_owned()),
+            ("current_$eq".to_owned(), "(J)V".to_owned()),
+            ("enabled".to_owned(), "()Z".to_owned()),
+            ("doubled".to_owned(), "()I".to_owned()),
+        ]
+    );
+    for (name, descriptor) in [
+        ("id", "()I"),
+        ("current", "()J"),
+        ("current_$eq", "(J)V"),
+        ("enabled", "()Z"),
+    ] {
+        let method = base
+            .methods
+            .iter()
+            .find(|method| {
+                base.constant_pool.utf8(method.name_index) == Ok(name)
+                    && base.constant_pool.utf8(method.descriptor_index) == Ok(descriptor)
+            })
+            .unwrap_or_else(|| panic!("Base declares {name}{descriptor}"));
+        assert!(
+            method.access_flags.is_public(),
+            "{name}{descriptor} is public"
+        );
+    }
+    assert!(middle.fields.is_empty());
+    assert!(leaf.fields.is_empty());
+    for child in [&middle, &leaf] {
+        assert!(methods_with_descriptors(child).iter().all(|(name, _)| {
+            !["id", "current", "current_$eq", "enabled", "doubled"].contains(&name.as_str())
+        }));
+    }
+    assert_invocation_sequence(
+        &middle,
+        emitted_method_code(&middle, "<init>"),
+        &[(0xb7, "Base", "<init>", "(I)V")],
+    );
+    assert_invocation_sequence(
+        &leaf,
+        emitted_method_code(&leaf, "<init>"),
+        &[(0xb7, "Middle", "<init>", "(I)V")],
+    );
+    let base_constructor = emitted_method_code(&base, "<init>");
+    assert_invocation_sequence(
+        &base,
+        base_constructor,
+        &[(0xb7, "java/lang/Object", "<init>", "()V")],
+    );
+    let base_constructor_instructions = decode_subset_instructions(base_constructor);
+    assert_eq!(
+        base_constructor_instructions
+            .iter()
+            .filter(|(_, opcode)| *opcode == 0xb5)
+            .count(),
+        3,
+        "Base initializes its id, current, and enabled backing fields exactly once"
+    );
+    assert_field_reference_sequence(
+        &base,
+        base_constructor,
+        &[
+            (0xb5, "Base", "id", "I"),
+            (0xb5, "Base", "current", "J"),
+            (0xb5, "Base", "enabled", "Z"),
+        ],
+    );
+    let object_init_pc = base_constructor_instructions
+        .iter()
+        .find(|(_, opcode)| *opcode == 0xb7)
+        .map(|(pc, _)| *pc)
+        .expect("Base calls Object.<init>");
+    let first_field_store_pc = base_constructor_instructions
+        .iter()
+        .find(|(_, opcode)| *opcode == 0xb5)
+        .map(|(pc, _)| *pc)
+        .expect("Base stores constructor and body fields");
+    assert!(
+        object_init_pc < first_field_store_pc,
+        "Base initializes Object before storing its own fields"
+    );
+    assert_field_reference_sequence(
+        &base,
+        emitted_method_code(&base, "current"),
+        &[(0xb4, "Base", "current", "J")],
+    );
+    assert_field_reference_sequence(
+        &base,
+        emitted_method_code(&base, "current_$eq"),
+        &[(0xb5, "Base", "current", "J")],
+    );
+    assert_opcode_sequence(emitted_method_code(&base, "current"), &[0x2a, 0xb4, 0xad]);
+    assert_eq!(code_max_stack(&base, "current"), 2);
+    assert_eq!(code_max_locals(&base, "current_$eq"), 3);
+    assert_field_reference_sequence(
+        &base,
+        emitted_method_code(&base, "enabled"),
+        &[(0xb4, "Base", "enabled", "Z")],
+    );
+    assert_invocation_sequence(
+        &middle,
+        emitted_method_code(&middle, "read"),
+        &[(0xb6, "Middle", "current", "()J")],
+    );
+    assert_eq!(
+        emitted_method_code(&middle, "read").last(),
+        Some(&0xad),
+        "the inherited Long getter returns with lreturn"
+    );
+    assert_invocation_sequence(
+        &middle,
+        emitted_method_code(&middle, "write"),
+        &[(0xb6, "Middle", "current_$eq", "(J)V")],
+    );
+    for (method, owner) in [
+        ("fromBase", "Base"),
+        ("fromMiddle", "Middle"),
+        ("fromLeaf", "Leaf"),
+    ] {
+        assert_invocation_sequence(
+            &reader,
+            emitted_method_code(&reader, method),
+            &[(0xb6, owner, "current", "()J")],
+        );
+    }
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "change"),
+        &[(0xb6, "Leaf", "current_$eq", "(J)V")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "id"),
+        &[(0xb6, "Leaf", "id", "()I")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "isEnabled"),
+        &[(0xb6, "Leaf", "enabled", "()Z")],
+    );
+    assert_invocation_sequence(
+        &base,
+        emitted_method_code(&base, "doubled"),
+        &[(0xb6, "Base", "id", "()I"), (0xb6, "Base", "id", "()I")],
+    );
+    for (class, methods) in [
+        (&middle, ["read", "write"].as_slice()),
+        (
+            &reader,
+            [
+                "fromBase",
+                "fromMiddle",
+                "fromLeaf",
+                "change",
+                "id",
+                "isEnabled",
+            ]
+            .as_slice(),
+        ),
+    ] {
+        for method in methods {
+            assert_no_field_reference_to_owner(class, emitted_method_code(class, method), "Base");
+        }
+    }
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let classpath = output.path().to_string_lossy().into_owned();
+    let javap = Command::new("javap")
+        .args([
+            "-c",
+            "-v",
+            "-p",
+            "-classpath",
+            &classpath,
+            "Base",
+            "Middle",
+            "Leaf",
+            "Reader",
+        ])
+        .output()
+        .expect("start javap for multilevel inherited accessors");
+    assert!(
+        javap.status.success(),
+        "javap rejected multilevel inherited accessors\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    for expected in [
+        "Base.\"<init>\":(I)V",
+        "Middle.\"<init>\":(I)V",
+        "Middle.current:()J",
+        "Middle.current_$eq:(J)V",
+        "Leaf.current:()J",
+        "Leaf.current_$eq:(J)V",
+        "major version: 65",
+        "private final int id",
+        "private long current",
+        "private final boolean enabled",
+    ] {
+        assert!(javap_output.contains(expected), "javap omitted {expected}");
+    }
+    let harness = output
+        .path()
+        .join("MultilevelInheritedAccessorsHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class MultilevelInheritedAccessorsHarness {
+    public static void main(String[] args) {
+        Reader reader = new Reader();
+        Base base = new Base(3);
+        Leaf first = new Leaf(7);
+        Leaf second = new Leaf(11);
+        if (first.id() != 7 || second.id() != 11 || reader.id(first) != 7) throw new AssertionError("inherited id");
+        if (!first.enabled() || !second.enabled() || first.doubled() != 14 || second.doubled() != 22) throw new AssertionError("body val and ordinary inherited method");
+        if (reader.fromBase(base) != 0L || reader.fromBase(first) != 0L || reader.fromMiddle(first) != 0L || reader.fromLeaf(first) != 0L || new Middle(9).read() != 0L) throw new AssertionError("inherited getter");
+        Middle middle = new Middle(9);
+        middle.write(Long.MIN_VALUE);
+        if (middle.read() != Long.MIN_VALUE) throw new AssertionError("intermediate setter");
+        reader.change(first, Long.MAX_VALUE);
+        second.current_$eq(Long.MIN_VALUE);
+        if (reader.fromBase(first) != Long.MAX_VALUE || reader.fromMiddle(first) != Long.MAX_VALUE || reader.fromLeaf(first) != Long.MAX_VALUE) throw new AssertionError("typed inherited setter dispatch");
+        if (reader.fromLeaf(second) != Long.MIN_VALUE || reader.fromBase(base) != 0L) throw new AssertionError("independent instances");
+        System.out.println("multilevel inherited accessors verified");
+    }
+}
+"#,
+    )
+    .expect("write multilevel inherited accessor harness");
+    let javac = Command::new("javac")
+        .args([
+            "--release",
+            "21",
+            "-classpath",
+            &classpath,
+            "-d",
+            &classpath,
+        ])
+        .arg(&harness)
+        .output()
+        .expect("start javac for multilevel inherited accessors");
+    assert!(
+        javac.status.success(),
+        "javac rejected multilevel inherited accessors\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            &classpath,
+            "MultilevelInheritedAccessorsHarness",
+        ])
+        .output()
+        .expect("start java verifier for multilevel inherited accessors");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected multilevel inherited accessors\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+}
+
+#[test]
+fn inherited_accessor_hierarchy_rejects_new_child_storage_without_partial_output() {
+    let output = TestOutputDirectory::new("inherited-accessor-child-storage-rejected");
+    let source =
+        "class Parent { val id: Int = 1 }\nclass Child extends Parent { val extra: Int = 2 }\n";
+    let mut expected_edge = None;
+    let result = compile_source_batch_observed(
+        source,
+        "InheritedAccessorChildStorage.scala",
+        output.path(),
+        SourceId::from_index(1612),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut |unit, _| {
+            expected_edge = Some((
+                audit_class_named(unit, "Child"),
+                audit_class_named(unit, "Parent"),
+            ));
+        }),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::UnsupportedJvmAccessorInheritance { class, parent }
+            )) if Some((class, parent)) == expected_edge
+        ),
+        "child-owned accessors remain outside the safe inherited subset: {result:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn effective_accessor_dispatch_projects_constructor_body_and_long_accessors_read_only() {
+    let output = TestOutputDirectory::new("effective-inherited-accessor-metadata");
+    let source = "class Parent(var current: Int)\nclass Child extends Parent(1)\nclass Leaf extends Child\nclass BodyParent { var amount: Int = 2 }\nclass BodyChild extends BodyParent\nclass LongParent { val id: Long = 42L }\nclass LongChild extends LongParent\nclass Unrelated(var current: Int)\n";
+    let mut observed_metadata = None;
+    let artifacts = compile_source_batch_with_source_observer(
+        source,
+        "EffectiveAccessorDispatch.scala",
+        output.path(),
+        SourceId::from_index(1609),
+        SourceUnitCardinality::AtLeastTwo,
+        &mut |_, _, unit, definitions| {
+            observed_metadata = Some(
+                unit.metadata(definitions)
+                    .expect("read-only metadata projects the bounded accessor hierarchy"),
+            );
+        },
+    )
+    .expect("safe inherited-accessor hierarchies emit after metadata validation");
+    assert_eq!(artifacts.len(), 8);
+
+    let metadata = observed_metadata.expect("source observer captures metadata");
+    let class = |name: &str| {
+        metadata
+            .iter()
+            .find(|class| class.identity().internal_name() == name)
+            .unwrap_or_else(|| panic!("{name} metadata"))
+    };
+    let parent = class("Parent");
+    let child = class("Child");
+    let leaf = class("Leaf");
+    let parent_field = parent.accessors()[0].source_field();
+    assert_eq!(parent.accessors()[0].getter().descriptor().as_str(), "()I");
+    assert_eq!(
+        parent.accessors()[0]
+            .setter()
+            .expect("var has a setter")
+            .descriptor()
+            .as_str(),
+        "(I)V"
+    );
+    assert!(child.accessors().is_empty());
+    assert!(leaf.accessors().is_empty());
+    for (receiver, expected_class) in [(child, "Child"), (leaf, "Leaf")] {
+        let current = receiver
+            .dispatch_accessors()
+            .iter()
+            .filter(|entry| entry.field() == parent_field)
+            .collect::<Vec<_>>();
+        assert_eq!(current.len(), 2, "getter and setter remain distinct");
+        assert!(current.iter().any(|entry| {
+            entry.role() == dotty_jvm::JvmAccessorDispatchRole::Getter
+                && entry.name() == "current"
+                && entry.descriptor().as_str() == "()I"
+        }));
+        assert!(current.iter().any(|entry| {
+            entry.role() == dotty_jvm::JvmAccessorDispatchRole::Setter
+                && entry.name() == "current_$eq"
+                && entry.descriptor().as_str() == "(I)V"
+        }));
+        assert!(current.iter().all(|entry| {
+            entry.receiver_class() == receiver.identity().symbol()
+                && entry.declaring_class() == parent.identity().symbol()
+        }));
+        assert_eq!(expected_class, receiver.identity().internal_name());
+    }
+
+    let body_parent = class("BodyParent");
+    let body_child = class("BodyChild");
+    let body_field = body_parent.accessors()[0].source_field();
+    let body_getter = body_child
+        .dispatch_accessors()
+        .iter()
+        .find(|entry| entry.field() == body_field)
+        .expect("body-field getter is inherited in the metadata view");
+    assert_eq!(body_getter.name(), "amount");
+    assert_eq!(body_getter.descriptor().as_str(), "()I");
+    assert_eq!(
+        body_getter.role(),
+        dotty_jvm::JvmAccessorDispatchRole::Getter
+    );
+
+    let long_parent = class("LongParent");
+    let long_child = class("LongChild");
+    let long_id = long_parent.accessors()[0].source_field();
+    let long_getter = long_child
+        .dispatch_accessors()
+        .iter()
+        .find(|entry| entry.field() == long_id)
+        .expect("val getter is inherited");
+    assert_eq!(long_getter.name(), "id");
+    assert_eq!(long_getter.descriptor().as_str(), "()J");
+    assert_eq!(
+        long_getter.role(),
+        dotty_jvm::JvmAccessorDispatchRole::Getter
+    );
+    assert_eq!(
+        long_child
+            .dispatch_accessors()
+            .iter()
+            .filter(|entry| entry.field() == long_id)
+            .count(),
+        1,
+        "immutable val does not acquire a setter"
+    );
+
+    let unrelated = class("Unrelated");
+    let unrelated_field = unrelated.accessors()[0].source_field();
+    assert_ne!(unrelated_field, parent_field);
+    assert!(
+        child
+            .dispatch_accessors()
+            .iter()
+            .all(|entry| entry.field() != unrelated_field)
+    );
+    for name in ["Child", "Leaf", "BodyChild", "LongChild"] {
+        let emitted = decode_emitted_class_named(&artifacts, name);
+        assert!(
+            emitted.fields.is_empty(),
+            "{name} must not copy parent fields"
+        );
+    }
+}
+
+#[test]
 fn object_graph_direct_new_and_completed_call_receivers_remain_supported() {
     let output = TestOutputDirectory::new("object-graph-supported-receivers");
     let artifacts = compile_planned_constructor_source(
@@ -6635,6 +7866,16 @@ fn resolve_source_constructor_calls(source_text: &str) -> Result<Vec<String>, Pi
         if typer.store().symbols.get(field).kind != SymbolKind::Field {
             continue;
         }
+        if index.definition_of(field)
+            != Some(SourceDefinition::Canonical {
+                source: source_id,
+                tree: *tree,
+            })
+        {
+            return Err(PipelineFailure::MissingSourceIdentity(
+                "canonical class-body field definition",
+            ));
+        }
         typer
             .complete_symbol(field)
             .map_err(PipelineFailure::Typer)?;
@@ -6647,19 +7888,48 @@ fn resolve_source_constructor_calls(source_text: &str) -> Result<Vec<String>, Pi
                 let context = typer
                     .field_initializer_context_for(field)
                     .map_err(PipelineFailure::Typer)?;
-                Some(
-                    typer
-                        .type_expression_expected(rhs, context, ty)
-                        .map_err(PipelineFailure::Typer)?,
-                )
+                let typed_rhs = typer
+                    .type_expression_expected(rhs, context, ty)
+                    .map_err(PipelineFailure::Typer)?;
+                if typer.source_typed_index().get(source_id, rhs) != Some(typed_rhs) {
+                    return Err(PipelineFailure::UnexpectedSourceShape(
+                        "source-to-typed field initializer binding",
+                    ));
+                }
+                Some(typed_rhs)
             }
             None => None,
         };
-        let source_visibility = match &definition.metadata.visibility {
+        let source_visibility = match definition.metadata.visibility {
+            None => {
+                let initializer = initializer.ok_or(PipelineFailure::Codegen(
+                    JvmCodegenError::MissingFieldInitializer { field },
+                ))?;
+                JvmFieldSourceVisibility::PlainPublic(
+                    JvmPublicBodyFieldSourceProof::from_source(
+                        class,
+                        field,
+                        source_id,
+                        *tree,
+                        initializer,
+                        &parsed.ast,
+                        &index,
+                        typer.source_typed_index(),
+                        typer.typed_ast(),
+                        typer.store(),
+                    )
+                    .map_err(PipelineFailure::Codegen)?,
+                )
+            }
+            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None }) => {
+                JvmFieldSourceVisibility::PlainPrivate
+            }
             Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: Some(_) }) => {
                 JvmFieldSourceVisibility::PrivateThis
             }
-            _ => JvmFieldSourceVisibility::PlainPrivate,
+            Some(dotty_core::ast::VisibilitySyntax::Protected { .. }) => {
+                JvmFieldSourceVisibility::PlainPrivate
+            }
         };
         fields.push(JvmFieldPlan {
             field,
@@ -6890,6 +8160,15 @@ fn source_initialization_plan(
                 .symbol_at(source, *tree)
                 .is_some_and(|symbol| store.symbols.get(symbol).kind == SymbolKind::Field)
     });
+    let has_public_body_fields = template.body.iter().any(|tree| {
+        let TreeKind::ValDef(definition) = &ast.get(*tree).kind else {
+            return false;
+        };
+        definition.metadata.visibility.is_none()
+            && index
+                .symbol_at(source, *tree)
+                .is_some_and(|symbol| store.symbols.get(symbol).kind == SymbolKind::Field)
+    });
     let constructor = index
         .symbol_at(source, template.constructor)
         .ok_or(JvmCodegenError::UnsupportedConstructor { class })?;
@@ -6910,7 +8189,11 @@ fn source_initialization_plan(
             .is_some_and(|symbol| store.symbols.get(symbol).kind == SymbolKind::Field),
         _ => false,
     });
-    if !has_fields && !has_parameters && !has_parent_arguments {
+    let has_explicit_empty_clause = !definition.value_param_clauses.is_empty();
+    if !has_parameters
+        && !has_parent_arguments
+        && (!has_fields || (has_public_body_fields && !has_explicit_empty_clause))
+    {
         return Ok(prove_implicit_noarg_constructor(
             ast, template, source, index, store,
         ));
@@ -6968,14 +8251,18 @@ fn prove_implicit_noarg_constructor(
         }
         _ => false,
     };
-    let body_contains_methods_only = template
-        .body
-        .iter()
-        .all(|tree| matches!(ast.get(*tree).kind, TreeKind::DefDef(_)));
+    let body_contains_supported_members =
+        template.body.iter().all(|tree| match &ast.get(*tree).kind {
+            TreeKind::DefDef(_) => true,
+            TreeKind::ValDef(_) => index
+                .symbol_at(source, *tree)
+                .is_some_and(|symbol| store.symbols.get(symbol).kind == SymbolKind::Field),
+            _ => false,
+        });
     if constructor_matches_emitted_shape
         && has_supported_noarg_parent(ast, template)
         && template.self_val.is_none()
-        && body_contains_methods_only
+        && body_contains_supported_members
     {
         JvmClassInitializationPlan::ImplicitNoArg
     } else {
@@ -7608,11 +8895,16 @@ fn canonical_int_arithmetic_and_comparisons_lower_to_ordered_jvm_instructions() 
 }
 
 #[test]
-fn int_equality_remains_outside_the_relational_intrinsic_subset() {
+fn int_equality_types_but_remains_outside_the_relational_intrinsic_subset() {
     assert_source_failure(
         "int-equality-not-lowered",
         "class UnsupportedEquality { def equal(a: Int, b: Int): Boolean = a == b }\n",
-        |failure| matches!(failure, PipelineFailure::Typer(_)),
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Codegen(JvmCodegenError::IntIntrinsicResolution { .. })
+            )
+        },
     );
 }
 
@@ -8267,6 +9559,96 @@ fn emitted_method_code<'a>(class: &ClassFile<'a>, name: &str) -> &'a [u8] {
         panic!("{name} should have one Code attribute");
     };
     code.code
+}
+
+fn assert_emitted_getter(
+    class: &ClassFile<'_>,
+    method_name: &str,
+    method_descriptor: &str,
+    field_name: &str,
+    field_descriptor: &str,
+    return_opcode: u8,
+    max_stack: u16,
+) {
+    let methods = class
+        .methods
+        .iter()
+        .filter(|method| {
+            class.constant_pool.utf8(method.name_index) == Ok(method_name)
+                && class.constant_pool.utf8(method.descriptor_index) == Ok(method_descriptor)
+        })
+        .collect::<Vec<_>>();
+    let [method] = methods.as_slice() else {
+        panic!("expected exactly one {method_name}{method_descriptor} getter");
+    };
+    assert!(method.access_flags.is_public());
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("getter {method_name} has one Code attribute");
+    };
+    assert_eq!(code.code.len(), 5);
+    assert_eq!(code.code[0], 0x2a, "getter starts with aload_0");
+    assert_eq!(code.code[1], 0xb4, "getter reads private backing field");
+    assert_eq!(code.code[4], return_opcode);
+    assert_eq!(code.max_stack, max_stack);
+    assert_eq!(code.max_locals, 1);
+    assert_field_reference_sequence(
+        class,
+        code.code,
+        &[(
+            0xb4,
+            class.constant_pool.class_name(class.this_class).unwrap(),
+            field_name,
+            field_descriptor,
+        )],
+    );
+}
+
+fn assert_emitted_setter(
+    class: &ClassFile<'_>,
+    method_name: &str,
+    method_descriptor: &str,
+    backing_field: (&str, &str),
+    load_opcode: u8,
+    stack_and_locals: (u16, u16),
+) {
+    let methods = class
+        .methods
+        .iter()
+        .filter(|method| {
+            class.constant_pool.utf8(method.name_index) == Ok(method_name)
+                && class.constant_pool.utf8(method.descriptor_index) == Ok(method_descriptor)
+        })
+        .collect::<Vec<_>>();
+    let [method] = methods.as_slice() else {
+        panic!("expected exactly one {method_name}{method_descriptor} setter");
+    };
+    assert!(method.access_flags.is_public());
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("setter {method_name} has one Code attribute");
+    };
+    assert_eq!(code.code.len(), 6);
+    assert_eq!(code.code[0], 0x2a, "setter starts with aload_0");
+    assert_eq!(
+        code.code[1], load_opcode,
+        "setter loads its exact parameter"
+    );
+    assert_eq!(
+        code.code[2], 0xb5,
+        "setter writes the private backing field"
+    );
+    assert_eq!(code.code[5], 0xb1, "setter returns JVM void");
+    assert_eq!(code.max_stack, stack_and_locals.0);
+    assert_eq!(code.max_locals, stack_and_locals.1);
+    assert_field_reference_sequence(
+        class,
+        code.code,
+        &[(
+            0xb5,
+            class.constant_pool.class_name(class.this_class).unwrap(),
+            backing_field.0,
+            backing_field.1,
+        )],
+    );
 }
 
 fn code_max_locals(class: &ClassFile<'_>, name: &str) -> u16 {
@@ -9340,6 +10722,20 @@ fn while_loops_reject_invalid_conditions_and_verify_calls_inside_control_flow() 
 }
 
 #[test]
+fn inherited_val_assignment_remains_rejected_by_typer() {
+    assert_source_batch_failure(
+        "inherited-val-assignment",
+        "class Parent { val id: Int = 1 }\nclass Child extends Parent { def update(): Unit = id = 2 }\n",
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Typer(TyperError::AssignmentTargetImmutable { .. })
+            )
+        },
+    );
+}
+
+#[test]
 fn unsupported_local_source_shapes_fail_at_their_pipeline_stage_without_artifacts() {
     assert_source_failure(
         "immutable-local-assignment",
@@ -9747,6 +11143,781 @@ fn verify_with_jdk(output_directory: &Path) {
 }
 
 #[test]
+fn real_source_accessor_calls_dispatch_through_validated_getters_and_setters() {
+    let source = r#"
+class Counter(val id: Int, var count: Long) {
+  val initial: Int = 10
+  var current: Long = 0L
+  def ownRead(): Long = this.count
+  def ownReadId(): Int = this.id
+  def ownUnqualifiedRead(): Long = count
+  def ownWrite(next: Long): Unit = this.count = next
+  def ownBodyRead(): Long = this.current
+  def ownBodyUnqualifiedRead(): Long = current
+  def ownBodyWrite(next: Long): Unit = this.current = next
+}
+class OtherCounter(var count: Long) {
+  var current: Long = 31L
+}
+class CounterFactory(var events: Int) {
+  def receiver(c: Counter): Counter = { events = events * 10 + 1; c }
+  def value(next: Long): Long = { events = events * 10 + 2; next }
+}
+class PrivateCounter {
+  private var count: Long = 0L
+  def read(): Long = this.count
+  def write(next: Long): Unit = this.count = next
+}
+class Reader {
+  def readInitial(c: Counter): Int = c.initial
+  def readCurrent(c: Counter): Long = c.current
+  def writeCurrent(c: Counter, next: Long): Unit = c.current = next
+  def localCurrent(c: Counter): Long = { val local = c; local.current }
+  def readOtherCurrent(c: OtherCounter): Long = c.current
+  def writeCurrentOnce(factory: CounterFactory, c: Counter, next: Long): Unit =
+    factory.receiver(c).current = factory.value(next)
+  def readId(c: Counter): Int = c.id
+  def readCount(c: Counter): Long = c.count
+  def write(c: Counter, next: Long): Unit = c.count = next
+  def nestedWrite(a: Counter, b: Counter): Unit = a.count = { b.count = 2L; 3L }
+  def readOther(c: OtherCounter): Long = c.count
+  def localRead(c: Counter): Long = { val local = c; local.count }
+  def localWrite(c: Counter, next: Long): Long = { val local = c; local.count = next; local.count }
+  def writeOnce(factory: CounterFactory, c: Counter, next: Long): Unit =
+    factory.receiver(c).count = factory.value(next)
+}
+"#;
+    let first_output = TestOutputDirectory::new("accessor-call-first");
+    let second_output = TestOutputDirectory::new("accessor-call-second");
+    let first = compile_source_batch(
+        source,
+        "AccessorCalls.scala",
+        first_output.path(),
+        SourceId::from_index(1562),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("real typed accessor selections and assignments lower through the call pipeline");
+    let second = compile_source_batch(
+        source,
+        "AccessorCalls.scala",
+        second_output.path(),
+        SourceId::from_index(1563),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("a fresh source session emits the same accessor call batch");
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        [
+            "Counter",
+            "OtherCounter",
+            "CounterFactory",
+            "PrivateCounter",
+            "Reader"
+        ]
+    );
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>()
+    );
+
+    let counter = decode_emitted_class_named(&first, "Counter");
+    let other_counter = decode_emitted_class_named(&first, "OtherCounter");
+    let private_counter = decode_emitted_class_named(&first, "PrivateCounter");
+    let reader = decode_emitted_class_named(&first, "Reader");
+
+    for (method, expected) in [
+        ("ownRead", &[(0xb6, "Counter", "count", "()J")][..]),
+        ("ownReadId", &[(0xb6, "Counter", "id", "()I")][..]),
+        (
+            "ownUnqualifiedRead",
+            &[(0xb6, "Counter", "count", "()J")][..],
+        ),
+        ("ownWrite", &[(0xb6, "Counter", "count_$eq", "(J)V")][..]),
+        ("ownBodyRead", &[(0xb6, "Counter", "current", "()J")][..]),
+        (
+            "ownBodyUnqualifiedRead",
+            &[(0xb6, "Counter", "current", "()J")][..],
+        ),
+        (
+            "ownBodyWrite",
+            &[(0xb6, "Counter", "current_$eq", "(J)V")][..],
+        ),
+    ] {
+        assert_invocation_sequence(&counter, emitted_method_code(&counter, method), expected);
+    }
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "readInitial"),
+        &[(0xb6, "Counter", "initial", "()I")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "readCurrent"),
+        &[(0xb6, "Counter", "current", "()J")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "writeCurrent"),
+        &[(0xb6, "Counter", "current_$eq", "(J)V")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "localCurrent"),
+        &[(0xb6, "Counter", "current", "()J")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "readOtherCurrent"),
+        &[(0xb6, "OtherCounter", "current", "()J")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "writeCurrentOnce"),
+        &[
+            (0xb6, "CounterFactory", "receiver", "(LCounter;)LCounter;"),
+            (0xb6, "CounterFactory", "value", "(J)J"),
+            (0xb6, "Counter", "current_$eq", "(J)V"),
+        ],
+    );
+    for method in ["ownBodyRead", "ownBodyUnqualifiedRead", "ownBodyWrite"] {
+        assert_no_field_reference_to_owner(
+            &counter,
+            emitted_method_code(&counter, method),
+            "Counter",
+        );
+    }
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "readId"),
+        &[(0xb6, "Counter", "id", "()I")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "readCount"),
+        &[(0xb6, "Counter", "count", "()J")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "write"),
+        &[(0xb6, "Counter", "count_$eq", "(J)V")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "nestedWrite"),
+        &[
+            (0xb6, "Counter", "count_$eq", "(J)V"),
+            (0xb6, "Counter", "count_$eq", "(J)V"),
+        ],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "readOther"),
+        &[(0xb6, "OtherCounter", "count", "()J")],
+    );
+    assert_field_reference(
+        &other_counter,
+        emitted_method_code(&other_counter, "count"),
+        0xb4,
+        "OtherCounter",
+        "count",
+        "J",
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "localRead"),
+        &[(0xb6, "Counter", "count", "()J")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "localWrite"),
+        &[
+            (0xb6, "Counter", "count_$eq", "(J)V"),
+            (0xb6, "Counter", "count", "()J"),
+        ],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "writeOnce"),
+        &[
+            (0xb6, "CounterFactory", "receiver", "(LCounter;)LCounter;"),
+            (0xb6, "CounterFactory", "value", "(J)J"),
+            (0xb6, "Counter", "count_$eq", "(J)V"),
+        ],
+    );
+    for method in [
+        "readInitial",
+        "readCurrent",
+        "writeCurrent",
+        "localCurrent",
+        "readOtherCurrent",
+        "writeCurrentOnce",
+        "readId",
+        "readCount",
+        "write",
+        "nestedWrite",
+        "readOther",
+        "localRead",
+        "localWrite",
+        "writeOnce",
+    ] {
+        assert_no_field_reference_to_owner(
+            &reader,
+            emitted_method_code(&reader, method),
+            "Counter",
+        );
+    }
+    assert_field_reference(
+        &private_counter,
+        emitted_method_code(&private_counter, "read"),
+        0xb4,
+        "PrivateCounter",
+        "count",
+        "J",
+    );
+    assert_field_reference(
+        &private_counter,
+        emitted_method_code(&private_counter, "write"),
+        0xb5,
+        "PrivateCounter",
+        "count",
+        "J",
+    );
+    assert_eq!(
+        methods_with_descriptors(&counter)
+            .iter()
+            .filter(|(name, _)| name.as_str() == "id" || name.as_str() == "count")
+            .map(|(name, descriptor)| (name.as_str(), descriptor.as_str()))
+            .collect::<Vec<_>>(),
+        [("id", "()I"), ("count", "()J")]
+    );
+    assert!(
+        !methods_with_descriptors(&counter)
+            .iter()
+            .any(|(name, _)| name == "id_$eq"),
+        "a val has no generated setter"
+    );
+    let counter_accessors = methods_with_descriptors(&counter)
+        .into_iter()
+        .filter(|(name, _)| {
+            matches!(
+                name.as_str(),
+                "id" | "count" | "initial" | "initial_$eq" | "current" | "current_$eq"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        counter_accessors,
+        [
+            ("id".to_owned(), "()I".to_owned()),
+            ("count".to_owned(), "()J".to_owned()),
+            ("initial".to_owned(), "()I".to_owned()),
+            ("current".to_owned(), "()J".to_owned()),
+            ("current_$eq".to_owned(), "(J)V".to_owned()),
+        ],
+        "constructor and body accessors keep their exact public ABI"
+    );
+
+    if require_jdk_or_skip() {
+        let harness = first_output.path().join("AccessorCallsHarness.java");
+        fs::write(
+            &harness,
+            r#"public final class AccessorCallsHarness {
+  private static void check(boolean condition, String label) { if (!condition) throw new AssertionError(label); }
+  public static void main(String[] args) {
+    Counter first = new Counter(7, 10L);
+    Counter second = new Counter(-3, 20L);
+    Reader reader = new Reader();
+    check(first.ownRead() == 10L && first.ownReadId() == 7 && first.ownUnqualifiedRead() == 10L, "this and unqualified getters");
+    check(reader.readId(first) == 7 && reader.readCount(first) == 10L, "parameter getters");
+    check(first.initial() == 10 && first.ownBodyRead() == 0L && first.ownBodyUnqualifiedRead() == 0L, "body field getters");
+    check(reader.readInitial(first) == 10 && reader.readCurrent(first) == 0L && reader.localCurrent(first) == 0L, "body field call sites");
+    reader.writeCurrent(first, Long.MIN_VALUE);
+    check(first.current() == Long.MIN_VALUE, "body var setter");
+    reader.writeCurrent(first, Long.MAX_VALUE);
+    check(first.current() == Long.MAX_VALUE, "body var setter width");
+    first.ownBodyWrite(-11L);
+    check(first.current() == -11L, "same-class body var setter");
+    check(second.current() == 0L, "body var instance isolation");
+    reader.write(first, Long.MIN_VALUE + 9);
+    check(first.count() == Long.MIN_VALUE + 9 && second.count() == 20L, "parameter setter and instance isolation");
+    Counter nestedA = new Counter(1, 10L);
+    Counter nestedB = new Counter(2, 20L);
+    reader.nestedWrite(nestedA, nestedB);
+    check(nestedA.count() == 3L && nestedB.count() == 2L, "nested assignments preserve outer receiver");
+    check(reader.localRead(second) == 20L, "stable local getter");
+    check(reader.localWrite(second, Long.MAX_VALUE - 4) == Long.MAX_VALUE - 4 && second.count() == Long.MAX_VALUE - 4, "stable local setter/getter and Long width");
+    OtherCounter other = new OtherCounter(31L);
+    check(reader.readOther(other) == 31L, "canonical same-named field owner");
+    check(reader.readOtherCurrent(other) == 31L, "same-spelled body field keeps its canonical owner");
+    CounterFactory factory = new CounterFactory(0);
+    reader.writeOnce(factory, first, 88L);
+    check(factory.events() == 12 && first.count() == 88L, "receiver then RHS exactly once");
+    factory.events_$eq(0);
+    reader.writeCurrentOnce(factory, first, 99L);
+    check(factory.events() == 12 && first.current() == 99L, "body setter receiver then RHS exactly once");
+    System.out.println("accessor calls ok");
+  }
+}
+"#,
+        )
+        .expect("write Java accessor call harness");
+        let classpath = first_output.path().to_str().expect("UTF-8 classpath");
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac for source accessor call harness");
+        assert!(
+            javac.status.success(),
+            "javac rejected AccessorCallsHarness.java\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "AccessorCallsHarness",
+            ])
+            .output()
+            .expect("start Java 21 verifier for source accessor call harness");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected accessor call classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "accessor calls ok"
+        );
+    }
+}
+
+#[test]
+fn class_body_accessor_acceptance_runs_body_only_and_parameterized_fixtures() {
+    let source = r#"
+class BodyOnly:
+  val seed: Int = 10
+  var enabled: Boolean = true
+  var ratio: Double = 1.5
+
+class Counter(val id: Int):
+  val initial: Int = 10
+  var current: Long = 0L
+  private var internal: Boolean = false
+  def snapshot(): Long = current
+  def updateInternal(value: Boolean): Unit = internal = value
+  def internalState(): Boolean = internal
+
+class Reader:
+  def read(c: Counter): Long = c.current
+  def initial(c: Counter): Int = c.initial
+  def write(c: Counter, next: Long): Unit = c.current = next
+  def readCurrent(c: Counter): Long =
+    val stable = c
+    stable.current
+"#;
+    let first_output = TestOutputDirectory::new("body-accessor-acceptance-first");
+    let second_output = TestOutputDirectory::new("body-accessor-acceptance-second");
+    let first = compile_source_batch(
+        source,
+        "BodyAccessorAcceptance.scala",
+        first_output.path(),
+        SourceId::from_index(1585),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("the complete class-body accessor acceptance batch compiles from real source");
+    let second = compile_source_batch(
+        source,
+        "BodyAccessorAcceptance.scala",
+        second_output.path(),
+        SourceId::from_index(1586),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("a fresh frontend session compiles the same acceptance batch");
+    let names = first
+        .iter()
+        .map(|artifact| artifact.class.internal_name())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["BodyOnly", "Counter", "Reader"]);
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| (
+                artifact.class.internal_name().to_owned(),
+                artifact.class.bytes().to_vec(),
+            ))
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| (
+                artifact.class.internal_name().to_owned(),
+                artifact.class.bytes().to_vec(),
+            ))
+            .collect::<Vec<_>>(),
+        "ordered complete classfile bytes are deterministic across fresh sessions"
+    );
+
+    let body_only = decode_emitted_class_named(&first, "BodyOnly");
+    let counter = decode_emitted_class_named(&first, "Counter");
+    let reader = decode_emitted_class_named(&first, "Reader");
+    let field_shapes = |class: &ClassFile<'_>| {
+        class
+            .fields
+            .iter()
+            .map(|field| {
+                (
+                    class
+                        .constant_pool
+                        .utf8(field.name_index)
+                        .unwrap()
+                        .to_owned(),
+                    class
+                        .constant_pool
+                        .utf8(field.descriptor_index)
+                        .unwrap()
+                        .to_owned(),
+                    field.access_flags,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let body_fields = field_shapes(&body_only);
+    assert_eq!(
+        body_fields
+            .iter()
+            .map(|(name, descriptor, _)| (name.as_str(), descriptor.as_str()))
+            .collect::<Vec<_>>(),
+        [("seed", "I"), ("enabled", "Z"), ("ratio", "D")]
+    );
+    assert!(body_fields[0].2.0 & 0x0002 != 0 && body_fields[0].2.0 & 0x0010 != 0);
+    assert!(
+        body_fields[1..]
+            .iter()
+            .all(|(_, _, flags)| flags.0 & 0x0002 != 0)
+    );
+    assert!(
+        body_fields[1..]
+            .iter()
+            .all(|(_, _, flags)| flags.0 & 0x0010 == 0)
+    );
+    let counter_fields = field_shapes(&counter);
+    assert_eq!(
+        counter_fields
+            .iter()
+            .map(|(name, descriptor, _)| (name.as_str(), descriptor.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("id", "I"),
+            ("initial", "I"),
+            ("current", "J"),
+            ("internal", "Z")
+        ]
+    );
+    assert!(counter_fields[0].2.0 & 0x0002 != 0 && counter_fields[0].2.0 & 0x0010 != 0);
+    assert!(counter_fields[1].2.0 & 0x0002 != 0 && counter_fields[1].2.0 & 0x0010 != 0);
+    assert!(
+        counter_fields[2..]
+            .iter()
+            .all(|(_, _, flags)| flags.0 & 0x0002 != 0)
+    );
+    assert!(
+        counter_fields[2..]
+            .iter()
+            .all(|(_, _, flags)| flags.0 & 0x0010 == 0)
+    );
+
+    let body_methods = methods_with_descriptors(&body_only);
+    assert!(
+        body_methods
+            .iter()
+            .any(|(name, descriptor)| name == "<init>" && descriptor == "()V")
+    );
+    for accessor in [
+        ("seed", "()I"),
+        ("enabled", "()Z"),
+        ("enabled_$eq", "(Z)V"),
+        ("ratio", "()D"),
+        ("ratio_$eq", "(D)V"),
+    ] {
+        assert!(
+            body_methods
+                .iter()
+                .any(|(name, descriptor)| (name.as_str(), descriptor.as_str()) == accessor)
+        );
+    }
+    assert!(!body_methods.iter().any(|(name, _)| name == "seed_$eq"));
+    let counter_methods = methods_with_descriptors(&counter);
+    for accessor in [
+        ("<init>", "(I)V"),
+        ("id", "()I"),
+        ("initial", "()I"),
+        ("current", "()J"),
+        ("current_$eq", "(J)V"),
+        ("snapshot", "()J"),
+        ("updateInternal", "(Z)V"),
+        ("internalState", "()Z"),
+    ] {
+        assert!(
+            counter_methods
+                .iter()
+                .any(|(name, descriptor)| (name.as_str(), descriptor.as_str()) == accessor)
+        );
+    }
+    for immutable in ["id_$eq", "initial_$eq", "internal", "internal_$eq"] {
+        assert!(!counter_methods.iter().any(|(name, _)| name == immutable));
+    }
+    assert!(
+        !counter_methods
+            .iter()
+            .any(|(name, descriptor)| { name == "<init>" && descriptor == "()V" })
+    );
+    for (class, public_methods) in [
+        (
+            &body_only,
+            [
+                ("<init>", "()V"),
+                ("seed", "()I"),
+                ("enabled", "()Z"),
+                ("enabled_$eq", "(Z)V"),
+                ("ratio", "()D"),
+                ("ratio_$eq", "(D)V"),
+            ]
+            .as_slice(),
+        ),
+        (
+            &counter,
+            [
+                ("<init>", "(I)V"),
+                ("id", "()I"),
+                ("initial", "()I"),
+                ("current", "()J"),
+                ("current_$eq", "(J)V"),
+            ]
+            .as_slice(),
+        ),
+    ] {
+        for (expected_name, expected_descriptor) in public_methods {
+            assert!(class.methods.iter().any(|method| {
+                class.constant_pool.utf8(method.name_index).unwrap() == *expected_name
+                    && class.constant_pool.utf8(method.descriptor_index).unwrap()
+                        == *expected_descriptor
+                    && method.access_flags.0 & 0x0001 != 0
+            }));
+        }
+    }
+
+    assert_field_reference_sequence(
+        &body_only,
+        emitted_method_code(&body_only, "<init>"),
+        &[
+            (0xb5, "BodyOnly", "seed", "I"),
+            (0xb5, "BodyOnly", "enabled", "Z"),
+            (0xb5, "BodyOnly", "ratio", "D"),
+        ],
+    );
+    for (method, opcode, field, descriptor) in [
+        ("seed", 0xb4, "seed", "I"),
+        ("enabled", 0xb4, "enabled", "Z"),
+        ("enabled_$eq", 0xb5, "enabled", "Z"),
+        ("ratio", 0xb4, "ratio", "D"),
+        ("ratio_$eq", 0xb5, "ratio", "D"),
+    ] {
+        assert_field_reference(
+            &body_only,
+            emitted_method_code(&body_only, method),
+            opcode,
+            "BodyOnly",
+            field,
+            descriptor,
+        );
+    }
+    assert_invocation_sequence(
+        &body_only,
+        emitted_method_code(&body_only, "<init>"),
+        &[(0xb7, "java/lang/Object", "<init>", "()V")],
+    );
+    assert_field_reference_sequence(
+        &counter,
+        emitted_method_code(&counter, "<init>"),
+        &[
+            (0xb5, "Counter", "id", "I"),
+            (0xb5, "Counter", "initial", "I"),
+            (0xb5, "Counter", "current", "J"),
+            (0xb5, "Counter", "internal", "Z"),
+        ],
+    );
+    for (method, opcode, field, descriptor) in [
+        ("id", 0xb4, "id", "I"),
+        ("initial", 0xb4, "initial", "I"),
+        ("current", 0xb4, "current", "J"),
+        ("current_$eq", 0xb5, "current", "J"),
+    ] {
+        assert_field_reference(
+            &counter,
+            emitted_method_code(&counter, method),
+            opcode,
+            "Counter",
+            field,
+            descriptor,
+        );
+    }
+    assert_invocation_sequence(
+        &counter,
+        emitted_method_code(&counter, "<init>"),
+        &[(0xb7, "java/lang/Object", "<init>", "()V")],
+    );
+    assert_invocation_sequence(
+        &counter,
+        emitted_method_code(&counter, "snapshot"),
+        &[(0xb6, "Counter", "current", "()J")],
+    );
+    assert_field_reference(
+        &counter,
+        emitted_method_code(&counter, "updateInternal"),
+        0xb5,
+        "Counter",
+        "internal",
+        "Z",
+    );
+    assert_field_reference(
+        &counter,
+        emitted_method_code(&counter, "internalState"),
+        0xb4,
+        "Counter",
+        "internal",
+        "Z",
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "read"),
+        &[(0xb6, "Counter", "current", "()J")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "initial"),
+        &[(0xb6, "Counter", "initial", "()I")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "write"),
+        &[(0xb6, "Counter", "current_$eq", "(J)V")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "readCurrent"),
+        &[(0xb6, "Counter", "current", "()J")],
+    );
+    for method in ["read", "initial", "write", "readCurrent"] {
+        assert_no_field_reference_to_owner(
+            &reader,
+            emitted_method_code(&reader, method),
+            "Counter",
+        );
+    }
+
+    if require_jdk_or_skip() {
+        for class_name in ["BodyOnly", "Counter", "Reader"] {
+            let javap = Command::new("javap")
+                .args([
+                    "-c",
+                    "-v",
+                    "-p",
+                    "-classpath",
+                    first_output.path().to_str().unwrap(),
+                    class_name,
+                ])
+                .output()
+                .expect("start javap for class-body accessor acceptance");
+            assert!(
+                javap.status.success(),
+                "javap rejected {class_name}: {}",
+                String::from_utf8_lossy(&javap.stderr)
+            );
+            assert!(String::from_utf8_lossy(&javap.stdout).contains("major version: 65"));
+        }
+
+        let harness = first_output
+            .path()
+            .join("BodyAccessorAcceptanceHarness.java");
+        fs::write(
+            &harness,
+            r#"public final class BodyAccessorAcceptanceHarness {
+  private static void check(boolean condition, String label) { if (!condition) throw new AssertionError(label); }
+  public static void main(String[] args) {
+    BodyOnly body = new BodyOnly();
+    check(body.seed() == 10 && body.enabled() && body.ratio() == 1.5, "body-only getters");
+    body.enabled_$eq(false);
+    body.ratio_$eq(-0.0d);
+    check(!body.enabled() && Double.doubleToRawLongBits(body.ratio()) == Double.doubleToRawLongBits(-0.0d), "Boolean and Double setters");
+    Counter first = new Counter(7);
+    Counter second = new Counter(-3);
+    Reader reader = new Reader();
+    check(first.id() == 7 && first.initial() == 10 && first.current() == 0L, "constructor and body getters");
+    check(reader.read(first) == 0L && reader.initial(first) == 10 && reader.readCurrent(first) == 0L, "cross-class getters");
+    reader.write(first, Long.MIN_VALUE);
+    check(first.current() == Long.MIN_VALUE && reader.readCurrent(first) == Long.MIN_VALUE, "Long minimum setter");
+    reader.write(first, Long.MAX_VALUE);
+    check(first.current() == Long.MAX_VALUE && second.current() == 0L, "Long maximum and instance isolation");
+    first.updateInternal(true);
+    check(first.internalState() && !second.internalState(), "private field stays behind declared methods");
+  }
+}
+"#,
+        )
+        .expect("write Java 21 class-body accessor acceptance harness");
+        let classpath = first_output.path().to_str().expect("UTF-8 classpath");
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac for class-body accessor acceptance harness");
+        assert!(
+            javac.status.success(),
+            "javac rejected the acceptance harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "BodyAccessorAcceptanceHarness",
+            ])
+            .output()
+            .expect("start Java 21 verifier for class-body accessor acceptance");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected the acceptance classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
+
+#[test]
 fn constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends() {
     let source = "class Measurement(val id: Int, var value: Double)\nclass Mixed(first: Int, val count: Long, var enabled: Boolean)\nclass LongBox(var count: Long)\n";
     let first_output = TestOutputDirectory::new("constructor-accessor-source-first");
@@ -9812,7 +11983,7 @@ fn constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends(
                     let accessor = class_metadata
                         .accessors()
                         .iter()
-                        .find(|accessor| accessor.constructor_parameter() == formal);
+                        .find(|accessor| accessor.constructor_parameter() == Some(formal));
                     if name == "first" {
                         assert!(
                             accessor.is_none(),
@@ -9832,7 +12003,7 @@ fn constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends(
                         )
                     );
                     assert_eq!(accessor.source_field(), source_field);
-                    assert_eq!(accessor.constructor_parameter(), formal);
+                    assert_eq!(accessor.constructor_parameter(), Some(formal));
                     assert_eq!(accessor.owner(), class);
                     assert_eq!(accessor.source_ordinal(), ordinal);
                     assert_eq!(accessor.is_mutable(), mutable);
@@ -10564,6 +12735,162 @@ fn multi_class_source_backend_failure_publishes_no_classes() {
         output.class_files().is_empty(),
         "a later class failure must not publish the earlier valid class"
     );
+}
+
+#[test]
+fn body_field_initializer_failure_keeps_a_multi_class_batch_unpublished() {
+    let output = TestOutputDirectory::new("body-field-initializer-batch-failure");
+    let result = compile_source_classes(
+        "class Ready { val value: Int = 10 }\nclass Broken { val first: Int = later; val later: Int = 2 }",
+        "BodyFieldBatch.scala",
+        output.path(),
+    );
+    assert!(matches!(
+        result,
+        Err(PipelineFailure::Codegen(
+            JvmCodegenError::FieldInitializerReadsUninitializedField { .. }
+        ))
+    ));
+    assert!(
+        output.class_files().is_empty(),
+        "a later body initialization error must not publish the earlier valid class"
+    );
+}
+
+#[test]
+fn public_body_field_rejections_keep_source_batches_unpublished() {
+    let cases: [SourceFailureExpectation; 11] = [
+        (
+            "public-body-missing-rhs",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(JvmCodegenError::MissingFieldInitializer { .. })
+                )
+            },
+        ),
+        (
+            "public-body-wrong-rhs",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = true }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Typer(TyperError::ExpectedExpressionTypeMismatch { .. })
+                )
+            },
+        ),
+        (
+            "public-body-duplicate-field",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = 1; var value: Int = 2 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(JvmCodegenError::DuplicateJvmFieldName { .. })
+                )
+            },
+        ),
+        (
+            "public-body-getter-collision",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = 1; def value(): Int = 2 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(
+                        JvmCodegenError::DuplicateJvmAccessorMethodIdentity { .. }
+                    )
+                )
+            },
+        ),
+        (
+            "public-body-setter-collision",
+            "class Ready { def id(): Int = 1 }\nclass Broken { var value: Int = 1; def value_=(next: Int): Unit = {} }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(
+                        JvmCodegenError::DuplicateJvmAccessorMethodIdentity { .. }
+                    )
+                )
+            },
+        ),
+        (
+            "public-body-immutable-assignment",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = 1; def update(): Unit = value = 2 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Typer(TyperError::AssignmentTargetImmutable { .. })
+                )
+            },
+        ),
+        (
+            "public-body-invalid-receiver",
+            "class Ready { def id(): Int = 1 }\nclass Broken { def read(value: Int): Int = value.amount }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Typer(TyperError::MemberNotFound { .. })
+                )
+            },
+        ),
+        (
+            "public-body-field-called-as-method",
+            "class Ready { def id(): Int = 1 }\nclass Broken { val value: Int = 1; def read(): Int = value() }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Typer(TyperError::ApplicationCalleeNotMethod { .. })
+                )
+            },
+        ),
+        (
+            "public-body-unsupported-protected-field",
+            "class Ready { def id(): Int = 1 }\nclass Broken { protected val value: Int = 1 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmVisibility { .. })
+                )
+            },
+        ),
+        (
+            "public-body-unsupported-private-this-field",
+            "class Ready { def id(): Int = 1 }\nclass Broken { private[this] val value: Int = 1 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(
+                        JvmCodegenError::UnsupportedJvmFieldSourceVisibility { .. }
+                    )
+                )
+            },
+        ),
+        (
+            "public-body-unsupported-lazy-field",
+            "class Ready { def id(): Int = 1 }\nclass Broken { lazy val value: Int = 1 }",
+            |failure| {
+                matches!(
+                    failure,
+                    PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmFieldFlag { .. })
+                )
+            },
+        ),
+    ];
+
+    for (label, source, expected_failure) in cases {
+        let output = TestOutputDirectory::new(label);
+        let failure = compile_source_classes(source, &format!("{label}.scala"), output.path())
+            .expect_err("invalid public-body source batch must fail before publication");
+        assert!(
+            expected_failure(&failure),
+            "{label} failed at an unexpected first pipeline stage: {failure:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label} failure must not publish an earlier valid class"
+        );
+    }
 }
 
 #[test]
@@ -17031,6 +19358,58 @@ fn unsupported_real_field_and_constructor_sources_fail_without_artifacts() {
         "class ImmutableAssignment { private val seed: Int = 1; def update(): Unit = seed = 2 }",
         |failure| matches!(failure, PipelineFailure::Typer(_)),
     );
+    assert_source_failure(
+        "implicit-noarg-forward-field-read",
+        "class ForwardRead { val first: Int = later; val later: Int = 2 }",
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Codegen(
+                    JvmCodegenError::FieldInitializerReadsUninitializedField { .. }
+                )
+            )
+        },
+    );
+    assert_source_failure(
+        "implicit-noarg-this-escape",
+        "class ThisEscape { val next: ThisEscape = this }",
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Codegen(
+                    JvmCodegenError::UnsupportedJvmReferenceType { .. }
+                        | JvmCodegenError::UnsupportedConstructorFieldInitializer { .. }
+                )
+            )
+        },
+    );
+    let private_noarg_output = TestOutputDirectory::new("private-explicit-noarg-constructor");
+    let private_noarg = compile_source(
+        "class Hidden private () { val value: Int = 1 }",
+        "PrivateNoArg.scala",
+        private_noarg_output.path(),
+    )
+    .expect("an explicit private no-arg constructor keeps its declared access");
+    let mut private_noarg_reader = Reader::new(private_noarg.class.bytes());
+    let private_noarg_class = ClassFile::decode(&mut private_noarg_reader)
+        .expect("decode class with explicit private constructor");
+    let constructors = private_noarg_class
+        .methods
+        .iter()
+        .filter(|method| private_noarg_class.constant_pool.utf8(method.name_index) == Ok("<init>"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        constructors.len(),
+        1,
+        "no duplicate public no-arg constructor"
+    );
+    assert_eq!(
+        private_noarg_class
+            .constant_pool
+            .utf8(constructors[0].descriptor_index),
+        Ok("()V")
+    );
+    assert!(constructors[0].access_flags.is_private());
     for (label, source) in [
         (
             "defaulted-constructor-parameter",
@@ -17197,6 +19576,15 @@ fn decode_emitted_class(artifact: &EmittedArtifact) -> ClassFile<'_> {
     class
 }
 
+fn decode_emitted_class_named<'a>(artifacts: &'a [EmittedArtifact], name: &str) -> ClassFile<'a> {
+    decode_emitted_class(
+        artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == name)
+            .unwrap_or_else(|| panic!("missing emitted class {name}")),
+    )
+}
+
 fn methods_with_descriptors(class: &ClassFile<'_>) -> Vec<(String, String)> {
     class
         .methods
@@ -17317,6 +19705,27 @@ fn assert_field_reference_sequence(
         actual, expected,
         "unexpected ordered field references in code"
     );
+}
+
+fn assert_no_field_reference_to_owner(class: &ClassFile<'_>, code: &[u8], owner: &str) {
+    for (offset, opcode) in decode_subset_instructions(code) {
+        if !matches!(opcode, 0xb4 | 0xb5) {
+            continue;
+        }
+        let index = u16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+        let ConstantPoolEntry::Fieldref { class_index, .. } = class
+            .constant_pool
+            .get(ConstantPoolIndex(index))
+            .expect("field access references a constant-pool entry")
+        else {
+            panic!("field access must reference Fieldref");
+        };
+        assert_ne!(
+            class.constant_pool.class_name(*class_index),
+            Ok(owner),
+            "external accessor call must not access private backing storage"
+        );
+    }
 }
 
 fn assert_javap_instruction_sequence(output: &str, method_header: &str, expected: &[&str]) {
@@ -18010,16 +20419,735 @@ fn verify_private_fields_with_jdk(output_directory: &Path) {
 }
 
 #[test]
-fn public_primitive_field_storage_is_rejected_without_an_artifact() {
-    assert_source_failure(
-        "public-field",
-        "class PublicField():\n  val seed: Int = 1",
-        |failure| {
-            matches!(
-                failure,
-                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmVisibility { .. })
-            )
-        },
+fn public_body_accessors_initialize_and_emit_verified_getters_and_setters() {
+    let source_text = "class BodyOnly:\n  val seed: Int = 10\n  var enabled: Boolean = true\n  val ratio: Double = 1.5\n  var score: Float = -2.25f\n  var rate: Double = 1.5\n\nclass Counter(val id: Int):\n  val initial: Int = 10\n  var current: Long = 0L\n  private val copied: Int = initial\n\nclass Holder(value: Counter):\n  var selected: Counter = value";
+    let output = TestOutputDirectory::new("public-body-field-initialization");
+    let mut observed = false;
+    let mut observe = |ast: &AstArena<Untyped>,
+                       index: &SourceSemanticIndex,
+                       unit: &mut JvmCompilationUnit<'_>,
+                       definitions: &Definitions| {
+        observed = true;
+        unit.validate()
+            .expect("the source-proven public body field plans validate");
+        let metadata = unit
+            .metadata(definitions)
+            .expect("the public fields project to checked private backing metadata");
+
+        for (
+            class_name,
+            expected_body_fields,
+            expected_source_fields,
+            expected_private_fields,
+            expected_constructor_accessors,
+        ) in [
+            (
+                "BodyOnly",
+                &["seed", "enabled", "ratio", "score", "rate"][..],
+                &["seed", "enabled", "ratio", "score", "rate"][..],
+                0,
+                0,
+            ),
+            (
+                "Counter",
+                &["initial", "current"][..],
+                &["initial", "current", "copied"][..],
+                1,
+                1,
+            ),
+            ("Holder", &["selected"][..], &["selected"][..], 0, 0),
+        ] {
+            let class = audit_class_named(unit, class_name);
+            let plan = unit
+                .classes
+                .iter()
+                .find(|plan| plan.class == class)
+                .expect("source class has a plan");
+            if class_name == "BodyOnly" {
+                assert!(matches!(
+                    plan.initialization,
+                    JvmClassInitializationPlan::ImplicitNoArg
+                ));
+            } else {
+                assert!(matches!(
+                    plan.initialization,
+                    JvmClassInitializationPlan::PrimaryConstructor(_)
+                ));
+            }
+            assert_eq!(plan.fields.len(), expected_source_fields.len());
+            assert_eq!(
+                plan.fields
+                    .iter()
+                    .map(|field| unit
+                        .store
+                        .names
+                        .resolve(unit.store.symbols.get(field.field).name.text())
+                        .to_owned())
+                    .collect::<Vec<_>>(),
+                expected_source_fields
+            );
+            let body_field_plans = plan
+                .fields
+                .iter()
+                .filter(|field| {
+                    matches!(
+                        field.source_visibility,
+                        JvmFieldSourceVisibility::PlainPublic(_)
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                body_field_plans
+                    .iter()
+                    .map(|field| {
+                        let field = *field;
+                        let JvmFieldSourceVisibility::PlainPublic(proof) = field.source_visibility
+                        else {
+                            panic!("ordinary public body field carries its checked source proof");
+                        };
+                        assert_eq!(proof.class(), class);
+                        assert_eq!(proof.field(), field.field);
+                        let symbol = unit.store.symbols.get(field.field);
+                        assert_eq!(symbol.kind, SymbolKind::Field);
+                        assert_eq!(symbol.owner, Some(class));
+                        assert_eq!(symbol.visibility, Visibility::Public);
+                        let dotty_core::SymbolInfo::Complete(_field_type) = symbol.info else {
+                            panic!("public body field type should be complete");
+                        };
+                        assert_eq!(proof.mutable(), symbol.flags.contains(SymbolFlags::MUTABLE));
+                        let initializer = field.initializer.expect("source field has an RHS");
+                        let source_definition = index
+                            .definition_of(field.field)
+                            .expect("body field has canonical source provenance");
+                        let SourceDefinition::Canonical { source, tree } = source_definition else {
+                            panic!("class-body field must keep its canonical source tree");
+                        };
+                        assert_eq!(
+                            source,
+                            SourceId::from_index(1479),
+                            "canonical source identity belongs to this source unit"
+                        );
+                        let TreeKind::ValDef(definition) = &ast.get(tree).kind else {
+                            panic!("field provenance points to its source ValDef");
+                        };
+                        assert_eq!(
+                            proof.mutable(),
+                            definition
+                                .metadata
+                                .modifiers
+                                .contains(&dotty_core::ast::Modifier::Var)
+                        );
+                        assert!(definition.metadata.visibility.is_none());
+                        let rhs = definition.rhs.expect("source field has an RHS");
+                        assert_eq!(proof.source(), source);
+                        assert_eq!(proof.declaration(), tree);
+                        assert_eq!(
+                            proof.template_position(),
+                            expected_body_fields
+                                .iter()
+                                .position(
+                                    |name| *name == unit.store.names.resolve(symbol.name.text())
+                                )
+                                .unwrap()
+                        );
+                        assert_eq!(proof.rhs(), rhs);
+                        assert_eq!(proof.initializer(), initializer);
+                        unit.store.names.resolve(symbol.name.text()).to_owned()
+                    })
+                    .collect::<Vec<_>>(),
+                expected_body_fields
+            );
+
+            let class_metadata = metadata
+                .iter()
+                .find(|metadata| metadata.identity().symbol() == class)
+                .expect("class has validated metadata");
+            assert_eq!(class_metadata.fields().len(), expected_private_fields);
+            assert_eq!(
+                class_metadata.accessors().len(),
+                expected_body_fields.len() + expected_constructor_accessors
+            );
+            if expected_constructor_accessors == 1 {
+                assert!(class_metadata.accessors().iter().any(|accessor| {
+                    matches!(
+                        accessor.origin(),
+                        dotty_jvm::JvmAccessorOrigin::ConstructorParameter(_)
+                    )
+                }));
+            }
+            for field_plan in &body_field_plans {
+                let field_plan = *field_plan;
+                let accessor = class_metadata
+                    .accessors()
+                    .iter()
+                    .find(|accessor| accessor.source_field() == field_plan.field)
+                    .expect("each source body field has an accessor projection");
+                let expected_descriptor = match unit
+                    .store
+                    .names
+                    .resolve(unit.store.symbols.get(field_plan.field).name.text())
+                {
+                    "seed" => "I",
+                    "enabled" => "Z",
+                    "ratio" => "D",
+                    "score" => "F",
+                    "rate" => "D",
+                    "initial" => "I",
+                    "current" => "J",
+                    "selected" => "LCounter;",
+                    _ => panic!("source field has a covered primitive type"),
+                };
+                assert_eq!(accessor.field_descriptor(), expected_descriptor);
+                assert!(matches!(
+                    accessor.origin(),
+                    dotty_jvm::JvmAccessorOrigin::ClassBodyField(proof)
+                        if proof.initializer() == field_plan.initializer.unwrap()
+                ));
+                assert!(
+                    accessor
+                        .field_access_flags()
+                        .contains(dotty_classfile::access_flags::ACC_PRIVATE)
+                );
+                assert_eq!(
+                    accessor
+                        .field_access_flags()
+                        .contains(dotty_classfile::access_flags::ACC_FINAL),
+                    !unit
+                        .store
+                        .symbols
+                        .get(field_plan.field)
+                        .flags
+                        .contains(SymbolFlags::MUTABLE)
+                );
+                assert_eq!(
+                    accessor.getter().name(),
+                    unit.store
+                        .names
+                        .resolve(unit.store.symbols.get(field_plan.field).name.text())
+                );
+                assert_eq!(
+                    accessor.getter().descriptor().as_str(),
+                    &format!("(){expected_descriptor}")
+                );
+                assert_eq!(
+                    accessor.setter().is_some(),
+                    unit.store
+                        .symbols
+                        .get(field_plan.field)
+                        .flags
+                        .contains(SymbolFlags::MUTABLE)
+                );
+                if let Some(setter) = accessor.setter() {
+                    assert_eq!(setter.name(), &format!("{}_$eq", accessor.field_name()));
+                    assert_eq!(
+                        setter.descriptor().as_str(),
+                        &format!("({expected_descriptor})V")
+                    );
+                    assert!(setter.access_flags().is_public());
+                }
+            }
+            let initializers = unit
+                .lower_constructor_field_initializers(class, definitions)
+                .expect("public body fields lower through their checked typed RHS proofs");
+            assert_eq!(initializers.fields().len(), expected_source_fields.len());
+            assert_eq!(
+                initializers
+                    .fields()
+                    .iter()
+                    .map(|initializer| initializer.field())
+                    .collect::<Vec<_>>(),
+                plan.fields
+                    .iter()
+                    .map(|field| field.field)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                initializers
+                    .fields()
+                    .iter()
+                    .map(|initializer| {
+                        let origin = match plan
+                            .fields
+                            .iter()
+                            .find(|field| field.field == initializer.field())
+                            .expect("initializer has its source field plan")
+                            .source_visibility
+                        {
+                            JvmFieldSourceVisibility::PlainPublic(_) => {
+                                dotty_jvm::JvmConstructorFieldInitializerOrigin::ClassBodyAccessor
+                            }
+                            JvmFieldSourceVisibility::PlainPrivate => {
+                                dotty_jvm::JvmConstructorFieldInitializerOrigin::PrivateField
+                            }
+                            JvmFieldSourceVisibility::PrivateThis => {
+                                panic!("private[this] fields are outside initialization scope")
+                            }
+                        };
+                        assert_eq!(initializer.origin(), origin);
+                        unit.store
+                            .names
+                            .resolve(unit.store.symbols.get(initializer.field()).name.text())
+                    })
+                    .collect::<Vec<_>>(),
+                expected_source_fields
+            );
+
+            if expected_body_fields.len() > 1 {
+                let class_index = unit
+                    .classes
+                    .iter()
+                    .position(|candidate| candidate.class == class)
+                    .expect("source class has a mutable plan");
+                unit.classes[class_index].fields.swap(0, 1);
+                assert!(matches!(
+                    unit.validate(),
+                    Err(JvmCodegenError::OutOfOrderPublicBodyFieldPlan {
+                        class: found_class,
+                        ..
+                    }) if found_class == class
+                ));
+                unit.classes[class_index].fields.swap(0, 1);
+                unit.validate()
+                    .expect("restoring source order restores the validated plan");
+            }
+
+            if class_name == "Counter" {
+                let class_index = unit
+                    .classes
+                    .iter()
+                    .position(|candidate| candidate.class == class)
+                    .expect("Counter has a mutable class plan");
+                let private_index = unit.classes[class_index]
+                    .fields
+                    .iter()
+                    .position(|field| {
+                        matches!(
+                            field.source_visibility,
+                            JvmFieldSourceVisibility::PlainPrivate
+                        )
+                    })
+                    .expect("Counter includes a private body field");
+                unit.classes[class_index].fields.swap(0, private_index);
+                assert!(matches!(
+                    unit.validate(),
+                    Err(JvmCodegenError::OutOfOrderFieldPlan {
+                        class: found_class,
+                        ..
+                    }) if found_class == class
+                ));
+                unit.classes[class_index].fields.swap(0, private_index);
+                unit.validate()
+                    .expect("restoring mixed visibility field order restores the plan");
+            }
+
+            if class_name == "BodyOnly" {
+                let current_plan = unit
+                    .classes
+                    .iter()
+                    .find(|candidate| candidate.class == class)
+                    .expect("source class has a plan after order validation");
+                let first_field = current_plan.fields[0];
+                let second_field = current_plan.fields[1];
+                let JvmFieldSourceVisibility::PlainPublic(first_proof) =
+                    first_field.source_visibility
+                else {
+                    panic!("the first public field carries checked source evidence");
+                };
+                let JvmFieldSourceVisibility::PlainPublic(second_proof) =
+                    second_field.source_visibility
+                else {
+                    panic!("the second public field carries checked source evidence");
+                };
+                let mut forged_index = dotty_core::SourceTypedIndex::new();
+                forged_index
+                    .insert(
+                        first_proof.source(),
+                        first_proof.rhs(),
+                        second_proof.initializer(),
+                    )
+                    .expect("the fresh source map can hold the fabricated binding");
+                assert!(matches!(
+                    JvmPublicBodyFieldSourceProof::from_source(
+                        class,
+                        first_field.field,
+                        first_proof.source(),
+                        first_proof.declaration(),
+                        second_proof.initializer(),
+                        ast,
+                        index,
+                        &forged_index,
+                        unit.typed_ast,
+                        unit.store,
+                    ),
+                    Err(JvmCodegenError::InvalidPublicBodyFieldSourceProof { field })
+                        if field == first_field.field
+                ));
+                assert!(matches!(
+                    JvmPublicBodyFieldSourceProof::from_source(
+                        class,
+                        first_field.field,
+                        first_proof.source(),
+                        first_proof.declaration(),
+                        first_proof.initializer(),
+                        ast,
+                        index,
+                        &dotty_core::SourceTypedIndex::new(),
+                        unit.typed_ast,
+                        unit.store,
+                    ),
+                    Err(JvmCodegenError::InvalidPublicBodyFieldSourceProof { field })
+                        if field == first_field.field
+                ));
+            }
+        }
+    };
+
+    let first_artifacts = compile_source_batch_with_source_observer(
+        source_text,
+        "BodyFields.scala",
+        output.path(),
+        SourceId::from_index(1479),
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe,
+    )
+    .expect("public class-body backing fields initialize in both constructor shapes");
+    assert!(
+        observed,
+        "plan validation runs before the emission boundary"
+    );
+    assert_eq!(output.class_files().len(), 3);
+    let second_output = TestOutputDirectory::new("public-body-field-initialization-second");
+    let second_artifacts = compile_source_batch(
+        source_text,
+        "BodyFields.scala",
+        second_output.path(),
+        SourceId::from_index(1479),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("a fresh frontend session emits the same body-field classes");
+    assert_eq!(first_artifacts.len(), 3);
+    assert_eq!(first_artifacts.len(), second_artifacts.len());
+    assert!(
+        first_artifacts
+            .iter()
+            .zip(&second_artifacts)
+            .all(|(first, second)| {
+                first.class.internal_name() == second.class.internal_name()
+                    && first.class.bytes() == second.class.bytes()
+            })
+    );
+
+    let output_path = output.path().to_str().expect("UTF-8 output path");
+    let body_only_bytes =
+        fs::read(output.path().join("BodyOnly.class")).expect("read emitted BodyOnly class file");
+    let mut body_only_reader = Reader::new(&body_only_bytes);
+    let body_only = ClassFile::decode(&mut body_only_reader).expect("decode BodyOnly class file");
+    assert!(body_only_reader.is_at_end());
+    body_only
+        .validate_references()
+        .expect("valid BodyOnly references");
+    assert_eq!(body_only.version.major, JVM_CLASSFILE_MAJOR_VERSION);
+    assert_field_reference_sequence(
+        &body_only,
+        emitted_method_code(&body_only, "<init>"),
+        &[
+            (0xb5, "BodyOnly", "seed", "I"),
+            (0xb5, "BodyOnly", "enabled", "Z"),
+            (0xb5, "BodyOnly", "ratio", "D"),
+            (0xb5, "BodyOnly", "score", "F"),
+            (0xb5, "BodyOnly", "rate", "D"),
+        ],
+    );
+    let body_only_constructor = emitted_method_code(&body_only, "<init>");
+    assert_eq!(
+        decode_subset_instructions(body_only_constructor)[..2],
+        [(0, 0x2a), (1, 0xb7)]
+    );
+    assert_method_reference(
+        &body_only,
+        body_only_constructor,
+        0xb7,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+    );
+    let counter_bytes =
+        fs::read(output.path().join("Counter.class")).expect("read emitted Counter class file");
+    let mut counter_reader = Reader::new(&counter_bytes);
+    let counter = ClassFile::decode(&mut counter_reader).expect("decode Counter class file");
+    assert!(counter_reader.is_at_end());
+    counter
+        .validate_references()
+        .expect("valid Counter references");
+    assert_eq!(counter.version.major, JVM_CLASSFILE_MAJOR_VERSION);
+    assert_field_reference_sequence(
+        &counter,
+        emitted_method_code(&counter, "<init>"),
+        &[
+            (0xb5, "Counter", "id", "I"),
+            (0xb5, "Counter", "initial", "I"),
+            (0xb5, "Counter", "current", "J"),
+            (0xb4, "Counter", "initial", "I"),
+            (0xb5, "Counter", "copied", "I"),
+        ],
+    );
+    let holder_bytes =
+        fs::read(output.path().join("Holder.class")).expect("read emitted Holder class file");
+    let mut holder_reader = Reader::new(&holder_bytes);
+    let holder = ClassFile::decode(&mut holder_reader).expect("decode Holder class file");
+    assert!(holder_reader.is_at_end());
+    holder
+        .validate_references()
+        .expect("valid Holder references");
+    assert_eq!(holder.version.major, JVM_CLASSFILE_MAJOR_VERSION);
+    let counter_constructor = emitted_method_code(&counter, "<init>");
+    assert_eq!(
+        decode_subset_instructions(counter_constructor)[..2],
+        [(0, 0x2a), (1, 0xb7)]
+    );
+    assert_method_reference(
+        &counter,
+        counter_constructor,
+        0xb7,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+    );
+    assert_eq!(
+        body_only
+            .methods
+            .iter()
+            .filter_map(|method| body_only.constant_pool.utf8(method.name_index).ok())
+            .collect::<Vec<_>>(),
+        [
+            "<init>",
+            "seed",
+            "enabled",
+            "enabled_$eq",
+            "ratio",
+            "score",
+            "score_$eq",
+            "rate",
+            "rate_$eq"
+        ]
+    );
+    let body_only_constructor = body_only
+        .methods
+        .iter()
+        .find(|method| body_only.constant_pool.utf8(method.name_index) == Ok("<init>"))
+        .expect("BodyOnly has one generated constructor");
+    assert!(body_only_constructor.access_flags.is_public());
+    assert_eq!(
+        body_only
+            .constant_pool
+            .utf8(body_only_constructor.descriptor_index),
+        Ok("()V")
+    );
+    let counter_method_names = counter
+        .methods
+        .iter()
+        .filter_map(|method| counter.constant_pool.utf8(method.name_index).ok())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        counter_method_names,
+        ["<init>", "id", "initial", "current", "current_$eq"]
+    );
+    let holder_method_names = holder
+        .methods
+        .iter()
+        .filter_map(|method| holder.constant_pool.utf8(method.name_index).ok())
+        .collect::<Vec<_>>();
+    assert_eq!(holder_method_names, ["<init>", "selected", "selected_$eq"]);
+
+    for (field_name, descriptor, is_final) in [
+        ("seed", "I", true),
+        ("enabled", "Z", false),
+        ("ratio", "D", true),
+        ("score", "F", false),
+        ("rate", "D", false),
+    ] {
+        let fields = body_only
+            .fields
+            .iter()
+            .filter(|field| {
+                body_only.constant_pool.utf8(field.name_index) == Ok(field_name)
+                    && body_only.constant_pool.utf8(field.descriptor_index) == Ok(descriptor)
+            })
+            .collect::<Vec<_>>();
+        let [field] = fields.as_slice() else {
+            panic!("expected exactly one {field_name}:{descriptor} backing field");
+        };
+        assert!(field.access_flags.is_private());
+        assert_eq!(field.access_flags.is_final(), is_final);
+    }
+    let counter_constructors = counter
+        .methods
+        .iter()
+        .filter(|method| counter.constant_pool.utf8(method.name_index) == Ok("<init>"))
+        .collect::<Vec<_>>();
+    assert_eq!(counter_constructors.len(), 1);
+    assert!(counter_constructors[0].access_flags.is_public());
+    assert_eq!(
+        counter
+            .constant_pool
+            .utf8(counter_constructors[0].descriptor_index),
+        Ok("(I)V")
+    );
+    for (field_name, descriptor, is_final) in [("initial", "I", true), ("current", "J", false)] {
+        let fields = counter
+            .fields
+            .iter()
+            .filter(|field| {
+                counter.constant_pool.utf8(field.name_index) == Ok(field_name)
+                    && counter.constant_pool.utf8(field.descriptor_index) == Ok(descriptor)
+            })
+            .collect::<Vec<_>>();
+        let [field] = fields.as_slice() else {
+            panic!("expected exactly one {field_name}:{descriptor} backing field");
+        };
+        assert!(field.access_flags.is_private());
+        assert_eq!(field.access_flags.is_final(), is_final);
+    }
+    let selected_fields = holder
+        .fields
+        .iter()
+        .filter(|field| {
+            holder.constant_pool.utf8(field.name_index) == Ok("selected")
+                && holder.constant_pool.utf8(field.descriptor_index) == Ok("LCounter;")
+        })
+        .collect::<Vec<_>>();
+    let [selected_field] = selected_fields.as_slice() else {
+        panic!("Holder has exactly one private Counter backing field");
+    };
+    assert!(selected_field.access_flags.is_private());
+    assert!(!selected_field.access_flags.is_final());
+
+    for (class, getter, descriptor, field_name, field_descriptor, return_opcode, stack) in [
+        (&body_only, "seed", "()I", "seed", "I", 0xac, 1),
+        (&body_only, "enabled", "()Z", "enabled", "Z", 0xac, 1),
+        (&body_only, "ratio", "()D", "ratio", "D", 0xaf, 2),
+        (&body_only, "score", "()F", "score", "F", 0xae, 1),
+        (&counter, "initial", "()I", "initial", "I", 0xac, 1),
+        (&counter, "current", "()J", "current", "J", 0xad, 2),
+        (
+            &holder,
+            "selected",
+            "()LCounter;",
+            "selected",
+            "LCounter;",
+            0xb0,
+            1,
+        ),
+    ] {
+        assert_emitted_getter(
+            class,
+            getter,
+            descriptor,
+            field_name,
+            field_descriptor,
+            return_opcode,
+            stack,
+        );
+    }
+
+    for (class, setter, descriptor, field_name, field_descriptor, load, stack, locals) in [
+        (
+            &body_only,
+            "enabled_$eq",
+            "(Z)V",
+            "enabled",
+            "Z",
+            0x1b,
+            2,
+            2,
+        ),
+        (&body_only, "score_$eq", "(F)V", "score", "F", 0x23, 2, 2),
+        (&body_only, "rate_$eq", "(D)V", "rate", "D", 0x27, 3, 3),
+        (&counter, "current_$eq", "(J)V", "current", "J", 0x1f, 3, 3),
+        (
+            &holder,
+            "selected_$eq",
+            "(LCounter;)V",
+            "selected",
+            "LCounter;",
+            0x2b,
+            2,
+            2,
+        ),
+    ] {
+        assert_emitted_setter(
+            class,
+            setter,
+            descriptor,
+            (field_name, field_descriptor),
+            load,
+            (stack, locals),
+        );
+    }
+
+    if require_jdk_or_skip() {
+        let harness_path = output.path().join("BodyFieldsHarness.java");
+        fs::write(
+            &harness_path,
+            "public final class BodyFieldsHarness {\n  public static void main(String[] args) {\n    BodyOnly body = new BodyOnly(); BodyOnly otherBody = new BodyOnly();\n    if (body.seed() != 10 || !body.enabled()) throw new AssertionError(\"BodyOnly getters\");\n    if (Double.doubleToRawLongBits(body.ratio()) != Double.doubleToRawLongBits(1.5d)) throw new AssertionError(\"ratio bits\");\n    body.enabled_$eq(false); body.score_$eq(-0.0f); body.rate_$eq(-0.0d);\n    if (body.enabled() || Float.floatToRawIntBits(body.score()) != Float.floatToRawIntBits(-0.0f) || Double.doubleToRawLongBits(body.rate()) != Double.doubleToRawLongBits(-0.0d)) throw new AssertionError(\"body setters\");\n    if (!otherBody.enabled() || Float.floatToRawIntBits(otherBody.score()) != Float.floatToRawIntBits(-2.25f) || Double.doubleToRawLongBits(otherBody.rate()) != Double.doubleToRawLongBits(1.5d)) throw new AssertionError(\"body instance isolation\");\n    Counter first = new Counter(7); Counter second = new Counter(13);\n    if (first.id() != 7 || first.initial() != 10 || first.current() != 0L) throw new AssertionError(\"first counter getters\");\n    first.current_$eq(Long.MIN_VALUE); if (first.current() != Long.MIN_VALUE) throw new AssertionError(\"Long.MIN_VALUE setter\");\n    first.current_$eq(Long.MAX_VALUE); if (first.current() != Long.MAX_VALUE) throw new AssertionError(\"Long.MAX_VALUE setter\");\n    if (second.id() != 13 || second.initial() != 10 || second.current() != 0L) throw new AssertionError(\"counter instance isolation\");\n    Holder holder = new Holder(first); if (holder.selected() != first) throw new AssertionError(\"reference getter\");\n    holder.selected_$eq(second); if (holder.selected() != second) throw new AssertionError(\"reference setter\");\n  }\n}\n",
+        )
+        .expect("write body-field harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness_path)
+            .output()
+            .expect("start javac for body-field harness");
+        assert!(javac.status.success(), "javac failed: {javac:?}");
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "BodyFieldsHarness",
+            ])
+            .output()
+            .expect("start java verifier for body-field harness");
+        assert!(java.status.success(), "java failed: {java:?}");
+    }
+}
+
+#[test]
+fn mixed_visibility_plan_permutation_cannot_hide_a_forward_field_read() {
+    let source_text = "class Mixed:\n  val first: Int = later\n  private val later: Int = 2";
+    let output = TestOutputDirectory::new("mixed-field-order-permutation");
+    let mut observed = false;
+    let mut observe = |unit: &mut JvmCompilationUnit<'_>, _definitions: &Definitions| {
+        let class = audit_class_named(unit, "Mixed");
+        let class_plan = unit
+            .classes
+            .iter_mut()
+            .find(|plan| plan.class == class)
+            .expect("Mixed has a class plan");
+        assert_eq!(class_plan.fields.len(), 2);
+        class_plan.fields.swap(0, 1);
+        observed = true;
+    };
+    let result = compile_source_batch_observed(
+        source_text,
+        "Mixed.scala",
+        output.path(),
+        SourceId::from_index(1481),
+        SourceUnitCardinality::ExactlyOne,
+        Some(&mut observe),
+    );
+    assert!(
+        observed,
+        "the test permutes the validated frontend field plan"
+    );
+    assert!(matches!(
+        result,
+        Err(PipelineFailure::Codegen(
+            JvmCodegenError::OutOfOrderFieldPlan { .. }
+        ))
+    ));
+    assert!(
+        output.class_files().is_empty(),
+        "an out-of-source-order mixed field plan must publish no class file"
     );
 }
 
@@ -18526,6 +21654,292 @@ fn source_subclass_rejects_overrides_of_final_parent_methods_without_output() {
         output.class_files().is_empty(),
         "a failed final-method override check must publish no class files"
     );
+}
+
+#[test]
+fn source_method_cannot_redefine_an_inherited_generated_accessor() {
+    let output = TestOutputDirectory::new("inherited-accessor-method-collision");
+    let source = "class Base(val id: Int)\nclass Derived extends Base(1) { def id(): Int = 2 }\n";
+    let error = compile_source_classes(source, "InheritedAccessorMethod.scala", output.path())
+        .expect_err("a source method cannot redefine a generated inherited accessor");
+
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::InheritedJvmAccessorCollision {
+                origin: dotty_jvm::JvmBinaryMethodOrigin::Method(_),
+                parent_origin: dotty_jvm::JvmBinaryMethodOrigin::Accessor {
+                    role: dotty_jvm::JvmAccessorDispatchRole::Getter,
+                    ..
+                },
+                name,
+                descriptor,
+                ..
+            }) if name == "id" && descriptor.as_deref() == Some("()I")
+        ),
+        "expected a typed inherited accessor collision, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn generated_accessors_cannot_redefine_inherited_source_method_slots() {
+    for (label, source, expected_name, expected_descriptor) in [
+        (
+            "nonfinal-getter",
+            "class Base { def current(): Int = 1 }\nclass Derived extends Base { val current: Int = 2 }\n",
+            "current",
+            "()I",
+        ),
+        (
+            "setter",
+            "class Base { def current_=(value: Int): Unit = () }\nclass Derived extends Base { var current: Int = 2 }\n",
+            "current_$eq",
+            "(I)V",
+        ),
+    ] {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source_classes(source, "InheritedMethodAccessor.scala", output.path())
+            .expect_err("a generated accessor cannot occupy an inherited source method slot");
+        assert!(
+            matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::InheritedJvmAccessorCollision {
+                    kind: dotty_jvm::JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedMethod,
+                    name,
+                    descriptor,
+                    ..
+                }) if name == expected_name && descriptor.as_deref() == Some(expected_descriptor)
+            ),
+            "{label}: expected typed accessor collision, got {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label}: no partial output"
+        );
+    }
+}
+
+#[test]
+fn accessor_collision_validation_rejects_an_incompatible_inherited_result_descriptor() {
+    let output = TestOutputDirectory::new("inherited-accessor-result-descriptor-mismatch");
+    let source = "class Base { def current(): Long = 1L }\nclass Derived extends Base { val current: Int = 2 }\n";
+    let error = compile_source_classes(source, "InheritedAccessorResult.scala", output.path())
+        .expect_err(
+            "same-name accessors with matching parameters and different results are unsafe",
+        );
+
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::InheritedJvmAccessorCollision {
+                kind: dotty_jvm::JvmAccessorCollisionKind::IncompatibleInheritedAccessorResult,
+                name,
+                descriptor: Some(descriptor),
+                parent_descriptor: Some(parent_descriptor),
+                ..
+            }) if name == "current" && descriptor == "()I" && parent_descriptor == "()J"
+        ),
+        "expected a typed result-descriptor mismatch, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn noncolliding_inherited_accessor_and_different_descriptor_overload_pass_preflight() {
+    let output = TestOutputDirectory::new("noncolliding-inherited-accessor");
+    let source = "class Base(var current: Int)\nclass Derived extends Base(0) { def read(): Int = 1; def current(value: Long): Int = 2 }\n";
+    let artifacts = compile_source_classes(source, "NoncollidingAccessor.scala", output.path())
+        .expect(
+            "a distinct descriptor overload and ordinary method coexist with inherited accessors",
+        );
+    assert_eq!(artifacts.len(), 2);
+    let base = decode_emitted_class_named(&artifacts, "Base");
+    let derived = decode_emitted_class_named(&artifacts, "Derived");
+    assert_eq!(base.fields.len(), 1);
+    assert!(derived.fields.is_empty(), "inherited storage stays in Base");
+    assert_eq!(
+        methods_with_descriptors(&derived),
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("read".to_owned(), "()I".to_owned()),
+            ("current".to_owned(), "(J)I".to_owned()),
+        ]
+    );
+    assert_invocation_sequence(
+        &derived,
+        emitted_method_code(&derived, "<init>"),
+        &[(0xb7, "Base", "<init>", "(I)V")],
+    );
+}
+
+#[test]
+fn inherited_accessor_collision_reports_nearest_declaration_across_two_edges() {
+    let output = TestOutputDirectory::new("grandparent-accessor-method-collision");
+    let source = "class Base(val id: Int)\nclass Middle extends Base(1)\nclass Leaf extends Middle { def id(): Int = 2 }\n";
+    let error = compile_source_classes(source, "GrandparentAccessor.scala", output.path())
+        .expect_err("a grandchild cannot redefine a grandparent accessor");
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::InheritedJvmAccessorCollision {
+                kind: dotty_jvm::JvmAccessorCollisionKind::SourceMethodRedefinesInheritedAccessor,
+                parent_origin: dotty_jvm::JvmBinaryMethodOrigin::Accessor {
+                    role: dotty_jvm::JvmAccessorDispatchRole::Getter,
+                    ..
+                },
+                name,
+                descriptor,
+                ..
+            }) if name == "id" && descriptor.as_deref() == Some("()I")
+        ),
+        "expected inherited grandparent collision, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn unplanned_final_parent_method_rejects_a_same_named_child_accessor() {
+    let output = TestOutputDirectory::new("unplanned-final-parent-accessor-collision");
+    let source =
+        "class Base { final def id(): Int = 1 }\nclass Derived extends Base { val id: Int = 2 }\n";
+    let mut omit_parent_methods = |unit: &mut JvmCompilationUnit<'_>,
+                                   _definitions: &Definitions| {
+        let parent = unit
+            .classes
+            .iter()
+            .find(|plan| {
+                let symbol = unit.store.symbols.get(plan.class);
+                unit.store.names.try_resolve(symbol.name.text()) == Some("Base")
+            })
+            .map(|plan| plan.class)
+            .expect("source batch has Base");
+        unit.classes
+            .iter_mut()
+            .find(|plan| plan.class == parent)
+            .expect("Base plan")
+            .methods
+            .clear();
+    };
+    let error = compile_source_batch_observed(
+        source,
+        "UnplannedFinalParentAccessor.scala",
+        output.path(),
+        SourceId::from_index(1610),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut omit_parent_methods),
+    )
+    .expect_err("an unplanned final source method must reject a same-named accessor");
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::InheritedJvmAccessorCollision {
+                kind: dotty_jvm::JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedFinalMethod,
+                parent_origin: dotty_jvm::JvmBinaryMethodOrigin::Method(_),
+                name,
+                descriptor: None,
+                ..
+            }) if name == "id"
+        ),
+        "expected conservative unplanned-final collision, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn unplanned_final_parent_setter_rejects_a_same_named_child_var() {
+    let output = TestOutputDirectory::new("unplanned-final-parent-setter-collision");
+    let source = "class Base { final def current_=(value: Int): Unit = () }\nclass Derived extends Base { var current: Int = 2 }\n";
+    let mut omit_parent_methods = |unit: &mut JvmCompilationUnit<'_>,
+                                   _definitions: &Definitions| {
+        let parent = unit
+            .classes
+            .iter()
+            .find(|plan| {
+                let symbol = unit.store.symbols.get(plan.class);
+                unit.store.names.try_resolve(symbol.name.text()) == Some("Base")
+            })
+            .map(|plan| plan.class)
+            .expect("source batch has Base");
+        unit.classes
+            .iter_mut()
+            .find(|plan| plan.class == parent)
+            .expect("Base plan")
+            .methods
+            .clear();
+    };
+    let error = compile_source_batch_observed(
+        source,
+        "UnplannedFinalParentSetter.scala",
+        output.path(),
+        SourceId::from_index(1611),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut omit_parent_methods),
+    )
+    .expect_err("an unplanned final setter must reject the generated child setter");
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::InheritedJvmAccessorCollision {
+                kind: dotty_jvm::JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedFinalMethod,
+                parent_origin: dotty_jvm::JvmBinaryMethodOrigin::Method(_),
+                name,
+                descriptor: None,
+                ..
+            }) if name == "current_$eq"
+        ),
+        "expected conservative unplanned final setter collision, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn unplanned_nonfinal_parent_method_rejects_a_same_named_child_accessor() {
+    let output = TestOutputDirectory::new("unplanned-nonfinal-parent-accessor-collision");
+    let source =
+        "class Base { def id(): Int = 1 }\nclass Derived extends Base { val id: Int = 2 }\n";
+    let mut omit_parent_methods = |unit: &mut JvmCompilationUnit<'_>,
+                                   _definitions: &Definitions| {
+        let parent = unit
+            .classes
+            .iter()
+            .find(|plan| {
+                let symbol = unit.store.symbols.get(plan.class);
+                unit.store.names.try_resolve(symbol.name.text()) == Some("Base")
+            })
+            .map(|plan| plan.class)
+            .expect("source batch has Base");
+        unit.classes
+            .iter_mut()
+            .find(|plan| plan.class == parent)
+            .expect("Base plan")
+            .methods
+            .clear();
+    };
+    let error = compile_source_batch_observed(
+        source,
+        "UnplannedNonfinalParentAccessor.scala",
+        output.path(),
+        SourceId::from_index(1612),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut omit_parent_methods),
+    )
+    .expect_err("an unplanned non-final source method must reject a same-named accessor");
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::InheritedJvmAccessorCollision {
+                kind: dotty_jvm::JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedMethod,
+                parent_origin: dotty_jvm::JvmBinaryMethodOrigin::Method(_),
+                name,
+                descriptor: None,
+                parent_descriptor: None,
+                ..
+            }) if name == "id"
+        ),
+        "expected conservative unplanned-method collision, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
 }
 
 #[test]

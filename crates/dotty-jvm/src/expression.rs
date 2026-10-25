@@ -155,6 +155,7 @@ struct JvmLoweringContext<'a> {
     local_layout: Option<&'a JvmLocalLayout>,
     initialized_locals: HashSet<SymbolId>,
     reference_assignment_restricted_region_depth: usize,
+    temporary_local_slots: usize,
     call_context: Option<(
         &'a JvmCompilationUnit<'a>,
         &'a JvmClassMetadata,
@@ -179,6 +180,7 @@ impl<'a> JvmLoweringContext<'a> {
             local_layout: None,
             initialized_locals: HashSet::new(),
             reference_assignment_restricted_region_depth: 0,
+            temporary_local_slots: 0,
             call_context: None,
             expected_expression_type: None,
             node_visits: 0,
@@ -212,6 +214,37 @@ impl<'a> JvmLoweringContext<'a> {
         validate_tree_type(self.store, tree, node.ty)?;
         self.node_visits += 1;
         Ok(())
+    }
+
+    fn reserve_temporary_local_slots(
+        &mut self,
+        tree: TreeId<Typed>,
+        slots: usize,
+    ) -> Result<usize, JvmCodegenError> {
+        let base = self
+            .local_layout
+            .map(|layout| usize::from(layout.max_locals()))
+            .ok_or(JvmCodegenError::JvmFieldWriteContextUnavailable {
+                tree,
+                method: self.method.symbol(),
+            })?;
+        let start = base.checked_add(self.temporary_local_slots).ok_or(
+            JvmCodegenError::TooManyLocalSlots {
+                method: self.method.symbol(),
+            },
+        )?;
+        let end = start
+            .checked_add(slots)
+            .filter(|end| *end <= usize::from(u16::MAX))
+            .ok_or(JvmCodegenError::TooManyLocalSlots {
+                method: self.method.symbol(),
+            })?;
+        self.temporary_local_slots = end - base;
+        Ok(start)
+    }
+
+    fn release_temporary_local_slots(&mut self, slots: usize) {
+        self.temporary_local_slots -= slots;
     }
 }
 
@@ -1122,6 +1155,146 @@ fn selected_field_symbol(
     )
 }
 
+fn resolve_accessor(
+    context: &JvmLoweringContext<'_>,
+    tree: TreeId<Typed>,
+    field: SymbolId,
+) -> Result<Option<(String, SymbolId, crate::JvmAccessorMetadata)>, JvmCodegenError> {
+    let Some((unit, _, classes)) = context.call_context else {
+        return Ok(None);
+    };
+    let mut found = None;
+    for owner in classes {
+        for accessor in owner
+            .accessors()
+            .iter()
+            .filter(|candidate| candidate.source_field() == field)
+        {
+            if found.is_some() {
+                return Err(JvmCodegenError::InvalidJvmAccessorCallMetadata {
+                    tree,
+                    field,
+                    owner: accessor.owner(),
+                    issue: crate::JvmAccessorCallMetadataIssue::DuplicateField,
+                });
+            }
+            found = Some((owner, accessor));
+        }
+    }
+    let Some((owner, accessor)) = found else {
+        return Ok(None);
+    };
+    let issue = |issue| JvmCodegenError::InvalidJvmAccessorCallMetadata {
+        tree,
+        field,
+        owner: accessor.owner(),
+        issue,
+    };
+    let symbol = unit.store.symbols.get(field);
+    if symbol.owner != Some(accessor.owner()) || owner.identity().symbol() != accessor.owner() {
+        return Err(issue(crate::JvmAccessorCallMetadataIssue::OwnerMismatch));
+    }
+    match accessor.origin() {
+        crate::JvmAccessorOrigin::ConstructorParameter(binding) => {
+            if !owner.accessor_bindings().contains(&binding) {
+                return Err(issue(crate::JvmAccessorCallMetadataIssue::BindingMissing));
+            }
+        }
+        crate::JvmAccessorOrigin::ClassBodyField(proof) => {
+            let planned_proof = unit
+                .classes
+                .iter()
+                .find(|plan| plan.class == accessor.owner())
+                .and_then(|plan| plan.fields.iter().find(|plan| plan.field == field))
+                .and_then(|plan| match plan.source_visibility {
+                    crate::JvmFieldSourceVisibility::PlainPublic(proof) => Some(proof),
+                    crate::JvmFieldSourceVisibility::PlainPrivate
+                    | crate::JvmFieldSourceVisibility::PrivateThis => None,
+                });
+            if proof.field() != field
+                || proof.class() != accessor.owner()
+                || proof.mutable() != accessor.is_mutable()
+                || symbol.origin != dotty_core::SymbolOrigin::Source(proof.source())
+                || symbol.visibility != dotty_core::symbols::Visibility::Public
+                || planned_proof != Some(proof)
+            {
+                return Err(issue(
+                    crate::JvmAccessorCallMetadataIssue::BodyFieldProofMismatch,
+                ));
+            }
+        }
+    }
+    let source_ty = match unit.store.symbols.info(field) {
+        SymbolInfo::Complete(ty) => *ty,
+        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+            return Err(JvmCodegenError::MissingSemanticInfo { symbol: field });
+        }
+        SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: field }),
+    };
+    let projected = crate::identity::project_field_value_type(
+        unit.store,
+        context.definitions,
+        field,
+        source_ty,
+        Some(
+            &unit
+                .classes
+                .iter()
+                .map(|plan| plan.class)
+                .filter_map(|class| {
+                    classes
+                        .iter()
+                        .find(|metadata| metadata.identity().symbol() == class)
+                        .map(|metadata| metadata.identity().clone())
+                })
+                .collect::<Vec<_>>(),
+        ),
+        Some(unit),
+    )?;
+    if projected != accessor.value_type()
+        || symbol
+            .flags
+            .contains(dotty_core::symbols::SymbolFlags::MUTABLE)
+            != accessor.is_mutable()
+    {
+        return Err(issue(
+            crate::JvmAccessorCallMetadataIssue::ValueTypeMismatch,
+        ));
+    }
+    let backing = accessor.field_access_flags();
+    if !backing.is_private() || backing.is_final() == accessor.is_mutable() {
+        return Err(issue(
+            crate::JvmAccessorCallMetadataIssue::BackingFieldFlagsMismatch,
+        ));
+    }
+    let getter = accessor.getter();
+    if !getter.access_flags().is_public()
+        || !getter.descriptor().parameters().is_empty()
+        || getter.descriptor().result() != crate::JvmReturnType::Value(accessor.value_type())
+    {
+        return Err(issue(
+            crate::JvmAccessorCallMetadataIssue::GetterSignatureMismatch,
+        ));
+    }
+    match (accessor.is_mutable(), accessor.setter()) {
+        (true, Some(setter))
+            if setter.access_flags().is_public()
+                && setter.descriptor().parameters() == [accessor.value_type()]
+                && setter.descriptor().result() == crate::JvmReturnType::Void => {}
+        (false, None) => {}
+        _ => {
+            return Err(issue(
+                crate::JvmAccessorCallMetadataIssue::SetterSignatureMismatch,
+            ));
+        }
+    }
+    Ok(Some((
+        owner.identity().internal_name().to_owned(),
+        owner.identity().symbol(),
+        accessor.clone(),
+    )))
+}
+
 fn emit_field_read(
     context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
@@ -1136,6 +1309,167 @@ fn emit_field_read(
             method: context.method.symbol(),
         });
     };
+    if let Some((_, owner_symbol, accessor)) = resolve_accessor(context, tree_id, field)? {
+        let Some((unit, _, classes)) = context.call_context else {
+            return Err(JvmCodegenError::JvmFieldReadContextUnavailable {
+                tree: tree_id,
+                method: context.method.symbol(),
+            });
+        };
+        let (reference_prefix, reference_target) =
+            match context.store.types.try_get(context.tree(tree_id)?.ty) {
+                Some(Type::TermRef { prefix, target }) => (*prefix, target.symbol()),
+                _ => (context.definitions.no_prefix, None),
+            };
+        if reference_target != Some(field) {
+            return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                tree: tree_id,
+                field,
+                class: class.identity().symbol(),
+            });
+        }
+        let receiver_class_symbol = if let Some(receiver) = receiver {
+            let receiver_type = context.tree(receiver)?.ty;
+            let receiver_value_type = match context.store.types.try_get(receiver_type) {
+                Some(Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                }) if context.store.symbols.contains(*symbol) => {
+                    match context.store.symbols.info(*symbol) {
+                        SymbolInfo::Complete(ty) => *ty,
+                        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+                            return Err(JvmCodegenError::MissingSemanticInfo { symbol: *symbol });
+                        }
+                        SymbolInfo::Error => {
+                            return Err(JvmCodegenError::ErrorSemanticInfo { symbol: *symbol });
+                        }
+                    }
+                }
+                _ => receiver_type,
+            };
+            if let Some(Type::ThisType { class }) = context.store.types.try_get(receiver_value_type)
+            {
+                *class
+            } else {
+                match planned_value_type(unit, receiver_value_type, context.definitions)? {
+                    JvmType::Reference(receiver_class) => receiver_class,
+                    _ => {
+                        return Err(JvmCodegenError::UnsupportedJvmFieldReceiver {
+                            tree: tree_id,
+                            field,
+                        });
+                    }
+                }
+            }
+        } else {
+            if !is_current_this_type(context.store, reference_prefix, class.identity().symbol()) {
+                return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                    tree: tree_id,
+                    field,
+                    class: class.identity().symbol(),
+                });
+            }
+            class.identity().symbol()
+        };
+        let receiver_class = classes
+            .iter()
+            .find(|candidate| candidate.identity().symbol() == receiver_class_symbol)
+            .ok_or(JvmCodegenError::InvalidJvmAccessorCallMetadata {
+                tree: tree_id,
+                field,
+                owner: owner_symbol,
+                issue: crate::JvmAccessorCallMetadataIssue::ReceiverClassMissing,
+            })?;
+        let dispatch = receiver_class
+            .dispatch_accessors()
+            .iter()
+            .filter(|candidate| {
+                candidate.field() == field
+                    && candidate.role() == crate::JvmAccessorDispatchRole::Getter
+            })
+            .collect::<Vec<_>>();
+        if dispatch.len() != 1 {
+            return Err(JvmCodegenError::InvalidJvmAccessorCallMetadata {
+                tree: tree_id,
+                field,
+                owner: owner_symbol,
+                issue: crate::JvmAccessorCallMetadataIssue::EffectiveGetterMissing,
+            });
+        }
+        let dispatch = dispatch[0];
+        if dispatch.receiver_class() != receiver_class_symbol
+            || dispatch.declaring_class() != owner_symbol
+            || dispatch.name() != accessor.getter().name()
+            || dispatch.descriptor() != accessor.getter().descriptor()
+            || !dispatch.access_flags().is_public()
+        {
+            return Err(JvmCodegenError::InvalidJvmAccessorCallMetadata {
+                tree: tree_id,
+                field,
+                owner: owner_symbol,
+                issue: crate::JvmAccessorCallMetadataIssue::EffectiveGetterMismatch,
+            });
+        }
+        if let Some(receiver) = receiver {
+            let receiver_type = context.tree(receiver)?.ty;
+            if reference_prefix != receiver_type
+                || !flow_assignable(
+                    context,
+                    JvmType::Reference(receiver_class_symbol),
+                    JvmType::Reference(owner_symbol),
+                )?
+            {
+                return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                    tree: tree_id,
+                    field,
+                    class: class.identity().symbol(),
+                });
+            }
+            match emit_expression(context, receiver, code, depth + 1)? {
+                Flow::Value(JvmType::Reference(found))
+                    if found == receiver_class_symbol
+                        && flow_assignable(
+                            context,
+                            JvmType::Reference(found),
+                            JvmType::Reference(owner_symbol),
+                        )? => {}
+                Flow::Diverges => return Ok(Flow::Diverges),
+                _ => {
+                    return Err(JvmCodegenError::UnsupportedJvmFieldReceiver {
+                        tree: tree_id,
+                        field,
+                    });
+                }
+            }
+        } else {
+            if !flow_assignable(
+                context,
+                JvmType::Reference(receiver_class_symbol),
+                JvmType::Reference(owner_symbol),
+            )? {
+                return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                    tree: tree_id,
+                    field,
+                    class: class.identity().symbol(),
+                });
+            }
+            code.aload(0)
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+        }
+        code.invokevirtual(
+            receiver_class.identity().internal_name(),
+            accessor.getter().name(),
+            accessor.getter().descriptor().as_str(),
+        )
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+        return Ok(Flow::Value(accessor.value_type()));
+    }
     let class_symbol = class.identity().symbol();
     if !class
         .methods()
@@ -1440,6 +1774,248 @@ fn emit_field_assignment(
             method: context.method.symbol(),
         });
     };
+    if let Some((_, owner_symbol, accessor)) = resolve_accessor(context, lhs, field)? {
+        if !accessor.is_mutable() || accessor.setter().is_none() {
+            return Err(JvmCodegenError::ImmutableFieldAssignment {
+                tree: tree_id,
+                field,
+            });
+        }
+        let (reference_prefix, reference_target) =
+            match context.store.types.try_get(context.tree(lhs)?.ty) {
+                Some(Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(target),
+                }) => (*prefix, *target),
+                _ => {
+                    return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                        tree: lhs,
+                        field,
+                        class: class.identity().symbol(),
+                    });
+                }
+            };
+        if reference_target != field {
+            return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                tree: lhs,
+                field,
+                class: class.identity().symbol(),
+            });
+        }
+        let Some((unit, _, classes)) = context.call_context else {
+            return Err(JvmCodegenError::JvmFieldWriteContextUnavailable {
+                tree: tree_id,
+                method: context.method.symbol(),
+            });
+        };
+        let receiver_class_symbol = if let Some(receiver) = receiver {
+            let receiver_type = context.tree(receiver)?.ty;
+            let receiver_value_type = match context.store.types.try_get(receiver_type) {
+                Some(Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                }) if context.store.symbols.contains(*symbol) => {
+                    match context.store.symbols.info(*symbol) {
+                        SymbolInfo::Complete(ty) => *ty,
+                        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+                            return Err(JvmCodegenError::MissingSemanticInfo { symbol: *symbol });
+                        }
+                        SymbolInfo::Error => {
+                            return Err(JvmCodegenError::ErrorSemanticInfo { symbol: *symbol });
+                        }
+                    }
+                }
+                _ => receiver_type,
+            };
+            if let Some(Type::ThisType { class }) = context.store.types.try_get(receiver_value_type)
+            {
+                *class
+            } else {
+                match planned_value_type(unit, receiver_value_type, context.definitions)? {
+                    JvmType::Reference(receiver_class) => receiver_class,
+                    _ => {
+                        return Err(JvmCodegenError::UnsupportedJvmFieldReceiver {
+                            tree: lhs,
+                            field,
+                        });
+                    }
+                }
+            }
+        } else {
+            if !is_current_this_type(context.store, reference_prefix, class.identity().symbol()) {
+                return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                    tree: lhs,
+                    field,
+                    class: class.identity().symbol(),
+                });
+            }
+            class.identity().symbol()
+        };
+        let receiver_class = classes
+            .iter()
+            .find(|candidate| candidate.identity().symbol() == receiver_class_symbol)
+            .ok_or(JvmCodegenError::InvalidJvmAccessorCallMetadata {
+                tree: lhs,
+                field,
+                owner: owner_symbol,
+                issue: crate::JvmAccessorCallMetadataIssue::ReceiverClassMissing,
+            })?;
+        if !flow_assignable(
+            context,
+            JvmType::Reference(receiver_class_symbol),
+            JvmType::Reference(owner_symbol),
+        )? {
+            return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                tree: lhs,
+                field,
+                class: class.identity().symbol(),
+            });
+        }
+        let setters = receiver_class
+            .dispatch_accessors()
+            .iter()
+            .filter(|candidate| {
+                candidate.field() == field
+                    && candidate.role() == crate::JvmAccessorDispatchRole::Setter
+            })
+            .collect::<Vec<_>>();
+        if setters.len() != 1 {
+            return Err(JvmCodegenError::InvalidJvmAccessorCallMetadata {
+                tree: lhs,
+                field,
+                owner: owner_symbol,
+                issue: crate::JvmAccessorCallMetadataIssue::EffectiveSetterMissing,
+            });
+        }
+        let setter = accessor
+            .setter()
+            .ok_or(JvmCodegenError::InvalidJvmAccessorCallMetadata {
+                tree: lhs,
+                field,
+                owner: owner_symbol,
+                issue: crate::JvmAccessorCallMetadataIssue::SetterSignatureMismatch,
+            })?;
+        let dispatch = setters[0];
+        if dispatch.receiver_class() != receiver_class_symbol
+            || dispatch.declaring_class() != owner_symbol
+            || dispatch.name() != setter.name()
+            || dispatch.descriptor() != setter.descriptor()
+            || !dispatch.access_flags().is_public()
+        {
+            return Err(JvmCodegenError::InvalidJvmAccessorCallMetadata {
+                tree: lhs,
+                field,
+                owner: owner_symbol,
+                issue: crate::JvmAccessorCallMetadataIssue::EffectiveSetterMismatch,
+            });
+        }
+        if let Some(receiver) = receiver {
+            let receiver_type = context.tree(receiver)?.ty;
+            if receiver_type != reference_prefix {
+                return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                    tree: lhs,
+                    field,
+                    class: class.identity().symbol(),
+                });
+            }
+            match emit_expression(context, receiver, code, depth + 1)? {
+                Flow::Value(JvmType::Reference(found))
+                    if found == receiver_class_symbol
+                        && flow_assignable(
+                            context,
+                            JvmType::Reference(found),
+                            JvmType::Reference(owner_symbol),
+                        )? => {}
+                Flow::Diverges => return Ok(Flow::Diverges),
+                _ => return Err(JvmCodegenError::UnsupportedJvmFieldReceiver { tree: lhs, field }),
+            }
+        } else {
+            code.aload(0)
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+        }
+        let temporary_slot_count = 1 + usize::from(accessor.value_type().slot_width());
+        let receiver_slot = context.reserve_temporary_local_slots(tree_id, temporary_slot_count)?;
+        let value_slot = receiver_slot + 1;
+        let result = (|| {
+            code.astore(receiver_slot)
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            let expected_type = match context.store.symbols.info(field) {
+                SymbolInfo::Complete(ty) => Some(*ty),
+                SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+                    return Err(JvmCodegenError::MissingSemanticInfo { symbol: field });
+                }
+                SymbolInfo::Error => {
+                    return Err(JvmCodegenError::ErrorSemanticInfo { symbol: field });
+                }
+            };
+            match emit_expression_with_expected(context, rhs, expected_type, code, depth + 1)? {
+                Flow::Diverges => return Ok(Flow::Diverges),
+                Flow::Null if matches!(accessor.value_type(), JvmType::Reference(_)) => {
+                    code.astore(value_slot)
+                        .map_err(|error| JvmCodegenError::CodeBuilder {
+                            tree: tree_id,
+                            error,
+                        })?;
+                }
+                Flow::Value(found) if flow_assignable(context, found, accessor.value_type())? => {
+                    let code = match found {
+                        JvmType::Reference(_) => code.astore(value_slot),
+                        JvmType::Int | JvmType::Boolean => code.istore(value_slot),
+                        JvmType::Long => code.lstore(value_slot),
+                        JvmType::Float => code.fstore(value_slot),
+                        JvmType::Double => code.dstore(value_slot),
+                    };
+                    code.map_err(|error| JvmCodegenError::CodeBuilder {
+                        tree: tree_id,
+                        error,
+                    })?;
+                }
+                found => {
+                    return Err(JvmCodegenError::AssignmentValueFlowMismatch {
+                        tree: tree_id,
+                        symbol: field,
+                        expected: accessor.value_type(),
+                        found: public_flow(found),
+                    });
+                }
+            }
+            let code = code
+                .aload(receiver_slot)
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            let code = match accessor.value_type() {
+                JvmType::Reference(_) => code.aload(value_slot),
+                JvmType::Int | JvmType::Boolean => code.iload(value_slot),
+                JvmType::Long => code.lload(value_slot),
+                JvmType::Float => code.fload(value_slot),
+                JvmType::Double => code.dload(value_slot),
+            }
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: tree_id,
+                error,
+            })?;
+            code.invokevirtual(
+                receiver_class.identity().internal_name(),
+                setter.name(),
+                setter.descriptor().as_str(),
+            )
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: tree_id,
+                error,
+            })?;
+            Ok(Flow::Unit)
+        })();
+        context.release_temporary_local_slots(temporary_slot_count);
+        return result;
+    }
     let class_symbol = class.identity().symbol();
     if !class
         .methods()
@@ -1547,73 +2123,64 @@ fn emit_field_assignment(
         SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: field }),
     };
 
-    let Some(local_layout) = context.local_layout else {
-        return Err(JvmCodegenError::JvmFieldWriteContextUnavailable {
-            tree: tree_id,
-            method: context.method.symbol(),
-        });
-    };
-    let receiver_slot = usize::from(local_layout.max_locals());
-    let value_slot = receiver_slot
-        .checked_add(1)
-        .filter(|slot| {
-            slot.checked_add(usize::from(field_type.slot_width()))
-                .is_some_and(|end| end <= usize::from(u16::MAX))
-        })
-        .ok_or(JvmCodegenError::TooManyLocalSlots {
-            method: context.method.symbol(),
-        })?;
-    code.aload(0)
-        .and_then(|code| code.astore(receiver_slot))
-        .map_err(|error| JvmCodegenError::CodeBuilder {
-            tree: tree_id,
-            error,
-        })?;
-    match emit_expression(context, rhs, code, depth + 1)? {
-        Flow::Diverges => Ok(Flow::Diverges),
-        Flow::Value(found) if flow_assignable(context, found, field_type)? => {
-            let store_value = match found {
-                JvmType::Reference(_) => code.astore(value_slot),
-                JvmType::Int | JvmType::Boolean => code.istore(value_slot),
-                JvmType::Long => code.lstore(value_slot),
-                JvmType::Float => code.fstore(value_slot),
-                JvmType::Double => code.dstore(value_slot),
-            };
-            let code = store_value
-                .and_then(|code| code.aload(receiver_slot))
+    let temporary_slot_count = 1 + usize::from(field_type.slot_width());
+    let receiver_slot = context.reserve_temporary_local_slots(tree_id, temporary_slot_count)?;
+    let value_slot = receiver_slot + 1;
+    let result = (|| {
+        code.aload(0)
+            .and_then(|code| code.astore(receiver_slot))
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: tree_id,
+                error,
+            })?;
+        match emit_expression(context, rhs, code, depth + 1)? {
+            Flow::Diverges => Ok(Flow::Diverges),
+            Flow::Value(found) if flow_assignable(context, found, field_type)? => {
+                let store_value = match found {
+                    JvmType::Reference(_) => code.astore(value_slot),
+                    JvmType::Int | JvmType::Boolean => code.istore(value_slot),
+                    JvmType::Long => code.lstore(value_slot),
+                    JvmType::Float => code.fstore(value_slot),
+                    JvmType::Double => code.dstore(value_slot),
+                };
+                let code = store_value
+                    .and_then(|code| code.aload(receiver_slot))
+                    .map_err(|error| JvmCodegenError::CodeBuilder {
+                        tree: tree_id,
+                        error,
+                    })?;
+                let code = match found {
+                    JvmType::Reference(_) => code.aload(value_slot),
+                    JvmType::Int | JvmType::Boolean => code.iload(value_slot),
+                    JvmType::Long => code.lload(value_slot),
+                    JvmType::Float => code.fload(value_slot),
+                    JvmType::Double => code.dload(value_slot),
+                }
                 .map_err(|error| JvmCodegenError::CodeBuilder {
                     tree: tree_id,
                     error,
                 })?;
-            let code = match found {
-                JvmType::Reference(_) => code.aload(value_slot),
-                JvmType::Int | JvmType::Boolean => code.iload(value_slot),
-                JvmType::Long => code.lload(value_slot),
-                JvmType::Float => code.fload(value_slot),
-                JvmType::Double => code.dload(value_slot),
+                code.putfield(
+                    class.identity().internal_name(),
+                    field_metadata.name(),
+                    field_metadata.descriptor(),
+                )
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+                Ok(Flow::Unit)
             }
-            .map_err(|error| JvmCodegenError::CodeBuilder {
+            found => Err(JvmCodegenError::AssignmentValueFlowMismatch {
                 tree: tree_id,
-                error,
-            })?;
-            code.putfield(
-                class.identity().internal_name(),
-                field_metadata.name(),
-                field_metadata.descriptor(),
-            )
-            .map_err(|error| JvmCodegenError::CodeBuilder {
-                tree: tree_id,
-                error,
-            })?;
-            Ok(Flow::Unit)
+                symbol: field,
+                expected: field_type,
+                found: public_flow(found),
+            }),
         }
-        found => Err(JvmCodegenError::AssignmentValueFlowMismatch {
-            tree: tree_id,
-            symbol: field,
-            expected: field_type,
-            found: public_flow(found),
-        }),
-    }
+    })();
+    context.release_temporary_local_slots(temporary_slot_count);
+    result
 }
 
 fn emit_block(
@@ -1937,6 +2504,9 @@ fn block_value_type(
     if context.store.symbols.contains(*symbol)
         && context.store.symbols.get(*symbol).kind == dotty_core::symbols::SymbolKind::Field
     {
+        if let Some((_, _, accessor)) = resolve_accessor(context, tree, *symbol)? {
+            return Ok(Some(accessor.value_type()));
+        }
         let Some((_, class, _)) = context.call_context else {
             return Err(JvmCodegenError::JvmFieldReadContextUnavailable {
                 tree,

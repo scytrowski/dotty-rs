@@ -21,24 +21,153 @@ pub(super) use blocks::LocalMethodIndex;
 pub(super) use function::FunctionLiteralIndex;
 
 impl SourceTyper<'_> {
-    /// Returns the session-canonical widened type for constants whose
-    /// underlying source type is modeled by `Definitions`.
-    pub(in crate::typer) fn constant_underlying_type(&self, constant: &Constant) -> Option<TypeId> {
+    /// Returns the canonical widened type for supported constants.
+    pub(in crate::typer) fn constant_underlying_type(
+        &mut self,
+        constant: &Constant,
+    ) -> Result<Option<TypeId>, ResolutionError> {
         match constant {
-            Constant::Unit => Some(self.definitions.unit),
-            Constant::Boolean(_) => Some(self.definitions.boolean),
-            Constant::Byte(_) => Some(self.definitions.byte),
-            Constant::Short(_) => Some(self.definitions.short),
-            Constant::Char(_) => Some(self.definitions.char),
-            Constant::Int(_) => Some(self.definitions.int),
-            Constant::Long(_) => Some(self.definitions.long),
-            Constant::FloatBits(_) => Some(self.definitions.float),
-            Constant::DoubleBits(_) => Some(self.definitions.double),
-            Constant::String(_)
-            | Constant::StringUtf16(_)
-            | Constant::Null
-            | Constant::Class(_) => None,
+            Constant::Unit => Ok(Some(self.definitions.unit)),
+            Constant::Boolean(_) => Ok(Some(self.definitions.boolean)),
+            Constant::Byte(_) => Ok(Some(self.definitions.byte)),
+            Constant::Short(_) => Ok(Some(self.definitions.short)),
+            Constant::Char(_) => Ok(Some(self.definitions.char)),
+            Constant::Int(_) => Ok(Some(self.definitions.int)),
+            Constant::Long(_) => Ok(Some(self.definitions.long)),
+            Constant::FloatBits(_) => Ok(Some(self.definitions.float)),
+            Constant::DoubleBits(_) => Ok(Some(self.definitions.double)),
+            Constant::String(_) | Constant::StringUtf16(_) => {
+                self.canonical_java_lang_string_type()
+            }
+            Constant::Null | Constant::Class(_) => Ok(None),
         }
+    }
+
+    fn canonical_java_lang_string_type(&mut self) -> Result<Option<TypeId>, ResolutionError> {
+        let store_checkpoint = self.store.checkpoint();
+        let resolver_checkpoint = self.resolver.checkpoint();
+        let result = self.resolve_canonical_java_lang_string_type();
+        if !matches!(result, Ok(Some(_))) {
+            self.resolver.rollback_to(self.store, resolver_checkpoint);
+            self.store.rollback_to(store_checkpoint);
+        }
+        result
+    }
+
+    fn resolve_canonical_java_lang_string_type(
+        &mut self,
+    ) -> Result<Option<TypeId>, ResolutionError> {
+        let path = ["java", "lang"];
+        let package = if let Some(package) = self.packages.symbol(&path) {
+            package
+        } else {
+            let Some(package) = self.resolver.resolve_package(self.store, &path)? else {
+                return Ok(None);
+            };
+            if !self.is_canonical_java_lang_package(package) {
+                return Err(ResolutionError::Malformed {
+                    reason: "java.lang package resolution returned a non-canonical package"
+                        .to_owned(),
+                });
+            }
+            package
+        };
+        if !self.is_canonical_java_lang_package(package) {
+            return Err(ResolutionError::Malformed {
+                reason: "registered java.lang package has a non-canonical owner chain".to_owned(),
+            });
+        }
+
+        let name = Name::new(self.store.names.intern("String"), Namespace::Type);
+        if let Some(scope) = self.packages.scope_of(package)
+            && self.store.scopes.contains(scope)
+        {
+            let candidates = self.store.scopes.get(scope).lookup_all(&name);
+            if !candidates.is_empty() {
+                if candidates.len() > 1 {
+                    return Err(ResolutionError::Ambiguous {
+                        candidates: candidates.len(),
+                    });
+                }
+                let canonical = candidates
+                    .iter()
+                    .copied()
+                    .filter(|symbol| self.is_canonical_java_lang_string_symbol(*symbol))
+                    .collect::<Vec<_>>();
+                return match canonical.as_slice() {
+                    [symbol] => Ok(Some(self.string_type_reference(*symbol))),
+                    [] => Ok(None),
+                    _ => Err(ResolutionError::Ambiguous {
+                        candidates: canonical.len(),
+                    }),
+                };
+            }
+        }
+
+        let prefix = self.package_type_prefix(package);
+        let request = MemberRequest {
+            prefix,
+            name,
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let Some(symbol) = self.resolver.resolve_member(self.store, &request)? else {
+            return Ok(None);
+        };
+        if !self.store.symbols.contains(symbol) {
+            return Err(ResolutionError::Malformed {
+                reason: "java.lang.String resolution returned an unknown symbol".to_owned(),
+            });
+        }
+        if !self.is_canonical_java_lang_string_symbol(symbol) {
+            return Ok(None);
+        }
+        Ok(Some(self.string_type_reference(symbol)))
+    }
+
+    fn is_canonical_java_lang_package(&self, package: SymbolId) -> bool {
+        if !self.store.symbols.contains(package) {
+            return false;
+        }
+        let lang = self.store.symbols.get(package);
+        if lang.kind != SymbolKind::Package
+            || !lang.name.is_term()
+            || self.store.names.resolve(lang.name.text()) != "lang"
+        {
+            return false;
+        }
+        let Some(java) = lang.owner else {
+            return false;
+        };
+        if !self.store.symbols.contains(java) {
+            return false;
+        }
+        let java_symbol = self.store.symbols.get(java);
+        if java_symbol.kind != SymbolKind::Package
+            || !java_symbol.name.is_term()
+            || self.store.names.resolve(java_symbol.name.text()) != "java"
+        {
+            return false;
+        }
+        let Some(root) = java_symbol.owner else {
+            return false;
+        };
+        if !self.store.symbols.contains(root) {
+            return false;
+        }
+        let root_symbol = self.store.symbols.get(root);
+        root_symbol.kind == SymbolKind::Package
+            && root_symbol.name.is_term()
+            && self.store.names.resolve(root_symbol.name.text()).is_empty()
+            && root_symbol.owner.is_none()
+    }
+
+    fn string_type_reference(&mut self, symbol: SymbolId) -> TypeId {
+        let prefix = self.type_symbol_prefix(symbol);
+        self.store.types.alloc(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(symbol),
+        })
     }
 
     pub(super) fn type_prefix_expression(
@@ -108,7 +237,7 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let operator_text = self.store.names.resolve(infix.op.text());
+        let operator_text = self.store.names.resolve(infix.op.text()).to_owned();
         if operator_text.ends_with(':') {
             return Err(TyperError::RightAssociativeInfixDeferred {
                 source: self.source,
@@ -120,7 +249,7 @@ impl SourceTyper<'_> {
         let left =
             self.type_value_expression_inner(infix.left, context, info_journal, new_mappings)?;
         let receiver_type = self.typed_arena.get(left).ty;
-        let resolved = self.resolve_infix_application_function(
+        let resolved = match self.resolve_infix_application_function(
             InfixApplicationRequest {
                 operator: infix.op,
                 qualifier: left,
@@ -132,7 +261,25 @@ impl SourceTyper<'_> {
             },
             info_journal,
             new_mappings,
-        )?;
+        ) {
+            Ok(resolved) => resolved,
+            Err(error @ TyperError::MemberNotFound { .. }) if operator_text == "+=" => {
+                if let Some(assignment) = self.type_mutable_local_plus_assign_fallback(
+                    tree,
+                    infix,
+                    position,
+                    left,
+                    receiver_type,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )? {
+                    return Ok(assignment);
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         self.type_resolved_application(
             ResolvedApplication {
                 tree_index: tree.index(),
@@ -148,6 +295,99 @@ impl SourceTyper<'_> {
             info_journal,
             new_mappings,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn type_mutable_local_plus_assign_fallback(
+        &mut self,
+        tree: TreeId<Untyped>,
+        infix: dotty_core::ast::InfixOp,
+        position: Option<SourceSpan>,
+        left: TreeId<Typed>,
+        receiver_type: TypeId,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<Option<TreeId<Typed>>, TyperError> {
+        if !matches!(
+            self.arena.try_get(infix.left).map(|node| &node.kind),
+            Some(TreeKind::Ident(_))
+        ) || !self.is_mutable_local_selection_receiver(left, receiver_type)
+        {
+            return Ok(None);
+        }
+        let widened_receiver_type =
+            self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
+        if !matches!(
+            self.conforms(widened_receiver_type, self.definitions.int),
+            Ok(true)
+        ) {
+            return Ok(None);
+        }
+
+        // A lexical extension named `+=` has precedence over the assignment
+        // rewrite. Infix extension resolution is still unsupported, so leave
+        // that case visible instead of silently rewriting around it.
+        let name_candidates =
+            match self.expression_term_candidates(infix.op, context, tree.index(), position) {
+                Ok(candidates) => candidates,
+                Err(TyperError::TermNameNotFound { .. }) => Vec::new(),
+                Err(_) => return Ok(None),
+            };
+        if name_candidates.iter().any(|symbol| {
+            self.store
+                .symbols
+                .get(*symbol)
+                .flags
+                .contains(SymbolFlags::EXTENSION)
+        }) {
+            return Ok(None);
+        }
+
+        let plus = dotty_core::Name::new(self.store.names.intern("+"), dotty_core::Namespace::Term);
+        let sum_function = self.resolve_infix_application_function(
+            InfixApplicationRequest {
+                operator: plus,
+                qualifier: left,
+                receiver_type,
+                argument_tree: infix.right,
+                context,
+                tree_index: tree.index(),
+                position,
+            },
+            info_journal,
+            new_mappings,
+        )?;
+        let sum = self.type_resolved_application(
+            ResolvedApplication {
+                tree_index: tree.index(),
+                application_kind: ApplyKind::Regular,
+                argument_trees: vec![infix.right],
+                position,
+                context,
+                function: sum_function.typed,
+                callable: sum_function.callable,
+                typed_arguments: Some(sum_function.arguments),
+                is_constructor_application: false,
+            },
+            info_journal,
+            new_mappings,
+        )?;
+        if !matches!(
+            self.conforms(self.typed_arena.get(sum).ty, widened_receiver_type),
+            Ok(true)
+        ) {
+            return Ok(None);
+        }
+
+        Ok(Some(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).assign(
+                left,
+                sum,
+                self.definitions.unit,
+                position,
+            ),
+        ))
     }
 
     pub(super) fn type_parenthesized_expression(
@@ -311,6 +551,7 @@ impl SourceTyper<'_> {
         match expression_type {
             Type::Constant(value) => self
                 .constant_underlying_type(&value)
+                .map_err(|error| TyperError::StringTypeResolution { error })?
                 .ok_or(TyperError::ExpressionTypeCannotBeWidened { ty }),
             Type::TermRef { prefix, target } => {
                 let TermRefTarget::Symbol(symbol) = target else {
