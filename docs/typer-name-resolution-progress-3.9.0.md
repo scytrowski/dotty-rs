@@ -2,6 +2,87 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
+## Fresh `package-term` baseline after PR #1642
+
+The audit was run serially from exact `main` SHA
+`be9264c797555d99e93d5d6fbb82a2bed9f85efa` (merge commit #1642), against the
+pinned Scala checkout `777528f19a58e794c9954a42f433373472ec57f8`, Scala
+artifacts 3.9.0, and JDK 21.0.8:
+
+```sh
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-main-be9264-runs" \
+SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
+SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" \
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
+  --verify-determinism target/issue-1566-main-be9264-package-term.md
+```
+
+Both serial passes covered 60 files and 369 selected method attempts. Their
+normalized method sidecars matched byte-for-byte (SHA-256
+`402f273c9e33fdead90d3b83b51522a32c58379c639b27c66dba86ba4acfbd38`). Parsing
+and naming succeeded for every file; zero methods were fully typed. Of the 369
+frozen rows, 292 had target observations. Comparing the frozen first blocker
+with this current baseline, 361 rows previously stopped at
+`ImportQualifierNotFound`: 139 now reach `MemberLookup`, 69 reach
+`TypeNameNotFound`, and the rest reach other later blockers. The remaining 8
+historical `TermNameNotFound` rows now reach either `MemberLookup` (4) or
+`UnsupportedExpression::InterpolatedString` (4). These are blocker transitions
+across the frozen cohort, not a claim that PR #1642 alone caused them.
+
+Current first blockers across the full selected cohort are:
+
+| First blocker | Rows | Files |
+| --- | ---: | ---: |
+| `MemberLookup` | 143 | 35 |
+| `TypeNameNotFound` | 69 | 18 |
+| `UnstableSelectionPrefix` | 36 | 6 |
+| `TermNameNotFound` | 20 | 6 |
+| `WrongTypeNameKind` | 20 | 2 |
+| `ObjectModuleClassUnavailable` | 18 | 1 |
+| `SymbolResolution` | 15 | 6 |
+| `LocalValueConformanceUnsupported` | 13 | 1 |
+| Other blockers | 35 | 18 |
+
+The compact row-level reconciliation, including exact selected `path#tree`
+IDs, prior/current blockers, current attempt IDs, and observed qualifier stage,
+is in [`typer-name-resolution-1566-main-be9264-package-term.tsv`](typer-name-resolution-1566-main-be9264-package-term.tsv).
+The generated full focused report and raw logs remain under `target/`; they
+are not checked into Git.
+
+### Next bounded research direction: external ASM method members
+
+The largest bucket, `MemberLookup`, is spread across 35 files and is too broad
+to implement as one feature. Four `MemberNotFound` roots also point at four
+different APIs, so they do not establish one shared fix. A narrower pair of
+real roots worth investigating is external classfile-backed ASM instance
+method lookup:
+
+- `compiler/src/dotty/tools/backend/jvm/opt/LocalOpt.scala#tree=3134`
+  (local helper `addVar`, selected row `#tree=2986`, line 942), whose source
+  calls `varIns.getOpcode()` on `scala.tools.asm.tree.AbstractInsnNode` and
+  currently reaches `MemberNotFound`.
+- `compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=420`
+  (`read`, with nested helper rows `#tree=212`, `#tree=226`, and `#tree=239`,
+  lines 98–100), whose source calls `ClassReader.readByte`, `readUTF8`, and
+  `readShort` and currently reaches `MemberLookup`.
+
+These are candidates, not yet a proven common failure: the cohort report
+records the first-blocker category and resolver observations, but not the
+exact member candidate or class-completion error at the failing expression.
+Pinned Scala 3.9 positive and negative source cases now confirm that
+`AbstractInsnNode.getOpcode` and `ClassReader.readByte`, `readUTF8`, and
+`readShort` resolve with the expected result types, while a truly absent
+`noSuchOpcodeMethod` remains rejected. The fixture and reproduction are in
+[`AsmMemberResolution.oracle.md`](../crates/dotty-typer/tests/fixtures/asm-member-resolution/AsmMemberResolution.oracle.md).
+This validates the source semantics but not the Rust Typer's failure cause.
+The next step is a focused Rust reproducer that traces each selected member
+through class completion, member-scope lookup, overload selection, and call
+typing. Only if the same bounded classfile-member operation explains both
+roots should it become the next implementation slice. Keep the ≤5-root limit;
+do not count either root as typed until the complete enclosing real method
+succeeds.
+
 ## Bounded continuation: inherited members of external object wildcard imports
 
 Issue [#1620](https://github.com/scytrowski/dotty-rs/issues/1620) starts from
