@@ -282,20 +282,9 @@ impl SourceTyper<'_> {
                 branch_tree_index: if_expr.else_branch.index(),
                 error: Box::new(error),
             })?;
-        let has_synthetic_unit_else =
-            self.arena
-                .try_get(if_expr.else_branch)
-                .is_some_and(|else_tree| {
-                    matches!(
-                        else_tree.kind,
-                        TreeKind::Literal(dotty_core::ast::Literal {
-                            value: dotty_core::Constant::Unit
-                        })
-                    ) && else_tree
-                        .position
-                        .is_some_and(|position| position.span().range().is_empty())
-                });
-        let (then_branch, then_type) = if has_synthetic_unit_else
+        let has_incomplete_else_chain = self.is_synthetic_unit_else(if_expr.else_branch)
+            || self.has_incomplete_else_if_chain(if_expr.else_branch);
+        let (then_branch, then_type) = if has_incomplete_else_chain
             && then_type != self.definitions.unit
         {
             let discarded_value = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
@@ -330,6 +319,30 @@ impl SourceTyper<'_> {
                 position,
             ),
         )
+    }
+
+    fn has_incomplete_else_if_chain(&self, tree: TreeId<Untyped>) -> bool {
+        let Some(tree) = self.arena.try_get(tree) else {
+            return false;
+        };
+        let TreeKind::If(if_expr) = &tree.kind else {
+            return false;
+        };
+        self.is_synthetic_unit_else(if_expr.else_branch)
+            || self.has_incomplete_else_if_chain(if_expr.else_branch)
+    }
+
+    fn is_synthetic_unit_else(&self, tree: TreeId<Untyped>) -> bool {
+        self.arena.try_get(tree).is_some_and(|else_tree| {
+            matches!(
+                else_tree.kind,
+                TreeKind::Literal(dotty_core::ast::Literal {
+                    value: dotty_core::Constant::Unit
+                })
+            ) && else_tree
+                .position
+                .is_some_and(|position| position.span().range().is_empty())
+        })
     }
 
     pub(in crate::typer) fn type_while_expression(

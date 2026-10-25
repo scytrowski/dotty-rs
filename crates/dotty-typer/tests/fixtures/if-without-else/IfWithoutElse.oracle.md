@@ -5,9 +5,11 @@ This fixture is checked against Scala 3.9.0 at pinned revision
 
 The compiler accepts the file. `inferred` has result type `Unit`; Scala adapts
 the non-Unit `String` expression in its then branch to `Unit` and emits the
-discarded-value warning. `statement` also compiles as `Unit`. An explicit
-`else ()` remains an ordinary two-branch conditional and is not treated as a
-parser-synthesized missing branch.
+discarded-value warning. `statement` and `incompleteChain` also compile as
+`Unit`; the latter confirms Scala recursively treats an incomplete nested
+`else if` chain as a no-`else` conditional and discards both string values. An
+explicit `else ()` remains an ordinary two-branch conditional and is not
+treated as a parser-synthesized missing branch.
 
 Reproduce with the pinned runtime jars and JDK 21:
 

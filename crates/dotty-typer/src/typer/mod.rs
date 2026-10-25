@@ -29426,12 +29426,14 @@ mod tests {
     #[test]
     fn if_expression_types_block_branches_and_synthetic_unit_else() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "def choose(flag: Boolean) = if flag then { val result = 1; result } else { val result = 2; result }; def partial(flag: Boolean) = if flag then 1; def explicitUnit(flag: Boolean) = if flag then 1 else ()",
+            "def choose(flag: Boolean) = if flag then { val result = 1; result } else { val result = 2; result }; def partial(flag: Boolean) = if flag then 1; def partialChain(flag: Boolean, innerFlag: Boolean) = if flag then 1 else if innerFlag then 2; def explicitUnit(flag: Boolean) = if flag then 1 else ()",
         );
         let (choose, choose_rhs) =
             method_definition_and_rhs(&parsed, &store, &index, source, "choose");
         let (partial, partial_rhs) =
             method_definition_and_rhs(&parsed, &store, &index, source, "partial");
+        let (partial_chain, partial_chain_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "partialChain");
         let (explicit_unit, explicit_unit_rhs) =
             method_definition_and_rhs(&parsed, &store, &index, source, "explicitUnit");
         let mut typer = SourceTyper::new(
@@ -29483,6 +29485,15 @@ mod tests {
         ));
         assert_eq!(
             typer.typed_ast().get(discarded_then.expr).ty,
+            definitions.unit
+        );
+
+        let partial_chain_context = typer.expression_context_for(partial_chain).unwrap();
+        let partial_chain_tree = typer
+            .type_expression(partial_chain_rhs, partial_chain_context)
+            .unwrap();
+        assert_eq!(
+            typer.typed_ast().get(partial_chain_tree).ty,
             definitions.unit
         );
 
