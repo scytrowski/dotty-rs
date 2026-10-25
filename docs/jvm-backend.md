@@ -714,6 +714,29 @@ body fields have no setter. Method bodies use the same typed lowering path as
 before. The file is encoded into an owned `GeneratedClass` only after every
 method and class-file structure has been built successfully.
 
+### Opt-in linked TASTy emission
+
+`dotty-jvm::emit_class_with_tasty_link` is an opt-in variant that accepts a
+typed `TastyLinkId` and adds only the audited class-level `TASTY` attribute.
+It does not depend on the TASTy producer and does not validate or create a
+sidecar. The standalone `emit_class` path continues to omit Scala metadata.
+
+The root `dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_class` coordinator
+is the bounded source integration for the audited Counter class. It uses the
+single-session plans from `jvm_tasty_plan`, serializes the complete TASTy
+first, validates its Scala 3.9.0 header, passes that producer-owned UUID to
+the opt-in JVM path, then decodes the class file and checks its version,
+internal name, member descriptors and access flags. It also verifies the
+class-level link against the exact TASTy bytes and returns both owned byte
+arrays with package-qualified relative paths. Any producer or validation
+failure returns an error before either artifact is exposed. It writes no files;
+the staged filesystem test adapter does not claim crash-atomic publication.
+
+This output is limited to source shapes accepted by the paired Counter
+contract. It does not add a production compiler driver, a general artifact
+publisher, or independent Scala-consumer interoperability; those boundaries
+remain in #1638 and later work.
+
 The frontend must set `JvmClassInitializationPlan::ImplicitNoArg` only after
 proving the source class has no constructor parameters or body, superclass
 arguments, fields, or template initialization expressions. A direct parent is
@@ -1183,8 +1206,9 @@ lookup, direct-parent `super` selection, and two-edge reference assignability
 through the bounded chain. Sibling joins without explicit checked context,
 unrelated/`Object`-only reference joins, nested allocation arguments, arbitrary
 effectful pre-super evaluation,
-branched constructors, qualified/trait super, and Scala ABI/TASTy emission also
-remain deferred.
+branched constructors, qualified/trait super, and general Scala ABI/TASTy
+emission remain deferred; the separate audited Counter pair path is documented
+above.
 
 The #1585 class-body accessor acceptance batch combines a body-only no-argument
 class (`Int`, mutable `Boolean`, and mutable `Double`), a parameterized class
@@ -1197,4 +1221,4 @@ with `java -Xverify:all`; earlier focused tests retain typed rejection and
 zero-partial-artifact checks for invalid batches. This does not add support for
 private cross-class access, inherited accessor call-site lowering,
 child-declared accessors above an accessor-bearing parent, traits, generics, or
-combined Scala ABI/TASTy output.
+general combined Scala ABI/TASTy output outside the audited Counter pair path.
