@@ -141,6 +141,7 @@ fn string_concatenation_uses_the_canonical_java_string_operator_only() {
         "class Token\n",
         "object StringConcatenation:\n",
         "  def concat(name: java.lang.String, desc: java.lang.String): java.lang.String = name + desc\n",
+        "  def explicit(name: java.lang.String, desc: java.lang.String): java.lang.String = name.+(desc)\n",
         "  def rollback(name: java.lang.String): java.lang.String = name + \"x\"\n",
         "  def unrelated(left: Token, right: Token): Token = left + right\n",
     );
@@ -211,6 +212,7 @@ fn string_concatenation_uses_the_canonical_java_string_operator_only() {
             .unwrap_or_else(|| panic!("source should contain {wanted} method"))
     };
     let (concat_method, concat_body) = method_and_body("concat");
+    let (explicit_method, explicit_body) = method_and_body("explicit");
     let (rollback_method, rollback_body) = method_and_body("rollback");
     let (unrelated_method, unrelated_body) = method_and_body("unrelated");
 
@@ -248,6 +250,19 @@ fn string_concatenation_uses_the_canonical_java_string_operator_only() {
             .lookup_all(&plus_name)
             .is_empty()
     );
+
+    typer.complete_symbol(explicit_method).unwrap();
+    let context = typer.expression_context_for(explicit_method).unwrap();
+    let typed = typer
+        .type_expression(explicit_body, context)
+        .expect("explicit String.+ selection should work before any infix use");
+    assert!(matches!(
+        typer.store().types.try_get(typer.typed_ast().get(typed).ty),
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        }) if *class == string_class
+    ));
 
     typer.complete_symbol(concat_method).unwrap();
     let context = typer.expression_context_for(concat_method).unwrap();

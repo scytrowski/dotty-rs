@@ -622,6 +622,24 @@ impl SourceTyper<'_> {
                             return Err(TyperError::MemberLookup(Box::new(error)));
                         }
                     };
+                    if members.is_empty()
+                        && !java_class_qualifier
+                        && self.store.names.resolve(selection.name.text()) == "+"
+                        && let Some(string_class) =
+                            self.canonical_java_lang_string_class(receiver_view)
+                        && self.ensure_java_lang_string_plus(string_class, receiver_view)?
+                    {
+                        members = match self.lookup_overload_members_journaled(
+                            receiver_view,
+                            selection.name,
+                            info_journal,
+                        ) {
+                            Ok(members) => members,
+                            Err(error) => {
+                                return Err(TyperError::MemberLookup(Box::new(error)));
+                            }
+                        };
+                    }
                     if java_class_qualifier {
                         members.retain(|member| {
                             self.store.symbols.contains(member.symbol)
