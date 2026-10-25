@@ -71,6 +71,10 @@ pub(crate) struct DecodedTastyModuleIdentity {
     pub module_class_flags: SymbolFlags,
     pub module_class_visibility: Option<DeclaredVisibility>,
     pub companion_class_kind: Option<SymbolKind>,
+    /// Visibility declared on nested type definitions in the module class's
+    /// TASTy template. JVM `InnerClasses` access flags can be less restrictive.
+    /// The map includes default-public declarations with a `None` value.
+    pub nested_type_visibilities: HashMap<String, Option<DeclaredVisibility>>,
 }
 
 /// Stable detail for a TASTy parent whose binary identity could not be
@@ -771,7 +775,32 @@ pub(crate) fn decode_module_identity(
                     RawTree::LengthNode(ref template) if template.tag == TEMPLATE_TAG
                 );
                 if name == module_class_name && has_template && has_modifier(&tail, OBJECT_TAG) {
-                    module_classes.push((symbol_flags(&tail), decode_visibility(&file, &tail)));
+                    let mut nested_type_visibilities = HashMap::new();
+                    if let RawTree::LengthNode(template_node) = type_or_template {
+                        for stat in template_node.decode_template_structure()?.stats {
+                            let RawTree::LengthNode(definition) = stat else {
+                                continue;
+                            };
+                            if definition.tag != TYPEDEF_TAG {
+                                continue;
+                            }
+                            let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                                name, tail, ..
+                            }) = definition.decode_structured()?
+                            else {
+                                continue;
+                            };
+                            if let Some(name) = wire_name(&file, name) {
+                                nested_type_visibilities
+                                    .insert(name, decode_visibility(&file, &tail));
+                            }
+                        }
+                    }
+                    module_classes.push((
+                        symbol_flags(&tail),
+                        decode_visibility(&file, &tail),
+                        nested_type_visibilities,
+                    ));
                 } else if name == object_name && has_template && !has_modifier(&tail, OBJECT_TAG) {
                     companion_classes.push(if has_modifier(&tail, TRAIT_TAG) {
                         SymbolKind::Trait
@@ -808,6 +837,7 @@ pub(crate) fn decode_module_identity(
         module_class_flags: module_class.0,
         module_class_visibility: module_class.1.clone(),
         companion_class_kind: companion_classes.first().copied(),
+        nested_type_visibilities: module_class.2.clone(),
     }))
 }
 

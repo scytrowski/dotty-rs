@@ -340,6 +340,7 @@ pub struct ModuleIdentity {
     pub companion_class: Option<SymbolId>,
     pub object_name: BinaryName,
     pub module_class_name: BinaryName,
+    pub nested_type_visibilities: HashMap<String, Visibility>,
 }
 
 /// Dependency work observed during one top-level class load.
@@ -1247,12 +1248,26 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             }
             self.link_class_object_companions(name, class, object)?;
         }
+        let nested_type_visibilities = decoded
+            .nested_type_visibilities
+            .iter()
+            .map(|(nested_name, declared)| {
+                let binary_name =
+                    BinaryName::from_internal(format!("{}${nested_name}", name.as_internal()));
+                let visibility = declared
+                    .as_ref()
+                    .map(|declared| self.tasty_visibility(&binary_name, declared))
+                    .unwrap_or(Visibility::Public);
+                (nested_name.clone(), visibility)
+            })
+            .collect();
         let identity = ModuleIdentity {
             object,
             module_class,
             companion_class,
             object_name: name.clone(),
             module_class_name,
+            nested_type_visibilities,
         };
         self.session.cache_module(name.clone(), identity.clone());
         Ok(identity)
@@ -3416,12 +3431,27 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         &outer,
                         ClassLoadDependencyReason::EnclosingOwnerIdentity,
                     );
-                    self.ensure_class_identity(&outer).map_err(|source| {
-                        ClassLoadError::DependencyFailure {
-                            owner: name.clone(),
-                            dependency: outer,
-                            source: Rc::new(source),
-                        }
+                    let owner = match self.ensure_class_identity(&outer) {
+                        Ok(owner) => Ok(owner),
+                        // Scala nested classes in a top-level object can
+                        // record the object's static forwarder class as the
+                        // JVM `InnerClasses` owner. That name has TASTy for
+                        // the object, but no class `TypeDef`; use the
+                        // TASTy-proven module identity only for this exact
+                        // missing-class case. A `$` in the binary name is
+                        // not sufficient evidence by itself.
+                        Err(ClassLoadError::InvalidTastyFile(
+                            _,
+                            tasty_symbol::TastyDecodeError::MissingTypeDef,
+                        )) => self
+                            .ensure_module_identity(&outer)
+                            .map(|identity| identity.module_class),
+                        Err(error) => Err(error),
+                    };
+                    owner.map_err(|source| ClassLoadError::DependencyFailure {
+                        owner: name.clone(),
+                        dependency: outer,
+                        source: Rc::new(source),
                     })
                 }
             })
