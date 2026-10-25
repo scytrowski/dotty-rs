@@ -43,6 +43,8 @@ pub enum TastyLinkError {
     InvalidPayloadLength { length: usize },
     /// A class has more than one class-level `TASTY` attribute.
     DuplicateClassAttribute,
+    /// A nested attribute tree exceeds the classfile decoder's traversal bound.
+    TooDeeplyNestedAttribute { depth: usize },
     /// `TASTY` appears on a field, method, or nested attribute instead of the class.
     MisplacedAttribute { location: TastyLinkLocation },
 }
@@ -74,6 +76,10 @@ impl fmt::Display for TastyLinkError {
             Self::DuplicateClassAttribute => {
                 formatter.write_str("class has more than one TASTY attribute")
             }
+            Self::TooDeeplyNestedAttribute { depth } => write!(
+                formatter,
+                "TASTY attribute scan reached nesting depth {depth}, exceeding the configured limit"
+            ),
             Self::MisplacedAttribute { location } => {
                 write!(formatter, "TASTY attribute is misplaced in {location:?}")
             }

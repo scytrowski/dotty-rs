@@ -1,8 +1,8 @@
 use crate::access_flags::{ACC_MODULE, ClassAccessFlags};
 use crate::attribute::{
-    Attribute, AttributeError, MODULE_ACC_MANDATED, MODULE_ACC_OPEN, MODULE_ACC_STATIC_PHASE,
-    MODULE_ACC_SYNTHETIC, MODULE_ACC_TRANSITIVE, ModuleAttribute, decode_attributes,
-    read_index_list, read_optional_index, validate_attributes,
+    Attribute, AttributeError, DEFAULT_MAX_ATTRIBUTE_DEPTH, MODULE_ACC_MANDATED, MODULE_ACC_OPEN,
+    MODULE_ACC_STATIC_PHASE, MODULE_ACC_SYNTHETIC, MODULE_ACC_TRANSITIVE, ModuleAttribute,
+    decode_attributes, read_index_list, read_optional_index, validate_attributes,
 };
 use crate::constant_pool::{
     ConstantPool, ConstantPoolError, ConstantPoolIndex, PoolRefError, read_index,
@@ -280,7 +280,7 @@ impl<'a> ClassFile<'a> {
                 }
                 payload = Some(bytes);
             }
-            validate_nested_tasty_link(attribute, &self.constant_pool)?;
+            validate_nested_tasty_link(attribute, &self.constant_pool, 0)?;
         }
 
         for field in &self.fields {
@@ -288,6 +288,7 @@ impl<'a> ClassFile<'a> {
                 &field.attributes,
                 &self.constant_pool,
                 TastyLinkLocation::Field,
+                0,
             )?;
         }
         for method in &self.methods {
@@ -295,6 +296,7 @@ impl<'a> ClassFile<'a> {
                 &method.attributes,
                 &self.constant_pool,
                 TastyLinkLocation::Method,
+                0,
             )?;
         }
 
@@ -937,12 +939,16 @@ fn validate_misplaced_tasty_link(
     attributes: &[Attribute<'_>],
     pool: &ConstantPool,
     location: TastyLinkLocation,
+    depth: usize,
 ) -> Result<(), TastyLinkError> {
+    if depth > DEFAULT_MAX_ATTRIBUTE_DEPTH {
+        return Err(TastyLinkError::TooDeeplyNestedAttribute { depth });
+    }
     for attribute in attributes {
         if tasty_link_payload(attribute, pool)?.is_some() {
             return Err(TastyLinkError::MisplacedAttribute { location });
         }
-        validate_nested_tasty_link(attribute, pool)?;
+        validate_nested_tasty_link(attribute, pool, depth)?;
     }
     Ok(())
 }
@@ -950,17 +956,25 @@ fn validate_misplaced_tasty_link(
 fn validate_nested_tasty_link(
     attribute: &Attribute<'_>,
     pool: &ConstantPool,
+    depth: usize,
 ) -> Result<(), TastyLinkError> {
+    if depth > DEFAULT_MAX_ATTRIBUTE_DEPTH {
+        return Err(TastyLinkError::TooDeeplyNestedAttribute { depth });
+    }
     match attribute {
-        Attribute::Code(code) => {
-            validate_misplaced_tasty_link(&code.attributes, pool, TastyLinkLocation::Nested)
-        }
+        Attribute::Code(code) => validate_misplaced_tasty_link(
+            &code.attributes,
+            pool,
+            TastyLinkLocation::Nested,
+            depth + 1,
+        ),
         Attribute::Record(components) => {
             for component in components {
                 validate_misplaced_tasty_link(
                     &component.attributes,
                     pool,
                     TastyLinkLocation::Nested,
+                    depth + 1,
                 )?;
             }
             Ok(())

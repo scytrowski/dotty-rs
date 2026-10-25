@@ -1,5 +1,6 @@
 use dotty_classfile::classfile::{
-    Attribute, ClassFile, ClassFileBuilder, ClassFileVersion, Reader, TastyLinkError, TastyLinkId,
+    Attribute, ClassFile, ClassFileBuilder, ClassFileVersion, CodeAttribute,
+    DEFAULT_MAX_ATTRIBUTE_DEPTH, Reader, RecordComponentInfo, TastyLinkError, TastyLinkId,
     TastyLinkLocation,
 };
 
@@ -22,6 +23,32 @@ fn linked_class(id: TastyLinkId) -> Vec<u8> {
     let mut builder = ClassFileBuilder::new("example/Linked", VERSION).unwrap();
     builder.tasty_link(id).unwrap();
     builder.encode().unwrap()
+}
+
+fn code_chain(depth: usize) -> Attribute<'static> {
+    let mut nested = Attribute::Deprecated;
+    for _ in 0..depth {
+        nested = Attribute::Code(CodeAttribute {
+            max_stack: 0,
+            max_locals: 0,
+            code: &[],
+            exception_table: vec![],
+            attributes: vec![nested],
+        });
+    }
+    nested
+}
+
+fn record_chain(depth: usize) -> Attribute<'static> {
+    let mut nested = Attribute::Deprecated;
+    for _ in 0..depth {
+        nested = Attribute::Record(vec![RecordComponentInfo {
+            name_index: dotty_classfile::classfile::ConstantPoolIndex(1),
+            descriptor_index: dotty_classfile::classfile::ConstantPoolIndex(1),
+            attributes: vec![nested],
+        }]);
+    }
+    nested
 }
 
 #[test]
@@ -124,6 +151,33 @@ fn accessor_rejects_malformed_duplicate_and_misplaced_links() {
         misplaced.tasty_link_id(),
         Err(TastyLinkError::MisplacedAttribute {
             location: TastyLinkLocation::Method,
+        })
+    );
+}
+
+#[test]
+fn accessor_bounds_nested_code_and_record_scans() {
+    let bytes = linked_class(TastyLinkId::from_bytes(COUNTER_LINK_ID));
+    let mut class = decode(&bytes);
+    class.attributes.clear();
+
+    class.attributes = vec![code_chain(DEFAULT_MAX_ATTRIBUTE_DEPTH)];
+    assert_eq!(class.tasty_link_id(), Ok(None));
+    class.attributes = vec![code_chain(DEFAULT_MAX_ATTRIBUTE_DEPTH + 1)];
+    assert_eq!(
+        class.tasty_link_id(),
+        Err(TastyLinkError::TooDeeplyNestedAttribute {
+            depth: DEFAULT_MAX_ATTRIBUTE_DEPTH + 1,
+        })
+    );
+
+    class.attributes = vec![record_chain(DEFAULT_MAX_ATTRIBUTE_DEPTH)];
+    assert_eq!(class.tasty_link_id(), Ok(None));
+    class.attributes = vec![record_chain(DEFAULT_MAX_ATTRIBUTE_DEPTH + 1)];
+    assert_eq!(
+        class.tasty_link_id(),
+        Err(TastyLinkError::TooDeeplyNestedAttribute {
+            depth: DEFAULT_MAX_ATTRIBUTE_DEPTH + 1,
         })
     );
 }
