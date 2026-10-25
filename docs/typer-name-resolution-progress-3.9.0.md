@@ -29,7 +29,9 @@ The deterministic pinned `package-term` audit rechecked the same 60 files and
 369 methods twice. Its normalized cohort sidecars matched byte-for-byte
 (SHA-256 `e812c812be1c29723935fd4deb9e6b40386233f9f4fed952c162174dfbc44985`).
 Both passes had zero parser failures, zero namer failures, and zero fully typed
-methods. The report observed 292 target rows and 139 current
+methods. This cohort is an earlier snapshot; the one-file audit below is a
+separate measurement at a later code revision. The report observed 292 target
+rows and 139 current
 `ImportQualifierNotFound` blockers. Among the 161 frozen rows whose failed
 qualifier is exactly `scala.jdk.CollectionConverters`, 120 still stop at
 `ImportQualifierNotFound` and 41 now have a later first blocker. The five-row
@@ -47,9 +49,130 @@ move from `SymbolResolution` to the later `MemberLookup` blocker, and member
 lookup errors fall from 15 to 0. No method becomes fully typed. The exact
 deterministic output is recorded in
 [`typer-focused-smoke-baseline-3.9.0.txt`](typer-focused-smoke-baseline-3.9.0.txt).
-This shows that the new hierarchy lookup advances some real typer paths, while
-the broader #1566 target methods remain blocked at the missing
-`CollectionConverters` qualifier.
+This shows that the new hierarchy lookup advances some real typer paths. At
+that cohort revision, the broader #1566 target methods remained blocked at the
+missing `CollectionConverters` qualifier.
+
+### Follow-up research after PR #1621
+
+In the earlier frozen `package-term` snapshot (code revision
+`51660f527dbf587cf1c514732c599bf2b9b04910`), the 120 rows whose frozen failed
+qualifier was `scala.jdk.CollectionConverters` still had category
+`ImportQualifierNotFound`; the full 60-file / 369-method cohort typed zero
+complete methods. That historical row-level TSV records the earlier
+qualifiers; it does not give the current failed qualifier. The audit's
+independent prefix observations do find
+`scala.jdk.CollectionConverters` as a TASTy-backed Object, but the cohort does
+not record a corresponding ModuleClass or module members. That observation
+does not prove the source import's qualifier-typing path succeeded: it is a
+separate classpath probe.
+
+I replayed the focused import regression using the pinned Maven
+`scala-library-3.9.0.jar`, the full JDK 21 and Scala 3.9 audit classpath, and
+the nested `dotty.tools` / `backend.jvm` package shape used by compiler
+sources. The direct qualifier lookup and inherited `IteratorHasAsScala`
+member lookup both passed, as did typing a method body that references the
+imported member. The checked-in TASTy fixture is not byte-identical
+to the Maven artifact (6,293 vs. 6,272 bytes; SHA-256
+`280f40f2282173f2e62b8eafcce04f809af524f6153071fe042fea2d6f742980` vs.
+`32e89fbf8c615892631884b627ceba507e92a9e26fb866a05edb2692c84fdc11`), but
+the exact-artifact replay shows that this difference alone does not prevent
+the tested lookup.
+
+I ran a one-file full-source audit at code revision
+`51660f527dbf587cf1c514732c599bf2b9b04910` (pinned Scala checkout
+`777528f19a58e794c9954a42f433373472ec57f8`) for the frozen
+`BackendUtils.scala#tree=240` / `#tree=302` roots and temporarily instrumented
+the audit harness to print the exact import tree on failure. Parsing and
+naming passed. Both roots reach the local import at `BackendUtils.scala:84`,
+`import asm.Opcodes.*` (`import_tree=201`, qualifier `asm.Opcodes`), then stop
+at `ImportQualifierNotFound`; zero of the two methods are fully typed. The
+resolver trace for the same method attempt resolves the term request
+`scala.jdk.CollectionConverters` to a TASTy Object. So this full-source run
+does reach that Object qualifier and moves these two roots past the frozen
+`CollectionConverters` blocker, though it does not establish that any
+inherited member from that wildcard import was selected.
+
+The frozen-root to current-attempt reconciliation, including both revisions
+and both qualifier outcomes, is recorded in
+[`typer-name-resolution-1566-backendutils-opcodes-reconciliation-3.9.0.tsv`](typer-name-resolution-1566-backendutils-opcodes-reconciliation-3.9.0.tsv).
+The linked five-row TSV above remains an immutable record of the earlier cohort
+snapshot.
+
+The current failing request is instead for `Opcodes` under the
+`scala.tools.asm` package in the term namespace, which the resolver reports
+as `package term member unsupported`. The classfile artifact contains
+`scala/tools/asm/Opcodes.class`. The pinned Scala 3.9.0 compiler accepts the
+same import shape and a use of one imported constant:
+
+```scala
+package dotty.tools
+package backend.jvm
+import scala.tools.asm
+object OpcodesImport:
+  import asm.Opcodes.*
+  val firstOpcode: Int = ICONST_0
+```
+
+A negative control using `asm.NotAnOpcode.*` fails with E008, as expected. The
+source import qualifier path currently asks for `Opcodes` in the term
+namespace and does not retry the selection in the type namespace. A bounded
+next candidate is therefore package-qualified external class lookup as an
+import qualifier, with an explicit type-namespace fallback. The two roots
+have advanced to this later blocker but remain untyped. The focused raw report
+and trace logs remain local under `target/issue-1620-runs/`; they are not
+checked in. Temporary harness instrumentation was removed after the run.
+
+Reproduce the one-file audit (the manifest selects the file, then the audit
+intersects it with the frozen method roots):
+
+```sh
+mkdir -p target/issue-1620-runs target/tmp
+printf '%s\n' compiler/src/dotty/tools/backend/jvm/BackendUtils.scala \
+  > target/issue-1620-runs/backendutils.manifest
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1620-runs" \
+SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
+SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+tools/typer-classpath-corpus-audit/run --focused-manifest target/issue-1620-runs/backendutils.manifest \
+  target/issue-1620-runs/backendutils-focused.md
+```
+
+Reproduce the Scala positive oracle and negative control. The Scala checkout
+is pinned to the revision above; cached Maven artifacts include compiler and
+library 3.9.0 plus `scala-asm` 9.9.0-scala-1. Both compilations use pinned JDK
+21.0.8:
+
+```sh
+mkdir -p target/tmp target/issue-1620-runs/oracle-out
+SCALA39_CP="$(find target/scala39-maven -type f -name '*.jar' -print | sort | paste -sd: -)"
+cat > target/issue-1620-runs/OpcodesImport.scala <<'EOF'
+package dotty.tools
+package backend.jvm
+import scala.tools.asm
+object OpcodesImport:
+  import asm.Opcodes.*
+  val firstOpcode: Int = ICONST_0
+EOF
+JAVA_HOME="$PWD/target/temurin21-1525" "$PWD/target/temurin21-1525/bin/java" \
+  -Djava.io.tmpdir="$PWD/target/tmp" -cp "$SCALA39_CP" dotty.tools.dotc.Main \
+  -classpath "$SCALA39_CP" -d target/issue-1620-runs/oracle-out \
+  target/issue-1620-runs/OpcodesImport.scala
+cat > target/issue-1620-runs/OpcodesImportNegative.scala <<'EOF'
+package dotty.tools
+package backend.jvm
+import scala.tools.asm
+object OpcodesImportNegative:
+  import asm.NotAnOpcode.*
+EOF
+JAVA_HOME="$PWD/target/temurin21-1525" "$PWD/target/temurin21-1525/bin/java" \
+  -Djava.io.tmpdir="$PWD/target/tmp" -cp "$SCALA39_CP" dotty.tools.dotc.Main \
+  -classpath "$SCALA39_CP" -d target/issue-1620-runs/oracle-out \
+  target/issue-1620-runs/OpcodesImportNegative.scala
+```
+
+The positive compilation exits successfully. The negative control exits
+nonzero with E008: `value NotAnOpcode is not a member of scala.tools.asm`.
 
 Reproduce the cohort audit with the pinned Scala checkout and cached artifacts:
 
