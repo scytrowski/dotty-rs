@@ -1,0 +1,4 @@
+path#tree	method	before_final_class_relation	current_first_blocker	fully_typed	attempt
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=212	nextByte	IfBranchJoinUnsupported	TypeNameNotFound	false	compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=420
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=226	nextUTF8	IfBranchJoinUnsupported	TypeNameNotFound	false	compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=420
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=239	nextShort	IfBranchJoinUnsupported	TypeNameNotFound	false	compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=420
