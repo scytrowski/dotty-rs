@@ -280,6 +280,7 @@ fn exact_jvm_tasty_linkage_counter_source_is_accepted_by_pickler() {
     let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
     assert_eq!(file.header().major_version, 28);
     assert_eq!(file.header().minor_version, 9);
+    assert_eq!(file.header().experimental_version, 0);
     let addresses = file.ast_address_index().unwrap();
     let declaration_name = |declaration: &SkeletonDeclaration| {
         let node = addresses.get(declaration.address).unwrap();
