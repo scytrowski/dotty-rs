@@ -357,15 +357,81 @@ pub fn validate_jvm_tasty_batch<'proof, 'unit, 'plan, 'session>(
         ));
     }
 
-    let source_id = tasty_plans[0].plan().source.id;
+    let first_plan = tasty_plans[0].plan();
+    if !std::ptr::eq(jvm_unit.store, first_plan.store) {
+        return Err(JvmTastyContractError::DifferentSession("semantic store"));
+    }
+    if !std::ptr::eq(jvm_unit.typed_ast, first_plan.typed_ast) {
+        return Err(JvmTastyContractError::DifferentSession("typed AST"));
+    }
+
+    let source_id = first_plan.source.id;
+    let source_packages = first_plan
+        .source_ast
+        .iter()
+        .filter_map(|(_, tree)| match &tree.kind {
+            TreeKind::PackageDef(package) if package.stats.contains(&first_plan.class_tree) => {
+                Some(package)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [source_package] = source_packages.as_slice() else {
+        return Err(JvmTastyContractError::BatchShape(
+            "source class tree must belong to exactly one package declaration",
+        ));
+    };
+    let mut source_classes = Vec::with_capacity(source_package.stats.len());
+    for tree in &source_package.stats {
+        if !matches!(
+            first_plan.source_ast.try_get(*tree).map(|tree| &tree.kind),
+            Some(TreeKind::TypeDef(_))
+        ) {
+            return Err(JvmTastyContractError::BatchShape(
+                "source package contains an unsupported top-level sibling",
+            ));
+        }
+        let class = first_plan.source_index.symbol_at(source_id, *tree).ok_or(
+            JvmTastyContractError::BatchShape(
+                "source class declaration is missing its canonical symbol",
+            ),
+        )?;
+        if !first_plan.store.symbols.contains(class) {
+            return Err(JvmTastyContractError::MemberProvenanceMismatch {
+                member: class,
+                source: source_id,
+            });
+        }
+        let symbol = first_plan.store.symbols.get(class);
+        if symbol.kind != SymbolKind::Class || symbol.origin != SymbolOrigin::Source(source_id) {
+            return Err(JvmTastyContractError::MemberProvenanceMismatch {
+                member: class,
+                source: source_id,
+            });
+        }
+        source_classes.push(class);
+    }
+    let jvm_classes = jvm_unit
+        .classes
+        .iter()
+        .map(|class| class.class)
+        .collect::<Vec<_>>();
+    let tasty_classes = tasty_plans
+        .iter()
+        .map(|plan| plan.plan().class)
+        .collect::<Vec<_>>();
+    if source_classes != jvm_classes || source_classes != tasty_classes {
+        return Err(JvmTastyContractError::BatchShape(
+            "JVM and TASTy class lists must exactly match source package declarations in order",
+        ));
+    }
+
     let mut class_ids = Vec::with_capacity(tasty_plans.len());
     let mut internal_names = Vec::with_capacity(tasty_plans.len());
     let mut artifact_paths = Vec::with_capacity(tasty_plans.len() * 2);
     let mut original_symbols = Vec::new();
     let mut classes = Vec::with_capacity(tasty_plans.len());
     let mut source_owner: Option<SymbolId> = None;
-    let first_plan = tasty_plans[0].plan();
-
     for (class_index, tasty_plan) in tasty_plans.iter().copied().enumerate() {
         let class = tasty_plan.plan().class;
         let plan = tasty_plan.plan();
@@ -618,6 +684,12 @@ pub fn validate_jvm_tasty_batch_artifacts(
             return Err(artifact_error(
                 "class ABI",
                 "class access flags differ from the checked source ABI".into(),
+            ));
+        }
+        if !class_file.interfaces.is_empty() {
+            return Err(artifact_error(
+                "class ABI",
+                "decoded class has interfaces absent from the checked source ABI".into(),
             ));
         }
         let expected_parent = metadata

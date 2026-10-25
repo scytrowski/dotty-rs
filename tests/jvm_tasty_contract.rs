@@ -27,6 +27,7 @@ use dotty_typer::SourceTyper;
 
 const COUNTER: &str = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n";
 const COUNTER_GAUGE: &str = include_str!("fixtures/jvm_tasty_multiclass/CounterGauge.scala");
+const THREE_CLASSES: &str = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass Gauge(start: Int):\n  private var reading: Int = start\n  def get(): Int = reading\n  def set(value: Int): Unit = reading = value\n\nclass Thermometer(start: Int):\n  private var temperature: Int = start\n  def get(): Int = temperature\n  def set(value: Int): Unit = temperature = value\n";
 
 #[test]
 fn whole_batch_proves_distinct_class_abi_and_rejects_partial_or_swapped_artifacts() {
@@ -170,6 +171,24 @@ fn whole_batch_proves_distinct_class_abi_and_rejects_partial_or_swapped_artifact
                 })
             ));
 
+            let mut unexpected_interface = reversed.clone();
+            let gauge = unexpected_interface
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/Gauge.class")
+                .unwrap();
+            let mut reader = Reader::new(&gauge.classfile_bytes);
+            let mut classfile = ClassFile::decode(&mut reader).unwrap();
+            classfile.interfaces.push(classfile.this_class);
+            gauge.classfile_bytes = classfile.encode().unwrap();
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&batch, unexpected_interface),
+                Err(JvmTastyContractError::BatchArtifact {
+                    phase: "class ABI",
+                    ..
+                })
+            ));
+
             let mut extra = reversed.clone();
             let mut unexpected = extra.classfiles[0].clone();
             unexpected.classfile_path = "example/Unexpected.class".into();
@@ -199,6 +218,78 @@ fn whole_batch_proves_distinct_class_abi_and_rejects_partial_or_swapped_artifact
 }
 
 #[test]
+fn whole_source_sequence_rejects_joint_truncation_and_joint_reordering() {
+    with_paired_jvm_tasty_batch_plan(
+        THREE_CLASSES,
+        "CounterGauge.scala",
+        SourceId::from_index(72),
+        |source_batch| {
+            let plans = source_batch
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            assert_eq!(plans.len(), 3);
+
+            let truncated_unit = JvmCompilationUnit {
+                store: source_batch.jvm_unit.store,
+                typed_ast: source_batch.jvm_unit.typed_ast,
+                classes: source_batch.jvm_unit.classes[..2].to_vec(),
+            };
+            assert!(matches!(
+                validate_jvm_tasty_batch(&truncated_unit, &plans[..2]),
+                Err(JvmTastyContractError::BatchShape(
+                    "JVM and TASTy class lists must exactly match source package declarations in order"
+                ))
+            ));
+
+            let mut reversed_classes = source_batch.jvm_unit.classes.clone();
+            reversed_classes.reverse();
+            let reversed_unit = JvmCompilationUnit {
+                store: source_batch.jvm_unit.store,
+                typed_ast: source_batch.jvm_unit.typed_ast,
+                classes: reversed_classes,
+            };
+            let reversed_plans = [plans[2], plans[1], plans[0]];
+            assert!(matches!(
+                validate_jvm_tasty_batch(&reversed_unit, &reversed_plans),
+                Err(JvmTastyContractError::BatchShape(
+                    "JVM and TASTy class lists must exactly match source package declarations in order"
+                ))
+            ));
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn batch_rejects_a_foreign_jvm_store_without_panicking() {
+    with_paired_jvm_tasty_batch_plan(
+        COUNTER_GAUGE,
+        "CounterGauge.scala",
+        SourceId::from_index(73),
+        |source_batch| {
+            let plans = source_batch
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let foreign_store = SemanticStore::new();
+            let foreign_unit = JvmCompilationUnit {
+                store: &foreign_store,
+                typed_ast: source_batch.jvm_unit.typed_ast,
+                classes: source_batch.jvm_unit.classes.clone(),
+            };
+            assert!(matches!(
+                validate_jvm_tasty_batch(&foreign_unit, &plans),
+                Err(JvmTastyContractError::DifferentSession("semantic store"))
+            ));
+        },
+    )
+    .unwrap();
+}
+
+#[test]
 fn whole_batch_rejects_wrong_tasty_order_and_duplicate_source_plan() {
     with_paired_jvm_tasty_batch_plan(
         COUNTER_GAUGE,
@@ -214,14 +305,14 @@ fn whole_batch_rejects_wrong_tasty_order_and_duplicate_source_plan() {
             assert!(matches!(
                 validate_jvm_tasty_batch(source_batch.jvm_unit, &swapped),
                 Err(JvmTastyContractError::BatchShape(
-                    "TASTy class order differs from the complete JVM unit"
+                    "JVM and TASTy class lists must exactly match source package declarations in order"
                 ))
             ));
             let duplicate = [plans[0], plans[0]];
             assert!(matches!(
                 validate_jvm_tasty_batch(source_batch.jvm_unit, &duplicate),
                 Err(JvmTastyContractError::BatchShape(
-                    "TASTy class order differs from the complete JVM unit"
+                    "JVM and TASTy class lists must exactly match source package declarations in order"
                 ))
             ));
         },

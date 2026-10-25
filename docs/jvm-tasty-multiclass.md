@@ -76,12 +76,14 @@ Cross-class source calls/fields and inheritance between these siblings, objects/
 
 `dotty-jvm-tasty-contract::validate_jvm_tasty_batch` consumes the complete
 ordered `JvmCompilationUnit` from #1653 and one validated class-state TASTy
-plan for each class (2–32 classes, matching #1653's planner bound). It returns a read-only receipt only after every class has
-passed the existing canonical ABI proof. The receipt preserves source order,
+plan for each class (2–32 classes, matching #1653's planner bound). It returns
+a read-only receipt only after every class has passed the existing canonical
+ABI proof. The receipt preserves source order,
 the common `SourceId`, each original class `SymbolId`, and its exact
 package-qualified `.class` and `.tasty` paths. Validation checks that both
 plans borrow the same store, source AST/index, definitions, typed AST, and
-source ID; class order and count agree with the JVM unit; package ownership,
+source ID; both caller lists exactly match the ordered class declarations
+recovered from the canonical source package; and package ownership,
 class names, source member/formal identities, typed RHS bindings, and ABI
 descriptors agree; and no class, binary name, path, or original symbol is
 represented twice. A failing later class rejects the receipt for the entire
@@ -91,9 +93,9 @@ The separate `validate_jvm_tasty_batch_artifacts` function consumes owned,
 independently keyed classfile and TASTy sidecar maps. Input order is immaterial:
 it sorts both path sets, rejects duplicate/cross-colliding paths, then checks
 the expected pair set in source order. Each pair must use the exact planned
-paths, decode without trailing classfile
-bytes, identify the expected package-qualified class, target classfile 65.0,
-match the checked class/member/access-flag ABI and superclass, carry a
+paths, decode without trailing classfile bytes, identify the expected
+package-qualified class, target classfile 65.0, match the checked
+class/member/access-flag ABI, superclass, and empty interface list, carry a
 classfile `TASTY` identifier equal to its sidecar header, and parse as TASTy
 28.9.0. The complete sidecar bytes must also equal the bytes produced by that
 class's validated TASTy plan. There is one sidecar per class for this audited
@@ -103,8 +105,9 @@ Nothing is published by either API.
 
 The first-error taxonomy is deterministic and contextual:
 
-- `BatchShape` rejects incomplete counts, duplicate class plans, and source
-  order disagreement before returning any proofs.
+- `BatchShape` rejects incomplete counts, duplicate class plans, unsupported
+  source siblings, and source order or coverage disagreement before returning
+  any proofs.
 - `BatchClass { class_index, class, error }` wraps the first semantic or
   per-class ABI failure in source declaration order.
 - `BatchArtifactPaths { reason, path }` reports the first duplicate, missing,
