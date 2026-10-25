@@ -51,6 +51,35 @@ This shows that the new hierarchy lookup advances some real typer paths, while
 the broader #1566 target methods remain blocked at the missing
 `CollectionConverters` qualifier.
 
+### Follow-up research after PR #1621
+
+The remaining 120 frozen `scala.jdk.CollectionConverters` roots still stop at
+`ImportQualifierNotFound`; the full 60-file / 369-method cohort types zero
+complete methods. The audit's independent prefix observations do find
+`scala.jdk.CollectionConverters` as a TASTy-backed Object, but the cohort does
+not record a corresponding ModuleClass or module members. That observation
+does not prove the source import's qualifier-typing path succeeded: it is a
+separate classpath probe.
+
+I replayed the focused import regression using the pinned Maven
+`scala-library-3.9.0.jar`, the full JDK 21 and Scala 3.9 audit classpath, and
+the nested `dotty.tools` / `backend.jvm` package shape used by compiler
+sources. The direct qualifier lookup and inherited `IteratorHasAsScala`
+member lookup both passed, as did typing a method body that references the
+imported member. The checked-in TASTy fixture is not byte-identical
+to the Maven artifact (6,293 vs. 6,272 bytes; SHA-256
+`280f40f2282173f2e62b8eafcce04f809af524f6153071fe042fea2d6f742980` vs.
+`32e89fbf8c615892631884b627ceba507e92a9e26fb866a05edb2692c84fdc11`), but
+the exact-artifact replay shows that this difference alone does not prevent
+the tested lookup.
+
+The next diagnostic should run the full source typing path for one frozen
+root and identify the exact import tree and failure phase. The current
+fixture regression invokes qualifier resolution and member lookup directly;
+it does not reproduce the entire import processing path of those source
+files. Until that replay is captured, the reason the cohort roots stop before
+the inherited lookup remains unconfirmed.
+
 Reproduce the cohort audit with the pinned Scala checkout and cached artifacts:
 
 ```sh
