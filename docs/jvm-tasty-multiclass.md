@@ -123,6 +123,57 @@ or protection from a concurrent process with the same user permissions racing
 the destination or staging tree. The rename is used only on the same filesystem;
 no cross-device fallback or crash-atomic transaction is claimed.
 
+## Strict Scala consumer gate (#1657)
+
+`tests/jvm_tasty_multiclass_scala_consumer.rs` is a separate opt-in integration
+target. With `DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER=1`, missing toolchain
+configuration or any failed consumer/control check fails the test; without the
+variable it reports a skip. It uses the #1656 batch publisher to stage two
+independently emitted fresh-session manifests, then hands only those staged
+Rust artifacts to the pinned Scala 3.9.0 harness. The older one-class
+`DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1` gate and its `consume-pair` mode remain
+unchanged.
+
+The harness verifies each batch contains exactly the four expected
+package-relative artifacts, compares every classfile and sidecar byte across
+fresh sessions, checks classfile major 65 and each classfile-to-TASTy UUID link,
+and records the artifact hashes. It compiles the checked-in separate
+[`Consumer.scala`](../tests/fixtures/jvm_tasty_multiclass/Consumer.scala) only
+against each Rust batch, checks that the client output contains no producer
+classes, and checks its bytecode references both constructors, setters, and
+getters. Running each result with `java -Xverify:all` must print `1329`; the
+Rust artifacts are hashed again afterward to prove compilation and execution
+did not change them.
+
+Per class, the harness also removes `get` from a copy of the classfile while
+retaining its TASTy file and compiles a dedicated method-use probe. A passing
+probe demonstrates that the Scala typer resolved `get` from that class's TASTy
+semantics. The corresponding classfile-only copy must fail because `get` is
+absent. Separate missing-sidecar and stale-UUID copies must fail with the
+expected TASTy diagnostics under `-Werror`. Each control has a fresh output
+directory, and an unexpected compiler failure reason fails the gate.
+
+To reproduce this strict gate from the repository root, use the Scala source
+checkout at the pinned revision and the cached Maven artifacts whose SHA-256
+provenance is checked by the harness:
+
+```sh
+SCALA39_ROOT=/path/to/scala3-at-777528f19a58e794c9954a42f433373472ec57f8 \
+JAVA_HOME=/path/to/jdk-21-or-newer \
+COURSIER_MAVEN_ROOT=/path/to/coursier/https/repo1.maven.org/maven2 \
+DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER=1 \
+cargo test -p dotty --test jvm_tasty_multiclass_scala_consumer \
+  --locked -- --nocapture
+```
+
+This issue's strict consumer run used Scala `3.9.0-bin-SNAPSHOT-git-777528f`
+from revision `777528f19a58e794c9954a42f433373472ec57f8` on Corretto JDK
+`25.0.4`. The harness prints the JDK release, checked compiler dependency
+hashes, fixture hash, per-class artifact hashes and link UUIDs, method
+references, control results, and both `1329` runtime outputs as JSON. The
+repository's separate mandatory JVM CI gate continues to validate JDK 21 class
+file verification and execution.
+
 ## Successor boundaries
 
 - **#1653** adds one-session whole-unit planning while preserving both independent classes, all member IDs, typed roots, and source order.
@@ -130,7 +181,7 @@ no cross-device fallback or crash-atomic transaction is claimed.
 - **#1655** emits the complete owned in-memory artifact set and rejects partial batches.
 - **#1656** stages and publishes the complete artifact set in a test-only
   adapter, with handled-error rollback and explicit filesystem limits.
-- **#1657** must test TASTy source semantics for each class separately and then execute a separate Scala client against the unchanged Rust classfiles.
+- **#1657** uses the strict Scala consumer gate above to test TASTy source semantics for each class separately, reject classfile-only/missing-sidecar/stale-link controls, and execute the separate client against unchanged Rust classfiles.
 - **#1658** is the strict fresh-session deterministic release gate. It must compare all class and TASTy bytes and paths, not only decoded shapes.
 
 Cross-class source calls/fields and inheritance between these siblings, objects/companions, nested classes, traits, generics, overloaded/default methods, external JDK classes, `String`, public constructor accessors, and other unsupported pickler forms remain outside this audit and the bounded successor fixture.
