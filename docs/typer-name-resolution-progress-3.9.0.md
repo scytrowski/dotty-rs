@@ -2,6 +2,68 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
+## Latest increment: adapt `if` expressions without `else` to `Unit`
+
+This increment starts from merged `main` at
+`91304853b7ffdc382107841414710de48e31e01f`, after #1598. The pinned source
+`InlineInfoAttribute.scala:110` contains `if (hasSelf) nextUTF8()` without an
+`else`. Before this change, the parser's synthetic zero-width `Unit` else was
+joined with the `String` then branch. The typer tried to compare those nominal
+types and stopped at `IfBranchJoinUnsupported` because `String` class info was
+unavailable. Scala 3.9.0's typer oracle confirms that a no-else conditional
+discards a non-`Unit` branch value, has type `Unit`, and warns about the
+discarded value. An explicit `else ()` remains a two-branch join.
+
+The source typer now recognizes only a parser-synthetic zero-width `Unit` else.
+When the then value is non-`Unit`, it wraps that value as a typed block
+statement followed by a canonical `Unit` literal, then joins the two `Unit`
+branches. The explicit-else case continues through the ordinary branch join.
+The focused typer regression checks both tree shape and result types, and the
+pinned oracle fixture is
+[`IfWithoutElse.oracle.md`](../crates/dotty-typer/tests/fixtures/if-without-else/IfWithoutElse.oracle.md).
+Implementation and regression commit:
+`f7f0ac67b9df1a272883c8648f84ca99bea460ba`.
+
+The deterministic `package-term` comparison used the same 60 files and 369
+methods before and after this increment. Both runs typed zero complete methods
+and had no parser or namer failures. Exactly the three `InlineInfoAttribute`
+rows advance, with no other first-blocker changes:
+
+| First blocker | Before (`913048`) | After (`f7f0ac`) |
+| --- | ---: | ---: |
+| `IfBranchJoinUnsupported` | 3 | 0 |
+| `ApplicationCalleeNotMethod` | 5 | 8 |
+| `MemberNotFound` | 3 | 3 |
+| All other first blockers | unchanged | unchanged |
+| Fully typed methods | 0 | 0 |
+
+`InlineInfoAttribute.scala#tree=212` (`nextByte`), `#tree=226`
+(`nextUTF8`), and `#tree=239` (`nextShort`) now pass the no-else branch join.
+Their enclosing `read#tree=420` attempt next stops at
+`ApplicationCalleeNotMethod`. This is measured blocker progress, not a fully
+typed real method. The per-method rows and failing source branch are in
+[`typer-name-resolution-1566-if-without-else-unit-3.9.0.tsv`](typer-name-resolution-1566-if-without-else-unit-3.9.0.tsv).
+The deterministic focused 3-file / 31-method smoke audit also matches its
+checked-in baseline exactly. All 884 `dotty-typer` unit tests and the crate's
+integration targets pass, along with Clippy, rustdoc, formatting, and the
+frontend boundary guard.
+
+Reproduce the cohort comparison with:
+
+```sh
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-if-unit-final-runs" \
+SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
+SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
+  --verify-determinism target/issue-1566-if-unit-final.md
+```
+
+The next bounded investigation is `ApplicationCalleeNotMethod` in the
+`InlineInfoAttribute.read#tree=420` attempt. Identify the exact application and
+its canonical callee before choosing a fix; do not expand into general
+application or overload support from this result alone.
+
 ## Latest increment: bounded `Int.&`
 
 This increment starts from merged `main` at
@@ -46,13 +108,8 @@ The smoke comparison uses the same environment with
 `tools/typer-classpath-corpus-audit/verify_focused_gate.py` against the pinned
 baseline.
 
-The next bounded investigation is the `IfBranchJoinUnsupported` result on
-`InlineInfoAttribute.read#tree=420`. It is an `if version == 1` branch in the
-pinned source after the bitwise expressions type. Before implementing that
-family, record the exact branch result types and spans, check Scala 3.9 oracle
-behavior, and identify whether the failure belongs to expression joins or a
-dependency-loading boundary. Do not count these methods as typed until the
-whole body succeeds.
+The `IfBranchJoinUnsupported` follow-up from this historical increment was
+investigated and resolved by the newer no-else `Unit` adaptation section above.
 
 ## Latest increment: universal equality
 
