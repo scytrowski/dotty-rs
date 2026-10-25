@@ -245,7 +245,7 @@ fn scala_39_oracle_records_reader_jvm_link_and_per_class_tasty_links() {
 }
 
 #[test]
-fn cross_class_typed_call_stops_at_the_actual_frontend_or_batch_rejection() {
+fn cross_class_call_types_canonically_before_the_paired_planner_rejects_it() {
     let source_id = SourceId::from_index(1671);
     let source = SourceText::new(SOURCE).unwrap();
     let scanner = ContextualScanner::new(SOURCE).unwrap();

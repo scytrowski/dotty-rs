@@ -29,6 +29,7 @@ use dotty_typer::{SourceTyper, TyperError};
 
 const FIXTURE_DIRECTORY: &str = "tests/fixtures/jvm";
 const LINKAGE_COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
+const CROSS_CLASS_TASTY_SOURCE: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader.scala");
 
 type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
@@ -23270,4 +23271,127 @@ fn super_calls_keep_canonical_targets_and_exact_frames_in_ordinary_branches() {
             String::from_utf8_lossy(&java.stderr)
         );
     }
+}
+
+#[test]
+fn cross_class_reader_call_compiles_and_runs_with_a_planned_counter() {
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let reversed = CROSS_CLASS_TASTY_SOURCE
+        .split("class Reader:")
+        .collect::<Vec<_>>();
+    assert_eq!(reversed.len(), 2);
+    let counter_start = reversed[0]
+        .find("class Counter(")
+        .expect("Counter declaration starts in fixture");
+    let package = &reversed[0][..counter_start];
+    let counter = &reversed[0][counter_start..];
+    let reader_first = format!("{package}class Reader:{}\n\n{counter}", reversed[1]);
+    compile_and_run_cross_class_reader(CROSS_CLASS_TASTY_SOURCE, "source-order", 1672);
+    compile_and_run_cross_class_reader(&reader_first, "reversed-order", 1673);
+    let same_named_decoy =
+        format!("{CROSS_CLASS_TASTY_SOURCE}\nclass Decoy:\n  def get(): Int = 0\n");
+    compile_and_run_cross_class_reader(&same_named_decoy, "same-named-decoy", 1676);
+}
+
+fn compile_and_run_cross_class_reader(source: &str, label: &str, source_id: u32) {
+    let output = TestOutputDirectory::new(label);
+    let artifacts = compile_source_batch(
+        source,
+        "Reader.scala",
+        output.path(),
+        SourceId::from_index(source_id),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .unwrap_or_else(|failure| panic!("cross-class source batch compiles ({label}): {failure:?}"));
+    assert!(artifacts.len() >= 2);
+    assert!(output.path().join("example/Counter.class").is_file());
+    assert!(output.path().join("example/Reader.class").is_file());
+
+    let harness = output.path().join("CrossClassHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class CrossClassHarness {
+    public static void main(String[] args) {
+        example.Counter counter = new example.Counter(41);
+        example.Reader reader = new example.Reader();
+        if (reader.read(counter) != 41) {
+            throw new AssertionError("Reader.read must return Counter.get");
+        }
+    }
+}
+"#,
+    )
+    .expect("write Java runtime harness");
+    let javac = Command::new("javac")
+        .arg("-classpath")
+        .arg(output.path())
+        .arg("-d")
+        .arg(output.path())
+        .arg(&harness)
+        .output()
+        .expect("run JDK javac");
+    assert!(
+        javac.status.success(),
+        "javac rejected generated Counter/Reader classes ({label}): {}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .arg("-Xverify:all")
+        .arg("-classpath")
+        .arg(output.path())
+        .arg("CrossClassHarness")
+        .output()
+        .expect("run JDK java verifier and harness");
+    assert!(
+        java.status.success(),
+        "JDK rejected or failed generated cross-class call ({label}): {}",
+        String::from_utf8_lossy(&java.stderr)
+    );
+}
+
+#[test]
+fn cross_class_call_reports_primitive_receiver_to_the_typer() {
+    let source = CROSS_CLASS_TASTY_SOURCE.replace("counter: Counter", "counter: Int");
+    let output = TestOutputDirectory::new("cross-class-primitive-receiver");
+    let error = compile_source_batch(
+        &source,
+        "Reader.scala",
+        output.path(),
+        SourceId::from_index(1674),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect_err("an Int receiver does not have Counter.get");
+    assert!(
+        matches!(
+            error,
+            PipelineFailure::Typer(TyperError::MemberNotFound { .. })
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn cross_class_private_method_call_reports_its_first_backend_failure() {
+    let source = CROSS_CLASS_TASTY_SOURCE.replace("def get()", "private def get()");
+    let output = TestOutputDirectory::new("cross-class-private-method");
+    let error = compile_source_batch(
+        &source,
+        "Reader.scala",
+        output.path(),
+        SourceId::from_index(1675),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect_err("a cross-class call cannot invoke Counter's private get");
+    assert!(
+        matches!(
+            error,
+            PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmVisibility {
+                visibility: Visibility::Private,
+                ..
+            })
+        ),
+        "{error:?}"
+    );
 }
