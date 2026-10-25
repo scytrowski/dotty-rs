@@ -135,7 +135,7 @@ SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1
 SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
 CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
 tools/typer-classpath-corpus-audit/run --focused-manifest target/issue-1620-runs/backendutils.manifest \
-  --output target/issue-1620-runs/backendutils-focused.md
+  target/issue-1620-runs/backendutils-focused.md
 ```
 
 Reproduce the Scala positive oracle and negative control. The Scala checkout
