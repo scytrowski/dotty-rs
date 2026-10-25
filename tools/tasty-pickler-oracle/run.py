@@ -1099,6 +1099,8 @@ object Consumer:
   def run(): Unit =
     val first = new Counter(start = 7)
     val second = new Counter(start = 2)
+    println(first.get())
+    println(second.get())
     first.set(value = 13)
     second.set(value = -42)
     println(first.get())
@@ -1160,7 +1162,7 @@ object TastyProbe:
                                "consumer.Consumer"])
             result = [line for line in runtime.strip().splitlines()
                       if not line.startswith("Picked up JAVA_TOOL_OPTIONS:")]
-            if result != ["13", "-42", "-42", "-42"]:
+            if result != ["7", "2", "13", "-42", "-42", "-42"]:
                 raise RuntimeError(f"Scala consumer returned an unexpected runtime result: {runtime}")
             if digest(pair / "example/Counter.class") != class_before:
                 raise RuntimeError("runtime did not use the unchanged Rust Counter.class")

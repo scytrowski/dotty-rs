@@ -134,7 +134,7 @@ fn pinned_scala_consumes_and_executes_the_rust_linked_counter_pair() {
     );
     assert!(
         report.contains(
-            "\"fresh_runtime_outputs\": [\n    \"13\",\n    \"-42\",\n    \"-42\",\n    \"-42\",\n    \"13\",\n    \"-42\",\n    \"-42\",\n    \"-42\"\n  ]"
+            "\"fresh_runtime_outputs\": [\n    \"7\",\n    \"2\",\n    \"13\",\n    \"-42\",\n    \"-42\",\n    \"-42\",\n    \"7\",\n    \"2\",\n    \"13\",\n    \"-42\",\n    \"-42\",\n    \"-42\"\n  ]"
         ),
         "{report}"
     );

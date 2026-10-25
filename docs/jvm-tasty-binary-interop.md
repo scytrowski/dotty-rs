@@ -372,8 +372,10 @@ For each fresh pair, the harness stages only `example/Counter.class` and
 generated client references `<init>(I)V`, `set(I)V`, and `get()I` on
 `example/Counter`, checks that scalac did not produce another `Counter.class`,
 and confirms the Rust class SHA-256 is unchanged. `java -Xverify:all` then runs
-the client against that same class. The client checks two instances and the
-mutation sequence `7 → 13 → -42`, with exact output `13, -42, -42, -42`.
+the client against that same class. The client reads the initial values of two
+instances (`7`, `2`) before mutation, then checks the sequence `7 → 13 → -42`
+on the first and `2 → -42` on the second, with exact output
+`7, 2, 13, -42, -42, -42`.
 Before Scala runs, the harness decodes each classfile's class-level attributes
 and the TASTy 28.9 header, requiring exactly one recognized 16-byte `TASTY`
 link equal to the sidecar UUID. A negative control changes the attribute name
@@ -406,7 +408,7 @@ method references, or an incorrect runtime value fail the test.
 The 2026-10-25 run passed with Scala 3.9.0 at revision
 `777528f19a58e794c9954a42f433373472ec57f8` and Temurin JDK `21.0.8+9`.
 Both independent Rust pairs were byte-identical; each client reported
-`13, -42, -42, -42` under `-Xverify:all`, and the runtime class hash remained
+`7, 2, 13, -42, -42, -42` under `-Xverify:all`, and the runtime class hash remained
 `086622661e477cd830f456161243cfed10b6d660ee74a008d79d9de0ef9ff26f`.
 The shared classfile/TASTy link UUID was
 `00e5acd1d044a9ac0000000000008193`.
@@ -430,9 +432,10 @@ independent Scala/JDK consumer in `tests/jvm_tasty_scala_consumer.rs`. The
 consumer gate emits each pair from one fresh source session, logs the canonical
 source/class/member identities, asserts package-qualified paths, identical
 `.class` and `.tasty` bytes across sessions, matching 28.9 UUIDs, client
-Methodrefs and output hashes. The Scala client mutates two independent
-instances (`7 → 13 → -42`) and the JVM runs it with `-Xverify:all` against the
-unchanged Rust class. Existing artifact tests assert class-file 65.0, source
+Methodrefs and output hashes. The Scala client first observes initial values
+`7` and `2`, then mutates two independent instances (`7 → 13 → -42` and
+`2 → -42`); the JVM runs it with `-Xverify:all` against the unchanged Rust
+class. Existing artifact tests assert class-file 65.0, source
 member order, constructor/field/method descriptors and flags; the plan test
 binds each JVM body and TASTy method to the exact typed source RHS.
 
