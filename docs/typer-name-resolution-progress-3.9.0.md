@@ -14,20 +14,23 @@ unavailable. Scala 3.9.0's typer oracle confirms that a no-else conditional
 discards a non-`Unit` branch value, has type `Unit`, and warns about the
 discarded value. An explicit `else ()` remains a two-branch join.
 
-The source typer now recognizes only a parser-synthetic zero-width `Unit` else.
-When the then value is non-`Unit`, it wraps that value as a typed block
-statement followed by a canonical `Unit` literal, then joins the two `Unit`
-branches. The explicit-else case continues through the ordinary branch join.
-The focused typer regression checks both tree shape and result types, and the
+The source typer recognizes a parser-synthetic zero-width `Unit` else, including
+when it is reached recursively through an `else if` chain. Each non-`Unit` then
+value in that incomplete chain is wrapped as a typed block statement followed
+by a canonical `Unit` literal, so the whole chain has type `Unit`. An explicit
+`else ()` remains an ordinary two-branch join. The focused typer regression
+checks direct and nested chains as well as the explicit-else type, and the
 pinned oracle fixture is
 [`IfWithoutElse.oracle.md`](../crates/dotty-typer/tests/fixtures/if-without-else/IfWithoutElse.oracle.md).
-Implementation and regression commit:
-`f7f0ac67b9df1a272883c8648f84ca99bea460ba`.
+The initial implementation commit was
+`f7f0ac67b9df1a272883c8648f84ca99bea460ba`; the review correction covering
+incomplete `else if` chains is `aade2d4de2`.
 
 The deterministic `package-term` comparison used the same 60 files and 369
-methods before and after this increment. Both runs typed zero complete methods
-and had no parser or namer failures. Exactly the three `InlineInfoAttribute`
-rows advance, with no other first-blocker changes:
+methods before and after this increment and was repeated after the review
+correction. Both final runs matched exactly, typed zero complete methods, and
+had no parser or namer failures. Exactly the three `InlineInfoAttribute` rows
+advance, with no other first-blocker changes:
 
 | First blocker | Before (`913048`) | After (`f7f0ac`) |
 | --- | ---: | ---: |
@@ -44,20 +47,27 @@ Their enclosing `read#tree=420` attempt next stops at
 typed real method. The per-method rows and failing source branch are in
 [`typer-name-resolution-1566-if-without-else-unit-3.9.0.tsv`](typer-name-resolution-1566-if-without-else-unit-3.9.0.tsv).
 The deterministic focused 3-file / 31-method smoke audit also matches its
-checked-in baseline exactly. All 884 `dotty-typer` unit tests and the crate's
-integration targets pass, along with Clippy, rustdoc, formatting, and the
-frontend boundary guard.
+checked-in baseline exactly. The Scala 3.9.0 oracle fixture includes
+`if (flag) "outer" else if (innerFlag) "inner"`; the typer output assigns the
+whole chain `Unit` and warns for both discarded strings, while explicit
+`else ()` remains `String | Unit`. After the review correction, all 884
+`dotty-typer` unit tests and integration targets passed, as did Clippy,
+rustdoc, formatting, and the frontend boundary guard.
 
 Reproduce the cohort comparison with:
 
 ```sh
-PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-if-unit-final-runs" \
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-if-unit-chain-runs" \
 SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
 SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
 CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
 tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
-  --verify-determinism target/issue-1566-if-unit-final.md
+  --verify-determinism target/issue-1566-if-unit-chain.md
 ```
+
+The deterministic run above was executed after `aade2d4de2`; the two normalized
+369-row cohort TSV outputs matched exactly and had no blocker-count changes
+relative to the pre-correction result.
 
 The next bounded investigation is `ApplicationCalleeNotMethod` in the
 `InlineInfoAttribute.read#tree=420` attempt. Identify the exact application and
