@@ -12,6 +12,7 @@ use std::fmt;
 use dotty_classfile::access_flags::{ACC_FINAL, ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC};
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::PoolRefError;
+use dotty_classfile::reader::Reader as ClassFileReader;
 use dotty_classfile::tasty_link::{TastyLinkError, TastyLinkId};
 use dotty_core::ast::{TreeKind, Untyped};
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, SymbolOrigin, Visibility};
@@ -93,6 +94,23 @@ pub enum JvmTastyContractError {
     InvalidClassName { error: PoolRefError },
     /// The sidecar is not a valid pinned Scala 3.9 TASTy file.
     InvalidTastyFile { error: TastyFileError },
+    /// The plans do not describe the complete ordered JVM compilation unit.
+    BatchShape(&'static str),
+    /// One class failed while validating the complete batch.
+    BatchClass {
+        class_index: usize,
+        class: SymbolId,
+        error: Box<JvmTastyContractError>,
+    },
+    /// A batch artifact entry set has a duplicate, missing, or unexpected path.
+    BatchArtifactPaths { reason: &'static str, path: String },
+    /// One emitted class/sidecar pair failed byte-level batch validation.
+    BatchArtifact {
+        class_index: usize,
+        class: SymbolId,
+        phase: &'static str,
+        reason: String,
+    },
 }
 
 impl fmt::Display for JvmTastyContractError {
@@ -102,6 +120,69 @@ impl fmt::Display for JvmTastyContractError {
 }
 
 impl Error for JvmTastyContractError {}
+
+/// A class's immutable ABI proof retained by a whole-source batch receipt.
+pub struct ValidatedJvmTastyBatchClass<'proof, 'unit, 'plan, 'session> {
+    proof: ValidatedJvmTastyClass<'proof, 'unit, 'plan, 'session>,
+    classfile_path: String,
+}
+
+impl ValidatedJvmTastyBatchClass<'_, '_, '_, '_> {
+    /// Per-class source/TASTy/JVM semantic proof.
+    pub fn proof(&self) -> &ValidatedJvmTastyClass<'_, '_, '_, '_> {
+        &self.proof
+    }
+    /// Exact package-qualified class-file path required by this batch.
+    pub fn classfile_path(&self) -> &str {
+        &self.classfile_path
+    }
+}
+
+/// Read-only proof that every planned class is present exactly once, ordered
+/// consistently, and validated against the same complete JVM unit/session.
+pub struct ValidatedJvmTastyBatch<'proof, 'unit, 'plan, 'session> {
+    classes: Vec<ValidatedJvmTastyBatchClass<'proof, 'unit, 'plan, 'session>>,
+    source_id: SourceId,
+}
+
+impl ValidatedJvmTastyBatch<'_, '_, '_, '_> {
+    /// Source identity shared by every class in this one-session batch.
+    pub const fn source_id(&self) -> SourceId {
+        self.source_id
+    }
+    /// Class proofs in canonical source declaration order.
+    pub fn classes(&self) -> &[ValidatedJvmTastyBatchClass<'_, '_, '_, '_>] {
+        &self.classes
+    }
+}
+
+/// Owned class-file bytes supplied to the post-encoding batch checker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmTastyClassFileArtifact {
+    /// Class-file output path.
+    pub classfile_path: String,
+    /// Complete class-file bytes.
+    pub classfile_bytes: Vec<u8>,
+}
+
+/// Owned TASTy sidecar bytes supplied to the post-encoding batch checker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmTastySidecarArtifact {
+    /// TASTy output path.
+    pub tasty_path: String,
+    /// Complete TASTy bytes.
+    pub tasty_bytes: Vec<u8>,
+}
+
+/// Owned, independently keyed artifact collections. Independent path maps
+/// allow orphan and extra sidecars to be rejected explicitly.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JvmTastyBatchArtifacts {
+    /// Class files in arbitrary input order.
+    pub classfiles: Vec<JvmTastyClassFileArtifact>,
+    /// TASTy sidecars in arbitrary input order.
+    pub sidecars: Vec<JvmTastySidecarArtifact>,
+}
 
 /// Check that a decoded classfile's `TASTY` UUID links to these exact
 /// validated Scala 3.9 TASTy bytes. This is a byte-level pair-integrity check;
@@ -260,6 +341,534 @@ pub fn validate_jvm_tasty_class<'proof, 'unit, 'plan, 'session>(
         metadata: jvm_metadata,
         tasty_path,
     })
+}
+
+/// Validate the complete ordered class batch against one original JVM unit.
+/// Every per-class proof is built before the receipt is returned; one failing
+/// class rejects the entire batch. The plans must be the exact source-ordered
+/// class set in `jvm_unit`, and all original symbols must have one owner.
+pub fn validate_jvm_tasty_batch<'proof, 'unit, 'plan, 'session>(
+    jvm_unit: &'proof JvmCompilationUnit<'unit>,
+    tasty_plans: &'proof [&'proof ValidatedClassStatePlan<'plan, 'session>],
+) -> Result<ValidatedJvmTastyBatch<'proof, 'unit, 'plan, 'session>, JvmTastyContractError> {
+    if !(2..=32).contains(&tasty_plans.len()) || tasty_plans.len() != jvm_unit.classes.len() {
+        return Err(JvmTastyContractError::BatchShape(
+            "TASTy plans must cover every class in a multi-class JVM unit",
+        ));
+    }
+
+    let first_plan = tasty_plans[0].plan();
+    if !std::ptr::eq(jvm_unit.store, first_plan.store) {
+        return Err(JvmTastyContractError::DifferentSession("semantic store"));
+    }
+    if !std::ptr::eq(jvm_unit.typed_ast, first_plan.typed_ast) {
+        return Err(JvmTastyContractError::DifferentSession("typed AST"));
+    }
+
+    let source_id = first_plan.source.id;
+    let source_packages = first_plan
+        .source_ast
+        .iter()
+        .filter_map(|(_, tree)| match &tree.kind {
+            TreeKind::PackageDef(package) if package.stats.contains(&first_plan.class_tree) => {
+                Some(package)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [source_package] = source_packages.as_slice() else {
+        return Err(JvmTastyContractError::BatchShape(
+            "source class tree must belong to exactly one package declaration",
+        ));
+    };
+    let mut source_classes = Vec::with_capacity(source_package.stats.len());
+    for tree in &source_package.stats {
+        if !matches!(
+            first_plan.source_ast.try_get(*tree).map(|tree| &tree.kind),
+            Some(TreeKind::TypeDef(_))
+        ) {
+            return Err(JvmTastyContractError::BatchShape(
+                "source package contains an unsupported top-level sibling",
+            ));
+        }
+        let class = first_plan.source_index.symbol_at(source_id, *tree).ok_or(
+            JvmTastyContractError::BatchShape(
+                "source class declaration is missing its canonical symbol",
+            ),
+        )?;
+        if !first_plan.store.symbols.contains(class) {
+            return Err(JvmTastyContractError::MemberProvenanceMismatch {
+                member: class,
+                source: source_id,
+            });
+        }
+        let symbol = first_plan.store.symbols.get(class);
+        if symbol.kind != SymbolKind::Class || symbol.origin != SymbolOrigin::Source(source_id) {
+            return Err(JvmTastyContractError::MemberProvenanceMismatch {
+                member: class,
+                source: source_id,
+            });
+        }
+        source_classes.push(class);
+    }
+    let jvm_classes = jvm_unit
+        .classes
+        .iter()
+        .map(|class| class.class)
+        .collect::<Vec<_>>();
+    let tasty_classes = tasty_plans
+        .iter()
+        .map(|plan| plan.plan().class)
+        .collect::<Vec<_>>();
+    if source_classes != jvm_classes || source_classes != tasty_classes {
+        return Err(JvmTastyContractError::BatchShape(
+            "JVM and TASTy class lists must exactly match source package declarations in order",
+        ));
+    }
+
+    let mut class_ids = Vec::with_capacity(tasty_plans.len());
+    let mut internal_names = Vec::with_capacity(tasty_plans.len());
+    let mut artifact_paths = Vec::with_capacity(tasty_plans.len() * 2);
+    let mut original_symbols = Vec::new();
+    let mut classes = Vec::with_capacity(tasty_plans.len());
+    let mut source_owner: Option<SymbolId> = None;
+    for (class_index, tasty_plan) in tasty_plans.iter().copied().enumerate() {
+        let class = tasty_plan.plan().class;
+        let plan = tasty_plan.plan();
+        if jvm_unit.classes[class_index].class != class {
+            return Err(JvmTastyContractError::BatchShape(
+                "TASTy class order differs from the complete JVM unit",
+            ));
+        }
+        if tasty_plan.plan().source.id != source_id {
+            return Err(JvmTastyContractError::BatchClass {
+                class_index,
+                class,
+                error: Box::new(JvmTastyContractError::DifferentSession("source identity")),
+            });
+        }
+        if !std::ptr::eq(first_plan.source_ast, plan.source_ast)
+            || !std::ptr::eq(first_plan.source_index, plan.source_index)
+            || !std::ptr::eq(first_plan.typed_ast, plan.typed_ast)
+            || !std::ptr::eq(first_plan.store, plan.store)
+            || !std::ptr::eq(first_plan.definitions, plan.definitions)
+        {
+            return Err(JvmTastyContractError::BatchClass {
+                class_index,
+                class,
+                error: Box::new(JvmTastyContractError::DifferentSession(
+                    "source AST, semantic index, definitions, or typed AST",
+                )),
+            });
+        }
+        if class_ids.contains(&class) {
+            return Err(JvmTastyContractError::BatchShape(
+                "duplicate source class in TASTy batch",
+            ));
+        }
+        let Some(owner) = jvm_unit.store.symbols.get(class).owner else {
+            return Err(JvmTastyContractError::BatchClass {
+                class_index,
+                class,
+                error: Box::new(JvmTastyContractError::MemberProvenanceMismatch {
+                    member: class,
+                    source: source_id,
+                }),
+            });
+        };
+        if plan.source_index.symbol_at(source_id, plan.class_tree) != Some(class) {
+            return Err(JvmTastyContractError::BatchClass {
+                class_index,
+                class,
+                error: Box::new(JvmTastyContractError::MemberProvenanceMismatch {
+                    member: class,
+                    source: source_id,
+                }),
+            });
+        }
+        if source_owner.is_some_and(|expected| expected != owner) {
+            return Err(JvmTastyContractError::BatchClass {
+                class_index,
+                class,
+                error: Box::new(JvmTastyContractError::MemberProvenanceMismatch {
+                    member: class,
+                    source: source_id,
+                }),
+            });
+        }
+        source_owner = Some(owner);
+
+        let proof = validate_jvm_tasty_class(jvm_unit, tasty_plan).map_err(|error| {
+            JvmTastyContractError::BatchClass {
+                class_index,
+                class,
+                error: Box::new(error),
+            }
+        })?;
+        let classfile_path = format!("{}.class", proof.internal_name());
+        let tasty_path = proof.tasty_path().to_owned();
+        if internal_names
+            .iter()
+            .any(|name| name == proof.internal_name())
+        {
+            return Err(JvmTastyContractError::BatchClass {
+                class_index,
+                class,
+                error: Box::new(JvmTastyContractError::BatchShape(
+                    "duplicate JVM internal name in source batch",
+                )),
+            });
+        }
+        for path in [&classfile_path, &tasty_path] {
+            if artifact_paths.iter().any(|existing| existing == path) {
+                return Err(JvmTastyContractError::BatchClass {
+                    class_index,
+                    class,
+                    error: Box::new(JvmTastyContractError::BatchShape(
+                        "duplicate class-file or TASTy artifact path in source batch",
+                    )),
+                });
+            }
+            artifact_paths.push(path.clone());
+        }
+
+        let mut owned_symbols = vec![class, plan.constructor.symbol];
+        owned_symbols.extend(plan.constructor.parameter_clauses.iter().flatten().copied());
+        owned_symbols.extend(plan.members.iter().map(|member| match member {
+            ClassMemberPicklePlan::Field(field) => field.symbol,
+            ClassMemberPicklePlan::Method { symbol, .. } => *symbol,
+        }));
+        if owned_symbols
+            .iter()
+            .any(|symbol| original_symbols.contains(symbol))
+        {
+            return Err(JvmTastyContractError::BatchClass {
+                class_index,
+                class,
+                error: Box::new(JvmTastyContractError::BatchShape(
+                    "original source symbol is represented by multiple classes",
+                )),
+            });
+        }
+        original_symbols.extend(owned_symbols);
+        class_ids.push(class);
+        internal_names.push(proof.internal_name().to_owned());
+        classes.push(ValidatedJvmTastyBatchClass {
+            proof,
+            classfile_path,
+        });
+    }
+
+    Ok(ValidatedJvmTastyBatch { classes, source_id })
+}
+
+/// Check a complete owned set of encoded class-file/TASTy pairs against an
+/// immutable semantic batch proof. Entries may arrive in any order; paths and
+/// members are checked in deterministic source order. The function consumes
+/// the bytes and returns no successful subset.
+pub fn validate_jvm_tasty_batch_artifacts(
+    batch: &ValidatedJvmTastyBatch<'_, '_, '_, '_>,
+    mut artifacts: JvmTastyBatchArtifacts,
+) -> Result<(), JvmTastyContractError> {
+    artifacts
+        .classfiles
+        .sort_by(|left, right| left.classfile_path.cmp(&right.classfile_path));
+    artifacts
+        .sidecars
+        .sort_by(|left, right| left.tasty_path.cmp(&right.tasty_path));
+    for paths in [
+        artifacts
+            .classfiles
+            .iter()
+            .map(|artifact| artifact.classfile_path.as_str())
+            .collect::<Vec<_>>(),
+        artifacts
+            .sidecars
+            .iter()
+            .map(|artifact| artifact.tasty_path.as_str())
+            .collect::<Vec<_>>(),
+    ] {
+        if let Some(pair) = paths.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(JvmTastyContractError::BatchArtifactPaths {
+                reason: "duplicate artifact path",
+                path: pair[0].to_owned(),
+            });
+        }
+    }
+    for classfile in &artifacts.classfiles {
+        if artifacts
+            .sidecars
+            .binary_search_by(|sidecar| sidecar.tasty_path.cmp(&classfile.classfile_path))
+            .is_ok()
+        {
+            return Err(JvmTastyContractError::BatchArtifactPaths {
+                reason: "class-file and TASTy sidecar use the same artifact path",
+                path: classfile.classfile_path.clone(),
+            });
+        }
+    }
+
+    let mut used_classfiles = vec![false; artifacts.classfiles.len()];
+    let mut used_sidecars = vec![false; artifacts.sidecars.len()];
+    for (class_index, expected) in batch.classes.iter().enumerate() {
+        let class = expected.proof.class();
+        let classfile_path = expected.classfile_path();
+        let tasty_path = expected.proof.tasty_path();
+        let Some((classfile_index, classfile)) = artifacts
+            .classfiles
+            .iter()
+            .enumerate()
+            .find(|(_, artifact)| artifact.classfile_path == classfile_path)
+        else {
+            return Err(JvmTastyContractError::BatchArtifactPaths {
+                reason: "missing expected class-file path",
+                path: classfile_path.to_owned(),
+            });
+        };
+        used_classfiles[classfile_index] = true;
+        let Some((sidecar_index, sidecar)) = artifacts
+            .sidecars
+            .iter()
+            .enumerate()
+            .find(|(_, artifact)| artifact.tasty_path == tasty_path)
+        else {
+            return Err(JvmTastyContractError::BatchArtifactPaths {
+                reason: "missing expected TASTy sidecar path",
+                path: tasty_path.to_owned(),
+            });
+        };
+        used_sidecars[sidecar_index] = true;
+
+        let artifact_error = |phase, reason: String| JvmTastyContractError::BatchArtifact {
+            class_index,
+            class,
+            phase,
+            reason,
+        };
+        let mut reader = ClassFileReader::new(&classfile.classfile_bytes);
+        let class_file = ClassFile::decode(&mut reader)
+            .map_err(|error| artifact_error("class-file decode", format!("{error:?}")))?;
+        if !reader.is_at_end() {
+            return Err(artifact_error(
+                "class-file trailing bytes",
+                "decoder did not consume the complete class file".into(),
+            ));
+        }
+        class_file
+            .validate_references()
+            .map_err(|error| artifact_error("class-file references", format!("{error:?}")))?;
+        if (class_file.version.major, class_file.version.minor) != (65, 0) {
+            return Err(artifact_error(
+                "class-file version",
+                format!(
+                    "expected 65.0, found {}.{}",
+                    class_file.version.major, class_file.version.minor
+                ),
+            ));
+        }
+        let actual_name = class_file
+            .constant_pool
+            .class_name(class_file.this_class)
+            .map_err(|error| artifact_error("class identity", format!("{error:?}")))?;
+        if actual_name != expected.proof.internal_name() {
+            return Err(artifact_error(
+                "class identity",
+                format!(
+                    "expected {}, found {actual_name}",
+                    expected.proof.internal_name()
+                ),
+            ));
+        }
+        let metadata = expected.proof.jvm_metadata();
+        if class_file.access_flags != metadata.identity().access_flags() {
+            return Err(artifact_error(
+                "class ABI",
+                "class access flags differ from the checked source ABI".into(),
+            ));
+        }
+        if !class_file.interfaces.is_empty() {
+            return Err(artifact_error(
+                "class ABI",
+                "decoded class has interfaces absent from the checked source ABI".into(),
+            ));
+        }
+        let expected_parent = metadata
+            .superclass()
+            .ok_or_else(|| {
+                artifact_error(
+                    "class ABI",
+                    "checked source ABI has no direct parent".into(),
+                )
+            })?
+            .parent_internal_name();
+        let actual_parent = class_file
+            .super_class
+            .map(|index| class_file.constant_pool.class_name(index))
+            .transpose()
+            .map_err(|error| artifact_error("class ABI", format!("{error:?}")))?;
+        if actual_parent != Some(expected_parent) {
+            return Err(artifact_error(
+                "class ABI",
+                "superclass differs from the checked source ABI".into(),
+            ));
+        }
+        validate_classfile_tasty_link(&class_file, &sidecar.tasty_bytes)
+            .map_err(|error| artifact_error("class-file/TASTy link", format!("{error:?}")))?;
+        let tasty = TastyFile::parse_and_validate_scala_3_9(&sidecar.tasty_bytes)
+            .map_err(|error| artifact_error("TASTy decode", format!("{error:?}")))?;
+        if (
+            tasty.header().major_version,
+            tasty.header().minor_version,
+            tasty.header().experimental_version,
+        ) != (28, 9, 0)
+        {
+            return Err(artifact_error(
+                "TASTy version",
+                format!(
+                    "expected 28.9.0, found {}.{}.{}",
+                    tasty.header().major_version,
+                    tasty.header().minor_version,
+                    tasty.header().experimental_version
+                ),
+            ));
+        }
+        let expected_tasty = expected
+            .proof
+            .tasty_plan
+            .pickle()
+            .map_err(|error| artifact_error("TASTy plan encoding", format!("{error:?}")))?;
+        if expected_tasty.bytes() != sidecar.tasty_bytes {
+            return Err(artifact_error(
+                "TASTy plan identity",
+                "decoded sidecar bytes differ from the exact validated class plan output".into(),
+            ));
+        }
+        validate_decoded_class_abi(&class_file, &expected.proof)
+            .map_err(|reason| artifact_error("member ABI", reason.into()))?;
+    }
+
+    if let Some((index, _)) = used_classfiles.iter().enumerate().find(|(_, used)| !**used) {
+        return Err(JvmTastyContractError::BatchArtifactPaths {
+            reason: "unexpected extra class file",
+            path: artifacts.classfiles[index].classfile_path.clone(),
+        });
+    }
+    if let Some((index, _)) = used_sidecars.iter().enumerate().find(|(_, used)| !**used) {
+        return Err(JvmTastyContractError::BatchArtifactPaths {
+            reason: "unexpected extra TASTy sidecar",
+            path: artifacts.sidecars[index].tasty_path.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_decoded_class_abi(
+    class_file: &ClassFile<'_>,
+    proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
+) -> Result<(), &'static str> {
+    let metadata = proof.jvm_metadata();
+    let mut expected_fields = metadata
+        .fields()
+        .iter()
+        .map(|field| {
+            (
+                field.name().to_owned(),
+                field.descriptor().to_owned(),
+                field.access_flags().0,
+            )
+        })
+        .chain(metadata.accessors().iter().map(|field| {
+            (
+                field.field_name().to_owned(),
+                field.field_descriptor().to_owned(),
+                field.field_access_flags().0,
+            )
+        }))
+        .collect::<Vec<_>>();
+    let mut actual_fields = class_file
+        .fields
+        .iter()
+        .map(|field| {
+            Ok((
+                class_file
+                    .constant_pool
+                    .utf8(field.name_index)
+                    .map_err(|_| "decoded field name does not resolve")?
+                    .to_owned(),
+                class_file
+                    .constant_pool
+                    .utf8(field.descriptor_index)
+                    .map_err(|_| "decoded field descriptor does not resolve")?
+                    .to_owned(),
+                field.access_flags.0,
+            ))
+        })
+        .collect::<Result<Vec<_>, &'static str>>()?;
+    expected_fields.sort();
+    actual_fields.sort();
+    if actual_fields != expected_fields {
+        return Err("decoded fields differ from checked source ABI");
+    }
+
+    let constructor = metadata
+        .constructor()
+        .ok_or("checked ABI has no primary constructor")?;
+    let mut expected_methods = vec![(
+        "<init>".to_owned(),
+        constructor.descriptor().as_str().to_owned(),
+        constructor.access_flags().0,
+    )];
+    expected_methods.extend(
+        metadata
+            .accessors()
+            .iter()
+            .flat_map(|accessor| {
+                std::iter::once((
+                    accessor.getter().name().to_owned(),
+                    accessor.getter().descriptor().as_str().to_owned(),
+                    accessor.getter().access_flags().0,
+                ))
+                .chain(accessor.setter().map(|setter| {
+                    (
+                        setter.name().to_owned(),
+                        setter.descriptor().as_str().to_owned(),
+                        setter.access_flags().0,
+                    )
+                }))
+            })
+            .chain(metadata.methods().iter().map(|method| {
+                (
+                    method.name().to_owned(),
+                    method.descriptor().as_str().to_owned(),
+                    method.access_flags().0,
+                )
+            })),
+    );
+    let mut actual_methods = class_file
+        .methods
+        .iter()
+        .map(|method| {
+            Ok((
+                class_file
+                    .constant_pool
+                    .utf8(method.name_index)
+                    .map_err(|_| "decoded method name does not resolve")?
+                    .to_owned(),
+                class_file
+                    .constant_pool
+                    .utf8(method.descriptor_index)
+                    .map_err(|_| "decoded method descriptor does not resolve")?
+                    .to_owned(),
+                method.access_flags.0,
+            ))
+        })
+        .collect::<Result<Vec<_>, &'static str>>()?;
+    expected_methods.sort();
+    actual_methods.sort();
+    if actual_methods != expected_methods {
+        return Err("decoded methods differ from checked source ABI");
+    }
+    Ok(())
 }
 
 fn validate_constructor(
