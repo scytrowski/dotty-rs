@@ -6020,38 +6020,23 @@ class Reader:
 }
 
 #[test]
-fn inherited_accessors_compose_across_parameterized_multilevel_hierarchy() {
-    let source = r#"
-class Base(val id: Int):
-  var current: Long = 0L
-  def doubled(): Int = id + id
-
-class Middle(seed: Int) extends Base(seed):
-  def read(): Long = current
-  def update(value: Long): Unit = current = value
-
-class Leaf(seed: Int) extends Middle(seed)
-
-class Runner:
-  def readAsBase(base: Base): Long = base.current
-  def readAsMiddle(middle: Middle): Long = middle.current
-  def readAsLeaf(leaf: Leaf): Long = leaf.current
-  def update(leaf: Leaf, value: Long): Unit = leaf.current = value
-"#;
-    let output = TestOutputDirectory::new("multilevel-inherited-accessors");
-    let second_output = TestOutputDirectory::new("multilevel-inherited-accessors-repeat");
+fn full_inherited_accessor_hierarchy_verifies_end_to_end_on_jvm() {
+    let source = fs::read_to_string(fixture_path("InheritedAccessorHierarchy.scala"))
+        .expect("read the Scala 3.9.0 inherited accessor hierarchy fixture");
+    let output = TestOutputDirectory::new("inherited-accessor-hierarchy-e2e");
+    let second_output = TestOutputDirectory::new("inherited-accessor-hierarchy-e2e-repeat");
     let mut observed_metadata = None;
     let artifacts = compile_source_batch_with_source_observer(
-        source,
-        "MultilevelInheritedAccessors.scala",
+        &source,
+        "InheritedAccessorHierarchy.scala",
         output.path(),
-        SourceId::from_index(1614),
+        SourceId::from_index(1615),
         SourceUnitCardinality::AtLeastTwo,
         &mut |_, _, unit, definitions| {
             let base_class = audit_class_named(unit, "Base");
             let middle_class = audit_class_named(unit, "Middle");
             let leaf_class = audit_class_named(unit, "Leaf");
-            let runner_class = audit_class_named(unit, "Runner");
+            let reader_class = audit_class_named(unit, "Reader");
             assert_eq!(
                 audit_class_parent(unit, base_class),
                 definitions.object_class
@@ -6078,14 +6063,22 @@ class Runner:
                 .find(|accessor| accessor.field_name() == "current")
                 .expect("Base.current is a canonical body accessor")
                 .source_field();
+            let enabled = base
+                .accessors()
+                .iter()
+                .find(|accessor| accessor.field_name() == "enabled")
+                .expect("Base.enabled is a canonical body val")
+                .source_field();
             for (class, method_name, field, expected_references) in [
                 (middle_class, "read", current, 1),
-                (middle_class, "update", current, 1),
-                (runner_class, "readAsBase", current, 1),
-                (runner_class, "readAsMiddle", current, 1),
-                (runner_class, "readAsLeaf", current, 1),
-                (runner_class, "update", current, 1),
+                (middle_class, "write", current, 1),
+                (reader_class, "fromBase", current, 1),
+                (reader_class, "fromMiddle", current, 1),
+                (reader_class, "fromLeaf", current, 1),
+                (reader_class, "change", current, 1),
                 (base_class, "doubled", id, 2),
+                (reader_class, "id", id, 1),
+                (reader_class, "isEnabled", enabled, 1),
             ] {
                 let method = audit_method_named(unit, class, method_name);
                 let body = method.body.expect("source method retains its typed body");
@@ -6100,7 +6093,39 @@ class Runner:
                     expected_references,
                     "{method_name} retains the canonical Base Field identity"
                 );
+                assert!(
+                    targets.iter().all(|tree_id| matches!(
+                        unit.typed_ast.get(*tree_id).kind,
+                        TreeKind::Ident(_) | TreeKind::Select(_)
+                    )),
+                    "{method_name} retains genuine typed identifier/selection nodes"
+                );
             }
+            let change = audit_method_named(unit, reader_class, "change");
+            let change_body = change.body.expect("change retains its typed body");
+            let mut assignments = Vec::new();
+            walk_typed_subtree(unit, change_body, &mut |tree_id| {
+                let tree = unit.typed_ast.get(tree_id);
+                if let TreeKind::Assign(assignment) = tree.kind
+                    && term_type_target(unit, unit.typed_ast.get(assignment.lhs).ty)
+                        == Some(current)
+                {
+                    assignments.push((tree_id, assignment));
+                }
+            });
+            assert_eq!(assignments.len(), 1);
+            assert!(
+                matches!(
+                    unit.typed_ast.get(assignments[0].1.lhs).kind,
+                    TreeKind::Select(_)
+                ),
+                "Reader.change retains a typed selected field on the Leaf receiver"
+            );
+            assert_eq!(
+                unit.typed_ast.get(assignments[0].0).ty,
+                definitions.unit,
+                "source setter assignment retains its Unit result"
+            );
             for (class, parent) in [(middle_class, base_class), (leaf_class, middle_class)] {
                 let plan = unit
                     .classes
@@ -6135,10 +6160,10 @@ class Runner:
     )
     .expect("real source accessors compose across Base-Middle-Leaf");
     let second = compile_source_batch(
-        source,
-        "MultilevelInheritedAccessors.scala",
+        &source,
+        "InheritedAccessorHierarchy.scala",
         second_output.path(),
-        SourceId::from_index(1614),
+        SourceId::from_index(1615),
         SourceUnitCardinality::AtLeastTwo,
     )
     .expect("fresh source session emits the same full class batch");
@@ -6158,7 +6183,7 @@ class Runner:
             .iter()
             .map(|artifact| artifact.class.internal_name())
             .collect::<Vec<_>>(),
-        ["Base", "Middle", "Leaf", "Runner"]
+        ["Base", "Middle", "Leaf", "Reader"]
     );
 
     let metadata = observed_metadata.expect("observer captures JVM metadata");
@@ -6177,6 +6202,7 @@ class Runner:
             ("id", dotty_jvm::JvmAccessorDispatchRole::Getter),
             ("current", dotty_jvm::JvmAccessorDispatchRole::Getter),
             ("current", dotty_jvm::JvmAccessorDispatchRole::Setter),
+            ("enabled", dotty_jvm::JvmAccessorDispatchRole::Getter),
         ] {
             let origin = base
                 .accessors()
@@ -6197,11 +6223,37 @@ class Runner:
     let base = decode_emitted_class_named(&artifacts, "Base");
     let middle = decode_emitted_class_named(&artifacts, "Middle");
     let leaf = decode_emitted_class_named(&artifacts, "Leaf");
-    let runner = decode_emitted_class_named(&artifacts, "Runner");
+    let reader = decode_emitted_class_named(&artifacts, "Reader");
+    for class in [&base, &middle, &leaf, &reader] {
+        assert_eq!(
+            class.version.major, 65,
+            "all emitted classes target Java 21"
+        );
+        assert!(class.access_flags.is_public());
+    }
+    assert_eq!(
+        base.constant_pool
+            .class_name(base.super_class.unwrap())
+            .unwrap(),
+        "java/lang/Object"
+    );
+    assert_eq!(
+        middle
+            .constant_pool
+            .class_name(middle.super_class.unwrap())
+            .unwrap(),
+        "Base"
+    );
+    assert_eq!(
+        leaf.constant_pool
+            .class_name(leaf.super_class.unwrap())
+            .unwrap(),
+        "Middle"
+    );
     assert_eq!(
         base.fields.len(),
-        2,
-        "Base alone owns id and current storage"
+        3,
+        "Base alone owns id, current, and enabled storage"
     );
     let base_fields = base
         .fields
@@ -6217,7 +6269,11 @@ class Runner:
         .collect::<Vec<_>>();
     assert_eq!(
         base_fields,
-        [("id", "I", true, true), ("current", "J", true, false)]
+        [
+            ("id", "I", true, true),
+            ("current", "J", true, false),
+            ("enabled", "Z", true, true),
+        ]
     );
     assert_eq!(
         methods_with_descriptors(&base),
@@ -6226,14 +6282,34 @@ class Runner:
             ("id".to_owned(), "()I".to_owned()),
             ("current".to_owned(), "()J".to_owned()),
             ("current_$eq".to_owned(), "(J)V".to_owned()),
+            ("enabled".to_owned(), "()Z".to_owned()),
             ("doubled".to_owned(), "()I".to_owned()),
         ]
     );
+    for (name, descriptor) in [
+        ("id", "()I"),
+        ("current", "()J"),
+        ("current_$eq", "(J)V"),
+        ("enabled", "()Z"),
+    ] {
+        let method = base
+            .methods
+            .iter()
+            .find(|method| {
+                base.constant_pool.utf8(method.name_index) == Ok(name)
+                    && base.constant_pool.utf8(method.descriptor_index) == Ok(descriptor)
+            })
+            .unwrap_or_else(|| panic!("Base declares {name}{descriptor}"));
+        assert!(
+            method.access_flags.is_public(),
+            "{name}{descriptor} is public"
+        );
+    }
     assert!(middle.fields.is_empty());
     assert!(leaf.fields.is_empty());
     for child in [&middle, &leaf] {
         assert!(methods_with_descriptors(child).iter().all(|(name, _)| {
-            !["id", "current", "current_$eq", "doubled"].contains(&name.as_str())
+            !["id", "current", "current_$eq", "enabled", "doubled"].contains(&name.as_str())
         }));
     }
     assert_invocation_sequence(
@@ -6258,45 +6334,115 @@ class Runner:
             .iter()
             .filter(|(_, opcode)| *opcode == 0xb5)
             .count(),
-        2,
-        "Base initializes its id and current backing fields exactly once"
+        3,
+        "Base initializes its id, current, and enabled backing fields exactly once"
     );
     assert_field_reference_sequence(
         &base,
         base_constructor,
-        &[(0xb5, "Base", "id", "I"), (0xb5, "Base", "current", "J")],
+        &[
+            (0xb5, "Base", "id", "I"),
+            (0xb5, "Base", "current", "J"),
+            (0xb5, "Base", "enabled", "Z"),
+        ],
+    );
+    let object_init_pc = base_constructor_instructions
+        .iter()
+        .find(|(_, opcode)| *opcode == 0xb7)
+        .map(|(pc, _)| *pc)
+        .expect("Base calls Object.<init>");
+    let first_field_store_pc = base_constructor_instructions
+        .iter()
+        .find(|(_, opcode)| *opcode == 0xb5)
+        .map(|(pc, _)| *pc)
+        .expect("Base stores constructor and body fields");
+    assert!(
+        object_init_pc < first_field_store_pc,
+        "Base initializes Object before storing its own fields"
+    );
+    assert_field_reference_sequence(
+        &base,
+        emitted_method_code(&base, "current"),
+        &[(0xb4, "Base", "current", "J")],
+    );
+    assert_field_reference_sequence(
+        &base,
+        emitted_method_code(&base, "current_$eq"),
+        &[(0xb5, "Base", "current", "J")],
+    );
+    assert_opcode_sequence(emitted_method_code(&base, "current"), &[0x2a, 0xb4, 0xad]);
+    assert_eq!(code_max_stack(&base, "current"), 2);
+    assert_eq!(code_max_locals(&base, "current_$eq"), 3);
+    assert_field_reference_sequence(
+        &base,
+        emitted_method_code(&base, "enabled"),
+        &[(0xb4, "Base", "enabled", "Z")],
     );
     assert_invocation_sequence(
         &middle,
         emitted_method_code(&middle, "read"),
         &[(0xb6, "Middle", "current", "()J")],
     );
+    assert_eq!(
+        emitted_method_code(&middle, "read").last(),
+        Some(&0xad),
+        "the inherited Long getter returns with lreturn"
+    );
     assert_invocation_sequence(
         &middle,
-        emitted_method_code(&middle, "update"),
+        emitted_method_code(&middle, "write"),
         &[(0xb6, "Middle", "current_$eq", "(J)V")],
     );
     for (method, owner) in [
-        ("readAsBase", "Base"),
-        ("readAsMiddle", "Middle"),
-        ("readAsLeaf", "Leaf"),
+        ("fromBase", "Base"),
+        ("fromMiddle", "Middle"),
+        ("fromLeaf", "Leaf"),
     ] {
         assert_invocation_sequence(
-            &runner,
-            emitted_method_code(&runner, method),
+            &reader,
+            emitted_method_code(&reader, method),
             &[(0xb6, owner, "current", "()J")],
         );
     }
     assert_invocation_sequence(
-        &runner,
-        emitted_method_code(&runner, "update"),
+        &reader,
+        emitted_method_code(&reader, "change"),
         &[(0xb6, "Leaf", "current_$eq", "(J)V")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "id"),
+        &[(0xb6, "Leaf", "id", "()I")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "isEnabled"),
+        &[(0xb6, "Leaf", "enabled", "()Z")],
     );
     assert_invocation_sequence(
         &base,
         emitted_method_code(&base, "doubled"),
         &[(0xb6, "Base", "id", "()I"), (0xb6, "Base", "id", "()I")],
     );
+    for (class, methods) in [
+        (&middle, ["read", "write"].as_slice()),
+        (
+            &reader,
+            [
+                "fromBase",
+                "fromMiddle",
+                "fromLeaf",
+                "change",
+                "id",
+                "isEnabled",
+            ]
+            .as_slice(),
+        ),
+    ] {
+        for method in methods {
+            assert_no_field_reference_to_owner(class, emitted_method_code(class, method), "Base");
+        }
+    }
 
     if !require_jdk_or_skip() {
         return;
@@ -6306,12 +6452,13 @@ class Runner:
         .args([
             "-c",
             "-v",
+            "-p",
             "-classpath",
             &classpath,
             "Base",
             "Middle",
             "Leaf",
-            "Runner",
+            "Reader",
         ])
         .output()
         .expect("start javap for multilevel inherited accessors");
@@ -6329,6 +6476,10 @@ class Runner:
         "Middle.current_$eq:(J)V",
         "Leaf.current:()J",
         "Leaf.current_$eq:(J)V",
+        "major version: 65",
+        "private final int id",
+        "private long current",
+        "private final boolean enabled",
     ] {
         assert!(javap_output.contains(expected), "javap omitted {expected}");
     }
@@ -6339,16 +6490,20 @@ class Runner:
         &harness,
         r#"public final class MultilevelInheritedAccessorsHarness {
     public static void main(String[] args) {
-        Runner runner = new Runner();
-        Base base = new Base(7);
+        Reader reader = new Reader();
+        Base base = new Base(3);
+        Leaf first = new Leaf(7);
+        Leaf second = new Leaf(11);
+        if (first.id() != 7 || second.id() != 11 || reader.id(first) != 7) throw new AssertionError("inherited id");
+        if (!first.enabled() || !second.enabled() || first.doubled() != 14 || second.doubled() != 22) throw new AssertionError("body val and ordinary inherited method");
+        if (reader.fromBase(base) != 0L || reader.fromBase(first) != 0L || reader.fromMiddle(first) != 0L || reader.fromLeaf(first) != 0L || new Middle(9).read() != 0L) throw new AssertionError("inherited getter");
         Middle middle = new Middle(9);
-        Leaf leaf = new Leaf(11);
-        if (base.id() != 7 || middle.id() != 9 || leaf.id() != 11) throw new AssertionError("id");
-        if (base.doubled() != 14 || middle.doubled() != 18 || leaf.doubled() != 22) throw new AssertionError("inherited ordinary method");
-        if (runner.readAsBase(leaf) != 0L || runner.readAsMiddle(middle) != 0L || runner.readAsLeaf(leaf) != 0L || middle.read() != 0L) throw new AssertionError("inherited getter");
-        middle.update(Long.MIN_VALUE);
-        runner.update(leaf, Long.MAX_VALUE);
-        if (runner.readAsBase(leaf) != Long.MAX_VALUE || runner.readAsLeaf(leaf) != Long.MAX_VALUE || middle.read() != Long.MIN_VALUE) throw new AssertionError("setter and independent instances");
+        middle.write(Long.MIN_VALUE);
+        if (middle.read() != Long.MIN_VALUE) throw new AssertionError("intermediate setter");
+        reader.change(first, Long.MAX_VALUE);
+        second.current_$eq(Long.MIN_VALUE);
+        if (reader.fromBase(first) != Long.MAX_VALUE || reader.fromMiddle(first) != Long.MAX_VALUE || reader.fromLeaf(first) != Long.MAX_VALUE) throw new AssertionError("typed inherited setter dispatch");
+        if (reader.fromLeaf(second) != Long.MIN_VALUE || reader.fromBase(base) != 0L) throw new AssertionError("independent instances");
         System.out.println("multilevel inherited accessors verified");
     }
 }
