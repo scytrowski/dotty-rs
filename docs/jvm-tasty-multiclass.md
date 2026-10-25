@@ -91,12 +91,45 @@ existing validated source/type subset. It does not change the legacy
 to #1656, and the independent pinned Scala 3.9.0 consumer proof for both classes
 belongs to #1657.
 
+## Test-only complete batch publication (#1656)
+
+The `jvm_tasty_artifacts.rs` integration-test adapter accepts the complete
+owned batch from #1655. It re-decodes every classfile and TASTy document,
+checks class-file and TASTy versions, canonical class names and paths, exact
+class/sidecar mapping, class-to-header UUID links, common source identity,
+distinct class identities and output paths, and the total byte limit before it
+creates a staging directory. The adapter currently permits 2–32 class pairs
+and at most 64 MiB of artifact bytes. For #1652's audited Counter/Gauge map,
+each class has its own sidecar; every required classfile and sidecar is
+inventoried once in deterministic source order.
+
+The destination must be an absent path beneath an existing, non-symlinked
+directory. Existing destinations are rejected without replacing or deleting
+their contents. After prevalidation, the adapter creates a unique sibling
+staging directory (mode `0700` on Unix), writes each file with exclusive
+creation, flushes it, then checks the staged tree inventory and every byte
+against the manifest. One same-filesystem directory rename promotes the full
+tree. A handled staging or promotion error removes the staging tree best
+effort; an injected post-promotion failure removes the newly promoted tree
+best effort and reports cleanup errors alongside the original error. Fault
+injection covers each of the four file writes, pre-promotion validation, and
+post-promotion rollback. The existing one-pair publisher and its tests remain
+unchanged.
+
+This integration helper is not a production filesystem API. Rollback covers
+reported errors while the process is running. It does not provide durability
+against power loss or process termination, a transaction across filesystems,
+or protection from a concurrent process with the same user permissions racing
+the destination or staging tree. The rename is used only on the same filesystem;
+no cross-device fallback or crash-atomic transaction is claimed.
+
 ## Successor boundaries
 
 - **#1653** adds one-session whole-unit planning while preserving both independent classes, all member IDs, typed roots, and source order.
 - **#1654** validates every class and path together and checks each link against its exact sidecar bytes.
 - **#1655** emits the complete owned in-memory artifact set and rejects partial batches.
-- **#1656** stages and publishes the complete artifact set.
+- **#1656** stages and publishes the complete artifact set in a test-only
+  adapter, with handled-error rollback and explicit filesystem limits.
 - **#1657** must test TASTy source semantics for each class separately and then execute a separate Scala client against the unchanged Rust classfiles.
 - **#1658** is the strict fresh-session deterministic release gate. It must compare all class and TASTy bytes and paths, not only decoded shapes.
 
