@@ -336,7 +336,10 @@ impl SourceTyper<'_> {
 
     /// Returns the class identity for the JDK's `java.lang.String`, without
     /// accepting a same-spelled source or TASTy class as the compiler intrinsic.
-    fn canonical_java_lang_string_class(&self, receiver: TypeId) -> Option<SymbolId> {
+    pub(in crate::typer) fn canonical_java_lang_string_class(
+        &self,
+        receiver: TypeId,
+    ) -> Option<SymbolId> {
         let Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(class),
             ..
@@ -347,46 +350,61 @@ impl SourceTyper<'_> {
         if !self.store.symbols.contains(*class) {
             return None;
         }
-        let string = self.store.symbols.get(*class);
+        if !self.is_canonical_java_lang_string_symbol(*class) {
+            return None;
+        }
+        Some(*class)
+    }
+
+    pub(in crate::typer) fn is_canonical_java_lang_string_symbol(&self, class: SymbolId) -> bool {
+        if !self.store.symbols.contains(class) {
+            return false;
+        }
+        let string = self.store.symbols.get(class);
         if string.kind != SymbolKind::Class
             || !matches!(string.origin, SymbolOrigin::Classfile(_))
             || !string.name.is_type()
             || self.store.names.resolve(string.name.text()) != "String"
         {
-            return None;
+            return false;
         }
-        let lang = string.owner?;
+        let Some(lang) = string.owner else {
+            return false;
+        };
         if !self.store.symbols.contains(lang) {
-            return None;
+            return false;
         }
         let lang_symbol = self.store.symbols.get(lang);
         if lang_symbol.kind != SymbolKind::Package
             || !lang_symbol.name.is_term()
             || self.store.names.resolve(lang_symbol.name.text()) != "lang"
         {
-            return None;
+            return false;
         }
-        let java = lang_symbol.owner?;
+        let Some(java) = lang_symbol.owner else {
+            return false;
+        };
         if !self.store.symbols.contains(java) {
-            return None;
+            return false;
         }
         let java_symbol = self.store.symbols.get(java);
         if java_symbol.kind != SymbolKind::Package
             || !java_symbol.name.is_term()
             || self.store.names.resolve(java_symbol.name.text()) != "java"
         {
-            return None;
+            return false;
         }
-        let root = java_symbol.owner?;
+        let Some(root) = java_symbol.owner else {
+            return false;
+        };
         if !self.store.symbols.contains(root) {
-            return None;
+            return false;
         }
         let root_symbol = self.store.symbols.get(root);
-        (root_symbol.kind == SymbolKind::Package
+        root_symbol.kind == SymbolKind::Package
             && root_symbol.name.is_term()
             && self.store.names.resolve(root_symbol.name.text()).is_empty()
-            && root_symbol.owner.is_none())
-        .then_some(*class)
+            && root_symbol.owner.is_none()
     }
 
     /// Installs Scala 3.9's compiler-synthesized `String.+(Any): String` on

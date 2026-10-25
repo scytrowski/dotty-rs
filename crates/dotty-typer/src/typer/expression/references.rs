@@ -464,7 +464,7 @@ impl SourceTyper<'_> {
     }
 
     pub(in crate::typer) fn literal_type(
-        &self,
+        &mut self,
         value: &dotty_core::Constant,
         tree_index: u32,
     ) -> Result<TypeId, TyperError> {
@@ -479,12 +479,17 @@ impl SourceTyper<'_> {
             Constant::Long(_) => Ok(self.definitions.long),
             Constant::FloatBits(_) => Ok(self.definitions.float),
             Constant::DoubleBits(_) => Ok(self.definitions.double),
-            Constant::String(_) | Constant::StringUtf16(_) => {
-                Err(TyperError::StringLiteralTypingDeferred {
+            Constant::String(_) | Constant::StringUtf16(_) => self
+                .canonical_java_lang_string_type()
+                .map_err(|error| TyperError::SymbolResolution {
                     source: self.source,
                     tree_index,
-                })
-            }
+                    error,
+                })?
+                .ok_or(TyperError::StringLiteralTypingDeferred {
+                    source: self.source,
+                    tree_index,
+                }),
             Constant::Null => Ok(self.definitions.null_type),
             Constant::Class(_) => Err(TyperError::UnsupportedExpression {
                 source: self.source,

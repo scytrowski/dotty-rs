@@ -142,7 +142,7 @@ fn string_concatenation_uses_the_canonical_java_string_operator_only() {
         "object StringConcatenation:\n",
         "  def concat(name: java.lang.String, desc: java.lang.String): java.lang.String = name + desc\n",
         "  def explicit(name: java.lang.String, desc: java.lang.String): java.lang.String = name.+(desc)\n",
-        "  def rollback(name: java.lang.String): java.lang.String = name + \"x\"\n",
+        "  def literal: java.lang.String = \"literal\"\n",
         "  def unrelated(left: Token, right: Token): Token = left + right\n",
     );
     let source = SourceId::from_index(0);
@@ -192,8 +192,6 @@ fn string_concatenation_uses_the_canonical_java_string_operator_only() {
         self_type: None,
     }));
     store.symbols.get_mut(string_class).info = SymbolInfo::Complete(class_info);
-    let plus_name = Name::new(store.names.intern("+"), Namespace::Term);
-
     let method_and_body = |wanted: &str| {
         parsed
             .ast
@@ -213,7 +211,7 @@ fn string_concatenation_uses_the_canonical_java_string_operator_only() {
     };
     let (concat_method, concat_body) = method_and_body("concat");
     let (explicit_method, explicit_body) = method_and_body("explicit");
-    let (rollback_method, rollback_body) = method_and_body("rollback");
+    let (literal_method, literal_body) = method_and_body("literal");
     let (unrelated_method, unrelated_body) = method_and_body("unrelated");
 
     let mut typer = SourceTyper::new(
@@ -229,27 +227,26 @@ fn string_concatenation_uses_the_canonical_java_string_operator_only() {
         lang_package,
         string_class,
     }));
-    typer.complete_symbol(rollback_method).unwrap();
-    let context = typer.expression_context_for(rollback_method).unwrap();
+
+    typer.complete_symbol(literal_method).unwrap();
+    let context = typer.expression_context_for(literal_method).unwrap();
+    let literal = typer
+        .type_expression(literal_body, context)
+        .expect("a string literal should use the canonical classfile-backed String type");
+    let literal_type = typer.typed_ast().get(literal).ty;
     assert!(matches!(
-        typer.type_expression(rollback_body, context),
-        Err(TyperError::StringLiteralTypingDeferred { .. })
+        typer.store().types.try_get(literal_type),
+        Some(Type::Constant(dotty_core::Constant::String(_)))
     ));
-    let declarations = match typer.store().symbols.get(string_class).info {
-        SymbolInfo::Complete(class_info) => match typer.store().types.get(class_info) {
-            Type::ClassInfo(info) => info.declarations,
-            _ => panic!("String should have class info"),
-        },
-        _ => panic!("String class should be complete"),
-    };
-    assert!(
-        typer
-            .store()
-            .scopes
-            .get(declarations)
-            .lookup_all(&plus_name)
-            .is_empty()
-    );
+    let widened_literal = typer.widen_expression_type(literal_type).unwrap();
+    assert!(matches!(
+        typer.store().types.try_get(widened_literal),
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        }) if *class == string_class
+    ));
+    assert!(typer.conforms(literal_type, widened_literal).unwrap());
 
     typer.complete_symbol(explicit_method).unwrap();
     let context = typer.expression_context_for(explicit_method).unwrap();

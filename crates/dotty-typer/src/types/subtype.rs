@@ -5,7 +5,9 @@ use std::fmt;
 
 use dotty_core::Namespace;
 use dotty_core::types::{ClassInfo, Type, TypeRefTarget};
-use dotty_core::{Constant, ScopeId, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TypeId};
+use dotty_core::{
+    Constant, ResolutionError, ScopeId, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TypeId,
+};
 
 use crate::types::{SymbolInfoState, TypeNormalizeError, TypeNormalizer};
 use crate::{SourceTyper, TyperError};
@@ -24,6 +26,9 @@ pub enum TypeRelationError {
     Normalization(TypeNormalizeError),
     /// A type shape lies outside the relation supported by this typer slice.
     UnsupportedType { found: TypeId, expected: TypeId },
+    /// Resolving the canonical Java String type failed while relating a string
+    /// constant to another type.
+    StringTypeResolution { error: ResolutionError },
     /// A class symbol referenced by a nominal type is not in the store.
     UnknownClassSymbol { symbol: SymbolId },
     /// A nominal type reference targets a symbol that is not class-like or a
@@ -88,7 +93,7 @@ impl SourceTyper<'_> {
     /// [`SourceTyper::complete_symbol`] explicitly first when source class
     /// completion is desired. Supported `Type::Constant` values compare by
     /// exact payload and conform to their modeled builtin type. String
-    /// constants support exact equality but have no modeled underlying type.
+    /// constants use the resolver's exact classfile-backed Java String type.
     /// `Or` uses the bounded union rules documented on [`Self::conforms`].
     /// Intersection, methodic, refined, recursive, match, wildcard, error, and
     /// name-designed structural types return
@@ -211,7 +216,11 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             }
             (_, Type::Constant(_)) => return Ok(false),
             (Type::Constant(constant), _) => {
-                let Some(underlying) = self.typer.constant_underlying_type(constant) else {
+                let Some(underlying) = self
+                    .typer
+                    .constant_underlying_type(constant)
+                    .map_err(|error| TypeRelationError::StringTypeResolution { error })?
+                else {
                     return Err(TypeRelationError::UnsupportedType { found, expected });
                 };
                 return self.is_subtype(underlying, expected);

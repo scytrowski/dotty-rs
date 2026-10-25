@@ -195,12 +195,27 @@ whether the varargs application itself is supported.
 The pinned `scala-asm` 9.9.0 classfile independently confirms `Opcodes` is a
 public interface (`ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT`) and its opcode
 fields are `ACC_PUBLIC | ACC_STATIC | ACC_FINAL`. This matches the import rule
-exercised by #1625. The next implementation slice must establish how the
-source session threads that exact classpath-backed String identity through
-constant conformance and widening; only then can the two `BackendUtils` roots
-reveal whether varargs application is another blocker. The post-merge focused
-output is retained locally at
-`target/issue-1620-runs/backendutils-after-merge.md`.
+exercised by #1625.
+
+### Canonical String literals
+
+The follow-up resolves `java.lang.String` through the session resolver and
+accepts it only when it is a classfile-backed type symbol with the exact
+`java.lang` → `java` → root package owner chain. It preserves ordinary and
+UTF-16 string literals as exact `Type::Constant` values; constant conformance
+and widening resolve the same canonical class on demand instead of retaining a
+possibly stale arena ID. Missing or noncanonical String symbols remain
+unsupported. The classpath-backed literal, widening, and conformance regression
+passes, as does the no-resolver test that confirms the explicit deferral path.
+
+The frozen `BackendUtils.scala#tree=240` and `#tree=302` roots both move from
+`StringLiteralTypingDeferred` to `MissingDeclaredType`; neither becomes fully
+typed. The resolver trace records canonical classfile-backed
+`java.lang.String`. The first missing type is an inferred lazy field at
+`BackendUtils.scala:122`, `serializedLamdaObjDesc`. This is earlier than a
+determination of whether the `targetMethods*` varargs call itself types, so
+no varargs support is claimed. The focused result is retained locally at
+`target/issue-1620-runs/backendutils-string-after.md`.
 
 Reproduce the one-file audit (the manifest selects the file, then the audit
 intersects it with the frozen method roots):
