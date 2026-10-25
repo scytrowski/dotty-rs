@@ -172,15 +172,49 @@ roots moved to `MemberLookup`; `ClosureOptimizer.scala#tree=1707` remains at
 Both serial passes matched sidecar SHA-256
 `dcec82c0cf9577201fc172fdb1ef2a6d6742ca4af9dc2d7c1cff55579aec0152`.
 
-The new `LocalOpt.addVar` blocker shows the next concrete gap: Java
-zero-argument method selections such as `varIns.getOpcode` still have type
-`Method([], Int)` where a value of type `Int` is expected. The focused
-`ClosureOptimizer` case `before.getPrevious` has the same Java no-parentheses
-shape. Pinned Scala 3.9 controls accept a Java `f()` method as `f` in a value
-position, reject a Scala `def f()` without `()`, accept a Scala parameterless
-`def f` without `()`, and reject `def f` with `()`. So the next bounded Typer
-slice should investigate a Java-binary-only value adaptation, keeping TASTy
-`ExprType`, explicit Scala empty clauses, and by-name parameters distinct.
+The next bounded slice implements Scala's Java nullary-method adaptation.
+Classfile methods already carry `JAVA_DEFINED`, while TASTy and source methods
+do not. In value position, a selected Java method with one plain empty clause
+now produces a typed zero-argument `Apply`. Application and type-application
+callee paths keep the selected method reference raw, so explicit `f()` syntax
+is not applied twice. The focused classfile integration tests cover both
+`op.instanceMethod` and `op.instanceMethod()` and assert the typed `Apply`
+shape and stable repeated source mapping.
+
+Pinned Scala 3.9 controls accept Java `f()` as `f` in value position, reject a
+Scala `def f()` without `()`, accept a Scala parameterless `def f` without
+`()`, and reject `def f` with `()`. This increment is limited to
+`JAVA_DEFINED` methods with a single plain empty clause; it does not unwrap
+TASTy `ExprType`, Scala explicit empty clauses, polymorphic methods, or
+by-name parameters.
+
+The same deterministic 60-file / 369-method cohort still types 0 methods, but
+eight rows change first blocker. Of the four previously focused roots,
+`LocalOpt.scala#tree=2986` advances from
+`ApplicationArgumentConformanceUnsupported` to `IfConditionConformanceUnsupported`;
+the two `InlinerHeuristics.scala` roots remain at `MemberLookup`; and
+`ClosureOptimizer.scala#tree=1707` advances from
+`InvalidInferredLocalValueType` to `UnstableSelectionPrefix`. Six more rows
+move in `BCodeSkelBuilder.scala#tree=1968`,
+`BCodeSkelBuilder.scala#tree=2025`, `BCodeUtils.scala#tree=157`, and
+`LocalOpt.scala#tree=2834`, `#tree=2875`, and `#tree=3172`.
+Exact transitions are recorded in
+[`typer-java-nullary-adaptation-progress-3.9.0.tsv`](typer-java-nullary-adaptation-progress-3.9.0.tsv).
+The two normalized cohort sidecars match byte-for-byte at SHA-256
+`80816778c15ca48652087367eb1d9a3314440484cd645c55bcb692fe9d365b25`.
+
+The focused `LocalOpt.addVar` path now gets past `varIns.getOpcode` and stops
+at condition conformance; the method remains incomplete. The cohort result is
+progress in the selected roots, not corpus completion: zero of 369 selected
+methods are fully typed. A later blocker is credited only after the preceding
+operation's signature shape and source-oracle controls are shown correct.
+
+Validation for this Typer slice passed `cargo fmt --all -- --check`,
+`python3 tools/check-frontend-boundaries.py`,
+`cargo test -p dotty-typer --all-targets --locked`, and
+`cargo clippy -p dotty-typer --all-targets --locked -- -D warnings`. The
+focused corpus audit was run twice serially; its compact sidecars matched as
+recorded above.
 
 The cohort result is progress in the focused roots, not corpus completion:
 zero of 369 selected methods are fully typed. A later blocker is credited only

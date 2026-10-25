@@ -594,7 +594,21 @@ fn type_opcodes_import(source_id: u32, source_text: &str) -> Result<(), dotty_ty
     )));
 
     let context = typer.expression_context_for(method).unwrap();
-    typer.type_expression(body, context).map(|_| ())
+    if source_id == 1628 {
+        assert!(matches!(parsed.ast.get(body).kind, TreeKind::Select(_)));
+    } else if source_id == 1629 {
+        assert!(matches!(parsed.ast.get(body).kind, TreeKind::Apply(_)));
+    }
+    let typed = typer.type_expression(body, context)?;
+    if matches!(source_id, 1628 | 1629) {
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("a Java zero-argument call should produce a typed Apply")
+        };
+        assert!(application.args.is_empty());
+        let repeated = typer.type_expression(body, context)?;
+        assert_eq!(repeated, typed);
+    }
+    Ok(())
 }
 
 #[test]
@@ -628,6 +642,18 @@ fn package_qualified_classfile_import_qualifier_rejects_instance_fields() {
         type_opcodes_import(1627, source_text),
         Err(dotty_typer::TyperError::ImportQualifierNotFound { .. })
     ));
+}
+
+#[test]
+fn classfile_nullary_instance_method_auto_applies_in_value_position() {
+    let source_text = "package consumer\nobject Use { def first(op: scala.tools.asm.Opcodes): Int = op.instanceMethod }";
+    type_opcodes_import(1628, source_text).unwrap();
+}
+
+#[test]
+fn classfile_nullary_instance_method_keeps_explicit_empty_call() {
+    let source_text = "package consumer\nobject Use { def first(op: scala.tools.asm.Opcodes): Int = op.instanceMethod() }";
+    type_opcodes_import(1629, source_text).unwrap();
 }
 
 #[test]
