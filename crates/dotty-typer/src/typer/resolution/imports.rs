@@ -323,7 +323,7 @@ impl SourceTyper<'_> {
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
         self.resolve_qualifier_symbol_with_expression_context(
-            tree, context, None, tree_index, position,
+            tree, context, None, false, tree_index, position,
         )
     }
 
@@ -332,6 +332,7 @@ impl SourceTyper<'_> {
         tree: TreeId<Untyped>,
         context: SourceContextId,
         expression_context: Option<ExpressionContext>,
+        allow_type_member_fallback: bool,
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
@@ -384,6 +385,7 @@ impl SourceTyper<'_> {
                     select.qualifier,
                     context,
                     expression_context,
+                    allow_type_member_fallback,
                     tree_index,
                     position,
                 )?
@@ -419,8 +421,33 @@ impl SourceTyper<'_> {
                     selector: MemberSelector::Unique,
                     space: MemberSpace::Prefix,
                 };
+                let term_member =
+                    self.resolver
+                        .resolve_member(self.store, &request)
+                        .map_err(|error| TyperError::SymbolResolution {
+                            source: self.source,
+                            tree_index,
+                            error,
+                        })?;
+                if term_member.is_some() || select.name.is_type() || !allow_type_member_fallback {
+                    return Ok(term_member);
+                }
+
+                // Import qualifiers use Scala's any-selection shape: a
+                // package-qualified class can be the prefix even when no
+                // same-named term (such as an Object) exists. Keep term
+                // lookup first, then ask the resolver for the type namespace
+                // only after that lookup misses.
+                let type_name =
+                    dotty_core::Name::new(select.name.text(), dotty_core::Namespace::Type);
+                let type_request = MemberRequest {
+                    prefix,
+                    name: type_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                };
                 self.resolver
-                    .resolve_member(self.store, &request)
+                    .resolve_member(self.store, &type_request)
                     .map_err(|error| TyperError::SymbolResolution {
                         source: self.source,
                         tree_index,
@@ -1101,6 +1128,7 @@ impl SourceTyper<'_> {
                 import.expr,
                 qualifier_context,
                 Some(expression_context),
+                true,
                 source_import.tree.index(),
                 location.position,
             );
@@ -1379,6 +1407,7 @@ impl SourceTyper<'_> {
                 tree,
                 context.lexical,
                 Some(context),
+                true,
                 import_tree_index,
                 source_node.position,
             )?
@@ -1540,7 +1569,14 @@ impl SourceTyper<'_> {
         import_tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
-        self.resolve_qualifier_symbol(qualifier, context, import_tree_index, position)
+        self.resolve_qualifier_symbol_with_expression_context(
+            qualifier,
+            context,
+            None,
+            true,
+            import_tree_index,
+            position,
+        )
     }
 
     pub(in crate::typer) fn lookup_context_symbol(

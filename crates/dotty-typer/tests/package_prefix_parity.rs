@@ -106,6 +106,30 @@ impl ClassPathEntry for DottyCoreClassPath {
     }
 }
 
+struct OpcodesFixturePath;
+
+impl ClassPathEntry for OpcodesFixturePath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        let bytes = match name.as_internal() {
+            "scala/tools/asm/Opcodes" => opcodes_class_file_stub(),
+            "java/lang/Object" => java_object_stub(),
+            _ => return Ok(None),
+        };
+        Ok(Some(ClassResource::new(
+            bytes,
+            ClassFormat::Class,
+            ClassOrigin::Directory("<Opcodes-import-classfile-fixture>".into()),
+        )))
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        Ok(matches!(
+            package,
+            ["scala"] | ["scala", "tools"] | ["scala", "tools", "asm"]
+        ))
+    }
+}
+
 type PackageRequestTrace = std::rc::Rc<std::cell::RefCell<Vec<(Vec<String>, Option<SymbolId>)>>>;
 
 struct TracedResolver<E: ClassPathEntry> {
@@ -177,6 +201,26 @@ fn class_file_stub(internal_name: &str) -> Vec<u8> {
     bytes.extend_from_slice(object_name);
     bytes.extend_from_slice(&[7, 0, 3, 0, 0x21, 0, 2, 0, 4]);
     bytes.extend_from_slice(&[0; 8]);
+    bytes
+}
+
+fn opcodes_class_file_stub() -> Vec<u8> {
+    let internal_name = b"scala/tools/asm/Opcodes";
+    let object_name = b"java/lang/Object";
+    let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 61, 0, 7, 1];
+    bytes.extend_from_slice(&(internal_name.len() as u16).to_be_bytes());
+    bytes.extend_from_slice(internal_name);
+    bytes.extend_from_slice(&[7, 0, 1, 1]);
+    bytes.extend_from_slice(&(object_name.len() as u16).to_be_bytes());
+    bytes.extend_from_slice(object_name);
+    bytes.extend_from_slice(&[7, 0, 3, 1, 0, 8]);
+    bytes.extend_from_slice(b"ICONST_0");
+    bytes.extend_from_slice(&[1, 0, 1, b'I']);
+    // public interface abstract Opcodes extends Object
+    bytes.extend_from_slice(&[0x06, 0x01, 0, 2, 0, 4, 0, 0]);
+    // public static final int ICONST_0; its descriptor is enough for typing.
+    bytes.extend_from_slice(&[0, 1, 0, 0x19, 0, 5, 0, 6, 0, 0]);
+    bytes.extend_from_slice(&[0, 0, 0, 0]);
     bytes
 }
 
@@ -487,6 +531,63 @@ fn current_package_import_reuses_package_identity_from_scala39_tasty() {
     };
     assert_eq!(*found, relative);
     assert_eq!(requests.borrow().as_slice(), [&["a", "consumer", "b"]]);
+}
+
+#[test]
+fn package_qualified_classfile_type_is_an_import_wildcard_qualifier() {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let source = SourceId::from_index(1624);
+    let source_text = "package consumer\nimport scala.tools.asm.Opcodes.*\nobject Use { def first: Int = ICONST_0 }";
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "OpcodesImport.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let (method, body) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "first" =>
+            {
+                Some((
+                    index.symbol_at(source, tree).unwrap(),
+                    definition.rhs.unwrap(),
+                ))
+            }
+            _ => None,
+        })
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(ClasspathSymbolResolver::new(
+        OpcodesFixturePath,
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    )));
+
+    let context = typer.expression_context_for(method).unwrap();
+    typer.type_expression(body, context).unwrap();
 }
 
 #[test]
