@@ -1,0 +1,397 @@
+use dotty_classfile::class_file::ClassFile;
+use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
+use dotty_classfile::reader::Reader as ClassReader;
+use dotty_core::ast::TreeKind;
+use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText};
+use dotty_lexer::ContextualScanner;
+use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
+use dotty_parser::parse_compilation_unit;
+use dotty_tasty::ast::{
+    APPLY_TAG, DEFDEF_TAG, IDENTTPT_TAG, PARAM_TAG, SELECTIN_TAG, SHAREDTYPE_TAG,
+    TERMREFDIRECT_TAG, TERMREFPKG_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG,
+};
+use dotty_tasty::tasty::{Attribute as TastyAttribute, DefinitionBody, RawName, TastyFile};
+use dotty_tasty::term::RawTree;
+use dotty_typer::SourceTyper;
+
+use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
+
+const COUNTER_CLASS: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_cross_class/scala39/example/Counter.class");
+const COUNTER_TASTY: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_cross_class/scala39/example/Counter.tasty");
+const READER_CLASS: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_cross_class/scala39/example/Reader.class");
+const READER_TASTY: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_cross_class/scala39/example/Reader.tasty");
+const SOURCE: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader.scala");
+
+const COUNTER_UUID: [u8; 16] = [
+    0x00, 0xd4, 0x56, 0x67, 0xbf, 0x83, 0x69, 0xe8, 0x00, 0x62, 0x9f, 0x05, 0xd0, 0xf0, 0x8f, 0x1b,
+];
+const READER_UUID: [u8; 16] = [
+    0x00, 0x70, 0xa0, 0x42, 0xf9, 0xd1, 0xe6, 0xef, 0x00, 0x95, 0x57, 0xa1, 0xd0, 0x2e, 0x6a, 0x1c,
+];
+
+fn decode_class(bytes: &[u8]) -> ClassFile<'_> {
+    let mut reader = ClassReader::new(bytes);
+    let class = ClassFile::decode(&mut reader).unwrap();
+    assert!(reader.is_at_end());
+    class
+}
+
+fn class_tasty_uuid(class: &ClassFile<'_>) -> [u8; 16] {
+    *class
+        .tasty_link_id()
+        .unwrap()
+        .expect("Scala class has one class-level TASTY link")
+        .as_bytes()
+}
+
+#[test]
+fn scala_39_oracle_records_reader_jvm_link_and_per_class_tasty_links() {
+    let counter = decode_class(COUNTER_CLASS);
+    let reader = decode_class(READER_CLASS);
+    assert_eq!(
+        counter.constant_pool.class_name(counter.this_class),
+        Ok("example/Counter")
+    );
+    assert_eq!(
+        reader.constant_pool.class_name(reader.this_class),
+        Ok("example/Reader")
+    );
+    assert_eq!((counter.version.major, reader.version.major), (61, 61));
+    assert_eq!(class_tasty_uuid(&counter), COUNTER_UUID);
+    assert_eq!(class_tasty_uuid(&reader), READER_UUID);
+
+    let read = reader
+        .methods
+        .iter()
+        .find(|method| reader.constant_pool.utf8(method.name_index).unwrap() == "read")
+        .expect("Reader declares read");
+    assert_eq!(
+        reader.constant_pool.utf8(read.descriptor_index),
+        Ok("(Lexample/Counter;)I")
+    );
+    let get_reference = reader
+        .constant_pool
+        .get(ConstantPoolIndex(21))
+        .expect("javap oracle identifies the get Methodref at constant-pool #21");
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = get_reference
+    else {
+        panic!("Reader.read invokes get through CONSTANT_Methodref");
+    };
+    assert_eq!(
+        reader.constant_pool.class_name(*class_index),
+        Ok("example/Counter")
+    );
+    assert_eq!(
+        reader.constant_pool.name_and_type(*name_and_type_index),
+        Ok(("get", "()I"))
+    );
+
+    let counter_tasty = TastyFile::parse_and_validate_scala_3_9(COUNTER_TASTY).unwrap();
+    let reader_tasty = TastyFile::parse_and_validate_scala_3_9(READER_TASTY).unwrap();
+    assert_eq!(counter_tasty.header().uuid, COUNTER_UUID);
+    assert_eq!(reader_tasty.header().uuid, READER_UUID);
+    assert_eq!(
+        (
+            reader_tasty.header().major_version,
+            reader_tasty.header().minor_version
+        ),
+        (28, 9)
+    );
+    let reader_attributes = reader_tasty.attributes().unwrap().unwrap();
+    let [TastyAttribute::SourceFile(source_path)] = reader_attributes.as_slice() else {
+        panic!("Reader sidecar records its single source-file path");
+    };
+    assert_eq!(
+        reader_tasty.names().render(*source_path).unwrap(),
+        "tests/fixtures/jvm_tasty_cross_class/Reader.scala"
+    );
+
+    let counter_package = counter_tasty.asts().unwrap();
+    let counter_root = counter_package.get(0).unwrap().decode_package().unwrap();
+    assert_eq!(
+        counter_root.stats.len(),
+        1,
+        "Counter sidecar owns only Counter"
+    );
+    let DefinitionBody::TypeDef { name, .. } = counter_root
+        .stats
+        .get(0)
+        .unwrap()
+        .decode_definition_body()
+        .unwrap()
+    else {
+        panic!("Counter sidecar contains a class type definition");
+    };
+    assert_eq!(counter_tasty.names().render(name).unwrap(), "Counter");
+
+    let asts = reader_tasty.asts().unwrap();
+    let package = asts.get(0).unwrap().decode_package().unwrap();
+    assert_eq!(
+        reader_tasty
+            .names()
+            .render(package.path_name().unwrap())
+            .unwrap(),
+        "example"
+    );
+    assert_eq!(package.stats.len(), 1, "Reader sidecar owns only Reader");
+    let reader_definition = package.stats.get(0).unwrap();
+    let DefinitionBody::TypeDef { name, .. } = reader_definition.decode_definition_body().unwrap()
+    else {
+        panic!("Reader sidecar contains a class type definition");
+    };
+    assert_eq!(reader_tasty.names().render(name).unwrap(), "Reader");
+    assert!(matches!(
+        reader_tasty.names().get(name),
+        Some(RawName::Utf8(_))
+    ));
+
+    let address_index = reader_tasty.ast_address_index().unwrap();
+    let mut reader_method = None;
+    let mut reader_formal = None;
+    for node in address_index.iter() {
+        if node.tag == DEFDEF_TAG {
+            let method = node.decode_defdef_body().unwrap();
+            if reader_tasty.names().render(method.name).unwrap() == "read" {
+                reader_method = Some((node.offset as u32, method));
+            }
+        }
+        if node.tag == PARAM_TAG {
+            reader_formal = Some((node.offset as u32, node.decode_parameter().unwrap()));
+        }
+    }
+    let (method_address, method) = reader_method.expect("Reader.read node exists");
+    let (formal_address, formal) = reader_formal.expect("Reader.read counter formal exists");
+    let parameter_name = formal.name();
+    assert_eq!(
+        reader_tasty.names().render(parameter_name).unwrap(),
+        "counter"
+    );
+    let type_body = formal.decode_body().unwrap();
+    let type_nodes = type_body.type_tree.nodes();
+    assert_eq!(type_nodes.first().unwrap().tag, IDENTTPT_TAG);
+    let type_ref = type_nodes
+        .iter()
+        .find(|node| node.tag == TYPEREF_TAG)
+        .expect("formal type is ordinary TYPEREF");
+    assert_eq!(type_ref.tag, TYPEREF_TAG);
+    assert_eq!(
+        reader_tasty
+            .names()
+            .render(type_body.type_tree.name_refs()[0])
+            .unwrap(),
+        "Counter"
+    );
+    assert!(type_nodes.iter().any(|node| node.tag == TERMREFPKG_TAG));
+    assert!(
+        type_body
+            .type_tree
+            .name_refs()
+            .iter()
+            .any(|name| reader_tasty.names().render(*name).unwrap() == "example")
+    );
+    assert!(
+        !type_nodes.iter().any(|node| node.tag == TYPEREFDIRECT_TAG),
+        "cross-sidecar type reference is not TYPEREFdirect"
+    );
+
+    let rhs = method.rhs.expect("Reader.read has a body");
+    let RawTree::LengthNode(apply) = rhs else {
+        panic!("Reader.read body is an APPLY category-five node");
+    };
+    assert_eq!(apply.tag, APPLY_TAG);
+    let apply_node = apply.decode_apply().unwrap();
+    let RawTree::LengthNode(select) = apply_node.function else {
+        panic!("Reader.read selects get through SELECTin");
+    };
+    assert_eq!(select.tag, SELECTIN_TAG);
+    let selected_node = select.decode_select_in().unwrap();
+    let signed = reader_tasty
+        .names()
+        .render_signed_name(selected_node.name)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        signed,
+        dotty_tasty::tasty::RenderedSignedName::Signed { original, signature }
+            if original == "get" && signature.parameters.is_empty() && signature.result == "scala.Int"
+    ));
+    let qualifier = selected_node.qualifier.nodes();
+    assert_eq!(qualifier[0].tag, TERMREFDIRECT_TAG);
+    assert_eq!(
+        selected_node.qualifier.ast_refs()[0].address,
+        formal_address
+    );
+    assert_eq!(selected_node.underlying_type.nodes()[0].tag, SHAREDTYPE_TAG);
+    let selected_type_references = selected_node.underlying_type.ast_refs();
+    let [selected_type_reference] = selected_type_references.as_slice() else {
+        panic!("selection has one shared result-type reference");
+    };
+    assert_eq!(
+        address_index
+            .get_node(selected_type_reference.address)
+            .unwrap()
+            .tag,
+        TYPEREF_TAG,
+        "selected result type shares Reader.read's Counter formal type tree"
+    );
+    assert!(address_index.get_node(method_address).is_some());
+}
+
+#[test]
+fn cross_class_typed_call_stops_at_the_actual_frontend_or_batch_rejection() {
+    let source_id = SourceId::from_index(1671);
+    let source = SourceText::new(SOURCE).unwrap();
+    let scanner = ContextualScanner::new(SOURCE).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(source, source_id, scanner, &mut store.names);
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+    let index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "Reader.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        other => panic!("cross-class audit source names cleanly: {other:?}"),
+    };
+    let dotty_core::ast::TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("fixture parses as one package");
+    };
+    let [counter_tree, reader_tree] = package.stats.as_slice() else {
+        panic!("fixture has Counter and Reader in this one session");
+    };
+    let counter = index.symbol_at(source_id, *counter_tree).unwrap();
+    let reader = index.symbol_at(source_id, *reader_tree).unwrap();
+    assert_ne!(counter, reader);
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer.complete_symbol(counter).unwrap();
+    typer.complete_symbol(reader).unwrap();
+    let dotty_core::ast::TreeKind::TypeDef(counter_def) = &parsed.ast.get(*counter_tree).kind
+    else {
+        panic!("Counter is a class definition");
+    };
+    let dotty_core::ast::TreeKind::Template(counter_template) =
+        &parsed.ast.get(counter_def.rhs).kind
+    else {
+        panic!("Counter has a class template");
+    };
+    let get_tree = counter_template
+        .body
+        .iter()
+        .copied()
+        .find(|tree| matches!(&parsed.ast.get(*tree).kind, dotty_core::ast::TreeKind::DefDef(def) if typer.store().names.resolve(def.name.as_name().text()) == "get"))
+        .expect("Counter declares get");
+    let get_symbol = index.symbol_at(source_id, get_tree).unwrap();
+    typer.complete_symbol(get_symbol).unwrap();
+
+    let dotty_core::ast::TreeKind::TypeDef(reader_def) = &parsed.ast.get(*reader_tree).kind else {
+        panic!("Reader is a class definition");
+    };
+    let dotty_core::ast::TreeKind::Template(reader_template) = &parsed.ast.get(reader_def.rhs).kind
+    else {
+        panic!("Reader has a class template");
+    };
+    let read_tree = reader_template
+        .body
+        .iter()
+        .copied()
+        .find(|tree| matches!(&parsed.ast.get(*tree).kind, dotty_core::ast::TreeKind::DefDef(def) if typer.store().names.resolve(def.name.as_name().text()) == "read"))
+        .expect("Reader declares read");
+    let read_symbol = index.symbol_at(source_id, read_tree).unwrap();
+    typer.complete_symbol(read_symbol).unwrap();
+    let dotty_core::ast::TreeKind::DefDef(read_definition) = &parsed.ast.get(read_tree).kind else {
+        panic!("read is a method");
+    };
+    let [counter_parameter_tree] = read_definition.value_param_clauses[0].as_slice() else {
+        panic!("read has one Counter formal");
+    };
+    let counter_parameter = index.symbol_at(source_id, *counter_parameter_tree).unwrap();
+    typer.complete_symbol(counter_parameter).unwrap();
+    assert_eq!(
+        typer.store().symbols.get(counter_parameter).owner,
+        Some(read_symbol)
+    );
+    let dotty_core::SymbolInfo::Complete(parameter_type) =
+        typer.store().symbols.get(counter_parameter).info
+    else {
+        panic!("read formal has a completed type");
+    };
+    assert!(matches!(
+        typer.store().types.get(parameter_type),
+        dotty_core::Type::TypeRef {
+            target: dotty_core::TypeRefTarget::Symbol(symbol),
+            ..
+        } if *symbol == counter
+    ));
+    let rhs = read_definition.rhs.unwrap();
+    let context = typer.expression_context_for(read_symbol).unwrap();
+    let typed = typer.type_expression(rhs, context);
+    let typed_rhs = typed.expect("typer resolves Counter.get to one canonical method");
+    assert_eq!(
+        typer.source_typed_index().get(source_id, rhs),
+        Some(typed_rhs)
+    );
+    let TreeKind::Apply(typed_apply) = &typer.typed_ast().get(typed_rhs).kind else {
+        panic!("typed Reader.read body remains an application");
+    };
+    let TreeKind::Select(typed_select) = &typer.typed_ast().get(typed_apply.function).kind else {
+        panic!("typed application selects Counter.get");
+    };
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(typed_apply.function).ty),
+        dotty_core::Type::TermRef {
+            target: dotty_core::TermRefTarget::Symbol(symbol),
+            ..
+        } if *symbol == get_symbol
+    ));
+    let TreeKind::Ident(typed_qualifier) = &typer.typed_ast().get(typed_select.qualifier).kind
+    else {
+        panic!("the selected receiver is the counter formal");
+    };
+    assert_eq!(
+        typer.store().names.resolve(typed_qualifier.name.text()),
+        "counter"
+    );
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(typed_select.qualifier).ty),
+        dotty_core::Type::TermRef {
+            target: dotty_core::TermRefTarget::Symbol(symbol),
+            ..
+        } if *symbol == counter_parameter
+    ));
+    drop(typer);
+
+    let batch = with_paired_jvm_tasty_batch_plan(SOURCE, "Reader.scala", source_id, |_| ());
+    assert!(matches!(
+        batch,
+        Err(PairedPlanError::BatchClass {
+            class_index: 1,
+            phase: "JVM class-plan validation",
+            reason,
+            ..
+        }) if reason.contains("ReferenceClassNotInJvmPlan")
+    ));
+}
