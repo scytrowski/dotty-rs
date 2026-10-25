@@ -5556,6 +5556,42 @@ fn object_graph_unsupported_deep_allocation_publishes_no_fixture_classes() {
 }
 
 #[test]
+fn inherited_body_accessor_reaches_backend_rejection_without_publishing_classes() {
+    let output = TestOutputDirectory::new("inherited-body-accessor-rejection");
+    let source = fs::read_to_string(fixture_path("InheritedAccessorBackend.scala"))
+        .expect("read inherited body-accessor fixture");
+    let mut expected_edge = None;
+    let result = compile_source_batch_with_source_observer(
+        &source,
+        "InheritedAccessorBackend.scala",
+        output.path(),
+        SourceId::from_index(1608),
+        SourceUnitCardinality::AtLeastTwo,
+        &mut |_, _, unit, _| {
+            expected_edge = Some((
+                audit_class_named(unit, "Child"),
+                audit_class_named(unit, "Parent"),
+            ));
+        },
+    );
+
+    assert!(
+        matches!(
+            result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::UnsupportedJvmAccessorInheritance { class, parent }
+            ))
+                if Some((class, parent)) == expected_edge
+        ),
+        "inherited body accessors must fail at the current backend boundary for Child -> Parent, got {result:?}"
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "an unsupported accessor hierarchy must not publish class files"
+    );
+}
+
+#[test]
 fn object_graph_direct_new_and_completed_call_receivers_remain_supported() {
     let output = TestOutputDirectory::new("object-graph-supported-receivers");
     let artifacts = compile_planned_constructor_source(
