@@ -720,7 +720,12 @@ impl SourceTyper<'_> {
         context: ExpressionContext,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let symbol = self.resolve_expression_term(ident.name, context, tree.index(), position)?;
+        let symbol = self.resolve_expression_term_with_inherited(
+            ident.name,
+            context,
+            tree.index(),
+            position,
+        )?;
         let declaration = self.store.symbols.get(symbol);
         if let Some(receiver) = self.uninitialized_parent_receiver
             && self.is_instance_class_member(symbol)

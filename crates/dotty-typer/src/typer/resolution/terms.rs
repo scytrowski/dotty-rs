@@ -14,6 +14,18 @@ impl SourceTyper<'_> {
         self.unique_expression_term(&candidates, name, tree_index, position)
     }
 
+    pub(in crate::typer) fn resolve_expression_term_with_inherited(
+        &mut self,
+        name: dotty_core::Name,
+        context: ExpressionContext,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<SymbolId, TyperError> {
+        let candidates =
+            self.expression_term_candidates_inner(name, context, tree_index, position, true)?;
+        self.unique_expression_term(&candidates, name, tree_index, position)
+    }
+
     /// Resolves the highest-precedence lexical/import bucket without choosing
     /// among method overloads. Ordinary expression references continue to use
     /// `resolve_expression_term` and defer when that bucket has several
@@ -24,6 +36,17 @@ impl SourceTyper<'_> {
         context: ExpressionContext,
         tree_index: u32,
         position: Option<SourceSpan>,
+    ) -> Result<Vec<SymbolId>, TyperError> {
+        self.expression_term_candidates_inner(name, context, tree_index, position, false)
+    }
+
+    fn expression_term_candidates_inner(
+        &mut self,
+        name: dotty_core::Name,
+        context: ExpressionContext,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+        include_inherited_fields: bool,
     ) -> Result<Vec<SymbolId>, TyperError> {
         self.validate_expression_scope_stack(context.local_scopes)?;
         let mut local_scope = context.local_scopes;
@@ -172,44 +195,7 @@ impl SourceTyper<'_> {
                     return Ok(candidates);
                 }
             }
-            let source_parent_has_field = if enclosing_class == Some(source_context.owner) {
-                let parents = match self.store.symbols.info(source_context.owner) {
-                    SymbolInfo::Complete(info) => match self.store.types.try_get(*info) {
-                        Some(Type::ClassInfo(info)) => Some(info.parents.as_slice()),
-                        _ => None,
-                    },
-                    SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => None,
-                };
-                parents.is_some_and(|parents| {
-                    parents.iter().any(|parent| {
-                        let Some(parent) = self.store.types.get(*parent).reference_symbol() else {
-                            return false;
-                        };
-                        if !self.store.symbols.contains(parent)
-                            || !matches!(
-                                self.store.symbols.get(parent).origin,
-                                SymbolOrigin::Source(_)
-                            )
-                        {
-                            return false;
-                        }
-                        self.index.scope_of(parent).is_some_and(|scope| {
-                            self.store
-                                .scopes
-                                .get(scope)
-                                .lookup_all(&name)
-                                .iter()
-                                .any(|symbol| {
-                                    self.store.symbols.contains(*symbol)
-                                        && self.store.symbols.get(*symbol).kind == SymbolKind::Field
-                                })
-                        })
-                    })
-                })
-            } else {
-                false
-            };
-            if source_parent_has_field {
+            if include_inherited_fields && enclosing_class == Some(source_context.owner) {
                 let this_type = self.store.types.alloc(Type::ThisType {
                     class: source_context.owner,
                 });

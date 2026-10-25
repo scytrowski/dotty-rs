@@ -81,9 +81,9 @@ The Typer resolves unqualified inherited public body fields as well as
 `TermRefTarget::Symbol` naming the canonical `Parent.current` field. The
 unqualified form carries the enclosing `Child` `ThisType` prefix, while an
 explicit selection retains the exact receiver type as its prefix. The narrow
-Typer fallback runs after direct lexical declarations and before imports, so
-local declarations keep precedence. It uses the existing bounded member
-lookup and does not copy fields into child scopes. Qualified constructor and
+Typer fallback runs after direct lexical declarations and explicit/wildcard
+imports, so local and imported declarations keep precedence. It uses the
+existing bounded member lookup and does not copy fields into child scopes. Qualified constructor and
 body accessor selections retain their existing canonical
 `AccessorParent.token`/`count` identities; mutable receiver instability and
 setter typing remain governed by the existing checks.
