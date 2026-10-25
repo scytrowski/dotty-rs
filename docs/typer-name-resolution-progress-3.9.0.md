@@ -2,6 +2,111 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
+## Fresh `package-term` baseline after PR #1642
+
+The audit was run serially from exact `main` SHA
+`be9264c797555d99e93d5d6fbb82a2bed9f85efa` (merge commit #1642), against the
+pinned Scala checkout `777528f19a58e794c9954a42f433373472ec57f8`, Scala
+artifacts 3.9.0, and JDK 21.0.8:
+
+```sh
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-main-be9264-runs" \
+SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
+SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" \
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
+  --verify-determinism target/issue-1566-main-be9264-package-term.md
+```
+
+Both serial passes covered 60 files and 369 selected method attempts. Their
+normalized method sidecars matched byte-for-byte (SHA-256
+`402f273c9e33fdead90d3b83b51522a32c58379c639b27c66dba86ba4acfbd38`). Parsing
+and naming succeeded for every file; zero methods were fully typed. Of the 369
+frozen rows, 292 had target observations. Comparing the frozen first blocker
+with this current baseline, 361 rows previously stopped at
+`ImportQualifierNotFound`: 139 now reach `MemberLookup`, 69 reach
+`TypeNameNotFound`, 152 reach other later blockers, and one row,
+`library/src/scala/collection/convert/JavaCollectionWrappers.scala#tree=2047`,
+still has `ImportQualifierNotFound`. The remaining 8 historical
+`TermNameNotFound` rows now reach either `MemberLookup` (4) or
+`UnsupportedExpression::InterpolatedString` (4). These are blocker transitions
+across the frozen cohort, not a claim that PR #1642 alone caused them.
+
+Current first blockers across the full selected cohort are:
+
+| First blocker | Rows | Files |
+| --- | ---: | ---: |
+| `MemberLookup` | 143 | 35 |
+| `TypeNameNotFound` | 69 | 18 |
+| `UnstableSelectionPrefix` | 36 | 6 |
+| `TermNameNotFound` | 20 | 6 |
+| `WrongTypeNameKind` | 20 | 2 |
+| `ObjectModuleClassUnavailable` | 18 | 1 |
+| `SymbolResolution` | 15 | 6 |
+| `LocalValueConformanceUnsupported` | 13 | 1 |
+| Other blockers | 35 | 18 |
+
+The compact row-level reconciliation, including exact selected `path#tree`
+IDs, prior/current blockers, current attempt IDs, and observed qualifier stage,
+is in [`typer-name-resolution-1566-main-be9264-package-term.tsv`](typer-name-resolution-1566-main-be9264-package-term.tsv).
+The generated full focused report and raw logs remain under `target/`; they
+are not checked into Git.
+
+### Current increment: retain expression context when selecting a package member
+
+The initial ASM-method candidate was too broad. Direct Typer probes using the
+full pinned Scala classpath typed `AbstractInsnNode.getOpcode`,
+`ClassReader.readByte`, and `ClassReader.readShort`. `readUTF8` also typed
+without a `scala.*` wildcard; with that wildcard, `Array[Char]` instead failed
+through `scala.Char` → `scala.AnyVal` → missing `scala.Matchable`. The Scala
+3.9 oracle fixture validates the ASM calls, but they were not the first corpus
+blockers.
+
+The focused `LocalOpt` probe, using its nested package clauses and import,
+reproduced the first failure: `collection.mutable` returned
+`MemberNotFound(mutable)`, while `mutable.ArrayBuffer` and the fully qualified
+`scala.collection.mutable.ArrayBuffer` both resolved. The package qualifier
+had first been resolved in the expression's import context; package-member
+selection then recomputed the full qualifier with only its lexical context and
+lost that imported `collection` binding. Package selection now passes the
+same `ExpressionContext` through the qualifier resolution path.
+
+The regression lives in the Typer unit tests. Its positive case defines a
+source-owned `scala.collection.mutable.ArrayBuffer`, imports
+`scala.collection.mutable`, and types
+`collection.mutable.ArrayBuffer.empty[Int]`. Its negative case confirms that
+`collection.noSuchPackage` remains a `MemberNotFound`. The pinned Scala 3.9
+compiler accepts the positive source and rejects the negative source with
+E008.
+
+On the real `LocalOpt.scala#tree=3134` method, this moves the first blocker
+from `MemberNotFound(mutable)` at AST tree 2928 to
+`InvalidInferredLocalValueType` at tree 2933, on line 939:
+`val renumber = collection.mutable.ArrayBuffer.empty[Int]`. The inferred type
+at that boundary is `MethodType([], ArrayBuffer[Int])`, not a value type. This
+is progress for one real root; zero methods in `LocalOpt.scala` are fully
+typed. The same deterministic 60-file / 369-method `package-term` cohort was
+rerun twice after the change. Both runs again had 292 observed target rows and
+zero fully typed methods; their normalized TSV hashes matched at
+`bb8888c938165fd2b143b50875d9c93452f29e75d6dfaddff8b22ef64f943d61`. A
+row-by-row comparison against the `be9264` baseline found exactly one first
+blocker transition: `LocalOpt.scala#tree=2986` (selected method, attempt
+`#tree=3134`) moved from `MemberNotFound` to
+`InvalidInferredLocalValueType`. The other 368 rows retained their first
+blocker and typed status. The compact per-method reconciliation is in
+[`typer-name-resolution-1566-after-package-context-3.9.0.tsv`](typer-name-resolution-1566-after-package-context-3.9.0.tsv).
+
+The next narrow candidate is adaptation of this parameterless generic method
+result to a value type. It needs its own method-signature evidence and negative
+controls before implementation.
+
+`InlineInfoAttribute.scala#tree=420` remains a separate case. Its per-file
+audit cannot see the source declaration `InlineInfo` in sibling
+`BTypes.scala`: each audited file gets a fresh `SemanticStore` and `Packages`
+registry. The recorded `SourceClassCompletion`/classloader error is therefore
+not evidence of a TASTy member-lookup defect. No classloader change is proposed
+from this root.
+
 ## Bounded continuation: inherited members of external object wildcard imports
 
 Issue [#1620](https://github.com/scytrowski/dotty-rs/issues/1620) starts from
