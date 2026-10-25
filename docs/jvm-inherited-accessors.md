@@ -97,6 +97,19 @@ backing-field reads, and `Child` receives neither copied fields nor generated
 getter methods. A Java harness exercises the inherited reads and setter with
 JDK 21 `-Xverify:all`.
 
+Typed assignments to inherited mutable accessors lower through the validated
+setter dispatch entry. The source receiver is evaluated once before the RHS;
+both are saved in category-correct temporary locals and the assignment returns
+`Unit`. The `invokevirtual` symbolic owner follows the receiver's static class,
+while dispatch retains the Parent field and setter as the declaring origin.
+`Child` and `Reader` therefore invoke `Child.current_$eq:(J)V` for a Child
+receiver without accessing Parent's private field or declaring a copied setter.
+Boolean setter assignments use the same path with the exact `(Z)V` descriptor.
+The source integration harness verifies the order and single evaluation of a
+call receiver and RHS, then reads the updated value through the inherited
+getter under `java -Xverify:all`. Assignments to inherited `val`s remain
+rejected by the Typer.
+
 When source assembly contains inherited accessors but no unsupported source
 selection, `JvmCompilationUnit::metadata` returns an effective accessor view
 for each planned receiver. Each getter or setter entry records the receiver,
@@ -159,6 +172,5 @@ and no accessor override or generated/user-member collision. It does not copy
 child fields or methods to satisfy symbolic resolution. Descendants with new
 accessors, bridges, traits, external ancestors, inaccessible constructors, or
 malformed hierarchy edges remain rejected before publication. Qualified
-inherited getter call lowering is implemented in #1612. Inherited setter call
-lowering remains tracked separately in #1613; runtime dispatch and JDK
-verification are covered by #1615.
+inherited getter and mutable setter lowering are implemented in #1612 and
+#1613. Runtime dispatch and JDK verification are covered by #1615.

@@ -1774,9 +1774,7 @@ fn emit_field_assignment(
             method: context.method.symbol(),
         });
     };
-    if let Some((owner_internal_name, owner_symbol, accessor)) =
-        resolve_accessor(context, lhs, field)?
-    {
+    if let Some((_, owner_symbol, accessor)) = resolve_accessor(context, lhs, field)? {
         if !accessor.is_mutable() || accessor.setter().is_none() {
             return Err(JvmCodegenError::ImmutableFieldAssignment {
                 tree: tree_id,
@@ -1804,6 +1802,113 @@ fn emit_field_assignment(
                 class: class.identity().symbol(),
             });
         }
+        let Some((unit, _, classes)) = context.call_context else {
+            return Err(JvmCodegenError::JvmFieldWriteContextUnavailable {
+                tree: tree_id,
+                method: context.method.symbol(),
+            });
+        };
+        let receiver_class_symbol = if let Some(receiver) = receiver {
+            let receiver_type = context.tree(receiver)?.ty;
+            let receiver_value_type = match context.store.types.try_get(receiver_type) {
+                Some(Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                }) if context.store.symbols.contains(*symbol) => {
+                    match context.store.symbols.info(*symbol) {
+                        SymbolInfo::Complete(ty) => *ty,
+                        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+                            return Err(JvmCodegenError::MissingSemanticInfo { symbol: *symbol });
+                        }
+                        SymbolInfo::Error => {
+                            return Err(JvmCodegenError::ErrorSemanticInfo { symbol: *symbol });
+                        }
+                    }
+                }
+                _ => receiver_type,
+            };
+            if let Some(Type::ThisType { class }) = context.store.types.try_get(receiver_value_type)
+            {
+                *class
+            } else {
+                match planned_value_type(unit, receiver_value_type, context.definitions)? {
+                    JvmType::Reference(receiver_class) => receiver_class,
+                    _ => {
+                        return Err(JvmCodegenError::UnsupportedJvmFieldReceiver {
+                            tree: lhs,
+                            field,
+                        });
+                    }
+                }
+            }
+        } else {
+            if !is_current_this_type(context.store, reference_prefix, class.identity().symbol()) {
+                return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                    tree: lhs,
+                    field,
+                    class: class.identity().symbol(),
+                });
+            }
+            class.identity().symbol()
+        };
+        let receiver_class = classes
+            .iter()
+            .find(|candidate| candidate.identity().symbol() == receiver_class_symbol)
+            .ok_or(JvmCodegenError::InvalidJvmAccessorCallMetadata {
+                tree: lhs,
+                field,
+                owner: owner_symbol,
+                issue: crate::JvmAccessorCallMetadataIssue::ReceiverClassMissing,
+            })?;
+        if !flow_assignable(
+            context,
+            JvmType::Reference(receiver_class_symbol),
+            JvmType::Reference(owner_symbol),
+        )? {
+            return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                tree: lhs,
+                field,
+                class: class.identity().symbol(),
+            });
+        }
+        let setters = receiver_class
+            .dispatch_accessors()
+            .iter()
+            .filter(|candidate| {
+                candidate.field() == field
+                    && candidate.role() == crate::JvmAccessorDispatchRole::Setter
+            })
+            .collect::<Vec<_>>();
+        if setters.len() != 1 {
+            return Err(JvmCodegenError::InvalidJvmAccessorCallMetadata {
+                tree: lhs,
+                field,
+                owner: owner_symbol,
+                issue: crate::JvmAccessorCallMetadataIssue::EffectiveSetterMissing,
+            });
+        }
+        let setter = accessor
+            .setter()
+            .ok_or(JvmCodegenError::InvalidJvmAccessorCallMetadata {
+                tree: lhs,
+                field,
+                owner: owner_symbol,
+                issue: crate::JvmAccessorCallMetadataIssue::SetterSignatureMismatch,
+            })?;
+        let dispatch = setters[0];
+        if dispatch.receiver_class() != receiver_class_symbol
+            || dispatch.declaring_class() != owner_symbol
+            || dispatch.name() != setter.name()
+            || dispatch.descriptor() != setter.descriptor()
+            || !dispatch.access_flags().is_public()
+        {
+            return Err(JvmCodegenError::InvalidJvmAccessorCallMetadata {
+                tree: lhs,
+                field,
+                owner: owner_symbol,
+                issue: crate::JvmAccessorCallMetadataIssue::EffectiveSetterMismatch,
+            });
+        }
         if let Some(receiver) = receiver {
             let receiver_type = context.tree(receiver)?.ty;
             if receiver_type != reference_prefix {
@@ -1815,24 +1920,16 @@ fn emit_field_assignment(
             }
             match emit_expression(context, receiver, code, depth + 1)? {
                 Flow::Value(JvmType::Reference(found))
-                    if flow_assignable(
-                        context,
-                        JvmType::Reference(found),
-                        JvmType::Reference(owner_symbol),
-                    )? => {}
+                    if found == receiver_class_symbol
+                        && flow_assignable(
+                            context,
+                            JvmType::Reference(found),
+                            JvmType::Reference(owner_symbol),
+                        )? => {}
                 Flow::Diverges => return Ok(Flow::Diverges),
                 _ => return Err(JvmCodegenError::UnsupportedJvmFieldReceiver { tree: lhs, field }),
             }
         } else {
-            if accessor.owner() != class.identity().symbol()
-                || !is_current_this_type(context.store, reference_prefix, accessor.owner())
-            {
-                return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
-                    tree: lhs,
-                    field,
-                    class: class.identity().symbol(),
-                });
-            }
             code.aload(0)
                 .map_err(|error| JvmCodegenError::CodeBuilder {
                     tree: tree_id,
@@ -1888,14 +1985,6 @@ fn emit_field_assignment(
                     });
                 }
             }
-            let Some(setter) = accessor.setter() else {
-                return Err(JvmCodegenError::InvalidJvmAccessorCallMetadata {
-                    tree: lhs,
-                    field,
-                    owner: accessor.owner(),
-                    issue: crate::JvmAccessorCallMetadataIssue::SetterSignatureMismatch,
-                });
-            };
             let code = code
                 .aload(receiver_slot)
                 .map_err(|error| JvmCodegenError::CodeBuilder {
@@ -1914,7 +2003,7 @@ fn emit_field_assignment(
                 error,
             })?;
             code.invokevirtual(
-                &owner_internal_name,
+                receiver_class.identity().internal_name(),
                 setter.name(),
                 setter.descriptor().as_str(),
             )
