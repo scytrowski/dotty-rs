@@ -9238,6 +9238,93 @@ mod tests {
     }
 
     #[test]
+    fn plain_package_import_is_available_as_selected_type_qualifier() {
+        let source_text = "package sample.collection.mutable { class TreeMap }; package sample.client { import sample.collection.mutable; class Use { val value: mutable.TreeMap = null } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let tree_map = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "TreeMap" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("source package should contain TreeMap");
+        let context = index.declaration_context_of(value).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.type_of_tpt(type_tree, context).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), tree_map);
+    }
+
+    #[test]
+    fn imported_external_subpackage_qualifies_a_selected_type() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        let source_text = "import scala.collection.mutable; class Use { val value: mutable.TreeMap[Int, String] = null }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let context = index.declaration_context_of(value).unwrap();
+        let mutable_name = Name::new(store.names.intern("mutable"), Namespace::Term);
+        let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(library_root)),
+            Box::new(JavaObjectStubPath),
+        ]);
+        let resolver = ClasspathSymbolResolver::new(
+            class_path,
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let mutable = typer
+            .lookup_context_symbol(mutable_name, context, type_tree.index(), None)
+            .unwrap()
+            .expect("the explicit import should resolve the classpath subpackage");
+        assert_eq!(typer.store().symbols.get(mutable).kind, SymbolKind::Package);
+        assert_eq!(
+            typer.package_path(mutable),
+            ["scala", "collection", "mutable"]
+        );
+
+        let error = typer.type_of_tpt(type_tree, context).unwrap_err();
+        assert!(
+            matches!(error, TyperError::SymbolResolution { .. }),
+            "{error:?}"
+        );
+        assert!(
+            format!("{error:?}").contains("scala/Cloneable"),
+            "{error:?}"
+        );
+        // The checked-in library fixture omits scala.Cloneable. The test still
+        // proves package resolution before the incomplete TreeMap parent graph.
+    }
+
+    #[test]
     fn object_member_import_uses_a_current_package_relative_prefix() {
         let source_text = "package a.consumer.b { object Local { val member: Int = 1 } }; package a.consumer { import b.Local.member; def use: Int = member }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
