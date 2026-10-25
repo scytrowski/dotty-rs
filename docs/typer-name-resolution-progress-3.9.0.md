@@ -80,6 +80,19 @@ it does not reproduce the entire import processing path of those source
 files. Until that replay is captured, the reason the cohort roots stop before
 the inherited lookup remains unconfirmed.
 
+I also ran a one-file full-source audit for the frozen
+`BackendUtils.scala#tree=240` / `#tree=302` roots. Parsing and naming passed;
+both method attempts still stop at `ImportQualifierNotFound`, with zero of the
+two methods typed. The audit's separate resolver-observation pass can resolve
+the exact `scala.jdk.CollectionConverters` term request to a TASTy Object, but
+it materializes neither a ModuleClass nor module members. This reproduces the
+gap in a complete source-file context and confirms that the observation is
+not evidence that the real import-lookup attempt succeeded. It still does not
+identify why that attempt returns no qualifier, so the cause remains
+unconfirmed. The focused report is retained locally under
+`target/issue-1620-runs/backendutils-focused.md`; it is not checked in as a raw
+log artifact.
+
 Reproduce the cohort audit with the pinned Scala checkout and cached artifacts:
 
 ```sh
