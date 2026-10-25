@@ -5887,18 +5887,22 @@ class Child extends Parent:
 class Reader:
   var receiverEvaluations: Int = 0
   var rhsEvaluations: Int = 0
+  var evaluationOrder: Int = 0
+  var receiverOrder: Int = 0
+  var rhsOrder: Int = 0
   def nextChild(): Child =
     receiverEvaluations = receiverEvaluations + 1
+    evaluationOrder = evaluationOrder + 1
+    receiverOrder = evaluationOrder
     new Child()
   def evaluate(value: Long): Long =
     rhsEvaluations = rhsEvaluations + 1
+    evaluationOrder = evaluationOrder + 1
+    rhsOrder = evaluationOrder
     value
   def updateChild(child: Child, value: Long): Unit = child.current = value
   def setFlag(child: Child): Unit = child.enabled = false
-  def updateFresh(value: Long): Child =
-    val receiver = nextChild()
-    receiver.current = evaluate(value)
-    receiver
+  def updateFresh(value: Long): Unit = nextChild().current = evaluate(value)
 "#;
     let output = TestOutputDirectory::new("inherited-mutable-assignment-lowering");
     let artifacts = compile_source_batch(
@@ -5976,10 +5980,11 @@ class Reader:
         if (child.current() != 11L) throw new AssertionError("Reader Child setter");
         reader.setFlag(child);
         if (child.enabled()) throw new AssertionError("Boolean setter");
-        Child fresh = reader.updateFresh(13L);
-        if (fresh.current() != 13L || reader.receiverEvaluations() != 1
-                || reader.rhsEvaluations() != 1)
-            throw new AssertionError("receiver and RHS must each evaluate once");
+        reader.updateFresh(13L);
+        if (reader.receiverEvaluations() != 1 || reader.rhsEvaluations() != 1
+                || reader.receiverOrder() != 1
+                || reader.rhsOrder() != 2)
+            throw new AssertionError("receiver must evaluate once before RHS");
     }
 }
 "#,
