@@ -1747,6 +1747,14 @@ pub enum TyperError {
         tree_index: u32,
         symbol: SymbolId,
     },
+    /// Completing a forward chain of inferred local lazy values exceeded the
+    /// bounded completion depth.
+    InferredLocalLazyTypeDepthExceeded {
+        source: SourceId,
+        tree_index: u32,
+        symbol: SymbolId,
+        max_depth: usize,
+    },
     /// Local value declarations are only supported as statements in a block.
     LocalValueOutsideBlock {
         source: SourceId,

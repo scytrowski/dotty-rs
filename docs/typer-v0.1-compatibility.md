@@ -811,18 +811,29 @@ later lazy value compiles. This Typer increment conservatively returns
 `RecursiveLazyLocalValueInitializer` for direct self-reference in either type
 form because it does not model Scala's cycle inference or warning analysis.
 Forward references from an earlier local lazy initializer to a later lazy
-declaration are supported when the target lazy value has an explicit type and
-every direct statement in the containing block is an explicitly typed local
-`lazy val`. Mixed blocks retain declaration-order behavior; this prevents
-later lazy declarations from becoming visible across eager initialization
-barriers or local method declarations. Inferred lazy targets remain
-unsupported and can report `TermNameNotFound`.
+declaration are supported when every direct statement in the containing block
+is a local `lazy val`. Explicit target types are available when the block is
+preindexed; inferred target types are completed on demand, including acyclic
+chains of inferred lazy values. A cycle encountered while inferring a forward
+target returns `RecursiveLazyLocalValueInitializer`, and chains deeper than 64
+inferred targets return `InferredLocalLazyTypeDepthExceeded`. Mixed blocks
+retain declaration-order behavior; this prevents later lazy declarations from
+becoming visible across eager initialization barriers or local method
+declarations. The pinned Scala 3.9.0 fixture `Forward.scala` covers explicit
+and single inferred forward references. A separate Rust regression covers an
+acyclic chain of inferred targets.
+
+The frozen classpath corpus profile records three inferred local lazy values
+across two declarations and two files, but those rows stop at enclosing
+resolution/classpath blockers before the declarations are typed. This focused
+change therefore has no measured corpus uplift; the full typer corpus result
+remains 0 / 3,297 fully typed local methods.
 
 Contextual search, contextual argument insertion, implicit conversions, and
 summon remain unsupported. `inline val` declarations and lazy pattern
-definitions remain deferred. Recursive inferred lazy initializers and
-forward references to later inferred lazy declarations remain unsupported as
-described above.
+definitions remain deferred. Recursive inferred lazy initializers remain
+unsupported and report `RecursiveLazyLocalValueInitializer`; the acyclic
+forward-reference subset is described above.
 Unsupported modifiers, duplicate modifiers, and unsupported or inconsistent
 modifier sets return `LocalValueModifierDeferred` with the source tree and
 complete modifier set.

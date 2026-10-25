@@ -363,7 +363,13 @@ impl SourceTyper<'_> {
                     symbol,
                 });
             }
-            let info = self.completed_expression_symbol_info(symbol, info_journal)?;
+            let info = if matches!(self.store.symbols.info(symbol), SymbolInfo::Missing)
+                && self.inferred_local_lazy_values.contains_key(&symbol)
+            {
+                self.complete_inferred_local_lazy_value_type(symbol, info_journal)?
+            } else {
+                self.completed_expression_symbol_info(symbol, info_journal)?
+            };
             if matches!(self.store.types.try_get(info), Some(Type::Repeated { .. })) {
                 return Err(TyperError::VarargsParameterReferenceDeferred {
                     source: self.source,
