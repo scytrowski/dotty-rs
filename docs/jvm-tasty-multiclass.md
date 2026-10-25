@@ -1,6 +1,6 @@
 # Scala 3.9.0 two-class JVM/TASTy layout audit
 
-This document records the bounded audit for [issue #1652](https://github.com/scytrowski/dotty-rs/issues/1652). It freezes the observed output for **one source file containing two independent top-level ordinary classes**. The oracle does not establish a general Scala packaging rule beyond this fixture, and the audit does not enable multi-class production emission.
+This document records the bounded audit for [issue #1652](https://github.com/scytrowski/dotty-rs/issues/1652) and the subsequent planning, validation, and in-memory emission steps. It freezes the observed output for **one source file containing two independent top-level ordinary classes**. The oracle does not establish a general Scala packaging rule beyond this fixture.
 
 The exact producer input is [`CounterGauge.scala`](../tests/fixtures/jvm_tasty_multiclass/CounterGauge.scala), SHA-256 `e560545eeb46fad4cb6e41a0a86e4b6932bbf221856780ade6fd4492a694f60c`. Scala 3.9.0 was checked out at revision [`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8). The compiler reported `3.9.0-bin-SNAPSHOT-git-777528f`, built from that checkout; the staged `scala3-compiler_3` jar SHA-256 was `b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f`. The compiler ran on Temurin JDK `21.0.8+9`. Its default class-file version is 61; the Rust JVM backend's current target, major 65, remains an independent setting.
 
@@ -59,14 +59,44 @@ These controls distinguish TASTy-based Scala compilation from JVM class availabi
 
 The regression `counter_and_gauge_keep_distinct_canonical_symbols_in_one_typer_session` runs the literal two-class source through one scanner, parser, namer, semantic store, source index, and `SourceTyper`. In source order it completes both canonical class and constructor identities, the constructor-owned `start` formals, the class-owned fields, and each class's `get`/`set` methods. It types every field initializer and method body and checks the original source-to-typed root mapping. The two classes have distinct class, constructor, formal, field, and method `SymbolId`s; each member owner remains its declaring class even though both classes spell their methods `get` and `set`.
 
-The existing `with_paired_jvm_tasty_class_plan` remains one-class-only. The updated `multi_class_source_is_rejected_without_a_partial_pair` regression passes this exact fixture and pins its current error: `UnsupportedSourceShape("exactly one top-level class; multi-class source units are not supported")`. The coordinator rejects package arity after parsing and naming, before it creates a `SourceTyper`; the separate frontend characterization test proves the two classes can be typed together without re-parsing the second class.
+The existing `with_paired_jvm_tasty_class_plan` and `emit_paired_jvm_tasty_class` remain one-class-only, preserving their existing error contract and output path. The regression `multi_class_source_is_rejected_without_a_partial_pair` pins the one-class planner's error for the Counter/Gauge fixture: `UnsupportedSourceShape("exactly one top-level class; multi-class source units are not supported")`. The separate batch planner and emitter are the bounded multi-class path.
 
-`ClassStatePicklePlan` and its validator describe one canonical class tree, constructor, and ordered member slice borrowing the caller's semantic stores and source/typed arenas. `with_paired_jvm_tasty_batch_plan` now collects the complete package declaration list, requires 2–32 ordinary classes, and plans them through one scanner/parser/namer/typer session. Its callback-scoped batch receipt contains one complete ordered `JvmCompilationUnit`, one class-scoped TASTy plan and cross-ABI proof per class, and each class's relative `.class`/`.tasty` path. Every proof is checked against that same complete JVM unit. Before whole-unit validation, each class's JVM metadata is validated in isolation so a class-specific failure is reported against the class and source declaration that own it. Remaining complete-unit failures use a batch-level error rather than being attributed to whichever class proof runs first. The planner rejects unsupported siblings, class/member shape errors, duplicate paths, and any failed class without returning a partial batch. The original `with_paired_jvm_tasty_class_plan` remains one-class-only with its existing error contract. This is planning-only: it does not encode class or TASTy bytes, publish files, or establish that a complete multi-class Rust artifact batch is safe to emit.
+`ClassStatePicklePlan` and its validator describe one canonical class tree, constructor, and ordered member slice borrowing the caller's semantic stores and source/typed arenas. `with_paired_jvm_tasty_batch_plan` collects the complete package declaration list, requires 2–32 ordinary classes, and plans them through one scanner/parser/namer/typer session. Its callback-scoped batch receipt contains one complete ordered `JvmCompilationUnit`, one class-scoped TASTy plan and cross-ABI proof per class, and each class's relative `.class`/`.tasty` path. Every proof is checked against that same complete JVM unit. Before whole-unit validation, each class's JVM metadata is validated in isolation so a class-specific failure is reported against the class and source declaration that own it. Remaining complete-unit failures use a batch-level error rather than being attributed to whichever class proof runs first. The planner rejects unsupported siblings, class/member shape errors, duplicate paths, and any failed class without returning a partial batch.
+
+## Owned in-memory batch emission (#1655)
+
+`dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_batch` consumes the complete
+borrowed batch within one `with_paired_jvm_tasty_batch_plan` callback. It first
+retains the #1654 whole-source receipt, then serializes each class's real
+validated TASTy plan, derives that class's link UUID from its own parsed
+28.9.0 header, and emits a classfile from the original full-session JVM unit.
+No class is replanned from a synthetic source file. The existing one-class
+encoding and validation logic is shared by both entry points.
+
+The API returns `PairedJvmTastyBatchArtifacts` only after every ordered pair
+has been encoded and the complete owned classfile/sidecar maps have passed
+`validate_jvm_tasty_batch_artifacts`. The return value contains the common
+`SourceId` and source-ordered class receipts with canonical class `SymbolId`,
+member order, package-relative paths, complete owned byte vectors, and the
+producer-derived UUID. If the second class or any cross-artifact check fails,
+the function returns an error with class index and symbol where applicable;
+there is no partial success value. Fresh-session regression tests compare the
+ordered paths, every classfile and TASTy byte, and each UUID.
+
+This is **in-memory emission only**. It does not stage or publish files and
+does not establish multi-class Scala consumer compatibility. The implementation
+is limited to the two-class independent Counter/Gauge fixture shape and the
+existing validated source/type subset. It does not change the legacy
+`emit_paired_jvm_tasty_class` API or its bytes. Filesystem publication belongs
+to #1656, and the independent pinned Scala 3.9.0 consumer proof for both classes
+belongs to #1657.
 
 ## Successor boundaries
 
-- **#1653** adds one-session whole-unit planning while preserving both independent classes, all member IDs, typed roots, and source order. The focused tests prove the Counter/Gauge fixture and all-or-nothing failure behavior; later issues still own batch validation of output bytes and publication.
-- **#1654–#1656** should validate every class and path together, derive each link from its exact sidecar bytes, reject duplicate paths, and emit then stage the complete artifact set before exposing it.
+- **#1653** adds one-session whole-unit planning while preserving both independent classes, all member IDs, typed roots, and source order.
+- **#1654** validates every class and path together and checks each link against its exact sidecar bytes.
+- **#1655** emits the complete owned in-memory artifact set and rejects partial batches.
+- **#1656** stages and publishes the complete artifact set.
 - **#1657** must test TASTy source semantics for each class separately and then execute a separate Scala client against the unchanged Rust classfiles.
 - **#1658** is the strict fresh-session deterministic release gate. It must compare all class and TASTy bytes and paths, not only decoded shapes.
 
