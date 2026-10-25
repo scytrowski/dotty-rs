@@ -41,10 +41,13 @@ The Counter sidecar declares only `Counter`; Reader's sidecar declares only
 `example`. It is not a `TYPEREFdirect` link to Counter's declaration and does
 not copy Counter's declaration into Reader's sidecar. The call body is
 `APPLY(SELECTin(...))`; the selected name is the signed TASTy name
-`get[Signed Signature(List(),scala.Int) @get]`. Its qualifier is
-`TERMREFdirect` to the `counter` formal node; the selection's result type is a
-`SHAREDTYPE` reference to the formal's Counter type node. The test walks these
-nodes and resolves the reference address against the decoded AST index.
+`get[Signed Signature(List(),scala.Int) @get]`, which identifies the zero-arg
+method returning `scala.Int`. Its qualifier is `TERMREFdirect` to the `counter`
+formal node. The trailing type in `SELECTin` is the method owner's type, not
+the selection result type: it is a `SHAREDTYPE` reference to the formal's
+`Counter` type node. Scala's unpickler uses this owner type together with the
+signed method name to resolve the member. The test walks these nodes and
+asserts that the shared reference points to that exact formal type node.
 
 ## One-session frontend and backend observations
 

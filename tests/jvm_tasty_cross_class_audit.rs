@@ -181,6 +181,19 @@ fn scala_39_oracle_records_reader_jvm_link_and_per_class_tasty_links() {
         .find(|node| node.tag == TYPEREF_TAG)
         .expect("formal type is ordinary TYPEREF");
     assert_eq!(type_ref.tag, TYPEREF_TAG);
+    let formal_type_node = address_index
+        .iter_nodes_with_tag(TYPEREF_TAG)
+        .find(|candidate| {
+            let mut parent = Some(*candidate);
+            while let Some(node) = parent {
+                if node.offset as u32 == formal_address {
+                    return true;
+                }
+                parent = address_index.parent_of(node.offset as u32);
+            }
+            false
+        })
+        .expect("formal type's TYPEREF is indexed beneath the formal node");
     assert_eq!(
         reader_tasty
             .names()
@@ -231,15 +244,19 @@ fn scala_39_oracle_records_reader_jvm_link_and_per_class_tasty_links() {
     assert_eq!(selected_node.underlying_type.nodes()[0].tag, SHAREDTYPE_TAG);
     let selected_type_references = selected_node.underlying_type.ast_refs();
     let [selected_type_reference] = selected_type_references.as_slice() else {
-        panic!("selection has one shared result-type reference");
+        panic!("selection has one shared owner-type reference");
     };
+    assert_eq!(
+        selected_type_reference.address, formal_type_node.offset as u32,
+        "SELECTin owner type shares Reader.read's exact Counter formal type node"
+    );
     assert_eq!(
         address_index
             .get_node(selected_type_reference.address)
             .unwrap()
             .tag,
         TYPEREF_TAG,
-        "selected result type shares Reader.read's Counter formal type tree"
+        "SELECTin owner type references the Counter formal's TYPEREF node"
     );
     assert!(address_index.get_node(method_address).is_some());
 }
