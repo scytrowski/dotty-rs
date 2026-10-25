@@ -2,6 +2,54 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
+## Latest increment: select a module's unique `apply` method
+
+This increment starts from merged `main` at
+`7d6c3ed3502d80efb235f994e551792fd2b4bdbb`, after #1600. In the pinned Scala
+3.9.0 source, `InlineInfoAttribute.scala:115` constructs `Some(name + desc)`.
+`Some` resolves to the canonical `scala.Some` companion module, whose generated
+polymorphic `apply[A](value: A): Some[A]` method makes the module callable.
+The source typer now selects that method when a module-class callee has exactly
+one callable `apply`, then uses the existing polymorphic application inference
+and conformance path. It preserves the selected method's symbol identity. A
+module without `apply` still reports `ApplicationCalleeNotMethod`; ambiguous
+module `apply` candidates remain explicitly deferred.
+
+The focused regression exercises generic `Factory.apply[A]`, checks the
+selected source method identity and inferred `Int` result, and confirms that a
+non-callable module is rejected. The deterministic `package-term` audit used
+the same 60 files and 369 methods in both runs. The normalized reports and
+369-row cohort TSVs matched exactly. Both runs had no parser or namer failures
+and typed zero complete methods. Exactly the three `InlineInfoAttribute`
+first-blocker rows advanced: `ApplicationCalleeNotMethod` moved from 8 to 5,
+and `MemberNotFound` moved from 3 to 6; all other first blockers were
+unchanged. `nextByte`, `nextUTF8`, and `nextShort` now pass the `Some(...)`
+application and stop later in the enclosing `read#tree=420` attempt at
+`MemberNotFound` while typing the argument expression `name + desc`. This is
+measured blocker progress, not a fully typed real method. The changed rows are
+recorded in
+[`typer-name-resolution-1566-module-apply-3.9.0.tsv`](typer-name-resolution-1566-module-apply-3.9.0.tsv).
+The deterministic 3-file / 31-method smoke audit also remained byte-for-byte
+stable across its two runs. One `StringParsers.parseInt#tree=482` row advances
+from `ApplicationCalleeNotMethod` to `ApplicationArgumentConformanceUnsupported`
+after resolving a module `apply`; the pinned smoke baseline records this
+intentional later blocker.
+
+Reproduce the deterministic cohort comparison with:
+
+```sh
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-some-apply-runs" \
+SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
+SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
+  --verify-determinism target/issue-1566-some-apply.md
+```
+
+The next bounded investigation is the `MemberNotFound` reached from
+`name + desc` in `InlineInfoAttribute.read#tree=420`; identify the exact
+receiver and canonical `+` member before choosing a fix.
+
 ## Latest increment: adapt `if` expressions without `else` to `Unit`
 
 This increment starts from merged `main` at
