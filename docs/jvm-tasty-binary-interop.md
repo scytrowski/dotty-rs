@@ -253,22 +253,22 @@ oracle control, not a Rust-produced pair.
 ## Negative matrix to preserve for follow-up issues
 
 The audit records observed Scala behavior separately from requirements for the
-future Rust publisher. Failures should be detected in preflight before either
-artifact becomes visible.
+bounded Rust output path and its test staging adapter. Failures should be
+detected before either artifact becomes visible.
 
 | Case | Observed Scala 3.9 behavior / required first rejection layer |
 | --- | --- |
-| Missing sidecar for class with `TASTY` | Scala classfile/TASTy discovery reports missing `.tasty`; publisher preflight must reject an incomplete pair. |
-| Class has no `TASTY`, explicit `-from-tasty` | Scala rejects it in `ReadTasty`; future linked publisher must reject before writing. |
-| UUID mismatch | Scala warns and still loads sidecar; `-Werror` fails. Rust preflight should reject mismatch as a pair-integrity error, before staging. |
+| Missing sidecar for class with `TASTY` | Scala classfile/TASTy discovery reports missing `.tasty`; the paired output path returns only complete in-memory pairs, and the test staging boundary rejects incomplete inputs. |
+| Class has no `TASTY`, explicit `-from-tasty` | Scala rejects it in `ReadTasty`; the paired output path always adds the audited link before returning the class. |
+| UUID mismatch | Scala warns and still loads sidecar; `-Werror` fails. The paired output path rejects a mismatch as a pair-integrity error before returning either artifact. |
 | `TASTY` payload length other than 16 | Pinned UUID parser reports an error; `ClassFile::tasty_link_id()` rejects it with `InvalidPayloadLength`. |
-| Wrong TASTy format version | Rust TASTy 3.9 validation rejects at TASTy validation; publisher must not attach a UUID from an unsupported payload. |
-| Package path / internal class name mismatch | Not characterized as a Scala diagnostic here. Shared-output validation must compare the canonical package path and internal name before encoding/publication. |
-| Source method, constructor, field, descriptor, or visibility disagreement | Must be rejected by the source/JVM/TASTy cross-artifact validator before either artifact is published; do not infer equivalence from matching names. |
-| Scala-private source field represented as public JVM accessor | The fixture has no generated accessor. The future validator must model source-vs-post-Getters rules explicitly and reject an unproven mismatch. |
+| Wrong TASTy format version | Rust TASTy 3.9 validation rejects at TASTy validation; the paired output path does not attach a UUID from an unsupported payload. |
+| Package path / internal class name mismatch | Not characterized as a Scala diagnostic here. The paired output path compares the canonical package path and internal name before returning artifacts. |
+| Source method, constructor, field, descriptor, or visibility disagreement | Rejected by the source/JVM/TASTy cross-artifact validator and decoded class ABI checks before either artifact is returned; do not infer equivalence from matching names. |
+| Scala-private source field represented as public JVM accessor | The fixture has no generated accessor. Broader source-vs-post-Getters shapes remain outside this bounded pair path and require an explicit proof before support. |
 | Duplicate class-level `TASTY` attributes | Not characterized as a Scala rejection. `ClassFile::tasty_link_id()` and `ClassFileBuilder::tasty_link()` reject duplicates to avoid ambiguous readers. |
-| Same simple class name in distinct packages | Use package-qualified identity and sidecar paths; include a two-package regression test before supporting batch output. |
-| Unsupported producer shape | Reject during plan validation before writing either artifact; do not emit just the class or just TASTy. |
+| Same simple class name in distinct packages | Package-qualified identities and sidecar paths are retained; paired output tests cover `left/Counter` and `right/Counter`. |
+| Unsupported producer shape | Reject during plan validation before returning either artifact; do not emit just the class or just TASTy. |
 
 An ordinary classpath compile that appears to accept an artifact is not a
 replacement for these negative assertions: Scala may warn on a stale UUID, and
@@ -319,24 +319,50 @@ to reject unsupported source forms before the pair proof is attempted.
 
 The separate `validate_classfile_tasty_link(&ClassFile, tasty_bytes)` helper
 checks that a decoded class has one valid `TASTY` link and that its UUID equals
-the UUID in a Scala 3.9-validated TASTy header. This rejects missing, malformed,
-and stale links before publication. It does not authenticate that the supplied
-bytes were produced by the borrowed `ValidatedClassStatePlan`, or that the
-classfile bytes were emitted from the paired JVM plan; #1637 must connect those
-exact producer outputs before staging them.
+the UUID in a Scala 3.9-validated TASTy header. The paired output coordinator
+uses it after invoking both producers, alongside the retained same-session
+proof and decoded JVM member checks, so the returned byte arrays are the exact
+producer outputs that were cross-validated.
 
 Likewise, an arbitrary `SourceTypedBindings` implementation is producer
 evidence, not an identity authenticator. The coordinator compares its result
 with both plans, while the session owner remains responsible for using the
 actual `SourceTypedIndex` from that session.
 
+## Owned linked pair output (#1637)
+
+`dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_class` consumes the borrowed
+one-session plan and returns an owned `PairedJvmTastyArtifacts`. The sequence
+is fail-closed:
+
+1. Pickle the complete supported class TASTy from the validated plan.
+2. Parse and validate the emitted TASTy as Scala 3.9.0, requiring format
+   28.9.0, then take the UUID directly from that encoded header.
+3. Pass that exact UUID to the opt-in
+   `dotty_jvm::emit_class_with_tasty_link` API. The normal `emit_class` path
+   remains unlinked and keeps its existing output behavior.
+4. Decode the emitted class file, require version 65.0 and the canonical
+   package-qualified class name, compare decoded fields/methods/descriptors/
+   access flags with the checked JVM metadata, and validate the class-level
+   link against the exact TASTy bytes.
+5. Only then return both complete owned byte arrays with their relative paths,
+   source class/member identities, source ID and TASTy link UUID.
+
+The API emits no files and does not claim interoperability from structural
+round-tripping alone. Its regression tests compare complete `.class` and
+`.tasty` byte arrays from two fresh source sessions and verify package-specific
+paths. A test-only staging adapter requires an empty output root, writes both
+files under a temporary directory before moving them into place, and cleans up
+after a forced staging failure. Multiple filesystem moves are best-effort;
+they are not atomic across process or machine crashes. Independent Scala
+consumer evidence remains #1638's responsibility.
+
 ## Successor boundary
 
 Audit #1632 changed tests, a pinned oracle fixture, and this document only.
 Issue #1633 adds the typed, Scala-independent classfile link representation
-and validation; it does not change the JVM backend, TASTy format/pickler,
-Typer, production dependencies, or add a compiler driver. Issue #1634 now
-provides source/JVM/TASTy semantic consistency validation. The remaining work
-follows the dependency sequence in #1635–#1639: derive both producer plans from
-one source session; atomically stage linked artifacts; prove independent Scala
-consumption; then run the full determinism/runtime gate.
+and validation; issue #1634 provides source/JVM/TASTy semantic consistency;
+issue #1635 builds both producer plans from one source session; and #1637 now
+returns a linked, decoded-and-validated owned artifact pair with test-only
+staging. The remaining work follows #1638–#1639: prove independent Scala
+consumption, then run the full determinism/runtime gate.

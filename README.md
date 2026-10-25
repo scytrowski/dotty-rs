@@ -38,8 +38,11 @@ The source-to-class-file pipeline is exercised in
 verification and execution in CI. The root `dotty::jvm_tasty_plan` library
 module now coordinates the audited single-class Counter overlap from one
 frontend session and exposes both validated borrowed plans within a callback.
-It does not emit artifacts or provide a compiler driver/CLI; general combined
-`.class`/`.tasty` output remains future work.
+The opt-in `dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_class` path now
+returns an owned, decoded-and-validated Counter `.class`/`.tasty` pair linked
+by the TASTy producer's exact header UUID. Filesystem publication and
+independent Scala consumption remain separate follow-up work; this is not a
+compiler driver/CLI or general Scala ABI support.
 
 Compatibility targets Scala **3.9.0**, pinned to source revision
 `777528f19a58e794c9954a42f433373472ec57f8`. The semantic pickler emits TASTy
@@ -63,7 +66,7 @@ revisions and are not measurements of the current checkout.
 | `dotty-classfile` | JVM class-file codec and bytecode builder |
 | `dotty-classloader` | Classpath discovery and binary loading |
 | `dotty-jvm` | Typed-semantic plans to JVM class files |
-| `dotty` (root) | Selected public re-exports, the bounded paired-plan coordinator, and integration tests |
+| `dotty` (root) | Selected public re-exports, the bounded paired-plan/artifact coordinator, and integration tests |
 
 The root facade does not re-export every workspace crate: use crates such as
 `dotty-lexer`, `dotty-namer`, `dotty-jvm`, and `dotty-tasty-pickler` directly when
