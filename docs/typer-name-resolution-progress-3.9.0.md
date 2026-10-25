@@ -114,14 +114,35 @@ object OpcodesImport:
   val firstOpcode: Int = ICONST_0
 ```
 
-A negative control using `asm.NotAnOpcode.*` fails with E008, as expected. The
-source import qualifier path currently asks for `Opcodes` in the term
-namespace and does not retry the selection in the type namespace. A bounded
-next candidate is therefore package-qualified external class lookup as an
-import qualifier, with an explicit type-namespace fallback. The two roots
-have advanced to this later blocker but remain untyped. The focused raw report
-and trace logs remain local under `target/issue-1620-runs/`; they are not
-checked in. Temporary harness instrumentation was removed after the run.
+A negative control using `asm.NotAnOpcode.*` fails with E008, as expected. At
+the audited code revision, the source import qualifier path asked for
+`Opcodes` in the term namespace and did not retry in the type namespace. The
+bounded follow-up below implements that fallback and records the new blocker
+for these roots. The pre-change focused raw report and trace logs remain local
+under `target/issue-1620-runs/`; they are not checked in. Temporary harness
+instrumentation was removed after the run.
+
+### Bounded follow-up: package-qualified classfile import qualifiers
+
+Implementation commit `502c4657b21a51af1d375c2bacb6a1422f90a337` keeps the
+existing term lookup first for import qualifiers, then retries a missing
+selection in the type namespace. This retry is enabled only for source import
+qualifier typing; other calls to the shared qualifier resolver retain their
+previous behavior. The regression uses a classfile-backed interface with a
+`public static final int ICONST_0` field and types
+`import scala.tools.asm.Opcodes.*` followed by a use of `ICONST_0`.
+
+The one-file audit was rerun on that code revision with the same Scala
+3.9.0 checkout and `BackendUtils.scala` manifest above. Parsing and naming
+passed; the two frozen roots `#240` and `#302` still share attempt `#365`, and
+both remain untyped. Their first blocker moved from
+`ImportQualifierNotFound` to `StringLiteralTypingDeferred`. The resolver trace
+records the expected term miss for `Opcodes`, then succeeds for the type
+request with canonical classfile-backed `scala.tools.asm.Opcodes` of kind
+`Trait`. Thus the import qualifier and its static wildcard members no longer
+block those method attempts, although no method is fully typed yet. The raw
+post-change audit is retained locally at
+`target/issue-1620-runs/backendutils-after-opcodes.md`.
 
 Reproduce the one-file audit (the manifest selects the file, then the audit
 intersects it with the frozen method roots):
