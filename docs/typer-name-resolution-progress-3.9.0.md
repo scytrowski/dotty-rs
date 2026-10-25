@@ -216,6 +216,18 @@ Validation for this Typer slice passed `cargo fmt --all -- --check`,
 focused corpus audit was run twice serially; its compact sidecars matched as
 recorded above.
 
+The independent review of #1650 found that this adaptation read a Java
+declaration's canonical signature directly, bypassing receiver-view validation
+for applied external generic classes. It now widens the selected reference
+before inspecting the empty method clause. A JDK 21 classfile fixture for
+`Opcodes<T>.get(): T` verifies that both `op.get` and `op.get()` preserve the
+existing `ExternalGenericInstantiationDeferred` rejection instead of
+producing a typed application with an uninstantiated `T`. This does not add
+external generic Java support. After the fix, the 60-file / 369-method audit
+again produced 292 observed rows, zero fully typed methods, and identical
+sidecars at SHA-256
+`80816778c15ca48652087367eb1d9a3314440484cd645c55bcb692fe9d365b25`.
+
 The cohort result is progress in the focused roots, not corpus completion:
 zero of 369 selected methods are fully typed. A later blocker is credited only
 after the preceding operation's signature shape and source-oracle controls are

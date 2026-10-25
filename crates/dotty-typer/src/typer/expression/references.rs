@@ -175,7 +175,10 @@ impl SourceTyper<'_> {
             return Ok(typed_tree);
         }
 
-        let method_type = self.completed_expression_symbol_info(symbol, info_journal)?;
+        // The declaration's canonical signature can still contain type
+        // parameters from its owning class. Widening the selected reference
+        // resolves the member through this receiver's instantiated view.
+        let method_type = self.widen_expression_type_journaled(selected_type, info_journal, 0)?;
         let Some(Type::Method(method)) = self.store.types.try_get(method_type).cloned() else {
             return Ok(typed_tree);
         };
