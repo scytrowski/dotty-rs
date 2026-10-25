@@ -1,0 +1,165 @@
+# Scala 3.9.0 two-class JVM/TASTy layout audit
+
+This document records the bounded audit for [issue #1652](https://github.com/scytrowski/dotty-rs/issues/1652). It freezes the observed output for **one source file containing two independent top-level ordinary classes**. The oracle does not establish a general Scala packaging rule beyond this fixture, and the audit does not enable multi-class production emission.
+
+The exact producer input is [`CounterGauge.scala`](../tests/fixtures/jvm_tasty_multiclass/CounterGauge.scala), SHA-256 `e560545eeb46fad4cb6e41a0a86e4b6932bbf221856780ade6fd4492a694f60c`. Scala 3.9.0 was checked out at revision [`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8). The compiler reported `3.9.0-bin-SNAPSHOT-git-777528f`, built from that checkout; the staged `scala3-compiler_3` jar SHA-256 was `b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f`. The compiler ran on Temurin JDK `21.0.8+9`. Its default class-file version is 61; the Rust JVM backend's current target, major 65, remains an independent setting.
+
+## Observed output and link map
+
+Compiling the literal source into a fresh empty directory produced exactly these four files:
+
+| Relative path | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `example/Counter.class` | 648 | `a650908f42813963ee324f8a3648c948ab59bd74d4f31217981d93f460f2bf29` |
+| `example/Counter.tasty` | 576 | `da6e9366a104db48e88100d065c9f6f37cd069dd3a44850bc7a3d346239cdf29` |
+| `example/Gauge.class` | 644 | `6625be15a2d9fc53a6663144f87a5fc97c816e9a99dab9aad1c9de4b6926f7eb` |
+| `example/Gauge.tasty` | 573 | `f9da39f65f194e09b85abd4401ee10829ef0958edc773c9497e60f77758ad88e` |
+
+There is one TASTy sidecar per class in this fixture, not one shared sidecar. Each classfile has one 16-byte class-level `TASTY` attribute, and that payload exactly matches the header UUID of its sibling sidecar:
+
+| Classfile | Sibling TASTy | UUID in both link and header |
+| --- | --- | --- |
+| `example/Counter.class` | `example/Counter.tasty` | `0075154beaa4bae8004b8b7090f4341b` |
+| `example/Gauge.class` | `example/Gauge.tasty` | `005b42ac860bfbe8005a27b4f8edbd1b` |
+
+The two measured UUIDs differ. This is evidence for these exact serialized classes; it is not a global UUID uniqueness contract. The link bytes identify the matching payload, so a producer must derive each class link from the TASTy bytes it will publish. No `CounterGauge.class` or shared `CounterGauge.tasty` was emitted.
+
+Both sidecars parse and validate as TASTy `28.9.0`. Each contains an `ASTs` section with one package root for `example` and one direct class `TypeDef`: `Counter` in the Counter sidecar, `Gauge` in the Gauge sidecar. The classfile `SourceFile` attribute names the basename `CounterGauge.scala`; the TASTy `Attributes` section records the compiler input path `tests/fixtures/jvm_tasty_multiclass/CounterGauge.scala`. The checked-in class and TASTy files under [`scala39/example`](../tests/fixtures/jvm_tasty_multiclass/scala39/example) are these exact compiler outputs. The focused Rust audit test decodes both classfiles, parses and validates both TASTy files, checks each package root and class name, and verifies each class-to-header link.
+
+Scala's compiler writes package-relative artifact paths. The output path set is the contract observed here; filesystem creation order is not used as a semantic ordering guarantee. The Rust batch manifest should preserve source declaration order (`Counter`, then `Gauge`) and reject duplicate final paths before publication. It should associate each canonical class with its own `.class`/`.tasty` path and UUID, rather than deriving identity from simple names alone.
+
+## Bounded class ABI
+
+| Class | Classfile version | Field | Methods, in emitted order | Constructor initialization |
+| --- | --- | --- | --- | --- |
+| `example/Counter` | 61.0 | `private current:I` | public `<init>(I)V`, `get()I`, `set(I)V` | Calls `Object.<init>()V`, then stores slot 1 into `current`. |
+| `example/Gauge` | 61.0 | `private reading:I` | public `<init>(I)V`, `get()I`, `set(I)V` | Calls `Object.<init>()V`, then stores slot 1 into `reading`. |
+
+The mutable backing fields are not final. `get` reads the class's own field; `set` writes that same field and returns `void`. Both constructors and setter parameters have `MethodParameters` names (`start` and `value`). `javap -v -p -c` shows five class attributes on each class: `Signature`, `SourceFile`, `TASTY`, `Scala3InlineInfo`, and `Scala`. In both outputs `Scala3InlineInfo` is `01 00 00 00`; no general requirement for that attribute is inferred from this audit.
+
+A second compile of the unchanged source into another fresh directory produced byte-identical contents for all four artifacts. The Rust classfile decoder and TASTy parser assert the measured member descriptors, access flags, class version, UUIDs, format version, package roots, and source class names against the checked-in oracle files.
+
+## External Scala consumer and failure controls
+
+[`Consumer.scala`](../tests/fixtures/jvm_tasty_multiclass/Consumer.scala) is a separate client. It uses named constructor arguments (`start`) and named setter arguments (`value`), verifies both initial values, mutates the classes independently, checks fresh instances retain their own state, and prints `1329`.
+
+The pinned compiler successfully compiled the client against the two oracle pairs. Running the consumer on JDK 21 with `java -Xverify:all` and the two original classfiles printed `1329`. The Scala consumer output contained only `consumer/Consumer.class`, `consumer/Consumer$.class`, and its own `consumer/Consumer.tasty`; it did not regenerate either producer class. The same consumer also compiled successfully with only the two `.tasty` files on its compile classpath, which confirms Scala can use the sidecars for source semantics without sibling classfiles. Runtime still requires the classfiles.
+
+| Control | Result with pinned Scala 3.9.0 | First observed stage |
+| --- | --- | --- |
+| Remove `Counter.tasty`, retain both linked classfiles | Compilation fails: “It should have been loaded from `.tasty` file. This `.tasty` file is missing.” | Scala classpath loading; there is no Java-shaped fallback for this linked Scala class. |
+| Flip one byte of Counter's classfile `TASTY` UUID, keep its sidecar | Default compilation succeeds with an “out of sync” warning and reports that it loaded the TASTy file. With `-Werror`, compilation fails because the warning is fatal. | Scala classpath loading / diagnostics; mismatch does not silently choose classfile semantics. |
+| Move `Counter.tasty` outside `example/` while leaving `Counter.class` in place | Compilation fails with the same missing-sidecar diagnostic. | Relative TASTy path resolution. |
+| Move `Gauge.class` outside `example/`, keep `example/Gauge.tasty` | Scala compilation succeeds by loading the TASTy sidecar; executing the client with that classpath fails with `NoClassDefFoundError: example/Gauge`. | Compile-time TASTy loading succeeds; JVM runtime class lookup fails. |
+| Provide only both package-relative `.tasty` files | Scala client compilation succeeds; runtime cannot execute without classfiles. | TASTy source-semantic loading. |
+
+These controls distinguish TASTy-based Scala compilation from JVM class availability. A successful client compile alone does not prove that runtime resolves the intended classfile; the consumer gate must also verify and execute the original Rust-produced classfiles.
+
+## Rust frontend and current producer boundary
+
+The regression `counter_and_gauge_keep_distinct_canonical_symbols_in_one_typer_session` runs the literal two-class source through one scanner, parser, namer, semantic store, source index, and `SourceTyper`. In source order it completes both canonical class and constructor identities, the constructor-owned `start` formals, the class-owned fields, and each class's `get`/`set` methods. It types every field initializer and method body and checks the original source-to-typed root mapping. The two classes have distinct class, constructor, formal, field, and method `SymbolId`s; each member owner remains its declaring class even though both classes spell their methods `get` and `set`.
+
+The existing `with_paired_jvm_tasty_class_plan` remains one-class-only. The updated `multi_class_source_is_rejected_without_a_partial_pair` regression passes this exact fixture and pins its current error: `UnsupportedSourceShape("exactly one top-level class; multi-class source units are not supported")`. The coordinator rejects package arity after parsing and naming, before it creates a `SourceTyper`; the separate frontend characterization test proves the two classes can be typed together without re-parsing the second class.
+
+`ClassStatePicklePlan` and its validator describe one canonical class tree, constructor, and ordered member slice borrowing the caller's semantic stores and source/typed arenas. There is no whole-source TASTy serializer or batch receipt today. The observed Scala files each have their own single-class package root, so the oracle does not require a shared multi-class TASTy root for this fixture. It is a reasonable next step to plan both classes in one frontend session and derive two class-scoped producer plans from that session, but their simultaneous validation and complete batch accounting still need focused implementation evidence; this audit does not claim multi-class Rust output is already safe.
+
+## Successor boundaries
+
+- **#1653** should add one-session whole-unit planning while preserving both independent classes, all member IDs, typed roots, and source order. It should prove each class-scoped TASTy plan from the shared session and retain an all-or-nothing batch receipt.
+- **#1654–#1656** should validate every class and path together, derive each link from its exact sidecar bytes, reject duplicate paths, and emit then stage the complete artifact set before exposing it.
+- **#1657** must test TASTy source semantics for each class separately and then execute a separate Scala client against the unchanged Rust classfiles.
+- **#1658** is the strict fresh-session deterministic release gate. It must compare all class and TASTy bytes and paths, not only decoded shapes.
+
+Cross-class source calls/fields and inheritance between these siblings, objects/companions, nested classes, traits, generics, overloaded/default methods, external JDK classes, `String`, public constructor accessors, and other unsupported pickler forms remain outside this audit and the bounded successor fixture.
+
+## Reproduction
+
+From the repository root, with the pinned Scala source checkout and JDK available:
+
+```sh
+SCALA_ROOT=/path/to/scala3-at-777528f19a58e794c9954a42f433373472ec57f8
+JAVA_HOME=/path/to/temurin-21
+SCALA_LIB_ROOT=/path/to/coursier/maven2/org/scala-lang
+export PATH="$JAVA_HOME/bin:$SCALA_ROOT/dist/target/universal/stage/bin:$PATH"
+export TMPDIR=/dev/shm
+export JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/dev/shm -XX:-UsePerfData'
+scalac -version
+java -version
+
+ORACLE_OUT=$(mktemp -d)
+scalac -d "$ORACLE_OUT" tests/fixtures/jvm_tasty_multiclass/CounterGauge.scala
+find "$ORACLE_OUT" -type f -printf '%P\t%s bytes\n' | sort
+sha256sum "$ORACLE_OUT"/example/*
+javap -classpath "$ORACLE_OUT" -v -p -c example.Counter
+javap -classpath "$ORACLE_OUT" -v -p -c example.Gauge
+
+SECOND_OUT=$(mktemp -d)
+scalac -d "$SECOND_OUT" tests/fixtures/jvm_tasty_multiclass/CounterGauge.scala
+for path in example/Counter.class example/Counter.tasty example/Gauge.class example/Gauge.tasty; do
+  cmp "$ORACLE_OUT/$path" "$SECOND_OUT/$path"
+done
+
+CONSUMER_OUT=$(mktemp -d)
+scalac -classpath "$ORACLE_OUT" -d "$CONSUMER_OUT" \
+  tests/fixtures/jvm_tasty_multiclass/Consumer.scala
+java -Xverify:all -classpath \
+  "$CONSUMER_OUT:$ORACLE_OUT:$SCALA_LIB_ROOT/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar:$SCALA_LIB_ROOT/scala-library/3.9.0/scala-library-3.9.0.jar" \
+  consumer.Consumer
+```
+
+The final command prints `1329`. The source fixture SHA-256 is
+`3d3822120d9ab41a8502c545f1693870ec09d3fcc1908f39d283c074787b3508`. The
+following controls use fresh classpath and output directories; failures are
+expected for the missing sidecar, stale UUID under `-Werror`, and wrong TASTy
+path:
+
+```sh
+CONSUMER_SOURCE=tests/fixtures/jvm_tasty_multiclass/Consumer.scala
+CONTROL_ROOT=$(mktemp -d)
+
+mkdir -p "$CONTROL_ROOT/missing" "$CONTROL_ROOT/missing-out"
+cp -R "$ORACLE_OUT/example" "$CONTROL_ROOT/missing/"
+rm "$CONTROL_ROOT/missing/example/Counter.tasty"
+scalac -classpath "$CONTROL_ROOT/missing" -d "$CONTROL_ROOT/missing-out" "$CONSUMER_SOURCE"
+
+mkdir -p "$CONTROL_ROOT/corrupt" "$CONTROL_ROOT/corrupt-default" "$CONTROL_ROOT/corrupt-werror"
+cp -R "$ORACLE_OUT/example" "$CONTROL_ROOT/corrupt/"
+python3 - "$CONTROL_ROOT/corrupt/example/Counter.class" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+data = bytearray(path.read_bytes())
+link = bytes.fromhex("0075154beaa4bae8004b8b7090f4341b")
+offset = data.find(link)
+assert offset >= 0
+data[offset] ^= 1
+path.write_bytes(data)
+PY
+scalac -classpath "$CONTROL_ROOT/corrupt" -d "$CONTROL_ROOT/corrupt-default" "$CONSUMER_SOURCE"
+scalac -Werror -classpath "$CONTROL_ROOT/corrupt" -d "$CONTROL_ROOT/corrupt-werror" "$CONSUMER_SOURCE"
+
+mkdir -p "$CONTROL_ROOT/wrong-tasty" "$CONTROL_ROOT/wrong-tasty-out"
+cp -R "$ORACLE_OUT/example" "$CONTROL_ROOT/wrong-tasty/"
+mv "$CONTROL_ROOT/wrong-tasty/example/Counter.tasty" "$CONTROL_ROOT/wrong-tasty/Counter.tasty"
+scalac -classpath "$CONTROL_ROOT/wrong-tasty" -d "$CONTROL_ROOT/wrong-tasty-out" "$CONSUMER_SOURCE"
+
+mkdir -p "$CONTROL_ROOT/wrong-class" "$CONTROL_ROOT/wrong-class-out"
+cp -R "$ORACLE_OUT/example" "$CONTROL_ROOT/wrong-class/"
+mv "$CONTROL_ROOT/wrong-class/example/Gauge.class" "$CONTROL_ROOT/wrong-class/Gauge.class"
+scalac -classpath "$CONTROL_ROOT/wrong-class" -d "$CONTROL_ROOT/wrong-class-out" "$CONSUMER_SOURCE"
+java -Xverify:all -classpath \
+  "$CONSUMER_OUT:$CONTROL_ROOT/wrong-class:$SCALA_LIB_ROOT/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar:$SCALA_LIB_ROOT/scala-library/3.9.0/scala-library-3.9.0.jar" \
+  consumer.Consumer
+
+mkdir -p "$CONTROL_ROOT/sidecars-only/example" "$CONTROL_ROOT/sidecars-only-out"
+cp "$ORACLE_OUT/example/Counter.tasty" "$ORACLE_OUT/example/Gauge.tasty" \
+  "$CONTROL_ROOT/sidecars-only/example/"
+scalac -classpath "$CONTROL_ROOT/sidecars-only" -d "$CONTROL_ROOT/sidecars-only-out" "$CONSUMER_SOURCE"
+```
+
+Expected outcomes: missing sidecar and wrong TASTy path fail during Scala
+classpath loading; UUID mismatch warns and succeeds normally, then fails under
+`-Werror`; the misplaced Gauge class still permits compile-time TASTy loading
+but Java execution fails with `NoClassDefFoundError`; sidecars alone compile
+the client. These controls distinguish TASTy semantic loading from JVM class
+lookup. They do not imply a Java fallback path for linked Scala classes.
