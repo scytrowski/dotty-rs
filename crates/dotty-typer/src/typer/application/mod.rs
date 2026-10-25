@@ -153,12 +153,16 @@ impl SourceTyper<'_> {
                     resolved.argument_trees,
                 )
             } else {
-                let function = self.type_value_expression_inner(
+                // Keep a Java nullary method selection as a method reference
+                // here: explicit `f()` syntax must not be auto-applied before
+                // the application consumes it.
+                let function = self.type_expression_inner(
                     application.function,
                     context,
                     info_journal,
                     new_mappings,
                 )?;
+                self.validate_value_expression(application.function, function)?;
                 let function_type = self.typed_arena.get(function).ty;
                 let callable =
                     self.widen_expression_type_journaled(function_type, info_journal, 0)?;
@@ -551,7 +555,10 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let function = match self.type_value_expression_inner(
+        // Type application still needs the callable method reference; Java
+        // nullary value adaptation happens only after explicit type arguments
+        // have been applied.
+        let function = match self.type_expression_inner(
             application.function,
             context,
             info_journal,

@@ -108,6 +108,32 @@ impl ClassPathEntry for DottyCoreClassPath {
 
 struct OpcodesFixturePath;
 
+struct GenericOpcodesFixturePath;
+
+impl ClassPathEntry for GenericOpcodesFixturePath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        let bytes = match name.as_internal() {
+            "scala/tools/asm/Opcodes" => {
+                include_bytes!("fixtures/java_generic/scala/tools/asm/Opcodes.class").to_vec()
+            }
+            "java/lang/Object" => java_object_stub(),
+            _ => return Ok(None),
+        };
+        Ok(Some(ClassResource::new(
+            bytes,
+            ClassFormat::Class,
+            ClassOrigin::Directory("<java-generic-nullary-method-fixture>".into()),
+        )))
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        Ok(matches!(
+            package,
+            ["scala"] | ["scala", "tools"] | ["scala", "tools", "asm"]
+        ))
+    }
+}
+
 impl ClassPathEntry for OpcodesFixturePath {
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
         let bytes = match name.as_internal() {
@@ -594,7 +620,21 @@ fn type_opcodes_import(source_id: u32, source_text: &str) -> Result<(), dotty_ty
     )));
 
     let context = typer.expression_context_for(method).unwrap();
-    typer.type_expression(body, context).map(|_| ())
+    if source_id == 1628 {
+        assert!(matches!(parsed.ast.get(body).kind, TreeKind::Select(_)));
+    } else if source_id == 1629 {
+        assert!(matches!(parsed.ast.get(body).kind, TreeKind::Apply(_)));
+    }
+    let typed = typer.type_expression(body, context)?;
+    if matches!(source_id, 1628 | 1629) {
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("a Java zero-argument call should produce a typed Apply")
+        };
+        assert!(application.args.is_empty());
+        let repeated = typer.type_expression(body, context)?;
+        assert_eq!(repeated, typed);
+    }
+    Ok(())
 }
 
 #[test]
@@ -628,6 +668,95 @@ fn package_qualified_classfile_import_qualifier_rejects_instance_fields() {
         type_opcodes_import(1627, source_text),
         Err(dotty_typer::TyperError::ImportQualifierNotFound { .. })
     ));
+}
+
+#[test]
+fn classfile_nullary_instance_method_auto_applies_in_value_position() {
+    let source_text = "package consumer\nobject Use { def first(op: scala.tools.asm.Opcodes): Int = op.instanceMethod }";
+    type_opcodes_import(1628, source_text).unwrap();
+}
+
+#[test]
+fn classfile_nullary_instance_method_keeps_explicit_empty_call() {
+    let source_text = "package consumer\nobject Use { def first(op: scala.tools.asm.Opcodes): Int = op.instanceMethod() }";
+    type_opcodes_import(1629, source_text).unwrap();
+}
+
+#[test]
+fn classfile_nullary_generic_method_rejects_deferred_receiver_instantiation() {
+    let source_text = "package consumer\nobject Use { def implicitCall(op: scala.tools.asm.Opcodes[java.lang.Object]): java.lang.Object = op.get; def explicitCall(op: scala.tools.asm.Opcodes[java.lang.Object]): java.lang.Object = op.get() }";
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let source = SourceId::from_index(1630);
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "JavaGenericNullaryMethod.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let methods = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(definition)
+                if matches!(
+                    store.names.resolve(definition.name.as_name().text()),
+                    "implicitCall" | "explicitCall"
+                ) =>
+            {
+                Some((
+                    index.symbol_at(source, tree).unwrap(),
+                    definition.rhs.unwrap(),
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(methods.len(), 2);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(ClasspathSymbolResolver::new(
+        GenericOpcodesFixturePath,
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    )));
+    for (method, body) in methods {
+        let context = typer.expression_context_for(method).unwrap();
+        let result = typer.type_expression(body, context);
+        let preserves_deferred_receiver_error = match &result {
+            Err(dotty_typer::TyperError::ExternalGenericInstantiationDeferred { .. }) => true,
+            Err(dotty_typer::TyperError::MemberLookup(error)) => matches!(
+                error.as_ref(),
+                dotty_typer::MemberLookupError::ParentTypeAdaptation {
+                    error: dotty_typer::TyperError::ExternalGenericInstantiationDeferred { .. },
+                    ..
+                }
+            ),
+            _ => false,
+        };
+        assert!(
+            preserves_deferred_receiver_error,
+            "expected deferred generic receiver instantiation, got {result:?}"
+        );
+    }
 }
 
 #[test]

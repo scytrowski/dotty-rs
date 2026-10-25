@@ -73,6 +73,12 @@ impl SourceTyper<'_> {
         if !matches!(source_kind, TreeKind::Ident(_) | TreeKind::Select(_)) {
             return None;
         }
+        if !matches!(
+            self.typed_arena.try_get(typed_tree).map(|node| &node.kind),
+            Some(TreeKind::Ident(_) | TreeKind::Select(_))
+        ) {
+            return None;
+        }
         let symbol = match self
             .store
             .types
@@ -133,8 +139,76 @@ impl SourceTyper<'_> {
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         let typed = self.type_expression_inner(source_tree, context, info_journal, new_mappings)?;
+        let typed =
+            self.adapt_java_nullary_method_value(source_tree, typed, info_journal, new_mappings)?;
         self.validate_value_expression(source_tree, typed)?;
         Ok(typed)
+    }
+
+    /// Java methods with no parameters are invoked when used as values in
+    /// Scala. Scala methods keep their source-level clause shape, so this is
+    /// restricted to method symbols marked `JAVA_DEFINED` by the classfile
+    /// adapter and to a single plain empty clause.
+    fn adapt_java_nullary_method_value(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        typed_tree: TreeId<Typed>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let selected_type = self.typed_arena.get(typed_tree).ty;
+        let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }) = self.store.types.try_get(selected_type)
+        else {
+            return Ok(typed_tree);
+        };
+        let symbol = *symbol;
+        if !self.store.symbols.contains(symbol) {
+            return Ok(typed_tree);
+        }
+        let declaration = self.store.symbols.get(symbol);
+        if declaration.kind != SymbolKind::Method
+            || !declaration.flags.contains(SymbolFlags::JAVA_DEFINED)
+        {
+            return Ok(typed_tree);
+        }
+
+        // The declaration's canonical signature can still contain type
+        // parameters from its owning class. Widening the selected reference
+        // resolves the member through this receiver's instantiated view.
+        let method_type = self.widen_expression_type_journaled(selected_type, info_journal, 0)?;
+        let Some(Type::Method(method)) = self.store.types.try_get(method_type).cloned() else {
+            return Ok(typed_tree);
+        };
+        if method.kind != MethodKind::Plain || !method.params.is_empty() {
+            return Ok(typed_tree);
+        }
+
+        let position = self
+            .arena
+            .try_get(source_tree)
+            .and_then(|node| node.position);
+        let applied = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply(
+            typed_tree,
+            Vec::new(),
+            method.result,
+            position,
+        );
+        self.typed_index.remove(self.source, source_tree);
+        self.typed_index
+            .insert(self.source, source_tree, applied)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        if !new_mappings.contains(&(self.source, source_tree)) {
+            new_mappings.push((self.source, source_tree));
+        }
+        Ok(applied)
     }
 
     pub(in crate::typer) fn enclosing_this_owner(
