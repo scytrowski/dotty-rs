@@ -2,6 +2,59 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
+## Bounded completion check for #1620
+
+I rechecked the five frozen #1620 roots from the pre-implementation baseline
+`ad3268b6132ac04d80bf628ec4d9483f4f5ff1f6` against current `main`
+`da8eb8ef4fd4f2d6793eb35e08286c8a5a7a85a2`, using the pinned Scala 3.9.0
+checkout `777528f19a58e794c9954a42f433373472ec57f8`, Scala artifacts 3.9.0,
+and JDK 21.0.8. The bounded manifest selects two source files, so the audit
+attempts 13 methods; the five issue roots are listed separately in
+[`typer-name-resolution-1620-final-roots-3.9.0.tsv`](typer-name-resolution-1620-final-roots-3.9.0.tsv).
+
+All 13 methods stopped at `ImportQualifierNotFound` on the baseline. On current
+`main`, all 13 advance to later first blockers: seven `TermNameNotFound`, two
+`TypeNameNotFound`, and four `MemberLookup`. None is fully typed. The selected
+`ProdConsAnalyzer.scala#tree=273` root contains the real
+`sourceValue.insns.iterator.asScala` use and advances to
+`TypeNameNotFound`. Its resolver trace now resolves the import qualifier to a
+TASTy-backed `scala.jdk.CollectionConverters` Object. This is a cumulative
+baseline-to-current-main comparison; it does not attribute the transition to
+PR #1621 alone.
+
+The focused import lookup regression separately resolves the inherited TASTy
+declaration `IteratorHasAsScala`, preserving its canonical symbol and owner
+`AsScalaExtensions`; the pinned Scala oracle accepts the iterator conversion
+and rejects the unrelated String conversion. The corpus audit itself did not
+materialize `CollectionConverters`' ModuleClass or record an
+`IteratorHasAsScala` candidate for the selected method attempts. This evidence
+therefore meets the bounded target of moving a real root past the qualifier
+blocker while validating inherited symbol identity in the focused regression;
+it does not show that the corpus methods apply implicit conversions or become
+fully typed.
+
+The final focused audit ran twice with identical normalized output (SHA-256
+`3182eac569079de63aefefbef554357a92d44f61d69ab1b306679a50816b1b7b`). The
+baseline focused output had SHA-256
+`17f5c4fe71fe6189921b7568a45a85a5fc4dc2d2011fd5e865a81776b1cdd42c`.
+Reproduce the current bounded run by creating a manifest containing the two
+unique source paths in the TSV's `source_file` column and running:
+
+```sh
+mkdir -p target/issue-1620-final-runs target/tmp
+cat > target/issue-1620-final-runs/five-roots.manifest <<'EOF'
+compiler/src/dotty/tools/backend/jvm/BackendUtils.scala
+compiler/src/dotty/tools/backend/jvm/analysis/ProdConsAnalyzer.scala
+EOF
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1620-final-runs" \
+SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
+SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+tools/typer-classpath-corpus-audit/run --focused-manifest target/issue-1620-final-runs/five-roots.manifest \
+  --verify-determinism target/issue-1620-final-runs/five-roots-main.md
+```
+
+
 ## Fresh `package-term` baseline after PR #1642
 
 The audit was run serially from exact `main` SHA
