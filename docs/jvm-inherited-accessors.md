@@ -60,6 +60,7 @@ descriptions are the compiler outcomes, not a proposed Rust acceptance policy.
 | Concrete child omits an abstract parent `val` implementation | Rejected: the child must be abstract or implement the accessor. |
 | Trait body accessor inherited by a class | Compiles. Trait storage/default-method ABI is outside this class-only audit. |
 | Generic constructor accessor `Parent[A](val value: A)` inherited as `Parent[Int]` | Compiles. Erasure, bridge and generic signature policy remain outside this bounded backend support. |
+| Covariant `override val current: String` over parent `val current: Object` | Compiles. The overriding child declares private-final `current:Ljava/lang/String;`, `current()Ljava/lang/String;`, and a public bridge `current()Ljava/lang/Object;`. This is an explicit override, not a copied inherited accessor. |
 | Four-class chain with an inherited body accessor | Compiles. The Rust backend's separate supported hierarchy depth remains bounded. |
 
 ## Rust source and backend boundary
