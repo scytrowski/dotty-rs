@@ -1304,8 +1304,14 @@ impl SourceTyper<'_> {
             }
             self.initializing_local_symbols.insert(symbol);
         }
+        if !lazy_value {
+            self.active_eager_local_initializers.push((scope, position));
+        }
         let typed_rhs_result =
             self.type_value_expression_inner(rhs, context, info_journal, new_mappings);
+        if !lazy_value {
+            self.active_eager_local_initializers.pop();
+        }
         if enter_before_initializer {
             self.initializing_local_symbols.remove(&symbol);
         }
