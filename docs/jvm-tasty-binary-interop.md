@@ -1,6 +1,6 @@
 # JVM classfile and TASTy binary linkage audit
 
-This document records the audit for [issue #1632](https://github.com/scytrowski/dotty-rs/issues/1632) and the follow-up planning increments. It freezes the observed Scala 3.9.0 contract and the current Rust producer overlap. It does not claim that Rust currently emits a Scala-loadable class/TASTy pair.
+This document preserves the historical audit for [issue #1632](https://github.com/scytrowski/dotty-rs/issues/1632), its follow-up implementation, and the bounded Scala 3.9.0 evidence now recorded in the [two-class release audit](jvm-tasty-multiclass.md). The initial one-class ABI comparison below is not itself a consumer proof; the later linked-pair and batch gates establish the exact interoperability claims for their fixtures.
 
 ## Pinned oracle and reproducibility
 
@@ -132,9 +132,12 @@ The Scala-generated ABI for this source is:
 For all three classfile outputs (Scala source, Rust TASTy recompiled by Scala,
 and Rust JVM), the exact member order is constructor `(I)V`, `get()I`,
 `set(I)V`; the field order is the single `current:I`. The Rust JVM class uses
-major 65, while the Scala baseline and `-from-tasty` class use major 61. The
-Rust class currently has no `TASTY` link attribute, so the source/TASTy/ABI
-agreement is characterized independently rather than as a loadable pair.
+major 65, while the Scala baseline and `-from-tasty` class use major 61. In
+the original #1632 audit, the unlinked Rust class had no `TASTY` link
+attribute, so source/TASTy/ABI agreement was characterized independently.
+Follow-up #1637 added an owned linked pair, and #1652–#1658 extended this to
+the audited Counter/Gauge batch. Those later gates are documented separately
+below and in [the multi-class release record](jvm-tasty-multiclass.md).
 
 In the source tree/pickled shape, `Unit` is the Scala result type; in the
 post-Getters JVM method descriptor it is `V`. The private source var stays
