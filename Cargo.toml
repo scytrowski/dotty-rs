@@ -17,6 +17,7 @@ members = [
     "crates/dotty-namer",
     "crates/dotty-typer",
     "crates/dotty-jvm",
+    "crates/dotty-jvm-tasty-contract",
     "tools/parser-smoke-dump",
     "tools/parser-corpus-report",
     "tools/tasty-pickler-oracle",
@@ -40,3 +41,4 @@ dotty-typer = { path = "crates/dotty-typer" }
 dotty-lexer = { path = "crates/dotty-lexer" }
 dotty-jvm = { path = "crates/dotty-jvm" }
 dotty-tasty-pickler = { path = "crates/dotty-tasty-pickler" }
+dotty-jvm-tasty-contract = { path = "crates/dotty-jvm-tasty-contract" }

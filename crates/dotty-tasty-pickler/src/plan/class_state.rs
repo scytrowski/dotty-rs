@@ -1002,6 +1002,13 @@ impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
     pub fn plan(&self) -> &'p ClassStatePicklePlan<'a> {
         self.plan
     }
+
+    /// Canonical relative path intended for this class's `.tasty` artifact.
+    ///
+    /// This is a path projection only; it does not encode or publish bytes.
+    pub fn intended_tasty_path(&self) -> Result<String, PickleError> {
+        crate::class_state_output::intended_class_tasty_path(self.plan, 256)
+    }
 }
 
 impl ClassStatePicklePlan<'_> {

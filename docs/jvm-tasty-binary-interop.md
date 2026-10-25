@@ -257,12 +257,69 @@ An ordinary classpath compile that appears to accept an artifact is not a
 replacement for these negative assertions: Scala may warn on a stale UUID, and
 classfile-only JVM linkage does not establish source/TASTy parity.
 
+## Same-session semantic pair proof (#1634)
+
+`dotty-jvm-tasty-contract` is the acyclic coordination layer above the
+independent JVM and TASTy producers. Its
+`validate_jvm_tasty_class(&JvmCompilationUnit,
+&ValidatedClassStatePlan)` accepts only already validated inputs and returns a
+borrowed `ValidatedJvmTastyClass`. The proof retains both input borrows, emits
+no bytes, and is limited to the class-state subset represented by the
+`Counter` fixture.
+
+Before returning a proof it checks:
+
+- both plans borrow the exact same `SemanticStore` and typed AST; source class,
+  constructor, fields, methods, and formals retain the same canonical IDs and
+  source ownership;
+- the primary constructor ID and ordered formal IDs match, with primitive
+  source formals projected to the checked JVM descriptor and the JVM
+  constructor result fixed to `V`;
+- class-state field and ordinary method identities occur in the same explicit
+  source order in the JVM plan, with no missing producer member;
+- every field initializer and concrete method RHS uses the exact typed root
+  associated with its source tree, and the TASTy binding index maps that source
+  tree to the same root;
+- the audited private mutable primitive field remains private, non-final
+  storage without a generated public accessor, and method descriptors are
+  independently projected from the canonical source method types (`Unit`
+  maps to `V`);
+- the Scala 3.9 encoded relative `.tasty` path equals the JVM internal class
+  name after removing `.tasty`. Package segments are retained, so equal simple
+  names in different packages remain distinct.
+
+The pairing crate depends on both producer crates; neither producer depends on
+the other. `dotty-jvm` remains dependent only on `dotty-core` and
+`dotty-classfile`, and `dotty-tasty-pickler` remains dependent only on
+`dotty-core` and `dotty-tasty` in production. No typer pass is rerun, and no
+symbol, type, or tree identity is created or reconstructed from text.
+
+Focused tests use the exact `Counter` source in one real frontend session and
+cover distinct sessions with numerically equal arena IDs, a mismatched typed
+initializer root, a missing JVM method, immutable-vs-mutable field shape, and
+same-named classes under separate packages. Existing plan validators continue
+to reject unsupported source forms before the pair proof is attempted.
+
+The separate `validate_classfile_tasty_link(&ClassFile, tasty_bytes)` helper
+checks that a decoded class has one valid `TASTY` link and that its UUID equals
+the UUID in a Scala 3.9-validated TASTy header. This rejects missing, malformed,
+and stale links before publication. It does not authenticate that the supplied
+bytes were produced by the borrowed `ValidatedClassStatePlan`, or that the
+classfile bytes were emitted from the paired JVM plan; #1637 must connect those
+exact producer outputs before staging them.
+
+Likewise, an arbitrary `SourceTypedBindings` implementation is producer
+evidence, not an identity authenticator. The coordinator compares its result
+with both plans, while the session owner remains responsible for using the
+actual `SourceTypedIndex` from that session.
+
 ## Successor boundary
 
 Audit #1632 changed tests, a pinned oracle fixture, and this document only.
 Issue #1633 adds the typed, Scala-independent classfile link representation
 and validation; it does not change the JVM backend, TASTy format/pickler,
-Typer, production dependencies, or add a compiler driver. The remaining work
-can proceed along the dependency sequence described by #1634–#1639:
-source/ABI validation; same-session paired plans; atomic pair staging; the
-independent Scala consumer; then the full determinism/runtime gate.
+Typer, production dependencies, or add a compiler driver. Issue #1634 now
+provides source/JVM/TASTy semantic consistency validation. The remaining work
+follows the dependency sequence in #1635–#1639: derive both producer plans from
+one source session; atomically stage linked artifacts; prove independent Scala
+consumption; then run the full determinism/runtime gate.
