@@ -1397,8 +1397,15 @@ inferred type for the source `TypeTree`. Short acyclic dependencies between
 inferred fields are supported; recursive dependencies and chains deeper than
 the fixed completion limit return typed errors. Mutable field reads and
 assignments use the inferred type, so incompatible assignments are rejected
-when the existing type relation can prove the mismatch. Lazy, inline, given,
-implicit, and module-class fields remain deferred, as do unsupported
+when the existing type relation can prove the mismatch. Inferred `lazy val`
+fields on ordinary source classes also use this path. Their `LAZY` flag is
+preserved; this types the value without synthesizing lazy initialization or
+runtime-lowering trees. Acyclic forward references to later lazy fields are
+supported, while recursive inference returns `RecursiveInferredFieldType`
+rather than Scala's E045 diagnostic. The pinned Scala oracle fixture is
+[`class-lazy-fields`](../crates/dotty-typer/tests/fixtures/class-lazy-fields/ClassLazyFields.scala).
+`inline`, `given`, `implicit`,
+module-class, and mutable lazy fields remain deferred, as do unsupported
 initializer expressions. Explicit field annotations continue through the
 declared-type completion path.
 

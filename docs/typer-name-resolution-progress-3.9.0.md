@@ -202,6 +202,29 @@ reveal whether varargs application is another blocker. The post-merge focused
 output is retained locally at
 `target/issue-1620-runs/backendutils-after-merge.md`.
 
+### Inferred class `lazy val` follow-up
+
+The current follow-up extends the existing transactional inferred-field path
+to `lazy val` on ordinary source classes. The source `LAZY` flag stays on the
+field; this adds type inference only and emits no lazy initialization or
+runtime-lowering trees. Scala 3.9.0 accepts an acyclic forward reference to a
+later lazy field, but reports E045 for inferred direct and mutual cycles. The
+Typer's existing field recursion guard rejects those cycles with
+`RecursiveInferredFieldType`; mutable lazy, module-class lazy, and
+inline/given/implicit fields remain deferred. The pinned source fixture is
+`crates/dotty-typer/tests/fixtures/class-lazy-fields/ClassLazyFields.scala`;
+Scala 3.9.0 reports E045 on the two inferred cycle cases and accepts the
+forward-reference and explicitly typed self-reference cases.
+
+The focused `BackendUtils.scala` audit was rerun with this change. Both frozen
+roots `#240` and `#302` move past the inferred lazy field's former
+`MissingDeclaredType` blocker to `StringLiteralTypingDeferred`; zero of the two
+methods are fully typed. This run measures only the lazy-field movement; without
+canonical String literal handling, the next blocker remains
+`StringLiteralTypingDeferred`. The focused report is retained locally at
+`target/issue-lazy-research/backendutils-after-lazy.md`; this does not establish
+a full-corpus count change.
+
 Reproduce the one-file audit (the manifest selects the file, then the audit
 intersects it with the frozen method roots):
 
