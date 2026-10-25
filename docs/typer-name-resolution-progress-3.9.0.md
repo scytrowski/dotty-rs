@@ -17,8 +17,10 @@ symbol is owned by that canonical String class and has the compiler-declared
 `Any => String` method shape.
 
 The focused regression checks symbol ownership/signature, an unrelated source
-class negative control, and rollback when typing the right operand fails
-before a successful retry. The pinned positive/negative Scala oracle and
+class negative control, explicit `name.+(desc)` before any infix use, and
+rollback when typing the right operand fails before a successful retry. The
+explicit selection check prevents the lookup from depending on whether a prior
+infix expression installed the synthetic member. The pinned positive/negative Scala oracle and
 reproduction command are in
 [`StringPlus.oracle.md`](../crates/dotty-typer/tests/fixtures/string-plus/StringPlus.oracle.md).
 
@@ -41,6 +43,9 @@ The only aggregate movement was `MemberNotFound` 6 → 3 and
 progress only; the #1566 goal of fully typing a real method remains unmet. The
 three row-level transitions are in
 [`typer-name-resolution-1566-string-plus-3.9.0.tsv`](typer-name-resolution-1566-string-plus-3.9.0.tsv).
+After the review fix for explicit selection, the deterministic `package-term`
+sidecar remained byte-for-byte identical to both the prior implementation run
+and its own verification rerun.
 
 The deterministic 3-file / 31-method smoke audit matched its checked-in
 baseline exactly, including every method row and blocker count. The separate
