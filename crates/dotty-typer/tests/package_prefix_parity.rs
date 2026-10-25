@@ -207,7 +207,7 @@ fn class_file_stub(internal_name: &str) -> Vec<u8> {
 fn opcodes_class_file_stub() -> Vec<u8> {
     let internal_name = b"scala/tools/asm/Opcodes";
     let object_name = b"java/lang/Object";
-    let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 61, 0, 7, 1];
+    let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 61, 0, 10, 1];
     bytes.extend_from_slice(&(internal_name.len() as u16).to_be_bytes());
     bytes.extend_from_slice(internal_name);
     bytes.extend_from_slice(&[7, 0, 1, 1]);
@@ -216,11 +216,20 @@ fn opcodes_class_file_stub() -> Vec<u8> {
     bytes.extend_from_slice(&[7, 0, 3, 1, 0, 8]);
     bytes.extend_from_slice(b"ICONST_0");
     bytes.extend_from_slice(&[1, 0, 1, b'I']);
-    // public interface abstract Opcodes extends Object
-    bytes.extend_from_slice(&[0x06, 0x01, 0, 2, 0, 4, 0, 0]);
-    // public static final int ICONST_0; its descriptor is enough for typing.
-    bytes.extend_from_slice(&[0, 1, 0, 0x19, 0, 5, 0, 6, 0, 0]);
-    bytes.extend_from_slice(&[0, 0, 0, 0]);
+    bytes.extend_from_slice(&[1, 0, 13]);
+    bytes.extend_from_slice(b"INSTANCE_ONLY");
+    bytes.extend_from_slice(&[1, 0, 14]);
+    bytes.extend_from_slice(b"instanceMethod");
+    bytes.extend_from_slice(&[1, 0, 3, b'(', b')', b'I']);
+    // public abstract Opcodes class extends Object
+    bytes.extend_from_slice(&[0x04, 0x21, 0, 2, 0, 4, 0, 0]);
+    // One static constant and one instance field.
+    bytes.extend_from_slice(&[0, 2]);
+    bytes.extend_from_slice(&[0, 0x19, 0, 5, 0, 6, 0, 0]);
+    bytes.extend_from_slice(&[0, 1, 0, 7, 0, 6, 0, 0]);
+    // An abstract instance method exercises selective member imports.
+    bytes.extend_from_slice(&[0, 1, 0x04, 0x01, 0, 8, 0, 9, 0, 0]);
+    bytes.extend_from_slice(&[0, 0]);
     bytes
 }
 
@@ -533,13 +542,11 @@ fn current_package_import_reuses_package_identity_from_scala39_tasty() {
     assert_eq!(requests.borrow().as_slice(), [&["a", "consumer", "b"]]);
 }
 
-#[test]
-fn package_qualified_classfile_type_is_an_import_wildcard_qualifier() {
+fn type_opcodes_import(source_id: u32, source_text: &str) -> Result<(), dotty_typer::TyperError> {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
     let mut packages = Packages::new();
-    let source = SourceId::from_index(1624);
-    let source_text = "package consumer\nimport scala.tools.asm.Opcodes.*\nobject Use { def first: Int = ICONST_0 }";
+    let source = SourceId::from_index(source_id);
     let scanner = ContextualScanner::new(source_text).unwrap();
     let parsed = parse_compilation_unit(
         SourceText::new(source_text).unwrap(),
@@ -587,7 +594,31 @@ fn package_qualified_classfile_type_is_an_import_wildcard_qualifier() {
     )));
 
     let context = typer.expression_context_for(method).unwrap();
-    typer.type_expression(body, context).unwrap();
+    typer.type_expression(body, context).map(|_| ())
+}
+
+#[test]
+fn package_qualified_classfile_type_imports_static_wildcard_members() {
+    let source_text = "package consumer\nimport scala.tools.asm.Opcodes.*\nobject Use { def first: Int = ICONST_0 }";
+    type_opcodes_import(1624, source_text).unwrap();
+}
+
+#[test]
+fn package_qualified_classfile_wildcard_import_rejects_instance_fields() {
+    let source_text = "package consumer\nimport scala.tools.asm.Opcodes.*\nobject Use { def first: Int = INSTANCE_ONLY }";
+    assert!(matches!(
+        type_opcodes_import(1625, source_text),
+        Err(dotty_typer::TyperError::TermNameNotFound { .. })
+    ));
+}
+
+#[test]
+fn package_qualified_classfile_selective_import_rejects_instance_methods() {
+    let source_text = "package consumer\nimport scala.tools.asm.Opcodes.instanceMethod\nobject Use { def first: Int = instanceMethod() }";
+    assert!(matches!(
+        type_opcodes_import(1626, source_text),
+        Err(dotty_typer::TyperError::TermNameNotFound { .. })
+    ));
 }
 
 #[test]

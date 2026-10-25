@@ -1160,6 +1160,11 @@ impl SourceTyper<'_> {
             });
         };
         let scopes = self.scopes_of(qualifier);
+        let qualifier_symbol = self.store.symbols.get(qualifier);
+        let qualifier_kind = qualifier_symbol.kind;
+        let qualifier_is_tasty = matches!(qualifier_symbol.origin, SymbolOrigin::Tasty(_));
+        let java_class_qualifier = matches!(qualifier_kind, SymbolKind::Class | SymbolKind::Trait)
+            && qualifier_symbol.flags.contains(SymbolFlags::JAVA_DEFINED);
         let mut matches = Vec::new();
         for (imported, is_wildcard) in relevant {
             let name = if is_wildcard {
@@ -1182,15 +1187,19 @@ impl SourceTyper<'_> {
                     // Object import into a type reference).
                     let candidates = self.store.scopes.get(*scope).lookup_all(&name);
                     found_locally |= !candidates.is_empty();
-                    matches.extend_from_slice(candidates);
+                    matches.extend(candidates.iter().copied().filter(|candidate| {
+                        !java_class_qualifier
+                            || self
+                                .store
+                                .symbols
+                                .get(*candidate)
+                                .flags
+                                .contains(SymbolFlags::STATIC)
+                    }));
                 }
             }
             if !found_locally {
-                let qualifier_symbol = self.store.symbols.get(qualifier);
-                if is_wildcard
-                    && qualifier_symbol.kind == SymbolKind::Object
-                    && matches!(qualifier_symbol.origin, SymbolOrigin::Tasty(_))
-                {
+                if is_wildcard && qualifier_kind == SymbolKind::Object && qualifier_is_tasty {
                     let store_checkpoint = self.store.checkpoint();
                     let resolver_checkpoint = self.resolver.checkpoint();
                     let type_checkpoint = self.type_index.checkpoint();
@@ -1218,10 +1227,7 @@ impl SourceTyper<'_> {
                         }
                     }
                 }
-                if !is_wildcard
-                    && !type_only
-                    && self.store.symbols.get(qualifier).kind == SymbolKind::Package
-                {
+                if !is_wildcard && !type_only && qualifier_kind == SymbolKind::Package {
                     let store_checkpoint = self.store.checkpoint();
                     let resolver_checkpoint = self.resolver.checkpoint();
                     let mut package_path = self.package_path(qualifier);
@@ -1272,7 +1278,16 @@ impl SourceTyper<'_> {
                 }
                 let cache_key = ImportMemberCacheKey { qualifier, name };
                 if let Some(symbol) = self.import_member_cache.get(&cache_key).copied() {
-                    matches.push(symbol);
+                    if !java_class_qualifier
+                        || self
+                            .store
+                            .symbols
+                            .get(symbol)
+                            .flags
+                            .contains(SymbolFlags::STATIC)
+                    {
+                        matches.push(symbol);
+                    }
                     continue;
                 }
                 let prefix = self.type_prefix_for_qualifier(qualifier)?;
@@ -1295,7 +1310,16 @@ impl SourceTyper<'_> {
                         return Err(TyperError::UnknownSymbol { symbol });
                     }
                     self.import_member_cache.insert(cache_key, symbol);
-                    matches.push(symbol);
+                    if !java_class_qualifier
+                        || self
+                            .store
+                            .symbols
+                            .get(symbol)
+                            .flags
+                            .contains(SymbolFlags::STATIC)
+                    {
+                        matches.push(symbol);
+                    }
                 }
             }
         }
