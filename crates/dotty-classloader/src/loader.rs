@@ -5844,6 +5844,59 @@ mod tests {
     }
 
     #[test]
+    fn lowers_unsupported_tasty_method_bounds_to_explicit_errors() {
+        let bytes = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library/scala/Some.tasty"),
+        )
+        .expect("pinned Some.tasty fixture should exist");
+        let decoded = tasty_symbol::decode_module_class_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("scala/Some$"),
+            |_, _| None,
+            |package, simple_name| {
+                Some(BinaryName::from_internal(format!(
+                    "{package}/{simple_name}"
+                )))
+            },
+        )
+        .expect("pinned Some module class should decode");
+        let mut apply = decoded
+            .methods
+            .iter()
+            .find(|method| method.name == "apply")
+            .expect("Some.apply should be present after generic decoding")
+            .clone();
+        apply.type_parameters[0].bounds_supported = false;
+        apply.type_parameters[0].lower_bound = None;
+        apply.type_parameters[0].upper_bound = None;
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let apply_type =
+            loader.lower_tasty_method(&BinaryName::from_internal("scala/Some$"), &apply);
+        drop(loader);
+
+        let Type::Poly(poly) = store.types.get(apply_type) else {
+            panic!("unsupported bounds should not drop the generic method")
+        };
+        let Type::Bounds { low, high } = store.types.get(poly.params[0].bounds) else {
+            panic!("generic method parameter should retain a bounds node")
+        };
+        assert_eq!(
+            low, high,
+            "unsupported bounds should stay explicit on both sides"
+        );
+        let Type::Error(error) = store.types.get(*low) else {
+            panic!("unsupported bounds should lower to an error, not Nothing..Any")
+        };
+        assert_eq!(
+            store.names.resolve(error.message),
+            "unresolved .tasty member type: unsupported method type parameter bounds"
+        );
+    }
+
+    #[test]
     fn static_nested_class_does_not_capture_an_outer_type_parameter() {
         let mut classes = enclosing_generics_classpath();
         let static_name = BinaryName::from_internal("enclosing_generics/Outer$Static");
