@@ -282,6 +282,36 @@ impl SourceTyper<'_> {
                 branch_tree_index: if_expr.else_branch.index(),
                 error: Box::new(error),
             })?;
+        let has_synthetic_unit_else =
+            self.arena
+                .try_get(if_expr.else_branch)
+                .is_some_and(|else_tree| {
+                    matches!(
+                        else_tree.kind,
+                        TreeKind::Literal(dotty_core::ast::Literal {
+                            value: dotty_core::Constant::Unit
+                        })
+                    ) && else_tree
+                        .position
+                        .is_some_and(|position| position.span().range().is_empty())
+                });
+        let (then_branch, then_type) = if has_synthetic_unit_else
+            && then_type != self.definitions.unit
+        {
+            let discarded_value = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .literal(dotty_core::Constant::Unit, self.definitions.unit, None);
+            let then_position = self.arena.get(if_expr.then_branch).position;
+            let adapted_branch = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .block(
+                    vec![then_branch],
+                    discarded_value,
+                    self.definitions.unit,
+                    then_position,
+                );
+            (adapted_branch, self.definitions.unit)
+        } else {
+            (then_branch, then_type)
+        };
         let ty = self
             .join_expression_types(then_type, else_type)
             .map_err(|error| TyperError::IfBranchJoinUnsupported {

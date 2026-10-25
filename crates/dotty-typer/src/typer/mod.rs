@@ -29426,12 +29426,14 @@ mod tests {
     #[test]
     fn if_expression_types_block_branches_and_synthetic_unit_else() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "def choose(flag: Boolean) = if flag then { val result = 1; result } else { val result = 2; result }; def partial(flag: Boolean) = if flag then 1",
+            "def choose(flag: Boolean) = if flag then { val result = 1; result } else { val result = 2; result }; def partial(flag: Boolean) = if flag then 1; def explicitUnit(flag: Boolean) = if flag then 1 else ()",
         );
         let (choose, choose_rhs) =
             method_definition_and_rhs(&parsed, &store, &index, source, "choose");
         let (partial, partial_rhs) =
             method_definition_and_rhs(&parsed, &store, &index, source, "partial");
+        let (explicit_unit, explicit_unit_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "explicitUnit");
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -29467,11 +29469,32 @@ mod tests {
                 .get(typer.typed_ast().get(partial_if.else_branch).ty),
             Type::Constant(dotty_core::Constant::Unit)
         ));
+        assert_eq!(typer.typed_ast().get(partial_tree).ty, definitions.unit);
+        let TreeKind::Block(discarded_then) = &typer.typed_ast().get(partial_if.then_branch).kind
+        else {
+            panic!("expected a Unit-adapted then branch");
+        };
+        assert_eq!(discarded_then.stats.len(), 1);
+        assert!(matches!(
+            typer.typed_ast().get(discarded_then.stats[0]).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Int(1)
+            })
+        ));
+        assert_eq!(
+            typer.typed_ast().get(discarded_then.expr).ty,
+            definitions.unit
+        );
+
+        let explicit_unit_context = typer.expression_context_for(explicit_unit).unwrap();
+        let explicit_unit_tree = typer
+            .type_expression(explicit_unit_rhs, explicit_unit_context)
+            .unwrap();
         assert!(matches!(
             typer
                 .store()
                 .types
-                .get(typer.typed_ast().get(partial_tree).ty),
+                .get(typer.typed_ast().get(explicit_unit_tree).ty),
             Type::Or { .. }
         ));
     }
