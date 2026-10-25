@@ -99,6 +99,21 @@ impl SourceTyper<'_> {
         }
 
         let contexts = self.source_context_chain(context.lexical, tree_index)?;
+        let enclosing_class = self
+            .store
+            .symbols
+            .contains(context.owner)
+            .then(|| self.store.symbols.get(context.owner))
+            .and_then(|owner| match owner.kind {
+                SymbolKind::Class | SymbolKind::Trait => Some(context.owner),
+                _ => owner.owner.filter(|symbol| {
+                    self.store.symbols.contains(*symbol)
+                        && matches!(
+                            self.store.symbols.get(*symbol).kind,
+                            SymbolKind::Class | SymbolKind::Trait
+                        )
+                }),
+            });
         let fallback_scope = self
             .store
             .symbols
@@ -129,6 +144,33 @@ impl SourceTyper<'_> {
                 .to_vec();
             if !candidates.is_empty() {
                 return Ok(candidates);
+            }
+            if enclosing_class == Some(source_context.owner) {
+                let this_type = self.store.types.alloc(Type::ThisType {
+                    class: source_context.owner,
+                });
+                let inherited = self
+                    .lookup_members(this_type, name)
+                    .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
+                    .into_iter()
+                    .filter(|candidate| candidate.inheritance_depth > 0)
+                    .filter(|candidate| {
+                        self.store.symbols.contains(candidate.symbol)
+                            && self.store.symbols.get(candidate.symbol).kind == SymbolKind::Field
+                            && self.store.symbols.get(candidate.symbol).visibility
+                                == dotty_core::symbols::Visibility::Public
+                            && !self
+                                .store
+                                .symbols
+                                .get(candidate.symbol)
+                                .flags
+                                .contains(SymbolFlags::STATIC)
+                    })
+                    .map(|candidate| candidate.symbol)
+                    .collect::<Vec<_>>();
+                if !inherited.is_empty() {
+                    return Ok(inherited);
+                }
             }
             // Top-level source methods are owned by their synthetic package
             // module class, while their recorded lexical context is the

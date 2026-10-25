@@ -23629,9 +23629,6 @@ mod tests {
         let field = val_symbol(&parsed, &store, &index, source, "value").0;
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
         let lexical = index.declaration_context_of(method).unwrap();
-        let scope = index.source_context(lexical).lexical_scope;
-        let field_name = store.symbols.get(field).name;
-        store.scopes.get_mut(scope).enter(field_name, field);
         let context = ExpressionContext {
             lexical,
             owner: method,
