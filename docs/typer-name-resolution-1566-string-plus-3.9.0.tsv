@@ -1,4 +1,4 @@
 path#tree	method	span	before_first_blocker	after_first_blocker	fully_typed	next_attribution	implementation_sha
-compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=212	nextByte	InlineInfoAttribute.scala:98	MemberNotFound	ApplicationArgumentConformanceUnsupported	false	read#tree=420	ac46491d0743606a8242a02cbff2e50d9b74b59a
-compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=226	nextUTF8	InlineInfoAttribute.scala:99	MemberNotFound	ApplicationArgumentConformanceUnsupported	false	read#tree=420	ac46491d0743606a8242a02cbff2e50d9b74b59a
-compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=239	nextShort	InlineInfoAttribute.scala:100	MemberNotFound	ApplicationArgumentConformanceUnsupported	false	read#tree=420	ac46491d0743606a8242a02cbff2e50d9b74b59a
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=212	nextByte	InlineInfoAttribute.scala:98	MemberNotFound	ApplicationArgumentConformanceUnsupported	false	read#tree=420	ac46491d075dda77a1090db8c7c93354c28ca5e2
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=226	nextUTF8	InlineInfoAttribute.scala:99	MemberNotFound	ApplicationArgumentConformanceUnsupported	false	read#tree=420	ac46491d075dda77a1090db8c7c93354c28ca5e2
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=239	nextShort	InlineInfoAttribute.scala:100	MemberNotFound	ApplicationArgumentConformanceUnsupported	false	read#tree=420	ac46491d075dda77a1090db8c7c93354c28ca5e2
