@@ -154,6 +154,33 @@ fn field_tree_and_rhs(
         .unwrap_or_else(|| panic!("missing initialized field {name}"))
 }
 
+fn field_for_in_owner(
+    ast: &dotty_core::AstArena<Untyped>,
+    source: SourceId,
+    index: &dotty_namer::SourceSemanticIndex,
+    typer: &SourceTyper<'_>,
+    owner: SymbolId,
+    name: &str,
+) -> SymbolId {
+    ast.iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::ValDef(definition) = &node.kind else {
+                return None;
+            };
+            let symbol = index.symbol_at(source, tree)?;
+            let info = typer.store().symbols.get(symbol);
+            (info.owner == Some(owner)
+                && info.kind == SymbolKind::Field
+                && typer
+                    .store()
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    == name)
+                .then_some(symbol)
+        })
+        .unwrap_or_else(|| panic!("missing field {name} on owner {owner:?}"))
+}
+
 fn method_tree_and_rhs(
     ast: &dotty_core::AstArena<Untyped>,
     index: &dotty_namer::SourceSemanticIndex,
@@ -3157,6 +3184,463 @@ fn constructor_accessor_source_selections_record_current_typer_boundary() {
             "assigning to the immutable accessor must stop at AssignmentTargetImmutable"
         );
     });
+}
+
+#[test]
+fn counter_reader_constructor_accessors_type_through_direct_and_constructed_receivers() {
+    let source_text = include_str!("fixtures/jvm/ConstructorAccessorReadiness.scala");
+    with_source(source_text, |ast, source, index, definitions, typer| {
+        let counter = symbol_named(ast, index, source, typer, "Counter");
+        let reader = symbol_named(ast, index, source, typer, "Reader");
+        let id_field = field_for_in_owner(ast, source, index, typer, counter, "id");
+        let count_field = field_for_in_owner(ast, source, index, typer, counter, "count");
+
+        assert_eq!(typer.store().symbols.get(id_field).kind, SymbolKind::Field);
+        assert_eq!(typer.store().symbols.get(id_field).owner, Some(counter));
+        assert!(
+            !typer
+                .store()
+                .symbols
+                .get(id_field)
+                .flags
+                .contains(SymbolFlags::MUTABLE)
+        );
+        assert_eq!(
+            typer.store().symbols.get(count_field).kind,
+            SymbolKind::Field
+        );
+        assert_eq!(typer.store().symbols.get(count_field).owner, Some(counter));
+        assert!(
+            typer
+                .store()
+                .symbols
+                .get(count_field)
+                .flags
+                .contains(SymbolFlags::MUTABLE)
+        );
+
+        for (owner, name) in [
+            (counter, "ownId"),
+            (counter, "ownRead"),
+            (counter, "ownWrite"),
+            (counter, "unqualifiedRead"),
+            (counter, "unqualifiedWrite"),
+            (reader, "readId"),
+            (reader, "read"),
+            (reader, "write"),
+            (reader, "constructedId"),
+            (reader, "constructedRead"),
+            (reader, "constructedWrite"),
+        ] {
+            let (method, _, rhs) = method_tree_and_rhs(ast, index, source, typer, owner, name);
+            typer.complete_symbol(method).unwrap();
+            let context = typer.expression_context_for(method).unwrap();
+            let typed = typer.type_expression(rhs, context).unwrap_or_else(|error| {
+                panic!("{name} must type through a constructor accessor: {error:?}")
+            });
+            assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed));
+        }
+
+        for (name, field, expected_total, expected_typed) in
+            [("id", id_field, 3, 3), ("count", count_field, 8, 6)]
+        {
+            let mut typed_count = 0;
+            let mut total_count = 0;
+            for (tree, node) in ast.iter() {
+                if let TreeKind::Select(selection) = &node.kind
+                    && typer.store().names.resolve(selection.name.text()) == name
+                {
+                    total_count += 1;
+                    let Some(typed) = typer.source_typed_index().get(source, tree) else {
+                        assert!(
+                            name == "id" || name == "count",
+                            "only characterized unsupported selections may be unmapped"
+                        );
+                        continue;
+                    };
+                    typed_count += 1;
+                    assert!(
+                        matches!(
+                            typer.store().types.get(typer.typed_ast().get(typed).ty),
+                            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                                if *symbol == field
+                        ),
+                        "{name} selection must retain its owner field identity"
+                    );
+                    assert!(
+                        typer
+                            .source_typed_index()
+                            .get(source, selection.qualifier)
+                            .is_some(),
+                        "{name} receiver must have a typed mapping"
+                    );
+                }
+            }
+            assert_eq!(total_count, expected_total, "source {name} selections");
+            assert_eq!(typed_count, expected_typed, "typed {name} selections");
+        }
+
+        let (_, _, unqualified_read) =
+            method_tree_and_rhs(ast, index, source, typer, counter, "unqualifiedRead");
+        let typed_unqualified_read = typer
+            .source_typed_index()
+            .get(source, unqualified_read)
+            .expect("unqualified count read must retain its typed mapping");
+        assert!(
+            matches!(
+                typer.store().types.get(typer.typed_ast().get(typed_unqualified_read).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                    if *symbol == count_field
+            ),
+            "unqualified count read must select Counter.count"
+        );
+
+        for (owner, method_name) in [
+            (counter, "ownWrite"),
+            (counter, "unqualifiedWrite"),
+            (reader, "write"),
+            (reader, "constructedWrite"),
+        ] {
+            let (_, _, rhs) = method_tree_and_rhs(ast, index, source, typer, owner, method_name);
+            let assignment_source = match &ast.get(rhs).kind {
+                TreeKind::Block(block) => block.expr,
+                _ => rhs,
+            };
+            let TreeKind::Assign(source_assign) = &ast.get(assignment_source).kind else {
+                panic!("{method_name} source must preserve Assign")
+            };
+            let typed_assignment = typer
+                .source_typed_index()
+                .get(source, assignment_source)
+                .unwrap();
+            let TreeKind::Assign(assign) = &typer.typed_ast().get(typed_assignment).kind else {
+                panic!("{method_name} must preserve an Assign node")
+            };
+            assert!(
+                matches!(
+                    typer.store().types.get(typer.typed_ast().get(assign.lhs).ty),
+                    Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                        if *symbol == count_field
+                ),
+                "{method_name} must target Counter.count"
+            );
+            assert_eq!(typer.typed_ast().get(typed_assignment).ty, definitions.unit);
+            let typed_lhs = typer
+                .source_typed_index()
+                .get(source, source_assign.lhs)
+                .expect("source assignment LHS must retain its typed mapping");
+            let typed_rhs = typer
+                .source_typed_index()
+                .get(source, source_assign.rhs)
+                .expect("source assignment RHS must retain its typed mapping");
+            assert_eq!(assign.lhs, typed_lhs, "assignment LHS evaluation order");
+            assert_eq!(assign.rhs, typed_rhs, "assignment RHS evaluation order");
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(parameter),
+                ..
+            } = typer.store().types.get(typer.typed_ast().get(typed_rhs).ty)
+            else {
+                panic!("{method_name} RHS should retain the next parameter reference")
+            };
+            assert_eq!(
+                typer.store().symbols.get(*parameter).kind,
+                SymbolKind::Parameter
+            );
+            assert_eq!(
+                typer.store().symbols.get(*parameter).info,
+                SymbolInfo::Complete(definitions.long),
+                "{method_name} assignment RHS type"
+            );
+        }
+
+        for method_name in ["unstableRead", "unstableWrite"] {
+            let (method, _, rhs) =
+                method_tree_and_rhs(ast, index, source, typer, reader, method_name);
+            let source_selection = match &ast.get(rhs).kind {
+                TreeKind::Block(block) => match &ast.get(block.expr).kind {
+                    TreeKind::Assign(assign) => assign.lhs,
+                    TreeKind::Select(_) => block.expr,
+                    other => panic!("unexpected {method_name} block result: {other:?}"),
+                },
+                other => panic!("expected a block in {method_name}: {other:?}"),
+            };
+            assert!(matches!(
+                ast.get(source_selection).kind,
+                TreeKind::Select(_)
+            ));
+            typer.complete_symbol(method).unwrap();
+            let context = typer.expression_context_for(method).unwrap();
+            assert!(
+                matches!(
+                    typer.type_expression(rhs, context),
+                    Err(dotty_typer::TyperError::UnstableSelectionPrefix {
+                        source: error_source,
+                        tree_index,
+                        ..
+                    }) if error_source == source && tree_index == source_selection.index()
+                ),
+                "{method_name} must preserve the unstable receiver blocker"
+            );
+            assert!(typer.source_typed_index().get(source, rhs).is_none());
+            assert!(
+                typer
+                    .source_typed_index()
+                    .get(source, source_selection)
+                    .is_none()
+            );
+        }
+
+        let (own_read, _own_read_tree, own_read_rhs) =
+            method_tree_and_rhs(ast, index, source, typer, counter, "ownRead");
+        let own_read_body = typer
+            .source_typed_index()
+            .get(source, own_read_rhs)
+            .expect("ownRead typed body");
+        let (own_write, own_write_tree, own_write_rhs) =
+            method_tree_and_rhs(ast, index, source, typer, counter, "ownWrite");
+        let own_write_body = typer
+            .source_typed_index()
+            .get(source, own_write_rhs)
+            .expect("ownWrite typed body");
+        let TreeKind::DefDef(own_write_definition) = &ast.get(own_write_tree).kind else {
+            unreachable!()
+        };
+        let own_write_parameters = own_write_definition
+            .value_param_clauses
+            .iter()
+            .flatten()
+            .map(|tree| index.symbol_at(source, *tree).unwrap())
+            .collect();
+        let (counter_constructor_tree, constructor_parameters) = ast
+            .iter()
+            .find_map(|(_, node)| {
+                let TreeKind::TypeDef(definition) = &node.kind else {
+                    return None;
+                };
+                if typer
+                    .store()
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    != "Counter"
+                {
+                    return None;
+                }
+                let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
+                    return None;
+                };
+                let TreeKind::DefDef(constructor) = &ast.get(template.constructor).kind else {
+                    return None;
+                };
+                let constructor_symbol = index.symbol_at(source, template.constructor)?;
+                let parameters = constructor
+                    .value_param_clauses
+                    .iter()
+                    .flatten()
+                    .map(|tree| index.derived_symbol_at(constructor_symbol, source, *tree))
+                    .collect::<Option<Vec<_>>>()?;
+                Some((template.constructor, parameters))
+            })
+            .expect("Counter primary constructor source proof");
+        let constructor = index.symbol_at(source, counter_constructor_tree).unwrap();
+        typer.complete_symbol(counter).unwrap();
+        typer.complete_symbol(reader).unwrap();
+        typer.complete_symbol(constructor).unwrap();
+        typer.complete_symbol(id_field).unwrap();
+        typer.complete_symbol(count_field).unwrap();
+        let constructor_plan = JvmPrimaryConstructorPlan::from_source(
+            counter,
+            constructor,
+            constructor_parameters,
+            ast,
+            index,
+        )
+        .unwrap();
+        let counter_plan = JvmClassPlan {
+            class: counter,
+            methods: vec![
+                JvmMethodPlan {
+                    method: own_read,
+                    parameters: Vec::new(),
+                    locals: Vec::new(),
+                    body: Some(own_read_body),
+                },
+                JvmMethodPlan {
+                    method: own_write,
+                    parameters: own_write_parameters,
+                    locals: Vec::new(),
+                    body: Some(own_write_body),
+                },
+            ],
+            fields: Vec::new(),
+            initialization: JvmClassInitializationPlan::PrimaryConstructor(constructor_plan),
+        };
+
+        let (external_read, external_read_tree, external_read_rhs) =
+            method_tree_and_rhs(ast, index, source, typer, reader, "read");
+        let external_read_body = typer
+            .source_typed_index()
+            .get(source, external_read_rhs)
+            .expect("Reader.read typed body");
+        let TreeKind::DefDef(external_read_definition) = &ast.get(external_read_tree).kind else {
+            unreachable!()
+        };
+        let external_read_parameters = external_read_definition
+            .value_param_clauses
+            .iter()
+            .flatten()
+            .map(|tree| index.symbol_at(source, *tree).unwrap())
+            .collect();
+        let (external_write, external_write_tree, external_write_rhs) =
+            method_tree_and_rhs(ast, index, source, typer, reader, "write");
+        let external_write_body = typer
+            .source_typed_index()
+            .get(source, external_write_rhs)
+            .expect("Reader.write typed body");
+        let TreeKind::DefDef(external_write_definition) = &ast.get(external_write_tree).kind else {
+            unreachable!()
+        };
+        let external_write_parameters = external_write_definition
+            .value_param_clauses
+            .iter()
+            .flatten()
+            .map(|tree| index.symbol_at(source, *tree).unwrap())
+            .collect();
+        let reader_plan = JvmClassPlan {
+            class: reader,
+            methods: vec![
+                JvmMethodPlan {
+                    method: external_read,
+                    parameters: external_read_parameters,
+                    locals: Vec::new(),
+                    body: Some(external_read_body),
+                },
+                JvmMethodPlan {
+                    method: external_write,
+                    parameters: external_write_parameters,
+                    locals: Vec::new(),
+                    body: Some(external_write_body),
+                },
+            ],
+            fields: Vec::new(),
+            initialization: JvmClassInitializationPlan::Unsupported,
+        };
+        let unit = JvmCompilationUnit {
+            store: typer.store(),
+            typed_ast: typer.typed_ast(),
+            classes: vec![counter_plan, reader_plan],
+        };
+        let own_backend_result = unit.lower_method_body(counter, own_read, definitions);
+        assert!(
+            matches!(
+                own_backend_result,
+                Err(dotty_jvm::JvmCodegenError::FieldNotInJvmPlan {
+                    class: actual_class,
+                    field,
+                    ..
+                }) if actual_class == counter && field == count_field
+            ),
+            "Counter.this.count direct field lowering result: {own_backend_result:?}"
+        );
+        assert!(
+            matches!(
+                unit.lower_method_body(counter, own_write, definitions),
+                Err(dotty_jvm::JvmCodegenError::FieldNotInJvmPlan {
+                    class: actual_class,
+                    field,
+                    ..
+                }) if actual_class == counter && field == count_field
+            ),
+            "Counter.this.count assignment is typed but not a direct JVM field plan"
+        );
+        assert!(
+            matches!(
+                unit.lower_method_body(reader, external_read, definitions),
+                Err(dotty_jvm::JvmCodegenError::WrongOwner {
+                    symbol,
+                    expected,
+                    actual: Some(actual),
+                }) if symbol == count_field && expected == reader && actual == counter
+            ),
+            "Reader.c.count is typed but a foreign Field cannot use direct field lowering"
+        );
+        assert!(
+            matches!(
+                unit.lower_method_body(reader, external_write, definitions),
+                Err(dotty_jvm::JvmCodegenError::WrongOwner {
+                    symbol,
+                    expected,
+                    actual: Some(actual),
+                }) if symbol == count_field && expected == reader && actual == counter
+            ),
+            "Reader.c.count assignment is typed but a foreign Field cannot use direct field lowering"
+        );
+    });
+}
+
+#[test]
+fn constructor_accessor_assignments_reject_immutable_and_mistyped_writes() {
+    with_source(
+        include_str!("fixtures/jvm/ImmutableAccessorWrite.scala"),
+        |ast, source, index, _, typer| {
+            let counter = symbol_named(ast, index, source, typer, "Counter");
+            let id_field = field_for_in_owner(ast, source, index, typer, counter, "id");
+            let (method, _, rhs) =
+                method_tree_and_rhs(ast, index, source, typer, counter, "immutableWrite");
+            typer.complete_symbol(method).unwrap();
+            let context = typer.expression_context_for(method).unwrap();
+            assert!(
+                matches!(
+                    typer.type_expression(rhs, context),
+                    Err(dotty_typer::TyperError::AssignmentTargetImmutable {
+                        source: error_source,
+                        tree_index,
+                        target,
+                    }) if error_source == source
+                        && tree_index == rhs.index()
+                        && target == id_field
+                ),
+                "immutable accessor assignment must fail at its source tree"
+            );
+            assert!(ast.get(rhs).position.is_some());
+            assert!(typer.source_typed_index().get(source, rhs).is_none());
+        },
+    );
+
+    with_source(
+        include_str!("fixtures/jvm/WrongAccessorWriteType.scala"),
+        |ast, source, index, definitions, typer| {
+            let counter = symbol_named(ast, index, source, typer, "Counter");
+            let (method, _, rhs) =
+                method_tree_and_rhs(ast, index, source, typer, counter, "wrongWrite");
+            let TreeKind::Assign(assignment) = &ast.get(rhs).kind else {
+                panic!("wrongWrite must contain a source assignment")
+            };
+            typer.complete_symbol(method).unwrap();
+            let context = typer.expression_context_for(method).unwrap();
+            assert!(
+                matches!(
+                    typer.type_expression(rhs, context),
+                    Err(dotty_typer::TyperError::ExpectedExpressionTypeMismatch {
+                        source: error_source,
+                        tree_index,
+                        actual,
+                        expected,
+                    }) if error_source == source
+                        && tree_index == assignment.rhs.index()
+                        && actual == definitions.boolean
+                        && expected == definitions.long
+                ),
+                "wrong accessor RHS must fail against the canonical Long field type"
+            );
+            assert!(typer.source_typed_index().get(source, rhs).is_none());
+            assert!(
+                typer
+                    .source_typed_index()
+                    .get(source, assignment.lhs)
+                    .is_none()
+            );
+        },
+    );
 }
 
 #[test]
