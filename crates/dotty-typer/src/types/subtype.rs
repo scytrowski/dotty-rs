@@ -87,13 +87,14 @@ impl fmt::Display for TypeRelationError {
 impl std::error::Error for TypeRelationError {}
 
 impl SourceTyper<'_> {
-    /// Tests the supported nominal subtype relation without completing symbols.
+    /// Tests the supported nominal subtype relation without completing source symbols.
     ///
-    /// The relation reads already completed class information. Call
+    /// Nominal parent checks read already completed class information. Call
     /// [`SourceTyper::complete_symbol`] explicitly first when source class
     /// completion is desired. Supported `Type::Constant` values compare by
     /// exact payload and conform to their modeled builtin type. String
-    /// constants use the resolver's exact classfile-backed Java String type.
+    /// constants resolve the exact classfile-backed Java String type on demand;
+    /// this may materialize classpath symbols but does not complete source symbols.
     /// `Or` uses the bounded union rules documented on [`Self::conforms`].
     /// Intersection, methodic, refined, recursive, match, wildcard, error, and
     /// name-designed structural types return
