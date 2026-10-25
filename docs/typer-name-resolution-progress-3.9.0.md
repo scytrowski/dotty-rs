@@ -172,14 +172,34 @@ String concatenation regression loads a classfile-backed `java.lang.String`
 through its resolver but still expects a string literal to defer, so class
 availability alone is not sufficient.
 
+The classpath resolver does provide a safe route to that identity: resolve the
+`java.lang` package, then request its `String` member in the type namespace.
+The classloader enters loaded classes into their canonical package scope, and
+the existing type-member lookup already checks that scope before asking the
+resolver. The typer can validate the resulting class with the same structural
+checks used by its String concatenation intrinsic: `Class` kind, classfile
+origin, type namespace, and the exact `java.lang` → `java` → root package owner
+chain. This avoids name-only symbol discovery and does not require inventing a
+builtin String symbol.
+
+The remaining design issue is where to perform and retain that lookup. The
+current `literal_type` and `constant_underlying_type` helpers take `&self`,
+while resolver materialization is mutable and participates in paired resolver
+and semantic-store checkpoints. String literals are first represented as
+`Type::Constant`, so a narrow implementation must make the canonical String
+type available both for literal conformance and when that constant is widened
+or compared later, without keeping a stale arena ID across rollback. The
+focused audit fails on the `lambdaDeserialize` argument before it can say
+whether the varargs application itself is supported.
+
 The pinned `scala-asm` 9.9.0 classfile independently confirms `Opcodes` is a
 public interface (`ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT`) and its opcode
 fields are `ACC_PUBLIC | ACC_STATIC | ACC_FINAL`. This matches the import rule
 exercised by #1625. The next implementation slice must establish how the
-source session obtains the exact classpath-backed String identity and uses it
-for constant conformance and widening; only then can the two `BackendUtils`
-roots reveal whether varargs application is another blocker. The post-merge
-focused output is retained locally at
+source session threads that exact classpath-backed String identity through
+constant conformance and widening; only then can the two `BackendUtils` roots
+reveal whether varargs application is another blocker. The post-merge focused
+output is retained locally at
 `target/issue-1620-runs/backendutils-after-merge.md`.
 
 Reproduce the one-file audit (the manifest selects the file, then the audit
