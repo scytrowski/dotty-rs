@@ -1855,7 +1855,11 @@ fn decode_tasty_type_parameter(
     else {
         return Some(decoded);
     };
-    if bounds.alias.is_some() {
+    // `TYPEBOUNDStpt` carries its alias in `alias`, while a one-child
+    // `TYPEBOUNDS` is itself the alias form used by method type-parameter
+    // headers. Neither shape is an ordinary lower bound with an implicit
+    // `Any` upper bound, so leave it unsupported rather than widening it.
+    if bounds.alias.is_some() || bounds.high.is_none() {
         return Some(decoded);
     }
 
@@ -1871,13 +1875,9 @@ fn decode_tasty_type_parameter(
         decode_tasty_member_type(file, high, package, type_parameters, resolve_bare, 0)
     });
     if let Some(lower_bound) = lower_bound {
-        match upper_bound {
-            Some(Some(upper_bound)) => {
-                decoded.upper_bound = Some(upper_bound);
-                decoded.bounds_supported = true;
-            }
-            None => decoded.bounds_supported = true,
-            Some(None) => {}
+        if let Some(Some(upper_bound)) = upper_bound {
+            decoded.upper_bound = Some(upper_bound);
+            decoded.bounds_supported = true;
         }
         if decoded.bounds_supported {
             decoded.lower_bound = Some(lower_bound);
@@ -3614,7 +3614,7 @@ fn render_member_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dotty_tasty::tasty::{AstChildNode, SimpleTerm};
+    use dotty_tasty::tasty::{AstChildNode, SimpleTerm, Writer};
 
     fn tsv_cell(value: &str) -> String {
         if value.is_empty() {
@@ -5510,5 +5510,60 @@ mod tests {
                     if name.as_internal() == "scala/Some")
                     && matches!(arguments.as_slice(), [DecodedTastyType::ParamRef(0)])
         ));
+    }
+
+    #[test]
+    fn rejects_a_single_child_typebounds_alias_in_a_method_type_parameter() {
+        let bytes = fixture_bytes("scala3-library/scala/Some.tasty");
+        let file = TastyFile::parse(&bytes).expect("pinned Some TASTy should parse");
+        let index = file.ast_address_index().unwrap();
+        let parameter_node = index
+            .iter()
+            .find(|node| node.tag == dotty_tasty::tasty::TYPEPARAM_TAG)
+            .expect("Some.apply should have a method type parameter")
+            .decode_parameter()
+            .unwrap();
+        let body = parameter_node.decode_body().unwrap();
+        let bounds_tree = match &body.type_tree {
+            RawTree::Leaf(term) if term.tag == SHAREDTYPE_TAG => decode_shared_tree(
+                &file,
+                term.ast_ref()
+                    .expect("shared type has an AST reference")
+                    .address,
+            )
+            .expect("shared bounds should resolve"),
+            other => other.clone(),
+        };
+        let StructuredTree::Length(StructuredNode::TypeBounds(mut bounds)) =
+            bounds_tree.decode_structured().unwrap()
+        else {
+            panic!("Some.apply type parameter should have TYPEBOUNDS")
+        };
+
+        // In TYPEBOUNDS, one child encodes AliasingBounds. Removing the high
+        // child from the pinned Nothing .. Any bounds gives that wire shape.
+        bounds.high = None;
+        let mut writer = Writer::new();
+        bounds.encode(&mut writer).unwrap();
+        let encoded = writer.into_inner();
+        let parameter = ParameterNode::TypeParam {
+            name: parameter_node.name(),
+            body: &encoded,
+            payload: &encoded,
+            offset: 0,
+        };
+
+        let decoded = decode_tasty_type_parameter(
+            &file,
+            &parameter,
+            "scala",
+            &HashMap::new(),
+            &mut |_, _| None,
+        )
+        .expect("type parameter shape should be retained");
+
+        assert!(!decoded.bounds_supported);
+        assert_eq!(decoded.lower_bound, None);
+        assert_eq!(decoded.upper_bound, None);
     }
 }
