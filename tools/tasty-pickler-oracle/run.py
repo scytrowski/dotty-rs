@@ -1095,12 +1095,19 @@ def consume_rust_pair(toolchain: Toolchain, pair_root: Path, tasty_link_uuid: st
 import example.Counter
 
 object Consumer:
-  def run(): Int =
-    val counter = new Counter(start = 7)
-    counter.set(value = 13)
-    counter.get()
-
-  def main(args: Array[String]): Unit = println(run())
+  def main(args: Array[String]): Unit = run()
+  def run(): Unit =
+    val first = new Counter(start = 7)
+    val second = new Counter(start = 2)
+    println(first.get())
+    println(second.get())
+    first.set(value = 13)
+    second.set(value = -42)
+    println(first.get())
+    println(second.get())
+    first.set(value = -42)
+    println(first.get())
+    println(second.get())
 """
     probe = """package consumer
 import example.Counter
@@ -1122,10 +1129,15 @@ object TastyProbe:
                     raise RuntimeError(f"Scala compiler/runtime dependency contains Counter.class: {jar}")
 
         fresh_runtime_outputs = []
+        artifact_hashes = {}
         for index, pair in enumerate((first, second)):
             client = work / f"client-{index}"
             client.mkdir()
             class_before = digest(pair / "example/Counter.class")
+            artifact_hashes[pair.name] = {
+                "class_sha256": class_before,
+                "tasty_sha256": digest(pair / "example/Counter.tasty"),
+            }
             toolchain.compiler(["-d", client, "-classpath", os.pathsep.join(
                 (str(pair), toolchain.classpath)), source])
             consumer_class = client / "consumer/Consumer.class"
@@ -1148,8 +1160,9 @@ object TastyProbe:
             runtime = execute([toolchain.java, "-Xverify:all", "-XX:-UsePerfData", "-classpath",
                                os.pathsep.join((str(pair), str(client), toolchain.classpath)),
                                "consumer.Consumer"])
-            result = runtime.strip().splitlines()[-1:]
-            if result != ["13"]:
+            result = [line for line in runtime.strip().splitlines()
+                      if not line.startswith("Picked up JAVA_TOOL_OPTIONS:")]
+            if result != ["7", "2", "13", "-42", "-42", "-42"]:
                 raise RuntimeError(f"Scala consumer returned an unexpected runtime result: {runtime}")
             if digest(pair / "example/Counter.class") != class_before:
                 raise RuntimeError("runtime did not use the unchanged Rust Counter.class")
@@ -1200,6 +1213,8 @@ object TastyProbe:
         return {
             "scala_consumer": True,
             "fresh_runtime_outputs": fresh_runtime_outputs,
+            "fresh_pair_hashes": artifact_hashes,
+            "counter_source_sha256": digest(ROOT / "tests/fixtures/jvm_tasty_interop/Counter.scala"),
             "rust_class_sha256": class_before,
             "fresh_pair_byte_identical": True,
             "tasty_link_uuid": tasty_link_uuid,
