@@ -282,6 +282,25 @@ impl SourceTyper<'_> {
                 branch_tree_index: if_expr.else_branch.index(),
                 error: Box::new(error),
             })?;
+        let has_incomplete_else_chain = self.is_synthetic_unit_else(if_expr.else_branch)
+            || self.has_incomplete_else_if_chain(if_expr.else_branch);
+        let (then_branch, then_type) = if has_incomplete_else_chain
+            && then_type != self.definitions.unit
+        {
+            let discarded_value = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .literal(dotty_core::Constant::Unit, self.definitions.unit, None);
+            let then_position = self.arena.get(if_expr.then_branch).position;
+            let adapted_branch = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .block(
+                    vec![then_branch],
+                    discarded_value,
+                    self.definitions.unit,
+                    then_position,
+                );
+            (adapted_branch, self.definitions.unit)
+        } else {
+            (then_branch, then_type)
+        };
         let ty = self
             .join_expression_types(then_type, else_type)
             .map_err(|error| TyperError::IfBranchJoinUnsupported {
@@ -300,6 +319,30 @@ impl SourceTyper<'_> {
                 position,
             ),
         )
+    }
+
+    fn has_incomplete_else_if_chain(&self, tree: TreeId<Untyped>) -> bool {
+        let Some(tree) = self.arena.try_get(tree) else {
+            return false;
+        };
+        let TreeKind::If(if_expr) = &tree.kind else {
+            return false;
+        };
+        self.is_synthetic_unit_else(if_expr.else_branch)
+            || self.has_incomplete_else_if_chain(if_expr.else_branch)
+    }
+
+    fn is_synthetic_unit_else(&self, tree: TreeId<Untyped>) -> bool {
+        self.arena.try_get(tree).is_some_and(|else_tree| {
+            matches!(
+                else_tree.kind,
+                TreeKind::Literal(dotty_core::ast::Literal {
+                    value: dotty_core::Constant::Unit
+                })
+            ) && else_tree
+                .position
+                .is_some_and(|position| position.span().range().is_empty())
+        })
     }
 
     pub(in crate::typer) fn type_while_expression(
