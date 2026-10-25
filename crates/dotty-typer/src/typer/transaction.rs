@@ -37,11 +37,14 @@ impl SourceTyper<'_> {
         let typed_index_checkpoint = self.typed_index.clone();
         let function_literals_checkpoint = self.function_literals.clone();
         let local_symbols_checkpoint = self.local_symbols.clone();
+        let inferred_local_lazy_values_checkpoint = self.inferred_local_lazy_values.clone();
         let local_scopes_checkpoint = self.local_scopes.clone();
         let patdef_expansions_checkpoint = self.patdef_expansions.clone();
         let pattern_bindings_checkpoint = self.pattern_bindings.clone();
         let local_methods_checkpoint = self.local_methods.clone();
         let initializing_local_symbols_checkpoint = self.initializing_local_symbols.clone();
+        let inferred_local_lazy_types_checkpoint =
+            self.inferred_local_lazy_types_in_progress.clone();
         let inferred_field_types_checkpoint = self.inferred_field_types_in_progress.clone();
         let inferred_method_results_checkpoint = self.inferred_method_results_in_progress.clone();
         let expression_scope_checkpoint = self.expression_scopes.clone();
@@ -64,11 +67,13 @@ impl SourceTyper<'_> {
             self.typed_index = typed_index_checkpoint;
             self.function_literals = function_literals_checkpoint;
             self.local_symbols = local_symbols_checkpoint;
+            self.inferred_local_lazy_values = inferred_local_lazy_values_checkpoint;
             self.local_scopes = local_scopes_checkpoint;
             self.patdef_expansions = patdef_expansions_checkpoint;
             self.pattern_bindings = pattern_bindings_checkpoint;
             self.local_methods = local_methods_checkpoint;
             self.initializing_local_symbols = initializing_local_symbols_checkpoint;
+            self.inferred_local_lazy_types_in_progress = inferred_local_lazy_types_checkpoint;
             self.inferred_field_types_in_progress = inferred_field_types_checkpoint;
             self.inferred_method_results_in_progress = inferred_method_results_checkpoint;
             self.expression_scopes = expression_scope_checkpoint;
@@ -96,11 +101,14 @@ impl SourceTyper<'_> {
         let type_index_checkpoint = self.type_index.checkpoint();
         let annotation_checkpoint = self.source_annotations.clone();
         let local_symbols_checkpoint = self.local_symbols.clone();
+        let inferred_local_lazy_values_checkpoint = self.inferred_local_lazy_values.clone();
         let local_scopes_checkpoint = self.local_scopes.clone();
         let patdef_expansions_checkpoint = self.patdef_expansions.clone();
         let pattern_bindings_checkpoint = self.pattern_bindings.clone();
         let local_methods_checkpoint = self.local_methods.clone();
         let initializing_local_symbols_checkpoint = self.initializing_local_symbols.clone();
+        let inferred_local_lazy_types_checkpoint =
+            self.inferred_local_lazy_types_in_progress.clone();
         let inferred_field_types_checkpoint = self.inferred_field_types_in_progress.clone();
         let expression_scope_checkpoint = self.expression_scopes.clone();
         let mut info_journal = Vec::new();
@@ -123,11 +131,13 @@ impl SourceTyper<'_> {
                 self.type_index.restore(type_index_checkpoint);
                 self.source_annotations = annotation_checkpoint;
                 self.local_symbols = local_symbols_checkpoint;
+                self.inferred_local_lazy_values = inferred_local_lazy_values_checkpoint;
                 self.local_scopes = local_scopes_checkpoint;
                 self.patdef_expansions = patdef_expansions_checkpoint;
                 self.pattern_bindings = pattern_bindings_checkpoint;
                 self.local_methods = local_methods_checkpoint;
                 self.initializing_local_symbols = initializing_local_symbols_checkpoint;
+                self.inferred_local_lazy_types_in_progress = inferred_local_lazy_types_checkpoint;
                 self.inferred_field_types_in_progress = inferred_field_types_checkpoint;
                 self.expression_scopes = expression_scope_checkpoint;
                 // Nested completion can type an inferred method body with its

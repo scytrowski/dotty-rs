@@ -111,6 +111,7 @@ pub struct SourceTyper<'a> {
     source_type_projection_depth: usize,
     signature_parameter_in_progress: Option<SymbolId>,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
+    inferred_local_lazy_values: HashMap<SymbolId, (TreeId<Untyped>, ExpressionContext)>,
     local_scopes: HashMap<(SourceId, TreeId<Untyped>), ScopeId>,
     patdef_expansions: expression::blocks::PatDefExpansionIndex,
     patdef_typing_attempts: HashMap<(SourceId, TreeId<Untyped>), Result<(), String>>,
@@ -120,6 +121,7 @@ pub struct SourceTyper<'a> {
     active_local_import_scopes: Vec<(SourceContextId, Option<ExpressionScopeId>)>,
     active_local_type_binders: Vec<(TypeId, Vec<SymbolId>)>,
     initializing_local_symbols: HashSet<SymbolId>,
+    inferred_local_lazy_types_in_progress: HashSet<SymbolId>,
     inferred_field_types_in_progress: HashSet<SymbolId>,
     inferred_method_results_in_progress: HashSet<SymbolId>,
     uninitialized_parent_receiver: Option<SymbolId>,
@@ -223,6 +225,7 @@ impl<'a> SourceTyper<'a> {
             source_type_projection_depth: 0,
             signature_parameter_in_progress: None,
             local_symbols: HashMap::new(),
+            inferred_local_lazy_values: HashMap::new(),
             local_scopes: HashMap::new(),
             patdef_expansions: expression::blocks::PatDefExpansionIndex::default(),
             patdef_typing_attempts: HashMap::new(),
@@ -232,6 +235,7 @@ impl<'a> SourceTyper<'a> {
             active_local_import_scopes: Vec::new(),
             active_local_type_binders: Vec::new(),
             initializing_local_symbols: HashSet::new(),
+            inferred_local_lazy_types_in_progress: HashSet::new(),
             inferred_field_types_in_progress: HashSet::new(),
             inferred_method_results_in_progress: HashSet::new(),
             uninitialized_parent_receiver: None,
@@ -20096,8 +20100,50 @@ mod tests {
             assert_ne!(first, later);
         }
 
+        for (source_text, method_name, expected_locals) in [
+            (
+                "class C { def use: Int = { lazy val first: Int = later; lazy val later = 1; first } }",
+                "use",
+                2,
+            ),
+            (
+                "class C { def use: Int = { lazy val first: Int = second; lazy val second = third; lazy val third = 1; first } }",
+                "use",
+                3,
+            ),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, method_name);
+            let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+                unreachable!();
+            };
+            let local_trees = block.stats.clone();
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+
+            typer
+                .type_expression(rhs, context)
+                .expect("acyclic forward references to inferred lazy values are supported");
+            assert_eq!(local_trees.len(), expected_locals);
+            for local_tree in local_trees {
+                let symbol = typer.local_symbol_at(source, local_tree).unwrap();
+                assert!(matches!(
+                    typer.store().symbols.info(symbol),
+                    SymbolInfo::Complete(ty) if *ty == definitions.int
+                ));
+            }
+        }
+
         for (source_text, method_name) in [
-            (LOCAL_LAZY_RECURSION_ORACLE_FIXTURE, "inferredMutual"),
             (
                 "class C { def use: Int = { val first: Int = later; lazy val later: Int = 1; first } }",
                 "use",
@@ -20144,6 +20190,93 @@ mod tests {
             assert!(typer.local_symbol_at(source, first).is_none());
             assert!(typer.typed_ast().iter().next().is_none());
         }
+    }
+
+    #[test]
+    fn inferred_mutual_local_lazy_cycle_is_reported_and_rolled_back() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(LOCAL_LAZY_RECURSION_ORACLE_FIXTURE);
+        let (method, rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "inferredMutual");
+        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+            unreachable!();
+        };
+        let first = block.stats[0];
+        let second = block.stats[1];
+        let TreeKind::ValDef(second_definition) = &parsed.ast.get(second).kind else {
+            unreachable!();
+        };
+        let recursive_reference = second_definition.rhs.unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::RecursiveLazyLocalValueInitializer {
+                source: actual_source,
+                tree_index,
+                ..
+            }) if actual_source == source && tree_index == recursive_reference.index()
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.local_symbol_at(source, first).is_none());
+        assert!(typer.local_symbol_at(source, second).is_none());
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.initializing_local_symbols.is_empty());
+        assert!(typer.inferred_local_lazy_types_in_progress.is_empty());
+    }
+
+    #[test]
+    fn inferred_local_lazy_forward_chain_has_a_completion_depth_limit() {
+        let mut declarations = (0..66)
+            .map(|index| {
+                if index == 65 {
+                    "lazy val value65 = 1".to_owned()
+                } else {
+                    format!("lazy val value{index} = value{}", index + 1)
+                }
+            })
+            .collect::<Vec<_>>();
+        declarations.push("value0".to_owned());
+        let source_text = format!(
+            "class C {{ def use: Int = {{ {} }} }}",
+            declarations.join("; ")
+        );
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(&source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::InferredLocalLazyTypeDepthExceeded {
+                source: actual_source,
+                max_depth: 64,
+                ..
+            }) if actual_source == source
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.local_symbols.is_empty());
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.initializing_local_symbols.is_empty());
+        assert!(typer.inferred_local_lazy_types_in_progress.is_empty());
     }
 
     #[test]
