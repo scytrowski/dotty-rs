@@ -2,11 +2,10 @@
 
 This document records the bounded Scala 3.9.0 audit for inherited class-body
 and primary-constructor `val`/`var` accessors requested by
-[#1608](https://github.com/scytrowski/dotty-rs/issues/1608). It does not enable
-accessor inheritance in the Rust backend. The existing typed rejection remains
-in force until the source Typer can represent inherited selections and the JVM
-projection can validate inherited generated members together with ordinary
-methods.
+[#1608](https://github.com/scytrowski/dotty-rs/issues/1608). The backend now
+projects inherited generated accessors into a read-only metadata view. Class
+emission still rejects accessor-bearing inheritance until collision checks
+and the safe hierarchy gate in #1610/#1611 are complete.
 
 ## Pinned oracle and fixtures
 
@@ -93,14 +92,23 @@ generalizing it to qualified selection forms. This issue does not change the
 Typer.
 
 When source assembly contains inherited accessors but no unsupported source
-selection, the batch reaches `JvmCompilationUnit::metadata` and fails with
-`UnsupportedJvmAccessorInheritance { class: Child, parent: Parent }`. The
-source-to-JVM regression asserts this backend failure and that no class files
-are published. The metadata gate runs before inherited ordinary-method
-collision validation, preventing a generated getter or setter from bypassing
-final-method checks. The current unit also rejects a subclass that declares
-accessors when its parent does not, and rejects constructor-accessor subclasses
-before class metadata is projected.
+selection, `JvmCompilationUnit::metadata` returns an effective accessor view
+for each planned receiver. Each getter or setter entry records the receiver,
+the physical declaring class, the canonical source field, the role, exact JVM
+name and descriptor, and access flags. Ordinary source methods remain in
+`dispatch_methods`; generated accessors do not receive fake method symbols or
+replace ordinary entries. Same-signature ordinary and generated entries remain
+separate collision evidence. Inherited entries do not appear in the child's
+declared `accessors()` list.
+
+The metadata projection is read-only. The class-file publication boundary
+still returns `UnsupportedJvmAccessorInheritance { class: Child, parent:
+Parent }` for accessor-bearing inheritance, and the source-to-JVM regression
+asserts that no class files are published. This keeps generated accessors from
+bypassing the later collision checks while allowing independent validation of
+effective identities and signatures. Constructor and body-field `var` tests
+also cover a two-edge `Parent → Child → Leaf` projection, `val Long` getter
+metadata, and unrelated same-spelled source fields.
 
 ## Ownership and prerequisites for future support
 
@@ -117,20 +125,18 @@ Keep three identities separate:
    and origin remain in `dotty-jvm`.
 
 Future backend enablement must consume the already-supported qualified typed
-selections and project effective accessor methods for each planned class
-without inserting generated source symbols. The still-unsupported unqualified
-lookup can remain outside a bounded backend increment. The backend must validate
-exact JVM descriptors and receiver owners; detect getter/setter collisions
-with user methods and inherited final methods; preserve immutable/mutable
-override rules; and reject unsupported bridges, traits, external ancestors,
-visibility forms, or malformed hierarchy edges before publishing artifacts.
-No child fields or methods should be copied merely to satisfy symbolic
-resolution.
+selections and the read-only effective accessor view without inserting
+generated source symbols. The still-unsupported unqualified lookup can remain
+outside a bounded backend increment. The backend must validate accessor
+collisions with user methods and inherited final methods; preserve
+immutable/mutable override rules; and reject unsupported bridges, traits,
+external ancestors, visibility forms, or malformed hierarchy edges before
+publishing artifacts. No child fields or methods should be copied merely to
+satisfy symbolic resolution.
 
-The current narrow prerequisite for a future backend increment is an
-Object-rooted planned class chain within the existing depth limit, with a
-validated immediate-parent constructor call and no accessor override or
-generated/user-member collision. Those restrictions are only a candidate
-bounded acceptance surface: source typing and pinned oracle evidence must be
-extended before implementation. The related hierarchy and dispatch work is
-tracked separately in #1609–#1613.
+The current narrow candidate for a future emission increment is an Object-rooted
+planned class chain within the existing depth limit, with a validated
+immediate-parent constructor call and no accessor override or
+generated/user-member collision. Those restrictions remain gated until #1610
+and #1611 validate them. Source-call lowering and runtime verification are
+tracked separately in #1612–#1615.

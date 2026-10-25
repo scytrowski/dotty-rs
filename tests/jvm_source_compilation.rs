@@ -5561,17 +5561,22 @@ fn inherited_body_accessor_reaches_backend_rejection_without_publishing_classes(
     let source = fs::read_to_string(fixture_path("InheritedAccessorBackend.scala"))
         .expect("read inherited body-accessor fixture");
     let mut expected_edge = None;
+    let mut observed_metadata = None;
     let result = compile_source_batch_with_source_observer(
         &source,
         "InheritedAccessorBackend.scala",
         output.path(),
         SourceId::from_index(1608),
         SourceUnitCardinality::AtLeastTwo,
-        &mut |_, _, unit, _| {
+        &mut |_, _, unit, definitions| {
             expected_edge = Some((
                 audit_class_named(unit, "Child"),
                 audit_class_named(unit, "Parent"),
             ));
+            observed_metadata = Some(
+                unit.metadata(definitions)
+                    .expect("read-only metadata includes inherited body accessors"),
+            );
         },
     );
 
@@ -5588,6 +5593,153 @@ fn inherited_body_accessor_reaches_backend_rejection_without_publishing_classes(
     assert!(
         output.class_files().is_empty(),
         "an unsupported accessor hierarchy must not publish class files"
+    );
+    let metadata = observed_metadata.expect("source observer captures metadata");
+    let parent = metadata
+        .iter()
+        .find(|class| class.identity().internal_name() == "Parent")
+        .unwrap();
+    let child = metadata
+        .iter()
+        .find(|class| class.identity().internal_name() == "Child")
+        .unwrap();
+    let parent_accessor = parent.accessors().first().unwrap();
+    let inherited_getter = child
+        .dispatch_accessors()
+        .iter()
+        .find(|entry| entry.role() == dotty_jvm::JvmAccessorDispatchRole::Getter)
+        .expect("Parent's generated getter is effective on Child");
+    assert_eq!(inherited_getter.receiver_class(), child.identity().symbol());
+    assert_eq!(
+        inherited_getter.declaring_class(),
+        parent.identity().symbol()
+    );
+    assert_eq!(inherited_getter.field(), parent_accessor.source_field());
+    assert_eq!(inherited_getter.name(), "id");
+    assert_eq!(inherited_getter.descriptor().as_str(), "()I");
+    assert!(
+        child.accessors().is_empty(),
+        "inherited accessors are not declared again"
+    );
+}
+
+#[test]
+fn effective_accessor_dispatch_projects_constructor_body_and_long_accessors_read_only() {
+    let output = TestOutputDirectory::new("effective-inherited-accessor-metadata");
+    let source = "class Parent(var current: Int)\nclass Child extends Parent(1)\nclass Leaf extends Child\nclass BodyParent { var amount: Int = 2 }\nclass BodyChild extends BodyParent\nclass LongParent { val id: Long = 42L }\nclass LongChild extends LongParent\nclass Unrelated(var current: Int)\n";
+    let mut observed_metadata = None;
+    let result = compile_source_batch_with_source_observer(
+        source,
+        "EffectiveAccessorDispatch.scala",
+        output.path(),
+        SourceId::from_index(1609),
+        SourceUnitCardinality::AtLeastTwo,
+        &mut |_, _, unit, definitions| {
+            observed_metadata = Some(
+                unit.metadata(definitions)
+                    .expect("read-only metadata projects the bounded accessor hierarchy"),
+            );
+        },
+    );
+    assert!(
+        matches!(result, Err(PipelineFailure::Codegen(_))),
+        "the metadata projection must not enable accessor-bearing class emission: {result:?}"
+    );
+    assert!(output.class_files().is_empty());
+
+    let metadata = observed_metadata.expect("source observer captures metadata");
+    let class = |name: &str| {
+        metadata
+            .iter()
+            .find(|class| class.identity().internal_name() == name)
+            .unwrap_or_else(|| panic!("{name} metadata"))
+    };
+    let parent = class("Parent");
+    let child = class("Child");
+    let leaf = class("Leaf");
+    let parent_field = parent.accessors()[0].source_field();
+    assert_eq!(parent.accessors()[0].getter().descriptor().as_str(), "()I");
+    assert_eq!(
+        parent.accessors()[0]
+            .setter()
+            .expect("var has a setter")
+            .descriptor()
+            .as_str(),
+        "(I)V"
+    );
+    assert!(child.accessors().is_empty());
+    assert!(leaf.accessors().is_empty());
+    for (receiver, expected_class) in [(child, "Child"), (leaf, "Leaf")] {
+        let current = receiver
+            .dispatch_accessors()
+            .iter()
+            .filter(|entry| entry.field() == parent_field)
+            .collect::<Vec<_>>();
+        assert_eq!(current.len(), 2, "getter and setter remain distinct");
+        assert!(current.iter().any(|entry| {
+            entry.role() == dotty_jvm::JvmAccessorDispatchRole::Getter
+                && entry.name() == "current"
+                && entry.descriptor().as_str() == "()I"
+        }));
+        assert!(current.iter().any(|entry| {
+            entry.role() == dotty_jvm::JvmAccessorDispatchRole::Setter
+                && entry.name() == "current_$eq"
+                && entry.descriptor().as_str() == "(I)V"
+        }));
+        assert!(current.iter().all(|entry| {
+            entry.receiver_class() == receiver.identity().symbol()
+                && entry.declaring_class() == parent.identity().symbol()
+        }));
+        assert_eq!(expected_class, receiver.identity().internal_name());
+    }
+
+    let body_parent = class("BodyParent");
+    let body_child = class("BodyChild");
+    let body_field = body_parent.accessors()[0].source_field();
+    let body_getter = body_child
+        .dispatch_accessors()
+        .iter()
+        .find(|entry| entry.field() == body_field)
+        .expect("body-field getter is inherited in the metadata view");
+    assert_eq!(body_getter.name(), "amount");
+    assert_eq!(body_getter.descriptor().as_str(), "()I");
+    assert_eq!(
+        body_getter.role(),
+        dotty_jvm::JvmAccessorDispatchRole::Getter
+    );
+
+    let long_parent = class("LongParent");
+    let long_child = class("LongChild");
+    let long_id = long_parent.accessors()[0].source_field();
+    let long_getter = long_child
+        .dispatch_accessors()
+        .iter()
+        .find(|entry| entry.field() == long_id)
+        .expect("val getter is inherited");
+    assert_eq!(long_getter.name(), "id");
+    assert_eq!(long_getter.descriptor().as_str(), "()J");
+    assert_eq!(
+        long_getter.role(),
+        dotty_jvm::JvmAccessorDispatchRole::Getter
+    );
+    assert_eq!(
+        long_child
+            .dispatch_accessors()
+            .iter()
+            .filter(|entry| entry.field() == long_id)
+            .count(),
+        1,
+        "immutable val does not acquire a setter"
+    );
+
+    let unrelated = class("Unrelated");
+    let unrelated_field = unrelated.accessors()[0].source_field();
+    assert_ne!(unrelated_field, parent_field);
+    assert!(
+        child
+            .dispatch_accessors()
+            .iter()
+            .all(|entry| entry.field() != unrelated_field)
     );
 }
 
