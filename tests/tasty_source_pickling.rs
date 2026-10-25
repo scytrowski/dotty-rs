@@ -2,6 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+use dotty_classfile::access_flags::{ACC_PRIVATE, ACC_PUBLIC};
+use dotty_classfile::class_file::ClassFile;
+use dotty_classfile::reader::Reader;
 use dotty_core::ast::*;
 use dotty_core::resolution::{MemberRequest, ResolutionError, ResolverCheckpoint, SymbolResolver};
 use dotty_core::*;
@@ -359,8 +362,47 @@ fn exact_jvm_tasty_linkage_counter_source_is_accepted_by_pickler() {
             .status()
             .expect("start pinned Scala 3.9 `-from-tasty` compiler");
         assert!(result.success(), "exact Counter TASTy `-from-tasty` failed");
-        assert!(output.join("example/Counter.class").is_file());
+        let generated_class = output.join("example/Counter.class");
+        assert!(generated_class.is_file());
         assert!(!candidate.parent().unwrap().join("Counter.class").exists());
+        let class_bytes = fs::read(generated_class).unwrap();
+        let mut class_reader = Reader::new(&class_bytes);
+        let class = ClassFile::decode(&mut class_reader).unwrap();
+        assert!(class_reader.is_at_end());
+        assert_eq!(
+            class.constant_pool.class_name(class.this_class).unwrap(),
+            "example/Counter"
+        );
+        assert_eq!(class.fields.len(), 1);
+        let field = &class.fields[0];
+        assert_eq!(
+            class.constant_pool.utf8(field.name_index).unwrap(),
+            "current"
+        );
+        assert_eq!(
+            class.constant_pool.utf8(field.descriptor_index).unwrap(),
+            "I"
+        );
+        assert!(field.access_flags.contains(ACC_PRIVATE));
+        let methods = class
+            .methods
+            .iter()
+            .map(|method| {
+                (
+                    class.constant_pool.utf8(method.name_index).unwrap(),
+                    class.constant_pool.utf8(method.descriptor_index).unwrap(),
+                    method.access_flags.0,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            methods
+                .iter()
+                .map(|method| (method.0, method.1))
+                .collect::<Vec<_>>(),
+            [("<init>", "(I)V"), ("get", "()I"), ("set", "(I)V")]
+        );
+        assert!(methods.iter().all(|method| method.2 & ACC_PUBLIC != 0));
         fs::remove_dir_all(temporary).unwrap();
     }
 }

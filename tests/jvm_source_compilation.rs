@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use dotty_classfile::access_flags::{ACC_PRIVATE, ACC_PUBLIC};
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
@@ -840,6 +841,35 @@ fn exact_tasty_linkage_counter_source_is_accepted_by_jvm_backend() {
     );
     assert_eq!(class.fields.len(), 1);
     assert_eq!(class.methods.len(), 3);
+    let field = &class.fields[0];
+    assert_eq!(
+        class.constant_pool.utf8(field.name_index).unwrap(),
+        "current"
+    );
+    assert_eq!(
+        class.constant_pool.utf8(field.descriptor_index).unwrap(),
+        "I"
+    );
+    assert!(field.access_flags.contains(ACC_PRIVATE));
+    let methods = class
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                class.constant_pool.utf8(method.name_index).unwrap(),
+                class.constant_pool.utf8(method.descriptor_index).unwrap(),
+                method.access_flags.0,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        methods
+            .iter()
+            .map(|method| (method.0, method.1))
+            .collect::<Vec<_>>(),
+        [("<init>", "(I)V"), ("get", "()I"), ("set", "(I)V")]
+    );
+    assert!(methods.iter().all(|method| method.2 & ACC_PUBLIC != 0));
     assert!(!class.attributes.iter().any(|attribute| match attribute {
         Attribute::Other(raw) => class.constant_pool.utf8(raw.name_index).unwrap() == "TASTY",
         _ => false,
