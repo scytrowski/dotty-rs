@@ -52,38 +52,41 @@ is in [`typer-name-resolution-1566-main-be9264-package-term.tsv`](typer-name-res
 The generated full focused report and raw logs remain under `target/`; they
 are not checked into Git.
 
-### Next bounded research direction: external ASM method members
+### Follow-up diagnosis: the candidate ASM method failures are earlier blockers
 
-The largest bucket, `MemberLookup`, is spread across 35 files and is too broad
-to implement as one feature. Four `MemberNotFound` roots also point at four
-different APIs, so they do not establish one shared fix. A narrower pair of
-real roots worth investigating is external classfile-backed ASM instance
-method lookup:
+The previous candidate that grouped external ASM method lookup was too broad.
+Two direct Typer probes using the full pinned Scala classpath successfully
+typed `AbstractInsnNode.getOpcode`, `ClassReader.readByte`, and
+`ClassReader.readShort`. A probe for `readUTF8` also succeeds without a
+`scala.*` wildcard import; with that wildcard present, resolving `Array[Char]`
+instead fails through `scala.Char` → `scala.AnyVal` → missing
+`scala.Matchable`. The Scala 3.9 oracle fixture confirms the expected positive
+and negative ASM method semantics, but this does not identify the corpus roots'
+first failure.
 
-- `compiler/src/dotty/tools/backend/jvm/opt/LocalOpt.scala#tree=3134`
-  (local helper `addVar`, selected row `#tree=2986`, line 942), whose source
-  calls `varIns.getOpcode()` on `scala.tools.asm.tree.AbstractInsnNode` and
-  currently reaches `MemberNotFound`.
-- `compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=420`
-  (`read`, with nested helper rows `#tree=212`, `#tree=226`, and `#tree=239`,
-  lines 98–100), whose source calls `ClassReader.readByte`, `readUTF8`, and
-  `readShort` and currently reaches `MemberLookup`.
+The exact selected roots stop before those ASM calls:
 
-These are candidates, not yet a proven common failure: the cohort report
-records the first-blocker category and resolver observations, but not the
-exact member candidate or class-completion error at the failing expression.
-Pinned Scala 3.9 positive and negative source cases now confirm that
-`AbstractInsnNode.getOpcode` and `ClassReader.readByte`, `readUTF8`, and
-`readShort` resolve with the expected result types, while a truly absent
-`noSuchOpcodeMethod` remains rejected. The fixture and reproduction are in
-[`AsmMemberResolution.oracle.md`](../crates/dotty-typer/tests/fixtures/asm-member-resolution/AsmMemberResolution.oracle.md).
-This validates the source semantics but not the Rust Typer's failure cause.
-The next step is a focused Rust reproducer that traces each selected member
-through class completion, member-scope lookup, overload selection, and call
-typing. Only if the same bounded classfile-member operation explains both
-roots should it become the next implementation slice. Keep the ≤5-root limit;
-do not count either root as typed until the complete enclosing real method
-succeeds.
+| Root | First failing operation | What is known |
+| --- | --- | --- |
+| `LocalOpt.scala#tree=3134` (`addVar`, selected row `#tree=2986`) | `collection.mutable` at AST tree 2928, reported as `MemberNotFound(mutable)` | The receiver type was rolled back with the failed attempt, so its exact type is unavailable. The `getOpcode` call is later in the helper. |
+| `InlineInfoAttribute.scala#tree=420` (`read`) | Source-class completion fails on the `InlineInfo` annotation in `InlineInfoAttribute(inlineInfo: InlineInfo)` at source span `[1695,1705]` | A resolver observation from `BTypesFromClassfile.scala#tree=932` reaches `dotty.tools.backend.jvm.InlineInfo` but records a classloader error. The underlying dependency error is not yet exposed by this focused audit. The ASM `ClassReader` calls are not the first failure. |
+
+As a control, an isolated source probe types both
+`collection.mutable.ArrayBuffer.empty[Int]` and the fully qualified
+`scala.collection.mutable.ArrayBuffer.empty[Int]`, including with an explicit
+`import scala.*`. This leaves a narrower discrepancy to reproduce: the real
+`LocalOpt` package/import context versus a small source unit. It does not yet
+prove whether the failure is in source package-term selection, default-import
+setup, or context accumulated while completing the surrounding class.
+
+The next bounded research step is to match the `LocalOpt` package clauses and
+imports in an isolated Typer source, then reduce them until
+`collection.mutable` either succeeds or fails at the same tree. In parallel,
+capture the complete classloader failure for `InlineInfo`; do not treat it as
+the same issue unless the dependency trace proves a shared cause. Keep the
+≤5-real-root limit and do not count a row as typed until the complete enclosing
+method succeeds. The standalone Rust probe and diagnostic print used during
+this investigation were removed; they are not part of the PR.
 
 ## Bounded continuation: inherited members of external object wildcard imports
 
