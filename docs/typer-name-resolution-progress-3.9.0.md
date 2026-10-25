@@ -25,8 +25,10 @@ and naming succeeded for every file; zero methods were fully typed. Of the 369
 frozen rows, 292 had target observations. Comparing the frozen first blocker
 with this current baseline, 361 rows previously stopped at
 `ImportQualifierNotFound`: 139 now reach `MemberLookup`, 69 reach
-`TypeNameNotFound`, and the rest reach other later blockers. The remaining 8
-historical `TermNameNotFound` rows now reach either `MemberLookup` (4) or
+`TypeNameNotFound`, 152 reach other later blockers, and one row,
+`library/src/scala/collection/convert/JavaCollectionWrappers.scala#tree=2047`,
+still has `ImportQualifierNotFound`. The remaining 8 historical
+`TermNameNotFound` rows now reach either `MemberLookup` (4) or
 `UnsupportedExpression::InterpolatedString` (4). These are blocker transitions
 across the frozen cohort, not a claim that PR #1642 alone caused them.
 
