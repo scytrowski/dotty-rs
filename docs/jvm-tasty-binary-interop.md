@@ -355,7 +355,8 @@ paths. A test-only staging adapter requires an empty output root, writes both
 files under a temporary directory before moving them into place, and cleans up
 after a forced staging failure. Multiple filesystem moves are best-effort;
 they are not atomic across process or machine crashes. Independent Scala
-consumer evidence remains #1638's responsibility.
+consumer evidence is provided by #1638; the final combined regression gate is
+recorded below for #1639.
 
 ## Independent Scala consumer gate (#1638)
 
@@ -371,7 +372,8 @@ For each fresh pair, the harness stages only `example/Counter.class` and
 generated client references `<init>(I)V`, `set(I)V`, and `get()I` on
 `example/Counter`, checks that scalac did not produce another `Counter.class`,
 and confirms the Rust class SHA-256 is unchanged. `java -Xverify:all` then runs
-the client against that same class and expects `13`.
+the client against that same class. The client checks two instances and the
+mutation sequence `7 → 13 → -42`, with exact output `13, -42, -42, -42`.
 Before Scala runs, the harness decodes each classfile's class-level attributes
 and the TASTy 28.9 header, requiring exactly one recognized 16-byte `TASTY`
 link equal to the sidecar UUID. A negative control changes the attribute name
@@ -403,15 +405,77 @@ method references, or an incorrect runtime value fail the test.
 
 The 2026-10-25 run passed with Scala 3.9.0 at revision
 `777528f19a58e794c9954a42f433373472ec57f8` and Temurin JDK `21.0.8+9`.
-Both independent Rust pairs were byte-identical; each client returned `13`
-under `-Xverify:all`, and the runtime class hash remained
+Both independent Rust pairs were byte-identical; each client reported
+`13, -42, -42, -42` under `-Xverify:all`, and the runtime class hash remained
 `086622661e477cd830f456161243cfed10b6d660ee74a008d79d9de0ef9ff26f`.
 The shared classfile/TASTy link UUID was
 `00e5acd1d044a9ac0000000000008193`.
 The TASTy-only `get` control compiled, while the classfile-only control failed
 with `value get is not a member of example.Counter`; the mismatched link failed
 under `-Werror` with Scala's stale TASTy UUID diagnostic. The original
-`-from-tasty` test also passed independently.
+`-from-tasty` test also passed independently. The checked-in source fixture
+SHA-256 is `79cd8926b6385dfafa39e766d80402643deeab673e526ba1abc67e3f67524a3e`;
+the strict gate report includes that source hash and both pair artifact hashes.
+Each emitted class SHA-256 was
+`086622661e477cd830f456161243cfed10b6d660ee74a008d79d9de0ef9ff26f`; each
+emitted TASTy SHA-256 was
+`fff57e24681c8989c56c6cb9225ff21a888e3a31c50c2e5e0b252009bde5742d`.
+
+## Counter MVP release gate (#1639)
+
+The final bounded MVP gate combines the one-session identity/typed-root proof
+in `tests/jvm_tasty_plan.rs`, pair ABI and wire validation in
+`tests/jvm_tasty_contract.rs` and `tests/jvm_tasty_artifacts.rs`, and the strict
+independent Scala/JDK consumer in `tests/jvm_tasty_scala_consumer.rs`. The
+consumer gate emits each pair from one fresh source session, logs the canonical
+source/class/member identities, asserts package-qualified paths, identical
+`.class` and `.tasty` bytes across sessions, matching 28.9 UUIDs, client
+Methodrefs and output hashes. The Scala client mutates two independent
+instances (`7 → 13 → -42`) and the JVM runs it with `-Xverify:all` against the
+unchanged Rust class. Existing artifact tests assert class-file 65.0, source
+member order, constructor/field/method descriptors and flags; the plan test
+binds each JVM body and TASTy method to the exact typed source RHS.
+
+The rejection matrix is distributed across the lowest useful layers: unsupported
+source shape, wrong typed root, wrong session, missing canonical method,
+immutable storage and unsupported body are rejected by plan/contract tests;
+missing, duplicate, malformed and misplaced class-level TASTY attributes are
+covered by the classfile decoder suite; stale link IDs and invalid/unsupported
+TASTy headers are covered by link/pickler tests; classfile-only, mismatched and
+unrecognized links are isolated in the pinned consumer gate. Pair publication
+tests assert both files are staged before exposure and staging is cleaned after
+a forced failure. These checks establish the bounded Counter MVP only; they do
+not establish broad Scala source or ABI compatibility.
+
+For the complete local release gate, configure the pinned Scala source checkout,
+JDK 21, and cached Scala artifacts as described in [the oracle contract](tasty-pickler-oracle.md), then run:
+
+```sh
+DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1 \
+  cargo test --test jvm_tasty_scala_consumer --locked -- --nocapture
+DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 \
+  cargo test --test tasty_source_pickling --locked -- --nocapture
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  --test jvm_stateful_class_contract --locked -- --nocapture
+cargo test -p dotty-jvm --locked
+cargo test -p dotty-classfile --locked
+cargo test -p dotty-tasty-pickler --locked
+cargo fmt --all -- --check
+python3 tools/check-frontend-boundaries.py
+cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo test --workspace --all-targets --locked
+git diff --check
+```
+
+The opt-in Scala/TASTy commands fail closed when the pinned source revision,
+compiler artifacts or JDK are unavailable. Ordinary Rust CI does not run these
+external-tool gates unless their required environment flags are set. No public
+compiler CLI, general classfile/TASTy ABI, or unsupported Scala syntax is part
+of this MVP.
 
 ## Successor boundary
 

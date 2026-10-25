@@ -38,11 +38,13 @@ The source-to-class-file pipeline is exercised in
 verification and execution in CI. The root `dotty::jvm_tasty_plan` library
 module now coordinates the audited single-class Counter overlap from one
 frontend session and exposes both validated borrowed plans within a callback.
-The opt-in `dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_class` path now
+The opt-in `dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_class` path
 returns an owned, decoded-and-validated Counter `.class`/`.tasty` pair linked
-by the TASTy producer's exact header UUID. Filesystem publication and
-independent Scala consumption remain separate follow-up work; this is not a
-compiler driver/CLI or general Scala ABI support.
+by the TASTy producer's exact header UUID. A pinned Scala 3.9.0 consumer gate
+compiles against two fresh deterministic Rust pairs, verifies TASTy-dependent
+member lookup and executes the unchanged Rust class under JDK 21. The gate is
+limited to the audited Counter source shape; this is not a compiler driver/CLI
+or general Scala ABI support. See the [binary interoperability record](docs/jvm-tasty-binary-interop.md).
 
 Compatibility targets Scala **3.9.0**, pinned to source revision
 `777528f19a58e794c9954a42f433373472ec57f8`. The semantic pickler emits TASTy

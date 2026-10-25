@@ -27,7 +27,9 @@ DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1 \
 It requires `SCALA39_ROOT`, `JAVA_HOME`, and `COURSIER_MAVEN_ROOT`, verifies
 their pinned revisions/hashes, consumes two identical fresh Rust-emitted pairs,
 and runs the named-argument Scala client under JDK 21 `-Xverify:all`. The
-compile-only control removes `get` from the classfile but keeps its TASTy
+client checks two independent counters across the state sequence `7 → 13 → -42`.
+Its JSON report includes the source fixture hash, both class/TASTy hashes and
+the link UUID. The compile-only control removes `get` from the classfile but keeps its TASTy
 sidecar; Scala must still resolve it. The same classfile without its sidecar
 and a classfile with a mismatched link UUID must fail their controls. Before
 compilation, the harness decodes the class-level `TASTY` attribute and TASTy
