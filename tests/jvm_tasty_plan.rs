@@ -184,11 +184,11 @@ fn separate_source_sessions_keep_deterministic_artifact_intent() {
 
 #[test]
 fn multi_class_source_is_rejected_without_a_partial_pair() {
-    let source = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass Other:\n  def answer(): Int = 42\n";
+    let source = include_str!("fixtures/jvm_tasty_multiclass/CounterGauge.scala");
     assert!(matches!(
         with_paired_jvm_tasty_class_plan(
             source,
-            "Counter.scala",
+            "CounterGauge.scala",
             SourceId::from_index(203),
             |_| ()
         ),
