@@ -44,6 +44,19 @@ impl SourceTyper<'_> {
     }
 
     fn canonical_java_lang_string_type(&mut self) -> Result<Option<TypeId>, ResolutionError> {
+        let store_checkpoint = self.store.checkpoint();
+        let resolver_checkpoint = self.resolver.checkpoint();
+        let result = self.resolve_canonical_java_lang_string_type();
+        if !matches!(result, Ok(Some(_))) {
+            self.resolver.rollback_to(self.store, resolver_checkpoint);
+            self.store.rollback_to(store_checkpoint);
+        }
+        result
+    }
+
+    fn resolve_canonical_java_lang_string_type(
+        &mut self,
+    ) -> Result<Option<TypeId>, ResolutionError> {
         let path = ["java", "lang"];
         let package = if let Some(package) = self.packages.symbol(&path) {
             package

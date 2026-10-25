@@ -837,7 +837,8 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                 | Constant::Long(_)
                 | Constant::FloatBits(_)
                 | Constant::DoubleBits(_)
-                | Constant::String(_),
+                | Constant::String(_)
+                | Constant::StringUtf16(_),
             ) => {}
             Type::Or { left, right } => {
                 children.push((left, true));

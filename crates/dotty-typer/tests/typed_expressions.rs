@@ -3,13 +3,13 @@
 use dotty_core::ast::{TreeKind, UntypedNode};
 use dotty_core::types::{ClassInfo, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
-    Definitions, MemberRequest, Name, Namespace, NoResolver, Packages, ResolutionError,
+    Constant, Definitions, MemberRequest, Name, Namespace, NoResolver, Packages, ResolutionError,
     ResolverCheckpoint, Scope, SemanticStore, SourceId, SourceText, Symbol, SymbolFlags,
     SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, SymbolResolver, TreeId, Untyped, Visibility,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
-use dotty_typer::{ExpressionContext, SourceTyper, TyperError};
+use dotty_typer::{ExpressionContext, SourceTyper, TypeRelationError, TyperError};
 
 const NULL_REFERENCE_IDENTITY_SOURCE: &str =
     include_str!("../../../tests/fixtures/jvm/NullReferenceIdentity.scala");
@@ -25,7 +25,7 @@ struct ScalaTypeResolver {
 struct JavaLangStringResolver {
     java_package: dotty_core::SymbolId,
     lang_package: dotty_core::SymbolId,
-    string_class: dotty_core::SymbolId,
+    string_class: Option<dotty_core::SymbolId>,
 }
 
 impl SymbolResolver for JavaLangStringResolver {
@@ -55,7 +55,7 @@ impl SymbolResolver for JavaLangStringResolver {
         Ok(if prefix == self.java_package && name == "lang" {
             Some(self.lang_package)
         } else if prefix == self.lang_package && name == "String" {
-            Some(self.string_class)
+            self.string_class
         } else {
             None
         })
@@ -225,7 +225,7 @@ fn string_concatenation_uses_the_canonical_java_string_operator_only() {
     .with_resolver(Box::new(JavaLangStringResolver {
         java_package,
         lang_package,
-        string_class,
+        string_class: Some(string_class),
     }));
 
     typer.complete_symbol(literal_method).unwrap();
@@ -312,6 +312,65 @@ fn string_concatenation_uses_the_canonical_java_string_operator_only() {
         Err(TyperError::MemberNotFound { name, .. })
             if typer.store().names.resolve(name.text()) == "+"
     ));
+}
+
+#[test]
+fn unresolved_string_relation_rolls_back_package_prefix_and_utf16_constants_are_supported() {
+    let text = "class C { def answer: Int = 42 }";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut package_registry = Packages::new();
+    let package_chain =
+        package_registry.enter(&mut store, SymbolOrigin::Builtin, &["java", "lang"]);
+    let java_package = package_chain[0].symbol;
+    let lang_package = package_chain[1].symbol;
+    let packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "unresolved-string-relation.scala",
+        &mut store,
+        &mut package_registry,
+    )
+    .unwrap();
+    let constant_string = store.names.intern("literal");
+    let string_constant = store
+        .types
+        .alloc(Type::Constant(Constant::String(constant_string)));
+    let utf16_constant = store
+        .types
+        .alloc(Type::Constant(Constant::StringUtf16(vec![0xD800])));
+    let checkpoint = store.checkpoint();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(JavaLangStringResolver {
+        java_package,
+        lang_package,
+        string_class: None,
+    }));
+
+    assert!(matches!(
+        typer.conforms(string_constant, definitions.int),
+        Err(TypeRelationError::UnsupportedType { .. })
+    ));
+    assert_eq!(typer.store().checkpoint(), checkpoint);
+    assert!(typer.conforms(utf16_constant, utf16_constant).unwrap());
 }
 
 #[test]
