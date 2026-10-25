@@ -3853,6 +3853,135 @@ fn accessor_bearing_subclass_is_rejected_before_inherited_method_validation() {
 }
 
 #[test]
+fn inherited_accessor_sources_keep_declaring_identity_and_pin_typer_blocker() {
+    with_source(
+        include_str!("fixtures/jvm/InheritedAccessors.scala"),
+        |ast, source, index, definitions, typer| {
+            let parent = symbol_named(ast, index, source, typer, "Parent");
+            let child = symbol_named(ast, index, source, typer, "Child");
+            let leaf = symbol_named(ast, index, source, typer, "Leaf");
+            let reader = symbol_named(ast, index, source, typer, "Reader");
+            let accessor_parent = symbol_named(ast, index, source, typer, "AccessorParent");
+            let accessor_child = symbol_named(ast, index, source, typer, "AccessorChild");
+            for class in [parent, child, leaf, reader, accessor_parent, accessor_child] {
+                typer.complete_symbol(class).unwrap();
+            }
+
+            let (id, _, id_rhs) = field_tree_and_rhs(ast, index, source, typer, "id");
+            let (current, _, current_rhs) =
+                field_tree_and_rhs(ast, index, source, typer, "current");
+            for (field, rhs, expected_type, mutable) in [
+                (id, id_rhs, definitions.long, false),
+                (current, current_rhs, definitions.int, true),
+            ] {
+                let symbol = typer.store().symbols.get(field);
+                assert_eq!(symbol.kind, SymbolKind::Field);
+                assert_eq!(symbol.owner, Some(parent));
+                assert_eq!(symbol.flags.contains(SymbolFlags::MUTABLE), mutable);
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("inherited source field should have a completed type");
+                };
+                assert_eq!(field_type, expected_type);
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let initializer = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                assert_eq!(
+                    typer.source_typed_index().get(source, rhs),
+                    Some(initializer)
+                );
+            }
+
+            let child_info = complete_class_info(typer, child);
+            assert!(child_info.parents.iter().any(|parent_type| {
+                typer.store().types.get(*parent_type).reference_symbol() == Some(parent)
+            }));
+            assert!(
+                typer
+                    .store()
+                    .scopes
+                    .get(child_info.declarations)
+                    .lookup_all(&typer.store().symbols.get(current).name)
+                    .is_empty()
+            );
+            let leaf_info = complete_class_info(typer, leaf);
+            assert!(leaf_info.parents.iter().any(|parent_type| {
+                typer.store().types.get(*parent_type).reference_symbol() == Some(child)
+            }));
+
+            // This is the first source-pipeline blocker for the requested ABI audit:
+            // the current Typer does not resolve an inherited body-field accessor.
+            let (read, _, read_rhs) = method_tree_and_rhs(ast, index, source, typer, child, "read");
+            typer.complete_symbol(read).unwrap();
+            let context = typer.expression_context_for(read).unwrap();
+            assert!(matches!(
+                typer.type_expression(read_rhs, context),
+                Err(dotty_typer::TyperError::TermNameNotFound {
+                    source: actual_source,
+                    tree_index,
+                    ..
+                }) if actual_source == source && tree_index == read_rhs.index()
+            ));
+
+            let Some(dotty_namer::SourceDefinition::Canonical {
+                source: accessor_source,
+                tree: accessor_tree,
+            }) = index.definition_of(accessor_parent)
+            else {
+                panic!("AccessorParent needs a canonical source definition");
+            };
+            let TreeKind::TypeDef(accessor_definition) = &ast.get(accessor_tree).kind else {
+                panic!("AccessorParent definition should be a TypeDef");
+            };
+            let TreeKind::Template(accessor_template) = &ast.get(accessor_definition.rhs).kind
+            else {
+                panic!("AccessorParent should contain a template");
+            };
+            let constructor = index
+                .symbol_at(accessor_source, accessor_template.constructor)
+                .unwrap();
+            let TreeKind::DefDef(constructor_definition) =
+                &ast.get(accessor_template.constructor).kind
+            else {
+                panic!("AccessorParent primary constructor should be a DefDef");
+            };
+            let parameters = constructor_definition.value_param_clauses[0].as_slice();
+            assert_eq!(parameters.len(), 2);
+            let mut constructor_fields = Vec::new();
+            for parameter_tree in parameters {
+                let field = index.symbol_at(accessor_source, *parameter_tree).unwrap();
+                let formal = index
+                    .derived_symbol_at(constructor, accessor_source, *parameter_tree)
+                    .unwrap();
+                typer.complete_symbol(field).unwrap();
+                typer.complete_symbol(formal).unwrap();
+                assert_eq!(typer.store().symbols.get(field).kind, SymbolKind::Field);
+                assert_eq!(
+                    typer.store().symbols.get(field).owner,
+                    Some(accessor_parent)
+                );
+                assert_eq!(
+                    typer.store().symbols.get(formal).kind,
+                    SymbolKind::Parameter
+                );
+                assert_eq!(typer.store().symbols.get(formal).owner, Some(constructor));
+                assert_ne!(field, formal);
+                constructor_fields.push(field);
+            }
+            assert!(
+                typer
+                    .store()
+                    .scopes
+                    .get(complete_class_info(typer, accessor_child).declarations)
+                    .lookup_all(&typer.store().symbols.get(constructor_fields[0]).name)
+                    .is_empty()
+            );
+        },
+    );
+}
+
+#[test]
 fn wrong_typed_field_initializer_is_a_typer_error_and_rolls_back_mapping() {
     with_source(
         "class Broken { private val count: Int = true }",
