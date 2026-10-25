@@ -1605,8 +1605,8 @@ pub enum JvmCodegenError {
         /// Inherited descriptor when checking a result-only mismatch.
         parent_descriptor: Option<String>,
     },
-    /// Accessor-bearing inheritance still cannot cross the class-file
-    /// publication boundary after metadata collision validation succeeds.
+    /// A descendant cannot add new generated accessor storage above inherited
+    /// accessors in the currently supported emission subset.
     UnsupportedJvmAccessorInheritance { class: SymbolId, parent: SymbolId },
     /// Two class symbols in one compilation unit project to the same internal name.
     DuplicateJvmClassIdentity {
@@ -1982,7 +1982,8 @@ impl JvmClassMetadata {
     }
 
     /// JVM-only backing-field and accessor-method signatures, in source order.
-    /// These are metadata only; class-file emission remains a later increment.
+    /// Emission uses these own-class entries only after validating the bounded
+    /// hierarchy and constructor proofs.
     pub fn accessors(&self) -> &[JvmAccessorMetadata] {
         &self.accessors
     }
@@ -2015,7 +2016,8 @@ impl JvmClassMetadata {
     ///
     /// Entries retain the declaring class and canonical source field. Getter
     /// and setter roles are distinct, inherited entries are never copied into
-    /// [`Self::accessors`], and this view does not enable class-file emission.
+    /// [`Self::accessors`]. The view supplies evidence to the bounded emission
+    /// gate; it does not independently authorize class-file emission.
     pub fn dispatch_accessors(&self) -> &[JvmAccessorDispatchMetadata] {
         &self.dispatch_accessors
     }

@@ -1852,24 +1852,27 @@ fn validate_and_build_method_dispatch(
     Ok(())
 }
 
-/// Keeps accessor-bearing ancestry available to read-only metadata callers,
-/// while preserving the closed class-file publication boundary.
+/// Allows emitted classes to inherit already-validated generated accessors
+/// when the receiver declares no new accessor storage of its own.
 pub(super) fn validate_accessor_inheritance_for_emission(
     metadata: &[JvmClassMetadata],
 ) -> Result<(), JvmCodegenError> {
     for child in metadata {
-        let Some(superclass) = child.superclass() else {
-            continue;
-        };
-        let parent = superclass.parent();
-        if let Some(parent_metadata) = metadata
+        let class = child.identity().symbol();
+        let has_inherited_accessor = child
+            .dispatch_accessors()
             .iter()
-            .find(|candidate| candidate.identity().symbol() == parent)
-            && (!child.accessors().is_empty() || !parent_metadata.accessors().is_empty())
-        {
+            .any(|accessor| accessor.declaring_class() != class);
+        if has_inherited_accessor && !child.accessors().is_empty() {
+            let Some(superclass) = child.superclass() else {
+                return Err(JvmCodegenError::UnsupportedJvmSuperclass {
+                    class,
+                    parent: None,
+                });
+            };
             return Err(JvmCodegenError::UnsupportedJvmAccessorInheritance {
-                class: child.identity().symbol(),
-                parent,
+                class,
+                parent: superclass.parent(),
             });
         }
     }
