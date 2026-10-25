@@ -342,43 +342,6 @@ impl SourceTyper<'_> {
                 });
             }
         }
-        if kind == SymbolKind::Local
-            && self
-                .store
-                .symbols
-                .get(symbol)
-                .flags
-                .contains(SymbolFlags::LAZY)
-            && let Some((initializer_scope, initializer_position)) =
-                self.active_eager_local_initializers.last().copied()
-            && initializer_position.is_some_and(|initializer_position| {
-                self.store
-                    .symbols
-                    .get(symbol)
-                    .position
-                    .is_some_and(|target_position| {
-                        target_position.source() == initializer_position.source()
-                            && target_position.span().range().start()
-                                > initializer_position.span().range().start()
-                    })
-            })
-            && self
-                .local_symbols
-                .iter()
-                .any(|((source, declaration), candidate)| {
-                    *source == self.source
-                        && *candidate == symbol
-                        && self.local_scopes.get(&(*source, *declaration))
-                            == Some(&initializer_scope)
-                })
-        {
-            return Err(TyperError::TermNameNotFound {
-                source: self.source,
-                tree_index,
-                name: self.store.symbols.get(symbol).name,
-                position: None,
-            });
-        }
         if !matches!(kind, SymbolKind::Object | SymbolKind::Package) {
             if self.initializing_local_symbols.contains(&symbol) {
                 if self

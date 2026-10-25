@@ -1304,14 +1304,8 @@ impl SourceTyper<'_> {
             }
             self.initializing_local_symbols.insert(symbol);
         }
-        if !lazy_value {
-            self.active_eager_local_initializers.push((scope, position));
-        }
         let typed_rhs_result =
             self.type_value_expression_inner(rhs, context, info_journal, new_mappings);
-        if !lazy_value {
-            self.active_eager_local_initializers.pop();
-        }
         if enter_before_initializer {
             self.initializing_local_symbols.remove(&symbol);
         }
@@ -1986,10 +1980,10 @@ impl SourceTyper<'_> {
         Ok(TypedStatExpansion::one(typed))
     }
 
-    /// Pre-enters explicitly typed lazy locals in import-free blocks. Their
-    /// declared types are known before any initializer is checked, so an
-    /// earlier lazy initializer can resolve a later lazy declaration without
-    /// making ordinary later vals visible.
+    /// Pre-enters explicitly typed lazy locals only when every direct block
+    /// statement is one of those declarations. Their declared types are known
+    /// before any initializer is checked, and the all-lazy shape avoids
+    /// exposing later declarations across eager initialization barriers.
     fn preindex_explicit_lazy_values(
         &mut self,
         stats: &[TreeId<Untyped>],
@@ -1997,14 +1991,6 @@ impl SourceTyper<'_> {
         block_scope: ScopeId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<(), TyperError> {
-        if stats.iter().any(|stat| {
-            self.arena
-                .try_get(*stat)
-                .is_some_and(|node| matches!(node.kind, TreeKind::Import(_)))
-        }) {
-            return Ok(());
-        }
-
         let mut candidates = Vec::new();
         let mut names = HashSet::new();
         for stat in stats {
@@ -2015,18 +2001,18 @@ impl SourceTyper<'_> {
                 });
             };
             let TreeKind::ValDef(definition) = &node.kind else {
-                continue;
+                return Ok(());
             };
             if definition.metadata.modifiers.as_slice() != [Modifier::Lazy]
                 || definition.rhs.is_none()
             {
-                continue;
+                return Ok(());
             }
             let Some(tpt) = self.arena.try_get(definition.tpt) else {
-                continue;
+                return Ok(());
             };
             if matches!(tpt.kind, TreeKind::TypeTree(_)) {
-                continue;
+                return Ok(());
             }
             let name = *definition.name.as_name();
             if !names.insert(name)

@@ -118,7 +118,6 @@ pub struct SourceTyper<'a> {
     local_methods: LocalMethodIndex,
     active_local_type_scopes: Vec<(SourceContextId, ScopeId)>,
     active_local_import_scopes: Vec<(SourceContextId, Option<ExpressionScopeId>)>,
-    active_eager_local_initializers: Vec<(ScopeId, Option<SourceSpan>)>,
     active_local_type_binders: Vec<(TypeId, Vec<SymbolId>)>,
     initializing_local_symbols: HashSet<SymbolId>,
     inferred_field_types_in_progress: HashSet<SymbolId>,
@@ -231,7 +230,6 @@ impl<'a> SourceTyper<'a> {
             local_methods: LocalMethodIndex::default(),
             active_local_type_scopes: Vec::new(),
             active_local_import_scopes: Vec::new(),
-            active_eager_local_initializers: Vec::new(),
             active_local_type_binders: Vec::new(),
             initializing_local_symbols: HashSet::new(),
             inferred_field_types_in_progress: HashSet::new(),
@@ -20106,6 +20104,10 @@ mod tests {
             ),
             (
                 "class C { def use: Int = { val first = later; lazy val later: Int = 1; first } }",
+                "use",
+            ),
+            (
+                "class C { def use: Int = { lazy val first: Int = later; val barrier: Int = 0; lazy val later: Int = 1; first } }",
                 "use",
             ),
             (
