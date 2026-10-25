@@ -52,41 +52,60 @@ is in [`typer-name-resolution-1566-main-be9264-package-term.tsv`](typer-name-res
 The generated full focused report and raw logs remain under `target/`; they
 are not checked into Git.
 
-### Follow-up diagnosis: the candidate ASM method failures are earlier blockers
+### Current increment: retain expression context when selecting a package member
 
-The previous candidate that grouped external ASM method lookup was too broad.
-Two direct Typer probes using the full pinned Scala classpath successfully
-typed `AbstractInsnNode.getOpcode`, `ClassReader.readByte`, and
-`ClassReader.readShort`. A probe for `readUTF8` also succeeds without a
-`scala.*` wildcard import; with that wildcard present, resolving `Array[Char]`
-instead fails through `scala.Char` → `scala.AnyVal` → missing
-`scala.Matchable`. The Scala 3.9 oracle fixture confirms the expected positive
-and negative ASM method semantics, but this does not identify the corpus roots'
-first failure.
+The initial ASM-method candidate was too broad. Direct Typer probes using the
+full pinned Scala classpath typed `AbstractInsnNode.getOpcode`,
+`ClassReader.readByte`, and `ClassReader.readShort`. `readUTF8` also typed
+without a `scala.*` wildcard; with that wildcard, `Array[Char]` instead failed
+through `scala.Char` → `scala.AnyVal` → missing `scala.Matchable`. The Scala
+3.9 oracle fixture validates the ASM calls, but they were not the first corpus
+blockers.
 
-The exact selected roots stop before those ASM calls:
+The focused `LocalOpt` probe, using its nested package clauses and import,
+reproduced the first failure: `collection.mutable` returned
+`MemberNotFound(mutable)`, while `mutable.ArrayBuffer` and the fully qualified
+`scala.collection.mutable.ArrayBuffer` both resolved. The package qualifier
+had first been resolved in the expression's import context; package-member
+selection then recomputed the full qualifier with only its lexical context and
+lost that imported `collection` binding. Package selection now passes the
+same `ExpressionContext` through the qualifier resolution path.
 
-| Root | First failing operation | What is known |
-| --- | --- | --- |
-| `LocalOpt.scala#tree=3134` (`addVar`, selected row `#tree=2986`) | `collection.mutable` at AST tree 2928, reported as `MemberNotFound(mutable)` | The receiver type was rolled back with the failed attempt, so its exact type is unavailable. The `getOpcode` call is later in the helper. |
-| `InlineInfoAttribute.scala#tree=420` (`read`) | Source-class completion fails on the `InlineInfo` annotation in `InlineInfoAttribute(inlineInfo: InlineInfo)` at source span `[1695,1705]` | A resolver observation from `BTypesFromClassfile.scala#tree=932` reaches `dotty.tools.backend.jvm.InlineInfo` but records a classloader error. The underlying dependency error is not yet exposed by this focused audit. The ASM `ClassReader` calls are not the first failure. |
+The regression lives in the Typer unit tests. Its positive case defines a
+source-owned `scala.collection.mutable.ArrayBuffer`, imports
+`scala.collection.mutable`, and types
+`collection.mutable.ArrayBuffer.empty[Int]`. Its negative case confirms that
+`collection.noSuchPackage` remains a `MemberNotFound`. The pinned Scala 3.9
+compiler accepts the positive source and rejects the negative source with
+E008.
 
-As a control, an isolated source probe types both
-`collection.mutable.ArrayBuffer.empty[Int]` and the fully qualified
-`scala.collection.mutable.ArrayBuffer.empty[Int]`, including with an explicit
-`import scala.*`. This leaves a narrower discrepancy to reproduce: the real
-`LocalOpt` package/import context versus a small source unit. It does not yet
-prove whether the failure is in source package-term selection, default-import
-setup, or context accumulated while completing the surrounding class.
+On the real `LocalOpt.scala#tree=3134` method, this moves the first blocker
+from `MemberNotFound(mutable)` at AST tree 2928 to
+`InvalidInferredLocalValueType` at tree 2933, on line 939:
+`val renumber = collection.mutable.ArrayBuffer.empty[Int]`. The inferred type
+at that boundary is `MethodType([], ArrayBuffer[Int])`, not a value type. This
+is progress for one real root; zero methods in `LocalOpt.scala` are fully
+typed. The same deterministic 60-file / 369-method `package-term` cohort was
+rerun twice after the change. Both runs again had 292 observed target rows and
+zero fully typed methods; their normalized TSV hashes matched at
+`bb8888c938165fd2b143b50875d9c93452f29e75d6dfaddff8b22ef64f943d61`. A
+row-by-row comparison against the `be9264` baseline found exactly one first
+blocker transition: `LocalOpt.scala#tree=2986` (selected method, attempt
+`#tree=3134`) moved from `MemberNotFound` to
+`InvalidInferredLocalValueType`. The other 368 rows retained their first
+blocker and typed status. The compact per-method reconciliation is in
+[`typer-name-resolution-1566-after-package-context-3.9.0.tsv`](typer-name-resolution-1566-after-package-context-3.9.0.tsv).
 
-The next bounded research step is to match the `LocalOpt` package clauses and
-imports in an isolated Typer source, then reduce them until
-`collection.mutable` either succeeds or fails at the same tree. In parallel,
-capture the complete classloader failure for `InlineInfo`; do not treat it as
-the same issue unless the dependency trace proves a shared cause. Keep the
-≤5-real-root limit and do not count a row as typed until the complete enclosing
-method succeeds. The standalone Rust probe and diagnostic print used during
-this investigation were removed; they are not part of the PR.
+The next narrow candidate is adaptation of this parameterless generic method
+result to a value type. It needs its own method-signature evidence and negative
+controls before implementation.
+
+`InlineInfoAttribute.scala#tree=420` remains a separate case. Its per-file
+audit cannot see the source declaration `InlineInfo` in sibling
+`BTypes.scala`: each audited file gets a fresh `SemanticStore` and `Packages`
+registry. The recorded `SourceClassCompletion`/classloader error is therefore
+not evidence of a TASTy member-lookup defect. No classloader change is proposed
+from this root.
 
 ## Bounded continuation: inherited members of external object wildcard imports
 

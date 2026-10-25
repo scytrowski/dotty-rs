@@ -840,7 +840,7 @@ impl SourceTyper<'_> {
         );
         if package_receiver {
             let candidate = self
-                .resolve_qualifier_symbol(tree, context.lexical, tree.index(), position)?
+                .resolve_expression_qualifier_symbol(tree, context, tree.index(), position)?
                 .ok_or(TyperError::MemberNotFound {
                     source: self.source,
                     tree_index: tree.index(),

@@ -9174,6 +9174,69 @@ mod tests {
     }
 
     #[test]
+    fn package_selection_qualifier_uses_the_imported_package_context() {
+        let source_text = r#"
+            package scala {
+                package collection {
+                    package mutable {
+                        object ArrayBuffer { def empty[A]: Int = 0 }
+                    }
+                }
+            }
+            package dotty.tools {
+                package backend.jvm {
+                    package opt {
+                        import scala.collection.mutable
+                        object Use {
+                            def run: Int = collection.mutable.ArrayBuffer.empty[Int]
+                            def absent: Int = collection.noSuchPackage.ArrayBuffer.empty[Int]
+                        }
+                    }
+                }
+            }
+        "#;
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let method = |wanted: &str| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == wanted =>
+                    {
+                        Some((
+                            index.symbol_at(source, tree).unwrap(),
+                            definition.rhs.unwrap(),
+                        ))
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let (run, run_rhs) = method("run");
+        let (absent, absent_rhs) = method("absent");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let run_context = typer.expression_context_for(run).unwrap();
+        let result = typer.type_expression(run_rhs, run_context);
+        assert!(result.is_ok(), "{result:?}");
+        let absent_context = typer.expression_context_for(absent).unwrap();
+        assert!(matches!(
+            typer.type_expression(absent_rhs, absent_context),
+            Err(TyperError::MemberNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "noSuchPackage"
+        ));
+    }
+
+    #[test]
     fn current_package_binding_does_not_fall_back_to_root_after_missing_member() {
         let source_text = "package b { object Local { class Root } }; package a.consumer.b { object Local { class Other } }; package a.consumer { import b.Local.Root; class Use { val value: Root = new Root } }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);

@@ -339,6 +339,23 @@ impl SourceTyper<'_> {
         )
     }
 
+    pub(in crate::typer) fn resolve_expression_qualifier_symbol(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        self.resolve_qualifier_symbol_with_expression_context(
+            tree,
+            context.lexical,
+            Some(context),
+            false,
+            tree_index,
+            position,
+        )
+    }
+
     fn resolve_qualifier_symbol_with_expression_context(
         &mut self,
         tree: TreeId<Untyped>,
