@@ -63,8 +63,11 @@ lookup. Successful body-field assignments remain source `Assign` nodes whose
 lvalue is the canonical field, whose RHS has its original typed mapping, and
 whose result type is canonical `Unit`.
 
-The source matrix was also compiled with the pinned Scala 3.9.0 compiler built
-from revision
+The exact positive source is checked in at
+[`tests/fixtures/jvm/ConstructorAccessorReadiness.scala`](../tests/fixtures/jvm/ConstructorAccessorReadiness.scala)
+and is consumed directly by
+`constructor_accessor_source_readiness_matrix_preserves_field_identity`. The
+same file was compiled with the pinned Scala 3.9.0 compiler built from revision
 [`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8).
 The local launcher reported `3.9.0-bin-SNAPSHOT-git-777528f` on JDK 21.0.8.
 The positive `Counter`/`Reader` fixture compiled successfully and `javap`
@@ -104,14 +107,34 @@ values), then invokes the setter and leaves the source `Unit` result. Ordinary
 private fields keep their existing same-class `getfield`/`putfield` path.
 Mutable-local receiver selection remains a Typer-owned limitation.
 
-Oracle reproduction, from the pinned checkout, uses
-`dist/target/universal/stage/bin/scalac -version`, then compiles the issue's
-unchanged `Counter`/`Reader` source with
-`dist/target/universal/stage/bin/scalac -d <output> <source>`. Inspect the
-successful output with `javap -classpath <output> -c -p Counter Reader`; compile
-the invalid assignments and unrelated receiver as separate negative controls
-to capture their first diagnostics. The focused Rust regressions assert
-canonical `SourceTypedIndex` edges and rollback on those same invalid shapes.
+Oracle reproduction, from the pinned Scala checkout, uses the following
+commands. The compiler artifact used for this run had SHA-256
+`3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a`.
+
+```sh
+SCALAC=dist/target/universal/stage/bin/scalac
+SCALA_REV=777528f19a58e794c9954a42f433373472ec57f8
+git checkout "$SCALA_REV"
+"$SCALAC" -version
+mkdir -p /tmp/accessor-oracle/positive
+"$SCALAC" -d /tmp/accessor-oracle/positive \
+  /path/to/dotty-rs/tests/fixtures/jvm/ConstructorAccessorReadiness.scala
+javap -classpath /tmp/accessor-oracle/positive -c -p Counter Reader
+
+mkdir -p /tmp/accessor-oracle/immutable /tmp/accessor-oracle/wrong-type \
+  /tmp/accessor-oracle/other-receiver
+"$SCALAC" -d /tmp/accessor-oracle/immutable \
+  /path/to/dotty-rs/tests/fixtures/jvm/ImmutableAccessorWrite.scala
+"$SCALAC" -d /tmp/accessor-oracle/wrong-type \
+  /path/to/dotty-rs/tests/fixtures/jvm/WrongAccessorWriteType.scala
+"$SCALAC" -d /tmp/accessor-oracle/other-receiver \
+  /path/to/dotty-rs/tests/fixtures/jvm/OtherAccessorReceiver.scala
+```
+
+The last two commands are expected to fail with the diagnostics recorded in
+the matrix above. The positive command succeeds and `javap` shows the accessor
+calls. The focused Rust regressions assert canonical `SourceTypedIndex` edges
+and rollback on those same invalid shapes.
 
 `JvmPrimaryConstructorPlan::from_source` accepts the audited parameter roles
 and produces an immutable source binding. The backend emits private backing
