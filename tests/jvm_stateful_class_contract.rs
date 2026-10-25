@@ -4032,12 +4032,14 @@ fn accessor_getter_remains_separate_from_an_inherited_final_source_method() {
                         parent_origin: dotty_jvm::JvmBinaryMethodOrigin::Method(found_method),
                         name,
                         descriptor: Some(descriptor),
+                        parent_descriptor: Some(parent_descriptor),
                     }) if *found_class == child
                         && *found_field == field
                         && *found_parent == parent
                         && *found_method == parent_method
                         && name == "id"
                         && descriptor == "()I"
+                        && parent_descriptor == "()I"
                 ),
                 "generated getter must collide with the inherited final source method: {result:?}"
             );

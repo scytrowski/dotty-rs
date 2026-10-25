@@ -363,6 +363,9 @@ pub enum JvmAccessorCollisionKind {
     GeneratedAccessorRedefinesInheritedFinalMethod,
     /// A child generated getter or setter occupies an inherited accessor slot.
     GeneratedAccessorRedefinesInheritedAccessor,
+    /// An accessor-related declaration has the inherited JVM parameter shape
+    /// but an incompatible result descriptor.
+    IncompatibleInheritedAccessorResult,
 }
 
 /// Read-only effective dispatch identity for one generated accessor method.
@@ -1599,6 +1602,8 @@ pub enum JvmCodegenError {
         parent_origin: JvmBinaryMethodOrigin,
         name: String,
         descriptor: Option<String>,
+        /// Inherited descriptor when checking a result-only mismatch.
+        parent_descriptor: Option<String>,
     },
     /// Accessor-bearing inheritance still cannot cross the class-file
     /// publication boundary after metadata collision validation succeeds.

@@ -69,10 +69,12 @@ Unit metadata also validates every inherited method-shaped accessor against
 declared source methods and generated getter/setter entries across the full
 planned ancestry. An exact JVM name-and-descriptor collision involving an
 accessor returns `InheritedJvmAccessorCollision`, preserving the canonical
-method symbol or source field plus getter/setter role on both sides. Ordinary
-method-to-method overrides retain their existing rules. Accessor overrides
-remain unsupported, and unplanned inherited final methods use the existing
-conservative same-name rejection for generated accessors.
+method symbol or source field plus getter/setter role on both sides. Equal
+parameter descriptors with incompatible result descriptors are also rejected;
+different parameter descriptors remain overloads. Ordinary method-to-method
+overrides retain their existing rules. Accessor overrides remain unsupported,
+and unplanned non-private inherited methods use a conservative same-name
+rejection for generated accessors.
 
 `JvmClassMetadata::methods()` continues to contain only methods declared in
 that class's plan. Its read-only `dispatch_methods()` view carries effective

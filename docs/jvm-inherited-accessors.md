@@ -108,12 +108,16 @@ ancestor edge. A collision reports `InheritedJvmAccessorCollision` with a
 reason (`SourceMethodRedefinesInheritedAccessor`,
 `GeneratedAccessorRedefinesInheritedMethod`,
 `GeneratedAccessorRedefinesInheritedFinalMethod`, or
-`GeneratedAccessorRedefinesInheritedAccessor`), both canonical origins
+`GeneratedAccessorRedefinesInheritedAccessor`, or
+`IncompatibleInheritedAccessorResult`), both canonical origins
 (`Method(SymbolId)` or `Accessor { field, role }`), the conflicting classes,
-and the exact JVM name and descriptor. Ordinary
+and the JVM name and descriptors. A result-only mismatch is rejected when
+the parameter descriptors match, even if the full JVM descriptors differ;
+different parameter descriptors remain valid overloads. Ordinary
 method-to-method overrides continue through their existing validator;
 accessor overrides remain unsupported. Unplanned inherited final methods
-retain a conservative name-only check and report no descriptor. Noncolliding
+and other unplanned non-private source methods retain a conservative name-only
+check for generated child accessors and report no descriptors. Noncolliding
 inherited accessors remain available in metadata, while the class-file
 publication boundary still returns `UnsupportedJvmAccessorInheritance` and
 publishes no files. Constructor and body-field `var` tests also cover a
