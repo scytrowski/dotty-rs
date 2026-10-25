@@ -13,12 +13,12 @@ use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, SymbolOrigin, Vis
 use dotty_core::types::{Type, TypeRefTarget};
 
 use crate::{
-    InvalidJvmClassInfoKind, JvmAccessorDispatchMetadata, JvmAccessorDispatchRole,
-    JvmAccessorMetadata, JvmAccessorMethodMetadata, JvmClassIdentity, JvmClassMetadata,
-    JvmCodegenError, JvmConstructorAccessorBinding, JvmFieldMetadata, JvmFieldPlan,
-    JvmMethodDescriptor, JvmMethodDispatchMetadata, JvmMethodMetadata, JvmNameKind,
-    JvmOverrideIssue, JvmParameterLocal, JvmReturnType, JvmType, UnsupportedJvmClassKind,
-    UnsupportedJvmFieldFlag, UnsupportedJvmSymbolFlag,
+    InvalidJvmClassInfoKind, JvmAccessorCollisionKind, JvmAccessorDispatchMetadata,
+    JvmAccessorDispatchRole, JvmAccessorMetadata, JvmAccessorMethodMetadata, JvmBinaryMethodOrigin,
+    JvmClassIdentity, JvmClassMetadata, JvmCodegenError, JvmConstructorAccessorBinding,
+    JvmFieldMetadata, JvmFieldPlan, JvmMethodDescriptor, JvmMethodDispatchMetadata,
+    JvmMethodMetadata, JvmNameKind, JvmOverrideIssue, JvmParameterLocal, JvmReturnType, JvmType,
+    UnsupportedJvmClassKind, UnsupportedJvmFieldFlag, UnsupportedJvmSymbolFlag,
 };
 
 pub(super) fn class_identity(
@@ -1410,8 +1410,219 @@ pub(super) fn unit_metadata(
         metadata.push(class);
     }
     validate_final_parent_method_collisions(unit, &metadata)?;
+    validate_inherited_accessor_collisions(unit, &metadata)?;
     validate_and_build_method_dispatch(unit, definitions, &mut metadata)?;
     Ok(metadata)
+}
+
+#[derive(Clone, Copy)]
+struct DeclaredJvmMethodIdentity<'a> {
+    origin: JvmBinaryMethodOrigin,
+    name: &'a str,
+    descriptor: &'a str,
+    is_accessor: bool,
+    is_final: bool,
+}
+
+fn declared_jvm_methods(class: &JvmClassMetadata) -> Vec<DeclaredJvmMethodIdentity<'_>> {
+    let mut declarations = class
+        .methods()
+        .iter()
+        .map(|method| DeclaredJvmMethodIdentity {
+            origin: JvmBinaryMethodOrigin::Method(method.symbol()),
+            name: method.name(),
+            descriptor: method.descriptor().as_str(),
+            is_accessor: false,
+            is_final: method.access_flags().is_final(),
+        })
+        .collect::<Vec<_>>();
+    for accessor in class.accessors() {
+        declarations.extend(
+            accessor_methods(accessor)
+                .filter(|(_, method)| method.access_flags().is_public())
+                .map(|(role, method)| DeclaredJvmMethodIdentity {
+                    origin: JvmBinaryMethodOrigin::Accessor {
+                        field: accessor.source_field(),
+                        role,
+                    },
+                    name: method.name(),
+                    descriptor: method.descriptor().as_str(),
+                    is_accessor: true,
+                    is_final: false,
+                }),
+        );
+    }
+    declarations
+}
+
+fn validate_inherited_accessor_collisions(
+    unit: &crate::JvmCompilationUnit<'_>,
+    metadata: &[JvmClassMetadata],
+) -> Result<(), JvmCodegenError> {
+    for child in metadata {
+        let child_methods = declared_jvm_methods(child);
+        let mut ancestor = child.superclass().map(|superclass| superclass.parent());
+        while let Some(parent) = ancestor.and_then(|parent_symbol| {
+            metadata
+                .iter()
+                .find(|candidate| candidate.identity().symbol() == parent_symbol)
+        }) {
+            let parent_methods = declared_jvm_methods(parent);
+            for child_method in child_methods.iter().copied() {
+                for parent_method in parent_methods.iter().copied().filter(|method| {
+                    // Private parent methods are not inherited declarations.
+                    method.is_accessor
+                        || match method.origin {
+                            JvmBinaryMethodOrigin::Method(symbol) => parent
+                                .methods()
+                                .iter()
+                                .find(|planned| planned.symbol() == symbol)
+                                .is_some_and(|planned| !planned.access_flags().is_private()),
+                            JvmBinaryMethodOrigin::Accessor { .. } => false,
+                        }
+                }) {
+                    // Ordinary method overrides retain their existing semantic
+                    // validation path. Any pair involving a generated entry
+                    // fails closed because accessors cannot yet be overridden.
+                    if (!child_method.is_accessor && !parent_method.is_accessor)
+                        || child_method.name != parent_method.name
+                    {
+                        continue;
+                    }
+                    if child_method.descriptor != parent_method.descriptor {
+                        if same_method_descriptor_parameters(
+                            child_method.descriptor,
+                            parent_method.descriptor,
+                            child_method.origin,
+                        )? {
+                            return Err(JvmCodegenError::InheritedJvmAccessorCollision {
+                                class: child.identity().symbol(),
+                                kind: JvmAccessorCollisionKind::IncompatibleInheritedAccessorResult,
+                                origin: child_method.origin,
+                                parent: parent.identity().symbol(),
+                                parent_origin: parent_method.origin,
+                                name: child_method.name.to_owned(),
+                                descriptor: Some(child_method.descriptor.to_owned()),
+                                parent_descriptor: Some(parent_method.descriptor.to_owned()),
+                            });
+                        }
+                        continue;
+                    }
+                    let kind = match (child_method.is_accessor, parent_method.is_accessor) {
+                        (false, true) => {
+                            Some(JvmAccessorCollisionKind::SourceMethodRedefinesInheritedAccessor)
+                        }
+                        (true, false) if parent_method.is_final => Some(
+                            JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedFinalMethod,
+                        ),
+                        (true, false) => Some(
+                            JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedMethod,
+                        ),
+                        (true, true) => Some(
+                            JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedAccessor,
+                        ),
+                        (false, false) => None,
+                    };
+                    let Some(kind) = kind else {
+                        continue;
+                    };
+                    return Err(JvmCodegenError::InheritedJvmAccessorCollision {
+                        class: child.identity().symbol(),
+                        kind,
+                        origin: child_method.origin,
+                        parent: parent.identity().symbol(),
+                        parent_origin: parent_method.origin,
+                        name: child_method.name.to_owned(),
+                        descriptor: Some(child_method.descriptor.to_owned()),
+                        parent_descriptor: Some(parent_method.descriptor.to_owned()),
+                    });
+                }
+            }
+
+            // A source declaration may be absent from the parent's emission
+            // plan because its body or signature is unsupported. Its JVM name
+            // is still enough to reject a child-generated accessor safely.
+            let parent_info = class_info(unit.store, parent.identity().symbol())?;
+            for parent_method in unit
+                .store
+                .scopes
+                .get(parent_info.declarations)
+                .entered_symbols()
+                .filter(|symbol| {
+                    unit.store.symbols.contains(*symbol)
+                        && unit.store.symbols.get(*symbol).kind == SymbolKind::Method
+                        && unit.store.symbols.get(*symbol).visibility != Visibility::Private
+                })
+                .filter(|symbol| {
+                    !parent
+                        .methods()
+                        .iter()
+                        .any(|planned| planned.symbol() == *symbol)
+                })
+            {
+                let parent_symbol = unit.store.symbols.get(parent_method);
+                let Some(source_name) = unit.store.names.try_resolve(parent_symbol.name.text())
+                else {
+                    continue;
+                };
+                let Some(name) = jvm_method_name(source_name) else {
+                    continue;
+                };
+                for child_accessor in child.accessors() {
+                    if let Some((role, accessor)) =
+                        accessor_methods(child_accessor).find(|(_, method)| method.name() == name)
+                    {
+                        let kind = if parent_symbol.flags.contains(SymbolFlags::FINAL) {
+                            JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedFinalMethod
+                        } else {
+                            JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedMethod
+                        };
+                        return Err(JvmCodegenError::InheritedJvmAccessorCollision {
+                            class: child.identity().symbol(),
+                            kind,
+                            origin: JvmBinaryMethodOrigin::Accessor {
+                                field: child_accessor.source_field(),
+                                role,
+                            },
+                            parent: parent.identity().symbol(),
+                            parent_origin: JvmBinaryMethodOrigin::Method(parent_method),
+                            name: accessor.name().to_owned(),
+                            descriptor: None,
+                            parent_descriptor: None,
+                        });
+                    }
+                }
+            }
+            ancestor = parent.superclass().map(|superclass| superclass.parent());
+        }
+    }
+    Ok(())
+}
+
+fn same_method_descriptor_parameters(
+    child_descriptor: &str,
+    parent_descriptor: &str,
+    child_origin: JvmBinaryMethodOrigin,
+) -> Result<bool, JvmCodegenError> {
+    let method = match child_origin {
+        JvmBinaryMethodOrigin::Method(symbol) => symbol,
+        JvmBinaryMethodOrigin::Accessor { field, .. } => field,
+    };
+    let child = dotty_classfile::descriptor::MethodDescriptor::parse(child_descriptor)
+        .map_err(|error| JvmCodegenError::InvalidGeneratedDescriptor { method, error })?;
+    let parent = dotty_classfile::descriptor::MethodDescriptor::parse(parent_descriptor)
+        .map_err(|error| JvmCodegenError::InvalidGeneratedDescriptor { method, error })?;
+    Ok(child.parameters == parent.parameters)
+}
+
+fn accessor_methods(
+    accessor: &JvmAccessorMetadata,
+) -> impl Iterator<Item = (JvmAccessorDispatchRole, &JvmAccessorMethodMetadata)> {
+    std::iter::once((JvmAccessorDispatchRole::Getter, accessor.getter())).chain(
+        accessor
+            .setter()
+            .map(|setter| (JvmAccessorDispatchRole::Setter, setter)),
+    )
 }
 
 fn validate_and_build_method_dispatch(
@@ -2026,7 +2237,11 @@ fn validate_final_parent_method_collisions(
                 })
             {
                 let parent_symbol = unit.store.symbols.get(parent_method);
-                let Some(name) = unit.store.names.try_resolve(parent_symbol.name.text()) else {
+                let Some(source_name) = unit.store.names.try_resolve(parent_symbol.name.text())
+                else {
+                    continue;
+                };
+                let Some(name) = jvm_method_name(source_name) else {
                     continue;
                 };
                 if let Some(child_method) =
@@ -2037,9 +2252,28 @@ fn validate_final_parent_method_collisions(
                         method: child_method.symbol(),
                         parent: parent.identity().symbol(),
                         parent_method,
-                        name: name.to_owned(),
+                        name: name.clone(),
                         descriptor: None,
                     });
+                }
+                for child_accessor in child.accessors() {
+                    for (role, accessor) in accessor_methods(child_accessor) {
+                        if accessor.name() == name {
+                            return Err(JvmCodegenError::InheritedJvmAccessorCollision {
+                                class: child.identity().symbol(),
+                                kind: JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedFinalMethod,
+                                origin: JvmBinaryMethodOrigin::Accessor {
+                                    field: child_accessor.source_field(),
+                                    role,
+                                },
+                                parent: parent.identity().symbol(),
+                                parent_origin: JvmBinaryMethodOrigin::Method(parent_method),
+                                name: name.clone(),
+                                descriptor: None,
+                                parent_descriptor: None,
+                            });
+                        }
+                    }
                 }
             }
 
@@ -2084,13 +2318,20 @@ fn method_metadata(
         .names
         .try_resolve(method.name.text())
         .ok_or_else(|| invalid_name(plan.method, JvmNameKind::Method, "<unresolved>"))?;
-    if method.name.namespace() != Namespace::Term || !is_simple_identifier(name) {
+    if method.name.namespace() != Namespace::Term {
         return Err(invalid_name(
             plan.method,
             JvmNameKind::Method,
             name.to_owned(),
         ));
     }
+    let Some(jvm_name) = jvm_method_name(name) else {
+        return Err(invalid_name(
+            plan.method,
+            JvmNameKind::Method,
+            name.to_owned(),
+        ));
+    };
 
     let mut slot = 1u16; // Slot zero is `this`; only instance methods are accepted.
     let mut parameters = Vec::with_capacity(plan.parameters.len());
@@ -2107,7 +2348,7 @@ fn method_metadata(
 
     Ok(JvmMethodMetadata {
         symbol: plan.method,
-        name: name.to_owned(),
+        name: jvm_name,
         descriptor,
         access_flags,
         parameters,
@@ -2342,6 +2583,14 @@ fn is_simple_identifier(text: &str) -> bool {
     };
     (first.is_alphabetic() || first == '_')
         && chars.all(|character| character.is_alphanumeric() || character == '_')
+}
+
+fn jvm_method_name(source_name: &str) -> Option<String> {
+    if let Some(setter_name) = source_name.strip_suffix("_=") {
+        is_simple_identifier(setter_name).then(|| format!("{setter_name}_$eq"))
+    } else {
+        is_simple_identifier(source_name).then(|| source_name.to_owned())
+    }
 }
 
 fn invalid_name(

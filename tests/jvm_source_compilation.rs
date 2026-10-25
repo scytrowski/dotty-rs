@@ -20634,6 +20634,280 @@ fn source_subclass_rejects_overrides_of_final_parent_methods_without_output() {
 }
 
 #[test]
+fn source_method_cannot_redefine_an_inherited_generated_accessor() {
+    let output = TestOutputDirectory::new("inherited-accessor-method-collision");
+    let source = "class Base(val id: Int)\nclass Derived extends Base(1) { def id(): Int = 2 }\n";
+    let error = compile_source_classes(source, "InheritedAccessorMethod.scala", output.path())
+        .expect_err("a source method cannot redefine a generated inherited accessor");
+
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::InheritedJvmAccessorCollision {
+                origin: dotty_jvm::JvmBinaryMethodOrigin::Method(_),
+                parent_origin: dotty_jvm::JvmBinaryMethodOrigin::Accessor {
+                    role: dotty_jvm::JvmAccessorDispatchRole::Getter,
+                    ..
+                },
+                name,
+                descriptor,
+                ..
+            }) if name == "id" && descriptor.as_deref() == Some("()I")
+        ),
+        "expected a typed inherited accessor collision, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn generated_accessors_cannot_redefine_inherited_source_method_slots() {
+    for (label, source, expected_name, expected_descriptor) in [
+        (
+            "nonfinal-getter",
+            "class Base { def current(): Int = 1 }\nclass Derived extends Base { val current: Int = 2 }\n",
+            "current",
+            "()I",
+        ),
+        (
+            "setter",
+            "class Base { def current_=(value: Int): Unit = () }\nclass Derived extends Base { var current: Int = 2 }\n",
+            "current_$eq",
+            "(I)V",
+        ),
+    ] {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source_classes(source, "InheritedMethodAccessor.scala", output.path())
+            .expect_err("a generated accessor cannot occupy an inherited source method slot");
+        assert!(
+            matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::InheritedJvmAccessorCollision {
+                    kind: dotty_jvm::JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedMethod,
+                    name,
+                    descriptor,
+                    ..
+                }) if name == expected_name && descriptor.as_deref() == Some(expected_descriptor)
+            ),
+            "{label}: expected typed accessor collision, got {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label}: no partial output"
+        );
+    }
+}
+
+#[test]
+fn accessor_collision_validation_rejects_an_incompatible_inherited_result_descriptor() {
+    let output = TestOutputDirectory::new("inherited-accessor-result-descriptor-mismatch");
+    let source = "class Base { def current(): Long = 1L }\nclass Derived extends Base { val current: Int = 2 }\n";
+    let error = compile_source_classes(source, "InheritedAccessorResult.scala", output.path())
+        .expect_err(
+            "same-name accessors with matching parameters and different results are unsafe",
+        );
+
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::InheritedJvmAccessorCollision {
+                kind: dotty_jvm::JvmAccessorCollisionKind::IncompatibleInheritedAccessorResult,
+                name,
+                descriptor: Some(descriptor),
+                parent_descriptor: Some(parent_descriptor),
+                ..
+            }) if name == "current" && descriptor == "()I" && parent_descriptor == "()J"
+        ),
+        "expected a typed result-descriptor mismatch, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn noncolliding_inherited_accessor_and_different_descriptor_overload_pass_preflight() {
+    let output = TestOutputDirectory::new("noncolliding-inherited-accessor");
+    let source = "class Base(var current: Int)\nclass Derived extends Base(0) { def read(): Int = 1; def current(value: Long): Int = 2 }\n";
+    let error = compile_source_classes(source, "NoncollidingAccessor.scala", output.path())
+        .expect_err("emission remains gated while metadata accepts noncolliding inherited members");
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmAccessorInheritance { .. })
+        ),
+        "different-descriptor overload and unrelated child method must pass collision preflight: {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn inherited_accessor_collision_reports_nearest_declaration_across_two_edges() {
+    let output = TestOutputDirectory::new("grandparent-accessor-method-collision");
+    let source = "class Base(val id: Int)\nclass Middle extends Base(1)\nclass Leaf extends Middle { def id(): Int = 2 }\n";
+    let error = compile_source_classes(source, "GrandparentAccessor.scala", output.path())
+        .expect_err("a grandchild cannot redefine a grandparent accessor");
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::InheritedJvmAccessorCollision {
+                kind: dotty_jvm::JvmAccessorCollisionKind::SourceMethodRedefinesInheritedAccessor,
+                parent_origin: dotty_jvm::JvmBinaryMethodOrigin::Accessor {
+                    role: dotty_jvm::JvmAccessorDispatchRole::Getter,
+                    ..
+                },
+                name,
+                descriptor,
+                ..
+            }) if name == "id" && descriptor.as_deref() == Some("()I")
+        ),
+        "expected inherited grandparent collision, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn unplanned_final_parent_method_rejects_a_same_named_child_accessor() {
+    let output = TestOutputDirectory::new("unplanned-final-parent-accessor-collision");
+    let source =
+        "class Base { final def id(): Int = 1 }\nclass Derived extends Base { val id: Int = 2 }\n";
+    let mut omit_parent_methods = |unit: &mut JvmCompilationUnit<'_>,
+                                   _definitions: &Definitions| {
+        let parent = unit
+            .classes
+            .iter()
+            .find(|plan| {
+                let symbol = unit.store.symbols.get(plan.class);
+                unit.store.names.try_resolve(symbol.name.text()) == Some("Base")
+            })
+            .map(|plan| plan.class)
+            .expect("source batch has Base");
+        unit.classes
+            .iter_mut()
+            .find(|plan| plan.class == parent)
+            .expect("Base plan")
+            .methods
+            .clear();
+    };
+    let error = compile_source_batch_observed(
+        source,
+        "UnplannedFinalParentAccessor.scala",
+        output.path(),
+        SourceId::from_index(1610),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut omit_parent_methods),
+    )
+    .expect_err("an unplanned final source method must reject a same-named accessor");
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::InheritedJvmAccessorCollision {
+                kind: dotty_jvm::JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedFinalMethod,
+                parent_origin: dotty_jvm::JvmBinaryMethodOrigin::Method(_),
+                name,
+                descriptor: None,
+                ..
+            }) if name == "id"
+        ),
+        "expected conservative unplanned-final collision, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn unplanned_final_parent_setter_rejects_a_same_named_child_var() {
+    let output = TestOutputDirectory::new("unplanned-final-parent-setter-collision");
+    let source = "class Base { final def current_=(value: Int): Unit = () }\nclass Derived extends Base { var current: Int = 2 }\n";
+    let mut omit_parent_methods = |unit: &mut JvmCompilationUnit<'_>,
+                                   _definitions: &Definitions| {
+        let parent = unit
+            .classes
+            .iter()
+            .find(|plan| {
+                let symbol = unit.store.symbols.get(plan.class);
+                unit.store.names.try_resolve(symbol.name.text()) == Some("Base")
+            })
+            .map(|plan| plan.class)
+            .expect("source batch has Base");
+        unit.classes
+            .iter_mut()
+            .find(|plan| plan.class == parent)
+            .expect("Base plan")
+            .methods
+            .clear();
+    };
+    let error = compile_source_batch_observed(
+        source,
+        "UnplannedFinalParentSetter.scala",
+        output.path(),
+        SourceId::from_index(1611),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut omit_parent_methods),
+    )
+    .expect_err("an unplanned final setter must reject the generated child setter");
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::InheritedJvmAccessorCollision {
+                kind: dotty_jvm::JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedFinalMethod,
+                parent_origin: dotty_jvm::JvmBinaryMethodOrigin::Method(_),
+                name,
+                descriptor: None,
+                ..
+            }) if name == "current_$eq"
+        ),
+        "expected conservative unplanned final setter collision, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn unplanned_nonfinal_parent_method_rejects_a_same_named_child_accessor() {
+    let output = TestOutputDirectory::new("unplanned-nonfinal-parent-accessor-collision");
+    let source =
+        "class Base { def id(): Int = 1 }\nclass Derived extends Base { val id: Int = 2 }\n";
+    let mut omit_parent_methods = |unit: &mut JvmCompilationUnit<'_>,
+                                   _definitions: &Definitions| {
+        let parent = unit
+            .classes
+            .iter()
+            .find(|plan| {
+                let symbol = unit.store.symbols.get(plan.class);
+                unit.store.names.try_resolve(symbol.name.text()) == Some("Base")
+            })
+            .map(|plan| plan.class)
+            .expect("source batch has Base");
+        unit.classes
+            .iter_mut()
+            .find(|plan| plan.class == parent)
+            .expect("Base plan")
+            .methods
+            .clear();
+    };
+    let error = compile_source_batch_observed(
+        source,
+        "UnplannedNonfinalParentAccessor.scala",
+        output.path(),
+        SourceId::from_index(1612),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut omit_parent_methods),
+    )
+    .expect_err("an unplanned non-final source method must reject a same-named accessor");
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::InheritedJvmAccessorCollision {
+                kind: dotty_jvm::JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedMethod,
+                parent_origin: dotty_jvm::JvmBinaryMethodOrigin::Method(_),
+                name,
+                descriptor: None,
+                parent_descriptor: None,
+                ..
+            }) if name == "id"
+        ),
+        "expected conservative unplanned-method collision, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
 fn source_subclass_rejects_overrides_of_final_grandparent_methods_without_output() {
     let output = TestOutputDirectory::new("final-grandparent-method-override");
     let source = "class Base { final def value(): Int = 1 }\nclass Middle extends Base {}\nclass Leaf extends Middle { override def value(): Int = 2 }\n";

@@ -4018,39 +4018,31 @@ fn accessor_getter_remains_separate_from_an_inherited_final_source_method() {
                 ],
             }
             .metadata(definitions);
-            let metadata = result.expect("read-only metadata projects child accessors");
-            let parent_metadata = metadata
-                .iter()
-                .find(|class| class.identity().symbol() == parent)
-                .unwrap();
-            let child_metadata = metadata
-                .iter()
-                .find(|class| class.identity().symbol() == child)
-                .unwrap();
-            let parent_method = parent_metadata
-                .methods()
-                .iter()
-                .find(|method| method.name() == "id")
-                .expect("Parent declares the final source method");
-            let inherited_method = child_metadata
-                .dispatch_methods()
-                .iter()
-                .find(|method| method.name() == "id")
-                .expect("ordinary final method remains in the ordinary dispatch view");
-            let generated_getter = child_metadata
-                .dispatch_accessors()
-                .iter()
-                .find(|entry| entry.name() == "id")
-                .expect("generated getter remains separate collision evidence");
-            assert_eq!(inherited_method.method(), parent_method.symbol());
-            assert_eq!(inherited_method.descriptor().as_str(), "()I");
-            assert_eq!(generated_getter.descriptor().as_str(), "()I");
-            assert_eq!(generated_getter.field(), field);
-            assert_eq!(
-                generated_getter.role(),
-                dotty_jvm::JvmAccessorDispatchRole::Getter
+            assert!(
+                matches!(
+                    &result,
+                    Err(dotty_jvm::JvmCodegenError::InheritedJvmAccessorCollision {
+                        class: found_class,
+                        kind: dotty_jvm::JvmAccessorCollisionKind::GeneratedAccessorRedefinesInheritedFinalMethod,
+                        origin: dotty_jvm::JvmBinaryMethodOrigin::Accessor {
+                            field: found_field,
+                            role: dotty_jvm::JvmAccessorDispatchRole::Getter,
+                        },
+                        parent: found_parent,
+                        parent_origin: dotty_jvm::JvmBinaryMethodOrigin::Method(found_method),
+                        name,
+                        descriptor: Some(descriptor),
+                        parent_descriptor: Some(parent_descriptor),
+                    }) if *found_class == child
+                        && *found_field == field
+                        && *found_parent == parent
+                        && *found_method == parent_method
+                        && name == "id"
+                        && descriptor == "()I"
+                        && parent_descriptor == "()I"
+                ),
+                "generated getter must collide with the inherited final source method: {result:?}"
             );
-            assert_eq!(generated_getter.declaring_class(), child);
         },
     );
 }

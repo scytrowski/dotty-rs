@@ -4,8 +4,9 @@ This document records the bounded Scala 3.9.0 audit for inherited class-body
 and primary-constructor `val`/`var` accessors requested by
 [#1608](https://github.com/scytrowski/dotty-rs/issues/1608). The backend now
 projects inherited generated accessors into a read-only metadata view. Class
-emission still rejects accessor-bearing inheritance until collision checks
-and the safe hierarchy gate in #1610/#1611 are complete.
+emission still rejects accessor-bearing inheritance until the safe hierarchy
+gate in #1611 is complete. Unit metadata now validates inherited
+method/accessor collisions before returning that view.
 
 ## Pinned oracle and fixtures
 
@@ -101,14 +102,32 @@ replace ordinary entries. Same-signature ordinary and generated entries remain
 separate collision evidence. Inherited entries do not appear in the child's
 declared `accessors()` list.
 
-The metadata projection is read-only. The class-file publication boundary
-still returns `UnsupportedJvmAccessorInheritance { class: Child, parent:
-Parent }` for accessor-bearing inheritance, and the source-to-JVM regression
-asserts that no class files are published. This keeps generated accessors from
-bypassing the later collision checks while allowing independent validation of
-effective identities and signatures. Constructor and body-field `var` tests
-also cover a two-edge `Parent → Child → Leaf` projection, `val Long` getter
-metadata, and unrelated same-spelled source fields.
+The metadata projection is read-only. Before returning, it compares declared
+source methods and generated getter/setter signatures across every validated
+ancestor edge. A collision reports `InheritedJvmAccessorCollision` with a
+reason (`SourceMethodRedefinesInheritedAccessor`,
+`GeneratedAccessorRedefinesInheritedMethod`,
+`GeneratedAccessorRedefinesInheritedFinalMethod`, or
+`GeneratedAccessorRedefinesInheritedAccessor`, or
+`IncompatibleInheritedAccessorResult`), both canonical origins
+(`Method(SymbolId)` or `Accessor { field, role }`), the conflicting classes,
+and the JVM name and descriptors. A result-only mismatch is rejected when
+the parameter descriptors match, even if the full JVM descriptors differ;
+different parameter descriptors remain valid overloads. Ordinary
+method-to-method overrides continue through their existing validator;
+accessor overrides remain unsupported. Unplanned inherited final methods
+and other unplanned non-private source methods retain a conservative name-only
+check for generated child accessors and report no descriptors. Noncolliding
+inherited accessors remain available in metadata, while the class-file
+publication boundary still returns `UnsupportedJvmAccessorInheritance` and
+publishes no files. Constructor and body-field `var` tests also cover a
+two-edge `Parent → Child → Leaf` projection, `val Long` getter metadata, and
+unrelated same-spelled source fields.
+
+For this collision audit, a source method named `current_=` projects to the
+Scala 3 JVM setter name `current_$eq` before exact descriptor comparison. This
+lets ordinary setter-shaped methods and generated `var` setters share the same
+binary identity check without introducing synthetic source method symbols.
 
 ## Ownership and prerequisites for future support
 
