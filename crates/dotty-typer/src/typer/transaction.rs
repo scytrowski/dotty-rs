@@ -30,6 +30,7 @@ impl SourceTyper<'_> {
         let checkpoint = self.store.checkpoint();
         let resolver_checkpoint = self.resolver.checkpoint();
         let package_entry_checkpoint = self.synthetic_package_entries.len();
+        let class_member_entry_checkpoint = self.synthetic_class_member_entries.len();
         let cache_checkpoint = self.type_index.checkpoint();
         let annotation_checkpoint = self.source_annotations.clone();
         let typed_ast_checkpoint = self.typed_arena.checkpoint();
@@ -54,6 +55,7 @@ impl SourceTyper<'_> {
                 }
             }
             self.rollback_synthetic_package_entries(package_entry_checkpoint);
+            self.rollback_synthetic_class_member_entries(class_member_entry_checkpoint);
             self.resolver.rollback_to(self.store, resolver_checkpoint);
             self.store.rollback_to(checkpoint);
             self.type_index.restore(cache_checkpoint);
@@ -90,6 +92,7 @@ impl SourceTyper<'_> {
         let store_checkpoint = self.store.checkpoint();
         let resolver_checkpoint = self.resolver.checkpoint();
         let package_entry_checkpoint = self.synthetic_package_entries.len();
+        let class_member_entry_checkpoint = self.synthetic_class_member_entries.len();
         let type_index_checkpoint = self.type_index.checkpoint();
         let annotation_checkpoint = self.source_annotations.clone();
         let local_symbols_checkpoint = self.local_symbols.clone();
@@ -114,6 +117,7 @@ impl SourceTyper<'_> {
                 }
                 self.typed_arena.rollback_to(ast_checkpoint);
                 self.rollback_synthetic_package_entries(package_entry_checkpoint);
+                self.rollback_synthetic_class_member_entries(class_member_entry_checkpoint);
                 self.resolver.rollback_to(self.store, resolver_checkpoint);
                 self.store.rollback_to(store_checkpoint);
                 self.type_index.restore(type_index_checkpoint);
@@ -145,6 +149,18 @@ impl SourceTyper<'_> {
                 .synthetic_package_entries
                 .pop()
                 .expect("length checked");
+            if self.store.scopes.contains(scope) {
+                self.store.scopes.get_mut(scope).remove(symbol);
+            }
+        }
+    }
+
+    pub(super) fn rollback_synthetic_class_member_entries(&mut self, checkpoint: usize) {
+        while self.synthetic_class_member_entries.len() > checkpoint {
+            let (scope, symbol) = self
+                .synthetic_class_member_entries
+                .pop()
+                .expect("the class member entry list was checked before popping");
             if self.store.scopes.contains(scope) {
                 self.store.scopes.get_mut(scope).remove(symbol);
             }

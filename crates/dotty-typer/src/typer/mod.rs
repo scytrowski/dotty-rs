@@ -132,6 +132,7 @@ pub struct SourceTyper<'a> {
     expression_scopes: Vec<ExpressionScopeFrame>,
     expression_scope_owner: u64,
     synthetic_package_entries: Vec<(ScopeId, SymbolId)>,
+    synthetic_class_member_entries: Vec<(ScopeId, SymbolId)>,
 }
 
 /// Canonical identity for one successfully typed ordinary local value.
@@ -243,6 +244,7 @@ impl<'a> SourceTyper<'a> {
             expression_scopes: Vec::new(),
             expression_scope_owner: next_expression_scope_owner(),
             synthetic_package_entries: Vec::new(),
+            synthetic_class_member_entries: Vec::new(),
         }
     }
 
@@ -304,6 +306,7 @@ impl<'a> SourceTyper<'a> {
         let store_checkpoint = self.store.checkpoint();
         let resolver_checkpoint = self.resolver.checkpoint();
         let package_entry_checkpoint = self.synthetic_package_entries.len();
+        let class_member_entry_checkpoint = self.synthetic_class_member_entries.len();
         let type_index_checkpoint = self.type_index.checkpoint();
         let inferred_field_types_checkpoint = self.inferred_field_types_in_progress.clone();
         let mut info_journal = Vec::new();
@@ -315,6 +318,7 @@ impl<'a> SourceTyper<'a> {
                 }
             }
             self.rollback_synthetic_package_entries(package_entry_checkpoint);
+            self.rollback_synthetic_class_member_entries(class_member_entry_checkpoint);
             self.resolver.rollback_to(self.store, resolver_checkpoint);
             self.store.rollback_to(store_checkpoint);
             self.type_index.restore(type_index_checkpoint);

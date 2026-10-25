@@ -1,6 +1,8 @@
 //! Candidate discovery, filtering, and selection for callable overloads.
 
 use super::super::*;
+use dotty_core::types::MethodParam;
+use dotty_core::{Namespace, Symbol, SymbolLinks, TermName};
 
 #[derive(Clone, Copy)]
 enum ApplicationFunctionShape {
@@ -127,9 +129,18 @@ impl SourceTyper<'_> {
                 rejection: None,
             }]
         } else {
-            let members = self
+            let mut members = self
                 .lookup_overload_members_journaled(receiver, operator, info_journal)
                 .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+            if members.is_empty()
+                && self.store.names.resolve(operator.text()) == "+"
+                && let Some(string_class) = self.canonical_java_lang_string_class(receiver)
+                && self.ensure_java_lang_string_plus(string_class, receiver)?
+            {
+                members = self
+                    .lookup_overload_members_journaled(receiver, operator, info_journal)
+                    .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+            }
             if members.is_empty() && !self.any_equality_operator_name(operator) {
                 return Err(TyperError::MemberNotFound {
                     source: self.source,
@@ -323,6 +334,122 @@ impl SourceTyper<'_> {
         })
     }
 
+    /// Returns the class identity for the JDK's `java.lang.String`, without
+    /// accepting a same-spelled source or TASTy class as the compiler intrinsic.
+    fn canonical_java_lang_string_class(&self, receiver: TypeId) -> Option<SymbolId> {
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        }) = self.store.types.try_get(receiver)
+        else {
+            return None;
+        };
+        if !self.store.symbols.contains(*class) {
+            return None;
+        }
+        let string = self.store.symbols.get(*class);
+        if string.kind != SymbolKind::Class
+            || !matches!(string.origin, SymbolOrigin::Classfile(_))
+            || !string.name.is_type()
+            || self.store.names.resolve(string.name.text()) != "String"
+        {
+            return None;
+        }
+        let lang = string.owner?;
+        if !self.store.symbols.contains(lang) {
+            return None;
+        }
+        let lang_symbol = self.store.symbols.get(lang);
+        if lang_symbol.kind != SymbolKind::Package
+            || !lang_symbol.name.is_term()
+            || self.store.names.resolve(lang_symbol.name.text()) != "lang"
+        {
+            return None;
+        }
+        let java = lang_symbol.owner?;
+        if !self.store.symbols.contains(java) {
+            return None;
+        }
+        let java_symbol = self.store.symbols.get(java);
+        if java_symbol.kind != SymbolKind::Package
+            || !java_symbol.name.is_term()
+            || self.store.names.resolve(java_symbol.name.text()) != "java"
+        {
+            return None;
+        }
+        let root = java_symbol.owner?;
+        if !self.store.symbols.contains(root) {
+            return None;
+        }
+        let root_symbol = self.store.symbols.get(root);
+        (root_symbol.kind == SymbolKind::Package
+            && root_symbol.name.is_term()
+            && self.store.names.resolve(root_symbol.name.text()).is_empty()
+            && root_symbol.owner.is_none())
+        .then_some(*class)
+    }
+
+    /// Installs Scala 3.9's compiler-synthesized `String.+(Any): String` on
+    /// the already-validated JDK class when the classfile member index omits it.
+    fn ensure_java_lang_string_plus(
+        &mut self,
+        string_class: SymbolId,
+        string_type: TypeId,
+    ) -> Result<bool, TyperError> {
+        let name = Name::new(self.store.names.intern("+"), Namespace::Term);
+        let SymbolInfo::Complete(class_info_id) = self.store.symbols.get(string_class).info else {
+            return Ok(false);
+        };
+        let Some(Type::ClassInfo(class_info)) = self.store.types.try_get(class_info_id) else {
+            return Ok(false);
+        };
+        if class_info.class != string_class || !self.store.scopes.contains(class_info.declarations)
+        {
+            return Ok(false);
+        }
+        let declarations = class_info.declarations;
+        let declaration_scope = self.store.scopes.get(declarations);
+        if declaration_scope.owner != Some(string_class) {
+            return Ok(false);
+        }
+        if declaration_scope.lookup_all(&name).iter().any(|symbol| {
+            self.store.symbols.contains(*symbol)
+                && self.store.symbols.get(*symbol).kind == SymbolKind::Method
+        }) {
+            return Ok(false);
+        }
+        if !declaration_scope.lookup_all(&name).is_empty() {
+            return Ok(false);
+        }
+
+        let method_info = self.store.types.alloc(Type::Method(MethodType {
+            params: vec![MethodParam {
+                name: TermName::new(self.store.names.intern("other")),
+                ty: self.definitions.any_type,
+                erased: false,
+                varargs: false,
+            }],
+            result: string_type,
+            kind: MethodKind::Plain,
+        }));
+        let symbol = self.store.symbols.alloc(Symbol {
+            name,
+            owner: Some(string_class),
+            kind: SymbolKind::Method,
+            flags: SymbolFlags::FINAL,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Complete(method_info),
+            origin: SymbolOrigin::Builtin,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        self.store.scopes.get_mut(declarations).enter(name, symbol);
+        self.synthetic_class_member_entries
+            .push((declarations, symbol));
+        Ok(true)
+    }
+
     fn require_compatible_universal_equality(
         &mut self,
         left: TypeId,
@@ -495,6 +622,24 @@ impl SourceTyper<'_> {
                             return Err(TyperError::MemberLookup(Box::new(error)));
                         }
                     };
+                    if members.is_empty()
+                        && !java_class_qualifier
+                        && self.store.names.resolve(selection.name.text()) == "+"
+                        && let Some(string_class) =
+                            self.canonical_java_lang_string_class(receiver_view)
+                        && self.ensure_java_lang_string_plus(string_class, receiver_view)?
+                    {
+                        members = match self.lookup_overload_members_journaled(
+                            receiver_view,
+                            selection.name,
+                            info_journal,
+                        ) {
+                            Ok(members) => members,
+                            Err(error) => {
+                                return Err(TyperError::MemberLookup(Box::new(error)));
+                            }
+                        };
+                    }
                     if java_class_qualifier {
                         members.retain(|member| {
                             self.store.symbols.contains(member.symbol)
