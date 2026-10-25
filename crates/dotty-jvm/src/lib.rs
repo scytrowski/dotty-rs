@@ -326,6 +326,32 @@ pub struct JvmMethodDispatchMetadata {
     descriptor: JvmMethodDescriptor,
 }
 
+/// Getter or setter role of an effective JVM accessor method.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum JvmAccessorDispatchRole {
+    /// Public generated getter for a Scala `val` or `var`.
+    Getter,
+    /// Public generated setter for a Scala `var`.
+    Setter,
+}
+
+/// Read-only effective dispatch identity for one generated accessor method.
+///
+/// Accessors retain their canonical source field as provenance instead of
+/// inventing a source method symbol. Conflicting declarations remain separate
+/// entries so later validation can inspect the collision without treating it
+/// as an override.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmAccessorDispatchMetadata {
+    receiver_class: SymbolId,
+    declaring_class: SymbolId,
+    field: SymbolId,
+    role: JvmAccessorDispatchRole,
+    name: String,
+    descriptor: JvmMethodDescriptor,
+    access_flags: dotty_classfile::access_flags::MethodAccessFlags,
+}
+
 /// Class identity paired with declared method metadata and an effective
 /// dispatch view. `methods` remains in class-plan order and excludes inherited
 /// declarations; unit-aware projections populate `dispatch_methods`.
@@ -339,6 +365,7 @@ pub struct JvmClassMetadata {
     accessors: Vec<JvmAccessorMetadata>,
     methods: Vec<JvmMethodMetadata>,
     dispatch_methods: Vec<JvmMethodDispatchMetadata>,
+    dispatch_accessors: Vec<JvmAccessorDispatchMetadata>,
 }
 
 /// A frontend-issued binding from one canonical field to its exact typed
@@ -1936,6 +1963,15 @@ impl JvmClassMetadata {
         &self.dispatch_methods
     }
 
+    /// Effective generated getter/setter methods reachable on this receiver.
+    ///
+    /// Entries retain the declaring class and canonical source field. Getter
+    /// and setter roles are distinct, inherited entries are never copied into
+    /// [`Self::accessors`], and this view does not enable class-file emission.
+    pub fn dispatch_accessors(&self) -> &[JvmAccessorDispatchMetadata] {
+        &self.dispatch_accessors
+    }
+
     /// Validated instance field metadata in the class plan's source order.
     pub fn fields(&self) -> &[JvmFieldMetadata] {
         &self.fields
@@ -2334,6 +2370,43 @@ impl JvmMethodDispatchMetadata {
     /// Exact JVM method descriptor.
     pub const fn descriptor(&self) -> &JvmMethodDescriptor {
         &self.descriptor
+    }
+}
+
+impl JvmAccessorDispatchMetadata {
+    /// Receiver class whose effective accessor view contains this entry.
+    pub const fn receiver_class(&self) -> SymbolId {
+        self.receiver_class
+    }
+
+    /// Class that declares the source field and generated accessor method.
+    pub const fn declaring_class(&self) -> SymbolId {
+        self.declaring_class
+    }
+
+    /// Canonical source field symbol; no source method symbol is fabricated.
+    pub const fn field(&self) -> SymbolId {
+        self.field
+    }
+
+    /// Whether the entry denotes the getter or setter role.
+    pub const fn role(&self) -> JvmAccessorDispatchRole {
+        self.role
+    }
+
+    /// JVM-safe generated accessor method name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Exact JVM method descriptor.
+    pub const fn descriptor(&self) -> &JvmMethodDescriptor {
+        &self.descriptor
+    }
+
+    /// Validated method access flags.
+    pub const fn access_flags(&self) -> dotty_classfile::access_flags::MethodAccessFlags {
+        self.access_flags
     }
 }
 

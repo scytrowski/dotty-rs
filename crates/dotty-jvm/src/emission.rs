@@ -31,6 +31,7 @@ pub(super) fn emit_class(
         })?;
 
     let all_metadata = unit.metadata(definitions)?;
+    super::identity::validate_accessor_inheritance_for_emission(&all_metadata)?;
     let metadata = all_metadata
         .iter()
         .find(|metadata| metadata.identity().symbol() == class_symbol)

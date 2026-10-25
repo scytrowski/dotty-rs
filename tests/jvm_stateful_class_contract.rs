@@ -3919,7 +3919,7 @@ fn constructor_accessor_metadata_rejects_user_setter_signature_collisions() {
 }
 
 #[test]
-fn accessor_bearing_subclass_is_rejected_before_inherited_method_validation() {
+fn accessor_getter_remains_separate_from_an_inherited_final_source_method() {
     with_source(
         "class Parent { final def id(): Int = 1 }\nclass Child(val id: Int) extends Parent",
         |ast, source, index, definitions, typer| {
@@ -4018,16 +4018,39 @@ fn accessor_bearing_subclass_is_rejected_before_inherited_method_validation() {
                 ],
             }
             .metadata(definitions);
-            assert!(
-                matches!(
-                    &result,
-                    Err(dotty_jvm::JvmCodegenError::UnsupportedJvmAccessorInheritance {
-                        class: found_class,
-                        parent: found_parent,
-                    }) if *found_class == child && *found_parent == parent
-                ),
-                "unexpected result: {result:?}"
+            let metadata = result.expect("read-only metadata projects child accessors");
+            let parent_metadata = metadata
+                .iter()
+                .find(|class| class.identity().symbol() == parent)
+                .unwrap();
+            let child_metadata = metadata
+                .iter()
+                .find(|class| class.identity().symbol() == child)
+                .unwrap();
+            let parent_method = parent_metadata
+                .methods()
+                .iter()
+                .find(|method| method.name() == "id")
+                .expect("Parent declares the final source method");
+            let inherited_method = child_metadata
+                .dispatch_methods()
+                .iter()
+                .find(|method| method.name() == "id")
+                .expect("ordinary final method remains in the ordinary dispatch view");
+            let generated_getter = child_metadata
+                .dispatch_accessors()
+                .iter()
+                .find(|entry| entry.name() == "id")
+                .expect("generated getter remains separate collision evidence");
+            assert_eq!(inherited_method.method(), parent_method.symbol());
+            assert_eq!(inherited_method.descriptor().as_str(), "()I");
+            assert_eq!(generated_getter.descriptor().as_str(), "()I");
+            assert_eq!(generated_getter.field(), field);
+            assert_eq!(
+                generated_getter.role(),
+                dotty_jvm::JvmAccessorDispatchRole::Getter
             );
+            assert_eq!(generated_getter.declaring_class(), child);
         },
     );
 }

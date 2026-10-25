@@ -13,9 +13,10 @@ use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, SymbolOrigin, Vis
 use dotty_core::types::{Type, TypeRefTarget};
 
 use crate::{
-    InvalidJvmClassInfoKind, JvmAccessorMetadata, JvmAccessorMethodMetadata, JvmClassIdentity,
-    JvmClassMetadata, JvmCodegenError, JvmConstructorAccessorBinding, JvmFieldMetadata,
-    JvmFieldPlan, JvmMethodDescriptor, JvmMethodDispatchMetadata, JvmMethodMetadata, JvmNameKind,
+    InvalidJvmClassInfoKind, JvmAccessorDispatchMetadata, JvmAccessorDispatchRole,
+    JvmAccessorMetadata, JvmAccessorMethodMetadata, JvmClassIdentity, JvmClassMetadata,
+    JvmCodegenError, JvmConstructorAccessorBinding, JvmFieldMetadata, JvmFieldPlan,
+    JvmMethodDescriptor, JvmMethodDispatchMetadata, JvmMethodMetadata, JvmNameKind,
     JvmOverrideIssue, JvmParameterLocal, JvmReturnType, JvmType, UnsupportedJvmClassKind,
     UnsupportedJvmFieldFlag, UnsupportedJvmSymbolFlag,
 };
@@ -708,6 +709,7 @@ pub(super) fn class_metadata(
         fields,
         methods,
         dispatch_methods: Vec::new(),
+        dispatch_accessors: Vec::new(),
     })
 }
 
@@ -1390,27 +1392,6 @@ pub(super) fn unit_metadata(
     let hierarchy = unit_hierarchy(unit, definitions)?;
     let class_identities = unit_class_identities(unit)?;
     let mut metadata = Vec::with_capacity(unit.classes.len());
-    for plan in &unit.classes {
-        let crate::JvmClassInitializationPlan::PrimaryConstructor(constructor) =
-            &plan.initialization
-        else {
-            continue;
-        };
-        if constructor.accessor_bindings().is_empty() {
-            continue;
-        }
-        let superclass = hierarchy
-            .superclasses()
-            .iter()
-            .find(|superclass| superclass.class() == plan.class)
-            .expect("every validated class has one direct superclass");
-        if superclass.parent() != definitions.object_class {
-            return Err(JvmCodegenError::UnsupportedJvmAccessorInheritance {
-                class: plan.class,
-                parent: superclass.parent(),
-            });
-        }
-    }
     for class_plan in &unit.classes {
         let superclass = hierarchy
             .superclasses()
@@ -1427,25 +1408,6 @@ pub(super) fn unit_metadata(
             Some(unit),
         )?;
         metadata.push(class);
-    }
-    for child in &metadata {
-        let Some(superclass) = child.superclass() else {
-            continue;
-        };
-        let parent = superclass.parent();
-        if parent == definitions.object_class {
-            continue;
-        }
-        let parent_has_accessors = metadata
-            .iter()
-            .find(|candidate| candidate.identity().symbol() == parent)
-            .is_some_and(|candidate| !candidate.accessors().is_empty());
-        if !child.accessors().is_empty() || parent_has_accessors {
-            return Err(JvmCodegenError::UnsupportedJvmAccessorInheritance {
-                class: child.identity().symbol(),
-                parent,
-            });
-        }
     }
     validate_final_parent_method_collisions(unit, &metadata)?;
     validate_and_build_method_dispatch(unit, definitions, &mut metadata)?;
@@ -1661,6 +1623,45 @@ fn validate_and_build_method_dispatch(
     for (class, dispatch) in metadata.iter_mut().zip(dispatch_by_class) {
         class.dispatch_methods = dispatch;
     }
+
+    let mut accessor_dispatch_by_class = Vec::with_capacity(metadata.len());
+    for class in metadata.iter() {
+        let mut active = HashSet::new();
+        accessor_dispatch_by_class.push(effective_dispatch_accessors(
+            class.identity().symbol(),
+            class.identity().symbol(),
+            unit,
+            metadata,
+            &mut active,
+        )?);
+    }
+    for (class, dispatch) in metadata.iter_mut().zip(accessor_dispatch_by_class) {
+        class.dispatch_accessors = dispatch;
+    }
+    Ok(())
+}
+
+/// Keeps accessor-bearing ancestry available to read-only metadata callers,
+/// while preserving the closed class-file publication boundary.
+pub(super) fn validate_accessor_inheritance_for_emission(
+    metadata: &[JvmClassMetadata],
+) -> Result<(), JvmCodegenError> {
+    for child in metadata {
+        let Some(superclass) = child.superclass() else {
+            continue;
+        };
+        let parent = superclass.parent();
+        if let Some(parent_metadata) = metadata
+            .iter()
+            .find(|candidate| candidate.identity().symbol() == parent)
+            && (!child.accessors().is_empty() || !parent_metadata.accessors().is_empty())
+        {
+            return Err(JvmCodegenError::UnsupportedJvmAccessorInheritance {
+                class: child.identity().symbol(),
+                parent,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -1873,6 +1874,101 @@ fn effective_dispatch_methods(
         }
     }
     Ok(methods)
+}
+
+fn effective_dispatch_accessors(
+    class: dotty_core::SymbolId,
+    receiver: dotty_core::SymbolId,
+    unit: &crate::JvmCompilationUnit<'_>,
+    metadata: &[JvmClassMetadata],
+    active: &mut HashSet<dotty_core::SymbolId>,
+) -> Result<Vec<JvmAccessorDispatchMetadata>, JvmCodegenError> {
+    if !active.insert(class) {
+        return Err(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: None,
+            issue: crate::JvmSuperclassIssue::InheritanceCycle,
+        });
+    }
+    let class_metadata = metadata
+        .iter()
+        .find(|candidate| candidate.identity().symbol() == class)
+        .ok_or(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: None,
+            issue: crate::JvmSuperclassIssue::ParentNotPlanned,
+        })?;
+    let mut accessors = match class_metadata.superclass() {
+        Some(superclass)
+            if metadata
+                .iter()
+                .any(|candidate| candidate.identity().symbol() == superclass.parent()) =>
+        {
+            effective_dispatch_accessors(superclass.parent(), receiver, unit, metadata, active)?
+        }
+        _ => Vec::new(),
+    };
+    active.remove(&class);
+
+    let class_info = class_info(unit.store, class)?;
+    let declarations = unit
+        .store
+        .scopes
+        .get(class_info.declarations)
+        .entered_symbols()
+        .collect::<HashSet<_>>();
+    let mut seen_fields = HashSet::new();
+    for accessor in class_metadata.accessors() {
+        let field = accessor.source_field();
+        let source = unit
+            .store
+            .symbols
+            .contains(field)
+            .then(|| unit.store.symbols.get(field))
+            .ok_or(JvmCodegenError::InvalidClassDeclaration {
+                class,
+                symbol: field,
+            })?;
+        if source.kind != SymbolKind::Field || source.owner != Some(class) {
+            return Err(JvmCodegenError::WrongOwner {
+                symbol: field,
+                expected: class,
+                actual: source.owner,
+            });
+        }
+        if !declarations.contains(&field) || !seen_fields.insert(field) {
+            return Err(JvmCodegenError::InvalidClassDeclaration {
+                class,
+                symbol: field,
+            });
+        }
+        let getter = accessor.getter();
+        if getter.access_flags().is_public() {
+            accessors.push(JvmAccessorDispatchMetadata {
+                receiver_class: receiver,
+                declaring_class: class,
+                field,
+                role: JvmAccessorDispatchRole::Getter,
+                name: getter.name().to_owned(),
+                descriptor: getter.descriptor().clone(),
+                access_flags: getter.access_flags(),
+            });
+        }
+        if let Some(setter) = accessor.setter()
+            && setter.access_flags().is_public()
+        {
+            accessors.push(JvmAccessorDispatchMetadata {
+                receiver_class: receiver,
+                declaring_class: class,
+                field,
+                role: JvmAccessorDispatchRole::Setter,
+                name: setter.name().to_owned(),
+                descriptor: setter.descriptor().clone(),
+                access_flags: setter.access_flags(),
+            });
+        }
+    }
+    Ok(accessors)
 }
 
 fn validate_final_parent_method_collisions(
