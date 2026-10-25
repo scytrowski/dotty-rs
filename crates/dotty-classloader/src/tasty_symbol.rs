@@ -4791,7 +4791,7 @@ mod tests {
         let mut attempted_package_alias = false;
         let result = decode_with_resolvers(
             &bytes,
-            &BinaryName::from_internal("review/Child"),
+            &BinaryName::from_internal("review/FullyQualifiedOwnerChild"),
             |owner, alias| {
                 attempted_package_alias = true;
                 assert_eq!(owner.as_internal(), "review/Owner/package$");
