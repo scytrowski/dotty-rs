@@ -10525,6 +10525,22 @@ class Reader:
             (0xb5, "BodyOnly", "ratio", "D"),
         ],
     );
+    for (method, opcode, field, descriptor) in [
+        ("seed", 0xb4, "seed", "I"),
+        ("enabled", 0xb4, "enabled", "Z"),
+        ("enabled_$eq", 0xb5, "enabled", "Z"),
+        ("ratio", 0xb4, "ratio", "D"),
+        ("ratio_$eq", 0xb5, "ratio", "D"),
+    ] {
+        assert_field_reference(
+            &body_only,
+            emitted_method_code(&body_only, method),
+            opcode,
+            "BodyOnly",
+            field,
+            descriptor,
+        );
+    }
     assert_invocation_sequence(
         &body_only,
         emitted_method_code(&body_only, "<init>"),
@@ -10540,6 +10556,21 @@ class Reader:
             (0xb5, "Counter", "internal", "Z"),
         ],
     );
+    for (method, opcode, field, descriptor) in [
+        ("id", 0xb4, "id", "I"),
+        ("initial", 0xb4, "initial", "I"),
+        ("current", 0xb4, "current", "J"),
+        ("current_$eq", 0xb5, "current", "J"),
+    ] {
+        assert_field_reference(
+            &counter,
+            emitted_method_code(&counter, method),
+            opcode,
+            "Counter",
+            field,
+            descriptor,
+        );
+    }
     assert_invocation_sequence(
         &counter,
         emitted_method_code(&counter, "<init>"),
