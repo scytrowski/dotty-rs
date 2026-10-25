@@ -221,6 +221,29 @@ impl SourceTyper<'_> {
         if self.store.symbols.get(candidate.symbol).kind != SymbolKind::Method {
             return Ok((function, callable));
         }
+        let declaration = self.store.symbols.get(candidate.symbol);
+        let accessible = match declaration.visibility {
+            Visibility::Public => true,
+            Visibility::Private => {
+                let same_owner = match self.enclosing_this_owner(
+                    None,
+                    request.context.owner,
+                    request.tree_index,
+                ) {
+                    Ok(current_class) => candidate.declaring_class == current_class,
+                    Err(TyperError::ThisOwnerNotEnclosing { .. }) => false,
+                    Err(error) => return Err(error),
+                };
+                same_owner && self.is_plain_private_source_method(candidate.symbol)
+            }
+            Visibility::Protected
+            | Visibility::Package(_)
+            | Visibility::PrivateWithin(_)
+            | Visibility::ProtectedWithin(_) => false,
+        };
+        if !accessible {
+            return Ok((function, callable));
+        }
 
         let member_type = self.member_type_on_journaled(candidate, info_journal)?;
         let is_callable_method = match self.store.types.try_get(member_type) {
@@ -245,6 +268,22 @@ impl SourceTyper<'_> {
         let selected_function = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .select(function, apply_name, false, selected_type, position);
         Ok((selected_function, member_type))
+    }
+
+    fn is_plain_private_source_method(&self, symbol: SymbolId) -> bool {
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(symbol)
+        else {
+            return false;
+        };
+        if source != self.source {
+            return false;
+        }
+        matches!(
+            self.arena.try_get(tree).map(|node| &node.kind),
+            Some(TreeKind::DefDef(definition))
+                if definition.metadata.visibility
+                    == Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
+        )
     }
 
     pub(in crate::typer) fn type_resolved_application(

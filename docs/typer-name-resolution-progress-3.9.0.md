@@ -16,24 +16,34 @@ module without `apply` still reports `ApplicationCalleeNotMethod`; ambiguous
 module `apply` candidates remain explicitly deferred.
 
 The focused regression exercises generic `Factory.apply[A]`, checks the
-selected source method identity and inferred `Int` result, and confirms that a
-non-callable module is rejected. The deterministic `package-term` audit used
+selected source method identity and inferred `Int` result, accepts plain
+`private apply` from its declaring module, rejects unrelated private/protected
+apply methods, and confirms that a non-callable module is rejected. Other
+non-public visibility forms remain unsupported by this implicit selection.
+The deterministic `package-term` audit used
 the same 60 files and 369 methods in both runs. The normalized reports and
 369-row cohort TSVs matched exactly. Both runs had no parser or namer failures
-and typed zero complete methods. Exactly the three `InlineInfoAttribute`
-first-blocker rows advanced: `ApplicationCalleeNotMethod` moved from 8 to 5,
-and `MemberNotFound` moved from 3 to 6; all other first blockers were
-unchanged. `nextByte`, `nextUTF8`, and `nextShort` now pass the `Some(...)`
-application and stop later in the enclosing `read#tree=420` attempt at
-`MemberNotFound` while typing the argument expression `name + desc`. This is
-measured blocker progress, not a fully typed real method. The changed rows are
-recorded in
+and typed zero complete methods. Eight frozen cohort rows advanced, all from
+`ApplicationCalleeNotMethod`:
+
+| Frozen row(s) | New first blocker | Evidence reached |
+| --- | --- | --- |
+| `InlineInfoAttribute.scala#tree=212,226,239` (`nextByte`, `nextUTF8`, `nextShort`) | `MemberNotFound` | `Some(...)` selects its companion `apply`; the enclosing `read#tree=420` attempt next fails while typing `name + desc`. |
+| `ScalaVersion.scala#tree=234,254,264,335` | `UnsupportedExpression::InterpolatedString` | `Failure(...)` in `parse#tree=394` proceeds past module `apply` and reaches the interpolated failure message. |
+| `MacroClassLoader.scala#tree=115` | `OverloadedSelectionDeferred` | `Option(...)` in `makeMacroClassLoader#tree=165` proceeds past module `apply`; the enclosing attempt next defers an overloaded selection. |
+
+Aggregate first-blocker counts changed from `ApplicationCalleeNotMethod` 8 to
+0, `MemberNotFound` 3 to 6, `UnsupportedExpression::InterpolatedString` 0 to
+4, and `OverloadedSelectionDeferred` 1 to 2. All other first blockers were
+unchanged. These are measured blocker transitions, not fully typed real
+methods. The eight changed rows are recorded in
 [`typer-name-resolution-1566-module-apply-3.9.0.tsv`](typer-name-resolution-1566-module-apply-3.9.0.tsv).
+
 The deterministic 3-file / 31-method smoke audit also remained byte-for-byte
-stable across its two runs. One `StringParsers.parseInt#tree=482` row advances
-from `ApplicationCalleeNotMethod` to `ApplicationArgumentConformanceUnsupported`
-after resolving a module `apply`; the pinned smoke baseline records this
-intentional later blocker.
+stable across its two runs. Outside the frozen cohort,
+`StringParsers.parseInt#tree=482` advances from `ApplicationCalleeNotMethod` to
+`ApplicationArgumentConformanceUnsupported` after resolving module `apply`;
+the pinned smoke baseline records this intentional later blocker.
 
 Reproduce the deterministic cohort comparison with:
 

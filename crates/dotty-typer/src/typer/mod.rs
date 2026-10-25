@@ -29513,14 +29513,20 @@ mod tests {
     #[test]
     fn application_of_a_module_value_selects_its_unique_apply_method() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "object Factory { def apply[A](value: A): A = value }; object NotCallable {}; object Use { def create(value: Int): Int = Factory(value); def invalid = NotCallable() }",
+            "object Factory { def apply[A](value: A): A = value }; object NotCallable {}; object PrivateFactory { private def apply(value: Int): Int = value; def sameOwner(value: Int): Int = PrivateFactory(value) }; object ProtectedFactory { protected def apply(value: Int): Int = value }; object Use { def create(value: Int): Int = Factory(value); def invalid = NotCallable(); def privateInvalid(value: Int): Int = PrivateFactory(value); def protectedInvalid(value: Int): Int = ProtectedFactory(value) }",
         );
         let (factory_apply, _) =
             method_definition_and_rhs(&parsed, &store, &index, source, "apply");
         let (create, create_rhs) =
             method_definition_and_rhs(&parsed, &store, &index, source, "create");
+        let (same_owner, same_owner_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "sameOwner");
         let (invalid, invalid_rhs) =
             method_definition_and_rhs(&parsed, &store, &index, source, "invalid");
+        let (private_invalid, private_invalid_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "privateInvalid");
+        let (protected_invalid, protected_invalid_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "protectedInvalid");
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -29548,9 +29554,27 @@ mod tests {
             } if *symbol == factory_apply
         ));
 
+        let same_owner_context = typer.expression_context_for(same_owner).unwrap();
+        let typed_same_owner = typer
+            .type_expression(same_owner_rhs, same_owner_context)
+            .unwrap();
+        assert_eq!(typer.typed_ast().get(typed_same_owner).ty, definitions.int);
+
         let invalid_context = typer.expression_context_for(invalid).unwrap();
         assert!(matches!(
             typer.type_expression(invalid_rhs, invalid_context),
+            Err(TyperError::ApplicationCalleeNotMethod { .. })
+        ));
+
+        let private_context = typer.expression_context_for(private_invalid).unwrap();
+        assert!(matches!(
+            typer.type_expression(private_invalid_rhs, private_context),
+            Err(TyperError::ApplicationCalleeNotMethod { .. })
+        ));
+
+        let protected_context = typer.expression_context_for(protected_invalid).unwrap();
+        assert!(matches!(
+            typer.type_expression(protected_invalid_rhs, protected_context),
             Err(TyperError::ApplicationCalleeNotMethod { .. })
         ));
     }
