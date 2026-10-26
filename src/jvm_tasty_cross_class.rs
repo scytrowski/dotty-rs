@@ -481,12 +481,20 @@ pub fn validate_cross_class_method_ref(
         ));
     }
 
-    let counter_get_body = counter_get_definition
-        .rhs
-        .and_then(|rhs| source_typed_index.get(source_id, rhs))
-        .ok_or(CrossClassMethodRefError::TypedBinding(
-            "Counter.get body has no source-to-typed binding",
-        ))?;
+    let counter_get_rhs =
+        counter_get_definition
+            .rhs
+            .ok_or(CrossClassMethodRefError::SourceShape(
+                "Counter.get must have a concrete body",
+            ))?;
+    if source_ast.try_get(counter_get_rhs).is_none() {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "Counter.get source body root is stale",
+        ));
+    }
+    let counter_get_body = source_typed_index.get(source_id, counter_get_rhs).ok_or(
+        CrossClassMethodRefError::TypedBinding("Counter.get body has no source-to-typed binding"),
+    )?;
     if typed_ast.try_get(counter_get_body).is_none() {
         return Err(CrossClassMethodRefError::TypedBinding(
             "Counter.get typed body root is stale",

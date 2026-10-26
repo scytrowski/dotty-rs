@@ -578,6 +578,39 @@ fn cross_class_call_types_canonically_before_the_paired_planner_rejects_it() {
         CrossClassMethodRefError::TypedBinding("Counter.get typed body root is stale")
     );
 
+    let mut stale_counter_source_ast = clone_untyped_ast(&parsed.ast);
+    let checkpoint = stale_counter_source_ast.checkpoint();
+    let stale_counter_source_rhs =
+        stale_counter_source_ast.alloc(stale_counter_source_ast.get(get_rhs).clone());
+    stale_counter_source_ast.rollback_to(checkpoint);
+    let TreeKind::DefDef(stale_counter_source_definition) =
+        &mut stale_counter_source_ast.get_mut(get_tree).kind
+    else {
+        unreachable!("Counter.get is a source method")
+    };
+    stale_counter_source_definition.rhs = Some(stale_counter_source_rhs);
+    let mut stale_counter_source_index = typer.source_typed_index().clone();
+    stale_counter_source_index.remove(source_id, get_rhs);
+    stale_counter_source_index
+        .insert(source_id, stale_counter_source_rhs, typed_get_rhs)
+        .unwrap();
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &stale_counter_source_ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &index,
+            source_typed_index: &stale_counter_source_index,
+            jvm_unit: &jvm_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::SourceShape("Counter.get source body root is stale")
+    );
+
     let mut stale_child_ast = clone_typed_ast(typer.typed_ast());
     let checkpoint = stale_child_ast.checkpoint();
     let stale_child = stale_child_ast.alloc(stale_child_ast.get(typed_rhs).clone());
