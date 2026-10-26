@@ -183,6 +183,7 @@ impl<'a> PicklePlan<'a> {
             limits,
             remaining: limits.max_items,
             class_members: None,
+            reference_fields: &[],
             planned_class_symbols: &[],
             local_bindings: HashMap::new(),
             registered_local_symbols: HashSet::new(),
@@ -206,6 +207,7 @@ pub(crate) fn validate_class_state_method(
     class: &crate::ClassStatePicklePlan<'_>,
     methods: &[MethodPicklePlan],
     local_values: &[LocalValueBinding],
+    reference_fields: &[SymbolId],
 ) -> Result<(), PickleError> {
     let constructor = DefaultConstructorPlan {
         symbol: class.constructor.symbol,
@@ -233,6 +235,7 @@ pub(crate) fn validate_class_state_method(
         limits: ValidationLimits::default(),
         remaining: ValidationLimits::default().max_items,
         class_members: Some(class.members),
+        reference_fields,
         planned_class_symbols: class.typed_bindings.planned_class_symbols(),
         local_bindings: HashMap::new(),
         registered_local_symbols: HashSet::new(),
@@ -272,6 +275,7 @@ struct Validator<'p, 'a> {
     limits: ValidationLimits,
     remaining: usize,
     class_members: Option<&'a [ClassMemberPicklePlan]>,
+    reference_fields: &'a [SymbolId],
     planned_class_symbols: &'a [SymbolId],
     local_bindings: HashMap<TreeId<Untyped>, LocalValueBinding>,
     registered_local_symbols: HashSet<SymbolId>,

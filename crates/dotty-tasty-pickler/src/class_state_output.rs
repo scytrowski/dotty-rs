@@ -174,6 +174,7 @@ fn method_input(
 
 pub(crate) fn validate_class_state_method_bodies(
     p: &crate::ClassStatePicklePlan<'_>,
+    reference_fields: &[SymbolId],
 ) -> Result<(), PickleError> {
     let method_inputs = p
         .members
@@ -195,14 +196,18 @@ pub(crate) fn validate_class_state_method_bodies(
         .iter()
         .flat_map(|(_, locals)| locals.iter().copied())
         .collect::<Vec<_>>();
-    crate::plan::validate_class_state_method(p, &methods, &local_values)
+    crate::plan::validate_class_state_method(p, &methods, &local_values, reference_fields)
 }
 
 impl ValidatedClassStatePlan<'_, '_> {
     /// Validate every method's source and typed body against the complete
     /// class-state TASTy subset without emitting bytes.
     pub fn validate_method_bodies(&self) -> Result<(), PickleError> {
-        validate_class_state_method_bodies(self.plan())
+        let reference_fields = self
+            .same_batch_reference_fields()
+            .map(|field| field.field())
+            .collect::<Vec<_>>();
+        validate_class_state_method_bodies(self.plan(), &reference_fields)
     }
 
     /// Emit complete Scala 3.9 TASTy for the validated class-state fields.
@@ -264,7 +269,11 @@ impl ValidatedClassStatePlan<'_, '_> {
             .iter()
             .flat_map(|(_, locals)| locals.iter().copied())
             .collect::<Vec<_>>();
-        crate::plan::validate_class_state_method(p, &methods, &local_values)?;
+        let reference_fields = self
+            .same_batch_reference_fields()
+            .map(|field| field.field())
+            .collect::<Vec<_>>();
+        crate::plan::validate_class_state_method(p, &methods, &local_values, &reference_fields)?;
 
         let mut context = EncodingContext::new(
             p.store,

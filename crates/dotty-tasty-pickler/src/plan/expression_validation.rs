@@ -464,7 +464,13 @@ impl Validator<'_, '_> {
                 ty: result_type,
             });
         }
-        if result_type != p.definitions.int && result_type != p.definitions.boolean {
+        let immutable_planned_reference_field = self.reference_fields.contains(&target)
+            && record.flags.is_empty()
+            && self.is_planned_sibling_class_type(field.declared_type, None);
+        if result_type != p.definitions.int
+            && result_type != p.definitions.boolean
+            && !immutable_planned_reference_field
+        {
             return Err(PickleError::UnsupportedTypeReference { ty: result_type });
         }
         if !matches!(self.ty(prefix)?, Type::ThisType { class } if *class == p.class) {
@@ -603,16 +609,38 @@ impl Validator<'_, '_> {
                 ty: typed_receiver.ty,
             });
         };
-        if *receiver_prefix != p.definitions.no_prefix
-            || !matches!(self.ty(*receiver_prefix)?, Type::NoPrefix)
-            || !method
-                .parameter_clauses
-                .iter()
-                .flatten()
-                .any(|parameter| parameter == receiver_symbol)
-            || self.symbol(*receiver_symbol)?.owner != Some(method.symbol)
-            || self.symbol(*receiver_symbol)?.name != source_ident.name
-        {
+        let receiver_is_parameter = method
+            .parameter_clauses
+            .iter()
+            .flatten()
+            .any(|parameter| parameter == receiver_symbol);
+        if receiver_is_parameter {
+            if *receiver_prefix != p.definitions.no_prefix
+                || !matches!(self.ty(*receiver_prefix)?, Type::NoPrefix)
+                || self.symbol(*receiver_symbol)?.owner != Some(method.symbol)
+                || self.symbol(*receiver_symbol)?.name != source_ident.name
+            {
+                return Err(PickleError::Reference {
+                    symbol: *receiver_symbol,
+                    reason: crate::ReferenceError::Owner,
+                });
+            }
+        } else if self.reference_fields.contains(receiver_symbol) {
+            if self.unqualified_name_is_shadowed(source_ident.name, method) {
+                return Err(PickleError::Reference {
+                    symbol: *receiver_symbol,
+                    reason: crate::ReferenceError::NotRegistered,
+                });
+            }
+            let receiver_type = self.complete(*receiver_symbol)?;
+            self.same_class_field_target(
+                *receiver_symbol,
+                source_ident.name,
+                *receiver_prefix,
+                typed_select.qualifier,
+                receiver_type,
+            )?;
+        } else {
             return Err(PickleError::Reference {
                 symbol: *receiver_symbol,
                 reason: crate::ReferenceError::Owner,
