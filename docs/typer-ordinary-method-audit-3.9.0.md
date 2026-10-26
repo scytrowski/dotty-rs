@@ -28,15 +28,12 @@ The #1680 seven-file sample remains a separate historical measurement of 36
 local methods and 0 typed. These counts do not estimate ordinary member-method
 coverage.
 
-These are frozen checked-in baseline artifacts, not reruns from this worktree.
-This environment does not contain the pinned Scala checkout or its JDK/classpath
-cache, so the three-file smoke and two frozen cohorts could not be re-executed
-against this implementation here. The historical files were left untouched;
-re-run the focused three-file smoke documented in
-[`typer-focused-audit-3.9.0.md`](typer-focused-audit-3.9.0.md), plus
-`--focused-cohort package-term` and `--focused-cohort object-module`, in a
-configured audit environment before using the PR as a refreshed corpus
-measurement.
+These are frozen checked-in baseline artifacts, not reruns from the original
+ordinary-audit worktree. At that time the pinned Scala checkout and JDK/classpath
+cache were unavailable, so the historical controls could not be re-executed.
+The follow-up closeout in
+[`typer-real-method-acceptance-sprint-3.9.0.md`](typer-real-method-acceptance-sprint-3.9.0.md)
+records the later pinned reruns without modifying any of these frozen baselines.
 
 The ordinary inventory walks source `DefDef` nodes and requires their exact
 canonical source/tree identity from the Namer index. It selects methods owned

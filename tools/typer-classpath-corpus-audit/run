@@ -272,11 +272,11 @@ if [[ "$method_kind" == ordinary ]]; then
             cat "$tmp_dir/$run.log" >&2
             exit 1
         fi
-        sed -n '/^ORDINARY_METHOD_REPORT_BEGIN$/,/^ORDINARY_METHOD_REPORT_END$/p' "$tmp_dir/$run.log" \
-            | sed '1d;$d' >"$tmp_dir/$run.ordinary-report.tsv"
-        if [[ ! -s "$tmp_dir/$run.ordinary-report.tsv" ]]; then
+        if ! PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/extract_report_markers.py" \
+            "$tmp_dir/$run.log" ORDINARY_METHOD_REPORT_BEGIN ORDINARY_METHOD_REPORT_END \
+            >"$tmp_dir/$run.ordinary-report.tsv"; then
             cat "$tmp_dir/$run.log" >&2
-            printf 'ordinary method report markers were missing\n' >&2
+            printf 'ordinary method report markers were missing or empty\n' >&2
             exit 1
         fi
     done
@@ -379,11 +379,11 @@ if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
             cat "$tmp_dir/$run.log" >&2
             exit 1
         fi
-        sed -n '/^FOCUSED_REPORT_BEGIN$/,/^FOCUSED_REPORT_END$/p' "$tmp_dir/$run.log" \
-            | sed '1d;$d' >"$tmp_dir/$run.focused-report"
-        if [[ ! -s "$tmp_dir/$run.focused-report" ]]; then
+        if ! PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/extract_report_markers.py" \
+            "$tmp_dir/$run.log" FOCUSED_REPORT_BEGIN FOCUSED_REPORT_END \
+            >"$tmp_dir/$run.focused-report"; then
             cat "$tmp_dir/$run.log" >&2
-            printf 'focused report markers were missing\n' >&2
+            printf 'focused report markers were missing or empty\n' >&2
             exit 1
         fi
         if [[ -n "$focused_cohort" ]]; then
