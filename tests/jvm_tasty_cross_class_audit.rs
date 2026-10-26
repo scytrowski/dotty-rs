@@ -950,6 +950,53 @@ fn cross_class_call_is_pickled_as_a_bounded_select_in_application() {
         assert!(tags.iter().filter(|&&tag| tag == APPLY_TAG).count() >= 1);
         assert!(tags.contains(&SELECTIN_TAG));
         assert_eq!(tags.iter().filter(|&&tag| tag == PARAM_TAG).count(), 1);
+
+        let (read_address, read_method) = address_index
+            .iter()
+            .filter(|node| node.tag == DEFDEF_TAG)
+            .map(|node| (node.offset as u32, node.decode_defdef_body().unwrap()))
+            .find(|(_, method)| file.names().render(method.name).unwrap() == "read")
+            .expect("generated Reader sidecar declares read");
+        let RawTree::LengthNode(apply) = read_method.rhs.expect("read has an RHS") else {
+            panic!("generated read body is an APPLY");
+        };
+        assert_eq!(apply.tag, APPLY_TAG);
+        let apply = apply.decode_apply().unwrap();
+        let RawTree::LengthNode(select) = apply.function else {
+            panic!("generated call selects the external get method");
+        };
+        assert_eq!(select.tag, SELECTIN_TAG);
+        let select = select.decode_select_in().unwrap();
+        let signed = file
+            .names()
+            .render_signed_name(select.name)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            signed,
+            dotty_tasty::tasty::RenderedSignedName::Signed { original, signature }
+                if original == "get" && signature.parameters.is_empty() && signature.result == "scala.Int"
+        ));
+        let receiver_references = select.qualifier.ast_refs();
+        let [receiver] = receiver_references.as_slice() else {
+            panic!("selected receiver references exactly one formal declaration");
+        };
+        assert_eq!(
+            address_index.get_node(receiver.address).unwrap().tag,
+            PARAM_TAG,
+            "generated selection receiver points to Reader.read's PARAM"
+        );
+        assert_eq!(select.underlying_type.nodes()[0].tag, SHAREDTYPE_TAG);
+        let owner_type_references = select.underlying_type.ast_refs();
+        let [owner_type] = owner_type_references.as_slice() else {
+            panic!("selection owner type shares the formal's class type");
+        };
+        assert_eq!(
+            address_index.get_node(owner_type.address).unwrap().tag,
+            TYPEREF_TAG,
+            "generated selection owner type references the formal's TYPEREF"
+        );
+        assert!(address_index.get_node(read_address).is_some());
         if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
             run_cross_class_call_oracle(output.bytes());
         }

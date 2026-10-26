@@ -2,7 +2,7 @@ use dotty::jvm_tasty_plan::{
     PairedPlanError, with_paired_jvm_tasty_batch_plan, with_paired_jvm_tasty_class_plan,
 };
 use dotty_core::ast::TreeKind;
-use dotty_core::{SourceId, SymbolId};
+use dotty_core::{SourceId, SymbolId, TreeId, Typed, Untyped};
 use dotty_jvm::JvmClassInitializationPlan;
 use dotty_tasty::tasty::*;
 use dotty_tasty_pickler::{
@@ -56,6 +56,85 @@ impl SourceTypedBindings for WithoutPlannedMethods<'_> {
         method: SymbolId,
     ) -> Vec<dotty_tasty_pickler::LocalValueBinding> {
         self.0.local_value_bindings(source, method)
+    }
+}
+
+struct WithoutTypedTree<'a> {
+    inner: &'a dyn SourceTypedBindings,
+    missing: TreeId<Untyped>,
+}
+
+fn cloned_typed_ast(ast: &dotty_core::ast::AstArena<Typed>) -> dotty_core::ast::AstArena<Typed> {
+    let mut cloned = dotty_core::ast::AstArena::new();
+    for (expected, tree) in ast.iter() {
+        assert_eq!(cloned.alloc(tree.clone()), expected);
+    }
+    cloned
+}
+
+fn cloned_source_ast(
+    ast: &dotty_core::ast::AstArena<Untyped>,
+) -> dotty_core::ast::AstArena<Untyped> {
+    let mut cloned = dotty_core::ast::AstArena::new();
+    for (expected, tree) in ast.iter() {
+        assert_eq!(cloned.alloc(tree.clone()), expected);
+    }
+    cloned
+}
+
+impl SourceTypedBindings for WithoutTypedTree<'_> {
+    fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
+        (tree != self.missing)
+            .then(|| self.inner.typed_at(source, tree))
+            .flatten()
+    }
+
+    fn planned_class_symbols(&self) -> &[SymbolId] {
+        self.inner.planned_class_symbols()
+    }
+
+    fn planned_method_symbols(&self) -> &[SymbolId] {
+        self.inner.planned_method_symbols()
+    }
+
+    fn local_value_bindings(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Vec<dotty_tasty_pickler::LocalValueBinding> {
+        self.inner.local_value_bindings(source, method)
+    }
+}
+
+struct WithStaleTypedTree<'a> {
+    inner: &'a dyn SourceTypedBindings,
+    stale: TreeId<Untyped>,
+    replacement: TreeId<Typed>,
+}
+
+impl SourceTypedBindings for WithStaleTypedTree<'_> {
+    fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
+        if tree == self.stale {
+            Some(self.replacement)
+        } else {
+            self.inner.typed_at(source, tree)
+        }
+    }
+
+    fn planned_class_symbols(&self) -> &[SymbolId] {
+        self.inner.planned_class_symbols()
+    }
+
+    fn planned_method_symbols(&self) -> &[SymbolId] {
+        self.inner.planned_method_symbols()
+    }
+
+    fn local_value_bindings(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Vec<dotty_tasty_pickler::LocalValueBinding> {
+        self.inner.local_value_bindings(source, method)
     }
 }
 
@@ -617,6 +696,286 @@ fn cross_class_call_requires_the_exact_planned_target_method() {
                 ),
                 "unexpected rejection: {error:?}"
             );
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn cross_class_call_rejects_a_missing_source_to_typed_body_binding() {
+    with_paired_jvm_tasty_batch_plan(
+        CROSS_CLASS_READER_CALL,
+        "tests/fixtures/jvm_tasty_cross_class/Reader.scala",
+        SourceId::from_index(1674),
+        |batch| {
+            let source_plan = batch.classes[1].tasty_plan.plan();
+            let read_tree = source_plan
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    dotty_tasty_pickler::ClassMemberPicklePlan::Method {
+                        source_tree, ..
+                    } if matches!(
+                        &source_plan.source_ast.get(*source_tree).kind,
+                        TreeKind::DefDef(definition)
+                            if source_plan.store.names.resolve(definition.name.as_name().text()) == "read"
+                    ) => Some(*source_tree),
+                    _ => None,
+                })
+                .expect("the Reader plan includes its read method");
+            let TreeKind::DefDef(read) = &source_plan.source_ast.get(read_tree).kind else {
+                panic!("read is a source method");
+            };
+            let body = read.rhs.expect("read has an application body");
+            let TreeKind::Apply(application) = &source_plan.source_ast.get(body).kind else {
+                panic!("read body is a regular application");
+            };
+            let selected_function = application.function;
+            let without_body = WithoutTypedTree {
+                inner: source_plan.typed_bindings,
+                missing: selected_function,
+            };
+            let plan = ClassStatePicklePlan {
+                store: source_plan.store,
+                definitions: source_plan.definitions,
+                source_ast: source_plan.source_ast,
+                typed_ast: source_plan.typed_ast,
+                source_index: source_plan.source_index,
+                typed_bindings: &without_body,
+                source: source_plan.source.clone(),
+                class: source_plan.class,
+                class_tree: source_plan.class_tree,
+                constructor: source_plan.constructor.clone(),
+                members: source_plan.members,
+            };
+            let Err(error) = plan.validate().unwrap().pickle() else {
+                panic!("a missing body root binding must reject before emission");
+            };
+            assert!(
+                matches!(error, PickleError::BodyBinding { tree, .. } if tree == selected_function),
+                "unexpected rejection for missing source-to-typed body binding: {error:?}"
+            );
+
+            let typed_body = source_plan
+                .typed_bindings
+                .typed_at(source_plan.source.id, body)
+                .expect("the frontend binds the application root");
+            let TreeKind::Apply(application) = &source_plan.typed_ast.get(typed_body).kind else {
+                panic!("typed read body is an application");
+            };
+            let TreeKind::Select(selection) = &source_plan
+                .typed_ast
+                .get(application.function)
+                .kind
+            else {
+                panic!("typed application selects get");
+            };
+            let stale = WithStaleTypedTree {
+                inner: source_plan.typed_bindings,
+                stale: selected_function,
+                replacement: selection.qualifier,
+            };
+            let stale_plan = ClassStatePicklePlan {
+                store: source_plan.store,
+                definitions: source_plan.definitions,
+                source_ast: source_plan.source_ast,
+                typed_ast: source_plan.typed_ast,
+                source_index: source_plan.source_index,
+                typed_bindings: &stale,
+                source: source_plan.source.clone(),
+                class: source_plan.class,
+                class_tree: source_plan.class_tree,
+                constructor: source_plan.constructor.clone(),
+                members: source_plan.members,
+            };
+            let Err(error) = stale_plan.validate().unwrap().pickle() else {
+                panic!("a stale nested typed root must reject before emission");
+            };
+            assert!(
+                matches!(error, PickleError::BodyBinding { tree, .. } if tree == selected_function),
+                "unexpected rejection for stale nested typed root: {error:?}"
+            );
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn cross_class_call_rejects_a_forged_selected_target_type() {
+    with_paired_jvm_tasty_batch_plan(
+        CROSS_CLASS_READER_CALL,
+        "tests/fixtures/jvm_tasty_cross_class/Reader.scala",
+        SourceId::from_index(1674),
+        |batch| {
+            let source_plan = batch.classes[1].tasty_plan.plan();
+            let read_tree = source_plan
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    dotty_tasty_pickler::ClassMemberPicklePlan::Method {
+                        source_tree, ..
+                    } if matches!(
+                        &source_plan.source_ast.get(*source_tree).kind,
+                        TreeKind::DefDef(definition)
+                            if source_plan.store.names.resolve(definition.name.as_name().text()) == "read"
+                    ) => Some(*source_tree),
+                    _ => None,
+                })
+                .expect("the Reader plan includes its read method");
+            let TreeKind::DefDef(read) = &source_plan.source_ast.get(read_tree).kind else {
+                panic!("read is a source method");
+            };
+            let source_body = read.rhs.expect("read has an application body");
+            let typed_body = source_plan
+                .typed_bindings
+                .typed_at(source_plan.source.id, source_body)
+                .expect("the frontend binds the source application root");
+            let TreeKind::Apply(application) = &source_plan.typed_ast.get(typed_body).kind else {
+                panic!("typed read body is an application");
+            };
+            let typed_function = application.function;
+            let TreeKind::Select(selection) =
+                &source_plan.typed_ast.get(typed_function).kind
+            else {
+                panic!("typed application selects get");
+            };
+            let receiver_type = source_plan
+                .typed_ast
+                .get(selection.qualifier)
+                .ty;
+            let mut typed_ast = cloned_typed_ast(source_plan.typed_ast);
+            typed_ast.get_mut(typed_function).ty = receiver_type;
+            let plan = ClassStatePicklePlan {
+                store: source_plan.store,
+                definitions: source_plan.definitions,
+                source_ast: source_plan.source_ast,
+                typed_ast: &typed_ast,
+                source_index: source_plan.source_index,
+                typed_bindings: source_plan.typed_bindings,
+                source: source_plan.source.clone(),
+                class: source_plan.class,
+                class_tree: source_plan.class_tree,
+                constructor: source_plan.constructor.clone(),
+                members: source_plan.members,
+            };
+            let Err(error) = plan.validate().unwrap().pickle() else {
+                panic!("a forged selected target must reject before emission");
+            };
+            assert!(
+                matches!(error, PickleError::Reference { .. } | PickleError::BodyType { .. }),
+                "unexpected rejection for forged selected target: {error:?}"
+            );
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn cross_class_call_rejects_unsupported_invocation_and_result_shapes() {
+    with_paired_jvm_tasty_batch_plan(
+        CROSS_CLASS_READER_CALL,
+        "tests/fixtures/jvm_tasty_cross_class/Reader.scala",
+        SourceId::from_index(1674),
+        |batch| {
+            let source_plan = batch.classes[1].tasty_plan.plan();
+            let read_tree = source_plan
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    dotty_tasty_pickler::ClassMemberPicklePlan::Method {
+                        source_tree, ..
+                    } if matches!(
+                        &source_plan.source_ast.get(*source_tree).kind,
+                        TreeKind::DefDef(definition)
+                            if source_plan.store.names.resolve(definition.name.as_name().text()) == "read"
+                    ) => Some(*source_tree),
+                    _ => None,
+                })
+                .expect("the Reader plan includes its read method");
+            let TreeKind::DefDef(read) = &source_plan.source_ast.get(read_tree).kind else {
+                panic!("read is a source method");
+            };
+            let source_body = read.rhs.expect("read has a source body");
+            let typed_body = source_plan
+                .typed_bindings
+                .typed_at(source_plan.source.id, source_body)
+                .expect("the frontend binds the application root");
+            let TreeKind::Apply(application) = &source_plan.typed_ast.get(typed_body).kind else {
+                panic!("typed read body is an application");
+            };
+            let typed_function = application.function;
+            let TreeKind::Select(selection) =
+                &source_plan.typed_ast.get(typed_function).kind
+            else {
+                panic!("typed call selects get");
+            };
+            let typed_receiver = selection.qualifier;
+            let source_select = match &source_plan.source_ast.get(source_body).kind {
+                TreeKind::Apply(application) => application.function,
+                _ => unreachable!("source read body is an application"),
+            };
+
+            for label in [
+                "nonempty argument clause",
+                "Boolean result",
+                "unsupported receiver expression",
+                "missing explicit empty source clause",
+            ] {
+                let mut typed_ast = cloned_typed_ast(source_plan.typed_ast);
+                let mut source_ast = cloned_source_ast(source_plan.source_ast);
+                match label {
+                    "nonempty argument clause" => {
+                        let TreeKind::Apply(application) =
+                            &mut typed_ast.get_mut(typed_body).kind
+                        else {
+                            unreachable!("typed body is an application")
+                        };
+                        application.args.push(typed_receiver);
+                    }
+                    "Boolean result" => {
+                        typed_ast.get_mut(typed_body).ty = source_plan.definitions.boolean;
+                    }
+                    "unsupported receiver expression" => {
+                        let nested = typed_ast.get(typed_body).kind.clone();
+                        typed_ast.get_mut(typed_receiver).kind = nested;
+                    }
+                    "missing explicit empty source clause" => {
+                        let selected = source_ast.get(source_select).kind.clone();
+                        source_ast.get_mut(source_body).kind = selected;
+                    }
+                    _ => unreachable!(),
+                }
+                let plan = ClassStatePicklePlan {
+                    store: source_plan.store,
+                    definitions: source_plan.definitions,
+                    source_ast: &source_ast,
+                    typed_ast: &typed_ast,
+                    source_index: source_plan.source_index,
+                    typed_bindings: source_plan.typed_bindings,
+                    source: source_plan.source.clone(),
+                    class: source_plan.class,
+                    class_tree: source_plan.class_tree,
+                    constructor: source_plan.constructor.clone(),
+                    members: source_plan.members,
+                };
+                let error = match plan.validate() {
+                    Err(error) => error,
+                    Ok(validated) => match validated.pickle() {
+                        Err(error) => error,
+                        Ok(_) => panic!("unsupported {label} was accepted by the pickler"),
+                    },
+                };
+                assert!(
+                    matches!(
+                        error,
+                        PickleError::Unsupported { .. }
+                            | PickleError::BodyType { .. }
+                            | PickleError::Reference { .. }
+                            | PickleError::SourceShape { .. }
+                    ),
+                    "unsupported {label} returned no contextual typed rejection: {error:?}"
+                );
+            }
         },
     )
     .unwrap();
