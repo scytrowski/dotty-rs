@@ -1228,6 +1228,19 @@ impl<'a> Validator<'_, 'a> {
                         role: TypeRole::Parameter,
                     });
                 }
+                let planned_class_parameters = signature
+                    .params
+                    .iter()
+                    .filter(|formal| self.is_planned_sibling_class_type(formal.ty, None))
+                    .count();
+                if planned_class_parameters != 0
+                    && (planned_class_parameters != 1 || signature.params.len() != 1)
+                {
+                    return Err(PickleError::MalformedType {
+                        ty,
+                        role: TypeRole::Parameter,
+                    });
+                }
                 if signature.result != p.definitions.int
                     && signature.result != p.definitions.boolean
                     && signature.result != p.definitions.unit

@@ -557,6 +557,114 @@ fn same_batch_class_formal_emits_reader_owned_counter_type_without_cloning_count
     .unwrap();
 }
 
+#[test]
+fn class_typed_method_formal_is_limited_to_one_parameter() {
+    for parameters in [
+        "counter: Counter, other: Counter",
+        "counter: Counter, value: Int",
+    ] {
+        let source = CROSS_CLASS_READER_LITERAL.replace("counter: Counter", parameters);
+        let result = with_paired_jvm_tasty_batch_plan(
+            &source,
+            "tests/fixtures/jvm_tasty_cross_class/ReaderLiteral.scala",
+            SourceId::from_index(1673),
+            |_| (),
+        );
+        let Err(dotty::jvm_tasty_plan::PairedPlanError::BatchClass { phase, reason, .. }) = result
+        else {
+            panic!("unsupported multi-formal shape must reject before bytes exist");
+        };
+        assert_eq!(phase, "JVM/TASTy cross-contract validation");
+        assert!(reason.contains("MalformedType"), "{reason}");
+    }
+}
+
+#[test]
+fn malformed_sibling_class_trees_are_rejected_before_pickling() {
+    with_paired_jvm_tasty_batch_plan(
+        CROSS_CLASS_READER_LITERAL,
+        "tests/fixtures/jvm_tasty_cross_class/ReaderLiteral.scala",
+        SourceId::from_index(1673),
+        |batch| {
+            let source_plan = batch.classes[1].tasty_plan.plan();
+            let sibling = batch.classes[0].class;
+            let Some(dotty_core::SourceDefinition::Canonical {
+                source: _,
+                tree: sibling_tree,
+            }) = source_plan.source_index.definition_of(sibling)
+            else {
+                panic!("Counter has a canonical source tree");
+            };
+
+            let mut missing_template = dotty_core::ast::AstArena::new();
+            for (_, tree) in source_plan.source_ast.iter() {
+                missing_template.alloc(tree.clone());
+            }
+            let TreeKind::TypeDef(definition) = &mut missing_template.get_mut(sibling_tree).kind
+            else {
+                panic!("Counter source tree is a type definition");
+            };
+            definition.rhs = sibling_tree;
+            let plan = ClassStatePicklePlan {
+                store: source_plan.store,
+                definitions: source_plan.definitions,
+                source_ast: &missing_template,
+                typed_ast: source_plan.typed_ast,
+                source_index: source_plan.source_index,
+                typed_bindings: source_plan.typed_bindings,
+                source: source_plan.source.clone(),
+                class: source_plan.class,
+                class_tree: source_plan.class_tree,
+                constructor: source_plan.constructor.clone(),
+                members: source_plan.members,
+            };
+            assert!(matches!(
+                plan.validate(),
+                Err(PickleError::SourceShape { .. })
+            ));
+
+            let mut generic_constructor = dotty_core::ast::AstArena::new();
+            for (_, tree) in source_plan.source_ast.iter() {
+                generic_constructor.alloc(tree.clone());
+            }
+            let TreeKind::TypeDef(definition) = &generic_constructor.get(sibling_tree).kind else {
+                panic!("Counter source tree is a type definition");
+            };
+            let TreeKind::Template(template) = &generic_constructor.get(definition.rhs).kind else {
+                panic!("Counter has a template");
+            };
+            let constructor_tree = template.constructor;
+            let TreeKind::DefDef(constructor) =
+                &mut generic_constructor.get_mut(constructor_tree).kind
+            else {
+                panic!("Counter template has a primary constructor");
+            };
+            constructor.type_params.push(sibling_tree);
+            let plan = ClassStatePicklePlan {
+                store: source_plan.store,
+                definitions: source_plan.definitions,
+                source_ast: &generic_constructor,
+                typed_ast: source_plan.typed_ast,
+                source_index: source_plan.source_index,
+                typed_bindings: source_plan.typed_bindings,
+                source: source_plan.source.clone(),
+                class: source_plan.class,
+                class_tree: source_plan.class_tree,
+                constructor: source_plan.constructor.clone(),
+                members: source_plan.members,
+            };
+            assert!(matches!(
+                plan.validate(),
+                Err(PickleError::Unsupported {
+                    feature: dotty_tasty_pickler::UnsupportedFeature::TypeParameters,
+                    ..
+                })
+            ));
+        },
+    )
+    .unwrap();
+}
+
 fn run_reader_signature_oracle(reader_tasty: &[u8]) {
     let scala_root = PathBuf::from(
         std::env::var_os("SCALA39_ROOT").expect("pinned Scala root for explicit oracle"),

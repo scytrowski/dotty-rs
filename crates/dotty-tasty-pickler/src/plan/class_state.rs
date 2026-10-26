@@ -283,6 +283,32 @@ impl ClassStateValidator<'_, '_> {
             {
                 return Err(PickleError::SourceDefinition { symbol: class });
             }
+            let TreeKind::Template(template) = &self.source_tree(definition.rhs)?.kind else {
+                return Err(PickleError::SourceShape {
+                    tree: definition.rhs,
+                    expected: SourceRole::Template,
+                });
+            };
+            if !template.parents.is_empty()
+                || template.self_val.is_some()
+                || !template.metadata.derives.is_empty()
+                || !template.metadata.uses.is_empty()
+            {
+                return Err(PickleError::SourceDefinition { symbol: class });
+            }
+            let TreeKind::DefDef(constructor) = &self.source_tree(template.constructor)?.kind
+            else {
+                return Err(PickleError::SourceShape {
+                    tree: template.constructor,
+                    expected: SourceRole::Constructor,
+                });
+            };
+            if !constructor.type_params.is_empty() {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::TypeParameters,
+                    symbol: Some(class),
+                });
+            }
             let class_type = self.completed(class)?;
             let Type::ClassInfo(info) = self
                 .plan
