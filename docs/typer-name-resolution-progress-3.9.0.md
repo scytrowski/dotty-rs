@@ -2,6 +2,32 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
+## Final bounded closeout audit for #1566
+
+The frozen `package-term` cohort was audited twice at repository source
+`0921a038f445e37157d3926c33f4c1ec148f1695`, against Scala revision
+`777528f19a58e794c9954a42f433373472ec57f8`, Scala artifacts 3.9.0, and JDK
+21.0.8. It covers 60 files and 369 selected methods. Parsing and naming had
+zero failures; all 369 method outcomes were present; 334 frozen target requests
+were observed; zero methods were fully typed. The deterministic normalized
+report SHA-256 is
+`8eb1142bdd70a88ace58d460343db02ddfa75a6076a970746c4483b425b58832`; the
+method sidecar SHA-256 is
+`00d2bec6b78fb78ab49139672e4f5b5e87fcea0014398c8c57b2199649466582`.
+
+The largest current first-blocker groups are 118 `TypeNameNotFound`, 78
+`MemberLookup`, 40 `UnstableSelectionPrefix`, 24 `TermNameNotFound`, 18 each
+`ConstructorResultTypeMismatch` and `ObjectModuleClassUnavailable`, 13
+`LocalValueConformanceUnsupported`, and 10 `OverloadedSelectionDeferred`.
+This closes the stated bounded goal as unmet: the audit confirms no fully typed
+method in this frozen cohort. It does not claim that no other source files or
+methods can type. The compact row-level snapshot is in
+[`typer-name-resolution-1566-closeout-3.9.0.tsv`](typer-name-resolution-1566-closeout-3.9.0.tsv),
+and the five frozen primary roots with baseline/intermediate/current results
+are in [`typer-name-resolution-1566-primary-3.9.0.tsv`](typer-name-resolution-1566-primary-3.9.0.tsv).
+Full provenance and reproduction instructions are in
+[`typer-name-resolution-1566-closeout-3.9.0.md`](typer-name-resolution-1566-closeout-3.9.0.md).
+
 ## Bounded completion check for #1620
 
 I rechecked the five frozen #1620 roots from the pre-implementation baseline
