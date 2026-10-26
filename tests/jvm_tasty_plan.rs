@@ -2239,6 +2239,76 @@ fn pending_reference_field_proof_rejects_mutable_and_non_direct_initializers() {
 }
 
 #[test]
+fn reference_field_proof_rejects_a_forged_constructor_parameter_target() {
+    let source = "package example\nclass Counter(start: Int)\nclass CounterOwner(seed: Int, other: Int):\n  private val inner: Counter = new Counter(seed)\n  private val second: Counter = new Counter(other)\n  def constant(): Int = 0\n";
+    with_paired_jvm_tasty_batch_plan(
+        source,
+        "CounterOwner.scala",
+        SourceId::from_index(1717),
+        |batch| {
+            let owner = &batch.classes[1];
+            let plan = owner.tasty_plan.plan();
+            let proofs = owner
+                .tasty_plan
+                .same_batch_reference_fields()
+                .collect::<Vec<_>>();
+            let seed_proof = proofs
+                .iter()
+                .find(|proof| {
+                    plan.store
+                        .names
+                        .resolve(plan.store.symbols.get(proof.field()).name.text())
+                        == "inner"
+                })
+                .expect("inner has a reference-field proof");
+            let other_proof = proofs
+                .iter()
+                .find(|proof| {
+                    plan.store
+                        .names
+                        .resolve(plan.store.symbols.get(proof.field()).name.text())
+                        == "second"
+                })
+                .expect("second has a reference-field proof");
+            let argument = |root| {
+                let TreeKind::Apply(application) = &plan.typed_ast.get(root).kind else {
+                    panic!("direct field initializer is an application");
+                };
+                application.args[0]
+            };
+            let seed_argument = argument(seed_proof.typed_initializer());
+            let other_argument = argument(other_proof.typed_initializer());
+            let other_reference = plan.typed_ast.get(other_argument).ty;
+
+            let mut forged_typed_ast = cloned_typed_ast(plan.typed_ast);
+            forged_typed_ast.get_mut(seed_argument).ty = other_reference;
+
+            let forged_plan = ClassStatePicklePlan {
+                store: plan.store,
+                definitions: plan.definitions,
+                source_ast: plan.source_ast,
+                typed_ast: &forged_typed_ast,
+                source_index: plan.source_index,
+                typed_bindings: plan.typed_bindings,
+                source: plan.source.clone(),
+                class: plan.class,
+                class_tree: plan.class_tree,
+                constructor: plan.constructor.clone(),
+                members: plan.members,
+            };
+            assert!(matches!(
+                forged_plan.validate(),
+                Err(PickleError::Unsupported {
+                    feature: dotty_tasty_pickler::UnsupportedFeature::UnsafeFieldInitializer,
+                    ..
+                })
+            ));
+        },
+    )
+    .unwrap();
+}
+
+#[test]
 fn unsupported_immutable_field_is_rejected_from_source_facts() {
     let immutable = "package example\nclass Counter(start: Int):\n  private val current: Int = start\n  def get(): Int = current\n";
     assert!(matches!(

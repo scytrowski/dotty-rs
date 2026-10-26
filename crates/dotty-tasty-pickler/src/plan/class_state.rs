@@ -1273,6 +1273,7 @@ impl ClassStateValidator<'_, '_> {
         if source_argument.name != typed_argument_ident.name
             || *prefix != plan.definitions.no_prefix
             || self.symbol(*argument_symbol)?.kind != SymbolKind::Parameter
+            || self.symbol(*argument_symbol)?.name != source_argument.name
             || self.symbol(*argument_symbol)?.owner != Some(constructor.symbol)
             || !constructor
                 .parameter_clauses
