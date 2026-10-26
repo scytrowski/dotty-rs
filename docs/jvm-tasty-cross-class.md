@@ -204,3 +204,87 @@ artifact-batch test is included in the mandatory JDK CI job and fails rather
 than skipping when `DOTTY_CLASSFILE_REQUIRE_JDK=1` and a tool is missing. The
 full workspace quality checks remain the repository gates described in
 `AGENTS.md`; no Scala corpus was rebuilt for this bounded audit.
+
+## Pinned Scala consumer of the linked Counter/Reader batch (#1677)
+
+The independent consumer gate compiles
+[`tests/fixtures/jvm_tasty_cross_class/Consumer.scala`](../tests/fixtures/jvm_tasty_cross_class/Consumer.scala)
+against only the four artifacts produced by `emit_paired_jvm_tasty_batch` from
+the unchanged [`Reader.scala`](../tests/fixtures/jvm_tasty_cross_class/Reader.scala)
+source and the pinned Scala runtime/compiler JARs. Each fresh source session is
+staged under its own empty classpath root. The Scala compiler writes only
+`consumer/Consumer$.class` and `consumer/Consumer.class`; neither Rust dependency
+classfile is generated or copied into the client output. The runtime classpath
+places the staged Rust artifacts before the client and Scala JARs, and
+`java -Xverify:all` executes the original Rust `Reader.read` method.
+
+The compiler classpath is the eight JARs verified by the existing oracle
+provenance manifest: `scala3-compiler_3`, `scala3-library_3`, `scala-library`,
+`tasty-core_3`, and `scala3-interfaces` version 3.9.0; `scala-asm`
+9.9.0-scala-1; `compiler-interface` 1.12.0; and `util-interface` 1.11.5.
+Compiler invocation uses that classpath for the compiler and uses the Rust
+artifact root plus those JARs as the client's `-classpath`. Runtime uses the
+Rust artifact root, the separate client output, and the same pinned JARs.
+Archive inspection rejects any compiler/runtime JAR that itself contains
+`example/Counter.class` or `example/Reader.class`.
+
+The strict run was performed with Scala **3.9.0**, source revision
+`777528f19a58e794c9954a42f433373472ec57f8`, and Temurin **21.0.8**. The compiler
+JAR hashes are the pinned values in
+[`provenance.json`](../tests/fixtures/tasty_pickler/provenance.json). Both Rust
+batches had byte-identical artifacts and distinct per-class TASTy links. The
+independent [`Consumer.scala`](../tests/fixtures/jvm_tasty_cross_class/Consumer.scala)
+input SHA-256 is
+`71a5920f7ee003e7245c9b833c02d6796e976c6050e93f5ce2bfe6062f5ef558`:
+
+| Artifact | SHA-256 | TASTy link UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `db6dbba04450ccb864a759a36bdc29eacae989de1dd62ccfe491f599621019d4` | `00a25b5f2a9ec7ac0000000000008193` |
+| `example/Counter.tasty` | `316afa2d30882e408341f64e7d093cff73c76b130f78318b2136b744c1170a69` | `00a25b5f2a9ec7ac0000000000008193` |
+| `example/Reader.class` | `e4a8b90f30f433b260a19689c7d5380b913a44e55519d79db5fb226497e81913` | `000aa2942d1232c40000000000008194` |
+| `example/Reader.tasty` | `15c02f4624ef2ef6048fc444ab876340865ad895f19f3166c5ee3cb6f75bb42a` | `000aa2942d1232c40000000000008194` |
+
+The consumer classfile references the expected Rust ABI:
+`Counter.<init>(I)V`, `Reader.<init>()V`,
+`Reader.read(Lexample/Counter;)I`, and `Counter.set(I)V`. It reads 7 through
+Reader, mutates the same Counter to 13 and reads again, then verifies a second
+Counter remains at -5 while the first changes. The JVM prints `713` for each
+fresh Rust batch. SHA-256 values for both classfiles and TASTy documents are
+compared before and after Scala compilation and JVM execution; they remain
+unchanged.
+
+TASTy-based member lookup is proved independently for each class. A compile-only
+copy of `Counter.class` with `get()I` removed still resolves `counter.get()` when
+its matching Counter TASTy sidecar is present. A separate copy of
+`Reader.class` with `read(Lexample/Counter;)I` removed still resolves
+`reader.read(counter)` from Reader TASTy. Each matched classfile-only control
+fails with the missing-member diagnostic, so the main consumer's Scala-shaped
+success cannot alone stand in for sidecar consumption. Further per-class
+controls reject a stale classfile TASTy UUID under `-Werror`, a missing sidecar,
+a sidecar at the wrong package path, and a TASTy file with corrupt magic. Those
+inconsistent files are used only for compilation controls and are never run.
+The observed Scala 3.9.0 diagnostic text includes `is out of sync with its
+TASTy file` for the changed UUID, `This .tasty file is missing` for absent or
+misplaced sidecars, `value get is not a member of example.Counter` and `value
+read is not a member of example.Reader` for the classfile-only controls, and
+`could not be read` / `not a TASTy file` for corrupt magic. UUID mismatch,
+missing-sidecar, path, and corrupt-file checks run with `-Werror` where Scala
+reports a warning instead of a hard error.
+
+Run the strict test with the pinned local inputs configured explicitly:
+
+```sh
+export JAVA_HOME=/path/to/temurin-21.0.8
+export PATH="$JAVA_HOME/bin:$PATH"
+export SCALA39_ROOT=/path/to/scala3-at-777528f19a58e794c9954a42f433373472ec57f8
+export COURSIER_MAVEN_ROOT=/path/to/cached/maven2
+DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER=1 cargo test \
+  --test jvm_tasty_cross_class_scala_consumer --locked -- --nocapture
+```
+
+The default workspace test skips this external Scala consumer unless the flag
+is set. With the flag set, missing or mismatched Scala source, pinned JARs,
+JDK tools, or a failed consumer/control is an error; it cannot be reported as a
+successful structural-only run. This issue proves bounded interoperability for
+this linked Counter/Reader shape. It does not claim general Scala dependency
+compatibility or change source typing and production code generation.
