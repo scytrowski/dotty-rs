@@ -1,8 +1,8 @@
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::reader::Reader as ClassReader;
-use dotty_core::ast::TreeKind;
-use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText};
+use dotty_core::ast::{AstArena, TreeKind};
+use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText, Typed, Untyped};
 use dotty_jvm::{JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmMethodPlan};
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
@@ -29,6 +29,22 @@ const READER_CLASS: &[u8] =
 const READER_TASTY: &[u8] =
     include_bytes!("fixtures/jvm_tasty_cross_class/scala39/example/Reader.tasty");
 const SOURCE: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader.scala");
+
+fn clone_typed_ast(ast: &AstArena<Typed>) -> AstArena<Typed> {
+    let mut clone = AstArena::new();
+    for (expected, tree) in ast.iter() {
+        assert_eq!(clone.alloc(tree.clone()), expected);
+    }
+    clone
+}
+
+fn clone_untyped_ast(ast: &AstArena<Untyped>) -> AstArena<Untyped> {
+    let mut clone = AstArena::new();
+    for (expected, tree) in ast.iter() {
+        assert_eq!(clone.alloc(tree.clone()), expected);
+    }
+    clone
+}
 
 const COUNTER_UUID: [u8; 16] = [
     0x00, 0xd4, 0x56, 0x67, 0xbf, 0x83, 0x69, 0xe8, 0x00, 0x62, 0x9f, 0x05, 0xd0, 0xf0, 0x8f, 0x1b,
@@ -470,6 +486,128 @@ fn cross_class_call_types_canonically_before_the_paired_planner_rejects_it() {
     assert_eq!(proof.typed_select(), typed_select_id);
     assert_eq!(proof.typed_receiver(), typed_receiver_id);
     assert_eq!(proof.method_descriptor(), "()I");
+
+    let mut wrong_prefix_ast = clone_typed_ast(typer.typed_ast());
+    wrong_prefix_ast.get_mut(typed_receiver_id).ty = definitions.int;
+    let wrong_prefix_unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: &wrong_prefix_ast,
+        classes: jvm_unit.classes.clone(),
+    };
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: &wrong_prefix_ast,
+            source_index: &index,
+            source_typed_index: typer.source_typed_index(),
+            jvm_unit: &wrong_prefix_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::TypedBinding(
+            "typed receiver and selected method must retain canonical symbol targets"
+        )
+    );
+
+    let mut stale_typed_ast = clone_typed_ast(typer.typed_ast());
+    let checkpoint = stale_typed_ast.checkpoint();
+    let stale_rhs = stale_typed_ast.alloc(stale_typed_ast.get(typed_rhs).clone());
+    stale_typed_ast.rollback_to(checkpoint);
+    let mut stale_source_typed_index = typer.source_typed_index().clone();
+    stale_source_typed_index.remove(source_id, rhs);
+    stale_source_typed_index
+        .insert(source_id, rhs, stale_rhs)
+        .unwrap();
+    let stale_jvm_unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: &stale_typed_ast,
+        classes: jvm_unit.classes.clone(),
+    };
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: &stale_typed_ast,
+            source_index: &index,
+            source_typed_index: &stale_source_typed_index,
+            jvm_unit: &stale_jvm_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::TypedBinding("Reader.read typed body root is stale")
+    );
+
+    let mut stale_child_ast = clone_typed_ast(typer.typed_ast());
+    let checkpoint = stale_child_ast.checkpoint();
+    let stale_child = stale_child_ast.alloc(stale_child_ast.get(typed_rhs).clone());
+    stale_child_ast.rollback_to(checkpoint);
+    let TreeKind::Apply(stale_child_apply) = &mut stale_child_ast.get_mut(typed_rhs).kind else {
+        unreachable!("the typed source root is an Apply")
+    };
+    stale_child_apply.function = stale_child;
+    let TreeKind::Apply(source_apply) = &parsed.ast.get(rhs).kind else {
+        unreachable!("the source body root is an Apply")
+    };
+    let mut stale_child_index = typer.source_typed_index().clone();
+    stale_child_index.remove(source_id, source_apply.function);
+    stale_child_index
+        .insert(source_id, source_apply.function, stale_child)
+        .unwrap();
+    let stale_child_unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: &stale_child_ast,
+        classes: jvm_unit.classes.clone(),
+    };
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: &stale_child_ast,
+            source_index: &index,
+            source_typed_index: &stale_child_index,
+            jvm_unit: &stale_child_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::TypedBinding("typed selected function root is stale")
+    );
+
+    let mut stale_source_ast = clone_untyped_ast(&parsed.ast);
+    let checkpoint = stale_source_ast.checkpoint();
+    let stale_source_child = stale_source_ast.alloc(stale_source_ast.get(rhs).clone());
+    stale_source_ast.rollback_to(checkpoint);
+    let TreeKind::Apply(stale_source_apply) = &mut stale_source_ast.get_mut(rhs).kind else {
+        unreachable!("the source body root is an Apply")
+    };
+    stale_source_apply.function = stale_source_child;
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &stale_source_ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &index,
+            source_typed_index: typer.source_typed_index(),
+            jvm_unit: &jvm_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::SourceShape(
+            "Reader.read selected function is not present in the source AST"
+        )
+    );
 
     let missing_counter = JvmCompilationUnit {
         store: typer.store(),

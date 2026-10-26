@@ -176,7 +176,12 @@ pub fn validate_cross_class_method_ref(
             "JVM unit uses a different typed AST",
         ));
     }
-    let TreeKind::PackageDef(package) = &source_ast.get(source_root).kind else {
+    let Some(source_root_tree) = source_ast.try_get(source_root) else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "source root is not present in the source AST",
+        ));
+    };
+    let TreeKind::PackageDef(package) = &source_root_tree.kind else {
         return Err(CrossClassMethodRefError::SourceShape(
             "source root must be one package declaration",
         ));
@@ -186,8 +191,10 @@ pub fn validate_cross_class_method_ref(
             "source package must contain exactly Counter and Reader",
         ));
     };
-    let class_name = |tree: TreeId<Untyped>| match &source_ast.get(tree).kind {
-        TreeKind::TypeDef(definition) => store.names.resolve(definition.name.as_name().text()),
+    let class_name = |tree: TreeId<Untyped>| match source_ast.try_get(tree).map(|tree| &tree.kind) {
+        Some(TreeKind::TypeDef(definition)) => {
+            store.names.resolve(definition.name.as_name().text())
+        }
         _ => "",
     };
     if class_name(*counter_tree) != "Counter" || class_name(*reader_tree) != "Reader" {
@@ -210,14 +217,21 @@ pub fn validate_cross_class_method_ref(
             "Counter and Reader must be distinct canonical classes",
         ));
     }
+    if !store.symbols.contains(counter_class) || !store.symbols.contains(reader_class) {
+        return Err(CrossClassMethodRefError::SourceIdentity(
+            "class source index contains a stale canonical symbol",
+        ));
+    }
     if store.symbols.get(counter_class).kind != SymbolKind::Class
         || store.symbols.get(reader_class).kind != SymbolKind::Class
         || store.symbols.get(counter_class).visibility != dotty_core::Visibility::Public
         || store.symbols.get(reader_class).visibility != dotty_core::Visibility::Public
-        || store.symbols.get(counter_class).flags.contains(
+        || has_any_flag(
+            store.symbols.get(counter_class).flags,
             SymbolFlags::CASE | SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
         )
-        || store.symbols.get(reader_class).flags.contains(
+        || has_any_flag(
+            store.symbols.get(reader_class).flags,
             SymbolFlags::CASE | SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
         )
     {
@@ -226,6 +240,11 @@ pub fn validate_cross_class_method_ref(
         ));
     }
     let package_owner = store.symbols.get(counter_class).owner;
+    if package_owner.is_some_and(|owner| !store.symbols.contains(owner)) {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "class package owner is stale",
+        ));
+    }
     if package_owner.is_none()
         || store.symbols.get(reader_class).owner != package_owner
         || package_owner.is_some_and(|owner| store.symbols.get(owner).kind != SymbolKind::Package)
@@ -270,6 +289,11 @@ pub fn validate_cross_class_method_ref(
     )?;
     validate_canonical_definition(source_index, source_id, counter_get_tree, counter_get)?;
     validate_canonical_definition(source_index, source_id, reader_read_tree, reader_read)?;
+    if !store.symbols.contains(counter_get) || !store.symbols.contains(reader_read) {
+        return Err(CrossClassMethodRefError::SourceIdentity(
+            "method source index contains a stale canonical symbol",
+        ));
+    }
     validate_member(store, counter_members, counter_class, counter_get, "get")?;
     validate_member(store, reader_members, reader_class, reader_read, "read")?;
     validate_public_concrete_method(store, counter_get, "Counter.get")?;
@@ -282,6 +306,11 @@ pub fn validate_cross_class_method_ref(
             "Reader.read counter formal has no canonical source symbol",
         ))?;
     validate_canonical_definition(source_index, source_id, counter_formal_tree, counter_formal)?;
+    if !store.symbols.contains(counter_formal) {
+        return Err(CrossClassMethodRefError::SourceIdentity(
+            "formal source index contains a stale canonical symbol",
+        ));
+    }
     if store.symbols.get(counter_formal).kind != SymbolKind::Parameter
         || store.symbols.get(counter_formal).owner != Some(reader_read)
         || store
@@ -299,8 +328,8 @@ pub fn validate_cross_class_method_ref(
         ));
     };
     if !matches!(
-        store.types.get(formal_type),
-        Type::TypeRef { target: TypeRefTarget::Symbol(target), .. } if *target == counter_class
+        store.types.try_get(formal_type),
+        Some(Type::TypeRef { target: TypeRefTarget::Symbol(target), .. }) if *target == counter_class
     ) {
         return Err(CrossClassMethodRefError::SemanticIdentity(
             "counter formal must refer to the planned Counter class identity",
@@ -334,17 +363,32 @@ pub fn validate_cross_class_method_ref(
         .ok_or(CrossClassMethodRefError::SourceShape(
             "Reader.read must have a concrete body",
         ))?;
-    let TreeKind::Apply(source_apply) = &source_ast.get(source_rhs).kind else {
+    let Some(source_rhs_tree) = source_ast.try_get(source_rhs) else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "Reader.read body is not present in the source AST",
+        ));
+    };
+    let TreeKind::Apply(source_apply) = &source_rhs_tree.kind else {
         return Err(CrossClassMethodRefError::SourceShape(
             "Reader.read body must be counter.get()",
         ));
     };
-    let TreeKind::Select(source_select) = &source_ast.get(source_apply.function).kind else {
+    let Some(source_function_tree) = source_ast.try_get(source_apply.function) else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "Reader.read selected function is not present in the source AST",
+        ));
+    };
+    let TreeKind::Select(source_select) = &source_function_tree.kind else {
         return Err(CrossClassMethodRefError::SourceShape(
             "Reader.read body must select get on its formal",
         ));
     };
-    let TreeKind::Ident(source_receiver) = &source_ast.get(source_select.qualifier).kind else {
+    let Some(source_receiver_tree) = source_ast.try_get(source_select.qualifier) else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "Reader.read receiver is not present in the source AST",
+        ));
+    };
+    let TreeKind::Ident(source_receiver) = &source_receiver_tree.kind else {
         return Err(CrossClassMethodRefError::SourceShape(
             "Reader.read receiver must be the counter formal identifier",
         ));
@@ -360,7 +404,12 @@ pub fn validate_cross_class_method_ref(
     let typed_rhs = source_typed_index.get(source_id, source_rhs).ok_or(
         CrossClassMethodRefError::TypedBinding("Reader.read body has no source-to-typed binding"),
     )?;
-    let TreeKind::Apply(typed_apply) = &typed_ast.get(typed_rhs).kind else {
+    let Some(typed_rhs_tree) = typed_ast.try_get(typed_rhs) else {
+        return Err(CrossClassMethodRefError::TypedBinding(
+            "Reader.read typed body root is stale",
+        ));
+    };
+    let TreeKind::Apply(typed_apply) = &typed_rhs_tree.kind else {
         return Err(CrossClassMethodRefError::TypedBinding(
             "Reader.read typed body is not an Apply",
         ));
@@ -375,7 +424,12 @@ pub fn validate_cross_class_method_ref(
             "selected method root is not the source-bound typed function",
         ));
     }
-    let TreeKind::Select(typed_select) = &typed_ast.get(typed_apply.function).kind else {
+    let Some(typed_function_tree) = typed_ast.try_get(typed_apply.function) else {
+        return Err(CrossClassMethodRefError::TypedBinding(
+            "typed selected function root is stale",
+        ));
+    };
+    let TreeKind::Select(typed_select) = &typed_function_tree.kind else {
         return Err(CrossClassMethodRefError::TypedBinding(
             "typed call function is not a Select",
         ));
@@ -385,7 +439,12 @@ pub fn validate_cross_class_method_ref(
             "receiver is not the source-bound typed qualifier",
         ));
     }
-    let TreeKind::Ident(typed_receiver) = &typed_ast.get(typed_select.qualifier).kind else {
+    let Some(typed_receiver_tree) = typed_ast.try_get(typed_select.qualifier) else {
+        return Err(CrossClassMethodRefError::TypedBinding(
+            "typed receiver root is stale",
+        ));
+    };
+    let TreeKind::Ident(typed_receiver) = &typed_receiver_tree.kind else {
         return Err(CrossClassMethodRefError::TypedBinding(
             "typed receiver is not an identifier",
         ));
@@ -393,19 +452,24 @@ pub fn validate_cross_class_method_ref(
     if store.names.resolve(typed_receiver.name.text()) != "counter"
         || store.names.resolve(typed_select.name.text()) != "get"
         || !matches!(
-            store.types.get(typed_ast.get(typed_apply.function).ty),
-            Type::TermRef { target: TermRefTarget::Symbol(target), .. } if *target == counter_get
+            store.types.try_get(typed_function_tree.ty),
+            Some(Type::TermRef { prefix, target: TermRefTarget::Symbol(target) })
+                if *target == counter_get && *prefix == typed_receiver_tree.ty
         )
         || !matches!(
-            store.types.get(typed_ast.get(typed_select.qualifier).ty),
-            Type::TermRef { target: TermRefTarget::Symbol(target), .. } if *target == counter_formal
+            store.types.try_get(typed_receiver_tree.ty),
+            Some(Type::TermRef { prefix, target: TermRefTarget::Symbol(target) })
+                if *target == counter_formal && *prefix == definitions.no_prefix
         )
     {
         return Err(CrossClassMethodRefError::TypedBinding(
             "typed receiver and selected method must retain canonical symbol targets",
         ));
     }
-    if typed_ast.get(typed_rhs).ty != definitions.int {
+    if store.types.try_get(typed_rhs_tree.ty).is_none()
+        || store.types.try_get(definitions.int).is_none()
+        || typed_rhs_tree.ty != definitions.int
+    {
         return Err(CrossClassMethodRefError::TypedBinding(
             "typed call result must be the canonical Int type",
         ));
@@ -489,12 +553,22 @@ fn validate_plain_class_source(
     source_ast: &AstArena<Untyped>,
     class_tree: TreeId<Untyped>,
 ) -> Result<(), CrossClassMethodRefError> {
-    let TreeKind::TypeDef(definition) = &source_ast.get(class_tree).kind else {
+    let Some(class_node) = source_ast.try_get(class_tree) else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "class declaration is not present in the source AST",
+        ));
+    };
+    let TreeKind::TypeDef(definition) = &class_node.kind else {
         return Err(CrossClassMethodRefError::SourceShape(
             "top-level declaration must be an ordinary class",
         ));
     };
-    let TreeKind::Template(template) = &source_ast.get(definition.rhs).kind else {
+    let Some(template_node) = source_ast.try_get(definition.rhs) else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "class template is not present in the source AST",
+        ));
+    };
+    let TreeKind::Template(template) = &template_node.kind else {
         return Err(CrossClassMethodRefError::SourceShape(
             "class declaration must have an ordinary template",
         ));
@@ -504,7 +578,12 @@ fn validate_plain_class_source(
             "cross-class reference proof excludes explicit parents and self types",
         ));
     }
-    let TreeKind::DefDef(constructor) = &source_ast.get(template.constructor).kind else {
+    let Some(constructor_node) = source_ast.try_get(template.constructor) else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "class constructor is not present in the source AST",
+        ));
+    };
+    let TreeKind::DefDef(constructor) = &constructor_node.kind else {
         return Err(CrossClassMethodRefError::SourceShape(
             "class primary constructor must be a source method",
         ));
@@ -522,17 +601,23 @@ fn class_declarations<'a>(
     source_index: &SourceSemanticIndex,
     class: SymbolId,
 ) -> Result<&'a dotty_core::Scope, CrossClassMethodRefError> {
+    if !store.symbols.contains(class) {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "class identity is stale",
+        ));
+    }
     let SymbolInfo::Complete(class_type) = store.symbols.get(class).info else {
         return Err(CrossClassMethodRefError::SemanticIdentity(
             "class info is not complete",
         ));
     };
-    let Type::ClassInfo(info) = store.types.get(class_type) else {
+    let Some(Type::ClassInfo(info)) = store.types.try_get(class_type) else {
         return Err(CrossClassMethodRefError::SemanticIdentity(
             "class symbol does not carry ClassInfo",
         ));
     };
-    if info.class != class
+    if !store.scopes.contains(info.declarations)
+        || info.class != class
         || store.scopes.get(info.declarations).owner != Some(class)
         || source_index.scope_of(class) != Some(info.declarations)
     {
@@ -542,6 +627,9 @@ fn class_declarations<'a>(
     }
     let declarations = store.scopes.get(info.declarations);
     if declarations.entered_symbols().any(|member| {
+        if !store.symbols.contains(member) {
+            return true;
+        }
         let symbol = store.symbols.get(member);
         symbol.kind == SymbolKind::TypeParameter && symbol.owner == Some(class)
     }) {
@@ -559,29 +647,39 @@ fn find_method<'a>(
     name: &str,
     reason: &'static str,
 ) -> Result<(TreeId<Untyped>, &'a dotty_core::ast::DefDef<Untyped>), CrossClassMethodRefError> {
-    let TreeKind::TypeDef(class_definition) = &source_ast.get(class_tree).kind else {
+    let Some(class_node) = source_ast.try_get(class_tree) else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "class declaration is not present in the source AST",
+        ));
+    };
+    let TreeKind::TypeDef(class_definition) = &class_node.kind else {
         return Err(CrossClassMethodRefError::SourceShape(
             "top-level declaration must be a class",
         ));
     };
-    let TreeKind::Template(template) = &source_ast.get(class_definition.rhs).kind else {
+    let Some(template_node) = source_ast.try_get(class_definition.rhs) else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "class template is not present in the source AST",
+        ));
+    };
+    let TreeKind::Template(template) = &template_node.kind else {
         return Err(CrossClassMethodRefError::SourceShape(
             "class declaration must have a template",
         ));
     };
-    let matches = template
-        .body
-        .iter()
-        .copied()
-        .filter_map(|tree| match &source_ast.get(tree).kind {
-            TreeKind::DefDef(definition)
-                if store.names.resolve(definition.name.as_name().text()) == name =>
-            {
-                Some((tree, definition))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let mut matches = Vec::new();
+    for tree in template.body.iter().copied() {
+        let Some(node) = source_ast.try_get(tree) else {
+            return Err(CrossClassMethodRefError::SourceShape(
+                "class member is not present in the source AST",
+            ));
+        };
+        if let TreeKind::DefDef(definition) = &node.kind
+            && store.names.resolve(definition.name.as_name().text()) == name
+        {
+            matches.push((tree, definition));
+        }
+    }
     match matches.as_slice() {
         [(tree, definition)] => Ok((*tree, *definition)),
         _ => Err(CrossClassMethodRefError::SourceShape(reason)),
@@ -595,6 +693,11 @@ fn validate_member(
     member: SymbolId,
     name: &str,
 ) -> Result<(), CrossClassMethodRefError> {
+    if !store.symbols.contains(member) {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "method identity is stale",
+        ));
+    }
     let symbol = store.symbols.get(member);
     if symbol.owner != Some(owner)
         || store.names.resolve(symbol.name.text()) != name
@@ -612,10 +715,16 @@ fn validate_public_concrete_method(
     method: SymbolId,
     label: &'static str,
 ) -> Result<(), CrossClassMethodRefError> {
+    if !store.symbols.contains(method) {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "method identity is stale",
+        ));
+    }
     let symbol = store.symbols.get(method);
     if symbol.kind != SymbolKind::Method
         || symbol.visibility != dotty_core::Visibility::Public
-        || symbol.flags.contains(
+        || has_any_flag(
+            symbol.flags,
             SymbolFlags::ABSTRACT
                 | SymbolFlags::SYNTHETIC
                 | SymbolFlags::ERASED
@@ -633,18 +742,27 @@ fn validate_public_concrete_method(
     Ok(())
 }
 
+fn has_any_flag(flags: SymbolFlags, excluded: SymbolFlags) -> bool {
+    !flags.intersection(excluded).is_empty()
+}
+
 fn complete_method_type<'a>(
     store: &'a SemanticStore,
     method: SymbolId,
     _label: &'static str,
 ) -> Result<&'a dotty_core::MethodType, CrossClassMethodRefError> {
+    if !store.symbols.contains(method) {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "method identity is stale",
+        ));
+    }
     let SymbolInfo::Complete(method_type) = store.symbols.get(method).info else {
         return Err(CrossClassMethodRefError::SemanticIdentity(
             "method signature is not complete",
         ));
     };
-    match store.types.get(method_type) {
-        Type::Method(method_type) => Ok(method_type),
+    match store.types.try_get(method_type) {
+        Some(Type::Method(method_type)) => Ok(method_type),
         _ => Err(CrossClassMethodRefError::SemanticIdentity(
             "method must have one non-generic plain method type",
         )),
@@ -712,4 +830,44 @@ fn validate_planned_method<'a>(
         ));
     }
     Ok(plan)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_any_flag;
+    use dotty_core::SymbolFlags;
+
+    #[test]
+    fn excluded_class_and_method_flags_are_checked_individually() {
+        let class_exclusions = [
+            SymbolFlags::CASE,
+            SymbolFlags::ENUM,
+            SymbolFlags::ABSTRACT,
+            SymbolFlags::SYNTHETIC,
+        ];
+        let method_exclusions = [
+            SymbolFlags::ABSTRACT,
+            SymbolFlags::SYNTHETIC,
+            SymbolFlags::ERASED,
+            SymbolFlags::STATIC,
+            SymbolFlags::EXTENSION,
+            SymbolFlags::GIVEN,
+            SymbolFlags::IMPLICIT,
+        ];
+
+        let class_mask = class_exclusions
+            .into_iter()
+            .fold(SymbolFlags::EMPTY, SymbolFlags::union);
+        let method_mask = method_exclusions
+            .into_iter()
+            .fold(SymbolFlags::EMPTY, SymbolFlags::union);
+        for flag in class_exclusions {
+            assert!(has_any_flag(flag, class_mask), "class flag {flag:?}");
+        }
+        for flag in method_exclusions {
+            assert!(has_any_flag(flag, method_mask), "method flag {flag:?}");
+        }
+        assert!(!has_any_flag(SymbolFlags::EMPTY, class_mask));
+        assert!(!has_any_flag(SymbolFlags::EMPTY, method_mask));
+    }
 }
