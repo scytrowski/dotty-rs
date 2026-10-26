@@ -317,12 +317,15 @@ fn validate_batch_pairs<'a>(
         let tasty_stem =
             validate_artifact_path(class_index, "TASTy path", pair.tasty_path, ".tasty")?;
         for path in [pair.classfile_path, pair.tasty_path] {
-            if paths.iter().any(|existing| existing == path) {
+            if paths
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(path))
+            {
                 return Err(invalid_manifest(
                     class_index,
                     "artifact paths",
                     path,
-                    "duplicate output path",
+                    "duplicate output path (case-insensitive)",
                 ));
             }
             paths.push(path.to_owned());
