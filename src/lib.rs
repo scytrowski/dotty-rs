@@ -30,5 +30,8 @@ pub use dotty_tasty_unpickler::tasty_unpickler;
 /// One-session planning for the audited JVM and Scala 3 TASTy class overlap.
 pub mod jvm_tasty_plan;
 
+/// Read-only cross-class source/typed identity proofs for JVM/TASTy planning.
+pub mod jvm_tasty_cross_class;
+
 /// Opt-in emission of a linked `.class` and complete `.tasty` pair.
 pub mod jvm_tasty_artifacts;

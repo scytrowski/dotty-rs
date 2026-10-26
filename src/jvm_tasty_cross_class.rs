@@ -1,0 +1,644 @@
+//! Read-only proofs for the bounded same-source cross-class reference used by
+//! the JVM/TASTy producer sequence.
+//!
+//! This validates source and typed provenance only. It does not lower or
+//! serialize a cross-class TASTy signature or method body.
+
+use std::fmt;
+
+use dotty_core::ast::{ApplyKind, AstArena, TreeKind, Typed, TypedAst, Untyped};
+use dotty_core::{
+    Definitions, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SourceTypedIndex,
+    SymbolFlags, SymbolId, SymbolInfo, SymbolKind, TermRefTarget, TreeId, Type, TypeRefTarget,
+};
+use dotty_jvm::{JvmClassPlan, JvmCompilationUnit};
+
+/// A typed failure while validating the bounded `Reader.read(counter)` proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrossClassMethodRefError {
+    /// The untyped source does not have the required two-class shape.
+    SourceShape(&'static str),
+    /// A source declaration is not bound to the canonical identity in this session.
+    SourceIdentity(&'static str),
+    /// A class, member, or parameter has an unsupported semantic type or owner.
+    SemanticIdentity(&'static str),
+    /// A source tree does not map to the exact typed tree being validated.
+    TypedBinding(&'static str),
+    /// The complete JVM unit does not contain the canonical source plans.
+    JvmPlan(&'static str),
+}
+
+impl fmt::Display for CrossClassMethodRefError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cross-class method reference proof failed: {self:?}")
+    }
+}
+
+impl std::error::Error for CrossClassMethodRefError {}
+
+/// Borrowed inputs from one frontend/JVM planning session.
+///
+/// The source root must be the package tree that owns the two planned classes.
+/// All IDs are interpreted only through these borrowed session stores and
+/// indexes; equal numeric IDs from a different session are not accepted as
+/// evidence.
+pub struct CrossClassMethodRefInput<'session> {
+    /// Source identity used by the parser and namer.
+    pub source_id: SourceId,
+    /// The exact package root from the untyped source arena.
+    pub source_root: TreeId<Untyped>,
+    /// Canonical symbols and semantic types for this session.
+    pub store: &'session SemanticStore,
+    /// Canonical primitive definitions for this session.
+    pub definitions: &'session Definitions,
+    /// Source trees from this session.
+    pub source_ast: &'session AstArena<Untyped>,
+    /// Typed trees from this session.
+    pub typed_ast: &'session TypedAst,
+    /// Canonical source declaration and scope mappings from this session.
+    pub source_index: &'session SourceSemanticIndex,
+    /// Source-to-typed mappings from this session.
+    pub source_typed_index: &'session SourceTypedIndex,
+    /// JVM plans built from the same semantic store and typed arena.
+    pub jvm_unit: &'session JvmCompilationUnit<'session>,
+}
+
+/// Validated source/typed identity for `Reader.read(counter: Counter) = counter.get()`.
+///
+/// This proof is read-only and retains the input borrows so that its IDs and
+/// typed roots remain tied to the exact compilation session that established
+/// them. It proves only the concrete zero-argument public `Counter.get(): Int`
+/// call shape; it does not claim that a TASTy producer can serialize it.
+pub struct ValidatedCrossClassMethodRef<'session> {
+    _store: &'session SemanticStore,
+    _source_ast: &'session AstArena<Untyped>,
+    _typed_ast: &'session TypedAst,
+    _source_index: &'session SourceSemanticIndex,
+    _source_typed_index: &'session SourceTypedIndex,
+    _jvm_unit: &'session JvmCompilationUnit<'session>,
+    source_id: SourceId,
+    counter_class: SymbolId,
+    reader_class: SymbolId,
+    counter_get: SymbolId,
+    reader_read: SymbolId,
+    counter_formal: SymbolId,
+    source_rhs: TreeId<Untyped>,
+    typed_rhs: TreeId<Typed>,
+    typed_select: TreeId<Typed>,
+    typed_receiver: TreeId<Typed>,
+    method_descriptor: &'static str,
+}
+
+impl ValidatedCrossClassMethodRef<'_> {
+    /// Source file identity shared by both declarations and typed roots.
+    pub fn source_id(&self) -> SourceId {
+        self.source_id
+    }
+
+    /// Canonical planned `Counter` class identity.
+    pub fn counter_class(&self) -> SymbolId {
+        self.counter_class
+    }
+
+    /// Canonical planned `Reader` class identity.
+    pub fn reader_class(&self) -> SymbolId {
+        self.reader_class
+    }
+
+    /// Canonical public `Counter.get(): Int` method identity.
+    pub fn counter_get(&self) -> SymbolId {
+        self.counter_get
+    }
+
+    /// Canonical `Reader.read(counter: Counter): Int` method identity.
+    pub fn reader_read(&self) -> SymbolId {
+        self.reader_read
+    }
+
+    /// Canonical `counter` formal owned by `Reader.read`.
+    pub fn counter_formal(&self) -> SymbolId {
+        self.counter_formal
+    }
+
+    /// Source body root for the call.
+    pub fn source_rhs(&self) -> TreeId<Untyped> {
+        self.source_rhs
+    }
+
+    /// Typed body root for the call.
+    pub fn typed_rhs(&self) -> TreeId<Typed> {
+        self.typed_rhs
+    }
+
+    /// Typed `counter.get` selection node.
+    pub fn typed_select(&self) -> TreeId<Typed> {
+        self.typed_select
+    }
+
+    /// Typed receiver identifier node.
+    pub fn typed_receiver(&self) -> TreeId<Typed> {
+        self.typed_receiver
+    }
+
+    /// JVM method descriptor proven by the supported zero-argument Int result.
+    pub fn method_descriptor(&self) -> &'static str {
+        self.method_descriptor
+    }
+}
+
+/// Validate canonical source, typed-tree, declaration-scope, and JVM-plan
+/// identity for the bounded `Counter` / `Reader` selected-call shape.
+///
+/// This operation only inspects borrowed state. It does not mutate the store,
+/// allocate symbols, emit classfiles, or construct TASTy bytes.
+pub fn validate_cross_class_method_ref(
+    input: CrossClassMethodRefInput<'_>,
+) -> Result<ValidatedCrossClassMethodRef<'_>, CrossClassMethodRefError> {
+    let CrossClassMethodRefInput {
+        source_id,
+        source_root,
+        store,
+        definitions,
+        source_ast,
+        typed_ast,
+        source_index,
+        source_typed_index,
+        jvm_unit,
+    } = input;
+
+    if !std::ptr::eq(jvm_unit.store, store) {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "JVM unit uses a different semantic store",
+        ));
+    }
+    if !std::ptr::eq(jvm_unit.typed_ast, typed_ast) {
+        return Err(CrossClassMethodRefError::TypedBinding(
+            "JVM unit uses a different typed AST",
+        ));
+    }
+    let TreeKind::PackageDef(package) = &source_ast.get(source_root).kind else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "source root must be one package declaration",
+        ));
+    };
+    let [counter_tree, reader_tree] = package.stats.as_slice() else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "source package must contain exactly Counter and Reader",
+        ));
+    };
+    let class_name = |tree: TreeId<Untyped>| match &source_ast.get(tree).kind {
+        TreeKind::TypeDef(definition) => store.names.resolve(definition.name.as_name().text()),
+        _ => "",
+    };
+    if class_name(*counter_tree) != "Counter" || class_name(*reader_tree) != "Reader" {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "source declarations must be Counter followed by Reader",
+        ));
+    }
+    let counter_class = source_index.symbol_at(source_id, *counter_tree).ok_or(
+        CrossClassMethodRefError::SourceIdentity("Counter has no canonical source symbol"),
+    )?;
+    let reader_class = source_index.symbol_at(source_id, *reader_tree).ok_or(
+        CrossClassMethodRefError::SourceIdentity("Reader has no canonical source symbol"),
+    )?;
+    validate_canonical_definition(source_index, source_id, *counter_tree, counter_class)?;
+    validate_canonical_definition(source_index, source_id, *reader_tree, reader_class)?;
+    if counter_class == reader_class {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "Counter and Reader must be distinct canonical classes",
+        ));
+    }
+    if store.symbols.get(counter_class).kind != SymbolKind::Class
+        || store.symbols.get(reader_class).kind != SymbolKind::Class
+        || store.symbols.get(counter_class).visibility != dotty_core::Visibility::Public
+        || store.symbols.get(reader_class).visibility != dotty_core::Visibility::Public
+    {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "both declarations must be public ordinary classes",
+        ));
+    }
+    let package_owner = store.symbols.get(counter_class).owner;
+    if package_owner.is_none()
+        || store.symbols.get(reader_class).owner != package_owner
+        || package_owner.is_some_and(|owner| store.symbols.get(owner).kind != SymbolKind::Package)
+    {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "Counter and Reader must have the exact same package owner",
+        ));
+    }
+    let counter_members = class_declarations(store, source_index, counter_class)?;
+    let reader_members = class_declarations(store, source_index, reader_class)?;
+
+    let (counter_get_tree, counter_get_definition) = find_method(
+        source_ast,
+        store,
+        *counter_tree,
+        "get",
+        "Counter must declare exactly one concrete get method",
+    )?;
+    let (reader_read_tree, reader_read_definition) = find_method(
+        source_ast,
+        store,
+        *reader_tree,
+        "read",
+        "Reader must declare exactly one concrete read method",
+    )?;
+    if !counter_get_definition.type_params.is_empty()
+        || counter_get_definition.value_param_clauses.len() != 1
+        || !counter_get_definition.value_param_clauses[0].is_empty()
+        || !reader_read_definition.type_params.is_empty()
+        || reader_read_definition.value_param_clauses.len() != 1
+        || reader_read_definition.value_param_clauses[0].len() != 1
+    {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "get must be get() and read must have one plain Counter formal",
+        ));
+    }
+    let counter_get = source_index.symbol_at(source_id, counter_get_tree).ok_or(
+        CrossClassMethodRefError::SourceIdentity("Counter.get has no canonical source symbol"),
+    )?;
+    let reader_read = source_index.symbol_at(source_id, reader_read_tree).ok_or(
+        CrossClassMethodRefError::SourceIdentity("Reader.read has no canonical source symbol"),
+    )?;
+    validate_canonical_definition(source_index, source_id, counter_get_tree, counter_get)?;
+    validate_canonical_definition(source_index, source_id, reader_read_tree, reader_read)?;
+    validate_member(store, counter_members, counter_class, counter_get, "get")?;
+    validate_member(store, reader_members, reader_class, reader_read, "read")?;
+    validate_public_concrete_method(store, counter_get, "Counter.get")?;
+    validate_public_concrete_method(store, reader_read, "Reader.read")?;
+
+    let counter_formal_tree = reader_read_definition.value_param_clauses[0][0];
+    let counter_formal = source_index
+        .symbol_at(source_id, counter_formal_tree)
+        .ok_or(CrossClassMethodRefError::SourceIdentity(
+            "Reader.read counter formal has no canonical source symbol",
+        ))?;
+    validate_canonical_definition(source_index, source_id, counter_formal_tree, counter_formal)?;
+    if store.symbols.get(counter_formal).kind != SymbolKind::Parameter
+        || store.symbols.get(counter_formal).owner != Some(reader_read)
+    {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "counter must be a Reader.read-owned parameter",
+        ));
+    }
+    let SymbolInfo::Complete(formal_type) = store.symbols.get(counter_formal).info else {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "counter formal type is not complete",
+        ));
+    };
+    if !matches!(
+        store.types.get(formal_type),
+        Type::TypeRef { target: TypeRefTarget::Symbol(target), .. } if *target == counter_class
+    ) {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "counter formal must refer to the planned Counter class identity",
+        ));
+    }
+
+    let counter_get_type = complete_method_type(store, counter_get, "Counter.get")?;
+    if !counter_get_type.params.is_empty()
+        || counter_get_type.result != definitions.int
+        || counter_get_type.kind != dotty_core::MethodKind::Plain
+    {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "Counter.get must have the exact zero-argument Int signature ()I",
+        ));
+    }
+    let reader_type = complete_method_type(store, reader_read, "Reader.read")?;
+    if reader_type.params.len() != 1
+        || reader_type.params[0].ty != formal_type
+        || reader_type.params[0].erased
+        || reader_type.params[0].varargs
+        || reader_type.result != definitions.int
+        || reader_type.kind != dotty_core::MethodKind::Plain
+    {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "Reader.read must have one plain Counter formal and return Int",
+        ));
+    }
+
+    let source_rhs = reader_read_definition
+        .rhs
+        .ok_or(CrossClassMethodRefError::SourceShape(
+            "Reader.read must have a concrete body",
+        ))?;
+    let TreeKind::Apply(source_apply) = &source_ast.get(source_rhs).kind else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "Reader.read body must be counter.get()",
+        ));
+    };
+    let TreeKind::Select(source_select) = &source_ast.get(source_apply.function).kind else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "Reader.read body must select get on its formal",
+        ));
+    };
+    let TreeKind::Ident(source_receiver) = &source_ast.get(source_select.qualifier).kind else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "Reader.read receiver must be the counter formal identifier",
+        ));
+    };
+    if store.names.resolve(source_select.name.text()) != "get"
+        || store.names.resolve(source_receiver.name.text()) != "counter"
+        || !source_apply.args.is_empty()
+    {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "Reader.read body must be the zero-argument counter.get() call",
+        ));
+    }
+    let typed_rhs = source_typed_index.get(source_id, source_rhs).ok_or(
+        CrossClassMethodRefError::TypedBinding("Reader.read body has no source-to-typed binding"),
+    )?;
+    let TreeKind::Apply(typed_apply) = &typed_ast.get(typed_rhs).kind else {
+        return Err(CrossClassMethodRefError::TypedBinding(
+            "Reader.read typed body is not an Apply",
+        ));
+    };
+    if typed_apply.kind != ApplyKind::Regular || !typed_apply.args.is_empty() {
+        return Err(CrossClassMethodRefError::TypedBinding(
+            "typed call must be one plain zero-argument Apply",
+        ));
+    }
+    if source_typed_index.get(source_id, source_apply.function) != Some(typed_apply.function) {
+        return Err(CrossClassMethodRefError::TypedBinding(
+            "selected method root is not the source-bound typed function",
+        ));
+    }
+    let TreeKind::Select(typed_select) = &typed_ast.get(typed_apply.function).kind else {
+        return Err(CrossClassMethodRefError::TypedBinding(
+            "typed call function is not a Select",
+        ));
+    };
+    if source_typed_index.get(source_id, source_select.qualifier) != Some(typed_select.qualifier) {
+        return Err(CrossClassMethodRefError::TypedBinding(
+            "receiver is not the source-bound typed qualifier",
+        ));
+    }
+    let TreeKind::Ident(typed_receiver) = &typed_ast.get(typed_select.qualifier).kind else {
+        return Err(CrossClassMethodRefError::TypedBinding(
+            "typed receiver is not an identifier",
+        ));
+    };
+    if store.names.resolve(typed_receiver.name.text()) != "counter"
+        || store.names.resolve(typed_select.name.text()) != "get"
+        || !matches!(
+            store.types.get(typed_ast.get(typed_apply.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(target), .. } if *target == counter_get
+        )
+        || !matches!(
+            store.types.get(typed_ast.get(typed_select.qualifier).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(target), .. } if *target == counter_formal
+        )
+    {
+        return Err(CrossClassMethodRefError::TypedBinding(
+            "typed receiver and selected method must retain canonical symbol targets",
+        ));
+    }
+    if typed_ast.get(typed_rhs).ty != definitions.int {
+        return Err(CrossClassMethodRefError::TypedBinding(
+            "typed call result must be the canonical Int type",
+        ));
+    }
+
+    let counter_get_body = counter_get_definition
+        .rhs
+        .and_then(|rhs| source_typed_index.get(source_id, rhs))
+        .ok_or(CrossClassMethodRefError::TypedBinding(
+            "Counter.get body has no source-to-typed binding",
+        ))?;
+    let counter_method_plan = unique_class_plan(jvm_unit, counter_class, "Counter")?;
+    let reader_method_plan = unique_class_plan(jvm_unit, reader_class, "Reader")?;
+    validate_planned_method(
+        jvm_unit,
+        counter_method_plan,
+        counter_get,
+        &[],
+        Some(counter_get_body),
+        "Counter.get",
+    )?;
+    validate_planned_method(
+        jvm_unit,
+        reader_method_plan,
+        reader_read,
+        &[counter_formal],
+        Some(typed_rhs),
+        "Reader.read",
+    )?;
+
+    Ok(ValidatedCrossClassMethodRef {
+        _store: store,
+        _source_ast: source_ast,
+        _typed_ast: typed_ast,
+        _source_index: source_index,
+        _source_typed_index: source_typed_index,
+        _jvm_unit: jvm_unit,
+        source_id,
+        counter_class,
+        reader_class,
+        counter_get,
+        reader_read,
+        counter_formal,
+        source_rhs,
+        typed_rhs,
+        typed_select: typed_apply.function,
+        typed_receiver: typed_select.qualifier,
+        method_descriptor: "()I",
+    })
+}
+
+fn validate_canonical_definition(
+    source_index: &SourceSemanticIndex,
+    source: SourceId,
+    tree: TreeId<Untyped>,
+    symbol: SymbolId,
+) -> Result<(), CrossClassMethodRefError> {
+    if source_index.symbol_at(source, tree) != Some(symbol)
+        || source_index.definition_of(symbol) != Some(SourceDefinition::Canonical { source, tree })
+    {
+        return Err(CrossClassMethodRefError::SourceIdentity(
+            "symbol is not the canonical identity for this exact source tree",
+        ));
+    }
+    Ok(())
+}
+
+fn class_declarations<'a>(
+    store: &'a SemanticStore,
+    source_index: &SourceSemanticIndex,
+    class: SymbolId,
+) -> Result<&'a dotty_core::Scope, CrossClassMethodRefError> {
+    let SymbolInfo::Complete(class_type) = store.symbols.get(class).info else {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "class info is not complete",
+        ));
+    };
+    let Type::ClassInfo(info) = store.types.get(class_type) else {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "class symbol does not carry ClassInfo",
+        ));
+    };
+    if info.class != class
+        || store.scopes.get(info.declarations).owner != Some(class)
+        || source_index.scope_of(class) != Some(info.declarations)
+    {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "class declaration scope is not the canonical source scope",
+        ));
+    }
+    Ok(store.scopes.get(info.declarations))
+}
+
+fn find_method<'a>(
+    source_ast: &'a AstArena<Untyped>,
+    store: &SemanticStore,
+    class_tree: TreeId<Untyped>,
+    name: &str,
+    reason: &'static str,
+) -> Result<(TreeId<Untyped>, &'a dotty_core::ast::DefDef<Untyped>), CrossClassMethodRefError> {
+    let TreeKind::TypeDef(class_definition) = &source_ast.get(class_tree).kind else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "top-level declaration must be a class",
+        ));
+    };
+    let TreeKind::Template(template) = &source_ast.get(class_definition.rhs).kind else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "class declaration must have a template",
+        ));
+    };
+    let matches = template
+        .body
+        .iter()
+        .copied()
+        .filter_map(|tree| match &source_ast.get(tree).kind {
+            TreeKind::DefDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == name =>
+            {
+                Some((tree, definition))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [(tree, definition)] => Ok((*tree, *definition)),
+        _ => Err(CrossClassMethodRefError::SourceShape(reason)),
+    }
+}
+
+fn validate_member(
+    store: &SemanticStore,
+    declarations: &dotty_core::Scope,
+    owner: SymbolId,
+    member: SymbolId,
+    name: &str,
+) -> Result<(), CrossClassMethodRefError> {
+    let symbol = store.symbols.get(member);
+    if symbol.owner != Some(owner)
+        || store.names.resolve(symbol.name.text()) != name
+        || declarations.lookup_all(&symbol.name) != [member]
+    {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "method owner or declaration-scope membership is not canonical",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_public_concrete_method(
+    store: &SemanticStore,
+    method: SymbolId,
+    label: &'static str,
+) -> Result<(), CrossClassMethodRefError> {
+    let symbol = store.symbols.get(method);
+    if symbol.kind != SymbolKind::Method
+        || symbol.visibility != dotty_core::Visibility::Public
+        || symbol
+            .flags
+            .contains(SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC | SymbolFlags::ERASED)
+    {
+        return Err(CrossClassMethodRefError::SemanticIdentity(match label {
+            "Counter.get" => "Counter.get must be public, concrete, and source-defined",
+            _ => "Reader.read must be public, concrete, and source-defined",
+        }));
+    }
+    Ok(())
+}
+
+fn complete_method_type<'a>(
+    store: &'a SemanticStore,
+    method: SymbolId,
+    _label: &'static str,
+) -> Result<&'a dotty_core::MethodType, CrossClassMethodRefError> {
+    let SymbolInfo::Complete(method_type) = store.symbols.get(method).info else {
+        return Err(CrossClassMethodRefError::SemanticIdentity(
+            "method signature is not complete",
+        ));
+    };
+    match store.types.get(method_type) {
+        Type::Method(method_type) => Ok(method_type),
+        _ => Err(CrossClassMethodRefError::SemanticIdentity(
+            "method must have one non-generic plain method type",
+        )),
+    }
+}
+
+fn unique_class_plan<'a>(
+    jvm_unit: &'a JvmCompilationUnit<'_>,
+    class: SymbolId,
+    label: &'static str,
+) -> Result<&'a JvmClassPlan, CrossClassMethodRefError> {
+    let mut matching = jvm_unit.classes.iter().filter(|plan| plan.class == class);
+    let Some(plan) = matching.next() else {
+        return Err(CrossClassMethodRefError::JvmPlan(match label {
+            "Counter" => "canonical Counter is absent from the complete JVM unit",
+            _ => "canonical Reader is absent from the complete JVM unit",
+        }));
+    };
+    if matching.next().is_some() {
+        return Err(CrossClassMethodRefError::JvmPlan(
+            "a canonical class occurs more than once in the JVM unit",
+        ));
+    }
+    Ok(plan)
+}
+
+fn validate_planned_method(
+    jvm_unit: &JvmCompilationUnit<'_>,
+    class_plan: &JvmClassPlan,
+    method: SymbolId,
+    parameters: &[SymbolId],
+    body: Option<TreeId<Typed>>,
+    label: &'static str,
+) -> Result<(), CrossClassMethodRefError> {
+    let total_occurrences = jvm_unit
+        .classes
+        .iter()
+        .flat_map(|plan| plan.methods.iter())
+        .filter(|plan| plan.method == method)
+        .count();
+    if total_occurrences == 0 {
+        return Err(CrossClassMethodRefError::JvmPlan(match label {
+            "Counter.get" => "canonical Counter.get is absent from Counter's JVM plan",
+            _ => "canonical Reader.read is absent from Reader's JVM plan",
+        }));
+    }
+    if total_occurrences != 1 {
+        return Err(CrossClassMethodRefError::JvmPlan(
+            "canonical method must occur exactly once in the complete JVM unit",
+        ));
+    }
+    let mut matching = class_plan
+        .methods
+        .iter()
+        .filter(|plan| plan.method == method);
+    let Some(plan) = matching.next() else {
+        return Err(CrossClassMethodRefError::JvmPlan(match label {
+            "Counter.get" => "canonical Counter.get is absent from Counter's JVM plan",
+            _ => "canonical Reader.read is absent from Reader's JVM plan",
+        }));
+    };
+    if matching.next().is_some() || plan.parameters != parameters || plan.body != body {
+        return Err(CrossClassMethodRefError::JvmPlan(
+            "planned method identity, formal order, or typed body does not match source",
+        ));
+    }
+    Ok(())
+}

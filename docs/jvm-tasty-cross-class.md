@@ -58,6 +58,18 @@ and Reader.read's `counter` formal `SymbolId(50)`. These numeric IDs describe
 this test session only; the test asserts semantic identity and ownership
 relationships rather than treating allocation order as a contract.
 
+The root API `validate_cross_class_method_ref` builds a borrowed, read-only
+`ValidatedCrossClassMethodRef` from that same source index, typed bindings,
+semantic store, typed arena, and complete JVM unit. It verifies the exact
+`Reader.read` formal type target, both class declaration scopes, public
+`Counter.get(): Int`, typed `Select` target, receiver `TermRef`,
+source-to-typed roots, and matching JVM method plans. The proof exposes the
+canonical class, method, formal, and typed-root IDs plus descriptor `()I`;
+its borrows keep those identities tied to the session. It rejects a missing
+planned class, a substituted method plan, or a JVM unit from another semantic
+store before any artifact operation. This proves source/typed provenance only
+and does not enable paired TASTy signature or call-body encoding.
+
 The formal completes to `TypeRef(SymbolId(39))`. Typing the body succeeds. Its
 typed root maps from the exact source RHS through `SourceTypedIndex`; the
 selected function's `TermRef` targets `SymbolId(45)`, and the typed receiver is
