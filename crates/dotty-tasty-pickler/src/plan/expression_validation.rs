@@ -2371,6 +2371,7 @@ impl Validator<'_, '_> {
             typed_new.position,
             typed_select.qualifier,
         )?;
+        let typed_new_result_type = typed_new.ty;
         let (TreeKind::New(source_new), TreeKind::New(typed_new)) =
             (&source_new.kind, &typed_new.kind)
         else {
@@ -2386,6 +2387,7 @@ impl Validator<'_, '_> {
                 .ok_or(PickleError::InvalidTypedTree {
                     tree: typed_new.tpt,
                 })?;
+        self.source_typed_binding(source_new.tpt, typed_new.tpt)?;
         self.paired_source_typed_span(source_type.position, typed_type.position, typed_new.tpt)?;
         let TreeKind::Ident(source_class_name) = &source_type.kind else {
             return Err(PickleError::SourceShape {
@@ -2413,6 +2415,7 @@ impl Validator<'_, '_> {
         let class = *class;
         if !self.is_planned_sibling_class_type(result_type, Some(source_class_name.name))
             || !self.same_planned_sibling_class_type(class_type, result_type)
+            || !self.same_planned_sibling_class_type(typed_new_result_type, class_type)
             || p.store.symbols.get(class).name != source_class_name.name
             || !matches!(p.store.types.try_get(typed_root.ty), Some(Type::TypeRef {
                 target: TypeRefTarget::Symbol(result_class), ..
