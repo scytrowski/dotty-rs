@@ -20,9 +20,11 @@
 //!
 //! [`ClassStatePicklePlan`] validates source-ordered private primitive fields,
 //! their typed initializers, bounded primary-constructor inputs and ordinary
-//! methods. [`ValidatedClassStatePlan::pickle`] emits the supported default-
-//! constructor class state, including private `val`/`var` declarations and
-//! their exact initializer trees. The separate [`PicklePlan`] method-only path
+//! methods. It also exposes read-only proofs for a private immutable reference
+//! field whose canonical target is a public class in the same source batch;
+//! that proof retains the pending initializer roots but does not authorize
+//! their serialization. [`ValidatedClassStatePlan::pickle`] emits only the
+//! supported primitive class-state subset. The separate [`PicklePlan`] method-only path
 //! also supports one primary-constructor clause of plain Int parameters,
 //! retaining the class-template and constructor-owned parameter identities.
 
@@ -52,7 +54,8 @@ pub use error::{
 pub use plan::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, DefaultConstructorPlan,
     LocalValueBinding, MethodPicklePlan, PicklePlan, PrimaryConstructorInputPlan, SourceMetadata,
-    SourceTypedBindings, ValidatedClassStatePlan, ValidatedPicklePlan, ValidationLimits,
+    SourceTypedBindings, ValidatedClassStatePlan, ValidatedPicklePlan,
+    ValidatedSameBatchReferenceField, ValidationLimits,
 };
 pub use projection::{EncodingContext, ProjectedFragment, ProjectionLimits};
 pub use skeleton::{DeclarationSkeleton, OmittedMethodBody, SkeletonDeclaration};

@@ -33,6 +33,7 @@ const COUNTER_READER: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader
 const COUNTER_FACTORY: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
 const THREE_CLASSES: &str = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass Gauge(start: Int):\n  private var reading: Int = start\n  def get(): Int = reading\n  def set(value: Int): Unit = reading = value\n\nclass Thermometer(start: Int):\n  private var temperature: Int = start\n  def get(): Int = temperature\n  def set(value: Int): Unit = temperature = value\n";
+const SAME_BATCH_REFERENCE_FIELD: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\nclass CounterOwner(seed: Int):\n  private val inner: Counter = new Counter(seed)\n  def constant(): Int = 0\n";
 
 #[test]
 fn whole_batch_proves_distinct_class_abi_and_rejects_partial_or_swapped_artifacts() {
@@ -217,6 +218,40 @@ fn whole_batch_proves_distinct_class_abi_and_rejects_partial_or_swapped_artifact
                     ..
                 })
             ));
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn private_immutable_same_batch_reference_field_matches_jvm_batch_abi() {
+    with_paired_jvm_tasty_batch_plan(
+        SAME_BATCH_REFERENCE_FIELD,
+        "CounterOwner.scala",
+        SourceId::from_index(1716),
+        |source_batch| {
+            let tasty_plans = source_batch
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let batch = validate_jvm_tasty_batch(source_batch.jvm_unit, &tasty_plans).unwrap();
+            assert_eq!(batch.classes().len(), 2);
+            assert_eq!(
+                batch
+                    .classes()
+                    .iter()
+                    .map(|class| class.proof().internal_name())
+                    .collect::<Vec<_>>(),
+                ["example/Counter", "example/CounterOwner"]
+            );
+            assert_eq!(
+                source_batch.classes[1]
+                    .tasty_plan
+                    .same_batch_reference_fields()
+                    .count(),
+                1
+            );
         },
     )
     .unwrap();

@@ -6,7 +6,7 @@ mod source_binding;
 
 pub use class_state::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, PrimaryConstructorInputPlan,
-    ValidatedClassStatePlan,
+    ValidatedClassStatePlan, ValidatedSameBatchReferenceField,
 };
 
 use dotty_core::ast::{

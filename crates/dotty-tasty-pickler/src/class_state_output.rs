@@ -218,6 +218,11 @@ impl ValidatedClassStatePlan<'_, '_> {
 
     fn assemble_class_state(&self, limits: PickleLimits) -> Result<Assembly, PickleError> {
         let p = self.plan();
+        if let Some(field) = self.same_batch_reference_fields().next() {
+            return Err(PickleError::UnsupportedTypeReference {
+                ty: field.declared_type(),
+            });
+        }
         let constructor_tree = p.source_ast.try_get(p.constructor.source_tree).ok_or(
             PickleError::InvalidSourceTree {
                 tree: p.constructor.source_tree,
