@@ -666,7 +666,7 @@ fn same_batch_class_formal_emits_reader_owned_counter_type_without_cloning_count
 }
 
 #[test]
-fn same_batch_class_result_emits_identity_tasty_and_keeps_allocation_unsupported() {
+fn same_batch_class_result_emits_identity_tasty_and_rejects_nonformal_constructor_arguments() {
     with_paired_jvm_tasty_batch_plan(
         CROSS_CLASS_IDENTITY_RESULT,
         "tests/fixtures/jvm_tasty_cross_class_factories/CounterIdentitySource.scala",
@@ -889,13 +889,15 @@ fn same_batch_class_result_emits_identity_tasty_and_keeps_allocation_unsupported
         &construction_source,
         "CounterIdentitySource.scala",
         SourceId::from_index(1693),
-        |_| panic!("unsupported New must not return a completed batch"),
+        |_| panic!("constructor literals are outside the validated source slice"),
     );
     let Err(PairedPlanError::BatchClass { phase, reason, .. }) = construction else {
-        panic!("unsupported New must fail before a completed batch: {construction:?}");
+        panic!(
+            "an unsupported constructor argument must fail before a completed batch: {construction:?}"
+        );
     };
     assert_eq!(phase, "JVM/TASTy cross-contract validation");
-    assert!(reason.contains("TastyPlan(BodyType"), "{reason}");
+    assert!(reason.contains("TastyPlan(Unsupported"), "{reason}");
 }
 
 #[test]

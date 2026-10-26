@@ -76,6 +76,7 @@ pub struct EncodingContext<'a> {
     external: HashMap<SymbolId, (NameRef, NameRef)>,
     same_source_external: HashSet<SymbolId>,
     types: HashMap<TypeId, AstLabel>,
+    type_order: Vec<(TypeId, AstLabel)>,
     active: HashSet<TypeId>,
 }
 
@@ -124,6 +125,7 @@ impl<'a> EncodingContext<'a> {
             external: HashMap::new(),
             same_source_external: HashSet::new(),
             types: HashMap::new(),
+            type_order: Vec::new(),
             active: HashSet::new(),
         };
         if !matches!(context.ty(definitions.no_prefix)?, Type::NoPrefix) {
@@ -1107,6 +1109,138 @@ impl<'a> EncodingContext<'a> {
         })
     }
 
+    /// Lowers the type syntax for one registered same-source sibling class.
+    /// This is used by the bounded `NEW` expression path after validation has
+    /// proved the source type tree and canonical class identity.
+    pub(crate) fn planned_class_type_syntax(
+        &mut self,
+        class: SymbolId,
+        class_type: TypeId,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|c| {
+            if !c.same_source_external.contains(&class) || c.declarations.contains_key(&class) {
+                return Err(reference(class, ReferenceError::NotRegistered));
+            }
+            let class_record = c.symbol(class)?;
+            if class_record.kind != SymbolKind::Class
+                || class_record.origin != SymbolOrigin::Source(c.source)
+                || class_record.visibility != Visibility::Public
+                || !class_record.flags.is_empty()
+                || !class_record.annotations.is_empty()
+            {
+                return Err(reference(class, ReferenceError::Metadata));
+            }
+            let name = c.utf8(c.text(class_record.name.text())?)?;
+            let child = c.lower_same_source_class_type(class, class_type)?;
+            c.wire
+                .push(AstNode::NatAst {
+                    tag: IDENTTPT_TAG,
+                    value: AstOperand::Nat(name),
+                    child,
+                })
+                .map_err(construction)
+        })
+    }
+
+    /// Lowers the exact public primary constructor selection for one planned
+    /// sibling class. The symbol is checked against its canonical source
+    /// declaration and completed `(Int)Class` signature before a signed name
+    /// is emitted; no constructor is copied into the current sidecar.
+    pub(crate) fn same_source_constructor_select_in(
+        &mut self,
+        class: SymbolId,
+        constructor: SymbolId,
+        receiver: AstLabel,
+        owner_type: TypeId,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|c| {
+            if !c.same_source_external.contains(&class) || c.declarations.contains_key(&class) {
+                return Err(reference(class, ReferenceError::NotRegistered));
+            }
+            let class_record = c.symbol(class)?;
+            let constructor_record = c.symbol(constructor)?;
+            if class_record.kind != SymbolKind::Class
+                || class_record.origin != SymbolOrigin::Source(c.source)
+                || class_record.visibility != Visibility::Public
+                || !class_record.flags.is_empty()
+                || !class_record.annotations.is_empty()
+                || constructor_record.kind != SymbolKind::Constructor
+                || constructor_record.owner != Some(class)
+                || constructor_record.origin != SymbolOrigin::Source(c.source)
+                || constructor_record.visibility != Visibility::Public
+                || !constructor_record.flags.is_empty()
+                || !constructor_record.annotations.is_empty()
+                || c.source_index
+                    .definition_of(constructor)
+                    .is_none_or(|definition| {
+                        !matches!(definition,
+                        SourceDefinition::Canonical { source, .. } if source == c.source)
+                    })
+            {
+                return Err(reference(constructor, ReferenceError::Metadata));
+            }
+            let SymbolInfo::Complete(signature_type) = constructor_record.info else {
+                return Err(PickleError::IncompleteSymbol {
+                    symbol: constructor,
+                    info: constructor_record.info,
+                });
+            };
+            let Type::Method(signature) = c.ty(signature_type)? else {
+                return Err(PickleError::MalformedType {
+                    ty: signature_type,
+                    role: crate::TypeRole::ConstructorSignature,
+                });
+            };
+            if signature.kind != MethodKind::Plain
+                || signature.params.len() != 1
+                || signature.params[0].ty != c.definitions.int
+                || signature.params[0].erased
+                || signature.params[0].varargs
+                || !matches!(c.ty(signature.result)?, Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(target),
+                } if *prefix == c.definitions.no_prefix && *target == class)
+            {
+                return Err(reference(constructor, ReferenceError::Metadata));
+            }
+            let owner = class_record
+                .owner
+                .ok_or(reference(class, ReferenceError::Owner))?;
+            let owner_record = c.symbol(owner)?;
+            if owner_record.kind != SymbolKind::Package {
+                return Err(reference(class, ReferenceError::Owner));
+            }
+            let package_name = c.package_name(owner)?;
+            let class_name = c.utf8(c.text(class_record.name.text())?)?;
+            let result_signature = c.intern(NameKey::Qualified(package_name, class_name))?;
+            let original = c.utf8("<init>")?;
+            let scala = c.utf8("scala")?;
+            let int = c.utf8("Int")?;
+            let int_signature = c.intern(NameKey::Qualified(scala, int))?;
+            let int_signature =
+                i32::try_from(int_signature).map_err(|_| PickleError::LimitExceeded {
+                    kind: LimitKind::Names,
+                    limit: i32::MAX as usize,
+                })?;
+            let signed_name = c.intern(NameKey::SignedMany(
+                original,
+                result_signature,
+                vec![int_signature],
+            ))?;
+            let owner_type = c.lower_same_source_class_type(class, owner_type)?;
+            c.wire
+                .push(AstNode::Length {
+                    tag: SELECTIN_TAG,
+                    fields: vec![
+                        AstField::Nat(signed_name),
+                        AstField::Tree(receiver),
+                        AstField::Tree(owner_type),
+                    ],
+                })
+                .map_err(construction)
+        })
+    }
+
     fn same_class_method_select_inner(
         &mut self,
         class: SymbolId,
@@ -1386,7 +1520,7 @@ impl<'a> EncodingContext<'a> {
             } if *symbol == class => {}
             _ => return Err(reference(class, ReferenceError::Owner)),
         }
-        let shared = self.types.iter().find_map(|(&ty, &label)| {
+        let shared = self.type_order.iter().find_map(|&(ty, label)| {
             matches!(
                 self.store.types.try_get(ty),
                 Some(Type::TypeRef {
@@ -1539,6 +1673,7 @@ impl<'a> EncodingContext<'a> {
         };
         self.active.remove(&ty);
         self.types.insert(ty, label);
+        self.type_order.push((ty, label));
         Ok(label)
     }
     /// An explicit Int result syntax wrapper, distinct from its semantic type.

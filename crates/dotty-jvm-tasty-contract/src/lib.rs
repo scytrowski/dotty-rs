@@ -888,15 +888,17 @@ struct CrossClassMethodRef {
     owner_internal_name: String,
     name: String,
     descriptor: String,
+    constructor: bool,
 }
 
 fn validate_cross_class_call_code(
     class_file: &ClassFile<'_>,
     proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
 ) -> Result<(), String> {
-    // The paired pickler admits the direct same-batch zero-argument call only.
-    // Keep the binary check equally narrow instead of accepting a plausible
-    // but differently owned or shaped invocation from classfile bytes.
+    // The paired pickler admits a direct same-batch zero-argument call or the
+    // bounded primary-constructor application only. Keep the binary check
+    // equally narrow instead of accepting a plausible but differently owned
+    // or shaped invocation from classfile bytes.
     let tasty = proof.tasty_plan.plan();
     let all_metadata = proof
         .jvm_unit
@@ -1029,6 +1031,43 @@ fn validate_cross_class_call_code(
             continue;
         };
         if application.kind != dotty_core::ast::ApplyKind::Regular || !application.args.is_empty() {
+            let constructor_receiver = match &function_tree.kind {
+                TreeKind::Select(selection) => tasty
+                    .typed_ast
+                    .try_get(selection.qualifier)
+                    .is_some_and(|receiver| matches!(receiver.kind, TreeKind::New(_))),
+                _ => false,
+            };
+            if target_info.kind == SymbolKind::Constructor
+                && constructor_receiver
+                && application.kind == dotty_core::ast::ApplyKind::Regular
+                && application.args.len() == 1
+            {
+                let constructor = target_class_metadata
+                    .constructor()
+                    .filter(|constructor| constructor.symbol() == *target)
+                    .ok_or_else(|| {
+                        format!("cross-class constructor {target:?} is absent from its JVM plan")
+                    })?;
+                let descriptor = constructor.descriptor().as_str();
+                if descriptor != "(I)V" || !constructor.access_flags().is_public() {
+                    return Err(format!(
+                        "cross-class constructor {target:?} is not an accessible (I)V primary constructor"
+                    ));
+                }
+                calls.push(CrossClassMethodRef {
+                    caller,
+                    target: *target,
+                    owner_internal_name: target_class_metadata
+                        .identity()
+                        .internal_name()
+                        .to_owned(),
+                    name: "<init>".to_owned(),
+                    descriptor: descriptor.to_owned(),
+                    constructor: true,
+                });
+                continue;
+            }
             return Err(format!(
                 "cross-class method {target:?} is not a direct zero-argument call"
             ));
@@ -1064,6 +1103,7 @@ fn validate_cross_class_call_code(
             owner_internal_name: target_metadata.0.identity().internal_name().to_owned(),
             name: target_metadata.1.name().to_owned(),
             descriptor: expected_descriptor,
+            constructor: false,
         });
     }
 
@@ -1099,20 +1139,62 @@ fn validate_cross_class_call_code(
                 call.caller
             ));
         };
-        if code.code.len() != 5
-            || code.code[0] != 0x2b
-            || code.code[1] != 0xb6
-            || code.code[4] != 0xac
-        {
-            return Err(format!(
-                "caller method {:?} does not contain the bounded aload_1/invokevirtual/ireturn shape",
-                call.caller
-            ));
-        }
-        let reference = dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
-            code.code[2],
-            code.code[3],
-        ]));
+        let reference = if call.constructor {
+            if code.code.len() != 9
+                || code.code[0] != 0xbb
+                || code.code[3] != 0x59
+                || code.code[4] != 0x1b
+                || code.code[5] != 0xb7
+                || code.code[8] != 0xb0
+            {
+                return Err(format!(
+                    "caller method {:?} does not contain the bounded new/dup/aload_1/invokespecial/areturn shape: {:02x?}",
+                    call.caller, code.code
+                ));
+            }
+            let class_reference =
+                dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+                    code.code[1],
+                    code.code[2],
+                ]));
+            let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Class { name_index }) =
+                class_file.constant_pool.get(class_reference)
+            else {
+                return Err(format!(
+                    "caller method {:?} new does not reference CONSTANT_Class",
+                    call.caller
+                ));
+            };
+            let actual_new_owner = class_file
+                .constant_pool
+                .utf8(*name_index)
+                .map_err(|error| format!("invalid new class name: {error:?}"))?;
+            if actual_new_owner != call.owner_internal_name {
+                return Err(format!(
+                    "caller method {:?} allocates {}, expected {}",
+                    call.caller, actual_new_owner, call.owner_internal_name
+                ));
+            }
+            dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+                code.code[6],
+                code.code[7],
+            ]))
+        } else {
+            if code.code.len() != 5
+                || code.code[0] != 0x2b
+                || code.code[1] != 0xb6
+                || code.code[4] != 0xac
+            {
+                return Err(format!(
+                    "caller method {:?} does not contain the bounded aload_1/invokevirtual/ireturn shape",
+                    call.caller
+                ));
+            }
+            dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+                code.code[2],
+                code.code[3],
+            ]))
+        };
         let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
             class_index,
             name_and_type_index,

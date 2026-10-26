@@ -9,6 +9,11 @@ use dotty_tasty::ast::{
     TERMREFDIRECT_TAG, TERMREFPKG_TAG, TYPEREF_TAG,
 };
 use dotty_tasty::file::TastyFile;
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
+const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 const FACTORY_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
@@ -322,20 +327,273 @@ fn scala_39_factory_oracle_pins_descriptors_constructor_wire_and_sidecar_links()
 }
 
 #[test]
-fn paired_tasty_planning_rejects_factory_new_at_body_validation() {
-    let error = emit_paired_jvm_tasty_batch(
+fn paired_tasty_planning_emits_the_canonical_factory_new_body() {
+    let artifacts = emit_paired_jvm_tasty_batch(
         FACTORY_SOURCE,
         "CounterFactory.scala",
         SourceId::from_index(1690),
     )
-    .expect_err("constructor New remains outside the #1692 body subset");
-    let evidence = format!("{error:?}");
-    assert!(
-        evidence.contains("phase: \"JVM/TASTy cross-contract validation\""),
-        "the real factory body must reach TASTy/JVM contract validation: {evidence}"
+    .expect("the audited same-batch constructor application emits a complete linked batch");
+    let factory_artifacts = artifacts
+        .classes()
+        .iter()
+        .find(|class| class.tasty_path() == "example/CounterFactory.tasty")
+        .expect("the factory sidecar is present");
+    let tasty = assert_pinned_tasty(factory_artifacts.tasty_bytes());
+    let (create_address, create) = method(&tasty, "create");
+    assert_counter_type_ref(
+        &create.return_type,
+        &tasty.ast_address_index().unwrap(),
+        &tasty,
     );
-    assert!(
-        evidence.contains("TastyPlan(BodyType"),
-        "the unsupported New expression must fail at body validation, not MethodResult: {evidence}"
+    let Some(dotty_tasty::term::RawTree::LengthNode(apply_node)) = create.rhs.as_ref() else {
+        panic!("factory RHS is the constructor APPLY");
+    };
+    assert_eq!(apply_node.tag, APPLY_TAG);
+    let apply = apply_node.decode_apply().unwrap();
+    assert_eq!(apply.arguments.len(), 1);
+    let dotty_tasty::term::RawTree::LengthNode(select_node) = &apply.function else {
+        panic!("factory applies the selected constructor");
+    };
+    assert_eq!(select_node.tag, SELECTIN_TAG);
+    let select = select_node.decode_select_in().unwrap();
+    let signed = tasty
+        .names()
+        .render_signed_name(select.name)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        signed,
+        dotty_tasty::tasty::RenderedSignedName::Signed { original, signature }
+            if original == "<init>"
+                && signature.result == "example.Counter"
+                && signature.parameters == [dotty_tasty::name_table::RenderedParamSig::TermParameter("scala.Int".to_owned())]
+    ));
+    let Some(dotty_tasty::term::RawTree::Ast {
+        tag: NEW_TAG,
+        child,
+        ..
+    }) = Some(&select.qualifier)
+    else {
+        panic!("constructor receiver is NEW");
+    };
+    let index = tasty.ast_address_index().unwrap();
+    assert_counter_type_ref(child, &index, &tasty);
+    assert_counter_type_ref(&select.underlying_type, &index, &tasty);
+    let argument_references = apply.arguments[0].ast_refs();
+    let [seed_reference] = argument_references.as_slice() else {
+        panic!("constructor argument is the original seed formal");
+    };
+    assert_eq!(
+        seed_reference.kind,
+        dotty_tasty::term::AstRefKind::TermRefDirect
     );
+    assert_eq!(
+        seed_reference.address,
+        parameter_address(&index, create_address)
+    );
+
+    let class = decode_class(factory_artifacts.classfile_bytes());
+    let create_member = class
+        .methods
+        .iter()
+        .find(|member| class.constant_pool.utf8(member.name_index).unwrap() == "create")
+        .unwrap();
+    assert_eq!(
+        class.constant_pool.utf8(create_member.descriptor_index),
+        Ok("(I)Lexample/Counter;")
+    );
+    assert_eq!(
+        method_code(&class, "create"),
+        [0xbb, 0x00, 0x0e, 0x59, 0x1b, 0xb7, 0x00, 0x11, 0xb0]
+    );
+    assert!(index.get(create_address).is_some());
+
+    let second = emit_paired_jvm_tasty_batch(
+        FACTORY_SOURCE,
+        "CounterFactory.scala",
+        SourceId::from_index(1694),
+    )
+    .expect("a fresh source session emits the same constructor batch");
+    assert_eq!(artifacts.classes().len(), second.classes().len());
+    for (first, second) in artifacts.classes().iter().zip(second.classes()) {
+        assert_eq!(first.classfile_path(), second.classfile_path());
+        assert_eq!(first.classfile_bytes(), second.classfile_bytes());
+        assert_eq!(first.tasty_path(), second.tasty_path());
+        assert_eq!(first.tasty_bytes(), second.tasty_bytes());
+        assert_eq!(first.tasty_link_id(), second.tasty_link_id());
+    }
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let counter_artifacts = artifacts
+            .classes()
+            .iter()
+            .find(|class| class.tasty_path() == "example/Counter.tasty")
+            .expect("Counter sidecar is in the complete source batch");
+        run_factory_constructor_oracle(
+            counter_artifacts.tasty_bytes(),
+            factory_artifacts.tasty_bytes(),
+        );
+    }
+}
+
+#[test]
+fn paired_tasty_planning_rejects_constructor_shapes_outside_the_exact_slice() {
+    let cases = [
+        (
+            "computed constructor argument",
+            FACTORY_SOURCE.replace("new Counter(seed)", "new Counter(seed + 1)"),
+            Some("BodyExpression"),
+        ),
+        (
+            "wrong constructor arity",
+            FACTORY_SOURCE.replace("new Counter(seed)", "new Counter()"),
+            None,
+        ),
+        (
+            "wrong constructor argument type",
+            FACTORY_SOURCE.replace("new Counter(seed)", "new Counter(true)"),
+            None,
+        ),
+        (
+            "wrong method result type",
+            FACTORY_SOURCE.replace(
+                "def create(seed: Int): Counter",
+                "def create(seed: Int): Int",
+            ),
+            None,
+        ),
+        (
+            "private primary constructor",
+            FACTORY_SOURCE.replace(
+                "class Counter(start: Int):",
+                "class Counter private (start: Int):",
+            ),
+            None,
+        ),
+    ];
+    for (index, (case, source, expected_error)) in cases.into_iter().enumerate() {
+        let error = emit_paired_jvm_tasty_batch(
+            &source,
+            "CounterFactory.scala",
+            SourceId::from_index(1695 + index as u32),
+        )
+        .expect_err("unsupported constructor application must not publish a batch");
+        let evidence = format!("{error:?}");
+        if let Some(expected) = expected_error {
+            assert!(
+                evidence.contains(expected),
+                "{case} should fail in TASTy expression validation: {evidence}"
+            );
+        }
+    }
+}
+
+fn run_factory_constructor_oracle(counter_tasty: &[u8], factory_tasty: &[u8]) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala root for explicit oracle"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let version = Command::new(&compiler)
+        .arg("-version")
+        .output()
+        .expect("query pinned Scala compiler version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"));
+
+    let temporary_root = std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir);
+    let temporary = temporary_root.join(format!(
+        "dotty-issue-1693-constructor-oracle-{}",
+        std::process::id()
+    ));
+    fs::remove_dir_all(&temporary).ok();
+    let candidate = temporary.join("candidate/example");
+    let compiled = temporary.join("compiled");
+    fs::create_dir_all(&candidate).unwrap();
+    fs::create_dir_all(&compiled).unwrap();
+    let counter_path = candidate.join("Counter.tasty");
+    let factory_path = candidate.join("CounterFactory.tasty");
+    fs::write(&counter_path, counter_tasty).unwrap();
+    fs::write(&factory_path, factory_tasty).unwrap();
+
+    let decompile = Command::new(&compiler)
+        .arg("-decompile")
+        .arg("-classpath")
+        .arg(temporary.join("candidate"))
+        .arg(&counter_path)
+        .arg(&factory_path)
+        .output()
+        .expect("decompile Rust-produced Counter and CounterFactory sidecars");
+    assert!(
+        decompile.status.success(),
+        "Scala decompiler rejected the linked sidecars: {}",
+        String::from_utf8_lossy(&decompile.stderr)
+    );
+    let decompiled = strip_ansi(&String::from_utf8_lossy(&decompile.stdout));
+    assert!(
+        decompiled.contains("= new example.Counter(seed)"),
+        "Scala decompiler did not recover the actual constructor body: {decompiled}"
+    );
+
+    let from_tasty = Command::new(&compiler)
+        .arg("-from-tasty")
+        .arg("-classpath")
+        .arg(temporary.join("candidate"))
+        .arg("-d")
+        .arg(&compiled)
+        .arg(&counter_path)
+        .arg(&factory_path)
+        .output()
+        .expect("consume Rust-produced factory sidecar with pinned Scala");
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected the factory constructor application: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    let javap = Command::new("javap")
+        .arg("-classpath")
+        .arg(&compiled)
+        .arg("-s")
+        .arg("example.CounterFactory")
+        .output()
+        .expect("inspect Scala-rebuilt factory descriptor");
+    assert!(javap.status.success());
+    assert!(
+        String::from_utf8_lossy(&javap.stdout).contains("(I)Lexample/Counter;"),
+        "Scala-rebuilt factory has the wrong descriptor: {}",
+        String::from_utf8_lossy(&javap.stdout)
+    );
+    fs::remove_dir_all(temporary).unwrap();
+}
+
+fn strip_ansi(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for character in chars.by_ref() {
+                if character.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            output.push(character);
+        }
+    }
+    output
 }
