@@ -4,16 +4,19 @@ use dotty_classfile::tasty_link::TastyLinkId;
 use dotty_core::SourceId;
 use dotty_jvm::emit_class;
 use dotty_jvm_tasty_contract::validate_classfile_tasty_link;
-use dotty_tasty::tasty::TastyFile;
+use dotty_tasty::tasty::{DefinitionBody, TastyFile};
 
 use dotty::jvm_tasty_artifacts::{
     PairedArtifactError, PairedBatchArtifactError, emit_paired_jvm_tasty_batch,
     emit_paired_jvm_tasty_class,
 };
 use dotty::jvm_tasty_plan::PairedPlanError;
+use dotty_classfile::attribute::Attribute;
+use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 
 const COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
 const COUNTER_GAUGE: &str = include_str!("fixtures/jvm_tasty_multiclass/CounterGauge.scala");
+const COUNTER_READER: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader.scala");
 
 #[test]
 fn counter_emits_complete_class_and_tasty_with_the_same_real_header_uuid() {
@@ -194,6 +197,161 @@ fn batch_emits_the_complete_ordered_class_and_tasty_manifest() {
         );
         validate_classfile_tasty_link(&class_file, pair.tasty_bytes()).unwrap();
     }
+}
+
+#[test]
+fn counter_reader_emits_four_complete_linked_cross_class_artifacts() {
+    let batch = emit_paired_jvm_tasty_batch(
+        COUNTER_READER,
+        "tests/fixtures/jvm_tasty_cross_class/Reader.scala",
+        SourceId::from_index(1675),
+    )
+    .unwrap();
+    assert_eq!(batch.classes().len(), 2);
+
+    let expected = [
+        (
+            "Counter",
+            "example/Counter",
+            "example/Counter.class",
+            "example/Counter.tasty",
+        ),
+        (
+            "Reader",
+            "example/Reader",
+            "example/Reader.class",
+            "example/Reader.tasty",
+        ),
+    ];
+    let mut decoded_classes = Vec::new();
+    for (pair, (simple_name, internal_name, classfile_path, tasty_path)) in
+        batch.classes().iter().zip(expected)
+    {
+        assert_eq!(pair.classfile_path(), classfile_path);
+        assert_eq!(pair.tasty_path(), tasty_path);
+        assert_eq!(pair.source_id(), batch.source_id());
+
+        let mut class_reader = Reader::new(pair.classfile_bytes());
+        let class = ClassFile::decode(&mut class_reader).unwrap();
+        assert!(class_reader.is_at_end());
+        assert_eq!((class.version.major, class.version.minor), (65, 0));
+        assert_eq!(
+            class.constant_pool.class_name(class.this_class).unwrap(),
+            internal_name
+        );
+        assert_eq!(class.tasty_link_id().unwrap(), Some(pair.tasty_link_id()));
+
+        let tasty = TastyFile::parse_and_validate_scala_3_9(pair.tasty_bytes()).unwrap();
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version,
+            ),
+            (28, 9, 0)
+        );
+        assert_eq!(
+            pair.tasty_link_id(),
+            TastyLinkId::from_bytes(tasty.header().uuid)
+        );
+        validate_classfile_tasty_link(&class, pair.tasty_bytes()).unwrap();
+
+        let package = tasty
+            .asts()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .decode_package()
+            .unwrap();
+        assert_eq!(package.stats.len(), 1, "each sidecar owns one source class");
+        let DefinitionBody::TypeDef { name, .. } = package
+            .stats
+            .get(0)
+            .unwrap()
+            .decode_definition_body()
+            .unwrap()
+        else {
+            panic!("each sidecar declares its corresponding source class");
+        };
+        assert_eq!(tasty.names().render(name).unwrap(), simple_name);
+        decoded_classes.push(class);
+    }
+
+    let counter = &decoded_classes[0];
+    let mut counter_methods = counter
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                counter.constant_pool.utf8(method.name_index).unwrap(),
+                counter.constant_pool.utf8(method.descriptor_index).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    counter_methods.sort();
+    assert_eq!(
+        counter_methods,
+        [("<init>", "(I)V"), ("get", "()I"), ("set", "(I)V")]
+    );
+    assert_eq!(counter.fields.len(), 1);
+    assert_eq!(
+        (
+            counter
+                .constant_pool
+                .utf8(counter.fields[0].name_index)
+                .unwrap(),
+            counter
+                .constant_pool
+                .utf8(counter.fields[0].descriptor_index)
+                .unwrap(),
+        ),
+        ("current", "I")
+    );
+    assert!(
+        counter.fields[0]
+            .access_flags
+            .contains(dotty_classfile::access_flags::ACC_PRIVATE)
+    );
+
+    let reader = &decoded_classes[1];
+    assert!(
+        reader.fields.is_empty(),
+        "Reader must not copy Counter state"
+    );
+    let read = reader
+        .methods
+        .iter()
+        .find(|method| reader.constant_pool.utf8(method.name_index).unwrap() == "read")
+        .expect("Reader declares read");
+    assert_eq!(
+        reader.constant_pool.utf8(read.descriptor_index).unwrap(),
+        "(Lexample/Counter;)I"
+    );
+    let [Attribute::Code(code)] = read.attributes.as_slice() else {
+        panic!("Reader.read has exactly one Code attribute");
+    };
+    assert_eq!(code.code.len(), 5);
+    assert_eq!(&code.code[..2], &[0x2b, 0xb6], "aload_1; invokevirtual");
+    assert_eq!(code.code[4], 0xac, "ireturn");
+    let method_ref = ConstantPoolIndex(u16::from_be_bytes([code.code[2], code.code[3]]));
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = reader.constant_pool.get(method_ref).unwrap()
+    else {
+        panic!("Reader.read invokes Counter.get through CONSTANT_Methodref");
+    };
+    assert_eq!(
+        reader.constant_pool.class_name(*class_index).unwrap(),
+        "example/Counter"
+    );
+    assert_eq!(
+        reader
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("get", "()I")
+    );
 }
 
 #[test]
