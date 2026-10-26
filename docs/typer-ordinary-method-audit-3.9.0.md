@@ -114,8 +114,11 @@ byte-identical reports.
 The current Typer API now exposes a narrow canonical member-definition entry
 point and reuses the existing local-method typed-tree builder. This supports a
 bounded subset of ordinary methods; unsupported RHS semantics remain blocked
-with their actual Typer error. In particular, the fixture result is not a
-claim about the Scala standard-library corpus. Re-run a small pinned standard
-library manifest before drawing any corpus coverage conclusion.
+with their actual Typer error. Parameter defaults are also explicitly blocked
+until the Typer can preserve and type those default-expression trees; the audit
+must not report such methods as complete merely because their parameter roots
+were mapped. In particular, the fixture result is not a claim about the Scala
+standard-library corpus. Re-run a small pinned standard library manifest
+before drawing any corpus coverage conclusion.
 
 Machine-readable fixture example: [`typer-ordinary-method-audit-sample-3.9.0.tsv`](typer-ordinary-method-audit-sample-3.9.0.tsv).

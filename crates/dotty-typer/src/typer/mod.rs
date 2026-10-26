@@ -395,6 +395,22 @@ impl<'a> SourceTyper<'a> {
                 kind: "method definition without body",
             });
         }
+        if definition
+            .value_param_clauses
+            .iter()
+            .flatten()
+            .any(|parameter| {
+                self.arena.try_get(*parameter).is_some_and(|node| {
+                    matches!(&node.kind, TreeKind::ValDef(parameter) if parameter.rhs.is_some())
+                })
+            })
+        {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                kind: "method definition with default parameter arguments",
+            });
+        }
         let definition = definition.clone();
         let position = node.position;
         let method = self
@@ -2129,6 +2145,59 @@ mod tests {
                 .get(source, method_tree)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn ordinary_member_typing_rejects_untyped_parameter_defaults() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def invalidBoolean(x: Int = true): Int = 1; def invalidName(x: Int = missing): Int = 1; def valid(x: Int = 1): Int = 1 }",
+        );
+        let method_tree = |name: &str| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == name =>
+                    {
+                        Some(tree)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let methods = [
+            (method_tree("invalidBoolean"), "invalidBoolean"),
+            (method_tree("invalidName"), "invalidName"),
+            (method_tree("valid"), "valid"),
+        ];
+        let symbols = methods
+            .iter()
+            .map(|(tree, _)| index.symbol_at(source, *tree).unwrap())
+            .collect::<Vec<_>>();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for ((tree, name), symbol) in methods.into_iter().zip(symbols) {
+            assert!(
+                matches!(
+                    typer.type_method_definition(tree),
+                    Err(TyperError::LocalBlockDeclarationDeferred {
+                        kind: "method definition with default parameter arguments",
+                        ..
+                    })
+                ),
+                "method {name} must remain explicitly unsupported until defaults are typed"
+            );
+            assert!(typer.source_typed_index().get(source, tree).is_none());
+            assert_eq!(typer.store().symbols.info(symbol), &SymbolInfo::Missing);
+        }
     }
 
     #[test]

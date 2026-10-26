@@ -14,6 +14,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
+fn source_line(text: &str, start: usize) -> usize {
+    text.get(..start)
+        .map(|prefix| prefix.bytes().filter(|byte| *byte == b'\n').count() + 1)
+        .unwrap_or(0)
+}
+
 pub(super) fn run() {
     const PINNED_SCALA_REVISION: &str = "777528f19a58e794c9954a42f433373472ec57f8";
     let scala_root =
@@ -162,8 +168,7 @@ pub(super) fn run() {
             let span = node.position.map(|position| position.span().range());
             let line = span
                 .and_then(|range| usize::try_from(range.start()).ok())
-                .and_then(|start| text.get(..start))
-                .map(|prefix| prefix.lines().count() + 1)
+                .map(|start| source_line(&text, start))
                 .unwrap_or(0);
             let range = span
                 .map(|range| format!("{}..{}", range.start(), range.end()))
@@ -340,7 +345,7 @@ fn member_exclusion(
 #[cfg(test)]
 mod tests {
     use super::super::collect_local_nodes;
-    use super::member_exclusion;
+    use super::{member_exclusion, source_line};
     use dotty_core::ast::TreeKind;
     use dotty_core::{
         Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolKind,
@@ -391,6 +396,34 @@ mod tests {
             ),
             Some("synthetic_or_forwarder")
         );
+    }
+
+    #[test]
+    fn ordinary_member_report_uses_the_definition_start_line() {
+        let source_text = include_str!("../fixtures/ordinary-member-audit/MemberOnly.scala");
+        let source = SourceId::from_index(0);
+        let mut store = SemanticStore::new();
+        let _definitions = Definitions::bootstrap(&mut store);
+        let scanner = ContextualScanner::new(source_text).unwrap();
+        let parsed = parse_compilation_unit(
+            SourceText::new(source_text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        let method_start = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "answer")
+                    .then(|| node.position.unwrap().span().range().start() as usize)
+            })
+            .unwrap();
+
+        assert_eq!(source_line(source_text, method_start), 2);
     }
 
     #[test]
