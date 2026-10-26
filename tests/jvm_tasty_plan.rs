@@ -2165,6 +2165,13 @@ fn pending_reference_field_proof_rejects_mutable_and_non_direct_initializers() {
             ),
         ),
         (
+            "secondary constructor selected instead of the primary constructor",
+            SAME_BATCH_REFERENCE_FIELD.replace(
+                "class Counter(start: Int):",
+                "class Counter(start: Int, extra: Boolean):\n  def this(start: Int) = this(start, false)",
+            ),
+        ),
+        (
             "computed constructor argument",
             SAME_BATCH_REFERENCE_FIELD.replace("new Counter(seed)", "new Counter(seed + 1)"),
         ),

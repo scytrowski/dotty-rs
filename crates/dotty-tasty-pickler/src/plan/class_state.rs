@@ -1177,11 +1177,36 @@ impl ClassStateValidator<'_, '_> {
             });
         };
         let constructor_info = self.symbol(*constructor_symbol)?;
+        let target_class_tree = match plan.source_index.definition_of(target_class) {
+            Some(SourceDefinition::Canonical { source, tree }) if source == plan.source.id => tree,
+            _ => {
+                return Err(PickleError::SourceDefinition {
+                    symbol: target_class,
+                });
+            }
+        };
+        let TreeKind::TypeDef(class_definition) = &self.source_tree(target_class_tree)?.kind else {
+            return Err(PickleError::SourceShape {
+                tree: target_class_tree,
+                expected: SourceRole::Class,
+            });
+        };
+        let TreeKind::Template(class_template) = &self.source_tree(class_definition.rhs)?.kind
+        else {
+            return Err(PickleError::SourceShape {
+                tree: class_definition.rhs,
+                expected: SourceRole::Template,
+            });
+        };
+        let primary_constructor = plan
+            .source_index
+            .symbol_at(plan.source.id, class_template.constructor);
         if source_select.name != constructor_info.name
             || plan.store.names.resolve(source_select.name.text()) != "<init>"
             || typed_select.name != source_select.name
             || constructor_info.kind != SymbolKind::Constructor
             || constructor_info.owner != Some(target_class)
+            || primary_constructor != Some(*constructor_symbol)
             || !matches!(
                 plan.store.types.try_get(*constructor_prefix),
                 Some(Type::TypeRef {
