@@ -2324,7 +2324,8 @@ object CounterTastyProbe:
         if not all(member in decompiled for member in expected_semantics):
             raise RuntimeError(f"Rust CounterOwner.tasty lost source field/initializer/read semantics: {decompiled}")
         counter_decompiled = toolchain.compiler([sidecar_package / "Counter.tasty"], decompile=True)
-        if "def get()" not in counter_decompiled or "current" not in counter_decompiled:
+        expected_counter_semantics = "def get(): scala.Int = Counter.this.current"
+        if expected_counter_semantics not in counter_decompiled:
             raise RuntimeError(f"Rust Counter.tasty lost source get semantics: {counter_decompiled}")
 
         rebuilt = work / "from-tasty-output"
