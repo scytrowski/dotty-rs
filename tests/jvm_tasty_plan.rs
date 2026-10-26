@@ -702,6 +702,27 @@ fn cross_class_call_requires_the_exact_planned_target_method() {
 }
 
 #[test]
+fn cross_class_call_rejects_an_overloaded_target_name() {
+    let source = CROSS_CLASS_READER_CALL.replace(
+        "  def set(value: Int): Unit = current = value",
+        "  def get(value: Int): Int = value\n  def set(value: Int): Unit = current = value",
+    );
+    let Err(error) = with_paired_jvm_tasty_batch_plan(
+        &source,
+        "tests/fixtures/jvm_tasty_cross_class/Reader.scala",
+        SourceId::from_index(1674),
+        |_| (),
+    ) else {
+        panic!("an overloaded external method target must reject the batch");
+    };
+    let diagnostic = format!("{error:?}");
+    assert!(
+        diagnostic.contains("Ambiguous") || diagnostic.contains("Unsupported"),
+        "overloaded method returned no contextual typed rejection: {diagnostic}"
+    );
+}
+
+#[test]
 fn cross_class_call_rejects_a_missing_source_to_typed_body_binding() {
     with_paired_jvm_tasty_batch_plan(
         CROSS_CLASS_READER_CALL,
@@ -910,6 +931,20 @@ fn cross_class_call_rejects_unsupported_invocation_and_result_shapes() {
                 panic!("typed call selects get");
             };
             let typed_receiver = selection.qualifier;
+            let selected_type = source_plan.typed_ast.get(typed_function).ty;
+            let dotty_core::Type::TermRef {
+                target: dotty_core::TermRefTarget::Symbol(target),
+                ..
+            } = source_plan.store.types.get(selected_type)
+            else {
+                panic!("selected function has a canonical method TermRef");
+            };
+            let target = *target;
+            let dotty_core::SourceDefinition::Canonical { tree: target_tree, .. } =
+                source_plan.source_index.definition_of(target).unwrap()
+            else {
+                panic!("Counter.get has a canonical source declaration");
+            };
             let source_select = match &source_plan.source_ast.get(source_body).kind {
                 TreeKind::Apply(application) => application.function,
                 _ => unreachable!("source read body is an application"),
@@ -920,6 +955,10 @@ fn cross_class_call_rejects_unsupported_invocation_and_result_shapes() {
                 "Boolean result",
                 "unsupported receiver expression",
                 "missing explicit empty source clause",
+                "foreign receiver owner",
+                "wrong target signature",
+                "private target",
+                "abstract target",
             ] {
                 let mut typed_ast = cloned_typed_ast(source_plan.typed_ast);
                 let mut source_ast = cloned_source_ast(source_plan.source_ast);
@@ -942,6 +981,36 @@ fn cross_class_call_rejects_unsupported_invocation_and_result_shapes() {
                     "missing explicit empty source clause" => {
                         let selected = source_ast.get(source_select).kind.clone();
                         source_ast.get_mut(source_body).kind = selected;
+                    }
+                    "foreign receiver owner" => {
+                        let selected_type = typed_ast.get(typed_function).ty;
+                        typed_ast.get_mut(typed_receiver).ty = selected_type;
+                    }
+                    "wrong target signature" => {
+                        let dotty_core::SymbolInfo::Complete(signature) =
+                            source_plan.store.symbols.get(target).info
+                        else {
+                            unreachable!("Counter.get has a completed signature")
+                        };
+                        typed_ast.get_mut(typed_function).ty = signature;
+                    }
+                    "private target" => {
+                        let TreeKind::DefDef(definition) =
+                            &mut source_ast.get_mut(target_tree).kind
+                        else {
+                            unreachable!("Counter.get has a source method tree")
+                        };
+                        definition.metadata.visibility = Some(
+                            dotty_core::ast::VisibilitySyntax::Private { qualifier: None },
+                        );
+                    }
+                    "abstract target" => {
+                        let TreeKind::DefDef(definition) =
+                            &mut source_ast.get_mut(target_tree).kind
+                        else {
+                            unreachable!("Counter.get has a source method tree")
+                        };
+                        definition.rhs = None;
                     }
                     _ => unreachable!(),
                 }
