@@ -1,6 +1,8 @@
 //! Block scopes and local value/method expression typing.
 
-use super::super::{ExpressionContext, ExpressionScopeId, SourceTyper, TyperError};
+use super::super::{
+    ActiveLocalTypeScope, ExpressionContext, ExpressionScopeId, SourceTyper, TyperError,
+};
 use super::super::{local_block_declaration_kind, source_method_flags, tree_kind_name};
 use dotty_core::ast::*;
 use dotty_core::types::*;
@@ -1701,7 +1703,10 @@ impl SourceTyper<'_> {
                 .push((signature, type_parameters));
         }
         self.active_local_type_scopes
-            .push((declaration_context.lexical, method_scope));
+            .push(ActiveLocalTypeScope::exact(
+                declaration_context.lexical,
+                method_scope,
+            ));
         self.active_local_import_scopes.push((
             declaration_context.lexical,
             declaration_context.local_scopes,

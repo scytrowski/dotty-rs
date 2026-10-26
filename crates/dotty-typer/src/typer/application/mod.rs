@@ -167,7 +167,7 @@ impl SourceTyper<'_> {
                 let callable =
                     self.widen_expression_type_journaled(function_type, info_journal, 0)?;
                 let (function, callable) =
-                    self.resolve_module_apply_function(function, callable, request, info_journal)?;
+                    self.resolve_apply_function(function, callable, request, info_journal)?;
                 (function, callable, None, None)
             };
         self.type_resolved_application(
@@ -188,25 +188,43 @@ impl SourceTyper<'_> {
         )
     }
 
-    fn resolve_module_apply_function(
+    fn resolve_apply_function(
         &mut self,
         function: TreeId<Typed>,
         callable: TypeId,
         request: ApplicationRequest<'_>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<(TreeId<Typed>, TypeId), TyperError> {
-        let Some(Type::TypeRef {
-            target: TypeRefTarget::Symbol(module_class),
-            ..
-        }) = self.store.types.try_get(callable)
-        else {
-            return Ok((function, callable));
+        let (class, receiver) = match self.store.types.try_get(callable) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            }) => (*class, callable),
+            Some(Type::Applied { tycon, .. }) => {
+                let Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(class),
+                    ..
+                }) = self.store.types.try_get(*tycon)
+                else {
+                    return Ok((function, callable));
+                };
+                (*class, callable)
+            }
+            _ => return Ok((function, callable)),
         };
-        if self.store.symbols.get(*module_class).kind != SymbolKind::ModuleClass {
+        if !self.store.symbols.contains(class) {
             return Ok((function, callable));
         }
-
-        let receiver = self.this_type_receiver_view(callable)?;
+        let declaration = self.store.symbols.get(class);
+        let receiver = match declaration.kind {
+            SymbolKind::ModuleClass => self.this_type_receiver_view(callable)?,
+            SymbolKind::Class | SymbolKind::Trait
+                if matches!(declaration.origin, SymbolOrigin::Source(_)) =>
+            {
+                receiver
+            }
+            _ => return Ok((function, callable)),
+        };
         let apply_name = Name::new(self.store.names.intern("apply"), Namespace::Term);
         let candidates = self
             .lookup_members_journaled(receiver, apply_name, info_journal)

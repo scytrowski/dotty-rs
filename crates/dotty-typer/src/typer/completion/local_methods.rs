@@ -239,7 +239,10 @@ impl SourceTyper<'_> {
                 .enter(name, parameter);
         }
         self.active_local_type_scopes
-            .push((declaration_context.lexical, method_scope));
+            .push(ActiveLocalTypeScope::exact(
+                declaration_context.lexical,
+                method_scope,
+            ));
         self.active_local_import_scopes.push((
             declaration_context.lexical,
             declaration_context.local_scopes,
