@@ -123,6 +123,43 @@ The decoded `Factory.create` Code has `max_stack=3` and `max_locals=2` (`this` i
 
 The source classfile and sidecar are separate runtime/compile-time artifacts. A TASTy-only classpath can provide Scala compile-time information, while the JVM still needs generated or otherwise supplied `.class` files. A classfile with Scala metadata but no sidecar is not accepted by this pinned Scala 3.9 classpath probe.
 
+## Pinned Scala 3.9 factory consumer (#1696)
+
+`DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER` makes `jvm_tasty_factory_scala_consumer` mandatory when present; an unset flag keeps the integration test opt-in. The dedicated `JVM TASTy factory Scala consumer` workflow installs Temurin JDK `21.0.8+9`, checks out Scala revision `777528f19a58e794c9954a42f433373472ec57f8`, verifies all eight compiler/runtime jar hashes against [`provenance.json`](../tests/fixtures/tasty_pickler/provenance.json), and runs this gate together with the existing strict Counter/Reader Scala consumer regression.
+
+The independent [`FactoryConsumer.scala`](../tests/fixtures/jvm_tasty_cross_class_factories/FactoryConsumer.scala) is the only Scala source compiled by the positive gate. For each of two fresh Rust frontend sessions, Scala 3.9.0 compiles it to an empty output directory with compile classpath order `<Rust batch root>`, `scala3-library_3-3.9.0.jar`, and `scala-library-3.9.0.jar`. The compiler process itself uses the eight pinned compiler/runtime jars (Scala 3 library, Scala library, compiler, TASTy core, interfaces, scala-asm, compiler-interface, util-interface). The runtime order is `<Rust batch root>`, `<client output>`, `scala3-library_3-3.9.0.jar`, and `scala-library-3.9.0.jar`; compiler-only jars are excluded. The client uses named `seed` and `value` arguments, observes the `Counter` result through `get` and `set`, checks state independence, and prints `42`. Its output is exactly `consumer/Consumer$.class` and `consumer/Consumer.class`; all eight compiler/runtime dependency jars are checked to contain neither `example/Counter.class` nor `example/CounterFactory.class`. `javap -verbose consumer.Consumer$` must include `CounterFactory.<init>:()V`, `CounterFactory.create:(I)Lexample/Counter;`, `Counter.get:()I`, and `Counter.set:(I)V`, and may not widen the factory result to `Object`.
+
+The test independently decodes `CounterFactory.create` and checks `new Counter; dup; iload_1; invokespecial Counter.<init>:(I)V; areturn`, verifies the allocation and constructor constant-pool owners, classfile major 65, TASTy 28.9.0, and per-class TASTY links. The fresh Rust batches match byte-for-byte across all four files and have equal producer-owned links. Each Scala compile and runtime uses the original classfiles from its batch; their SHA-256 and bytes are unchanged afterward.
+
+The method-discovery controls are isolated. Removing `CounterFactory.create` from its classfile while retaining its matching sidecar still lets the probe compile through `CounterFactory.tasty`; removing `Counter.get` while retaining `Counter.tasty` still lets its probe compile. In both matched classfile-only roots (the altered classfile without its sidecar), the method lookup fails with Scala E008 (`create`/`get` is not a member). A separate missing-classfile control for each class still compiles against its sidecar but fails at execution with `NoClassDefFoundError: example/Counter` or `NoClassDefFoundError: example/CounterFactory`. These incomplete roots are never used by the successful runtime. Independent Counter and CounterFactory UUID mismatches fail with `out of sync with its TASTy file` under `-Werror`. Missing and misplaced sidecars fail at the Scala loader with `This .tasty file is missing`; corrupt sidecars fail while loading with `could not be read ... not a TASTy file`. Scala can emit a further source-level error after the first diagnostic, so the tests match the specific first-stage message. These controls distinguish TASTy lookup from runtime class availability.
+
+The successful local run used Rust `1.98.1`, Scala `3.9.0`, revision `777528f19a58e794c9954a42f433373472ec57f8`, and Temurin `21.0.8+9`. The two emitted batches shared these hashes and UUIDs:
+
+| Class | Class SHA-256 | TASTy SHA-256 | TASTY UUID |
+| --- | --- | --- | --- |
+| `Counter` | `827ae5af5932752105e82918df61cbac2d9fc9eeae4e451b71bc3f5f4641b7c6` | `711b949785f948786bb2a796f646cdaf53121476f0e5ee11db4f556505e2635f` | `00a3d0f572713eac0000000000008193` |
+| `CounterFactory` | `6708e19958c8c8f085a4916ff298c7d1cc4c8e47f406bfb5aa0991a78d7cae38` | `f7ca66c9cd8f3df9467f5dc19686f3958025e6bb5de7b0ba971358198f5dfb32` | `00557cce1fd3e1c10000000000008194` |
+
+Run the strict Scala consumer and the existing strict Scala regression with the pinned local inputs:
+
+```sh
+DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER=1 \
+SCALA39_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source \
+JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
+COURSIER_MAVEN_ROOT=/home/vdrake6/dotty-rs/target-fs2/coursier/https/repo1.maven.org/maven2 \
+cargo +1.98.1 test --test jvm_tasty_factory_scala_consumer \
+  --locked -- --nocapture
+
+DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER=1 \
+SCALA39_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source \
+JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
+COURSIER_MAVEN_ROOT=/home/vdrake6/dotty-rs/target-fs2/coursier/https/repo1.maven.org/maven2 \
+cargo +1.98.1 test --test jvm_tasty_cross_class_scala_consumer \
+  --locked -- --nocapture
+```
+
+The oracle report includes the exact compiler and Java command arguments, compile/runtime classpath order, all eight jar hashes, source hash, Rust artifact hashes, UUIDs, runtime output, and the diagnostics observed for each negative control. Missing Scala sources, JDK tools, pinned jars, revision or matching artifact hashes fail the test instead of turning the strict gate into a skip.
+
 ## Negative and unsupported cases
 
 This matrix combines observed failure-stage probes in the focused tests with the existing object creation contract in [`jvm-object-creation-contract.md`](jvm-object-creation-contract.md). It records the first boundary known from those contracts; it does not claim that every unsupported form reaches the factory method-result check.

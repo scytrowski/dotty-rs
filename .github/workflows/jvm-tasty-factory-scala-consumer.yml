@@ -1,0 +1,107 @@
+name: JVM TASTy factory Scala consumer
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/jvm-tasty-factory-scala-consumer.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'src/**'
+      - 'crates/**'
+      - 'tests/**'
+      - 'tools/tasty-pickler-oracle/**'
+      - 'docs/jvm-tasty-cross-class-factories.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jvm-tasty-factory-scala-consumer-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  consume-factory:
+    name: Pinned Scala 3.9 factory TASTy consumer
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SCALA39_ROOT: ${{ github.workspace }}/scala39-source
+      COURSIER_MAVEN_ROOT: ${{ github.workspace }}/.cache/coursier/v1/https/repo1.maven.org/maven2
+
+    steps:
+      - name: Check out dotty-rs
+        uses: actions/checkout@v4
+
+      - name: Check out pinned Scala 3.9.0 sources
+        uses: actions/checkout@v4
+        with:
+          repository: scala/scala3
+          ref: 777528f19a58e794c9954a42f433373472ec57f8
+          path: scala39-source
+          persist-credentials: false
+
+      - name: Install pinned JDK 21.0.8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21.0.8+9.0.LTS'
+          check-latest: false
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+
+      - name: Cache pinned Scala artifacts and Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/coursier
+            target/debug
+            target/.rustc_info.json
+          key: ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-scala-3.9.0
+          restore-keys: |
+            ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-
+
+      - name: Verify pinned source and JDK
+        run: |
+          set -euo pipefail
+          test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = "777528f19a58e794c9954a42f433373472ec57f8"
+          grep -q '^JAVA_VERSION="21.0.8"$' "$JAVA_HOME/release"
+          test -d "$JAVA_HOME/jmods"
+          mkdir -p "$COURSIER_MAVEN_ROOT"
+
+      - name: Download and verify pinned Scala compiler artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS=' ' read -r relative_path sha256; do
+            [[ -z "$relative_path" ]] && continue
+            destination="$COURSIER_MAVEN_ROOT/$relative_path"
+            mkdir -p "$(dirname "$destination")"
+            if [[ ! -f "$destination" ]] || ! printf '%s  %s\n' "$sha256" "$destination" | sha256sum --check --status; then
+              curl --fail --location --retry 3 \
+                "https://repo1.maven.org/maven2/$relative_path" \
+                --output "$destination"
+            fi
+            printf '%s  %s\n' "$sha256" "$destination" | sha256sum --check --status
+          done <<'ARTIFACTS'
+          org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar 9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba
+          org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd
+          org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar 3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a
+          org/scala-lang/tasty-core_3/3.9.0/tasty-core_3-3.9.0.jar 66e12dda98bb23e864f3a31f8527c8338bf47bce9b85cc380b368c69c1ba8d0f
+          org/scala-lang/scala3-interfaces/3.9.0/scala3-interfaces-3.9.0.jar 64dfde1d2c6309d65a01c5f3ea836137eb84338dcadeb16f85764561ef4e10db
+          org/scala-lang/modules/scala-asm/9.9.0-scala-1/scala-asm-9.9.0-scala-1.jar 75ac366e8ecb691e06a7e85041eed0f67919a646e5262fa0901225698c104375
+          org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar 92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3
+          org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar 1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af
+          ARTIFACTS
+
+      - name: Run strict factory and existing cross-class Scala consumers
+        env:
+          DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER: '1'
+        run: |
+          cargo +1.98.1 test --test jvm_tasty_factory_scala_consumer \
+            --test jvm_tasty_cross_class_scala_consumer --locked -- --nocapture
