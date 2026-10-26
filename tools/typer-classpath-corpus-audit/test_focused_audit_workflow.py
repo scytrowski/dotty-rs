@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -28,6 +29,22 @@ class FocusedAuditWorkflowTests(unittest.TestCase):
         self.assertIn("verify_focused_gate.py", workflow)
         self.assertIn("actions/upload-artifact@v4", workflow)
         self.assertNotIn("tools/typer-classpath-corpus-audit/run --verify-determinism", workflow)
+
+    def test_root_method_outcomes_are_limited_to_focused_manifests(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        runner = repo / "tools/typer-classpath-corpus-audit/run"
+        result = subprocess.run(
+            [str(runner), "--include-root-method-outcomes"],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "--include-root-method-outcomes requires --focused-manifest",
+            result.stderr,
+        )
 
 
 if __name__ == "__main__":
