@@ -46,8 +46,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-debug-
 
-      - name: Install stable Rust toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
 
       - name: Record measurement environment
         run: |
