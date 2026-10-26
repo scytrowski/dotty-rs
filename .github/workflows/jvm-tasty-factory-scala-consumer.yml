@@ -27,7 +27,7 @@ jobs:
   consume-factory:
     name: Pinned Scala 3.9 factory TASTy consumer
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       SCALA39_ROOT: ${{ github.workspace }}/scala39-source
       COURSIER_MAVEN_ROOT: ${{ github.workspace }}/.cache/coursier/v1/https/repo1.maven.org/maven2
@@ -73,6 +73,9 @@ jobs:
           test -d "$JAVA_HOME/jmods"
           mkdir -p "$COURSIER_MAVEN_ROOT"
 
+      - name: Stage the pinned Scala source compiler
+        run: cd "$SCALA39_ROOT" && ./sbt "dist/universal:stage"
+
       - name: Download and verify pinned Scala compiler artifacts
         shell: bash
         run: |
@@ -98,10 +101,31 @@ jobs:
           org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar 1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af
           ARTIFACTS
 
-      - name: Run strict factory and existing cross-class Scala consumers
+      - name: Run strict linked Scala and TASTy oracle release gates
         env:
-          DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER: '1'
+          DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
         run: |
-          cargo +1.98.1 test --test jvm_tasty_factory_scala_consumer \
-            --test jvm_tasty_cross_class_scala_consumer --locked -- --nocapture
+          cargo +1.98.1 test \
+            --test jvm_tasty_scala_consumer \
+            --test jvm_tasty_multiclass_scala_consumer \
+            --test jvm_tasty_cross_class_scala_consumer \
+            --test jvm_tasty_factory_scala_consumer \
+            --test jvm_tasty_cross_class_factories \
+            --test tasty_source_pickling \
+            --locked -- --nocapture
+
+      - name: Run mandatory Java 21 verifier and publisher gate
+        env:
+          DOTTY_CLASSFILE_REQUIRE_JDK: '1'
+        run: |
+          cargo +1.98.1 test \
+            -p dotty-classfile --test classfile_jvm_encoder \
+            -p dotty-jvm --lib \
+            -p dotty --test jvm_source_compilation \
+            --test jvm_tasty_artifacts \
+            --test jvm_stateful_class_contract \
+            --locked -- --nocapture

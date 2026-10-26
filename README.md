@@ -32,9 +32,13 @@ APIs and supported language subsets are still evolving.
   same-unit inheritance. Source integration tests also cover sibling reference
   joins, nested construction, reference field initialization, and chained call
   receivers, and the bounded same-source `Reader.read(counter) = counter.get()`
-  cross-class call. The latter has a strict Scala 3.9 consumer gate and runs the
-  unchanged Rust classes on JDK 21. These are bounded features, not arbitrary
-  Scala/JVM code generation.
+  cross-class call, and a linked `CounterFactory.create` that constructs and
+  returns the exact `Counter` reference type. Strict pinned Scala 3.9 gates
+  consume the Rust TASTy for single-class, independent two-class, Reader and
+  factory cross-class cases; the factory consumer runs the unchanged Rust
+  classes on JDK 21 and a separate oracle rebuilds Rust TASTy with
+  `-from-tasty`. These are bounded features, not arbitrary Scala/JVM code
+  generation.
 
 The source-to-class-file pipeline is exercised in
 [`tests/jvm_source_compilation.rs`](tests/jvm_source_compilation.rs), with JVM
