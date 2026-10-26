@@ -5,6 +5,23 @@ mod block;
 mod local;
 mod while_loop;
 
+fn validate_cross_class_target_signature(
+    signature_type: TypeId,
+    signature: &dotty_core::MethodType,
+    int_type: TypeId,
+) -> Result<(), PickleError> {
+    if signature.kind != MethodKind::Plain
+        || !signature.params.is_empty()
+        || signature.result != int_type
+    {
+        return Err(PickleError::MalformedType {
+            ty: signature_type,
+            role: TypeRole::Parameter,
+        });
+    }
+    Ok(())
+}
+
 impl Validator<'_, '_> {
     fn validate_int_expression(
         &mut self,
@@ -714,16 +731,7 @@ impl Validator<'_, '_> {
                 role: TypeRole::Parameter,
             });
         };
-        if signature.kind != MethodKind::Plain
-            || !signature.params.is_empty()
-            || signature.result != p.definitions.int
-        {
-            return Err(PickleError::MalformedType {
-                ty: signature_type,
-                role: TypeRole::Parameter,
-            });
-        }
-        Ok(())
+        validate_cross_class_target_signature(signature_type, signature, p.definitions.int)
     }
 
     fn same_class_method_application_target(
@@ -2231,5 +2239,56 @@ impl Validator<'_, '_> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cross_class_target_signature_tests {
+    use super::*;
+    use dotty_core::MethodType;
+
+    #[test]
+    fn rejects_a_selected_method_with_a_nonempty_parameter_list() {
+        let mut store = dotty_core::SemanticStore::new();
+        let int_type = store.types.alloc(Type::NoType);
+        let signature_type = store.types.alloc(Type::NoType);
+        let parameter_name = dotty_core::TermName::new(store.names.intern("value"));
+        let signature = MethodType {
+            params: vec![dotty_core::MethodParam {
+                name: parameter_name,
+                ty: int_type,
+                erased: false,
+                varargs: false,
+            }],
+            result: int_type,
+            kind: MethodKind::Plain,
+        };
+        assert_eq!(
+            validate_cross_class_target_signature(signature_type, &signature, int_type),
+            Err(PickleError::MalformedType {
+                ty: signature_type,
+                role: TypeRole::Parameter,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_selected_method_with_a_non_int_result() {
+        let mut store = dotty_core::SemanticStore::new();
+        let int_type = store.types.alloc(Type::NoType);
+        let wrong_result = store.types.alloc(Type::NoType);
+        let signature_type = store.types.alloc(Type::NoType);
+        let signature = MethodType {
+            params: vec![],
+            result: wrong_result,
+            kind: MethodKind::Plain,
+        };
+        assert_eq!(
+            validate_cross_class_target_signature(signature_type, &signature, int_type),
+            Err(PickleError::MalformedType {
+                ty: signature_type,
+                role: TypeRole::Parameter,
+            })
+        );
     }
 }
