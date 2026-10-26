@@ -1,0 +1,73 @@
+name: CI Cargo compile timings
+
+on:
+  workflow_dispatch:
+    inputs:
+      cache:
+        description: Restore the CI Cargo cache, or skip it for a cold build
+        required: true
+        type: choice
+        default: warm
+        options:
+          - warm
+          - cold
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cargo-timings-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+
+jobs:
+  cargo-timings:
+    name: Cargo test compile timing
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Restore CI Cargo cache
+        if: inputs.cache == 'warm'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+            target/.rustc_info.json
+          key: ${{ runner.os }}-cargo-debug-${{ hashFiles('**/Cargo.lock') }}-test-no-debug-no-incremental
+          restore-keys: |
+            ${{ runner.os }}-cargo-debug-
+
+      - name: Install stable Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+
+      - name: Record measurement environment
+        run: |
+          mkdir -p target/cargo-timings
+          {
+            printf 'commit\t%s\n' "$(git rev-parse HEAD)"
+            printf 'rust\t%s\n' "$(rustc --version)"
+            printf 'cargo\t%s\n' "$(cargo --version)"
+            printf 'runner_os\t%s\n' '${{ runner.os }}'
+            printf 'cache_mode\t%s\n' '${{ inputs.cache }}'
+          } > target/cargo-timings/environment.tsv
+
+      - name: Compile the workspace test targets and write Cargo timings
+        run: cargo test --workspace --all-targets --locked --no-run --timings
+
+      - name: Upload Cargo timing report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-timings-${{ github.sha }}-${{ inputs.cache }}
+          path: target/cargo-timings/
+          if-no-files-found: warn
+          retention-days: 30
