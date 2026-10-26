@@ -13,7 +13,7 @@ report for the frozen `package-term` cohort, not a full-corpus claim.
 - Cohort: the existing 60-file, 369-method `package-term` cohort
 - Frozen primary cohort: five `path#tree` roots in
   [`typer-name-resolution-1566-primary-3.9.0.tsv`](typer-name-resolution-1566-primary-3.9.0.tsv)
-  compared from baseline `e06c4ee` through intermediate `bfc4759` to final
+  compared from baseline `e06c4ee` through post-`+=` intermediate `75eab259` to final
   source `1b71f49`.
 
 ## Outcome
@@ -21,7 +21,7 @@ report for the frozen `package-term` cohort, not a full-corpus claim.
 Both serial runs attempted all 369 methods. Parser failures: 0; namer
 failures: 0; fully typed methods: 0. Every frozen row had an observed current
 method outcome. The normalized reports had SHA-256
-`704595c365110e84b8b849d4495862da32c1b550b095b473b8825f8e5a9ae8c3`; the
+`704595c365110e84b8d849d4495862da32c1b550b095b473b8825f8e5a9ae8c3`; the
 per-method TSVs had SHA-256
 `8a1072ae4df4e6597d355d1b9bbecf85324355d0ce74a08212826b8cfa5c4853`.
 Each pair matched byte-for-byte.
