@@ -10,9 +10,10 @@ impl SourceTyper<'_> {
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
+        let contexts = self.source_context_chain(context, tree_index)?;
         let mut local_type_candidates = Vec::new();
         for (local_context, scope) in self.active_local_type_scopes.iter().rev() {
-            if *local_context != context {
+            if !contexts.contains(local_context) {
                 continue;
             }
             let candidates = self
@@ -29,7 +30,6 @@ impl SourceTyper<'_> {
                 break;
             }
         }
-        let contexts = self.source_context_chain(context, tree_index)?;
         let active_local_import_scopes = self.active_local_import_scopes.clone();
         for (local_context, mut local_scopes) in active_local_import_scopes.into_iter().rev() {
             if local_context != context {

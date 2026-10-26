@@ -275,9 +275,17 @@ impl<'a> SourceTyper<'a> {
             self.validate_cached_parent_argument_receiver_access(tree, typed)?;
             return Ok(typed);
         }
-        self.run_expression_transaction(|typer, info_journal, new_mappings| {
+        let method_type_scope = self.enclosing_method_type_scope(context)?;
+        if let Some(scope) = method_type_scope {
+            self.active_local_type_scopes.push((context.lexical, scope));
+        }
+        let result = self.run_expression_transaction(|typer, info_journal, new_mappings| {
             typer.type_value_expression_inner(tree, context, info_journal, new_mappings)
-        })
+        });
+        if method_type_scope.is_some() {
+            self.active_local_type_scopes.pop();
+        }
+        result
     }
 
     /// Types an expression and checks its widened value type against `expected`.
@@ -288,7 +296,11 @@ impl<'a> SourceTyper<'a> {
         context: ExpressionContext,
         expected: TypeId,
     ) -> Result<TreeId<Typed>, TyperError> {
-        self.run_expression_transaction(|typer, info_journal, new_mappings| {
+        let method_type_scope = self.enclosing_method_type_scope(context)?;
+        if let Some(scope) = method_type_scope {
+            self.active_local_type_scopes.push((context.lexical, scope));
+        }
+        let result = self.run_expression_transaction(|typer, info_journal, new_mappings| {
             typer.type_expression_expected_inner(
                 tree,
                 context,
@@ -296,7 +308,33 @@ impl<'a> SourceTyper<'a> {
                 info_journal,
                 new_mappings,
             )
-        })
+        });
+        if method_type_scope.is_some() {
+            self.active_local_type_scopes.pop();
+        }
+        result
+    }
+
+    fn enclosing_method_type_scope(
+        &self,
+        context: ExpressionContext,
+    ) -> Result<Option<ScopeId>, TyperError> {
+        if !self.store.symbols.contains(context.owner)
+            || !matches!(
+                self.store.symbols.get(context.owner).kind,
+                SymbolKind::Method | SymbolKind::Constructor
+            )
+        {
+            return Ok(None);
+        }
+        let scope = self.method_scope(context.owner)?;
+        Ok(self
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .any(|symbol| self.store.symbols.get(symbol).kind == SymbolKind::TypeParameter)
+            .then_some(scope))
     }
 
     /// Returns the value type represented by a typed expression's own type.
@@ -19168,6 +19206,72 @@ mod tests {
     }
 
     #[test]
+    fn local_method_signature_resolves_enclosing_class_method_type_parameters() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer[A](value: A): A = { def inner(nested: A): A = nested; inner(value) } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let local_method_tree = match &parsed.ast.get(block_tree).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("outer body should be a block"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        typer
+            .type_expression(block_tree, context)
+            .expect("local signature should resolve the outer class method's A parameter");
+
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, local_method_tree)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn expected_expression_typing_resolves_enclosing_method_type_parameters() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer[A](value: A): A = { def inner(nested: A): A = nested; inner(value) } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let local_method_tree = match &parsed.ast.get(block_tree).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("outer body should be a block"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        typer
+            .type_expression_expected(block_tree, context, definitions.any_type)
+            .expect("expected typing should retain the outer method's A parameter scope");
+
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, local_method_tree)
+                .is_some()
+        );
+    }
+
+    #[test]
     fn typing_an_unused_local_method_publishes_its_signature() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def outer: Int = { def unused(value: Int): Int = value; 0 } }",
@@ -30340,6 +30444,49 @@ mod tests {
         assert!(matches!(
             typer.type_expression(protected_invalid_rhs, protected_context),
             Err(TyperError::ApplicationCalleeNotMethod { .. })
+        ));
+    }
+
+    #[test]
+    fn application_of_a_class_value_selects_its_unique_apply_method() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Fn[A] { def apply(value: A): A = value }; class Use { def run(function: Fn[Int]): Int = function(1) }",
+        );
+        let (run, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "run");
+        let apply_method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "apply")
+                    .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .expect("Fn should declare apply");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let context = typer.expression_context_for(run).unwrap();
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("application of a class value should remain an Apply")
+        };
+        let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind else {
+            panic!("class application should select its apply method")
+        };
+        assert_eq!(typer.store().names.resolve(selection.name.text()), "apply");
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == apply_method
         ));
     }
 
