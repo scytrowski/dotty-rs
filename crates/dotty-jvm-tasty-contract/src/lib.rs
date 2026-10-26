@@ -1659,12 +1659,10 @@ fn source_method_descriptor(
             _ => break,
         }
     }
-    let result = match primitive_descriptor(definitions, ty) {
-        Some("I") => "I",
-        Some("Z") => "Z",
-        _ if is_unit_type(definitions, ty) => "V",
-        _ => return None,
-    };
+    let result = primitive_descriptor(definitions, ty)
+        .map(str::to_owned)
+        .or_else(|| is_unit_type(definitions, ty).then(|| "V".to_owned()))
+        .or_else(|| planned_class_descriptor(store, definitions, ty, planned_classes))?;
     Some(format!("({}){result}", parameters.concat()))
 }
 

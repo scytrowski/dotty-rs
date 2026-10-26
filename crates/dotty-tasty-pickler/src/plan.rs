@@ -395,6 +395,24 @@ impl<'a> Validator<'_, 'a> {
             )
     }
 
+    fn same_planned_sibling_class_type(&self, left: TypeId, right: TypeId) -> bool {
+        matches!(
+            (self.plan.store.types.try_get(left), self.plan.store.types.try_get(right)),
+            (
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(left_class),
+                    ..
+                }),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(right_class),
+                    ..
+                })
+            ) if left_class == right_class
+                && self.is_planned_sibling_class_type(left, None)
+                && self.is_planned_sibling_class_type(right, None)
+        )
+    }
+
     fn kind(&self, symbol: SymbolId, expected: SymbolKind) -> Result<(), PickleError> {
         let actual = self.symbol(symbol)?.kind;
         if actual != expected {
@@ -1205,10 +1223,14 @@ impl<'a> Validator<'_, 'a> {
                     role: TypeRole::Builtin(Builtin::Unit),
                 })?;
         self.name(result.name)?;
+        let supports_result = |validator: &Self, result_ty| {
+            result_ty == p.definitions.int
+                || result_ty == p.definitions.boolean
+                || result_ty == p.definitions.unit
+                || validator.is_planned_sibling_class_type(result_ty, Some(result.name))
+        };
         match definition.value_param_clauses.as_slice() {
-            [] if ty == p.definitions.int
-                || ty == p.definitions.boolean
-                || ty == p.definitions.unit => {}
+            [] if supports_result(self, ty) => {}
             [] => {
                 return Err(PickleError::MalformedType {
                     ty,
@@ -1247,10 +1269,7 @@ impl<'a> Validator<'_, 'a> {
                         role: TypeRole::Parameter,
                     });
                 }
-                if signature.result != p.definitions.int
-                    && signature.result != p.definitions.boolean
-                    && signature.result != p.definitions.unit
-                {
+                if !supports_result(self, signature.result) {
                     return Err(PickleError::MalformedType {
                         ty,
                         role: TypeRole::MethodResult,
@@ -1290,6 +1309,8 @@ impl<'a> Validator<'_, 'a> {
             self.symbol(boolean)?.name
         } else if result_type == p.definitions.unit {
             self.symbol(unit)?.name
+        } else if self.is_planned_sibling_class_type(result_type, Some(result.name)) {
+            result.name
         } else {
             return Err(PickleError::MalformedType {
                 ty: result_type,

@@ -12,9 +12,6 @@ use dotty_tasty::file::TastyFile;
 
 const FACTORY_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
-const IDENTITY_SOURCE: &str =
-    include_str!("fixtures/jvm_tasty_cross_class_factories/CounterIdentitySource.scala");
-
 const COUNTER_CLASS: &[u8] =
     include_bytes!("fixtures/jvm_tasty_cross_class_factories/scala39/example/Counter.class");
 const COUNTER_TASTY: &[u8] =
@@ -325,31 +322,20 @@ fn scala_39_factory_oracle_pins_descriptors_constructor_wire_and_sidecar_links()
 }
 
 #[test]
-fn paired_tasty_planning_rejects_identity_and_factory_at_method_result_validation() {
-    for (source, source_name, source_id, method) in [
-        (
-            FACTORY_SOURCE,
-            "CounterFactory.scala",
-            SourceId::from_index(1690),
-            "create",
-        ),
-        (
-            IDENTITY_SOURCE,
-            "CounterIdentity.scala",
-            SourceId::from_index(1691),
-            "identity",
-        ),
-    ] {
-        let error = emit_paired_jvm_tasty_batch(source, source_name, source_id)
-            .expect_err("reference-result methods exceed the current TASTy subset");
-        let evidence = format!("{error:?}");
-        assert!(
-            evidence.contains("phase: \"JVM/TASTy cross-contract validation\""),
-            "{method} must pass source typing and JVM unit validation before the cross-contract rejects it: {evidence}"
-        );
-        assert!(
-            evidence.contains("TastyPlan(MalformedType") && evidence.contains("role: MethodResult"),
-            "{method} must fail specifically at the pickler's reference result contract: {evidence}"
-        );
-    }
+fn paired_tasty_planning_rejects_factory_new_at_body_validation() {
+    let error = emit_paired_jvm_tasty_batch(
+        FACTORY_SOURCE,
+        "CounterFactory.scala",
+        SourceId::from_index(1690),
+    )
+    .expect_err("constructor New remains outside the #1692 body subset");
+    let evidence = format!("{error:?}");
+    assert!(
+        evidence.contains("phase: \"JVM/TASTy cross-contract validation\""),
+        "the real factory body must reach TASTy/JVM contract validation: {evidence}"
+    );
+    assert!(
+        evidence.contains("TastyPlan(BodyType"),
+        "the unsupported New expression must fail at body validation, not MethodResult: {evidence}"
+    );
 }

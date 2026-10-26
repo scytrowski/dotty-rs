@@ -284,11 +284,20 @@ impl ValidatedClassStatePlan<'_, '_> {
                 Some(_) => &[],
                 None => return Err(PickleError::InvalidType { ty: signature_id }),
             };
-            for parameter in parameters {
+            let result_ty = match p.store.types.try_get(signature_id) {
+                Some(Type::Method(signature)) => signature.result,
+                Some(_) => signature_id,
+                None => return Err(PickleError::InvalidType { ty: signature_id }),
+            };
+            for parameter_ty in parameters
+                .iter()
+                .map(|parameter| parameter.ty)
+                .chain(std::iter::once(result_ty))
+            {
                 let Some(Type::TypeRef {
                     target: dotty_core::TypeRefTarget::Symbol(class),
                     ..
-                }) = p.store.types.try_get(parameter.ty)
+                }) = p.store.types.try_get(parameter_ty)
                 else {
                     continue;
                 };
@@ -726,7 +735,61 @@ impl ValidatedClassStatePlan<'_, '_> {
                             ));
                         }
                     }
-                    let result_type = context.primitive_type_syntax(result_ty)?;
+                    let result_type = if result_ty == p.definitions.int
+                        || result_ty == p.definitions.boolean
+                        || result_ty == p.definitions.unit
+                    {
+                        context.primitive_type_syntax(result_ty)?
+                    } else {
+                        let TreeKind::Ident(result_syntax) = &p.source_ast.get(definition.tpt).kind
+                        else {
+                            return Err(PickleError::SourceShape {
+                                tree: definition.tpt,
+                                expected: crate::SourceRole::TypeSyntax,
+                            });
+                        };
+                        let Some(Type::TypeRef {
+                            target: dotty_core::TypeRefTarget::Symbol(result_class),
+                            ..
+                        }) = p.store.types.try_get(result_ty)
+                        else {
+                            return Err(PickleError::UnsupportedTypeReference { ty: result_ty });
+                        };
+                        let Some(dotty_core::SourceDefinition::Canonical { source, tree }) =
+                            p.source_index.definition_of(*result_class)
+                        else {
+                            return Err(PickleError::SourceDefinition {
+                                symbol: *result_class,
+                            });
+                        };
+                        let TreeKind::TypeDef(class_definition) = &p.source_ast.get(tree).kind
+                        else {
+                            return Err(PickleError::SourceShape {
+                                tree,
+                                expected: crate::SourceRole::Class,
+                            });
+                        };
+                        if source != p.source.id
+                            || p.source_index.symbol_at(source, tree) != Some(*result_class)
+                            || *result_class == p.class
+                            || !p
+                                .typed_bindings
+                                .planned_class_symbols()
+                                .contains(result_class)
+                            || class_definition.name.as_name() != &result_syntax.name
+                        {
+                            return Err(PickleError::SourceDefinition {
+                                symbol: *result_class,
+                            });
+                        }
+                        let name = context.intern_name(result_syntax.name)?;
+                        let child = context.lower_type(result_ty)?;
+                        context.wire_node(AstNode::NatAst {
+                            tag: IDENTTPT_TAG,
+                            value: AstOperand::Nat(name),
+                            child,
+                        })?
+                    };
                     method_fields.push(AstField::Tree(result_type));
                     let source_rhs = definition
                         .rhs

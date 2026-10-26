@@ -26,7 +26,8 @@ surface.
 The accepted shape is the oracle's ordinary public class in one explicit named
 package, implicit Object parent, a default constructor or one primary
 constructor with one plain Int parameter clause, and one or more public methods
-with an Int or Boolean result. Plain constructor parameters retain their
+with an Int or Boolean result, plus the bounded same-batch class-reference
+identity result described below. Plain constructor parameters retain their
 distinct class-owned template and constructor-owned signature identities;
 source `val` and `var` accessor parameters remain unsupported. Bodies may be typed Int/Boolean literals,
 references to a same-typed ordinary formal, ordinary parameterless references,
@@ -54,14 +55,19 @@ batch and package. The batch binding must provide that canonical class
 identity; the pickler checks its source declaration, owner, declaration scope,
 `ClassInfo`, and the formal's exact `TypeRef` and source syntax. The formal is
 emitted as a method-owned `PARAM` with the pinned external-to-sidecar
-`TYPEREF`/`TERMREFpkg` class type. A method body may make a zero-argument
+`TYPEREF`/`TERMREFpkg` class type. One method may return that exact planned
+class when its source result syntax, completed result `TypeRef`, and sole
+class-typed formal all name the same canonical symbol, and its typed body is a
+direct reference to that formal. Its result is emitted with the pinned
+`IDENTtpt`/`TYPEREF`/`TERMREFpkg` shape. A method body may make a zero-argument
 call to one public, concrete, non-generic method with an explicit empty value
 clause on that exact formal, when both classes and the target method are
 present in the same validated source/JVM/TASTy batch. The selected target must
 be the canonical `TermRef`; its owner type shares the formal's class type node.
 Arbitrary receivers, external or unplanned targets, overloaded/private/abstract
-methods, arguments, type applications, reference-typed method results,
-constructors, and multiple class formals remain unsupported.
+methods, arguments, type applications, other reference-valued method results,
+constructors, and multiple class formals remain unsupported. A direct `new`
+expression is still rejected during body validation.
 A method may have no value clause, one explicit
 empty clause, or one plain clause of ordinary Int or Boolean
 parameters. Parameter IDs, ownership, source scope, types and order must agree
