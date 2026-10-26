@@ -80,14 +80,31 @@ pub(crate) fn resolve_tasty_alias<E: ClassPathEntry>(
     owner: &BinaryName,
     alias: &str,
 ) -> Result<Option<BinaryName>, TastyAliasResolutionError> {
+    resolve_tasty_alias_with_probes(class_path, owner, alias, None)
+}
+
+fn resolve_tasty_alias_with_probes<E: ClassPathEntry>(
+    class_path: &E,
+    owner: &BinaryName,
+    alias: &str,
+    probes: Option<&RefCell<Vec<String>>>,
+) -> Result<Option<BinaryName>, TastyAliasResolutionError> {
+    let callback_key = format!("alias|{}|{alias}", owner.as_internal());
     let Some((target_owner, candidate)) =
         follow_tasty_alias_chain(owner.clone(), alias.to_owned(), |owner, alias| {
-            resolve_tasty_alias_target(class_path, owner, alias)
+            resolve_tasty_alias_target_with_probes(class_path, owner, alias, &callback_key, probes)
         })?
     else {
         return Ok(None);
     };
-    validate_alias_candidate(class_path, target_owner.package_path(), candidate)
+    validate_alias_candidate_with_probes(
+        class_path,
+        target_owner.package_path(),
+        candidate,
+        "alias",
+        &callback_key,
+        probes,
+    )
 }
 
 /// Resolves an unqualified reference against the package and Scala/Java
@@ -98,6 +115,16 @@ pub(crate) fn resolve_tasty_bare_reference<E: ClassPathEntry>(
     package: &str,
     simple_name: &str,
 ) -> Result<Option<BinaryName>, TastyAliasResolutionError> {
+    resolve_tasty_bare_reference_with_probes(class_path, package, simple_name, None)
+}
+
+fn resolve_tasty_bare_reference_with_probes<E: ClassPathEntry>(
+    class_path: &E,
+    package: &str,
+    simple_name: &str,
+    probes: Option<&RefCell<Vec<String>>>,
+) -> Result<Option<BinaryName>, TastyAliasResolutionError> {
+    let callback_key = format!("bare|{package}|{simple_name}");
     let mut candidates = Vec::with_capacity(3);
     for candidate_package in [package, "scala", "java/lang"] {
         let internal = if candidate_package.is_empty() {
@@ -113,8 +140,7 @@ pub(crate) fn resolve_tasty_bare_reference<E: ClassPathEntry>(
 
     let mut matches = Vec::new();
     for candidate in candidates {
-        if class_path
-            .find_class(&candidate)
+        if profiled_tasty_find_class(class_path, &candidate, "bare", &callback_key, probes)
             .map_err(|error| TastyAliasResolutionError::ClassPath(candidate.clone(), error))?
             .is_some()
         {
@@ -158,10 +184,21 @@ fn follow_tasty_alias_chain<E>(
     Ok(None)
 }
 
+#[cfg(test)]
 fn resolve_tasty_alias_target<E: ClassPathEntry>(
     class_path: &E,
     owner: &BinaryName,
     alias: &str,
+) -> Result<Option<tasty_symbol::TypeAliasTarget>, TastyAliasResolutionError> {
+    resolve_tasty_alias_target_with_probes(class_path, owner, alias, "", None)
+}
+
+fn resolve_tasty_alias_target_with_probes<E: ClassPathEntry>(
+    class_path: &E,
+    owner: &BinaryName,
+    alias: &str,
+    callback_key: &str,
+    probes: Option<&RefCell<Vec<String>>>,
 ) -> Result<Option<tasty_symbol::TypeAliasTarget>, TastyAliasResolutionError> {
     if !matches!(owner.simple_name(), "package" | "package$") {
         return Ok(None);
@@ -171,9 +208,10 @@ fn resolve_tasty_alias_target<E: ClassPathEntry>(
         .strip_suffix('$')
         .unwrap_or(owner.as_internal());
     let package_name = BinaryName::from_internal(package_object);
-    let package_tasty = class_path
-        .find_class(&package_name)
-        .map_err(|error| TastyAliasResolutionError::ClassPath(package_name.clone(), error))?;
+    let step_key = format!("{callback_key}|alias_step|{}|{alias}", owner.as_internal());
+    let package_tasty =
+        profiled_tasty_find_class(class_path, &package_name, "alias", &step_key, probes)
+            .map_err(|error| TastyAliasResolutionError::ClassPath(package_name.clone(), error))?;
     let Some(resource) = package_tasty.filter(|resource| resource.format() == ClassFormat::Tasty)
     else {
         return Ok(None);
@@ -243,6 +281,17 @@ fn validate_alias_candidate<E: ClassPathEntry>(
     package: &str,
     candidate: BinaryName,
 ) -> Result<Option<BinaryName>, TastyAliasResolutionError> {
+    validate_alias_candidate_with_probes(class_path, package, candidate, "alias", "", None)
+}
+
+fn validate_alias_candidate_with_probes<E: ClassPathEntry>(
+    class_path: &E,
+    package: &str,
+    candidate: BinaryName,
+    category: &str,
+    callback_key: &str,
+    probes: Option<&RefCell<Vec<String>>>,
+) -> Result<Option<BinaryName>, TastyAliasResolutionError> {
     let raw = candidate.clone();
     let relative = if package.is_empty() || raw.as_internal().starts_with(&format!("{package}/")) {
         None
@@ -254,8 +303,7 @@ fn validate_alias_candidate<E: ClassPathEntry>(
     };
     let mut resolved = None;
     for candidate in std::iter::once(raw).chain(relative) {
-        if class_path
-            .find_class(&candidate)
+        if profiled_tasty_find_class(class_path, &candidate, category, callback_key, probes)
             .map_err(|error| TastyAliasResolutionError::ClassPath(candidate.clone(), error))?
             .is_some()
         {
@@ -266,6 +314,41 @@ fn validate_alias_candidate<E: ClassPathEntry>(
         }
     }
     Ok(resolved)
+}
+
+fn profiled_tasty_find_class<E: ClassPathEntry>(
+    class_path: &E,
+    name: &BinaryName,
+    category: &str,
+    callback_key: &str,
+    probes: Option<&RefCell<Vec<String>>>,
+) -> Result<Option<ClassResource>, ClassPathError> {
+    let started = probes.map(|_| Instant::now());
+    let result = class_path.find_class(name);
+    if let (Some(probes), Some(started)) = (probes, started) {
+        let outcome = match &result {
+            Ok(Some(_)) => "found",
+            Ok(None) => "missing",
+            Err(_) => "error",
+        };
+        probes.borrow_mut().push(format!(
+            "probe\t{category}\t{}\t{}\t{outcome}\t{}",
+            hex_encode(callback_key.as_bytes()),
+            hex_encode(name.as_internal().as_bytes()),
+            started.elapsed().as_nanos()
+        ));
+    }
+    result
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 /// Loads `.class`/`.tasty`-backed classes from a [`ClassPathEntry`] into a
@@ -400,6 +483,8 @@ pub struct ClassLoadProfile {
     pub tasty_decode_exclusive_ns: u128,
     /// Sum of opt-in TASTy decoder phase timings and callback counts.
     pub tasty_decode_counters: BTreeMap<String, u128>,
+    /// Stable, per-request callback and classpath candidate observations.
+    pub tasty_resolution_observations: Vec<String>,
     /// Inclusive time in uncached loads, including decode, semantic projection, and dependencies.
     pub load_uncached_inclusive_ns: u128,
     /// Direct module completion attempts represented by this profile.
@@ -467,6 +552,7 @@ struct ActiveLoadProfile {
     tasty_decode_calls: usize,
     tasty_decode_exclusive_ns: u128,
     tasty_decode_counters: BTreeMap<String, u128>,
+    tasty_resolution_observations: Vec<String>,
     nested_tasty_decode_ns: u128,
     load_uncached_inclusive_ns: u128,
     module_completion_calls: usize,
@@ -692,6 +778,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             tasty_decode_calls: profile.tasty_decode_calls,
             tasty_decode_exclusive_ns: profile.tasty_decode_exclusive_ns,
             tasty_decode_counters: profile.tasty_decode_counters,
+            tasty_resolution_observations: profile.tasty_resolution_observations,
             load_uncached_inclusive_ns: profile.load_uncached_inclusive_ns,
             module_completion_calls: profile.module_completion_calls,
             module_completion_successes: profile.module_completion_successes,
@@ -792,6 +879,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         name: &BinaryName,
         payload_bytes: usize,
         detail: &tasty_symbol::TastyDecodeProfile,
+        probe_observations: &[String],
     ) {
         let Some(profile) = self.active_load_profile.as_mut() else {
             return;
@@ -811,6 +899,23 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             detail.outcome,
         );
         *counters.entry(observation).or_default() += 1;
+        let resolution_observations = &mut profile.tasty_resolution_observations;
+        for (category, callbacks) in [
+            ("alias", &detail.parent_alias_callbacks),
+            ("parent_bare", &detail.parent_bare_callbacks),
+            ("constructor_bare", &detail.constructor_accessor_callbacks),
+            ("member_bare", &detail.member_bare_callbacks),
+        ] {
+            for callback in &callbacks.observations {
+                resolution_observations.push(format!(
+                    "callback\t{category}\t{}\t{}\t{}",
+                    hex_encode(callback.key.as_bytes()),
+                    callback.outcome,
+                    callback.elapsed_ns
+                ));
+            }
+        }
+        resolution_observations.extend(probe_observations.iter().cloned());
         for (key, value) in [
             ("parse_ns", detail.parse_ns),
             ("index_ns", detail.index_ns),
@@ -842,6 +947,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "parent_alias_unresolved",
                 detail.parent_alias_callbacks.unresolved as u128,
             ),
+            (
+                "parent_alias_errors",
+                detail.parent_alias_callbacks.errors as u128,
+            ),
             ("parent_alias_ns", detail.parent_alias_callbacks.elapsed_ns),
             (
                 "parent_bare_calls",
@@ -855,6 +964,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "parent_bare_unresolved",
                 detail.parent_bare_callbacks.unresolved as u128,
             ),
+            (
+                "parent_bare_errors",
+                detail.parent_bare_callbacks.errors as u128,
+            ),
             ("parent_bare_ns", detail.parent_bare_callbacks.elapsed_ns),
             (
                 "constructor_bare_calls",
@@ -867,6 +980,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             (
                 "constructor_bare_unresolved",
                 detail.constructor_accessor_callbacks.unresolved as u128,
+            ),
+            (
+                "constructor_bare_errors",
+                detail.constructor_accessor_callbacks.errors as u128,
             ),
             (
                 "constructor_bare_ns",
@@ -884,7 +1001,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "member_bare_unresolved",
                 detail.member_bare_callbacks.unresolved as u128,
             ),
+            (
+                "member_bare_errors",
+                detail.member_bare_callbacks.errors as u128,
+            ),
             ("member_bare_ns", detail.member_bare_callbacks.elapsed_ns),
+            ("callback_errors", detail.callback_errors as u128),
         ] {
             *counters.entry(key.to_owned()).or_default() += value;
         }
@@ -1132,6 +1254,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
 
         let alias_error = RefCell::new(None);
+        let callback_error_keys = RefCell::new(Vec::new());
+        let probe_observations = RefCell::new(Vec::new());
         let class_path = &self.class_path;
         let resource_before_decode = self.resource_lookup_total_ns();
         let decoded = if let Some(cached) = decoded_cache.get(name)
@@ -1147,20 +1271,32 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 tasty_symbol::decode_module_class_with_resolvers_profiled(
                     resource.bytes(),
                     &identity.module_class_name,
-                    |owner, alias| match resolve_tasty_alias(class_path, owner, alias) {
+                    |owner, alias| match resolve_tasty_alias_with_probes(
+                        class_path,
+                        owner,
+                        alias,
+                        Some(&probe_observations),
+                    ) {
                         Ok(target) => target,
                         Err(error) => {
+                            callback_error_keys
+                                .borrow_mut()
+                                .push(format!("alias|{}|{alias}", owner.as_internal()));
                             alias_error.borrow_mut().get_or_insert(error);
                             None
                         }
                     },
-                    |package, simple_name| match resolve_tasty_bare_reference(
+                    |package, simple_name| match resolve_tasty_bare_reference_with_probes(
                         class_path,
                         package,
                         simple_name,
+                        Some(&probe_observations),
                     ) {
                         Ok(target) => target,
                         Err(error) => {
+                            callback_error_keys
+                                .borrow_mut()
+                                .push(format!("bare|{package}|{simple_name}"));
                             alias_error.borrow_mut().get_or_insert(error);
                             None
                         }
@@ -1193,10 +1329,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             };
             self.record_tasty_decode(decode_started, resource_before_decode);
             if self.collect_load_profiles {
+                let callback_error_keys = callback_error_keys.into_inner();
+                decode_profile.mark_callback_errors(&callback_error_keys);
                 self.record_tasty_decode_profile(
                     &identity.module_class_name,
                     resource.bytes().len(),
                     &decode_profile,
+                    &probe_observations.into_inner(),
                 );
             }
             if let Some(error) = alias_error.into_inner() {
@@ -2828,6 +2967,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
         let alias_error = RefCell::new(None);
+        let callback_error_keys = RefCell::new(Vec::new());
+        let probe_observations = RefCell::new(Vec::new());
         let class_path = &self.class_path;
         let resource_before_decode = self.resource_lookup_total_ns();
         let decode_started = self.collect_load_profiles.then(Instant::now);
@@ -2836,20 +2977,32 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             tasty_symbol::decode_with_resolvers_profiled(
                 bytes,
                 name,
-                |owner, alias| match resolve_tasty_alias(class_path, owner, alias) {
+                |owner, alias| match resolve_tasty_alias_with_probes(
+                    class_path,
+                    owner,
+                    alias,
+                    Some(&probe_observations),
+                ) {
                     Ok(target) => target,
                     Err(error) => {
+                        callback_error_keys
+                            .borrow_mut()
+                            .push(format!("alias|{}|{alias}", owner.as_internal()));
                         alias_error.borrow_mut().get_or_insert(error);
                         None
                     }
                 },
-                |package, simple_name| match resolve_tasty_bare_reference(
+                |package, simple_name| match resolve_tasty_bare_reference_with_probes(
                     class_path,
                     package,
                     simple_name,
+                    Some(&probe_observations),
                 ) {
                     Ok(target) => target,
                     Err(error) => {
+                        callback_error_keys
+                            .borrow_mut()
+                            .push(format!("bare|{package}|{simple_name}"));
                         alias_error.borrow_mut().get_or_insert(error);
                         None
                     }
@@ -2882,7 +3035,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         };
         self.record_tasty_decode(decode_started, resource_before_decode);
         if self.collect_load_profiles {
-            self.record_tasty_decode_profile(name, bytes.len(), &decode_profile);
+            let callback_error_keys = callback_error_keys.into_inner();
+            decode_profile.mark_callback_errors(&callback_error_keys);
+            self.record_tasty_decode_profile(
+                name,
+                bytes.len(),
+                &decode_profile,
+                &probe_observations.into_inner(),
+            );
         }
         if let Some(error) = alias_error.into_inner() {
             let (error, context) = error.into_class_load_error();
@@ -4603,6 +4763,96 @@ mod tests {
             resolve_tasty_bare_reference(&class_path, "example", "Closeable").unwrap(),
             Some(BinaryName::from_internal("java/lang/Closeable"))
         );
+    }
+
+    #[test]
+    fn profiled_bare_reference_records_every_candidate_probe_and_outcome() {
+        let class_path = InMemoryClassPath(HashMap::from([(
+            BinaryName::from_internal("java/lang/Closeable"),
+            Vec::new(),
+        )]));
+        let observations = RefCell::new(Vec::new());
+        assert_eq!(
+            resolve_tasty_bare_reference_with_probes(
+                &class_path,
+                "example",
+                "Closeable",
+                Some(&observations),
+            )
+            .unwrap(),
+            Some(BinaryName::from_internal("java/lang/Closeable"))
+        );
+        let events = observations.into_inner();
+        assert_eq!(events.len(), 3);
+        assert!(events[0].contains("missing"));
+        assert!(events[1].contains("missing"));
+        assert!(events[2].contains("found"));
+        assert!(events[0].contains(&hex_encode(b"bare|example|Closeable")));
+    }
+
+    #[test]
+    fn profiled_bare_reference_records_ambiguous_and_missing_candidates() {
+        let ambiguous = InMemoryClassPath(HashMap::from([
+            (BinaryName::from_internal("example/Closeable"), Vec::new()),
+            (BinaryName::from_internal("java/lang/Closeable"), Vec::new()),
+        ]));
+        let observations = RefCell::new(Vec::new());
+        assert_eq!(
+            resolve_tasty_bare_reference_with_probes(
+                &ambiguous,
+                "example",
+                "Closeable",
+                Some(&observations),
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(observations.borrow().len(), 3);
+        assert_eq!(
+            observations
+                .borrow()
+                .iter()
+                .filter(|event| event.contains("found"))
+                .count(),
+            2
+        );
+
+        let missing = InMemoryClassPath(HashMap::new());
+        let observations = RefCell::new(Vec::new());
+        assert_eq!(
+            resolve_tasty_bare_reference_with_probes(
+                &missing,
+                "example",
+                "Closeable",
+                Some(&observations),
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(observations.borrow().len(), 3);
+        assert!(
+            observations
+                .borrow()
+                .iter()
+                .all(|event| event.contains("missing"))
+        );
+    }
+
+    #[test]
+    fn profiled_bare_reference_records_classpath_errors_as_errors() {
+        let observations = RefCell::new(Vec::new());
+        assert!(
+            resolve_tasty_bare_reference_with_probes(
+                &AlwaysErrors,
+                "example",
+                "Closeable",
+                Some(&observations),
+            )
+            .is_err()
+        );
+        let events = observations.into_inner();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("error"));
     }
 
     #[test]
@@ -9609,6 +9859,7 @@ mod tests {
 
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(ResourceClassPath(resources), &mut store);
+        loader.set_load_profile_collection(true);
         let failure = loader
             .load_class_detailed(&BinaryName::from_internal("Source"))
             .expect_err("malformed package alias TASTy should be reported");
@@ -9624,6 +9875,25 @@ mod tests {
             Some(ClassOrigin::Directory(PathBuf::from("/alias")))
         );
         assert_eq!(failure.format, Some(ClassFormat::Tasty));
+        let profile = loader
+            .take_load_profiles()
+            .into_iter()
+            .find(|profile| profile.root == "Source")
+            .expect("failed profiled TASTy load should publish counters");
+        assert_eq!(profile.tasty_decode_counters["callback_errors"], 1);
+        assert_eq!(
+            profile.tasty_decode_counters["parent_alias_errors"]
+                + profile.tasty_decode_counters["parent_bare_errors"]
+                + profile.tasty_decode_counters["constructor_bare_errors"]
+                + profile.tasty_decode_counters["member_bare_errors"],
+            1
+        );
+        assert!(
+            profile
+                .tasty_resolution_observations
+                .iter()
+                .any(|event| { event.starts_with("callback\t") && event.contains("\terror\t") })
+        );
     }
 
     #[test]

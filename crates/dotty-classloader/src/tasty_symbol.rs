@@ -80,6 +80,7 @@ pub(crate) struct TastyDecodeProfile {
     pub constructor_accessor_exclusive_ns: u128,
     pub member_projection_ns: u128,
     pub member_projection_exclusive_ns: u128,
+    pub callback_errors: usize,
     pub parent_alias_callbacks: TastyCallbackProfile,
     pub parent_bare_callbacks: TastyCallbackProfile,
     pub constructor_accessor_callbacks: TastyCallbackProfile,
@@ -91,7 +92,41 @@ pub(crate) struct TastyCallbackProfile {
     pub calls: usize,
     pub resolved: usize,
     pub unresolved: usize,
+    pub errors: usize,
     pub elapsed_ns: u128,
+    pub observations: Vec<TastyCallbackObservation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TastyCallbackObservation {
+    pub key: String,
+    pub outcome: String,
+    pub elapsed_ns: u128,
+}
+
+impl TastyDecodeProfile {
+    pub(crate) fn mark_callback_errors(&mut self, keys: &[String]) {
+        for profile in [
+            &mut self.parent_alias_callbacks,
+            &mut self.parent_bare_callbacks,
+            &mut self.constructor_accessor_callbacks,
+            &mut self.member_bare_callbacks,
+        ] {
+            for observation in &mut profile.observations {
+                if keys.iter().any(|key| key == &observation.key)
+                    && observation.outcome == "unresolved"
+                {
+                    observation.outcome = "error".to_owned();
+                    profile.unresolved = profile.unresolved.saturating_sub(1);
+                    profile.errors += 1;
+                    self.callback_errors += 1;
+                }
+            }
+        }
+        if self.callback_errors > 0 {
+            self.outcome = "callback_error".to_owned();
+        }
+    }
 }
 
 struct ProfileTimer<'a> {
@@ -115,6 +150,7 @@ impl Drop for ProfileTimer<'_> {
 }
 
 fn profile_callback<T>(
+    key: impl FnOnce() -> String,
     callback: impl FnOnce() -> Option<T>,
     profile: Option<&mut TastyCallbackProfile>,
 ) -> Option<T> {
@@ -124,12 +160,20 @@ fn profile_callback<T>(
     let started = Instant::now();
     let result = callback();
     profile.calls += 1;
-    if result.is_some() {
+    let outcome = if result.is_some() {
         profile.resolved += 1;
+        "resolved"
     } else {
         profile.unresolved += 1;
-    }
-    profile.elapsed_ns += started.elapsed().as_nanos();
+        "unresolved"
+    };
+    let elapsed_ns = started.elapsed().as_nanos();
+    profile.elapsed_ns += elapsed_ns;
+    profile.observations.push(TastyCallbackObservation {
+        key: key(),
+        outcome: outcome.to_owned(),
+        elapsed_ns,
+    });
     result
 }
 
@@ -1157,12 +1201,14 @@ fn decode_impl(
         let result = {
             let mut profiled_alias = |owner: &BinaryName, alias: &str| {
                 profile_callback(
+                    || format!("alias|{}|{alias}", owner.as_internal()),
                     || resolve_alias(owner, alias),
                     collect_callback_profile.then_some(&mut parent_alias_callbacks),
                 )
             };
             let mut profiled_bare = |package: &str, simple_name: &str| {
                 profile_callback(
+                    || format!("bare|{package}|{simple_name}"),
                     || resolve_bare(package, simple_name),
                     collect_callback_profile.then_some(&mut parent_bare_callbacks),
                 )
@@ -1245,6 +1291,7 @@ fn decode_impl(
         );
         let mut profiled_bare = |package: &str, simple_name: &str| {
             profile_callback(
+                || format!("bare|{package}|{simple_name}"),
                 || resolve_bare(package, simple_name),
                 collect_callback_profile.then_some(&mut constructor_bare_callbacks),
             )
@@ -1292,6 +1339,7 @@ fn decode_impl(
         );
         let mut profiled_bare = |package: &str, simple_name: &str| {
             profile_callback(
+                || format!("bare|{package}|{simple_name}"),
                 || resolve_bare(package, simple_name),
                 collect_callback_profile.then_some(&mut member_bare_callbacks),
             )
