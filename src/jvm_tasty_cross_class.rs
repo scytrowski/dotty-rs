@@ -63,12 +63,12 @@ pub struct CrossClassFactoryProofInput<'session> {
 pub enum CrossClassFactoryProofKind {
     /// `CounterFactory.create(seed: Int): Counter = new Counter(seed)`.
     Factory,
-    /// `CounterIdentity.identity(counter: Counter): Counter = counter`.
+    /// `identity(counter: Counter): Counter = counter` in CounterFactory or CounterIdentity.
     Identity,
 }
 
 /// Read-only canonical identity proof for a factory constructor call or the
-/// separate reference-identity control method.
+/// independent reference-identity control method.
 pub struct ValidatedCrossClassFactoryProof<'session> {
     _store: &'session SemanticStore,
     _source_ast: &'session AstArena<Untyped>,
@@ -99,7 +99,7 @@ impl ValidatedCrossClassFactoryProof<'_> {
     pub fn counter_class(&self) -> SymbolId {
         self.counter_class
     }
-    /// Canonical `CounterFactory` or `CounterIdentity` class identity.
+    /// Canonical factory or identity-owner class identity.
     pub fn owner_class(&self) -> SymbolId {
         self.owner_class
     }
@@ -193,18 +193,20 @@ pub fn validate_cross_class_factory_proof(
             "source unit must contain exactly Counter and one proof class",
         ));
     };
-    let expected_owner = match kind {
-        CrossClassFactoryProofKind::Factory => "CounterFactory",
-        CrossClassFactoryProofKind::Identity => "CounterIdentity",
-    };
     let source_class_name = |tree| match source_ast.try_get(tree).map(|node| &node.kind) {
         Some(TreeKind::TypeDef(definition)) => {
             store.names.resolve(definition.name.as_name().text())
         }
         _ => "",
     };
+    let owner_name = source_class_name(*owner_tree).to_owned();
     if source_class_name(*counter_tree) != "Counter"
-        || source_class_name(*owner_tree) != expected_owner
+        || match kind {
+            CrossClassFactoryProofKind::Factory => owner_name != "CounterFactory",
+            CrossClassFactoryProofKind::Identity => {
+                owner_name != "CounterFactory" && owner_name != "CounterIdentity"
+            }
+        }
     {
         return Err(CrossClassFactoryProofError::SourceShape(
             "source declarations must be Counter followed by the expected proof class",
@@ -236,6 +238,8 @@ pub fn validate_cross_class_factory_proof(
             "proof owner is not bound to this exact source declaration",
         )
     })?;
+    let counter_declarations = factory_class_declarations(store, source_index, counter)?;
+    let owner_declarations = factory_class_declarations(store, source_index, owner)?;
     if !store.symbols.contains(counter) || !store.symbols.contains(owner) || counter == owner {
         return Err(CrossClassFactoryProofError::SourceIdentity(
             "class identity is stale or aliased",
@@ -274,6 +278,27 @@ pub fn validate_cross_class_factory_proof(
             "both classes must have the exact same package owner",
         ));
     }
+    let package_scope =
+        source_index
+            .scope_of(package_owner)
+            .ok_or(CrossClassFactoryProofError::SourceIdentity(
+                "canonical package has no declaration scope in the source index",
+            ))?;
+    if source_index.symbol_at(source_id, source_root) != Some(package_owner)
+        || !store.scopes.contains(package_scope)
+        || store.scopes.get(package_scope).owner != Some(package_owner)
+        || [counter, owner].iter().any(|class| {
+            !store
+                .scopes
+                .get(package_scope)
+                .entered_symbols()
+                .any(|member| member == *class)
+        })
+    {
+        return Err(CrossClassFactoryProofError::SourceIdentity(
+            "Counter and proof owner must be members of the exact source package scope",
+        ));
+    }
     let TreeKind::TypeDef(counter_def) = &source_ast.get(*counter_tree).kind else {
         unreachable!()
     };
@@ -301,6 +326,14 @@ pub fn validate_cross_class_factory_proof(
             "Counter primary constructor has no canonical identity",
         ),
     )?;
+    if !counter_declarations
+        .entered_symbols()
+        .any(|symbol| symbol == constructor)
+    {
+        return Err(CrossClassFactoryProofError::SourceIdentity(
+            "Counter primary constructor is absent from its canonical declaration scope",
+        ));
+    }
     validate_canonical_definition(source_index, source_id, ctor_tree, constructor).map_err(
         |_| {
             CrossClassFactoryProofError::SourceIdentity(
@@ -417,6 +450,14 @@ pub fn validate_cross_class_factory_proof(
     let method = source_index.symbol_at(source_id, *method_tree).ok_or(
         CrossClassFactoryProofError::SourceIdentity("method has no canonical source symbol"),
     )?;
+    if !owner_declarations
+        .entered_symbols()
+        .any(|symbol| symbol == method)
+    {
+        return Err(CrossClassFactoryProofError::SourceIdentity(
+            "proof method is absent from its canonical declaration scope",
+        ));
+    }
     validate_canonical_definition(source_index, source_id, *method_tree, method).map_err(|_| {
         CrossClassFactoryProofError::SourceIdentity("method is not bound to its exact source tree")
     })?;
@@ -741,8 +782,17 @@ pub fn validate_cross_class_factory_proof(
     let counter_plan = unique_class_plan(jvm_unit, counter, "Counter").map_err(|_| {
         CrossClassFactoryProofError::JvmPlan("complete JVM unit omits canonical Counter")
     })?;
-    let owner_plan = unique_class_plan(jvm_unit, owner, expected_owner)
-        .map_err(|_| CrossClassFactoryProofError::JvmPlan("complete JVM unit omits proof owner"))?;
+    let mut owner_plans = jvm_unit.classes.iter().filter(|plan| plan.class == owner);
+    let owner_plan = owner_plans
+        .next()
+        .ok_or(CrossClassFactoryProofError::JvmPlan(
+            "complete JVM unit omits proof owner",
+        ))?;
+    if owner_plans.next().is_some() {
+        return Err(CrossClassFactoryProofError::JvmPlan(
+            "proof owner occurs more than once in the JVM unit",
+        ));
+    }
     let dotty_jvm::JvmClassInitializationPlan::PrimaryConstructor(primary) =
         &counter_plan.initialization
     else {
@@ -859,6 +909,39 @@ pub fn validate_cross_class_factory_proof(
         typed_new,
         descriptor: descriptor.as_str().to_owned(),
     })
+}
+
+fn factory_class_declarations<'a>(
+    store: &'a SemanticStore,
+    source_index: &SourceSemanticIndex,
+    class: SymbolId,
+) -> Result<&'a dotty_core::Scope, CrossClassFactoryProofError> {
+    if !store.symbols.contains(class) {
+        return Err(CrossClassFactoryProofError::SourceIdentity(
+            "class identity is stale",
+        ));
+    }
+    let symbol = store.symbols.get(class);
+    let SymbolInfo::Complete(class_type) = symbol.info else {
+        return Err(CrossClassFactoryProofError::SemanticIdentity(
+            "class info is incomplete",
+        ));
+    };
+    let Some(Type::ClassInfo(info)) = store.types.try_get(class_type) else {
+        return Err(CrossClassFactoryProofError::SemanticIdentity(
+            "class symbol does not carry ClassInfo",
+        ));
+    };
+    if !store.scopes.contains(info.declarations)
+        || info.class != class
+        || store.scopes.get(info.declarations).owner != Some(class)
+        || source_index.scope_of(class) != Some(info.declarations)
+    {
+        return Err(CrossClassFactoryProofError::SourceIdentity(
+            "class declaration scope is not associated with its canonical source identity",
+        ));
+    }
+    Ok(store.scopes.get(info.declarations))
 }
 
 /// A typed failure while validating the bounded `Reader.read(counter)` proof.

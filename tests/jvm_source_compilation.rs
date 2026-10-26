@@ -13336,6 +13336,12 @@ fn factory_return_and_identity_control_reach_the_real_jvm_source_pipeline() {
             "create",
         ),
         (
+            FACTORY_CROSS_CLASS_SOURCE,
+            SourceId::from_index(1690),
+            "CounterFactory",
+            "identity",
+        ),
+        (
             IDENTITY_CROSS_CLASS_SOURCE,
             SourceId::from_index(1691),
             "CounterIdentity",
@@ -13442,6 +13448,39 @@ fn factory_return_and_identity_control_reach_the_real_jvm_source_pipeline() {
                     dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::TypedBinding(_)
                 ));
 
+                let TreeKind::PackageDef(package) = &ast.get(source_root).kind else {
+                    panic!("factory source root remains a package");
+                };
+                let mut missing_scopes = SourceSemanticIndex::new();
+                for class_tree in &package.stats {
+                    let class = index
+                        .symbol_at(source_id, *class_tree)
+                        .expect("top-level source class has its canonical symbol");
+                    missing_scopes
+                        .record_symbol(source_id, *class_tree, class)
+                        .expect("canonical class identity can be replayed");
+                }
+                let missing_scope = validate_cross_class_factory_proof(
+                    CrossClassFactoryProofInput {
+                        source_id,
+                        source_root,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: unit.typed_ast,
+                        source_index: &missing_scopes,
+                        source_typed_index,
+                        jvm_unit: unit,
+                    },
+                    CrossClassFactoryProofKind::Factory,
+                )
+                .err()
+                .expect("canonical class mappings without declaration scopes are rejected");
+                assert!(matches!(
+                    missing_scope,
+                    dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::SourceIdentity(_)
+                ));
+
                 let stale_source = validate_cross_class_factory_proof(
                     CrossClassFactoryProofInput {
                         source_id: SourceId::from_index(source_id.index() + 1),
@@ -13527,7 +13566,8 @@ fn factory_return_and_identity_control_reach_the_real_jvm_source_pipeline() {
                     unplanned_method,
                     dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::JvmPlan(_)
                 ));
-
+            }
+            if class_name == "CounterIdentity" {
                 let wrong_source_kind = validate_cross_class_factory_proof(
                     CrossClassFactoryProofInput {
                         source_id,
@@ -13540,10 +13580,10 @@ fn factory_return_and_identity_control_reach_the_real_jvm_source_pipeline() {
                         source_typed_index,
                         jvm_unit: unit,
                     },
-                    CrossClassFactoryProofKind::Identity,
+                    CrossClassFactoryProofKind::Factory,
                 )
                 .err()
-                .expect("a mismatched owner shape is rejected");
+                .expect("a factory proof rejects the standalone identity-control owner");
                 assert!(matches!(
                     wrong_source_kind,
                     dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::SourceShape(_)
