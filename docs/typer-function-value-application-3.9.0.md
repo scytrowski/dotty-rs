@@ -30,11 +30,21 @@ SHA-256
 Both local methods remained untyped at baseline.
 
 The resolver observations show a canonical `scala.Function2` TASTy class and
-its `scala.annotation.retainsCap` dependency were available. The actual gap is
-that application resolution leaves this external canonical function class
-untouched: `resolve_apply_function` accepted module classes and source classes
-or traits, but not the classpath-backed `scala.FunctionN` family. This is not
-evidence of a missing `apply` member or a reason to invent one by name.
+its `scala.annotation.retainsCap` dependency were available. Application
+resolution previously left this external canonical function class untouched.
+It now recognizes only the exact class identity returned by the existing
+canonical `scala.FunctionN` resolver, requires TASTy provenance, selects the
+real public `apply` member, and routes arguments through ordinary method
+application and checking.
+
+The compact classpath fixture preserves the actual `apply` symbol and parameter
+clause, but its TASTy reduction encodes the class type parameter references as
+`Error` types. For canonical ordinary functions only, the typer instantiates
+the Scala `FunctionN.apply` contract from the receiver's already-resolved type
+arguments. It fails closed if the member shape is not a plain method with the
+expected arity or if the reduced signature is not uniformly unresolved. This
+does not create a symbol or privilege a same-spelled source class. Contextual,
+polymorphic, and higher-arity families remain deferred.
 
 ## Scala oracle
 
@@ -68,5 +78,23 @@ java -cp "$SCALA39_CLASSPATH" dotty.tools.dotc.Main \
 
 ## Implementation results
 
-Pending. The before/after table will retain these same two source identities
-and report blocker movement separately from full local-method typing.
+Focused regressions cover `Function1`, `Function2`, generic input/output
+parameters, actual selected `apply` identity, source-to-typed mappings, wrong
+argument types and arities, rollback after failure, and a successful retry. A
+source class named `Function1` also confirms that spelling alone does not
+select the canonical classpath path.
+
+The before/after audit retains exactly the same two source identities in the
+TSV. It still reports `ApplicationCalleeNotMethod` for both local methods and
+`methods_typed=0`; this change therefore does not claim either whole local
+method now types. The focused audit reports the first failure for each local
+method and does not identify which nested application produced it. In the
+Scala oracle body, the same expression also contains `seq.apply(...)`, whose
+external generic member instantiation remains unsupported. The direct
+`FunctionN.apply` regression passes, but the audit provides no evidence that
+these full roots have advanced past that other blocker.
+
+The after-audit was run with `--verify-determinism`; its two normalized reports
+matched byte-for-byte. It used the same single-file manifest, pinned Scala
+revision, artifacts, and JDK as the baseline. The checked-in TSV records both
+unchanged method outcomes rather than changing the denominator.
