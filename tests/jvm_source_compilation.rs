@@ -37,6 +37,8 @@ const FACTORY_CROSS_CLASS_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
 const IDENTITY_CROSS_CLASS_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterIdentitySource.scala");
+const TASTY_OBJECT_COMPOSITION_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_object_composition/CounterOwner.scala");
 
 type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
@@ -6980,6 +6982,112 @@ fn reference_field_initializer_constructs_one_verified_child_after_super() {
         assert!(
             java.status.success(),
             "java -Xverify:all rejected the field initializer classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
+
+#[test]
+fn exact_tasty_object_composition_fixture_emits_reference_field_and_executes() {
+    let output = TestOutputDirectory::new("tasty-object-composition");
+    let artifacts = compile_source_classes(
+        TASTY_OBJECT_COMPOSITION_SOURCE,
+        "CounterOwner.scala",
+        output.path(),
+    )
+    .expect("exact issue fixture compiles through the real source-to-JVM pipeline");
+    assert_eq!(artifacts.len(), 2);
+
+    let owner_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "example/CounterOwner")
+        .expect("CounterOwner is emitted");
+    let owner = decode_emitted_class(owner_artifact);
+    assert_eq!((owner.version.major, owner.version.minor), (65, 0));
+    let [inner] = owner.fields.as_slice() else {
+        panic!("CounterOwner has one physical source field");
+    };
+    assert_eq!(owner.constant_pool.utf8(inner.name_index), Ok("inner"));
+    assert_eq!(
+        owner.constant_pool.utf8(inner.descriptor_index),
+        Ok("Lexample/Counter;")
+    );
+    assert!(inner.access_flags.is_private());
+    assert!(inner.access_flags.is_final());
+
+    assert_opcode_sequence(
+        emitted_method_code(&owner, "<init>"),
+        &[0x2a, 0xb7, 0x2a, 0xbb, 0x59, 0x1b, 0xb7, 0xb5, 0xb1],
+    );
+    assert_invocation_sequence(
+        &owner,
+        emitted_method_code(&owner, "<init>"),
+        &[
+            (0xb7, "java/lang/Object", "<init>", "()V"),
+            (0xb7, "example/Counter", "<init>", "(I)V"),
+        ],
+    );
+    assert_field_reference(
+        &owner,
+        emitted_method_code(&owner, "<init>"),
+        0xb5,
+        "example/CounterOwner",
+        "inner",
+        "Lexample/Counter;",
+    );
+    assert_eq!(code_max_stack(&owner, "<init>"), 4);
+
+    assert_opcode_sequence(
+        emitted_method_code(&owner, "read"),
+        &[0x2a, 0xb4, 0xb6, 0xac],
+    );
+    assert_field_reference(
+        &owner,
+        emitted_method_code(&owner, "read"),
+        0xb4,
+        "example/CounterOwner",
+        "inner",
+        "Lexample/Counter;",
+    );
+    assert_invocation_sequence(
+        &owner,
+        emitted_method_code(&owner, "read"),
+        &[(0xb6, "example/Counter", "get", "()I")],
+    );
+
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("ObjectCompositionHarness.java");
+        fs::write(
+            &harness,
+            "public final class ObjectCompositionHarness { public static void main(String[] args) { example.CounterOwner first = new example.CounterOwner(7); example.CounterOwner second = new example.CounterOwner(42); if (first.read() != 7 || second.read() != 42) throw new AssertionError(\"reference field object composition\"); } }\n",
+        )
+        .expect("write exact issue fixture runtime harness");
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac for the object-composition fixture");
+        assert!(
+            javac.status.success(),
+            "javac rejected object-composition harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-ea",
+                "-classpath",
+                classpath,
+                "ObjectCompositionHarness",
+            ])
+            .output()
+            .expect("start Java verifier for the object-composition fixture");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected object-composition harness\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&java.stdout),
             String::from_utf8_lossy(&java.stderr)
         );
