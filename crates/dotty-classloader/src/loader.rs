@@ -89,10 +89,16 @@ fn resolve_tasty_alias_with_probes<E: ClassPathEntry>(
     alias: &str,
     probes: Option<&RefCell<Vec<String>>>,
 ) -> Result<Option<BinaryName>, TastyAliasResolutionError> {
-    let callback_key = format!("alias|{}|{alias}", owner.as_internal());
+    let callback_key = probes.map(|_| format!("alias|{}|{alias}", owner.as_internal()));
     let Some((target_owner, candidate)) =
         follow_tasty_alias_chain(owner.clone(), alias.to_owned(), |owner, alias| {
-            resolve_tasty_alias_target_with_probes(class_path, owner, alias, &callback_key, probes)
+            resolve_tasty_alias_target_with_probes(
+                class_path,
+                owner,
+                alias,
+                callback_key.as_deref().unwrap_or_default(),
+                probes,
+            )
         })?
     else {
         return Ok(None);
@@ -102,7 +108,7 @@ fn resolve_tasty_alias_with_probes<E: ClassPathEntry>(
         target_owner.package_path(),
         candidate,
         "alias",
-        &callback_key,
+        callback_key.as_deref().unwrap_or_default(),
         probes,
     )
 }
@@ -124,7 +130,7 @@ fn resolve_tasty_bare_reference_with_probes<E: ClassPathEntry>(
     simple_name: &str,
     probes: Option<&RefCell<Vec<String>>>,
 ) -> Result<Option<BinaryName>, TastyAliasResolutionError> {
-    let callback_key = format!("bare|{package}|{simple_name}");
+    let callback_key = probes.map(|_| format!("bare|{package}|{simple_name}"));
     let mut candidates = Vec::with_capacity(3);
     for candidate_package in [package, "scala", "java/lang"] {
         let internal = if candidate_package.is_empty() {
@@ -140,9 +146,15 @@ fn resolve_tasty_bare_reference_with_probes<E: ClassPathEntry>(
 
     let mut matches = Vec::new();
     for candidate in candidates {
-        if profiled_tasty_find_class(class_path, &candidate, "bare", &callback_key, probes)
-            .map_err(|error| TastyAliasResolutionError::ClassPath(candidate.clone(), error))?
-            .is_some()
+        if profiled_tasty_find_class(
+            class_path,
+            &candidate,
+            "bare",
+            callback_key.as_deref().unwrap_or_default(),
+            probes,
+        )
+        .map_err(|error| TastyAliasResolutionError::ClassPath(candidate.clone(), error))?
+        .is_some()
         {
             matches.push(candidate);
             if matches.len() > 1 {
@@ -208,7 +220,11 @@ fn resolve_tasty_alias_target_with_probes<E: ClassPathEntry>(
         .strip_suffix('$')
         .unwrap_or(owner.as_internal());
     let package_name = BinaryName::from_internal(package_object);
-    let step_key = format!("{callback_key}|alias_step|{}|{alias}", owner.as_internal());
+    let step_key = if probes.is_some() {
+        format!("{callback_key}|alias_step|{}|{alias}", owner.as_internal())
+    } else {
+        String::new()
+    };
     let package_tasty =
         profiled_tasty_find_class(class_path, &package_name, "alias", &step_key, probes)
             .map_err(|error| TastyAliasResolutionError::ClassPath(package_name.clone(), error))?;
@@ -1254,7 +1270,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
 
         let alias_error = RefCell::new(None);
-        let callback_error_keys = RefCell::new(Vec::new());
         let probe_observations = RefCell::new(Vec::new());
         let class_path = &self.class_path;
         let resource_before_decode = self.resource_lookup_total_ns();
@@ -1277,13 +1292,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         alias,
                         Some(&probe_observations),
                     ) {
-                        Ok(target) => target,
+                        Ok(target) => tasty_symbol::TastyResolverResult::Value(target),
                         Err(error) => {
-                            callback_error_keys
-                                .borrow_mut()
-                                .push(format!("alias|{}|{alias}", owner.as_internal()));
                             alias_error.borrow_mut().get_or_insert(error);
-                            None
+                            tasty_symbol::TastyResolverResult::Error(None)
                         }
                     },
                     |package, simple_name| match resolve_tasty_bare_reference_with_probes(
@@ -1292,13 +1304,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         simple_name,
                         Some(&probe_observations),
                     ) {
-                        Ok(target) => target,
+                        Ok(target) => tasty_symbol::TastyResolverResult::Value(target),
                         Err(error) => {
-                            callback_error_keys
-                                .borrow_mut()
-                                .push(format!("bare|{package}|{simple_name}"));
                             alias_error.borrow_mut().get_or_insert(error);
-                            None
+                            tasty_symbol::TastyResolverResult::Error(None)
                         }
                     },
                     &mut decode_profile,
@@ -1329,8 +1338,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             };
             self.record_tasty_decode(decode_started, resource_before_decode);
             if self.collect_load_profiles {
-                let callback_error_keys = callback_error_keys.into_inner();
-                decode_profile.mark_callback_errors(&callback_error_keys);
                 self.record_tasty_decode_profile(
                     &identity.module_class_name,
                     resource.bytes().len(),
@@ -2967,7 +2974,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
         let alias_error = RefCell::new(None);
-        let callback_error_keys = RefCell::new(Vec::new());
         let probe_observations = RefCell::new(Vec::new());
         let class_path = &self.class_path;
         let resource_before_decode = self.resource_lookup_total_ns();
@@ -2983,13 +2989,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     alias,
                     Some(&probe_observations),
                 ) {
-                    Ok(target) => target,
+                    Ok(target) => tasty_symbol::TastyResolverResult::Value(target),
                     Err(error) => {
-                        callback_error_keys
-                            .borrow_mut()
-                            .push(format!("alias|{}|{alias}", owner.as_internal()));
                         alias_error.borrow_mut().get_or_insert(error);
-                        None
+                        tasty_symbol::TastyResolverResult::Error(None)
                     }
                 },
                 |package, simple_name| match resolve_tasty_bare_reference_with_probes(
@@ -2998,13 +3001,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     simple_name,
                     Some(&probe_observations),
                 ) {
-                    Ok(target) => target,
+                    Ok(target) => tasty_symbol::TastyResolverResult::Value(target),
                     Err(error) => {
-                        callback_error_keys
-                            .borrow_mut()
-                            .push(format!("bare|{package}|{simple_name}"));
                         alias_error.borrow_mut().get_or_insert(error);
-                        None
+                        tasty_symbol::TastyResolverResult::Error(None)
                     }
                 },
                 &mut decode_profile,
@@ -3035,8 +3035,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         };
         self.record_tasty_decode(decode_started, resource_before_decode);
         if self.collect_load_profiles {
-            let callback_error_keys = callback_error_keys.into_inner();
-            decode_profile.mark_callback_errors(&callback_error_keys);
             self.record_tasty_decode_profile(
                 name,
                 bytes.len(),
