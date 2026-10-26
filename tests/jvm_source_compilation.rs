@@ -30,6 +30,10 @@ use dotty_typer::{SourceTyper, TyperError};
 const FIXTURE_DIRECTORY: &str = "tests/fixtures/jvm";
 const LINKAGE_COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
 const CROSS_CLASS_TASTY_SOURCE: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader.scala");
+const FACTORY_CROSS_CLASS_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
+const IDENTITY_CROSS_CLASS_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_cross_class_factories/CounterIdentitySource.scala");
 
 type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
@@ -13305,6 +13309,161 @@ fn real_reference_object_apis_compile_and_verify_end_to_end() {
 }
 
 #[test]
+fn factory_return_and_identity_control_reach_the_real_jvm_source_pipeline() {
+    for (source, source_id, class_name, method_name) in [
+        (
+            FACTORY_CROSS_CLASS_SOURCE,
+            SourceId::from_index(1690),
+            "CounterFactory",
+            "create",
+        ),
+        (
+            IDENTITY_CROSS_CLASS_SOURCE,
+            SourceId::from_index(1691),
+            "CounterIdentity",
+            "identity",
+        ),
+    ] {
+        let output = TestOutputDirectory::new("factory-cross-class-source");
+        let mut observed = false;
+        let mut observe_source = |ast: &AstArena<Untyped>,
+                                  index: &SourceSemanticIndex,
+                                  unit: &mut JvmCompilationUnit<'_>,
+                                  _definitions: &Definitions| {
+            observed = true;
+            let counter = audit_class_named(unit, "Counter");
+            let owner = audit_class_named(unit, class_name);
+            let source_method = ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if unit.store.names.resolve(definition.name.as_name().text())
+                            == method_name =>
+                    {
+                        Some((tree, definition))
+                    }
+                    _ => None,
+                })
+                .expect("source declares the audited method");
+            let method = index
+                .symbol_at(source_id, source_method.0)
+                .expect("method has its canonical source symbol");
+            assert_eq!(unit.store.symbols.get(method).owner, Some(owner));
+            let dotty_core::SymbolInfo::Complete(method_type) = unit.store.symbols.get(method).info
+            else {
+                panic!("audited method signature is complete");
+            };
+            let Type::Method(signature) = unit.store.types.get(method_type) else {
+                panic!("audited method has a method type");
+            };
+            assert_eq!(audit_type_symbol(unit, signature.result), Some(counter));
+            let plan = audit_method_named(unit, owner, method_name);
+            assert_eq!(plan.method, method);
+            let typed_root = plan.body.expect("typed source body reaches the JVM plan");
+            assert!(source_method.1.rhs.is_some());
+
+            let parameter_tree = source_method.1.value_param_clauses[0][0];
+            let parameter = index
+                .symbol_at(source_id, parameter_tree)
+                .expect("method parameter has its canonical source symbol");
+            assert_eq!(unit.store.symbols.get(parameter).owner, Some(method));
+            if method_name == "create" {
+                let counter_tree = ast
+                    .iter()
+                    .find_map(|(tree, node)| match &node.kind {
+                        TreeKind::TypeDef(definition)
+                            if unit.store.names.resolve(definition.name.as_name().text())
+                                == "Counter" =>
+                        {
+                            Some((tree, definition))
+                        }
+                        _ => None,
+                    })
+                    .expect("Counter declaration exists in the source unit");
+                let TreeKind::Template(template) = &ast.get(counter_tree.1.rhs).kind else {
+                    panic!("Counter has an ordinary template");
+                };
+                let constructor = index
+                    .symbol_at(source_id, template.constructor)
+                    .expect("Counter has its canonical primary constructor");
+                assert_eq!(unit.store.symbols.get(constructor).owner, Some(counter));
+                let TreeKind::Apply(application) = &unit.typed_ast.get(typed_root).kind else {
+                    panic!("create body is a typed constructor application");
+                };
+                assert_eq!(application.args.len(), 1);
+                let TreeKind::Select(selection) = &unit.typed_ast.get(application.function).kind
+                else {
+                    panic!("constructor application selects the canonical constructor");
+                };
+                assert_eq!(
+                    term_type_target(unit, unit.typed_ast.get(application.function).ty),
+                    Some(constructor)
+                );
+                let TreeKind::New(new_tree) = &unit.typed_ast.get(selection.qualifier).kind else {
+                    panic!("constructor selection is qualified by typed New");
+                };
+                assert_eq!(
+                    audit_type_symbol(unit, unit.typed_ast.get(new_tree.tpt).ty),
+                    Some(counter)
+                );
+                assert_eq!(
+                    term_type_target(unit, unit.typed_ast.get(application.args[0]).ty),
+                    Some(parameter)
+                );
+            } else {
+                let TreeKind::Ident(_) = &unit.typed_ast.get(typed_root).kind else {
+                    panic!("identity control body is its typed parameter reference");
+                };
+                assert_eq!(
+                    term_type_target(unit, unit.typed_ast.get(typed_root).ty),
+                    Some(parameter)
+                );
+            }
+        };
+        let artifacts = compile_source_batch_with_source_observer(
+            source,
+            "CounterFactory.scala",
+            output.path(),
+            source_id,
+            SourceUnitCardinality::AtLeastTwo,
+            &mut observe_source,
+        )
+        .expect("source typing and JVM-only emission succeed for reference results");
+        assert!(observed);
+        assert_eq!(artifacts.len(), 2);
+        let emitted = artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name().ends_with(class_name))
+            .expect("audited declaring class was emitted");
+        let class = decode_emitted_class(emitted);
+        let descriptor = methods_with_descriptors(&class)
+            .into_iter()
+            .find(|(name, _)| name == method_name)
+            .map(|(_, descriptor)| descriptor)
+            .expect("audited reference method is emitted");
+        assert_eq!(
+            descriptor,
+            if method_name == "create" {
+                "(I)Lexample/Counter;"
+            } else {
+                "(Lexample/Counter;)Lexample/Counter;"
+            }
+        );
+        assert_opcode_sequence(
+            emitted_method_code(&class, method_name),
+            if method_name == "create" {
+                &[0xbb, 0x59, 0x1b, 0xb7, 0xb0]
+            } else {
+                &[0x2b, 0xb0]
+            },
+        );
+        if method_name == "create" && require_jdk_or_skip() {
+            verify_reference_factory_with_jdk(output.path());
+        }
+    }
+}
+
+#[test]
 fn parameterized_direct_super_constructors_preserve_source_arguments_and_verify() {
     let first_output = TestOutputDirectory::new("parameterized-super-first");
     let second_output = TestOutputDirectory::new("parameterized-super-second");
@@ -20101,6 +20260,61 @@ fn verify_reference_holder_with_jdk(output_directory: &Path) {
         java.status.success(),
         "java failed for reference holder: {:?}",
         java
+    );
+}
+
+fn verify_reference_factory_with_jdk(output_directory: &Path) {
+    let output_path = output_directory.to_str().expect("UTF-8 class output path");
+    let harness = output_directory.join("FactoryJdkHarness.java");
+    fs::write(
+        &harness,
+        r#"
+import example.Counter;
+import example.CounterFactory;
+
+public final class FactoryJdkHarness {
+  public static void main(String[] args) {
+    Counter counter = new CounterFactory().create(7);
+    if (counter.get() != 7) throw new AssertionError("create result");
+    counter.set(42);
+    if (counter.get() != 42) throw new AssertionError("factory result identity");
+  }
+}
+"#,
+    )
+    .expect("write Java 21 factory acceptance harness");
+    let javac = Command::new("javac")
+        .args([
+            "--release",
+            "21",
+            "-classpath",
+            output_path,
+            "-d",
+            output_path,
+        ])
+        .arg(&harness)
+        .output()
+        .expect("start javac for the reference factory acceptance harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected the factory acceptance harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            output_path,
+            "FactoryJdkHarness",
+        ])
+        .output()
+        .expect("start Java 21 verifier for the reference factory");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected factory output\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
     );
 }
 
