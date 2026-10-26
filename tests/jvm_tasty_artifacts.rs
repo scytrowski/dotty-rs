@@ -20,6 +20,8 @@ const COUNTER_GAUGE: &str = include_str!("fixtures/jvm_tasty_multiclass/CounterG
 const COUNTER_READER: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader.scala");
 const COUNTER_FACTORY: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
+const COUNTER_FACTORY_RUNTIME: &str =
+    include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactoryRuntime.scala");
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
 const COUNTER_FACTORY_REFERENCE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def create(counter: Counter): Counter = counter\n";
@@ -754,13 +756,13 @@ fn require_jdk_21_or_skip() -> bool {
         return true;
     }
     let message = format!(
-        "linked Counter/Reader runtime requires java, javac, and javap from JDK 21+ on PATH; unavailable: {}",
+        "linked JVM batch runtime requires java, javac, and javap from JDK 21+ on PATH; unavailable: {}",
         unavailable.join(", ")
     );
     if std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1") {
         panic!("{message}");
     }
-    eprintln!("skipping optional linked Counter/Reader JDK runtime: {message}");
+    eprintln!("skipping optional linked JVM batch JDK runtime: {message}");
     false
 }
 
@@ -1104,6 +1106,399 @@ fn equal_simple_names_in_different_packages_keep_distinct_pair_paths() {
     assert_eq!(left.tasty_path(), "left/Counter.tasty");
     assert_eq!(right.classfile_path(), "right/Counter.class");
     assert_eq!(right.tasty_path(), "right/Counter.tasty");
+}
+
+#[test]
+fn rust_factory_counter_batch_executes_with_verified_reference_returns_on_jdk21() {
+    if !require_jdk_21_or_skip() {
+        return;
+    }
+
+    let first = emit_paired_jvm_tasty_batch(
+        COUNTER_FACTORY_RUNTIME,
+        "tests/fixtures/jvm_tasty_cross_class_factories/CounterFactoryRuntime.scala",
+        SourceId::from_index(1695),
+    )
+    .unwrap();
+    let second = emit_paired_jvm_tasty_batch(
+        COUNTER_FACTORY_RUNTIME,
+        "tests/fixtures/jvm_tasty_cross_class_factories/CounterFactoryRuntime.scala",
+        SourceId::from_index(1696),
+    )
+    .unwrap();
+    assert_ne!(first.source_id(), second.source_id());
+    assert_eq!(first.classes().len(), 2);
+    assert_eq!(second.classes().len(), 2);
+    for (left, right) in first.classes().iter().zip(second.classes()) {
+        assert_eq!(left.classfile_path(), right.classfile_path());
+        assert_eq!(left.classfile_bytes(), right.classfile_bytes());
+        assert_eq!(left.tasty_path(), right.tasty_path());
+        assert_eq!(left.tasty_bytes(), right.tasty_bytes());
+    }
+
+    let output = TestDirectory::new("factory-counter-jdk-runtime");
+    let class_root = output.path().join("rust-classes");
+    let harness_root = output.path().join("harness-classes");
+    std::fs::create_dir(&class_root).unwrap();
+    std::fs::create_dir(&harness_root).unwrap();
+    for (pair, expected_path) in first
+        .classes()
+        .iter()
+        .zip(["example/Counter.class", "example/CounterFactory.class"])
+    {
+        assert_eq!(pair.classfile_path(), expected_path);
+        let classfile = class_root.join(pair.classfile_path());
+        let tasty = class_root.join(pair.tasty_path());
+        std::fs::create_dir_all(classfile.parent().unwrap()).unwrap();
+        std::fs::write(&classfile, pair.classfile_bytes()).unwrap();
+        std::fs::write(&tasty, pair.tasty_bytes()).unwrap();
+    }
+    assert_eq!(
+        read_relative_files(&class_root).unwrap(),
+        [
+            "example/Counter.class",
+            "example/Counter.tasty",
+            "example/CounterFactory.class",
+            "example/CounterFactory.tasty",
+        ]
+    );
+
+    let counter_pair = &first.classes()[0];
+    let mut reader = Reader::new(counter_pair.classfile_bytes());
+    let counter = ClassFile::decode(&mut reader).unwrap();
+    assert!(reader.is_at_end());
+    assert_eq!((counter.version.major, counter.version.minor), (65, 0));
+    assert!(counter.access_flags.is_public());
+    assert_eq!(
+        counter
+            .constant_pool
+            .class_name(counter.this_class)
+            .unwrap(),
+        "example/Counter"
+    );
+    assert_eq!(counter.fields.len(), 1);
+    assert_eq!(
+        (
+            counter
+                .constant_pool
+                .utf8(counter.fields[0].name_index)
+                .unwrap(),
+            counter
+                .constant_pool
+                .utf8(counter.fields[0].descriptor_index)
+                .unwrap()
+        ),
+        ("current", "I")
+    );
+    assert!(counter.fields[0].access_flags.is_private());
+    let mut counter_methods = counter
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                counter.constant_pool.utf8(method.name_index).unwrap(),
+                counter.constant_pool.utf8(method.descriptor_index).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    counter_methods.sort_unstable();
+    assert_eq!(
+        counter_methods,
+        [("<init>", "(I)V"), ("get", "()I"), ("set", "(I)V")]
+    );
+    assert!(
+        counter
+            .methods
+            .iter()
+            .find(|method| counter.constant_pool.utf8(method.name_index).unwrap() == "<init>")
+            .unwrap()
+            .access_flags
+            .is_public()
+    );
+    assert!(
+        counter
+            .methods
+            .iter()
+            .all(|method| method.access_flags.is_public())
+    );
+
+    let factory_pair = &first.classes()[1];
+    let mut reader = Reader::new(factory_pair.classfile_bytes());
+    let factory = ClassFile::decode(&mut reader).unwrap();
+    assert!(reader.is_at_end());
+    assert_eq!((factory.version.major, factory.version.minor), (65, 0));
+    assert!(factory.access_flags.is_public());
+    assert_eq!(
+        factory
+            .constant_pool
+            .class_name(factory.this_class)
+            .unwrap(),
+        "example/CounterFactory"
+    );
+    assert!(
+        factory.fields.is_empty(),
+        "Factory has no copied Counter storage"
+    );
+    let mut factory_methods = factory
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                factory.constant_pool.utf8(method.name_index).unwrap(),
+                factory.constant_pool.utf8(method.descriptor_index).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    factory_methods.sort_unstable();
+    assert_eq!(
+        factory_methods,
+        [("<init>", "()V"), ("create", "(I)Lexample/Counter;")]
+    );
+    assert!(
+        factory
+            .methods
+            .iter()
+            .all(|method| method.access_flags.is_public())
+    );
+    let create = factory
+        .methods
+        .iter()
+        .find(|method| factory.constant_pool.utf8(method.name_index).unwrap() == "create")
+        .unwrap();
+    assert!(create.access_flags.is_public());
+    let [Attribute::Code(code)] = create.attributes.as_slice() else {
+        panic!("Factory.create has exactly one Code attribute");
+    };
+    assert_eq!(code.max_stack, 3);
+    assert_eq!(code.max_locals, 2, "this is local 0 and seed is local 1");
+
+    // Check instruction flow and canonical references without pinning bytecode
+    // offsets or constant-pool indices.
+    let mut cursor = 0;
+    assert_eq!(code.code.get(cursor), Some(&0xbb), "new Counter");
+    cursor += 1;
+    let new_operand = code
+        .code
+        .get(cursor..cursor + 2)
+        .expect("new has a u2 class operand");
+    let new_index = ConstantPoolIndex(u16::from_be_bytes([new_operand[0], new_operand[1]]));
+    cursor += 2;
+    assert!(matches!(
+        factory.constant_pool.get(new_index),
+        Some(ConstantPoolEntry::Class { .. })
+    ));
+    assert_eq!(
+        factory.constant_pool.class_name(new_index).unwrap(),
+        "example/Counter"
+    );
+    assert_eq!(
+        code.code.get(cursor),
+        Some(&0x59),
+        "dup preserves the return value"
+    );
+    cursor += 1;
+    assert_eq!(
+        code.code.get(cursor),
+        Some(&0x1b),
+        "iload_1 loads seed once"
+    );
+    cursor += 1;
+    assert_eq!(
+        code.code.get(cursor),
+        Some(&0xb7),
+        "invokespecial initializes the allocation"
+    );
+    cursor += 1;
+    let method_operand = code
+        .code
+        .get(cursor..cursor + 2)
+        .expect("invokespecial has a u2 method operand");
+    let method_index =
+        ConstantPoolIndex(u16::from_be_bytes([method_operand[0], method_operand[1]]));
+    cursor += 2;
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = factory.constant_pool.get(method_index).unwrap()
+    else {
+        panic!("invokespecial references a CONSTANT_Methodref");
+    };
+    assert_eq!(
+        factory.constant_pool.class_name(*class_index).unwrap(),
+        "example/Counter"
+    );
+    assert_eq!(
+        factory
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("<init>", "(I)V")
+    );
+    assert_eq!(
+        code.code.get(cursor),
+        Some(&0xb0),
+        "areturn returns initialized Counter"
+    );
+    cursor += 1;
+    assert_eq!(
+        cursor,
+        code.code.len(),
+        "no uninitialized reference escapes"
+    );
+
+    let javap = Command::new("javap")
+        .args([
+            "-classpath",
+            class_root.to_str().unwrap(),
+            "-p",
+            "-s",
+            "-c",
+            "-v",
+            "example.CounterFactory",
+        ])
+        .output()
+        .expect("start JDK 21 javap for the original Rust Factory.class");
+    assert!(
+        javap.status.success(),
+        "javap rejected Rust CounterFactory.class:\n{}",
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap = String::from_utf8_lossy(&javap.stdout);
+    for expected in [
+        "major version: 65",
+        "public example.Counter create(int)",
+        "descriptor: (I)Lexample/Counter;",
+        "new           #",
+        "class example/Counter",
+        "dup",
+        "iload_1",
+        "invokespecial #",
+        "Method example/Counter.\"<init>\":(I)V",
+        "areturn",
+    ] {
+        assert!(
+            javap.contains(expected),
+            "javap omitted {expected:?}:\n{javap}"
+        );
+    }
+    assert!(!javap.contains("CounterFactory.get"), "{javap}");
+    assert!(
+        !javap.contains("java/lang/Object;"),
+        "Factory result is not widened:\n{javap}"
+    );
+
+    let class_paths = [
+        class_root.join("example/Counter.class"),
+        class_root.join("example/CounterFactory.class"),
+    ];
+    let original_hashes = class_paths
+        .iter()
+        .map(|path| {
+            let output = Command::new("sha256sum")
+                .arg(path)
+                .output()
+                .expect("start sha256sum for the original Rust classfile");
+            assert!(
+                output.status.success(),
+                "sha256sum failed for {}",
+                path.display()
+            );
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .next()
+                .expect("sha256sum prints a digest")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+
+    let harness = output.path().join("FactoryRuntimeHarness.java");
+    std::fs::write(
+        &harness,
+        r#"public final class FactoryRuntimeHarness {
+    public static void main(String[] args) {
+        example.CounterFactory firstFactory = new example.CounterFactory();
+        example.Counter first = firstFactory.create(7);
+        example.Counter second = new example.CounterFactory().create(2);
+        expect(first.get(), 7);
+        expect(second.get(), 2);
+        first.set(13);
+        expect(first.get(), 13);
+        expect(second.get(), 2);
+        first.set(-42);
+        expect(first.get(), -42);
+        expect(second.get(), 2);
+        example.Counter zero = firstFactory.create(0);
+        expect(zero.get(), 0);
+        expect(first.get(), -42);
+        expect(second.get(), 2);
+        System.out.println("factory runtime: 7,2,13,-42; fresh=0");
+    }
+
+    private static void expect(int actual, int expected) {
+        if (actual != expected) {
+            throw new AssertionError("expected " + expected + ", got " + actual);
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let javac = Command::new("javac")
+        .arg("-classpath")
+        .arg(&class_root)
+        .arg("-d")
+        .arg(&harness_root)
+        .arg(&harness)
+        .output()
+        .expect("start JDK 21 javac for the Rust factory runtime harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected the original Rust Counter/CounterFactory classes:\n{}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+
+    let java = Command::new("java")
+        .args(["-Xverify:all", "-classpath"])
+        .arg(format!(
+            "{}:{}",
+            harness_root.display(),
+            class_root.display()
+        ))
+        .arg("FactoryRuntimeHarness")
+        .output()
+        .expect("start JDK 21 verifier and Rust factory runtime harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected or failed the Rust factory batch:\n{}\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "factory runtime: 7,2,13,-42; fresh=0"
+    );
+    for (index, (path, pair)) in class_paths.iter().zip(first.classes()).enumerate() {
+        let output = Command::new("sha256sum")
+            .arg(path)
+            .output()
+            .expect("recompute SHA-256 for the original Rust classfile");
+        assert!(
+            output.status.success(),
+            "sha256sum failed for {}",
+            path.display()
+        );
+        let final_hash = String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()
+            .expect("sha256sum prints a digest")
+            .to_owned();
+        assert_eq!(final_hash, original_hashes[index]);
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            pair.classfile_bytes(),
+            "javac/java retain original Rust-produced bytes"
+        );
+    }
 }
 
 struct TestDirectory(std::path::PathBuf);
