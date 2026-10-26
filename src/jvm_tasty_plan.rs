@@ -131,6 +131,7 @@ struct BatchClassSource {
 struct BatchSourceTypedBindings<'a> {
     index: &'a SourceTypedIndex,
     planned_classes: Vec<SymbolId>,
+    planned_methods: Vec<SymbolId>,
 }
 
 impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
@@ -144,6 +145,10 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
 
     fn planned_class_symbols(&self) -> &[SymbolId] {
         &self.planned_classes
+    }
+
+    fn planned_method_symbols(&self) -> &[SymbolId] {
+        &self.planned_methods
     }
 }
 
@@ -953,9 +958,18 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         .iter()
         .map(|draft| draft.source.class)
         .collect::<Vec<_>>();
+    let planned_methods = drafts
+        .iter()
+        .flat_map(|draft| draft.tasty_members.iter())
+        .filter_map(|member| match member {
+            ClassMemberPicklePlan::Method { symbol, .. } => Some(*symbol),
+            ClassMemberPicklePlan::Field(_) => None,
+        })
+        .collect::<Vec<_>>();
     let typed_bindings = BatchSourceTypedBindings {
         index: typer.source_typed_index(),
         planned_classes,
+        planned_methods,
     };
     let tasty_inputs = drafts
         .iter()

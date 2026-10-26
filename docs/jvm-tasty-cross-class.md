@@ -70,8 +70,9 @@ arena-backed IDs, callers must pass the source index, typed bindings, ASTs, and
 JVM unit from one session; equal numeric IDs cannot authenticate a foreign
 same-slot arena. It rejects a missing planned class, a substituted method
 plan, or a JVM unit from another semantic store before any artifact operation.
-This proves source/typed provenance only and does not enable paired TASTy
-signature or call-body encoding.
+This proof remains the JVM-side provenance audit. The paired TASTy batch also
+uses the same canonical class/method identities before it lowers a cross-class
+body reference.
 
 The formal completes to the canonical package-qualified
 `TypeRef(SymbolId(39))`; an unrelated type prefix is rejected even if the
@@ -100,18 +101,24 @@ declares only Reader; it does not copy Counter declarations. The corresponding
 JVM metadata is checked as `(Lexample/Counter;)I` against the full planned
 class unit.
 
-The original `counter.get()` source remains a body-stage pending case. It now
-passes complete-unit JVM validation and rejects at
-`JVM/TASTy cross-contract validation` with the pickler's unsupported
-`BodyExpression` error. The call's TASTy SELECT/APPLY shape remains #1674; no
-literal substitution or omitted body is accepted.
+Issue [#1674](https://github.com/scytrowski/dotty-rs/issues/1674) adds the
+narrow `Reader.read` body `counter.get()` to the same-source batch. The pickler
+requires the exact planned public `Counter.get(): Int` symbol, one explicit
+empty parameter clause, a `counter` receiver bound to Reader's canonical
+formal, same-package planned class ownership, and exact source-to-typed tree
+bindings. It emits the body as `APPLY(SELECTin(...))`, with the signed
+zero-argument `get` name and a shared reference to the formal's `Counter` type.
+It does not add `new`, fields, setters, overloads, nested calls, or arbitrary
+external class references. A batch without the exact planned method identity
+is rejected.
 
-The #1673 integration test also has an opt-in pinned Scala 3.9.0 `-from-tasty`
-check controlled by `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1` and
-`SCALA39_ROOT`. It compiles the matching Counter fixture, stages only its class
-and sidecar beside the Rust-produced Reader sidecar, and checks the rebuilt
-`Reader.read(example.Counter)` signature. This verifies the signature slice;
-it does not claim that the original `counter.get()` body can be encoded.
+The #1673 signature test and #1674 full-body test have opt-in pinned Scala
+3.9.0 `-from-tasty` checks controlled by
+`DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1` and `SCALA39_ROOT`. The #1674 check
+compiles the fixture with pinned Scala, stages only the matching Counter class
+and sidecar beside the Rust-produced Reader sidecar, and asks Scala to rebuild
+Reader. `javap` verifies the rebuilt method descriptor
+`(Lexample/Counter;)I`.
 
 ## Negative-case evidence
 
@@ -129,6 +136,7 @@ fixture.
 | Primitive formal used as a receiver | Typer rejects `counter.get()` with an `Int` formal as `MemberNotFound` | `cross_class_call_reports_primitive_receiver_to_the_typer` in `tests/jvm_source_compilation.rs` |
 | Private selected method | Typer resolves the source call, then JVM backend validation rejects the cross-class target with `UnsupportedJvmVisibility { visibility: Private }` | `cross_class_private_method_call_reports_its_first_backend_failure` in `tests/jvm_source_compilation.rs` |
 | Stale selected target / wrong owner | JVM canonical target validation returns `UnknownMethod` for a stale method symbol and `WrongOwner` for another class's same-named method | `rejects_unknown_class_method_and_parameter_ids` and `same_named_method_from_a_different_owner_cannot_replace_the_planned_symbol` in `crates/dotty-jvm/src/tests.rs` |
+| Missing planned TASTy target method | Pickler rejects the call when the same-source batch omits the exact `Counter.get` method identity | `cross_class_call_requires_the_exact_planned_target_method` in `tests/jvm_tasty_plan.rs` |
 | Reversed source class order | Both orders compile and execute against the generated Counter and Reader | `cross_class_reader_call_compiles_and_runs_with_a_planned_counter` in `tests/jvm_source_compilation.rs` |
 | Mismatched TASTy path / UUID | Artifact and Scala-consumer controls reject stale links and mismatched class/sidecar pairs | `stale_classfile_link_uuid_is_rejected_against_validated_tasty_header` in `tests/jvm_tasty_contract.rs`; `pinned_scala_consumes_both_rust_tasty_classes_and_executes_the_original_batch` controls in `tests/jvm_tasty_multiclass_scala_consumer.rs` |
 
