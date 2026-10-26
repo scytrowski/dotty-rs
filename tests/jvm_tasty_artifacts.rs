@@ -20,6 +20,7 @@ const COUNTER_GAUGE: &str = include_str!("fixtures/jvm_tasty_multiclass/CounterG
 const COUNTER_READER: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader.scala");
 const COUNTER_FACTORY: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
+const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 
 #[test]
 fn counter_emits_complete_class_and_tasty_with_the_same_real_header_uuid() {
@@ -339,6 +340,34 @@ fn factory_emits_four_complete_linked_artifacts_from_one_source_session() {
         code.code,
         [0xbb, 0x00, 0x0e, 0x59, 0x1b, 0xb7, 0x00, 0x11, 0xb0]
     );
+}
+
+#[test]
+fn identity_only_counter_factory_keeps_the_existing_linked_batch_path() {
+    let batch = emit_paired_jvm_tasty_batch(
+        COUNTER_FACTORY_IDENTITY_ONLY,
+        "tests/fixtures/jvm_tasty_cross_class_factories/CounterFactoryIdentityOnly.scala",
+        SourceId::from_index(1696),
+    )
+    .unwrap();
+
+    assert_eq!(batch.classes().len(), 2);
+    assert_eq!(batch.classes()[0].classfile_path(), "example/Counter.class");
+    assert_eq!(
+        batch.classes()[1].classfile_path(),
+        "example/CounterFactory.class"
+    );
+    for pair in batch.classes() {
+        assert_eq!(
+            pair.tasty_link_id(),
+            TastyLinkId::from_bytes(
+                TastyFile::parse_and_validate_scala_3_9(pair.tasty_bytes())
+                    .unwrap()
+                    .header()
+                    .uuid
+            )
+        );
+    }
 }
 
 #[test]
