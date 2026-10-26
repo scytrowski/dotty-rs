@@ -1,0 +1,10 @@
+# Exploratory sample of standard-library files with nested local methods.
+# Full typing is measured by successful typed DefDef emission in SourceTypedIndex.
+# Pinned Scala checkout: 777528f19a58e794c9954a42f433373472ec57f8
+library/src/scala/StringContext.scala
+library/src/scala/collection/IndexedSeqView.scala
+library/src/scala/collection/StringParsers.scala
+library/src/scala/collection/mutable/RedBlackTree.scala
+library/src/scala/reflect/ClassManifestDeprecatedApis.scala
+library/src/scala/util/Random.scala
+library/src/scala/util/Using.scala
