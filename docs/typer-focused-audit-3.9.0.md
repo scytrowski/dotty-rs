@@ -34,14 +34,19 @@ for `tools/typer-classpath-corpus-audit/run`:
 ```sh
 tools/typer-classpath-corpus-audit/run \
   --focused-manifest docs/typer-focused-smoke-manifest-3.9.0.tsv \
-  --verify-determinism --compare-legacy-profile /tmp/typer-focused-smoke.md
+  --verify-determinism --compare-legacy-profile target/typer-audits/typer-focused-smoke.md
 
 tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
-  /tmp/typer-focused-package-term.md
+  target/typer-audits/typer-focused-package-term.md
 
 tools/typer-classpath-corpus-audit/run --focused-cohort object-module \
-  /tmp/typer-focused-object-module.md
+  target/typer-audits/typer-focused-object-module.md
 ```
+
+The runner stores scratch files under
+`target/typer-classpath-corpus-audit-tmp` by default, avoiding the shared system
+`/tmp`. Set `DOTTY_AUDIT_TMP_ROOT` to a task-specific workspace directory when
+the per-run logs and intermediates must be retained for comparison or review.
 
 The smoke manifest audits all methods in its three files. A named cohort selects
 only its frozen method trees for outcome accounting; the typer runs the nearest

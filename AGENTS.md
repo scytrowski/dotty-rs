@@ -252,6 +252,22 @@ Corpus and compatibility metrics are evidence, not substitutes for focused
 tests. A lower diagnostic count alone does not prove a parser change is
 correct, and a parseable round-trip alone does not prove encoder equivalence.
 
+### Long-running corpus checks and audit artifacts
+
+- Run large, repeated, or determinism-checked corpus audits with their temporary
+  files under a task-specific directory in the repository's `target/` tree (or
+  another explicitly provisioned workspace volume). Do not let these runs fall
+  back to the shared system `/tmp`; it can fill up across worktrees and break
+  later iterations.
+- Before a long run, check available space on the selected volume. Keep logs,
+  reports, and intermediates needed for a repeat, comparison, or independent
+  review until those steps finish. Remove only this task's temporary directory
+  after preserving the evidence needed for the report and review.
+- For `tools/typer-classpath-corpus-audit/run`, the default scratch location is
+  `target/typer-classpath-corpus-audit-tmp`. Set `DOTTY_AUDIT_TMP_ROOT` to a
+  task-specific directory when the runner should retain per-run logs and
+  intermediates for comparison or review.
+
 Do not regenerate checked-in baselines or compatibility expectations merely to
 make a failing test green. Regeneration must correspond to an intentional,
 reviewable behavior change.

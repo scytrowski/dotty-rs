@@ -16,8 +16,10 @@ Usage: tools/typer-classpath-corpus-audit/run [--verify-determinism] [OUTPUT_PAT
        tools/typer-classpath-corpus-audit/run --focused-manifest MANIFEST --compare-legacy-profile [OUTPUT_PATH]
 
 By default, run the pinned audit once and write its report. Pass
---verify-determinism to run it twice and compare normalized output. Set
-DOTTY_AUDIT_TMP_ROOT to retain per-run logs and intermediate reports there.
+--verify-determinism to run it twice and compare normalized output. Scratch
+files default to target/typer-classpath-corpus-audit-tmp instead of shared
+/tmp. Set DOTTY_AUDIT_TMP_ROOT to retain per-run logs and intermediate reports
+in a task-specific directory for comparison or review.
 --source-file runs the import-prefix probe only for frozen observations in one
 Scala source file and prints its resolver trace without generating a cohort report.
 --focused-manifest validates a Scala-root-relative file list, then runs only
@@ -222,13 +224,20 @@ if [[ "$output_path" != /* ]]; then
     output_path="$repo_root/$output_path"
 fi
 if [[ -n "${DOTTY_AUDIT_TMP_ROOT:-}" ]]; then
-    mkdir -p "$DOTTY_AUDIT_TMP_ROOT"
-    tmp_dir="$(mktemp -d "$DOTTY_AUDIT_TMP_ROOT/run.XXXXXXXX")"
+    audit_tmp_root="$DOTTY_AUDIT_TMP_ROOT"
+    retain_tmp=1
+else
+    audit_tmp_root="$repo_root/target/typer-classpath-corpus-audit-tmp"
+    retain_tmp=0
+fi
+mkdir -p "$audit_tmp_root"
+tmp_dir="$(mktemp -d "$audit_tmp_root/run.XXXXXXXX")"
+export TMPDIR="$tmp_dir"
+if [[ "$retain_tmp" == 1 ]]; then
     trap 'printf "audit intermediates retained at %s\n" "$tmp_dir" >&2' EXIT
     PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/audit_run_directory.py" \
-        record "$DOTTY_AUDIT_TMP_ROOT" "$tmp_dir"
+        record "$audit_tmp_root" "$tmp_dir"
 else
-    tmp_dir="$(mktemp -d)"
     trap 'rm -rf "$tmp_dir"' EXIT
 fi
 
