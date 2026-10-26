@@ -81,7 +81,7 @@ revisions and are not measurements of the current checkout.
 | `dotty-classfile` | JVM class-file codec and bytecode builder |
 | `dotty-classloader` | Classpath discovery and binary loading |
 | `dotty-jvm` | Typed-semantic plans to JVM class files |
-| `dotty` (root) | Selected public re-exports, the bounded paired-plan/artifact coordinator, and integration tests |
+| `dotty` (root) | Selected public re-exports, bounded paired-plan/artifact coordination (including linked Counter/CounterOwner composition), and integration tests |
 
 The root facade does not re-export every workspace crate: use crates such as
 `dotty-lexer`, `dotty-namer`, `dotty-jvm`, and `dotty-tasty-pickler` directly when
