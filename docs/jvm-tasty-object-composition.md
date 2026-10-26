@@ -238,18 +238,59 @@ cross-class call and forged receiver `Fieldref` or missing final field flag
 are rejected; a failure in the owner class does not return the already emitted
 Counter pair.
 
-`reference_field_owner_batch_executes_on_verified_jdk21` checks the decoded
-classfile layout and `javap` disassembly, then compiles a Java harness and runs
-both owners under `java -Xverify:all`. Scala's independent classpath consumer
-remains the separate #1721 check.
+The #1719 runtime regression establishes initial execution for owners seeded
+with 7 and 42. The expanded #1720 gate below adds edge seeds, repeated reads,
+publisher staging, and byte-integrity checks.
+
+## Issue #1720: verified runtime for owned reference fields
+
+`reference_field_owner_emits_a_complete_deterministic_linked_batch` checks
+both original classfiles from the exact issue source: Java 21 class-file
+version 65.0, `Object` as direct superclass, exact ordered methods/descriptors
+and access flags, and the physical fields `Counter.current:I` and
+`CounterOwner.inner:Lexample/Counter;` with their source visibility/finality.
+For `CounterOwner.<init>(I)V`, it checks the direct-super call occurs first,
+then exactly one allocation, `dup`, the original `seed` local load, the
+planned `Counter.<init>(I)V` reference, and one store through the checked
+`CounterOwner.inner` `Fieldref`. Its `Code` limits are `max_stack=4` and
+`max_locals=2`, with no exception table or nested frame attributes. `read()I`
+checks `aload_0`, the exact `inner` `Fieldref`, the exact
+`Counter.get()I` `Methodref`, `ireturn`, and its `max_stack=1`/
+`max_locals=1` limits.
+
+`reference_field_owner_batch_executes_on_verified_jdk21` stages the complete
+four-file Rust batch into a new directory with the validated batch publisher.
+It runs `javap -v -p -c` on those classfiles, compiles a standalone Java
+harness into a separate directory, then executes with `java -Xverify:all`.
+The harness creates distinct owners with seeds 7, 42, 0, and -3 and performs
+three interleaved reads of each; all reads return their original seed. SHA-256
+digests and exact classfile bytes captured from the original Rust batch match
+after both `javac` and `java`, so the runtime result cannot come from replaced
+or rebuilt dependency classfiles. The local run used Eclipse Temurin 21.0.8.
+The test runs under `DOTTY_CLASSFILE_REQUIRE_JDK=1` in both JVM CI gates;
+missing or older-than-21 `java`, `javac`, or `javap` fails the test instead
+of skipping it.
+
+Contract mutation coverage rejects an incorrect allocation class, constructor
+owner or descriptor, missing `dup`, wrong parameter local, wrong field owner
+or descriptor, wrong `read` target, wrong `Fieldref` kind, missing final flag,
+and missing class artifact before publication. The class-state plan also
+rejects a different same-session class `SymbolId` forged as the field identity.
+These mutations return typed contract, plan, or manifest errors; no invalid
+artifact is accepted for execution.
+The implementation reuses the existing classfile verifier and constructor
+lowering. It adds no bytecode emitter or verifier-state model. The JDK harness
+uses only the original Rust-generated classfiles; Scala's independent
+classpath/TASTy consumer remains the separate #1721 check.
 
 ## Next ownership boundary
 
 The #1715 evidence-only audit is superseded by the #1716 metadata/type proof,
-#1717 initializer serialization, #1718 TASTy receiver-call support, and #1719
-linked JVM/TASTy batch. Scala's independent consumer validation remains in
-#1721, and complete linked source-to-JVM/TASTy end-to-end coverage remains in
-#1722. Any typer blocker still belongs to the Typer owner.
+#1717 initializer serialization, #1718 TASTy receiver-call support, #1719
+linked JVM/TASTy batch, and #1720 verified Java runtime gate. Scala's
+independent consumer validation remains in #1721, and complete linked
+source-to-JVM/TASTy end-to-end coverage remains in #1722. Any typer blocker
+still belongs to the Typer owner.
 
 ## Checks run
 

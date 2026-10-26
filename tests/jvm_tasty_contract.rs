@@ -4,7 +4,7 @@ use dotty_classfile::attribute::Attribute;
 use dotty_classfile::classfile::{
     ClassFile, ClassFileBuilder, ClassFileVersion, Reader, TastyLinkId,
 };
-use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
+use dotty_classfile::constant_pool::{ConstantPool, ConstantPoolEntry, ConstantPoolIndex};
 use dotty_core::ast::TreeKind;
 use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolKind};
 use dotty_jvm::emit_class_with_tasty_link;
@@ -565,6 +565,373 @@ fn reference_field_receiver_artifact_rejects_a_forged_fieldref_and_missing_final
         },
     )
     .unwrap();
+}
+
+#[test]
+fn reference_field_owner_batch_rejects_forged_constructor_and_dispatch_shapes() {
+    with_paired_jvm_tasty_batch_plan(
+        COUNTER_OWNER,
+        "tests/fixtures/jvm_tasty_object_composition/CounterOwner.scala",
+        SourceId::from_index(1720),
+        |source_batch| {
+            let plans = source_batch
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(source_batch.jvm_unit, &plans).unwrap();
+            let artifacts = encode_batch_for_contract_test(&source_batch);
+            let owner_artifact = artifacts
+                .classfiles
+                .iter()
+                .find(|artifact| artifact.classfile_path == "example/CounterOwner.class")
+                .unwrap();
+            let (
+                owner_class_index,
+                counter_class_index,
+                object_constructor_ref,
+                counter_constructor_ref,
+                counter_get_method_ref,
+            ) = {
+                let mut reader = Reader::new(&owner_artifact.classfile_bytes);
+                let class = ClassFile::decode(&mut reader).unwrap();
+                let constructor = class
+                    .methods
+                    .iter()
+                    .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "<init>")
+                    .unwrap();
+                let [Attribute::Code(code)] = constructor.attributes.as_slice() else {
+                    panic!("CounterOwner constructor has one Code attribute");
+                };
+                let read = class
+                    .methods
+                    .iter()
+                    .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "read")
+                    .unwrap();
+                let [Attribute::Code(read_code)] = read.attributes.as_slice() else {
+                    panic!("CounterOwner.read has one Code attribute");
+                };
+                (
+                    class.this_class.0,
+                    u16::from_be_bytes([code.code[6], code.code[7]]),
+                    u16::from_be_bytes([code.code[2], code.code[3]]),
+                    u16::from_be_bytes([code.code[11], code.code[12]]),
+                    u16::from_be_bytes([read_code.code[5], read_code.code[6]]),
+                )
+            };
+
+            let mut wrong_allocation_owner = artifacts.clone();
+            mutate_owner_method_code(
+                &mut wrong_allocation_owner,
+                "<init>",
+                6,
+                &owner_class_index.to_be_bytes(),
+            );
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_allocation_owner),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "reference-field initializer",
+                    reason,
+                    ..
+                }) if reason.contains("allocates example/CounterOwner")
+            ));
+
+            let mut wrong_constructor_owner = artifacts.clone();
+            mutate_owner_method_code(
+                &mut wrong_constructor_owner,
+                "<init>",
+                11,
+                &object_constructor_ref.to_be_bytes(),
+            );
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_constructor_owner),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "reference-field initializer",
+                    reason,
+                    ..
+                }) if reason.contains("expected example/Counter.<init>(I)V")
+            ));
+
+            let mut wrong_constructor_descriptor = artifacts.clone();
+            mutate_owner_method_code(
+                &mut wrong_constructor_descriptor,
+                "<init>",
+                11,
+                &counter_get_method_ref.to_be_bytes(),
+            );
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_constructor_descriptor),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "reference-field initializer",
+                    reason,
+                    ..
+                }) if reason.contains("expected example/Counter.<init>(I)V")
+            ));
+
+            let mut missing_dup = artifacts.clone();
+            mutate_owner_method_code(&mut missing_dup, "<init>", 8, &[0x00]);
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, missing_dup),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "reference-field initializer",
+                    reason,
+                    ..
+                }) if reason.contains("iload_1")
+            ));
+
+            let mut wrong_parameter_slot = artifacts.clone();
+            mutate_owner_method_code(&mut wrong_parameter_slot, "<init>", 9, &[0x2a]);
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_parameter_slot),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "reference-field initializer",
+                    reason,
+                    ..
+                }) if reason.contains("iload_1")
+            ));
+
+            let mut wrong_field_owner = artifacts.clone();
+            let owner_artifact = wrong_field_owner
+                .classfiles
+                .iter()
+                .find(|artifact| artifact.classfile_path == "example/CounterOwner.class")
+                .unwrap();
+            let field_ref = {
+                let mut reader = Reader::new(&owner_artifact.classfile_bytes);
+                let class = ClassFile::decode(&mut reader).unwrap();
+                let constructor = class
+                    .methods
+                    .iter()
+                    .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "<init>")
+                    .unwrap();
+                let [Attribute::Code(code)] = constructor.attributes.as_slice() else {
+                    panic!("CounterOwner constructor has one Code attribute");
+                };
+                ConstantPoolIndex(u16::from_be_bytes([code.code[14], code.code[15]]))
+            };
+            mutate_fieldref_owner(
+                &mut wrong_field_owner,
+                field_ref,
+                ConstantPoolIndex(counter_class_index),
+            );
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_field_owner),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "reference-field initializer",
+                    reason,
+                    ..
+                }) if reason.contains("constructor initializes example/Counter.inner")
+            ));
+
+            let mut wrong_field_descriptor = artifacts.clone();
+            mutate_fieldref_descriptor(
+                &mut wrong_field_descriptor,
+                field_ref,
+                "Ljava/lang/Object;",
+            );
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_field_descriptor),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "reference-field initializer",
+                    reason,
+                    ..
+                }) if reason.contains("expected example/CounterOwner.inner:Lexample/Counter;")
+            ));
+
+            let mut wrong_dispatch_target = artifacts.clone();
+            mutate_owner_method_code(
+                &mut wrong_dispatch_target,
+                "read",
+                5,
+                &counter_constructor_ref.to_be_bytes(),
+            );
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_dispatch_target),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "cross-class invocation",
+                    reason,
+                    ..
+                }) if reason.contains("expected example/Counter.get()I")
+            ));
+
+            let mut missing_counter = artifacts;
+            missing_counter
+                .classfiles
+                .retain(|artifact| artifact.classfile_path != "example/Counter.class");
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, missing_counter),
+                Err(JvmTastyContractError::BatchArtifactPaths {
+                    reason: "missing expected class-file path",
+                    path,
+                }) if path == "example/Counter.class"
+            ));
+        },
+    )
+    .unwrap();
+}
+
+fn mutate_owner_method_code(
+    artifacts: &mut JvmTastyBatchArtifacts,
+    method_name: &str,
+    code_offset: usize,
+    replacement: &[u8],
+) {
+    let artifact = artifacts
+        .classfiles
+        .iter_mut()
+        .find(|artifact| artifact.classfile_path == "example/CounterOwner.class")
+        .unwrap();
+    let code = {
+        let mut reader = Reader::new(&artifact.classfile_bytes);
+        let class = ClassFile::decode(&mut reader).unwrap();
+        let method = class
+            .methods
+            .iter()
+            .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == method_name)
+            .unwrap();
+        let [Attribute::Code(code)] = method.attributes.as_slice() else {
+            panic!("CounterOwner method has one Code attribute");
+        };
+        code.code.to_vec()
+    };
+    assert!(code_offset + replacement.len() <= code.len());
+    let positions = artifact
+        .classfile_bytes
+        .windows(code.len())
+        .enumerate()
+        .filter_map(|(index, bytes)| (bytes == code).then_some(index))
+        .collect::<Vec<_>>();
+    let [code_offset_in_class] = positions.as_slice() else {
+        panic!("CounterOwner method Code occurs exactly once in class bytes");
+    };
+    artifact.classfile_bytes[code_offset_in_class + code_offset
+        ..code_offset_in_class + code_offset + replacement.len()]
+        .copy_from_slice(replacement);
+}
+
+fn mutate_fieldref_owner(
+    artifacts: &mut JvmTastyBatchArtifacts,
+    field_ref: ConstantPoolIndex,
+    owner: ConstantPoolIndex,
+) {
+    let artifact = artifacts
+        .classfiles
+        .iter_mut()
+        .find(|artifact| artifact.classfile_path == "example/CounterOwner.class")
+        .unwrap();
+    let (class_index, name_and_type_index, constant_pool_end) = {
+        let mut reader = Reader::new(&artifact.classfile_bytes);
+        let class = ClassFile::decode(&mut reader).unwrap();
+        let ConstantPoolEntry::Fieldref {
+            class_index,
+            name_and_type_index,
+        } = class.constant_pool.get(field_ref).unwrap()
+        else {
+            panic!("initializer references CONSTANT_Fieldref");
+        };
+        let mut reader = Reader::new(&artifact.classfile_bytes);
+        reader.read_bytes(8).unwrap();
+        ConstantPool::decode(&mut reader).unwrap();
+        (*class_index, *name_and_type_index, reader.position())
+    };
+    let encoding = [
+        9,
+        (class_index.0 >> 8) as u8,
+        class_index.0 as u8,
+        (name_and_type_index.0 >> 8) as u8,
+        name_and_type_index.0 as u8,
+    ];
+    let positions = artifact.classfile_bytes[..constant_pool_end]
+        .windows(encoding.len())
+        .enumerate()
+        .filter_map(|(index, bytes)| (bytes == encoding).then_some(index))
+        .collect::<Vec<_>>();
+    let [entry_offset] = positions.as_slice() else {
+        panic!("initializer Fieldref constant pool entry occurs exactly once");
+    };
+    artifact.classfile_bytes[*entry_offset + 1..*entry_offset + 3]
+        .copy_from_slice(&owner.0.to_be_bytes());
+}
+
+fn mutate_fieldref_descriptor(
+    artifacts: &mut JvmTastyBatchArtifacts,
+    field_ref: ConstantPoolIndex,
+    descriptor: &str,
+) {
+    let artifact = artifacts
+        .classfiles
+        .iter_mut()
+        .find(|artifact| artifact.classfile_path == "example/CounterOwner.class")
+        .unwrap();
+    let (name_index, descriptor_index, constant_pool_end, constant_pool_count) = {
+        let mut reader = Reader::new(&artifact.classfile_bytes);
+        let class = ClassFile::decode(&mut reader).unwrap();
+        let ConstantPoolEntry::Fieldref {
+            name_and_type_index,
+            ..
+        } = class.constant_pool.get(field_ref).unwrap()
+        else {
+            panic!("initializer references CONSTANT_Fieldref");
+        };
+        let ConstantPoolEntry::NameAndType {
+            name_index,
+            descriptor_index,
+        } = class.constant_pool.get(*name_and_type_index).unwrap()
+        else {
+            panic!("initializer Fieldref points to CONSTANT_NameAndType");
+        };
+        let mut reader = Reader::new(&artifact.classfile_bytes);
+        let header = reader.read_bytes(10).unwrap();
+        let count = u16::from_be_bytes([header[8], header[9]]);
+        let mut reader = Reader::new(&artifact.classfile_bytes);
+        reader.read_bytes(8).unwrap();
+        ConstantPool::decode(&mut reader).unwrap();
+        (*name_index, *descriptor_index, reader.position(), count)
+    };
+    assert!(descriptor.is_ascii());
+    let descriptor_bytes = descriptor.as_bytes();
+    let encoded_utf8 = [
+        vec![
+            1,
+            (descriptor_bytes.len() >> 8) as u8,
+            descriptor_bytes.len() as u8,
+        ],
+        descriptor_bytes.to_vec(),
+    ]
+    .concat();
+    artifact
+        .classfile_bytes
+        .splice(constant_pool_end..constant_pool_end, encoded_utf8);
+    let new_constant_pool_end = constant_pool_end + descriptor_bytes.len() + 3;
+    let new_count = constant_pool_count + 1;
+    artifact.classfile_bytes[8..10].copy_from_slice(&new_count.to_be_bytes());
+
+    let name_and_type = [
+        12,
+        (name_index.0 >> 8) as u8,
+        name_index.0 as u8,
+        (descriptor_index.0 >> 8) as u8,
+        descriptor_index.0 as u8,
+    ];
+    let positions = artifact.classfile_bytes[..new_constant_pool_end]
+        .windows(name_and_type.len())
+        .enumerate()
+        .filter_map(|(index, bytes)| (bytes == name_and_type).then_some(index))
+        .collect::<Vec<_>>();
+    let [entry_offset] = positions.as_slice() else {
+        panic!("initializer NameAndType constant pool entry occurs exactly once");
+    };
+    let new_descriptor_index = ConstantPoolIndex(constant_pool_count);
+    artifact.classfile_bytes[*entry_offset + 3..*entry_offset + 5]
+        .copy_from_slice(&new_descriptor_index.0.to_be_bytes());
 }
 
 #[test]

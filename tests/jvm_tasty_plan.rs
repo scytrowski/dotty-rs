@@ -2239,6 +2239,50 @@ fn pending_reference_field_proof_rejects_mutable_and_non_direct_initializers() {
 }
 
 #[test]
+fn same_batch_reference_field_rejects_a_foreign_class_symbol_as_field_identity() {
+    with_paired_jvm_tasty_batch_plan(
+        SAME_BATCH_REFERENCE_FIELD,
+        "CounterOwner.scala",
+        SourceId::from_index(1720),
+        |batch| {
+            let owner = &batch.classes[1];
+            let plan = owner.tasty_plan.plan();
+            let mut forged_members = plan.members.to_vec();
+            let Some(ClassMemberPicklePlan::Field(field)) = forged_members
+                .iter_mut()
+                .find(|member| matches!(member, ClassMemberPicklePlan::Field(_)))
+            else {
+                panic!("CounterOwner has a planned reference field");
+            };
+            field.symbol = batch.classes[0].class;
+
+            let forged_plan = ClassStatePicklePlan {
+                store: plan.store,
+                definitions: plan.definitions,
+                source_ast: plan.source_ast,
+                typed_ast: plan.typed_ast,
+                source_index: plan.source_index,
+                typed_bindings: plan.typed_bindings,
+                source: plan.source.clone(),
+                class: plan.class,
+                class_tree: plan.class_tree,
+                constructor: plan.constructor.clone(),
+                members: &forged_members,
+            };
+            assert!(matches!(
+                forged_plan.validate(),
+                Err(PickleError::Kind {
+                    symbol,
+                    expected: dotty_core::SymbolKind::Field,
+                    actual: dotty_core::SymbolKind::Class,
+                }) if symbol == batch.classes[0].class
+            ));
+        },
+    )
+    .unwrap();
+}
+
+#[test]
 fn reference_field_proof_rejects_a_forged_constructor_parameter_target() {
     let source = "package example\nclass Counter(start: Int)\nclass CounterOwner(seed: Int, other: Int):\n  private val inner: Counter = new Counter(seed)\n  private val second: Counter = new Counter(other)\n  def constant(): Int = 0\n";
     with_paired_jvm_tasty_batch_plan(
