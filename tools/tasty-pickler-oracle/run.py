@@ -1541,6 +1541,244 @@ object GaugeTastyProbe:
     }
 
 
+def consume_cross_class_batch(toolchain: Toolchain, batch_root: Path) -> dict:
+    """Consume the Rust Counter/Reader pair and prove both TASTy sidecars are used."""
+    relative_paths = {
+        "example/Counter.class",
+        "example/Counter.tasty",
+        "example/Reader.class",
+        "example/Reader.tasty",
+    }
+    roots: dict[str, set[str]] = {"fresh-a": relative_paths, "fresh-b": relative_paths}
+    for class_name in ("Counter", "Reader"):
+        tasty_path = f"example/{class_name}.tasty"
+        roots[f"tasty-only-{class_name}"] = relative_paths
+        roots[f"uuid-mismatch-{class_name}"] = relative_paths
+        roots[f"classfile-only-{class_name}"] = relative_paths - {tasty_path}
+        roots[f"missing-sidecar-{class_name}"] = relative_paths - {tasty_path}
+        roots[f"wrong-path-{class_name}"] = (
+            relative_paths - {tasty_path} | {f"misplaced/{class_name}.tasty"}
+        )
+        roots[f"corrupt-sidecar-{class_name}"] = relative_paths
+
+    for name, expected in roots.items():
+        root = batch_root / name
+        actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
+        if actual != expected:
+            raise RuntimeError(f"{name} artifact inventory differs: {sorted(actual)}")
+
+    first = batch_root / "fresh-a"
+    second = batch_root / "fresh-b"
+    hashes: dict[str, dict[str, str]] = {}
+    links: dict[str, str] = {}
+    for class_name in ("Counter", "Reader"):
+        class_path = first / f"example/{class_name}.class"
+        tasty_path = first / f"example/{class_name}.tasty"
+        class_bytes = class_path.read_bytes()
+        tasty_bytes = tasty_path.read_bytes()
+        if class_bytes[6:8] != (65).to_bytes(2, "big"):
+            raise RuntimeError(f"Rust {class_name}.class is not classfile major 65")
+        class_link = _class_tasty_link(class_bytes)
+        tasty_link = _tasty_header_uuid(tasty_bytes)
+        if class_link is None or class_link != tasty_link:
+            raise RuntimeError(f"Rust {class_name} classfile and TASTy UUIDs do not match")
+        for path in (class_path, tasty_path):
+            other = second / path.relative_to(first)
+            if digest(path) != digest(other):
+                raise RuntimeError(f"fresh Rust artifact bytes differ: {path.relative_to(first)}")
+        hashes[class_name] = {
+            "class_sha256": digest(class_path),
+            "tasty_sha256": digest(tasty_path),
+        }
+        links[class_name] = class_link.hex()
+    if links["Counter"] == links["Reader"]:
+        raise RuntimeError("Counter and Reader unexpectedly share one TASTy UUID")
+
+    compiler_jars = [Path(path) for path in toolchain.classpath.split(os.pathsep)]
+    for jar in compiler_jars:
+        with zipfile.ZipFile(jar) as archive:
+            names = set(archive.namelist())
+        for class_name in ("Counter", "Reader"):
+            if f"example/{class_name}.class" in names:
+                raise RuntimeError(f"Scala compiler/runtime dependency contains {class_name}.class: {jar}")
+
+    consumer_source = ROOT / "tests/fixtures/jvm_tasty_cross_class/Consumer.scala"
+    probes = {
+        "Counter": (
+            """package consumer
+object CounterTastyProbe:
+  def read(counter: example.Counter): Int = counter.get()
+""",
+            "get",
+        ),
+        "Reader": (
+            """package consumer
+object ReaderTastyProbe:
+  def read(reader: example.Reader, counter: example.Counter): Int = reader.read(counter)
+""",
+            "read",
+        ),
+    }
+    runtime_outputs: list[str] = []
+    negative_diagnostics: dict[str, str] = {}
+    artifact_hashes_before = {
+        f"{root.name}/{relative}": digest(root / relative)
+        for root in (first, second)
+        for relative in sorted(relative_paths)
+    }
+
+    def compile_probe(work: Path, class_name: str, label: str, classpath_root: Path,
+                      source: Path, *, werror: bool = False) -> None:
+        output = work / f"{label}-{class_name}-output"
+        output.mkdir()
+        args: list[str | Path] = []
+        if werror:
+            args.append("-Werror")
+        args.extend(("-d", output, source))
+        toolchain.compiler(
+            args,
+            classpath=os.pathsep.join((str(classpath_root), toolchain.classpath)),
+        )
+
+    with tempfile.TemporaryDirectory(prefix="dotty-scala-cross-class-consumer-") as temporary:
+        work = Path(temporary)
+        client_source = work / "src/Consumer.scala"
+        client_source.parent.mkdir()
+        shutil.copyfile(consumer_source, client_source)
+        for index, pair_root in enumerate((first, second)):
+            client = work / f"client-{index}"
+            client.mkdir()
+            toolchain.compiler(
+                ["-d", client, client_source],
+                classpath=os.pathsep.join((str(pair_root), toolchain.classpath)),
+            )
+            classfiles = sorted(path.relative_to(client).as_posix() for path in client.rglob("*.class"))
+            expected_client = ["consumer/Consumer$.class", "consumer/Consumer.class"]
+            if classfiles != expected_client:
+                raise RuntimeError(f"Scala consumer emitted unexpected classfiles: {classfiles}")
+            if list(client.rglob("Counter.class")) or list(client.rglob("Reader.class")):
+                raise RuntimeError("Scala compiler emitted or copied a Rust dependency class")
+
+            javap = execute([
+                toolchain.javap,
+                "-classpath",
+                os.pathsep.join((str(client), str(pair_root))),
+                "-verbose",
+                "consumer.Consumer$",
+            ])
+            methodrefs = (
+                'example/Counter."<init>":(I)V',
+                'example/Reader."<init>":()V',
+                "example/Reader.read:(Lexample/Counter;)I",
+                "example/Counter.set:(I)V",
+            )
+            for reference in methodrefs:
+                if reference not in javap:
+                    raise RuntimeError(f"Scala consumer bytecode lacks Methodref {reference}: {javap}")
+
+            runtime = execute([
+                toolchain.java,
+                "-Xverify:all",
+                "-XX:-UsePerfData",
+                "-classpath",
+                os.pathsep.join((str(pair_root), str(client), toolchain.classpath)),
+                "consumer.Consumer",
+            ])
+            output = [line for line in runtime.strip().splitlines()
+                      if not line.startswith("Picked up JAVA_TOOL_OPTIONS:")]
+            if output != ["713"]:
+                raise RuntimeError(f"Scala consumer returned unexpected output: {runtime}")
+            runtime_outputs.extend(output)
+
+        for class_name, (probe_text, member) in probes.items():
+            probe = work / f"{class_name}TastyProbe.scala"
+            probe.write_text(probe_text)
+            tasty_only = batch_root / f"tasty-only-{class_name}"
+            try:
+                compile_probe(work, class_name, "tasty-only", tasty_only, probe)
+            except CommandFailure as error:
+                raise RuntimeError(f"{class_name} TASTy-only lookup failed: {error.output}") from error
+            generated = work / f"tasty-only-{class_name}-output/consumer/{class_name}TastyProbe$.class"
+            if not generated.is_file():
+                raise RuntimeError(f"{class_name} TASTy-only probe emitted no client class")
+
+            classfile_only = batch_root / f"classfile-only-{class_name}"
+            try:
+                compile_probe(work, class_name, "classfile-only", classfile_only, probe)
+            except CommandFailure as error:
+                failure = error.output
+            else:
+                raise RuntimeError(f"{class_name} classfile-only control resolved {member}")
+            if not re.search(rf"(?i){member}.*(not found|not a member)|no member.*{member}", failure):
+                raise RuntimeError(f"{class_name} classfile-only failed for another reason: {failure}")
+            negative_diagnostics[f"{class_name}.classfile_only"] = failure.strip()
+
+            for control, pattern in (
+                ("uuid-mismatch", r"(?i)out of sync with its TASTy file"),
+                ("missing-sidecar", r"(?i)this `?\.tasty`? file is missing"),
+                ("wrong-path", r"(?i)this `?\.tasty`? file is missing"),
+                ("corrupt-sidecar", r"(?is)could not be read.*not a TASTy file"),
+            ):
+                try:
+                    compile_probe(
+                        work,
+                        class_name,
+                        control,
+                        batch_root / f"{control}-{class_name}",
+                        probe,
+                        werror=True,
+                    )
+                except CommandFailure as error:
+                    failure = error.output
+                else:
+                    raise RuntimeError(f"{class_name} {control} control unexpectedly resolved {member}")
+                if not re.search(pattern, failure):
+                    raise RuntimeError(
+                        f"{class_name} {control} did not report its expected first-stage diagnostic: {failure}"
+                    )
+                negative_diagnostics[f"{class_name}.{control}"] = failure.strip()
+
+    artifact_hashes_after = {
+        f"{root.name}/{relative}": digest(root / relative)
+        for root in (first, second)
+        for relative in sorted(relative_paths)
+    }
+    if artifact_hashes_after != artifact_hashes_before:
+        raise RuntimeError("Scala compile/runtime changed a staged Rust artifact")
+
+    return {
+        "scala_consumer": True,
+        "scala_source_sha256": digest(consumer_source),
+        "fresh_batches_byte_identical": True,
+        "fresh_batch_hashes": hashes,
+        "tasty_link_uuids": links,
+        "runtime_outputs": runtime_outputs,
+        "counter_tasty_only_get_resolved": True,
+        "reader_tasty_only_read_resolved": True,
+        "counter_classfile_only_control_rejected": True,
+        "reader_classfile_only_control_rejected": True,
+        "counter_uuid_mismatch_control_rejected": True,
+        "reader_uuid_mismatch_control_rejected": True,
+        "counter_missing_sidecar_control_rejected": True,
+        "reader_missing_sidecar_control_rejected": True,
+        "counter_wrong_path_control_rejected": True,
+        "reader_wrong_path_control_rejected": True,
+        "counter_corrupt_sidecar_control_rejected": True,
+        "reader_corrupt_sidecar_control_rejected": True,
+        "negative_control_diagnostics": negative_diagnostics,
+        "rust_artifacts_unchanged_after_compile_and_run": True,
+        "consumer_classes": ["consumer/Consumer$.class", "consumer/Consumer.class"],
+        "consumer_methodrefs": [
+            'example/Counter."<init>":(I)V',
+            'example/Reader."<init>":()V',
+            "example/Reader.read:(Lexample/Counter;)I",
+            "example/Counter.set:(I)V",
+        ],
+        "java_version": toolchain.jdk_release["JAVA_VERSION"],
+        "compiler_artifacts_sha256": toolchain.artifacts,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -1557,6 +1795,11 @@ def main() -> None:
         "consume-batch", help="compile and run a Scala client against a Rust linked batch"
     )
     batch.add_argument("batch_root", type=Path)
+    cross_class = subcommands.add_parser(
+        "consume-cross-class",
+        help="compile and run a Scala client against a Rust Counter/Reader cross-class batch",
+    )
+    cross_class.add_argument("batch_root", type=Path)
     subcommands.add_parser("check", help="regenerate/check fixtures, compile originals/reduced Answer, run negative controls")
     args = parser.parse_args()
     if args.command == "consume-pair":
@@ -1567,6 +1810,10 @@ def main() -> None:
     if args.command == "consume-batch":
         toolchain = Toolchain()
         print(json.dumps(consume_rust_batch(toolchain, args.batch_root), indent=2, sort_keys=True))
+        return
+    if args.command == "consume-cross-class":
+        toolchain = Toolchain()
+        print(json.dumps(consume_cross_class_batch(toolchain, args.batch_root), indent=2, sort_keys=True))
         return
     binary = inspector()
     structure = snapshot(binary, args.candidate) if args.command == "verify" else None
