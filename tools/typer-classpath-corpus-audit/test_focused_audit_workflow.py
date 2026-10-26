@@ -1,4 +1,3 @@
-import subprocess
 import unittest
 from pathlib import Path
 
@@ -29,31 +28,6 @@ class FocusedAuditWorkflowTests(unittest.TestCase):
         self.assertIn("verify_focused_gate.py", workflow)
         self.assertIn("actions/upload-artifact@v4", workflow)
         self.assertNotIn("tools/typer-classpath-corpus-audit/run --verify-determinism", workflow)
-
-    def test_root_method_outcomes_are_limited_to_focused_manifests(self) -> None:
-        repo = Path(__file__).resolve().parents[2]
-        runner = repo / "tools/typer-classpath-corpus-audit/run"
-        result = subprocess.run(
-            [str(runner), "--include-root-method-outcomes"],
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-
-        self.assertEqual(result.returncode, 2)
-        self.assertIn(
-            "--include-root-method-outcomes requires --focused-manifest",
-            result.stderr,
-        )
-
-    def test_legacy_comparison_clears_root_method_outcome_mode(self) -> None:
-        repo = Path(__file__).resolve().parents[2]
-        runner = (repo / "tools/typer-classpath-corpus-audit/run").read_text(encoding="utf-8")
-        legacy_comparison = runner.split('if [[ "$compare_legacy_profile" == 1 ]]; then', 1)[1]
-        legacy_comparison = legacy_comparison.split("legacy_timing=", 1)[0]
-
-        self.assertIn("unset DOTTY_AUDIT_FOCUSED_FILES DOTTY_AUDIT_FOCUSED_METHODS", legacy_comparison)
-        self.assertIn("DOTTY_AUDIT_INCLUDE_ROOT_METHOD_OUTCOMES", legacy_comparison)
 
 
 if __name__ == "__main__":

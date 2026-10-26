@@ -5823,7 +5823,6 @@ struct Audit {
     missing_declared_type_profile: MissingDeclaredTypeProfile,
     local_method_first_blockers: BTreeMap<String, String>,
     local_method_attempts: BTreeSet<String>,
-    root_method_outcomes: BTreeMap<String, String>,
     import_prefix_selectors: BTreeMap<String, Vec<String>>,
     local_value_blocker_profile: LocalValueBlockerProfile,
     local_value_baseline_outcomes: BTreeSet<LocalValueBaselineOutcome>,
@@ -6179,7 +6178,6 @@ impl Default for Audit {
             missing_declared_type_profile: MissingDeclaredTypeProfile::default(),
             local_method_first_blockers: BTreeMap::new(),
             local_method_attempts: BTreeSet::new(),
-            root_method_outcomes: BTreeMap::new(),
             import_prefix_selectors: BTreeMap::new(),
             local_value_blocker_profile: LocalValueBlockerProfile::default(),
             local_value_baseline_outcomes: BTreeSet::new(),
@@ -7032,7 +7030,6 @@ impl Audit {
             .extend(other.local_method_first_blockers);
         self.local_method_attempts
             .extend(other.local_method_attempts);
-        self.root_method_outcomes.extend(other.root_method_outcomes);
         self.import_prefix_selectors
             .extend(other.import_prefix_selectors);
         self.resolution_blocker_profile
@@ -7444,12 +7441,6 @@ fn pinned_scala39_local_definition_audit() {
                 },
             )
     });
-    let include_root_method_outcomes =
-        std::env::var_os("DOTTY_AUDIT_INCLUDE_ROOT_METHOD_OUTCOMES").is_some();
-    assert!(
-        !include_root_method_outcomes || (focused_files.is_some() && focused_methods.is_none()),
-        "root method outcomes require a focused file manifest without a local-method filter"
-    );
     let profile_files = std::env::var("DOTTY_AUDIT_PROFILE_FILES")
         .ok()
         .map(|files| files.split(',').map(str::to_owned).collect::<BTreeSet<_>>());
@@ -7612,12 +7603,6 @@ fn pinned_scala39_local_definition_audit() {
         println!("namer_failed_files={}", audit.namer_failed_files);
         println!("methods_attempted={}", audit.local_method_attempts.len());
         println!("methods_typed={}", audit.typed_local_defdefs);
-        if include_root_method_outcomes {
-            println!(
-                "root_methods_attempted={}",
-                audit.root_method_outcomes.len()
-            );
-        }
         println!(
             "first_blocker_rows={}",
             audit.local_method_first_blockers.len()
@@ -7629,12 +7614,6 @@ fn pinned_scala39_local_definition_audit() {
         println!("method_outcomes:");
         for row in &audit.local_method_attempts {
             println!("  {row}");
-        }
-        if include_root_method_outcomes {
-            println!("root_method_outcomes:");
-            for (method, outcome) in &audit.root_method_outcomes {
-                println!("  method={method}::outcome={outcome}");
-            }
         }
         println!("resolver_observations:");
         println!("  attempt\ttarget\toutcome\tcause\tmaterialized_prefix\tselected_identity");
@@ -12358,8 +12337,6 @@ fn audit_source_inner_filtered(
     focused_method_tree_filter: Option<&BTreeSet<u32>>,
 ) -> Audit {
     let profile_timing = std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some();
-    let include_root_method_outcomes =
-        std::env::var_os("DOTTY_AUDIT_INCLUDE_ROOT_METHOD_OUTCOMES").is_some();
     let mode = profile_mode();
     let timing_only_profile = profile_timing && mode == AuditProfileMode::SemanticOnly;
     let file_started = Instant::now();
@@ -12505,11 +12482,7 @@ fn audit_source_inner_filtered(
             audit.patdef_profile.total
         );
     }
-    if !import_prefix_only
-        && audit.local_defdefs == 0
-        && audit.patdef_profile.total == 0
-        && !include_root_method_outcomes
-    {
+    if !import_prefix_only && audit.local_defdefs == 0 && audit.patdef_profile.total == 0 {
         if profile_timing {
             eprintln!(
                 "AUDIT_FILE_TIMING file={path} outcome=no_local_definitions parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms=0 typing_ms=0 postprocess_ms=0 match_ms=0 total_ms={}",
@@ -12524,22 +12497,10 @@ fn audit_source_inner_filtered(
     let typer_setup_started = Instant::now();
     let probe_classpath = classpath.as_ref().map(|(classpath, _)| classpath.clone());
 
-    let root_method_exclusions = include_root_method_outcomes.then(|| {
-        local_method_trees(&parsed.ast)
-            .into_iter()
-            .map(|(tree, _)| tree.index())
-            .collect::<BTreeSet<_>>()
-    });
     let root_methods = parsed
         .ast
         .iter()
         .filter_map(|(tree, node)| {
-            if root_method_exclusions
-                .as_ref()
-                .is_some_and(|excluded| excluded.contains(&tree.index()))
-            {
-                return None;
-            }
             let TreeKind::DefDef(definition) = &node.kind else {
                 return None;
             };
@@ -12598,11 +12559,7 @@ fn audit_source_inner_filtered(
                 .collect()
         })
     };
-    if !import_prefix_only
-        && method_tree_filter.is_none()
-        && focused_method_tree_filter.is_none()
-        && !include_root_method_outcomes
-    {
+    if !import_prefix_only && method_tree_filter.is_none() && focused_method_tree_filter.is_none() {
         let target_ranges = local_method_trees(&parsed.ast)
             .into_iter()
             .map(|(_, range)| range)
@@ -12820,28 +12777,6 @@ fn audit_source_inner_filtered(
         let outcome = typer
             .expression_context_for(method)
             .and_then(|context| typer.type_expression(rhs, context));
-        if include_root_method_outcomes {
-            let result = match &outcome {
-                Ok(_) => "typed".to_owned(),
-                Err(error) => {
-                    classify_typer_error(
-                        error,
-                        &parsed.ast,
-                        &type_operator_spellings,
-                        &typer.store().names,
-                    )
-                    .bucket
-                }
-            };
-            audit.root_method_outcomes.insert(
-                format!(
-                    "{path}#tree={}::{}",
-                    method_tree.index(),
-                    audit_symbol_path(typer.store(), method)
-                ),
-                result,
-            );
-        }
         if profile_timing {
             let result_label = match &outcome {
                 Ok(_) => "success".to_owned(),

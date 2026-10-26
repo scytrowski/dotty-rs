@@ -1,5 +1,0 @@
-# Small exploratory source-file sample for member/root method body typing.
-# Pinned Scala checkout: 777528f19a58e794c9954a42f433373472ec57f8
-library/src/scala/ScalaReflectionException.scala
-library/src/scala/Proxy.scala
-library/src/scala/util/NotGiven.scala

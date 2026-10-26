@@ -10,7 +10,6 @@ Usage: tools/typer-classpath-corpus-audit/run [--verify-determinism] [OUTPUT_PAT
        tools/typer-classpath-corpus-audit/run --import-prefix-profile [--verify-determinism] [OUTPUT_PATH]
        tools/typer-classpath-corpus-audit/run --import-prefix-profile --source-file RELATIVE_PATH
        tools/typer-classpath-corpus-audit/run --focused-manifest MANIFEST [--verify-determinism] [OUTPUT_PATH]
-       tools/typer-classpath-corpus-audit/run --focused-manifest MANIFEST --include-root-method-outcomes [--verify-determinism] [OUTPUT_PATH]
        tools/typer-classpath-corpus-audit/run --focused-cohort package-term|object-module [--verify-determinism] [OUTPUT_PATH]
        tools/typer-classpath-corpus-audit/run --focused-manifest MANIFEST --compare-legacy-profile [OUTPUT_PATH]
 
@@ -21,8 +20,6 @@ DOTTY_AUDIT_TMP_ROOT to retain per-run logs and intermediate reports there.
 Scala source file and prints its resolver trace without generating a cohort report.
 --focused-manifest validates a Scala-root-relative file list, then runs only
 those source files and writes a separate FOCUSED / PARTIAL report.
---include-root-method-outcomes reports body-typing results for non-local method
-definitions in the selected files; it is available only with --focused-manifest.
 --focused-cohort selects stable path/tree identities from a pinned historical
 cohort and writes a separate FOCUSED / PARTIAL report.
 --compare-legacy-profile runs the legacy file-only profile once on the same
@@ -36,7 +33,6 @@ output_path=""
 source_file=""
 focused_manifest=""
 focused_cohort=""
-include_root_method_outcomes=0
 compare_legacy_profile=0
 while (($#)); do
     case "$1" in
@@ -61,9 +57,6 @@ while (($#)); do
             fi
             focused_cohort="$2"
             shift
-            ;;
-        --include-root-method-outcomes)
-            include_root_method_outcomes=1
             ;;
         --compare-legacy-profile)
             compare_legacy_profile=1
@@ -113,10 +106,6 @@ if [[ ( -n "$focused_manifest" || -n "$focused_cohort" ) && "$import_prefix_prof
 fi
 if [[ "$compare_legacy_profile" == 1 && -z "$focused_manifest$focused_cohort" ]]; then
     printf '%s\n' '--compare-legacy-profile requires a focused manifest or cohort' >&2
-    exit 2
-fi
-if [[ "$include_root_method_outcomes" == 1 && -z "$focused_manifest" ]]; then
-    printf '%s\n' '--include-root-method-outcomes requires --focused-manifest' >&2
     exit 2
 fi
 
@@ -247,11 +236,6 @@ if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
         export DOTTY_AUDIT_FOCUSED_METHODS="$tmp_dir/focused-methods.txt"
     fi
     export DOTTY_AUDIT_FOCUSED_FILES="$tmp_dir/focused-files.txt"
-    if [[ "$include_root_method_outcomes" == 1 ]]; then
-        export DOTTY_AUDIT_INCLUDE_ROOT_METHOD_OUTCOMES=1
-    else
-        unset DOTTY_AUDIT_INCLUDE_ROOT_METHOD_OUTCOMES
-    fi
     if ! (
         cd "$repo_root"
         cargo test -p dotty-typer --test local_definition_audit --locked --no-run
@@ -313,8 +297,7 @@ if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
         profile_files="$(paste -sd, "$tmp_dir/focused-files.txt")"
         if ! (
             cd "$repo_root"
-            unset DOTTY_AUDIT_FOCUSED_FILES DOTTY_AUDIT_FOCUSED_METHODS \
-                DOTTY_AUDIT_INCLUDE_ROOT_METHOD_OUTCOMES
+            unset DOTTY_AUDIT_FOCUSED_FILES DOTTY_AUDIT_FOCUSED_METHODS
             export DOTTY_AUDIT_PROFILE_FILES="$profile_files"
             if [[ -x /usr/bin/time ]]; then
                 /usr/bin/time -f 'MAX_RSS_KB=%M' -o "$tmp_dir/legacy.rss" \
