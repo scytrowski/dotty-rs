@@ -34,8 +34,9 @@ use std::fmt;
 /// failure, so the member itself is still reconstructed with an unknown type
 /// rather than dropped or aborting the whole class. Generic methods preserve
 /// their type-parameter order and address-based references for the supported
-/// subset; unsupported bounds remain explicit. Class type parameters are not
-/// modeled. `signature`/`nest_host`/etc. (JVM
+/// subset; unsupported bounds remain explicit. Class-parameter references
+/// are retained as distinct indexed markers, though class type parameter
+/// declarations are not modeled. `signature`/`nest_host`/etc. (JVM
 /// classfile-only concepts) are not reconstructed from `.tasty` at all,
 /// so a `.tasty`-backed symbol still gets no [`crate::symbol::ClassfileMetadata`]
 /// entry.
@@ -206,6 +207,10 @@ pub(crate) struct DecodedTastyMethod {
 pub(crate) enum DecodedTastyType {
     Named(BinaryName),
     ParamRef(u32),
+    /// A reference to a parameter declared by the containing class. Kept
+    /// distinct from method-local parameters so lowering can preserve exact
+    /// evidence for a bounded receiver substitution.
+    ClassParamRef(u32),
     Applied {
         tycon: Box<DecodedTastyType>,
         arguments: Vec<DecodedTastyType>,
@@ -1049,8 +1054,31 @@ fn decode_impl(
         package,
         &mut resolve_bare,
     )?;
-    let (stats_fields, methods) =
-        decode_members(&file, &template.stats, package, &mut resolve_bare)?;
+    let class_type_parameters = template
+        .type_params
+        .iter()
+        .filter(|parameter| matches!(parameter, ParameterNode::TypeParam { .. }))
+        .enumerate()
+        .filter_map(|(parameter_index, parameter)| {
+            let payload = parameter.payload();
+            let address = index
+                .iter()
+                .find(|indexed| {
+                    indexed.tag == dotty_tasty::tasty::TYPEPARAM_TAG
+                        && indexed.payload.len() == payload.len()
+                        && indexed.payload.as_ptr() == payload.as_ptr()
+                })
+                .and_then(|indexed| u32::try_from(indexed.offset).ok())?;
+            Some((address, u32::try_from(parameter_index).ok()?))
+        })
+        .collect::<HashMap<_, _>>();
+    let (stats_fields, methods) = decode_members(
+        &file,
+        &template.stats,
+        package,
+        &class_type_parameters,
+        &mut resolve_bare,
+    )?;
     fields.extend(stats_fields);
 
     Ok(DecodedTastyClass {
@@ -1772,6 +1800,7 @@ fn decode_tasty_member_type(
     tree: &RawTree<'_>,
     package: &str,
     type_parameters: &HashMap<u32, u32>,
+    class_type_parameters: &HashMap<u32, u32>,
     resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
     depth: usize,
 ) -> Option<DecodedTastyType> {
@@ -1790,6 +1819,7 @@ fn decode_tasty_member_type(
             &shared,
             package,
             type_parameters,
+            class_type_parameters,
             resolve_bare,
             depth + 1,
         );
@@ -1803,6 +1833,7 @@ fn decode_tasty_member_type(
             &ident.type_tree,
             package,
             type_parameters,
+            class_type_parameters,
             resolve_bare,
             depth + 1,
         );
@@ -1815,6 +1846,13 @@ fn decode_tasty_member_type(
     {
         return Some(DecodedTastyType::ParamRef(index));
     }
+    if let RawTree::Leaf(term) = tree
+        && term.tag == TYPEREFDIRECT_TAG
+        && let Some(reference) = term.ast_ref()
+        && let Some(&index) = class_type_parameters.get(&reference.address)
+    {
+        return Some(DecodedTastyType::ClassParamRef(index));
+    }
 
     if let Ok(StructuredTree::Reference(ReferenceNode {
         tag: TYPEREFSYMBOL_TAG,
@@ -1825,6 +1863,15 @@ fn decode_tasty_member_type(
     {
         return Some(DecodedTastyType::ParamRef(index));
     }
+    if let Ok(StructuredTree::Reference(ReferenceNode {
+        tag: TYPEREFSYMBOL_TAG,
+        reference,
+        ..
+    })) = tree.decode_structured()
+        && let Some(&index) = class_type_parameters.get(&reference)
+    {
+        return Some(DecodedTastyType::ClassParamRef(index));
+    }
 
     if let Ok(StructuredTree::Length(StructuredNode::AppliedType(applied))) =
         tree.decode_structured()
@@ -1834,6 +1881,7 @@ fn decode_tasty_member_type(
             &applied.tycon,
             package,
             type_parameters,
+            class_type_parameters,
             resolve_bare,
             depth + 1,
         )?;
@@ -1846,6 +1894,7 @@ fn decode_tasty_member_type(
                     argument,
                     package,
                     type_parameters,
+                    class_type_parameters,
                     resolve_bare,
                     depth + 1,
                 )
@@ -1874,6 +1923,7 @@ fn decode_tasty_type_parameter(
     parameter: &ParameterNode<'_>,
     package: &str,
     type_parameters: &HashMap<u32, u32>,
+    class_type_parameters: &HashMap<u32, u32>,
     resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
 ) -> Option<DecodedTastyTypeParameter> {
     let ParameterNode::TypeParam { name, .. } = parameter else {
@@ -1915,11 +1965,20 @@ fn decode_tasty_type_parameter(
         &bounds.low_or_alias,
         package,
         type_parameters,
+        class_type_parameters,
         resolve_bare,
         0,
     );
     let upper_bound = bounds.high.as_ref().map(|high| {
-        decode_tasty_member_type(file, high, package, type_parameters, resolve_bare, 0)
+        decode_tasty_member_type(
+            file,
+            high,
+            package,
+            type_parameters,
+            class_type_parameters,
+            resolve_bare,
+            0,
+        )
     });
     if let Some(lower_bound) = lower_bound {
         if let Some(Some(upper_bound)) = upper_bound {
@@ -1959,6 +2018,7 @@ fn decode_members(
     file: &TastyFile<'_>,
     stats: &[RawTree<'_>],
     package: &str,
+    class_type_parameters: &HashMap<u32, u32>,
     resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
 ) -> Result<(Vec<DecodedTastyField>, Vec<DecodedTastyMethod>), TastyDecodeError> {
     let mut fields = Vec::new();
@@ -2043,6 +2103,7 @@ fn decode_members(
                             parameter,
                             package,
                             &type_parameters_by_address,
+                            class_type_parameters,
                             resolve_bare,
                         )
                     })
@@ -2069,6 +2130,7 @@ fn decode_members(
                             &body.type_tree,
                             package,
                             &type_parameters_by_address,
+                            class_type_parameters,
                             resolve_bare,
                             0,
                         )
@@ -2093,6 +2155,7 @@ fn decode_members(
                         &return_type,
                         package,
                         &type_parameters_by_address,
+                        class_type_parameters,
                         resolve_bare,
                         0,
                     )
@@ -5690,6 +5753,30 @@ mod tests {
     }
 
     #[test]
+    fn decodes_scala39_function1_apply_class_parameter_references() {
+        let decoded = decode(
+            &fixture_bytes("scala3-library/scala/Function1.tasty"),
+            &BinaryName::from_internal("scala/Function1"),
+        )
+        .expect("pinned Scala 3.9 Function1 TASTy should decode");
+        let apply = decoded
+            .methods
+            .iter()
+            .find(|method| method.name == "apply")
+            .expect("Function1.apply should be decoded");
+
+        assert_eq!(apply.parameters.len(), 1);
+        assert!(matches!(
+            apply.parameters[0].declared_type,
+            Some(DecodedTastyType::ClassParamRef(0))
+        ));
+        assert!(matches!(
+            apply.return_type,
+            Some(DecodedTastyType::ClassParamRef(1))
+        ));
+    }
+
+    #[test]
     fn rejects_a_single_child_typebounds_alias_in_a_method_type_parameter() {
         let bytes = fixture_bytes("scala3-library/scala/Some.tasty");
         let file = TastyFile::parse(&bytes).expect("pinned Some TASTy should parse");
@@ -5734,6 +5821,7 @@ mod tests {
             &file,
             &parameter,
             "scala",
+            &HashMap::new(),
             &HashMap::new(),
             &mut |_, _| None,
         )
