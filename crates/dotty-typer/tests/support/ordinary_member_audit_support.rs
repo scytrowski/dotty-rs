@@ -1,7 +1,7 @@
 use super::{audit_classpath_from_environment, audit_symbol_path, git_revision};
 use dotty_classloader::classloader::{ClasspathSymbolResolver, LoadingSession};
-use dotty_core::ast::TreeKind;
-use dotty_core::types::{TermRefTarget, Type};
+use dotty_core::ast::{Modifier, TreeKind, Untyped, UntypedNode};
+use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceDefinition, SourceId, SourceText, SymbolFlags,
     SymbolInfo, SymbolKind,
@@ -18,6 +18,32 @@ fn source_line(text: &str, start: usize) -> usize {
     text.get(..start)
         .map(|prefix| prefix.bytes().filter(|byte| *byte == b'\n').count() + 1)
         .unwrap_or(0)
+}
+
+fn ast_feature(kind: &TreeKind<Untyped>) -> Option<&'static str> {
+    match kind {
+        TreeKind::Apply(_) | TreeKind::TypeApply(_) => Some("calls"),
+        TreeKind::Select(_) => Some("selections"),
+        TreeKind::Ident(_) => Some("identifiers"),
+        TreeKind::Literal(_) => Some("literals"),
+        TreeKind::ValDef(_) => Some("local_values"),
+        TreeKind::DefDef(_) => Some("nested_methods"),
+        TreeKind::If(_) => Some("branches"),
+        TreeKind::Match(_) => Some("matches"),
+        TreeKind::Try(_) => Some("tries"),
+        TreeKind::Closure(_) => Some("closures"),
+        TreeKind::While(_) => Some("loops"),
+        TreeKind::PhaseSpecific(
+            UntypedNode::Function(_)
+            | UntypedNode::FunctionWithMods(_)
+            | UntypedNode::PolyFunction(_),
+        ) => Some("closures"),
+        TreeKind::PhaseSpecific(UntypedNode::ParsedTry(_)) => Some("tries"),
+        TreeKind::PhaseSpecific(UntypedNode::ForYield(_) | UntypedNode::ForDo(_)) => {
+            Some("for_comprehensions")
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn inventory_candidates() {
@@ -170,20 +196,7 @@ pub(super) fn inventory_candidates() {
                         continue;
                     }
                     rhs_nodes.push((node_range.start(), node_range.end()));
-                    let feature = match rhs_node.kind {
-                        TreeKind::Apply(_) | TreeKind::TypeApply(_) => Some("calls"),
-                        TreeKind::Select(_) => Some("selections"),
-                        TreeKind::Ident(_) => Some("identifiers"),
-                        TreeKind::Literal(_) => Some("literals"),
-                        TreeKind::ValDef(_) => Some("local_values"),
-                        TreeKind::DefDef(_) => Some("nested_methods"),
-                        TreeKind::If(_) => Some("branches"),
-                        TreeKind::Match(_) => Some("matches"),
-                        TreeKind::Try(_) => Some("tries"),
-                        TreeKind::Closure(_) => Some("closures"),
-                        TreeKind::While(_) => Some("loops"),
-                        _ => None,
-                    };
+                    let feature = ast_feature(&rhs_node.kind);
                     if let Some(feature) = feature {
                         *counts.entry(feature).or_default() += 1;
                     }
@@ -231,6 +244,8 @@ pub(super) fn inventory_candidates() {
                 + counts.get("tries").copied().unwrap_or(0) * 2
                 + counts.get("closures").copied().unwrap_or(0) * 2
                 + counts.get("loops").copied().unwrap_or(0) * 2;
+            let control_flow =
+                control_flow + counts.get("for_comprehensions").copied().unwrap_or(0) * 2;
             let score = body_size
                 + max_depth * 4
                 + type_parameters * 8
@@ -290,9 +305,7 @@ pub(super) fn inventory_candidates() {
                     "explicit"
                 },
                 defaults,
-                if symbol.flags.contains(SymbolFlags::IMPLICIT)
-                    || symbol.flags.contains(SymbolFlags::GIVEN)
-                {
+                if has_contextual_value_parameter(&parsed.ast, definition) {
                     "contextual"
                 } else {
                     "ordinary"
@@ -322,6 +335,103 @@ pub(super) fn inventory_candidates() {
             output.display()
         )
     });
+}
+
+fn has_contextual_value_parameter(
+    ast: &dotty_core::ast::AstArena<Untyped>,
+    definition: &dotty_core::ast::DefDef<Untyped>,
+) -> bool {
+    definition
+        .value_param_clauses
+        .iter()
+        .flatten()
+        .any(|parameter| {
+            ast.try_get(*parameter).is_some_and(|node| {
+                matches!(
+                    &node.kind,
+                    TreeKind::ValDef(parameter)
+                        if parameter.metadata.modifiers.contains(&Modifier::Implicit)
+                            || parameter.metadata.modifiers.contains(&Modifier::Given)
+                )
+            })
+        })
+}
+
+fn method_result_shape(store: &SemanticStore, method: dotty_core::SymbolId) -> String {
+    let &SymbolInfo::Complete(mut ty) = store.symbols.info(method) else {
+        return String::new();
+    };
+    loop {
+        match store.types.get(ty) {
+            Type::Poly(poly) => ty = poly.result,
+            Type::Method(method) => ty = method.result,
+            _ => return stable_type_shape(store, ty, 0),
+        }
+    }
+}
+
+fn stable_type_shape(store: &SemanticStore, ty: dotty_core::TypeId, depth: usize) -> String {
+    if depth >= 16 {
+        return "<depth-limit>".to_owned();
+    }
+    match store.types.get(ty) {
+        Type::TypeRef { target, .. } => match target {
+            TypeRefTarget::Symbol(symbol) => audit_symbol_path(store, *symbol),
+            TypeRefTarget::Name(name) => store.names.resolve(name.as_name().text()).to_owned(),
+        },
+        Type::Applied { tycon, args } => format!(
+            "{}[{}]",
+            stable_type_shape(store, *tycon, depth + 1),
+            args.iter()
+                .map(|argument| stable_type_shape(store, *argument, depth + 1))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Type::Constant(constant) => format!("constant:{constant:?}"),
+        Type::ParamRef { index, .. } => format!("typeparam#{index}"),
+        Type::JavaArray { element } => {
+            format!("Array[{}]", stable_type_shape(store, *element, depth + 1))
+        }
+        Type::ByName { result } => {
+            format!("=> {}", stable_type_shape(store, *result, depth + 1))
+        }
+        Type::Repeated { element } => {
+            format!(
+                "Repeated[{}]",
+                stable_type_shape(store, *element, depth + 1)
+            )
+        }
+        Type::And { left, right } => format!(
+            "{} & {}",
+            stable_type_shape(store, *left, depth + 1),
+            stable_type_shape(store, *right, depth + 1)
+        ),
+        Type::Or { left, right } => format!(
+            "{} | {}",
+            stable_type_shape(store, *left, depth + 1),
+            stable_type_shape(store, *right, depth + 1)
+        ),
+        Type::NoType => "<no-type>".to_owned(),
+        Type::Error(_) => "<error>".to_owned(),
+        Type::NoPrefix => "<no-prefix>".to_owned(),
+        Type::TermRef { .. } => "<term-ref>".to_owned(),
+        Type::ThisType { class } => format!("{}.this", audit_symbol_path(store, *class)),
+        Type::SuperType { .. } => "<super>".to_owned(),
+        Type::Bounds { .. } => "<bounds>".to_owned(),
+        Type::AliasingBounds { alias } => stable_type_shape(store, *alias, depth + 1),
+        Type::Flexible { underlying } => stable_type_shape(store, *underlying, depth + 1),
+        Type::Refined { .. } => "<refined>".to_owned(),
+        Type::Recursive { .. } => "<recursive>".to_owned(),
+        Type::RecThis { .. } => "<recursive-this>".to_owned(),
+        Type::Method(_) => "<method>".to_owned(),
+        Type::Poly(_) => "<poly>".to_owned(),
+        Type::TypeLambda(_) => "<type-lambda>".to_owned(),
+        Type::Match(_) => "<match-type>".to_owned(),
+        Type::MatchCase { .. } => "<match-case>".to_owned(),
+        Type::Annotated { underlying, .. } => stable_type_shape(store, *underlying, depth + 1),
+        Type::Wildcard { .. } => "<wildcard>".to_owned(),
+        Type::ClassInfo(_) => "<class-info>".to_owned(),
+    }
 }
 
 fn collect_scala_sources(directory: &Path, output: &mut Vec<PathBuf>) {
@@ -595,7 +705,10 @@ pub(super) fn run() {
                             });
                     if complete {
                         typed += 1;
-                        "typed".to_owned()
+                        format!(
+                            "typed::result={}",
+                            method_result_shape(typer.store(), method)
+                        )
                     } else {
                         blocked += 1;
                         "blocked::missing_typed_method_subtree_mapping".to_owned()
@@ -672,8 +785,8 @@ fn member_exclusion(
 #[cfg(test)]
 mod tests {
     use super::super::collect_local_nodes;
-    use super::{member_exclusion, source_line};
-    use dotty_core::ast::TreeKind;
+    use super::{ast_feature, has_contextual_value_parameter, member_exclusion, source_line};
+    use dotty_core::ast::{TreeKind, UntypedNode};
     use dotty_core::{
         Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolKind,
     };
@@ -723,6 +836,65 @@ mod tests {
             ),
             Some("synthetic_or_forwarder")
         );
+    }
+
+    #[test]
+    fn candidate_profile_counts_source_lambdas_tries_and_for_comprehensions() {
+        let source_text = "object C { def mapped(xs: List[Int]) = xs.map(x => try x catch { case _: Exception => 0 }); def values(xs: List[Int]) = for (x <- xs) yield x }";
+        let source = SourceId::from_index(0);
+        let mut store = SemanticStore::new();
+        let _definitions = Definitions::bootstrap(&mut store);
+        let scanner = ContextualScanner::new(source_text).unwrap();
+        let parsed = parse_compilation_unit(
+            SourceText::new(source_text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        let features = parsed
+            .ast
+            .iter()
+            .filter_map(|(_, node)| ast_feature(&node.kind))
+            .collect::<Vec<_>>();
+
+        assert!(features.contains(&"closures"));
+        assert!(features.contains(&"tries"));
+        assert!(features.contains(&"for_comprehensions"));
+        assert!(parsed.ast.iter().any(|(_, node)| matches!(
+            &node.kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        )));
+    }
+
+    #[test]
+    fn candidate_parameter_kind_uses_parameter_contextual_modifiers() {
+        let source_text = "object C { def contextual(using value: Int): Int = value; implicit def ordinary(value: Int): Int = value }";
+        let source = SourceId::from_index(0);
+        let mut store = SemanticStore::new();
+        let _definitions = Definitions::bootstrap(&mut store);
+        let scanner = ContextualScanner::new(source_text).unwrap();
+        let parsed = parse_compilation_unit(
+            SourceText::new(source_text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        let kinds = parsed
+            .ast
+            .iter()
+            .filter_map(|(_, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                let name = store.names.resolve(definition.name.as_name().text());
+                (!matches!(name, "<init>" | "$init$")).then_some((
+                    name,
+                    has_contextual_value_parameter(&parsed.ast, definition),
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(kinds, [("contextual", true), ("ordinary", false)]);
     }
 
     #[test]
