@@ -49,11 +49,13 @@ The checked-in Scala output is pinned at [`scala39/example`](../tests/fixtures/j
 
 | Pair | TASTY UUID | Class SHA-256 | TASTy SHA-256 |
 | --- | --- | --- | --- |
-| `Counter` | `00b187029fc0c9e800629c56fbd58f1b` | `eb06dbe8772e356000a600654dfae0679048aacb33e6899c3ce1d00da15a5ef7` | `86cc8fcb7f3b337035e28e36e3f72a1b8c2697ee3c7341873bbdd4100f082ec7` |
-| `CounterFactory` | `00acfba1d5731fed00b9210da970cb1e` | `26c1cfd5925e439a0343932e060982a3c2e586e9a2b61314db05600e5ce213dc` | `520623e9ed48eb7ee981f6a47a623d0e6a56cc677e3edaf14327fcbe47221264` |
+| `Counter` | `00a5635c9fca05e800deb738f3edb71b` | `eb06dbe8772e356000a600654dfae0679048aacb33e6899c3ce1d00da15a5ef7` | `86cc8fcb7f3b337035e28e36e3f72a1b8c2697ee3c7341873bbdd4100f082ec7` |
+| `CounterFactory` | `00c419a25977ffef005fc36c1872301c` | `26c1cfd5925e439a0343932e060982a3c2e586e9a2b61314db05600e5ce213dc` | `520623e9ed48eb7ee981f6a47a623d0e6a56cc677e3edaf14327fcbe47221264` |
 | `CounterIdentity` | `0051b70ada9c40eb00eb1d896f7ae618` | `089030ee03931cccdb904db1020ca62bf840d996b4b86d8e372e4ce573902f6b` | `d08a460dab5bb44907b2784aedd632f90a4be91ba1d54b08b340c953556c63e0` |
 
-The factory sidecar validates as 28.9.0 and contains the `example` package root, `CounterFactory`, `create`, `seed`, `Counter`, and `<init>` names. Its AST contains `APPLY`, `SELECTin` (tag 176), and `NEW` nodes. The `Counter` reference is a qualified `example.Counter` name-table entry; the generated classfile independently links it through the exact constructor `Methodref`. The identity sidecar/classfile is audited separately and has the reference identity descriptor but its method code is only `aload_1; areturn`.
+The method-specific TASTy walk pins the cross-class relationships, rather than just finding tags somewhere in the sidecar. In `CounterFactory.tasty`, `create` is `DEFDEF` at AST address 30 and its result type is the exact `IDENTtpt → TYPEREF → TERMREFpkg` wire shape. The name references are `Counter` qualified by `example`. The body is `APPLY(SELECTin(NEW(...)), [seed])`: the `SELECTin` signed name is `<init>` with parameter `scala.Int` and result `example.Counter`; its owner type and the `NEW` type both share the `TYPEREF` at address 44. The sole argument is `TERMREFdirect` to the `seed` `PARAM` at address 33. The classfile independently pins the same owner/name/descriptor as `Methodref example/Counter.<init>:(I)V`.
+
+`CounterIdentity.tasty` is decoded separately. Its `identity` `DEFDEF` is at address 30, the `Counter` result type shares the `TYPEREF` at address 38, and its `counter` formal has the same exact qualified type. The body is a direct `TERMREFdirect` to that method's `counter` `PARAM` at address 33; it contains no `NEW` or constructor `APPLY`. In both sidecars the linked type address resolves to a `TYPEREF` AST node and the name table supplies the qualified `example.Counter` entry. The pinned regression asserts these method bodies, reference kinds, target tags/addresses, constructor signed name and signature, and the corrected classfile/sidecar UUID pairs. This identity control remains separate from construction evidence.
 
 ## Canonical source-session evidence
 
