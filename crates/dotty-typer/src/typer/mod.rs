@@ -3659,6 +3659,249 @@ mod tests {
     }
 
     #[test]
+    fn generic_this_receiver_instantiates_its_two_parameter_parent_in_order() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Parent[X, Y]; class Child[A, B] extends Parent[A, B]");
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let child_a = type_parameter_symbol(&parsed, &store, &index, source, "A");
+        let child_b = type_parameter_symbol(&parsed, &store, &index, source, "B");
+        assert_eq!(store.symbols.get(child_a).owner, Some(child));
+        assert_eq!(store.symbols.get(child_b).owner, Some(child));
+        let receiver = store.types.alloc(Type::ThisType { class: child });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let child_info = typer.complete_symbol(child).unwrap();
+        let Type::ClassInfo(info) = typer.store().types.get(child_info) else {
+            panic!("expected Child class info")
+        };
+        let parent_view = info.parents[0];
+        let adapted = typer
+            .adapt_parent_view(child, receiver, parent_view)
+            .unwrap();
+
+        let Type::Applied { tycon, args } = typer.store().types.get(adapted) else {
+            panic!("expected applied generic parent view")
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), parent);
+        assert_eq!(args.len(), 2);
+        for (argument, expected_parameter) in args.iter().zip([child_a, child_b]) {
+            let Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(parameter),
+            } = typer.store().types.get(*argument)
+            else {
+                panic!("expected canonical source type-parameter reference")
+            };
+            assert_eq!(*parameter, expected_parameter);
+            assert!(matches!(
+                typer.store().types.get(*prefix),
+                Type::ThisType { class } if *class == child
+            ));
+        }
+    }
+
+    #[test]
+    fn source_parent_adaptation_rejects_an_unrelated_receiver_owner() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Parent[A, B]; class Child[A, B] extends Parent[A, B]; class Other[A, B]",
+        );
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let other = class_symbol(&parsed, &store, &index, source, "Other");
+        let other_a = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(other),
+        });
+        let other_b = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(other),
+        });
+        let receiver = applied_class_type(&mut store, definitions, other, &[other_a, other_b]);
+        let parent_view = applied_class_type(
+            &mut store,
+            definitions,
+            parent,
+            &[definitions.int, definitions.boolean],
+        );
+        let checkpoint = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.adapt_parent_view(child, receiver, parent_view),
+            Err(TyperError::ReceiverDoesNotDenoteExpectedClass {
+                expected,
+                actual: Some(actual),
+            }) if expected == child && actual == other
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+    }
+
+    #[test]
+    fn source_parent_substitution_preserves_same_named_unrelated_parameters() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Parent[X, Y]; class Child[A, B]; class Other[A, B]");
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let other = class_symbol(&parsed, &store, &index, source, "Other");
+        let receiver = applied_class_type(
+            &mut store,
+            definitions,
+            child,
+            &[definitions.int, definitions.boolean],
+        );
+        let other_prefix = store.types.alloc(Type::ThisType { class: other });
+        let parent_tycon = nominal_type_ref(&mut store, definitions, parent);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let child_parameters = typer.source_class_type_parameters(child).unwrap();
+        let other_parameters = typer.source_class_type_parameters(other).unwrap();
+        let other_arguments = other_parameters
+            .iter()
+            .map(|parameter| {
+                typer.store.types.alloc(Type::TypeRef {
+                    prefix: other_prefix,
+                    target: TypeRefTarget::Symbol(*parameter),
+                })
+            })
+            .collect();
+        let parent_view = typer.store.types.alloc(Type::Applied {
+            tycon: parent_tycon,
+            args: other_arguments,
+        });
+
+        let adapted = typer
+            .adapt_parent_view(child, receiver, parent_view)
+            .unwrap();
+
+        let Type::Applied { args, .. } = typer.store.types.get(adapted) else {
+            panic!("expected applied generic parent view")
+        };
+        assert_eq!(args.len(), 2);
+        for (argument, expected_parameter) in args.iter().zip(other_parameters) {
+            let Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(parameter),
+            } = typer.store.types.get(*argument)
+            else {
+                panic!("expected the unrelated canonical type parameter")
+            };
+            assert_eq!(*parameter, expected_parameter);
+            assert_eq!(typer.store.symbols.get(*parameter).owner, Some(other));
+            assert!(matches!(
+                typer.store.types.get(*prefix),
+                Type::ThisType { class } if *class == other
+            ));
+        }
+        assert_eq!(child_parameters.len(), 2);
+        assert!(
+            child_parameters
+                .iter()
+                .all(|parameter| typer.store.symbols.get(*parameter).owner == Some(child))
+        );
+    }
+
+    #[test]
+    fn wrong_arity_during_source_parent_lookup_rolls_back_completion() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Parent[A, B] { val value: A = null }; class Child[A, B] extends Parent[A, B]",
+        );
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let name = Name::new(store.names.intern("value"), Namespace::Term);
+        let receiver = applied_class_type(&mut store, definitions, child, &[definitions.int]);
+        let checkpoint = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.lookup_members(receiver, name),
+            Err(MemberLookupError::ParentTypeAdaptation {
+                symbol,
+                error: TyperError::ReceiverGenericArityMismatch {
+                    class,
+                    expected: 2,
+                    actual: 1,
+                },
+            }) if symbol == child && class == child
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert!(matches!(
+            *typer.store.symbols.info(child),
+            SymbolInfo::Missing
+        ));
+        assert!(matches!(
+            *typer.store.symbols.info(parent),
+            SymbolInfo::Missing
+        ));
+    }
+
+    #[test]
+    fn malformed_source_parent_shape_is_explicit_and_lookup_is_transactional() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Parent[A, B]; class Child[A, B] extends Parent[A, B]");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let name = Name::new(store.names.intern("missing"), Namespace::Term);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let child_info = typer.complete_symbol(child).unwrap();
+        let malformed_parent = typer.store.types.alloc(Type::ByName {
+            result: definitions.int,
+        });
+        let Type::ClassInfo(info) = typer.store.types.get_mut(child_info) else {
+            panic!("expected Child class info")
+        };
+        info.parents[0] = malformed_parent;
+        let receiver = typer.store.types.alloc(Type::ThisType { class: child });
+        let checkpoint = typer.store.checkpoint();
+
+        assert!(matches!(
+            typer.lookup_members(receiver, name),
+            Err(MemberLookupError::MalformedParentType { ty }) if ty == malformed_parent
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        let SymbolInfo::Complete(child_info) = *typer.store.symbols.info(child) else {
+            panic!("failed lookup should preserve the pre-existing Child completion")
+        };
+        let Type::ClassInfo(info) = typer.store.types.get(child_info) else {
+            panic!("expected preserved Child class info")
+        };
+        assert_eq!(info.parents, [malformed_parent]);
+    }
+
+    #[test]
     fn inherited_nested_parent_arguments_are_instantiated_before_member_lookup() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class Parent[A] { val value: A = null }; class List[X]; class Child[B] extends Parent[List[B]]; class Text",

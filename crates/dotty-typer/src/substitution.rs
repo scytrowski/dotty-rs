@@ -138,6 +138,11 @@ impl SourceTyper<'_> {
         receiver_view: TypeId,
         parent_view: TypeId,
     ) -> Result<TypeId, TyperError> {
+        // In subtype checks a generic source `this` arrives as a bare
+        // `ThisType`. Give it the class's own canonical type parameters before
+        // substituting them through its declared parent, just as member lookup
+        // does for source receivers.
+        let receiver_view = self.this_type_receiver_view(receiver_view)?;
         let current = self.class_view(receiver_view)?;
         if current.class != Some(class) {
             return Err(TyperError::ReceiverDoesNotDenoteExpectedClass {
