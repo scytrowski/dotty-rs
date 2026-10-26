@@ -46,6 +46,15 @@ class FocusedAuditWorkflowTests(unittest.TestCase):
             result.stderr,
         )
 
+    def test_legacy_comparison_clears_root_method_outcome_mode(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        runner = (repo / "tools/typer-classpath-corpus-audit/run").read_text(encoding="utf-8")
+        legacy_comparison = runner.split('if [[ "$compare_legacy_profile" == 1 ]]; then', 1)[1]
+        legacy_comparison = legacy_comparison.split("legacy_timing=", 1)[0]
+
+        self.assertIn("unset DOTTY_AUDIT_FOCUSED_FILES DOTTY_AUDIT_FOCUSED_METHODS", legacy_comparison)
+        self.assertIn("DOTTY_AUDIT_INCLUDE_ROOT_METHOD_OUTCOMES", legacy_comparison)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -313,7 +313,8 @@ if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
         profile_files="$(paste -sd, "$tmp_dir/focused-files.txt")"
         if ! (
             cd "$repo_root"
-            unset DOTTY_AUDIT_FOCUSED_FILES DOTTY_AUDIT_FOCUSED_METHODS
+            unset DOTTY_AUDIT_FOCUSED_FILES DOTTY_AUDIT_FOCUSED_METHODS \
+                DOTTY_AUDIT_INCLUDE_ROOT_METHOD_OUTCOMES
             export DOTTY_AUDIT_PROFILE_FILES="$profile_files"
             if [[ -x /usr/bin/time ]]; then
                 /usr/bin/time -f 'MAX_RSS_KB=%M' -o "$tmp_dir/legacy.rss" \
