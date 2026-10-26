@@ -13,6 +13,7 @@ use dotty::jvm_tasty_artifacts::{
 use dotty::jvm_tasty_plan::PairedPlanError;
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
+use std::process::Command;
 
 const COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
 const COUNTER_GAUGE: &str = include_str!("fixtures/jvm_tasty_multiclass/CounterGauge.scala");
@@ -387,6 +388,169 @@ fn counter_reader_emits_four_complete_linked_cross_class_artifacts() {
             .unwrap(),
         ("get", "()I")
     );
+}
+
+#[test]
+fn linked_counter_reader_batch_executes_on_verified_jdk21() {
+    if !require_jdk_21_or_skip() {
+        return;
+    }
+
+    let batch = emit_paired_jvm_tasty_batch(
+        COUNTER_READER,
+        "tests/fixtures/jvm_tasty_cross_class/Reader.scala",
+        SourceId::from_index(1676),
+    )
+    .unwrap();
+    let output = TestDirectory::new("cross-class-jdk-runtime");
+    for pair in batch.classes() {
+        let classfile = output.path().join(pair.classfile_path());
+        let tasty = output.path().join(pair.tasty_path());
+        std::fs::create_dir_all(classfile.parent().unwrap()).unwrap();
+        std::fs::write(&classfile, pair.classfile_bytes()).unwrap();
+        std::fs::write(&tasty, pair.tasty_bytes()).unwrap();
+    }
+
+    let harness = output.path().join("CrossClassRuntimeHarness.java");
+    std::fs::write(
+        &harness,
+        r#"public final class CrossClassRuntimeHarness {
+    public static void main(String[] args) {
+        example.Counter first = new example.Counter(7);
+        example.Counter second = new example.Counter(-5);
+        example.Reader reader = new example.Reader();
+        expect(reader.read(first), 7);
+        first.set(13);
+        expect(reader.read(first), 13);
+        first.set(-42);
+        expect(reader.read(first), -42);
+        expect(reader.read(second), -5);
+        second.set(99);
+        expect(reader.read(first), -42);
+        expect(reader.read(second), 99);
+        System.out.println("7,13,-42; independent=-5,99");
+    }
+
+    private static void expect(int actual, int expected) {
+        if (actual != expected) {
+            throw new AssertionError("expected " + expected + ", got " + actual);
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let javac = Command::new("javac")
+        .arg("-classpath")
+        .arg(output.path())
+        .arg("-d")
+        .arg(output.path())
+        .arg(&harness)
+        .output()
+        .expect("start JDK 21 javac for the Rust artifact harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected the Rust Counter/Reader batch:\n{}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+
+    let javap = Command::new("javap")
+        .args([
+            "-classpath",
+            output.path().to_str().unwrap(),
+            "-p",
+            "-s",
+            "-c",
+            "-v",
+        ])
+        .arg("example.Reader")
+        .output()
+        .expect("start JDK 21 javap for the Rust Reader class");
+    assert!(
+        javap.status.success(),
+        "javap rejected Rust Reader.class:\n{}",
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap = String::from_utf8_lossy(&javap.stdout);
+    assert!(javap.contains("major version: 65"), "{javap}");
+    let read_details = javap
+        .split("public int read(example.Counter);")
+        .nth(1)
+        .expect("javap shows Reader.read as a public instance method");
+    for expected in [
+        "descriptor: (Lexample/Counter;)I",
+        "flags: (0x0001) ACC_PUBLIC",
+        "invokevirtual",
+        "Method example/Counter.get:()I",
+    ] {
+        assert!(
+            read_details.contains(expected),
+            "javap Reader.read section omitted {expected:?}:\n{read_details}"
+        );
+    }
+
+    let java = Command::new("java")
+        .args(["-Xverify:all", "-classpath"])
+        .arg(output.path())
+        .arg("CrossClassRuntimeHarness")
+        .output()
+        .expect("start JDK 21 verifier and Rust artifact harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected or failed the Rust Counter/Reader batch:\n{}\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "7,13,-42; independent=-5,99"
+    );
+
+    for pair in batch.classes() {
+        assert_eq!(
+            std::fs::read(output.path().join(pair.classfile_path())).unwrap(),
+            pair.classfile_bytes(),
+            "JDK tools must not replace or mutate Rust-produced classfiles"
+        );
+    }
+}
+
+fn require_jdk_21_or_skip() -> bool {
+    let unavailable = ["java", "javac", "javap"]
+        .into_iter()
+        .filter_map(|tool| match jdk_tool_major_version(tool) {
+            Some(version) if version >= 21 => None,
+            Some(version) => Some(format!("{tool} {version} (requires JDK 21+)")),
+            None => Some(format!("{tool} (missing or version unavailable)")),
+        })
+        .collect::<Vec<_>>();
+    if unavailable.is_empty() {
+        return true;
+    }
+    let message = format!(
+        "linked Counter/Reader runtime requires java, javac, and javap from JDK 21+ on PATH; unavailable: {}",
+        unavailable.join(", ")
+    );
+    if std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1") {
+        panic!("{message}");
+    }
+    eprintln!("skipping optional linked Counter/Reader JDK runtime: {message}");
+    false
+}
+
+fn jdk_tool_major_version(tool: &str) -> Option<u32> {
+    let output = Command::new(tool).arg("-version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    version_text
+        .split(|character: char| !character.is_ascii_digit())
+        .find_map(|component| component.parse::<u32>().ok())
 }
 
 #[test]
