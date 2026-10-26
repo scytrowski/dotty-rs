@@ -115,7 +115,7 @@ This matrix combines observed failure-stage probes in the focused tests with the
 | Unplanned constructor target or stale/foreign constructor symbol | JVM validation reports `MissingClassPlan` or rejects the source-proven constructor identity (`InvalidPrimaryConstructor` / constructor-owner validation). See `reference_projection_rejects_unplanned_stale_and_noncanonical_targets` and `rejects_a_constructor_reference_owned_by_another_class`. |
 | External class without a planned class artifact | JVM projection rejects the external/unplanned target; it does not guess a class plan from a descriptor. Missing source class symbols instead fail at typer lookup. |
 | Wrong-owner TypeRef, malformed class info, or invalid package chain | JVM metadata/projection rejects the class/type identity before emission (`UnsupportedJvmReferenceType`, `InvalidJvmClassInfo`, or `InvalidPackageOwnerChain`/`InvalidJvmName`). See `method_signature_projection_requires_exact_class_and_package_identity`, `rejects_malformed_class_info_instead_of_guessing_class_shape`, and `rejects_nested_and_invalid_package_owner_chains`. |
-| Reference-valued factory or identity result | Source typing and JVM unit validation succeed; paired TASTy cross-contract reports `TastyPlan(MalformedType { role: MethodResult })`. |
+| Reference-valued factory or identity result | The source/JVM-only #1691 proof validates the canonical class, method, formal, and typed return identities. The paired TASTy planner still reports `TastyPlan(MalformedType { role: MethodResult })`; reference-result encoding remains #1692. |
 | One nested `new` as a constructor argument, or sibling allocations | JVM source lowering accepts the bounded shapes and JDK verification passes; see `nested_new_constructor_arguments_lower_lifo_and_verify_initialized_values`. Deeper nesting or a third simultaneously pending allocation is rejected by source lowering / the class-aware verifier before class publication. |
 | Cross-class reference field initialized by an approved direct `new` | JVM-only source path supports a planned private reference field with a bounded initializer. Factory-valued/nested/branch-valued reference field initialization is rejected by JVM codegen. The factory's paired result boundary fails earlier at `MethodResult`, so it is not evidence for field serialization. |
 | Classfile-only Scala classpath or stale/missing TASTy sidecar | Pinned Scala 3.9 loader rejects the Scala class with the missing-sidecar diagnostic. |
@@ -127,7 +127,7 @@ The existing Scala consumer audit also measures missing, misplaced, corrupt, and
 
 Issue #1690 provides a pinned source/runtime oracle and the first-boundary evidence needed by its successors. The remaining implementation work should proceed in this dependency order:
 
-1. **#1691** — canonical typed construction proof and source-to-typed identity.
+1. **#1691** — canonical typed construction proof and source-to-typed identity (implemented below; proof only, no output bytes).
 2. **#1692** — reference-valued result TASTy encoding.
 3. **#1693** — constructor `New`/`SELECTin`/`<init>` TASTy encoding and exact owner/formal bindings.
 4. **#1694** — batch cross-class TASTy validation and linked artifacts.
@@ -136,6 +136,35 @@ Issue #1690 provides a pinned source/runtime oracle and the first-boundary evide
 7. **#1697** — final release gate after the preceding compatibility layers pass.
 
 The audit does not mark those successor requirements complete. The Scala oracle validates their target behavior; the current Rust paired producer still rejects the reference result before serializing the factory method body.
+
+## #1691 source/JVM identity proof
+
+`dotty-jvm-tasty-contract::validate_same_batch_factory_result` now accepts the
+complete JVM unit plus the original source AST, source semantic index, and
+source-to-typed index. It verifies that the ordered top-level source classes
+are exactly the JVM unit classes, then checks the original public `Counter`
+class, its source primary constructor and derived `Int` formal, and the public
+`CounterFactory` methods by canonical `SymbolId`.
+
+For `create`, the proof retains the source `New`, selected constructor
+`Select`, `Apply`, and argument tree IDs alongside the mapped typed `Apply`
+and its exact typed `New`, `Select`, and formal-reference argument roots. The
+frontend supplies a source-to-typed binding for the RHS root; nested source
+children are retained and checked against the complete typed shape without
+inventing nested mappings. The signature result `TypeId` is retained exactly,
+and the semantic target and JVM metadata establish
+`(I)Lexample/Counter;` with the primary constructor descriptor `(I)V`.
+
+`identity(counter: Counter): Counter = counter` has a separate proof record
+for its method, formal, direct typed `Ident`, declared result `TypeId`, and
+`(Lexample/Counter;)Lexample/Counter;` descriptor. It is not used as evidence
+for constructor selection. Missing batch classes, wrong class roles, and
+stale source-to-typed RHS mappings fail with a stage-specific typed error.
+
+This is a read-only source/JVM contract. It emits neither TASTy nor classfile
+bytes and does not change the Typer or the paired TASTy producer. The true-source
+regression lives in `tests/jvm_source_compilation.rs` and exercises both the
+successful proof and representative invalid inputs before class publication.
 
 ## Rust regression commands
 
