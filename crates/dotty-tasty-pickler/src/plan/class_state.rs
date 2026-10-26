@@ -9,7 +9,7 @@ use dotty_core::ast::{
 use dotty_core::{
     Constant, Definitions, MethodKind, Name, SemanticStore, SourceDefinition, SourceSemanticIndex,
     Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TermRefTarget, TreeId,
-    Type, TypeId, Visibility,
+    Type, TypeId, TypeRefTarget, Visibility,
 };
 
 use crate::{
@@ -36,6 +36,84 @@ pub struct ClassFieldPicklePlan {
     pub source_tree: TreeId<Untyped>,
     pub typed_initializer: TreeId<Typed>,
     pub declared_type: TypeId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SameBatchReferenceFieldData {
+    field: ClassFieldPicklePlan,
+    target_class: SymbolId,
+    target_class_tree: TreeId<Untyped>,
+    type_name: Name,
+}
+
+/// Read-only proof for one private immutable field whose class type is another
+/// canonical public class in this plan's exact source batch. The initializer
+/// remains pending: this proof records its source and typed roots and result
+/// identity, but does not authorize expression serialization.
+#[derive(Clone, Copy)]
+pub struct ValidatedSameBatchReferenceField<'p, 'a> {
+    plan: &'p ClassStatePicklePlan<'a>,
+    data: SameBatchReferenceFieldData,
+}
+
+impl ValidatedSameBatchReferenceField<'_, '_> {
+    /// Canonical class-owned field symbol.
+    pub fn field(&self) -> SymbolId {
+        self.data.field.symbol
+    }
+
+    /// Canonical owner class symbol.
+    pub fn owner_class(&self) -> SymbolId {
+        self.plan.class
+    }
+
+    /// Canonical public target class symbol from the same source batch.
+    pub fn target_class(&self) -> SymbolId {
+        self.data.target_class
+    }
+
+    /// Exact declared semantic TypeRef retained by the field.
+    pub fn declared_type(&self) -> TypeId {
+        self.data.field.declared_type
+    }
+
+    /// Original source initializer tree. It is pending and is not serialized.
+    pub fn source_initializer(&self) -> TreeId<Untyped> {
+        let TreeKind::ValDef(definition) =
+            &self.plan.source_ast.get(self.data.field.source_tree).kind
+        else {
+            unreachable!("validated reference field retains its ValDef")
+        };
+        definition.rhs.expect("validated reference initializer")
+    }
+
+    /// Exact typed initializer root bound to the source initializer.
+    pub fn typed_initializer(&self) -> TreeId<Typed> {
+        self.data.field.typed_initializer
+    }
+
+    /// Source field declaration tree.
+    pub fn source_field(&self) -> TreeId<Untyped> {
+        self.data.field.source_tree
+    }
+
+    pub(crate) fn projection_parts(
+        &self,
+    ) -> (
+        &ClassStatePicklePlan<'_>,
+        SymbolId,
+        TreeId<Untyped>,
+        Name,
+        TypeId,
+    ) {
+        (
+            self.plan,
+            self.data.target_class,
+            self.data.target_class_tree,
+            self.data.type_name,
+            self.data.field.declared_type,
+        )
+    }
 }
 
 /// Ordered class body entry. The explicit sequence is authoritative; the
@@ -177,6 +255,38 @@ impl ClassStateValidator<'_, '_> {
                 prefix,
                 target: dotty_core::TypeRefTarget::Symbol(symbol),
             }) if *prefix == self.plan.definitions.no_prefix && *symbol == expected_symbol
+        )
+    }
+
+    fn same_exact_type_ref(&self, actual: TypeId, expected: TypeId) -> bool {
+        matches!(
+            (self.plan.store.types.try_get(actual), self.plan.store.types.try_get(expected)),
+            (
+                Some(Type::TypeRef {
+                    prefix: actual_prefix,
+                    target: TypeRefTarget::Symbol(actual_target),
+                }),
+                Some(Type::TypeRef {
+                    prefix: expected_prefix,
+                    target: TypeRefTarget::Symbol(expected_target),
+                })
+            ) if actual_prefix == expected_prefix && actual_target == expected_target
+        )
+    }
+
+    fn same_type_ref_target(&self, actual: TypeId, expected: TypeId) -> bool {
+        matches!(
+            (self.plan.store.types.try_get(actual), self.plan.store.types.try_get(expected)),
+            (
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(actual_target),
+                    ..
+                }),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(expected_target),
+                    ..
+                })
+            ) if actual_target == expected_target
         )
     }
 
@@ -434,7 +544,7 @@ impl ClassStateValidator<'_, '_> {
         Ok(())
     }
 
-    fn validate(&mut self) -> Result<(), PickleError> {
+    fn validate(&mut self) -> Result<Vec<SameBatchReferenceFieldData>, PickleError> {
         let p = self.plan;
         self.charge(p.members.len())?;
         if p.source.name.is_empty()
@@ -564,6 +674,7 @@ impl ClassStateValidator<'_, '_> {
         expected.insert(constructor.symbol);
         let mut fields = HashSet::new();
         let mut field_names = HashSet::new();
+        let mut reference_fields = Vec::new();
         self.charge(template_body.len())?;
         for (tree, member) in template_body.iter().zip(p.members) {
             self.charge(1)?;
@@ -582,7 +693,11 @@ impl ClassStateValidator<'_, '_> {
                             symbol: field.symbol,
                         });
                     }
-                    self.validate_field(*field, p.class, constructor, &fields)?;
+                    if let Some(reference_field) =
+                        self.validate_field(*field, p.class, constructor, &fields)?
+                    {
+                        reference_fields.push(reference_field);
+                    }
                 }
                 ClassMemberPicklePlan::Method {
                     symbol,
@@ -643,7 +758,7 @@ impl ClassStateValidator<'_, '_> {
                 return Err(PickleError::ScopeMembers { owner: p.class });
             }
         }
-        Ok(())
+        Ok(reference_fields)
     }
 
     fn validate_constructor(
@@ -913,13 +1028,276 @@ impl ClassStateValidator<'_, '_> {
         Ok(())
     }
 
+    fn validate_reference_field_type(
+        &self,
+        field: ClassFieldPicklePlan,
+        class: SymbolId,
+        type_syntax: Name,
+    ) -> Result<SameBatchReferenceFieldData, PickleError> {
+        let Some(Type::TypeRef { prefix, target }) =
+            self.plan.store.types.try_get(field.declared_type)
+        else {
+            return Err(PickleError::UnsupportedTypeReference {
+                ty: field.declared_type,
+            });
+        };
+        let TypeRefTarget::Symbol(target_class) = target else {
+            return Err(PickleError::UnsupportedTypeReference {
+                ty: field.declared_type,
+            });
+        };
+        let target_class = *target_class;
+        let target_symbol = self.symbol(target_class)?;
+        let owner = self.symbol(class)?.owner;
+        let package_prefix_matches = matches!(
+            self.plan.store.types.try_get(*prefix),
+            Some(Type::TypeRef {
+                prefix: package_prefix,
+                target: TypeRefTarget::Symbol(package),
+            }) if *package_prefix == self.plan.definitions.no_prefix
+                && Some(*package) == target_symbol.owner
+        );
+        if !package_prefix_matches
+            || target_class == class
+            || !self
+                .plan
+                .typed_bindings
+                .planned_class_symbols()
+                .contains(&target_class)
+            || target_symbol.kind != SymbolKind::Class
+            || target_symbol.origin != SymbolOrigin::Source(self.plan.source.id)
+            || target_symbol.owner != owner
+            || target_symbol.visibility != Visibility::Public
+            || !target_symbol.flags.is_empty()
+            || !target_symbol.annotations.is_empty()
+            || target_symbol.name != type_syntax
+        {
+            return Err(PickleError::UnsupportedTypeReference {
+                ty: field.declared_type,
+            });
+        }
+        let Some(SourceDefinition::Canonical { source, tree }) =
+            self.plan.source_index.definition_of(target_class)
+        else {
+            return Err(PickleError::SourceDefinition {
+                symbol: target_class,
+            });
+        };
+        if source != self.plan.source.id
+            || self.plan.source_index.symbol_at(source, tree) != Some(target_class)
+        {
+            return Err(PickleError::SourceDefinition {
+                symbol: target_class,
+            });
+        }
+        let target_type = self.completed(target_class)?;
+        let Some(Type::ClassInfo(info)) = self.plan.store.types.try_get(target_type) else {
+            return Err(PickleError::MalformedType {
+                ty: target_type,
+                role: TypeRole::ClassInfo,
+            });
+        };
+        if info.class != target_class || info.prefix != self.plan.definitions.no_prefix {
+            return Err(PickleError::MalformedType {
+                ty: target_type,
+                role: TypeRole::ClassInfo,
+            });
+        }
+        Ok(SameBatchReferenceFieldData {
+            field,
+            target_class,
+            target_class_tree: tree,
+            type_name: type_syntax,
+        })
+    }
+
+    fn validate_pending_reference_initializer(
+        &self,
+        field: ClassFieldPicklePlan,
+        constructor: &PrimaryConstructorInputPlan,
+        target_class: SymbolId,
+        source_rhs: TreeId<Untyped>,
+    ) -> Result<(), PickleError> {
+        let plan = self.plan;
+        let source_root = self.source_tree(source_rhs)?;
+        let typed_root = self.typed_tree(field.typed_initializer)?;
+        let binding = |source_tree| plan.typed_bindings.typed_at(plan.source.id, source_tree);
+        if binding(source_rhs) != Some(field.typed_initializer)
+            || source_root.position.is_none()
+            || source_root.position != typed_root.position
+            || source_root
+                .position
+                .is_some_and(|position| position.source() != plan.source.id)
+        {
+            return Err(PickleError::FieldInitializerBinding {
+                source: plan.source.id,
+                source_tree: source_rhs,
+                expected: field.typed_initializer,
+                actual: binding(source_rhs),
+            });
+        }
+        let (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply)) =
+            (&source_root.kind, &typed_root.kind)
+        else {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::UnsafeFieldInitializer,
+                symbol: Some(field.symbol),
+            });
+        };
+        if source_apply.kind != dotty_core::ast::ApplyKind::Regular
+            || typed_apply.kind != dotty_core::ast::ApplyKind::Regular
+            || source_apply.args.len() != 1
+            || typed_apply.args.len() != 1
+            || binding(source_apply.function) != Some(typed_apply.function)
+            || binding(source_apply.args[0]) != Some(typed_apply.args[0])
+        {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::UnsafeFieldInitializer,
+                symbol: Some(field.symbol),
+            });
+        }
+        let (TreeKind::Select(source_select), TreeKind::Select(typed_select)) = (
+            &self.source_tree(source_apply.function)?.kind,
+            &self.typed_tree(typed_apply.function)?.kind,
+        ) else {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::UnsafeFieldInitializer,
+                symbol: Some(field.symbol),
+            });
+        };
+        let typed_function = self.typed_tree(typed_apply.function)?;
+        let Some(Type::TermRef {
+            prefix: constructor_prefix,
+            target: TermRefTarget::Symbol(constructor_symbol),
+        }) = plan.store.types.try_get(typed_function.ty)
+        else {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::UnsafeFieldInitializer,
+                symbol: Some(field.symbol),
+            });
+        };
+        let constructor_info = self.symbol(*constructor_symbol)?;
+        if source_select.name != constructor_info.name
+            || plan.store.names.resolve(source_select.name.text()) != "<init>"
+            || typed_select.name != source_select.name
+            || constructor_info.kind != SymbolKind::Constructor
+            || constructor_info.owner != Some(target_class)
+            || !matches!(
+                plan.store.types.try_get(*constructor_prefix),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(selected_class),
+                    ..
+                }) if *selected_class == target_class
+            )
+        {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::UnsafeFieldInitializer,
+                symbol: Some(field.symbol),
+            });
+        }
+        if binding(source_select.qualifier) != Some(typed_select.qualifier) {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::UnsafeFieldInitializer,
+                symbol: Some(field.symbol),
+            });
+        }
+        let (TreeKind::New(source_new), TreeKind::New(typed_new)) = (
+            &self.source_tree(source_select.qualifier)?.kind,
+            &self.typed_tree(typed_select.qualifier)?.kind,
+        ) else {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::UnsafeFieldInitializer,
+                symbol: Some(field.symbol),
+            });
+        };
+        if binding(source_new.tpt) != Some(typed_new.tpt) {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::UnsafeFieldInitializer,
+                symbol: Some(field.symbol),
+            });
+        }
+        let TreeKind::Ident(source_type) = &self.source_tree(source_new.tpt)?.kind else {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::UnsafeFieldInitializer,
+                symbol: Some(field.symbol),
+            });
+        };
+        let TreeKind::Ident(source_argument) = &self.source_tree(source_apply.args[0])?.kind else {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::UnsafeFieldInitializer,
+                symbol: Some(field.symbol),
+            });
+        };
+        let typed_argument = self.typed_tree(typed_apply.args[0])?;
+        let TreeKind::Ident(typed_argument_ident) = &typed_argument.kind else {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::UnsafeFieldInitializer,
+                symbol: Some(field.symbol),
+            });
+        };
+        let Some(Type::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(argument_symbol),
+        }) = plan.store.types.try_get(typed_argument.ty)
+        else {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::UnsafeFieldInitializer,
+                symbol: Some(field.symbol),
+            });
+        };
+        if source_argument.name != typed_argument_ident.name
+            || *prefix != plan.definitions.no_prefix
+            || self.symbol(*argument_symbol)?.kind != SymbolKind::Parameter
+            || self.symbol(*argument_symbol)?.owner != Some(constructor.symbol)
+            || !constructor
+                .parameter_clauses
+                .iter()
+                .flatten()
+                .any(|parameter| parameter == argument_symbol)
+        {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::UnsafeFieldInitializer,
+                symbol: Some(field.symbol),
+            });
+        }
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(source_target),
+            ..
+        }) = plan.store.types.try_get(self.typed_tree(typed_new.tpt)?.ty)
+        else {
+            return Err(PickleError::UnsupportedTypeReference { ty: typed_root.ty });
+        };
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(result_target),
+            ..
+        }) = plan.store.types.try_get(typed_root.ty)
+        else {
+            return Err(PickleError::FieldType {
+                symbol: field.symbol,
+                expected: field.declared_type,
+                actual: typed_root.ty,
+            });
+        };
+        if *source_target != target_class
+            || *result_target != target_class
+            || plan.store.symbols.get(target_class).name != source_type.name
+        {
+            return Err(PickleError::FieldType {
+                symbol: field.symbol,
+                expected: field.declared_type,
+                actual: typed_root.ty,
+            });
+        }
+        Ok(())
+    }
+
     fn validate_field(
         &mut self,
         field: ClassFieldPicklePlan,
         class: SymbolId,
         constructor: &PrimaryConstructorInputPlan,
         fields_seen: &HashSet<SymbolId>,
-    ) -> Result<(), PickleError> {
+    ) -> Result<Option<SameBatchReferenceFieldData>, PickleError> {
         let TreeKind::ValDef(definition) = &self.source_tree(field.source_tree)?.kind else {
             return Err(PickleError::SourceShape {
                 tree: field.source_tree,
@@ -968,11 +1346,18 @@ impl ClassStateValidator<'_, '_> {
         let is_int = self.same_canonical_type(field.declared_type, self.plan.definitions.int);
         let is_boolean =
             self.same_canonical_type(field.declared_type, self.plan.definitions.boolean);
-        if !is_int && !is_boolean {
-            return Err(PickleError::UnsupportedTypeReference {
-                ty: field.declared_type,
-            });
-        }
+        let reference_field = if !is_int && !is_boolean {
+            let is_var = definition.metadata.modifiers.as_slice() == [Modifier::Var];
+            if is_var {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::ClassField,
+                    symbol: Some(field.symbol),
+                });
+            }
+            Some(self.validate_reference_field_type(field, class, type_syntax.name)?)
+        } else {
+            None
+        };
         let expected_name = self
             .plan
             .store
@@ -980,11 +1365,7 @@ impl ClassStateValidator<'_, '_> {
             .get(field.declared_type)
             .reference_symbol()
             .map(|symbol| self.plan.store.symbols.get(symbol).name);
-        if expected_name.is_none_or(|expected| {
-            let expected = self.plan.store.names.try_resolve(expected.text());
-            let actual = self.plan.store.names.try_resolve(type_syntax.name.text());
-            expected.is_none() || expected != actual
-        }) {
+        if expected_name.is_none_or(|expected| expected != type_syntax.name) {
             return Err(PickleError::FieldType {
                 symbol: field.symbol,
                 expected: field.declared_type,
@@ -992,7 +1373,12 @@ impl ClassStateValidator<'_, '_> {
             });
         }
         let actual_type = self.completed(field.symbol)?;
-        if !self.same_canonical_type(actual_type, field.declared_type) {
+        let field_type_matches = if reference_field.is_some() {
+            self.same_exact_type_ref(actual_type, field.declared_type)
+        } else {
+            self.same_canonical_type(actual_type, field.declared_type)
+        };
+        if !field_type_matches {
             return Err(PickleError::FieldType {
                 symbol: field.symbol,
                 expected: field.declared_type,
@@ -1026,6 +1412,22 @@ impl ClassStateValidator<'_, '_> {
         }
         let source_initializer = self.source_tree(source_rhs)?;
         let typed = self.typed_tree(field.typed_initializer)?;
+        if let Some(reference_field) = reference_field {
+            self.validate_pending_reference_initializer(
+                field,
+                constructor,
+                reference_field.target_class,
+                source_rhs,
+            )?;
+            if !self.same_type_ref_target(typed.ty, field.declared_type) {
+                return Err(PickleError::FieldType {
+                    symbol: field.symbol,
+                    expected: field.declared_type,
+                    actual: typed.ty,
+                });
+            }
+            return Ok(Some(reference_field));
+        }
         match (&source_initializer.kind, &typed.kind) {
             (
                 TreeKind::PhaseSpecific(UntypedNode::Number(source_literal)),
@@ -1095,7 +1497,7 @@ impl ClassStateValidator<'_, '_> {
                 actual: initializer_type,
             });
         }
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -1111,11 +1513,27 @@ impl ClassMemberPicklePlan {
 /// A checked class-state input. It only borrows its source compilation session.
 pub struct ValidatedClassStatePlan<'p, 'a> {
     plan: &'p ClassStatePicklePlan<'a>,
+    same_batch_reference_fields: Vec<SameBatchReferenceFieldData>,
 }
 
 impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
     pub fn plan(&self) -> &'p ClassStatePicklePlan<'a> {
         self.plan
+    }
+
+    /// Read-only proofs for immutable reference fields whose target class is
+    /// part of this exact source batch. The initializer roots remain pending
+    /// and are not passed to the expression serializer by this API.
+    pub fn same_batch_reference_fields(
+        &self,
+    ) -> impl ExactSizeIterator<Item = ValidatedSameBatchReferenceField<'_, 'a>> + '_ {
+        self.same_batch_reference_fields
+            .iter()
+            .copied()
+            .map(|data| ValidatedSameBatchReferenceField {
+                plan: self.plan,
+                data,
+            })
     }
 
     /// Canonical relative path intended for this class's `.tasty` artifact.
@@ -1137,12 +1555,15 @@ impl ClassStatePicklePlan<'_> {
         &self,
         limits: ValidationLimits,
     ) -> Result<ValidatedClassStatePlan<'_, '_>, PickleError> {
-        ClassStateValidator {
+        let same_batch_reference_fields = ClassStateValidator {
             plan: self,
             limits,
             remaining: limits.max_items,
         }
         .validate()?;
-        Ok(ValidatedClassStatePlan { plan: self })
+        Ok(ValidatedClassStatePlan {
+            plan: self,
+            same_batch_reference_fields,
+        })
     }
 }

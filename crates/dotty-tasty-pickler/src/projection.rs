@@ -5,7 +5,10 @@ use std::collections::{HashMap, HashSet};
 use dotty_core::*;
 use dotty_tasty::tasty::*;
 
-use crate::{Builtin, LimitKind, PickleError, ReferenceError, ValidatedPicklePlan};
+use crate::{
+    Builtin, LimitKind, PickleError, ReferenceError, ValidatedPicklePlan,
+    ValidatedSameBatchReferenceField,
+};
 
 mod primitive_operator;
 
@@ -1717,6 +1720,41 @@ impl<'a> EncodingContext<'a> {
         } else {
             Err(PickleError::UnsupportedTypeReference { ty })
         }
+    }
+
+    /// Projects the Scala 3.9 `IDENTtpt` wrapper for a validated same-batch
+    /// reference field. This returns only a type fragment; it does not make
+    /// the pending field initializer serializable.
+    pub fn same_batch_reference_field_type_syntax(
+        &mut self,
+        field: &ValidatedSameBatchReferenceField<'_, '_>,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|context| {
+            let (plan, target, target_tree, type_name, declared_type) = field.projection_parts();
+            if !std::ptr::eq(context.store, plan.store)
+                || !std::ptr::eq(context.definitions, plan.definitions)
+                || !std::ptr::eq(context.source_index, plan.source_index)
+                || context.source != plan.source.id
+                || !context.declarations.contains_key(&plan.class)
+            {
+                return Err(reference(target, ReferenceError::NotRegistered));
+            }
+            context.register_planned_source_class(
+                target,
+                target_tree,
+                plan.typed_bindings.planned_class_symbols(),
+            )?;
+            let child = context.lower(declared_type, 0)?;
+            let name = context.utf8(context.text(type_name.text())?)?;
+            context
+                .wire
+                .push(AstNode::NatAst {
+                    tag: IDENTTPT_TAG,
+                    value: AstOperand::Nat(name),
+                    child,
+                })
+                .map_err(construction)
+        })
     }
     /// The oracle's wire Unit return type for a default constructor. It never
     /// replaces the constructor's canonical class-instance semantic signature.
