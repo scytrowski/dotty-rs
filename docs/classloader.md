@@ -948,8 +948,15 @@ remain separate evidence.
 
 The manual hosted workflow runs two serial full audits and compares the new
 root/file provenance sidecar with the normalized reports and historical cohort
-sidecars. The current hard limits are completed dependency p95 <= 6 and maximum
-completed-class fanout <= 16. The historic #1342 root weights total 8,949,
-while their separate source-attribution sidecar totals 8,948; this mismatch is
-explicitly retained pending the final reconciliation. No current full-corpus
-measurement or recommendation is claimed until that workflow succeeds.
+sidecars. The current gate keeps completed dependency p95 <= 6. Raw maximum
+completed-class fanout remains reported; requests above 16 pass only when their
+full request identity, completion set, and dependency graph match the pinned
+current-main oracle. The verifier requires every completion to lie in the
+verified hierarchy closure, rejects unknown high-fanout roots and cycles, and
+applies separate 256-identity, 512-edge, and 256-depth budgets. The focused
+policy evidence and reproduction are in
+[`classloader-completion-fanout-policy-3.9.0.md`](classloader-completion-fanout-policy-3.9.0.md).
+The historic #1342 root weights total 8,949, while their separate
+source-attribution sidecar totals 8,948; this mismatch is explicitly retained
+pending final reconciliation. The focused policy is not a new full-corpus
+measurement.

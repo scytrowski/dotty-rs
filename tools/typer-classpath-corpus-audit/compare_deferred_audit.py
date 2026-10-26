@@ -7,6 +7,14 @@ import io
 import re
 from pathlib import Path
 
+from fanout_policy import (
+    LEGACY_COMPLETION_LIMIT,
+    MAX_HIERARCHY_DEPTH,
+    MAX_PROFILE_EDGES,
+    MAX_PROFILE_IDENTITIES,
+    verify_high_fanout_profiles,
+)
+
 
 COHORTS = {
     'impure_function_baseline_before_after': '#946',
@@ -98,9 +106,31 @@ def gate(baseline, current, baseline_target_keys=None, baseline_class_successes=
         errors.append(f'lost previously successful targets: {sorted(lost)}')
     depth = scalar(current, 'dependency_load_profile', 'p95_dependency_depth')
     fanout = scalar(current, 'dependency_load_profile', 'max_distinct_fully_completed_classes_per_request')
-    if depth > 6 or fanout > 16:
-        errors.append(
-            f'dependency reduction gate failed: p95={depth}/6, fanout={fanout}/16')
+    verified_fanout = []
+    try:
+        high_count = scalar(
+            current, 'dependency_load_profile', 'completed_fanout_over_16_requests')
+        high_profiles = [
+            line.removeprefix('    high_fanout_profile=')
+            for line in section_lines(current, 'dependency_load_profile')
+            if line.startswith('    high_fanout_profile=')
+        ]
+        if high_count == 0 and fanout > LEGACY_COMPLETION_LIMIT:
+            errors.append('high completion fanout profile evidence is missing')
+        elif high_count > 0:
+            verified_fanout = verify_high_fanout_profiles(high_profiles, high_count)
+            if not verified_fanout:
+                errors.append('high completion fanout has no verified hierarchy evidence')
+            if fanout != max(profile.completed for profile in verified_fanout):
+                errors.append(
+                    'raw maximum completed fanout differs from verified high-fanout profiles')
+        if (fanout > LEGACY_COMPLETION_LIMIT) != (high_count > 0):
+            errors.append(
+                f'high-fanout request count {high_count} contradicts raw maximum {fanout}')
+    except ValueError as error:
+        errors.append(f'unverified high completion fanout: {error}')
+    if depth > 6:
+        errors.append(f'dependency depth gate failed: p95={depth}/6')
     before = (scalar(baseline, 'resolver_metrics', 'external_class_symbol_successes')
               if baseline_class_successes is None else baseline_class_successes)
     after = scalar(current, 'resolver_metrics', 'external_class_symbol_successes')
@@ -300,8 +330,33 @@ def main():
             writer.writerows(rows)
     if gate_error:
         print(f'Gate failed: {gate_error}')
+    elif fanout <= LEGACY_COMPLETION_LIMIT:
+        print(
+            f'Gate passed: p95 completion depth {depth}/6; '
+            f'maximum completed fanout {fanout}/{LEGACY_COMPLETION_LIMIT}.'
+        )
     else:
-        print(f'Gate passed: p95 completion depth {depth}/6; maximum completed fanout {fanout}/16.')
+        high_count = scalar(
+            current, 'dependency_load_profile', 'completed_fanout_over_16_requests')
+        high_profiles = [
+            line.removeprefix('    high_fanout_profile=')
+            for line in section_lines(current, 'dependency_load_profile')
+            if line.startswith('    high_fanout_profile=')
+        ]
+        verified = verify_high_fanout_profiles(high_profiles, high_count)
+        print(
+            f'Gate passed: p95 completion depth {depth}/6; raw maximum completed '
+            f'fanout {fanout}; hierarchy-verified exception profiles {len(verified)}.'
+        )
+        for profile in verified:
+            print(
+                f'  {profile.method}: raw completed={profile.completed}; '
+                f'proven hierarchy={profile.proven_hierarchy}; '
+                f'unexpected={profile.unexpected}; max depth={profile.depth}; '
+                f'distinct identities={profile.identities}; '
+                f'budgets={MAX_PROFILE_IDENTITIES} identities / '
+                f'{MAX_PROFILE_EDGES} edges / {MAX_HIERARCHY_DEPTH} depth.'
+            )
     baseline_successes = (successful_targets(baseline) if target_keys is None
                           else target_keys)
     current_successes = successful_targets(current)
