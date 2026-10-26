@@ -83,14 +83,16 @@ An independent identity-only session with `SourceId(1691)` also produced `Counte
 
 The existing JVM-only source path accepts and emits both methods. The focused test checks the emitted descriptors and instruction sequences for `create` and `identity`; with `DOTTY_CLASSFILE_REQUIRE_JDK=1`, it also compiles a Java 21 client and executes the factory result under `java -Xverify:all`.
 
-The paired JVM/TASTy batch planner runs the same source frontend, completes both typed bodies, and validates the complete JVM unit before it reaches the cross-contract check. The first rejection is then:
+The paired JVM/TASTy batch planner runs the same source frontend, completes both typed bodies, and validates the complete JVM unit before it reaches the cross-contract check. With #1692, the identity-only source passes this check and emits a complete `CounterIdentity.tasty`. The positive test checks its class-valued result syntax and original formal reference. When `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE` is set, it also asks pinned Scala 3.9 `-from-tasty` to rebuild both Rust-produced `Counter` and `CounterIdentity` sidecars, checks `(Lexample/Counter;)Lexample/Counter;` with `javap`, and runs a Java 21 `-Xverify:all` identity client.
+
+The constructor-body control still fails while validating the real typed body:
 
 ```text
 phase: "JVM/TASTy cross-contract validation"
-reason: TastyPlan(MalformedType { ty: TypeId(...), role: MethodResult })
+reason: TastyPlan(BodyType { tree: TreeId(...), ty: TypeId(...) })
 ```
 
-The regression runs `create` and `identity` as separate batches. Both fail on the reference-valued method result. The class-state pickler's method-result subset currently permits only `Int`, `Boolean`, and `Unit`; the wrapper reports the error while validating the TASTy/JVM cross-contract. No typed trees, constructor symbols, or type references are fabricated to get past it. This makes identity an independent control for the ABI/result boundary, not evidence that factory construction works in paired output.
+The regression keeps `create` unsupported at the body stage: the pickler does not replace `new Counter(seed)` with a fake direct return or invent constructor trees. The bounded reference-result case only accepts the exact source-declared class symbol from the same validated batch, and only when the typed RHS is the matching method formal. Primitive method output and the existing class-valued formal signature remain unchanged.
 
 ## Scala consumer and classpath controls
 
@@ -119,27 +121,26 @@ This matrix combines observed failure-stage probes in the focused tests with the
 | Unplanned constructor target or stale/foreign constructor symbol | JVM validation reports `MissingClassPlan` or rejects the source-proven constructor identity (`InvalidPrimaryConstructor` / constructor-owner validation). See `reference_projection_rejects_unplanned_stale_and_noncanonical_targets` and `rejects_a_constructor_reference_owned_by_another_class`. |
 | External class without a planned class artifact | JVM projection rejects the external/unplanned target; it does not guess a class plan from a descriptor. Missing source class symbols instead fail at typer lookup. |
 | Wrong-owner TypeRef, malformed class info, or invalid package chain | JVM metadata/projection rejects the class/type identity before emission (`UnsupportedJvmReferenceType`, `InvalidJvmClassInfo`, or `InvalidPackageOwnerChain`/`InvalidJvmName`). See `method_signature_projection_requires_exact_class_and_package_identity`, `rejects_malformed_class_info_instead_of_guessing_class_shape`, and `rejects_nested_and_invalid_package_owner_chains`. |
-| Reference-valued factory or identity result | Source typing and JVM unit validation succeed; paired TASTy cross-contract reports `TastyPlan(MalformedType { role: MethodResult })`. |
+| Identity returning its exact planned class-valued formal | Source and JVM/TASTy validation accept the reference result; `new` is not involved. The opt-in Scala consumer check is described above. |
+| Factory result from `new Counter(seed)` | Source typing and JVM unit validation succeed; TASTy body validation rejects the unsupported constructor expression with `TastyPlan(BodyType { .. })`. |
 | One nested `new` as a constructor argument, or sibling allocations | JVM source lowering accepts the bounded shapes and JDK verification passes; see `nested_new_constructor_arguments_lower_lifo_and_verify_initialized_values`. Deeper nesting or a third simultaneously pending allocation is rejected by source lowering / the class-aware verifier before class publication. |
-| Cross-class reference field initialized by an approved direct `new` | JVM-only source path supports a planned private reference field with a bounded initializer. Factory-valued/nested/branch-valued reference field initialization is rejected by JVM codegen. The factory's paired result boundary fails earlier at `MethodResult`, so it is not evidence for field serialization. |
+| Cross-class reference field initialized by an approved direct `new` | JVM-only source path supports a planned private reference field with a bounded initializer. Factory-valued/nested/branch-valued reference field initialization is rejected by JVM codegen. The identity result proof does not claim support for serializing factory-valued field initializers. |
 | Classfile-only Scala classpath or stale/missing TASTy sidecar | Pinned Scala 3.9 loader rejects the Scala class with the missing-sidecar diagnostic. |
 | TASTy-only Scala classpath | Scala compiler can typecheck; execution cannot load a missing JVM class until `-from-tasty` or another compiler provides it. |
 
-The existing Scala consumer audit also measures missing, misplaced, corrupt, and stale-UUID sidecars: [`jvm-tasty-cross-class.md`](jvm-tasty-cross-class.md) records each observed diagnostic and first stage. The factory's Rust paired producer stops at the reference-result contract for `create` and `identity`; it does not claim that the later constructor, field, owner, or sidecar forms are accepted by paired output.
+The existing Scala consumer audit also measures missing, misplaced, corrupt, and stale-UUID sidecars: [`jvm-tasty-cross-class.md`](jvm-tasty-cross-class.md) records each observed diagnostic and first stage. #1692 adds the opt-in Scala consumer test for identity-only Rust sidecars; factory construction and linked batch artifact publication remain later increments.
 
 ## Follow-up dependency map
 
-Issue #1690 provides a pinned source/runtime oracle and the first-boundary evidence needed by its successors. The remaining implementation work should proceed in this dependency order:
+Issues #1690–#1692 provide the pinned source/runtime oracle, canonical source/typed identity proof, and the first reference-result TASTy case. Remaining implementation proceeds in this dependency order:
 
-1. **#1691** — canonical typed construction proof and source-to-typed identity.
-2. **#1692** — reference-valued result TASTy encoding.
-3. **#1693** — constructor `New`/`SELECTin`/`<init>` TASTy encoding and exact owner/formal bindings.
-4. **#1694** — batch cross-class TASTy validation and linked artifacts.
-5. **#1695** — JDK verification and runtime factory client.
-6. **#1696** — independent Scala consumer and sidecar/classpath behavior.
-7. **#1697** — final release gate after the preceding compatibility layers pass.
+1. **#1693** — constructor `New`/`SELECTin`/`<init>` TASTy encoding and exact owner/formal bindings.
+2. **#1694** — batch cross-class TASTy validation and linked artifacts.
+3. **#1695** — JDK verification and runtime factory client.
+4. **#1696** — independent Scala consumer and sidecar/classpath behavior.
+5. **#1697** — final release gate after the preceding compatibility layers pass.
 
-The audit does not mark those successor requirements complete. The Scala oracle validates their target behavior; the current Rust paired producer still rejects the reference result before serializing the factory method body.
+These later increments are not completed by the identity result test. The Rust paired producer continues to reject constructor `New` before serializing that method body.
 
 ## Rust regression commands
 

@@ -1700,7 +1700,10 @@ impl Validator<'_, '_> {
                             reason: crate::ReferenceError::Owner,
                         });
                     }
-                    if self.complete(*parameter)? != result_type {
+                    let parameter_type = self.complete(*parameter)?;
+                    if parameter_type != result_type
+                        && !self.same_planned_sibling_class_type(parameter_type, result_type)
+                    {
                         return Err(PickleError::UnsupportedTypeReference { ty: node.ty });
                     }
                     None

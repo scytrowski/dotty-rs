@@ -2,7 +2,9 @@ use dotty::jvm_tasty_plan::{
     PairedPlanError, with_paired_jvm_tasty_batch_plan, with_paired_jvm_tasty_class_plan,
 };
 use dotty_core::ast::TreeKind;
-use dotty_core::{SourceId, SymbolId, TreeId, Typed, Untyped};
+use dotty_core::{
+    SourceId, SymbolId, SymbolInfo, TermRefTarget, TreeId, Type, TypeRefTarget, Typed, Untyped,
+};
 use dotty_jvm::JvmClassInitializationPlan;
 use dotty_tasty::tasty::*;
 use dotty_tasty_pickler::{
@@ -13,6 +15,8 @@ const COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
 const CROSS_CLASS_READER_LITERAL: &str =
     include_str!("fixtures/jvm_tasty_cross_class/ReaderLiteral.scala");
 const CROSS_CLASS_READER_CALL: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader.scala");
+const CROSS_CLASS_IDENTITY_RESULT: &str =
+    include_str!("fixtures/jvm_tasty_cross_class_factories/CounterIdentitySource.scala");
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 struct WithoutPlannedClasses<'a>(&'a dyn SourceTypedBindings);
@@ -662,6 +666,239 @@ fn same_batch_class_formal_emits_reader_owned_counter_type_without_cloning_count
 }
 
 #[test]
+fn same_batch_class_result_emits_identity_tasty_and_keeps_allocation_unsupported() {
+    with_paired_jvm_tasty_batch_plan(
+        CROSS_CLASS_IDENTITY_RESULT,
+        "tests/fixtures/jvm_tasty_cross_class_factories/CounterIdentitySource.scala",
+        SourceId::from_index(1692),
+        |batch| {
+            let [counter, factory] = batch.classes else {
+                panic!("fixture has Counter and CounterIdentity plans");
+            };
+            let plan = factory.tasty_plan.plan();
+            let method = factory
+                .compatibility
+                .jvm_metadata()
+                .methods()
+                .iter()
+                .find(|method| {
+                    batch.jvm_unit.store.names.try_resolve(
+                        batch
+                            .jvm_unit
+                            .store
+                            .symbols
+                            .get(method.symbol())
+                            .name
+                            .text(),
+                    ) == Some("identity")
+                })
+                .expect("identity is present in the JVM class plan");
+            assert_eq!(
+                method.descriptor().as_str(),
+                "(Lexample/Counter;)Lexample/Counter;"
+            );
+
+            let ClassMemberPicklePlan::Method {
+                symbol: method_symbol,
+                source_tree,
+            } = plan.members[0]
+            else {
+                panic!("CounterIdentity contains its identity method")
+            };
+            let TreeKind::DefDef(source_method) = &plan.source_ast.get(source_tree).kind else {
+                panic!("identity source member is a method")
+            };
+            let rhs = source_method.rhs.expect("identity has its original RHS");
+            let typed_root = plan
+                .typed_bindings
+                .typed_at(plan.source.id, rhs)
+                .expect("identity RHS has its frontend binding");
+            let TreeKind::Ident(_) = &plan.typed_ast.get(typed_root).kind else {
+                panic!("identity returns the original direct parameter reference")
+            };
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(formal),
+                ..
+            } = plan.store.types.get(plan.typed_ast.get(typed_root).ty)
+            else {
+                panic!("identity RHS keeps its exact formal TermRef")
+            };
+            assert_eq!(plan.store.symbols.get(*formal).owner, Some(method_symbol));
+            assert_eq!(
+                plan.store.symbols.get(method_symbol).owner,
+                Some(factory.class)
+            );
+
+            let SymbolInfo::Complete(signature) = plan.store.symbols.get(method_symbol).info else {
+                panic!("identity signature is complete")
+            };
+            let Type::Method(signature) = plan.store.types.get(signature) else {
+                panic!("identity has a method signature")
+            };
+            let referenced_class = |ty| match plan.store.types.get(ty) {
+                Type::TypeRef {
+                    target: TypeRefTarget::Symbol(class),
+                    ..
+                } => *class,
+                _ => panic!("identity formal/result use a canonical class TypeRef"),
+            };
+            assert_eq!(signature.params.len(), 1);
+            assert_eq!(referenced_class(signature.params[0].ty), counter.class);
+            assert_eq!(referenced_class(signature.result), counter.class);
+            assert_eq!(
+                signature.params[0].name.as_name(),
+                &plan.store.symbols.get(*formal).name
+            );
+
+            let output = factory
+                .tasty_plan
+                .pickle()
+                .expect("same-batch Counter result serializes as semantic TASTy");
+            let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+            let package = file
+                .asts()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .decode_package()
+                .unwrap();
+            assert_eq!(package.stats.len(), 1, "no local Counter clone is emitted");
+            let DefinitionBody::TypeDef { name, .. } = package
+                .stats
+                .get(0)
+                .unwrap()
+                .decode_definition_body()
+                .unwrap()
+            else {
+                panic!("the sidecar contains one class declaration")
+            };
+            assert_eq!(file.names().render(name).unwrap(), "CounterIdentity");
+
+            let declaration = output
+                .declarations()
+                .iter()
+                .find(|declaration| declaration.symbol == method_symbol)
+                .expect("the method has its canonical TASTy declaration");
+            let body = file
+                .ast_address_index()
+                .unwrap()
+                .get(declaration.address)
+                .unwrap()
+                .decode_defdef_body()
+                .unwrap();
+            assert_eq!(file.names().render(body.name).unwrap(), "identity");
+            assert!(
+                body.return_type
+                    .nodes()
+                    .iter()
+                    .any(|node| node.tag == IDENTTPT_TAG)
+            );
+            assert!(
+                body.return_type
+                    .nodes()
+                    .iter()
+                    .any(|node| node.tag == TYPEREF_TAG)
+            );
+            assert!(
+                body.return_type
+                    .nodes()
+                    .iter()
+                    .any(|node| node.tag == TERMREFPKG_TAG)
+            );
+            let result_names = body
+                .return_type
+                .name_refs()
+                .iter()
+                .map(|name| file.names().render(*name).unwrap())
+                .collect::<Vec<_>>();
+            assert!(result_names.iter().any(|name| name == "Counter"));
+            assert!(result_names.iter().any(|name| name == "example"));
+            let formal_type_names = body.parameters[0]
+                .decode_body()
+                .unwrap()
+                .type_tree
+                .name_refs()
+                .iter()
+                .map(|name| file.names().render(*name).unwrap())
+                .collect::<Vec<_>>();
+            assert!(formal_type_names.iter().any(|name| name == "Counter"));
+            assert!(formal_type_names.iter().any(|name| name == "example"));
+            assert!(
+                body.rhs
+                    .as_ref()
+                    .unwrap()
+                    .nodes()
+                    .iter()
+                    .any(|node| node.tag == TERMREFDIRECT_TAG)
+            );
+            let formal_declaration = output
+                .declarations()
+                .iter()
+                .find(|declaration| declaration.symbol == *formal)
+                .expect("the original formal has a bound PARAM address");
+            let references = file
+                .ast_address_index()
+                .unwrap()
+                .get(declaration.address)
+                .unwrap()
+                .ast_refs()
+                .unwrap();
+            assert!(
+                references.iter().any(|reference| {
+                    reference.kind == AstRefKind::TermRefDirect
+                        && reference.address == formal_declaration.address
+                }),
+                "references={references:?}; method={declaration:?}; formal={formal_declaration:?}"
+            );
+
+            let without_planned_classes = WithoutPlannedClasses(plan.typed_bindings);
+            let rejected_plan = ClassStatePicklePlan {
+                store: plan.store,
+                definitions: plan.definitions,
+                source_ast: plan.source_ast,
+                typed_ast: plan.typed_ast,
+                source_index: plan.source_index,
+                typed_bindings: &without_planned_classes,
+                source: plan.source.clone(),
+                class: plan.class,
+                class_tree: plan.class_tree,
+                constructor: plan.constructor.clone(),
+                members: plan.members,
+            };
+            assert!(matches!(
+                rejected_plan.validate().unwrap().pickle(),
+                Err(PickleError::MalformedType {
+                    role: dotty_tasty_pickler::TypeRole::MethodResult,
+                    ..
+                }) | Err(PickleError::UnsupportedTypeReference { .. })
+            ));
+
+            if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+                let counter_output = counter.tasty_plan.pickle().unwrap();
+                run_identity_result_oracle(counter_output.bytes(), output.bytes());
+            }
+        },
+    )
+    .unwrap();
+
+    let construction_source = CROSS_CLASS_IDENTITY_RESULT.replace(
+        "def identity(counter: Counter): Counter = counter",
+        "def identity(counter: Counter): Counter = new Counter(1)",
+    );
+    let construction = with_paired_jvm_tasty_batch_plan(
+        &construction_source,
+        "CounterIdentitySource.scala",
+        SourceId::from_index(1693),
+        |_| panic!("unsupported New must not return a completed batch"),
+    );
+    let Err(PairedPlanError::BatchClass { phase, reason, .. }) = construction else {
+        panic!("unsupported New must fail before a completed batch: {construction:?}");
+    };
+    assert_eq!(phase, "JVM/TASTy cross-contract validation");
+    assert!(reason.contains("TastyPlan(BodyType"), "{reason}");
+}
+
+#[test]
 fn cross_class_call_requires_the_exact_planned_target_method() {
     with_paired_jvm_tasty_batch_plan(
         CROSS_CLASS_READER_CALL,
@@ -1255,6 +1492,104 @@ fn run_reader_signature_oracle(reader_tasty: &[u8]) {
         String::from_utf8_lossy(&javap.stdout).contains("read(example.Counter)"),
         "compiled Reader has unexpected signature: {}",
         String::from_utf8_lossy(&javap.stdout)
+    );
+    fs::remove_dir_all(temporary).unwrap();
+}
+
+fn run_identity_result_oracle(counter_tasty: &[u8], identity_tasty: &[u8]) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala root for explicit oracle"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let version = Command::new(&compiler)
+        .arg("-version")
+        .output()
+        .expect("query pinned Scala compiler version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"));
+
+    let temporary_root = std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir);
+    let temporary = temporary_root.join(format!(
+        "dotty-issue-1692-identity-oracle-{}",
+        std::process::id()
+    ));
+    let candidate = temporary.join("candidate/example");
+    let compiled = temporary.join("compiled");
+    fs::remove_dir_all(&temporary).ok();
+    fs::create_dir_all(&candidate).unwrap();
+    fs::create_dir_all(&compiled).unwrap();
+    fs::write(candidate.join("Counter.tasty"), counter_tasty).unwrap();
+    fs::write(candidate.join("CounterIdentity.tasty"), identity_tasty).unwrap();
+
+    let from_tasty = Command::new(&compiler)
+        .arg("-from-tasty")
+        .arg("-classpath")
+        .arg(temporary.join("candidate"))
+        .arg("-d")
+        .arg(&compiled)
+        .arg(candidate.join("Counter.tasty"))
+        .arg(candidate.join("CounterIdentity.tasty"))
+        .output()
+        .expect("consume both Rust-produced TASTy sidecars with Scala 3.9");
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected reference-result sidecars: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+
+    let javap = Command::new("javap")
+        .arg("-classpath")
+        .arg(&compiled)
+        .arg("-s")
+        .arg("example.CounterIdentity")
+        .output()
+        .expect("inspect Scala-rebuilt identity descriptor");
+    assert!(javap.status.success());
+    assert!(
+        String::from_utf8_lossy(&javap.stdout).contains("(Lexample/Counter;)Lexample/Counter;"),
+        "Scala-rebuilt identity has the wrong descriptor: {}",
+        String::from_utf8_lossy(&javap.stdout)
+    );
+
+    let client = temporary.join("IdentityClient.java");
+    fs::write(
+        &client,
+        "package example; public final class IdentityClient { public static void main(String[] args) { Counter counter = new Counter(7); if (new CounterIdentity().identity(counter) != counter || counter.get() != 7) throw new AssertionError(\"identity result\"); } }\n",
+    )
+    .unwrap();
+    let javac = Command::new("javac")
+        .arg("-classpath")
+        .arg(&compiled)
+        .arg("-d")
+        .arg(&compiled)
+        .arg(&client)
+        .status()
+        .expect("compile Java identity-result verification client");
+    assert!(javac.success(), "Java client compilation failed");
+    let java = Command::new("java")
+        .arg("-Xverify:all")
+        .arg("-classpath")
+        .arg(&compiled)
+        .arg("example.IdentityClient")
+        .status()
+        .expect("run Java 21 identity-result verification client");
+    assert!(
+        java.success(),
+        "Scala-rebuilt identity result failed at runtime"
     );
     fs::remove_dir_all(temporary).unwrap();
 }
