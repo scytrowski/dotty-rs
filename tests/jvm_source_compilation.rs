@@ -13748,6 +13748,44 @@ fn same_source_identity_reference_proof_does_not_require_a_factory_constructor_m
             Some(proof.method())
         );
         assert_eq!(proof.descriptor(), "(Lexample/Counter;)Lexample/Counter;");
+        let (identity_method, _) = proof.source_roots();
+        let factory_tree = ast
+            .iter()
+            .find_map(|(tree, _)| {
+                (index.symbol_at(source_id, tree) == Some(factory)).then_some(tree)
+            })
+            .expect("factory source class exists");
+        let mut malformed_source_ast = AstArena::new();
+        for (tree_id, tree) in ast.iter() {
+            let mut copied = tree.clone();
+            if tree_id == factory_tree {
+                let TreeKind::TypeDef(definition) = &mut copied.kind else {
+                    unreachable!()
+                };
+                definition.rhs = identity_method;
+            }
+            assert_eq!(malformed_source_ast.alloc(copied), tree_id);
+        }
+        assert!(matches!(
+            dotty_jvm_tasty_contract::validate_same_batch_reference_return(
+                unit,
+                definitions,
+                dotty_jvm_tasty_contract::SameBatchSourceEvidence {
+                    source: source_id,
+                    source_ast: &malformed_source_ast,
+                    source_index: index,
+                    typed_index,
+                },
+                counter,
+                factory,
+            ),
+            Err(
+                dotty_jvm_tasty_contract::JvmTastyContractError::FactoryReferenceMismatch {
+                    stage: "complete source batch",
+                    ..
+                }
+            )
+        ));
     };
     let artifacts = compile_source_batch_with_factory_proof_observer(
         source,

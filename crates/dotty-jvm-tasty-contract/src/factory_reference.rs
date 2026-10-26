@@ -510,7 +510,8 @@ pub fn validate_same_batch_reference_return<'proof, 'unit>(
         ));
     }
     for (tree, class_plan) in package.stats.iter().zip(&unit.classes) {
-        let Some(TreeKind::TypeDef(_)) = source_ast.try_get(*tree).map(|node| &node.kind) else {
+        let Some(TreeKind::TypeDef(definition)) = source_ast.try_get(*tree).map(|node| &node.kind)
+        else {
             return Err(mismatch(
                 class_plan.class,
                 None,
@@ -519,13 +520,17 @@ pub fn validate_same_batch_reference_return<'proof, 'unit>(
                 "all top-level siblings must be ordinary classes",
             ));
         };
-        if source_index.symbol_at(source, *tree) != Some(class_plan.class) {
+        if !matches!(
+            source_ast.try_get(definition.rhs).map(|node| &node.kind),
+            Some(TreeKind::Template(_))
+        ) || source_index.symbol_at(source, *tree) != Some(class_plan.class)
+        {
             return Err(mismatch(
                 class_plan.class,
                 None,
                 Some(*tree),
                 "complete source batch",
-                "source declaration identity/order differs from the JVM unit",
+                "source declaration identity/order or class template differs from the JVM unit",
             ));
         }
     }
