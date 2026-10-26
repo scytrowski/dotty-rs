@@ -12,12 +12,334 @@ use dotty_parser::parse_compilation_unit;
 use dotty_typer::SourceTyper;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn source_line(text: &str, start: usize) -> usize {
     text.get(..start)
         .map(|prefix| prefix.bytes().filter(|byte| *byte == b'\n').count() + 1)
         .unwrap_or(0)
+}
+
+pub(super) fn inventory_candidates() {
+    const PINNED_SCALA_REVISION: &str = "777528f19a58e794c9954a42f433373472ec57f8";
+    let scala_root =
+        PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT required"));
+    assert_eq!(
+        git_revision(&scala_root),
+        PINNED_SCALA_REVISION,
+        "ordinary candidate inventory requires the pinned Scala 3.9.0 source revision"
+    );
+    let output = PathBuf::from(
+        std::env::var_os("DOTTY_ORDINARY_CANDIDATE_INVENTORY")
+            .expect("DOTTY_ORDINARY_CANDIDATE_INVENTORY required"),
+    );
+    let source_root = scala_root.join("library/src/scala");
+    let mut files = Vec::new();
+    collect_scala_sources(&source_root, &mut files);
+    files.sort();
+
+    let mut records = Vec::<(usize, String, u32, String)>::new();
+    let mut parse_diagnostics = 0usize;
+    let mut naming_failures = 0usize;
+    let mut eligible = 0usize;
+    let mut excluded_reasons = BTreeMap::<&'static str, usize>::new();
+    for path in &files {
+        let relative_path = path
+            .strip_prefix(&scala_root)
+            .expect("source file is under the pinned Scala root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text = fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("cannot read Scala source {relative_path}: {error}"));
+        let source = SourceId::from_index(0);
+        let mut store = SemanticStore::new();
+        let _definitions = Definitions::bootstrap(&mut store);
+        let scanner = ContextualScanner::new(&text)
+            .unwrap_or_else(|error| panic!("cannot scan {relative_path}: {error}"));
+        let parsed = parse_compilation_unit(
+            SourceText::new(&text).expect("Scala source should be valid UTF-8"),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        parse_diagnostics += parsed.diagnostics.len();
+        let mut packages = Packages::new();
+        let index = match name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            &relative_path,
+            &mut store,
+            &mut packages,
+        ) {
+            Ok(index) => index,
+            Err(_) => {
+                naming_failures += 1;
+                continue;
+            }
+        };
+
+        let import_count = parsed
+            .ast
+            .iter()
+            .filter(|(_, node)| matches!(node.kind, TreeKind::Import(_)))
+            .count();
+        let mut declaration_counts = BTreeMap::<(String, String), usize>::new();
+        for (tree, node) in parsed.ast.iter() {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                continue;
+            };
+            let Some(method) = index.symbol_at(source, tree) else {
+                continue;
+            };
+            let symbol = store.symbols.get(method);
+            let owner_path = symbol
+                .owner
+                .map(|owner| audit_symbol_path(&store, owner))
+                .unwrap_or_default();
+            let method_name = store
+                .names
+                .resolve(definition.name.as_name().text())
+                .to_owned();
+            *declaration_counts
+                .entry((owner_path, method_name))
+                .or_default() += 1;
+        }
+
+        for (tree, node) in parsed.ast.iter() {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                continue;
+            };
+            let Some(method) = index.symbol_at(source, tree) else {
+                continue;
+            };
+            let symbol = store.symbols.get(method);
+            let canonical = matches!(
+                index.definition_of(method),
+                Some(SourceDefinition::Canonical {
+                    source: canonical_source,
+                    tree: canonical_tree
+                }) if canonical_source == source && canonical_tree == tree
+            );
+            let owner_kind = symbol.owner.map(|owner| store.symbols.get(owner).kind);
+            if let Some(reason) = member_exclusion(
+                symbol.kind,
+                symbol.flags,
+                owner_kind,
+                definition.rhs.is_some(),
+                canonical,
+            ) {
+                *excluded_reasons.entry(reason).or_default() += 1;
+                continue;
+            }
+
+            let owner_path = symbol
+                .owner
+                .map(|owner| audit_symbol_path(&store, owner))
+                .unwrap_or_default();
+            let method_name = store
+                .names
+                .resolve(definition.name.as_name().text())
+                .to_owned();
+            let range = node.position.map(|position| position.span().range());
+            let Some(range) = range else {
+                continue;
+            };
+            let line = source_line(&text, range.start() as usize);
+            let rhs_range = definition
+                .rhs
+                .and_then(|rhs| parsed.ast.try_get(rhs))
+                .and_then(|rhs| rhs.position)
+                .map(|position| position.span().range());
+            let rhs_text = rhs_range
+                .and_then(|range| text.get(range.start() as usize..range.end() as usize))
+                .unwrap_or_default();
+            let has_placeholder = rhs_text.contains("???")
+                || rhs_text.contains("NotImplementedError")
+                || rhs_text.contains("??? :");
+            let mut rhs_nodes = Vec::<(u32, u32)>::new();
+            let mut counts = BTreeMap::<&'static str, usize>::new();
+            if let Some(rhs_range) = rhs_range {
+                for (_, rhs_node) in parsed.ast.iter() {
+                    let Some(position) = rhs_node.position else {
+                        continue;
+                    };
+                    let node_range = position.span().range();
+                    if rhs_range.start() > node_range.start() || node_range.end() > rhs_range.end()
+                    {
+                        continue;
+                    }
+                    rhs_nodes.push((node_range.start(), node_range.end()));
+                    let feature = match rhs_node.kind {
+                        TreeKind::Apply(_) | TreeKind::TypeApply(_) => Some("calls"),
+                        TreeKind::Select(_) => Some("selections"),
+                        TreeKind::Ident(_) => Some("identifiers"),
+                        TreeKind::Literal(_) => Some("literals"),
+                        TreeKind::ValDef(_) => Some("local_values"),
+                        TreeKind::DefDef(_) => Some("nested_methods"),
+                        TreeKind::If(_) => Some("branches"),
+                        TreeKind::Match(_) => Some("matches"),
+                        TreeKind::Try(_) => Some("tries"),
+                        TreeKind::Closure(_) => Some("closures"),
+                        TreeKind::While(_) => Some("loops"),
+                        _ => None,
+                    };
+                    if let Some(feature) = feature {
+                        *counts.entry(feature).or_default() += 1;
+                    }
+                }
+            }
+            rhs_nodes.sort_by_key(|(start, end)| (*start, std::cmp::Reverse(*end)));
+            let mut nesting_ends = Vec::<u32>::new();
+            let mut max_depth = 0usize;
+            for (start, end) in &rhs_nodes {
+                while nesting_ends
+                    .last()
+                    .is_some_and(|parent_end| parent_end < start)
+                {
+                    nesting_ends.pop();
+                }
+                nesting_ends.push(*end);
+                max_depth = max_depth.max(nesting_ends.len());
+            }
+            let type_parameters = definition.type_params.len();
+            let value_parameters = definition
+                .value_param_clauses
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>();
+            let defaults = definition
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .filter(|parameter| {
+                    parsed.ast.try_get(**parameter).is_some_and(|node| {
+                        matches!(&node.kind, TreeKind::ValDef(parameter) if parameter.rhs.is_some())
+                    })
+                })
+                .count();
+            let result_inferred = parsed
+                .ast
+                .try_get(definition.tpt)
+                .is_some_and(|tpt| matches!(tpt.kind, TreeKind::TypeTree(_)));
+            let body_size = rhs_nodes.len();
+            let calls = counts.get("calls").copied().unwrap_or(0);
+            let selections = counts.get("selections").copied().unwrap_or(0);
+            let nested_methods = counts.get("nested_methods").copied().unwrap_or(0);
+            let control_flow = counts.get("branches").copied().unwrap_or(0)
+                + counts.get("matches").copied().unwrap_or(0) * 2
+                + counts.get("tries").copied().unwrap_or(0) * 2
+                + counts.get("closures").copied().unwrap_or(0) * 2
+                + counts.get("loops").copied().unwrap_or(0) * 2;
+            let score = body_size
+                + max_depth * 4
+                + type_parameters * 8
+                + value_parameters * 2
+                + calls * 3
+                + selections * 3
+                + nested_methods * 10
+                + control_flow * 4
+                + defaults * 12
+                + usize::from(result_inferred) * 4
+                + import_count.min(5)
+                + declaration_counts
+                    .get(&(owner_path.clone(), method_name.clone()))
+                    .copied()
+                    .unwrap_or(1)
+                    .saturating_sub(1)
+                    * 8
+                + usize::from(has_placeholder) * 100;
+            let tier = if score <= 24 {
+                "A0"
+            } else if score <= 55 {
+                "A1"
+            } else {
+                "edge"
+            };
+            let overload_count = declaration_counts
+                .get(&(owner_path.clone(), method_name.clone()))
+                .copied()
+                .unwrap_or(1)
+                .saturating_sub(1);
+            let feature_text = counts
+                .iter()
+                .map(|(key, value)| (*key, *value))
+                .chain(std::iter::once(("imports", import_count)))
+                .chain(std::iter::once(("same_name_overloads", overload_count)))
+                .chain(std::iter::once((
+                    "placeholder",
+                    usize::from(has_placeholder),
+                )))
+                .filter(|(_, value)| *value > 0)
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let identity = format!("{relative_path}#tree={}", tree.index());
+            let row = format!(
+                "{identity}\t{owner_path}\t{method_name}\t{line}\t{}..{}\t{score}\t{tier}\t{body_size}\t{max_depth}\t{type_parameters}\t{value_parameters}\t{}\t{}\t{}\t{feature_text}",
+                range.start(),
+                range.end(),
+                if result_inferred {
+                    "inferred"
+                } else {
+                    "explicit"
+                },
+                defaults,
+                if symbol.flags.contains(SymbolFlags::IMPLICIT)
+                    || symbol.flags.contains(SymbolFlags::GIVEN)
+                {
+                    "contextual"
+                } else {
+                    "ordinary"
+                },
+            );
+            records.push((score, relative_path.clone(), tree.index(), row));
+            eligible += 1;
+        }
+    }
+    records.sort_by(|left, right| (&left.0, &left.1, &left.2).cmp(&(&right.0, &right.1, &right.2)));
+    let mut report = format!(
+        "scala_revision\t{PINNED_SCALA_REVISION}\nsource_scope\tlibrary/src/scala\nfiles_seen\t{}\nparse_diagnostics\t{parse_diagnostics}\nnamer_failed_files\t{naming_failures}\neligible_ordinary_methods\t{eligible}\n",
+        files.len()
+    );
+    report.push_str("exclusions\n");
+    for (reason, count) in excluded_reasons {
+        report.push_str(&format!("{reason}\t{count}\n"));
+    }
+    report.push_str("\nmethod\towner_path\tmethod_name\tline\trange\trank_score\ttier\trhs_nodes\trhs_depth\ttype_params\tvalue_params\tresult_mode\tdefault_params\tparameter_kind\tfeatures\n");
+    for (_, _, _, row) in records {
+        report.push_str(&row);
+        report.push('\n');
+    }
+    fs::write(&output, report).unwrap_or_else(|error| {
+        panic!(
+            "cannot write ordinary method candidate inventory {}: {error}",
+            output.display()
+        )
+    });
+}
+
+fn collect_scala_sources(directory: &Path, output: &mut Vec<PathBuf>) {
+    let mut entries = fs::read_dir(directory)
+        .unwrap_or_else(|error| {
+            panic!(
+                "cannot read Scala source directory {}: {error}",
+                directory.display()
+            )
+        })
+        .map(|entry| entry.expect("directory entry should be readable").path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            collect_scala_sources(&path, output);
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "scala")
+        {
+            output.push(path);
+        }
+    }
 }
 
 pub(super) fn run() {
@@ -295,7 +617,7 @@ pub(super) fn run() {
     }
     assert!(rows.iter().all(|row| row.len() == 10));
     rows.sort();
-    println!("ORDINARY_METHOD_REPORT_BEGIN");
+    println!("\nORDINARY_METHOD_REPORT_BEGIN");
     println!("schema=1");
     println!("pinned_scala_revision={PINNED_SCALA_REVISION}");
     println!("selected={}", identities.len());

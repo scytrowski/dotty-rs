@@ -7412,6 +7412,12 @@ fn pinned_scala39_ordinary_member_method_audit() {
 }
 
 #[test]
+#[ignore = "run with SCALA39_ROOT and DOTTY_ORDINARY_CANDIDATE_INVENTORY to inventory pinned library sources"]
+fn pinned_scala39_ordinary_member_candidate_inventory() {
+    ordinary_member_audit_support::inventory_candidates();
+}
+
+#[test]
 #[ignore = "run tools/typer-classpath-corpus-audit/run with the pinned Scala checkout and explicit JAVA_HOME"]
 fn pinned_scala39_local_definition_audit() {
     let audit_started = Instant::now();
