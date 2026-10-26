@@ -14982,14 +14982,60 @@ fn print_classload_profile_timings(profiles: &[DependencyObservation], match_fil
         .iter()
         .map(|observation| observation.profile.load_uncached_inclusive_ns)
         .sum::<u128>();
+    let mut tasty_counters = BTreeMap::<String, u128>::new();
+    for observation in profiles {
+        for (key, value) in &observation.profile.tasty_decode_counters {
+            *tasty_counters.entry(key.clone()).or_default() += value;
+        }
+    }
+    let tasty_counters = tasty_counters
+        .iter()
+        .filter(|(key, _)| !key.starts_with("resource_observation:"))
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     if let Some(file) = match_file {
         println!(
             "AUDIT_MATCH_CLASSLOAD_TIMINGS file={file} resource_lookup_ns={resource_lookup_ns} classfile_decode_ns={classfile_decode_ns} tasty_decode_ns={tasty_decode_ns} load_uncached_inclusive_ns={load_uncached_inclusive_ns}"
         );
+        println!("AUDIT_MATCH_TASTY_PHASES file={file} {tasty_counters}");
+        for observation in profiles.iter().flat_map(|profile| {
+            profile
+                .profile
+                .tasty_decode_counters
+                .iter()
+                .filter(|(key, _)| key.starts_with("resource_observation:"))
+        }) {
+            let record = observation
+                .0
+                .strip_prefix("resource_observation:")
+                .unwrap_or(observation.0);
+            println!(
+                "AUDIT_MATCH_TASTY_RESOURCE file={file} resource={record} count={}",
+                observation.1
+            );
+        }
     } else {
         println!(
             "AUDIT_CLASSLOAD_TIMINGS resource_lookup_ns={resource_lookup_ns} classfile_decode_ns={classfile_decode_ns} tasty_decode_ns={tasty_decode_ns} load_uncached_inclusive_ns={load_uncached_inclusive_ns}"
         );
+        println!("AUDIT_TASTY_PHASES {tasty_counters}");
+        for observation in profiles.iter().flat_map(|profile| {
+            profile
+                .profile
+                .tasty_decode_counters
+                .iter()
+                .filter(|(key, _)| key.starts_with("resource_observation:"))
+        }) {
+            let record = observation
+                .0
+                .strip_prefix("resource_observation:")
+                .unwrap_or(observation.0);
+            println!(
+                "AUDIT_TASTY_RESOURCE resource={record} count={}",
+                observation.1
+            );
+        }
     }
 }
 

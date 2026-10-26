@@ -158,6 +158,7 @@ def parse_run(log: str) -> dict:
         "classpath_resources": {}, "archive_resources": {}, "resolver_profile": {}, "match_resolver_profiles": [],
         "repeated_requests": [],
         "classload_timings": {}, "match_classload_timings": [],
+        "tasty_phases": {}, "match_tasty_phases": [], "tasty_resources": [], "match_tasty_resources": [],
         "resolver_roots": [], "resolver_root_phases": [], "resolver_cache": {}, "match_resolver_cache": [],
     }
     for line in log.splitlines():
@@ -209,6 +210,10 @@ def parse_run(log: str) -> dict:
             )
         elif line.startswith("AUDIT_CLASSLOAD_TIMINGS "):
             result["classload_timings"] = {key: int(value) for key, value in kvs(line).items()}
+        elif line.startswith("AUDIT_TASTY_PHASES "):
+            result["tasty_phases"] = {key: int(value) for key, value in kvs(line).items()}
+        elif line.startswith("AUDIT_TASTY_RESOURCE "):
+            result["tasty_resources"].append(kvs(line))
         elif line.startswith("AUDIT_RESOLVER_ROOT_PHASE "):
             values = kvs(line)
             values.setdefault("scope", "source")
@@ -225,6 +230,16 @@ def parse_run(log: str) -> dict:
             values = kvs(line)
             result["match_classload_timings"].append(
                 {"file": values["file"], **{key: int(value) for key, value in values.items() if key != "file"}}
+            )
+        elif line.startswith("AUDIT_MATCH_TASTY_PHASES "):
+            values = kvs(line)
+            result["match_tasty_phases"].append(
+                {"file": values.pop("file"), **{key: int(value) for key, value in values.items()}}
+            )
+        elif line.startswith("AUDIT_MATCH_TASTY_RESOURCE "):
+            values = kvs(line)
+            result["match_tasty_resources"].append(
+                {"file": values.pop("file"), **values}
             )
         elif line.startswith("AUDIT_RESOLVER_STAGE "):
             result["resolver_stages"].append(kvs(line))
@@ -678,6 +693,32 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
             for run_index, run in enumerate(runs, 1)
             for row in run.get("match_classload_timings", [])
         ), encoding="utf-8")
+    tasty_keys = sorted({key for run in runs for key in run.get("tasty_phases", {})})
+    (out_dir / "tasty-phases.tsv").write_text(
+        "run\t" + "\t".join(tasty_keys) + "\n" + "".join(
+            f"{run_index}\t" + "\t".join(str(run.get("tasty_phases", {}).get(key, 0)) for key in tasty_keys) + "\n"
+            for run_index, run in enumerate(runs, 1)
+        ), encoding="utf-8")
+    match_tasty_keys = sorted({key for run in runs for row in run.get("match_tasty_phases", []) for key in row})
+    (out_dir / "match-tasty-phases.tsv").write_text(
+        "run\tfile\t" + "\t".join(key for key in match_tasty_keys if key != "file") + "\n" + "".join(
+            f"{run_index}\t{row.get('file', 'not_captured')}\t" + "\t".join(str(row.get(key, 0)) for key in match_tasty_keys if key != "file") + "\n"
+            for run_index, run in enumerate(runs, 1)
+            for row in run.get("match_tasty_phases", [])
+        ), encoding="utf-8")
+    tasty_resource_rows = ["run\tscope\tfile\tresource\tversion\tsize_bucket\toutcome\tcount"]
+    for run_index, run in enumerate(runs, 1):
+        for scope, records in (("source", run.get("tasty_resources", [])), ("match", run.get("match_tasty_resources", []))):
+            for record in records:
+                resource = record.get("resource")
+                if resource is None:
+                    continue
+                parts = resource.split("|", 3)
+                if len(parts) != 4:
+                    fail(f"malformed TASTy resource record: {resource!r}")
+                resource_name, version, size_bucket, outcome = parts
+                tasty_resource_rows.append(f"{run_index}\t{scope}\t{record.get('file', '')}\t{resource_name}\t{version}\t{size_bucket}\t{outcome}\t{record.get('count', '0')}")
+    (out_dir / "tasty-resources.tsv").write_text("\n".join(tasty_resource_rows) + "\n", encoding="utf-8")
     (out_dir / "methods.tsv").write_text("\n".join(method_rows) + "\n", encoding="utf-8")
     outcome_rows = ["run\tfile\ttree\tresult"] + [
         f"{run_index}\t{path}\t{tree}\t{result}"
