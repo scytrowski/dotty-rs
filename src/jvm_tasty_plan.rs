@@ -1184,22 +1184,32 @@ fn is_counter_factory_source(
         }
         _ => "",
     };
-    class_name(*counter) == "Counter"
-        && class_name(*factory) == "CounterFactory"
-        && matches!(
-            source_ast
-                .try_get(*factory)
-                .and_then(|tree| match &tree.kind {
-                    TreeKind::TypeDef(definition) => Some(definition.rhs),
-                    _ => None,
-                })
-                .and_then(|rhs| source_ast.try_get(rhs))
-                .map(|tree| &tree.kind),
-            Some(TreeKind::Template(template))
-                if template.body.iter().any(|member| matches!(
-                    source_ast.try_get(*member).map(|tree| &tree.kind),
-                    Some(TreeKind::DefDef(definition))
-                        if store.names.resolve(definition.name.as_name().text()) == "create"
-                ))
-        )
+    if class_name(*counter) != "Counter" || class_name(*factory) != "CounterFactory" {
+        return false;
+    }
+
+    let Some(TreeKind::TypeDef(factory_definition)) =
+        source_ast.try_get(*factory).map(|tree| &tree.kind)
+    else {
+        return false;
+    };
+    let Some(TreeKind::Template(template)) = source_ast
+        .try_get(factory_definition.rhs)
+        .map(|tree| &tree.kind)
+    else {
+        return false;
+    };
+
+    template.body.iter().any(|member| {
+        let Some(TreeKind::DefDef(definition)) = source_ast.try_get(*member).map(|tree| &tree.kind)
+        else {
+            return false;
+        };
+        store.names.resolve(definition.name.as_name().text()) == "create"
+            && matches!(
+                source_ast.try_get(definition.tpt).map(|tree| &tree.kind),
+                Some(TreeKind::Ident(result))
+                    if store.names.resolve(result.name.text()) == "Counter"
+            )
+    })
 }
