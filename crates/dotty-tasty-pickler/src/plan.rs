@@ -41,6 +41,13 @@ pub struct SourceMetadata {
 pub trait SourceTypedBindings {
     fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>>;
 
+    /// Canonical classes present in the complete source/JVM/TASTy batch, when
+    /// the producer has such a batch plan. The pickler validates each listed
+    /// class against the same source index and semantic store before using it.
+    fn planned_class_symbols(&self) -> &[SymbolId] {
+        &[]
+    }
+
     /// Exact source/typed/symbol/scope proofs for method-local value declarations.
     /// Producers that support local values must return the canonical frontend
     /// bindings; the pickler never reconstructs them from names.
@@ -170,6 +177,7 @@ impl<'a> PicklePlan<'a> {
             limits,
             remaining: limits.max_items,
             class_members: None,
+            planned_class_symbols: &[],
             local_bindings: HashMap::new(),
             registered_local_symbols: HashSet::new(),
             seen_local_bindings: HashSet::new(),
@@ -219,6 +227,7 @@ pub(crate) fn validate_class_state_method(
         limits: ValidationLimits::default(),
         remaining: ValidationLimits::default().max_items,
         class_members: Some(class.members),
+        planned_class_symbols: class.typed_bindings.planned_class_symbols(),
         local_bindings: HashMap::new(),
         registered_local_symbols: HashSet::new(),
         seen_local_bindings: HashSet::new(),
@@ -257,6 +266,7 @@ struct Validator<'p, 'a> {
     limits: ValidationLimits,
     remaining: usize,
     class_members: Option<&'a [ClassMemberPicklePlan]>,
+    planned_class_symbols: &'a [SymbolId],
     local_bindings: HashMap<TreeId<Untyped>, LocalValueBinding>,
     registered_local_symbols: HashSet<SymbolId>,
     seen_local_bindings: HashSet<TreeId<Untyped>>,
@@ -340,6 +350,43 @@ impl<'a> Validator<'_, 'a> {
         };
         self.ty(ty)?;
         Ok(ty)
+    }
+
+    fn is_planned_sibling_class_type(&self, ty: TypeId, syntax_name: Option<Name>) -> bool {
+        let Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(class),
+        }) = self.plan.store.types.try_get(ty)
+        else {
+            return false;
+        };
+        if *class == self.plan.class || !self.planned_class_symbols.contains(class) {
+            return false;
+        }
+        if !self.plan.store.symbols.contains(*class)
+            || !self.plan.store.symbols.contains(self.plan.class)
+        {
+            return false;
+        }
+        let record = self.plan.store.symbols.get(*class);
+        let Some(package) = self.plan.store.symbols.get(self.plan.class).owner else {
+            return false;
+        };
+        record.kind == SymbolKind::Class
+            && record.origin == SymbolOrigin::Source(self.plan.source.id)
+            && record.owner == Some(package)
+            && record.visibility == Visibility::Public
+            && record.flags.is_empty()
+            && record.annotations.is_empty()
+            && syntax_name.is_none_or(|name| record.name == name)
+            && matches!(
+                self.plan.store.types.try_get(*prefix),
+                Some(Type::TypeRef {
+                    prefix: package_prefix,
+                    target: TypeRefTarget::Symbol(target_package),
+                }) if *package_prefix == self.plan.definitions.no_prefix
+                    && *target_package == package
+            )
     }
 
     fn kind(&self, symbol: SymbolId, expected: SymbolKind) -> Result<(), PickleError> {
@@ -571,14 +618,12 @@ impl<'a> Validator<'_, 'a> {
                         self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))
                     );
                 };
-                let declared_type = match parameter_type.name {
-                    name if name == self.symbol(int)?.name => self.plan.definitions.int,
-                    name if name == self.symbol(boolean)?.name => self.plan.definitions.boolean,
-                    _ => {
-                        return Err(
-                            self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))
-                        );
-                    }
+                let declared_type = if parameter_type.name == self.symbol(int)?.name {
+                    Some(self.plan.definitions.int)
+                } else if parameter_type.name == self.symbol(boolean)?.name {
+                    Some(self.plan.definitions.boolean)
+                } else {
+                    None
                 };
                 self.source_symbol(
                     symbol,
@@ -588,7 +633,9 @@ impl<'a> Validator<'_, 'a> {
                 )?;
                 self.owner(symbol, Some(method))?;
                 let ty = self.complete(symbol)?;
-                if ty != declared_type {
+                if !declared_type.is_some_and(|declared| declared == ty)
+                    && !self.is_planned_sibling_class_type(ty, Some(parameter_type.name))
+                {
                     return Err(PickleError::UnsupportedTypeReference { ty });
                 }
                 if self.scope(method)?.lookup_all(parameter.name.as_name()) != [symbol] {
@@ -1194,7 +1241,9 @@ impl<'a> Validator<'_, 'a> {
                     signature.params.iter().zip(&method.parameter_clauses[0])
                 {
                     if formal.name.as_name() != &self.symbol(parameter)?.name
-                        || (formal.ty != p.definitions.int && formal.ty != p.definitions.boolean)
+                        || (formal.ty != p.definitions.int
+                            && formal.ty != p.definitions.boolean
+                            && !self.is_planned_sibling_class_type(formal.ty, None))
                         || self.complete(parameter)? != formal.ty
                         || formal.erased
                         || formal.varargs
