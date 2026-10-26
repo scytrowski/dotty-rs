@@ -15015,6 +15015,15 @@ fn print_classload_profile_timings(profiles: &[DependencyObservation], match_fil
                 observation.1
             );
         }
+        for event in profiles
+            .iter()
+            .flat_map(|profile| &profile.profile.tasty_resolution_observations)
+        {
+            println!(
+                "AUDIT_MATCH_TASTY_RESOLUTION file={file} event={}",
+                event.replace('\t', "|")
+            );
+        }
     } else {
         println!(
             "AUDIT_CLASSLOAD_TIMINGS resource_lookup_ns={resource_lookup_ns} classfile_decode_ns={classfile_decode_ns} tasty_decode_ns={tasty_decode_ns} load_uncached_inclusive_ns={load_uncached_inclusive_ns}"
@@ -15035,6 +15044,12 @@ fn print_classload_profile_timings(profiles: &[DependencyObservation], match_fil
                 "AUDIT_TASTY_RESOURCE resource={record} count={}",
                 observation.1
             );
+        }
+        for event in profiles
+            .iter()
+            .flat_map(|profile| &profile.profile.tasty_resolution_observations)
+        {
+            println!("AUDIT_TASTY_RESOLUTION event={}", event.replace('\t', "|"));
         }
     }
 }

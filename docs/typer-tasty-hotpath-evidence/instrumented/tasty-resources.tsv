@@ -1,0 +1,301 @@
+run	scope	file	resource	version	size_bucket	outcome	count
+1	source		dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+1	source		dotty/tools/dotc/core/Phases$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+1	source		dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Types$	28.9.0	64KiB-1MiB	success	1
+1	source		dotty/tools/dotc/core/TypeApplications$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/TypeErasure$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/printing/Showable	28.9.0	0-4KiB	success	1
+1	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Constants$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+1	source		dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/DenotTransformers$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+1	source		dotty/tools/dotc/core/StdNames$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/ast/Trees$	28.9.0	64KiB-1MiB	success	1
+1	source		dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Types$	28.9.0	64KiB-1MiB	success	1
+1	source		dotty/tools/dotc/util/Spans$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+1	source		scala/annotation/Annotation	28.9.0	0-4KiB	success	1
+1	source		scala/unchecked	28.9.0	0-4KiB	success	1
+1	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+1	source		dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/StdNames$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/NullOpsDecorator$	28.9.0	0-4KiB	success	1
+1	source		dotty/tools/dotc/core/Scopes$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Constants$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+1	source		dotty/tools/dotc/core/Phases$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/SymDenotations$	28.9.0	64KiB-1MiB	success	1
+1	source		dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/Denotations$	28.9.0	64KiB-1MiB	success	1
+1	source		dotty/tools/dotc/core/Periods$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/core/CheckRealizable$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/util/Stats$	28.9.0	4-64KiB	success	1
+1	source		dotty/tools/dotc/ast/tpd$	28.9.0	64KiB-1MiB	success	1
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Phases$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Types$	28.9.0	64KiB-1MiB	success	1
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/TypeApplications$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/TypeErasure$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Constants$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/DenotTransformers$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/StdNames$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/ast/Trees$	28.9.0	64KiB-1MiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Types$	28.9.0	64KiB-1MiB	success	1
+1	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/util/Spans$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/StdNames$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/NullOpsDecorator$	28.9.0	0-4KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Scopes$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Constants$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Phases$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/SymDenotations$	28.9.0	64KiB-1MiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Denotations$	28.9.0	64KiB-1MiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Periods$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/CheckRealizable$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/util/Stats$	28.9.0	4-64KiB	success	1
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/ast/tpd$	28.9.0	64KiB-1MiB	success	1
+2	source		dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+2	source		dotty/tools/dotc/core/Phases$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+2	source		dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Types$	28.9.0	64KiB-1MiB	success	1
+2	source		dotty/tools/dotc/core/TypeApplications$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/TypeErasure$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/printing/Showable	28.9.0	0-4KiB	success	1
+2	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Constants$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+2	source		dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/DenotTransformers$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+2	source		dotty/tools/dotc/core/StdNames$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/ast/Trees$	28.9.0	64KiB-1MiB	success	1
+2	source		dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Types$	28.9.0	64KiB-1MiB	success	1
+2	source		dotty/tools/dotc/util/Spans$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+2	source		scala/annotation/Annotation	28.9.0	0-4KiB	success	1
+2	source		scala/unchecked	28.9.0	0-4KiB	success	1
+2	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+2	source		dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/StdNames$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/NullOpsDecorator$	28.9.0	0-4KiB	success	1
+2	source		dotty/tools/dotc/core/Scopes$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Constants$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+2	source		dotty/tools/dotc/core/Phases$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/SymDenotations$	28.9.0	64KiB-1MiB	success	1
+2	source		dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/Denotations$	28.9.0	64KiB-1MiB	success	1
+2	source		dotty/tools/dotc/core/Periods$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/core/CheckRealizable$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/util/Stats$	28.9.0	4-64KiB	success	1
+2	source		dotty/tools/dotc/ast/tpd$	28.9.0	64KiB-1MiB	success	1
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Phases$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Types$	28.9.0	64KiB-1MiB	success	1
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/TypeApplications$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/TypeErasure$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Constants$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/DenotTransformers$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/StdNames$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/ast/Trees$	28.9.0	64KiB-1MiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Types$	28.9.0	64KiB-1MiB	success	1
+2	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/util/Spans$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/StdNames$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/NullOpsDecorator$	28.9.0	0-4KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Scopes$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Constants$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Phases$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/SymDenotations$	28.9.0	64KiB-1MiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Denotations$	28.9.0	64KiB-1MiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Periods$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/CheckRealizable$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/util/Stats$	28.9.0	4-64KiB	success	1
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/ast/tpd$	28.9.0	64KiB-1MiB	success	1
+3	source		dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+3	source		dotty/tools/dotc/core/Phases$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+3	source		dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Types$	28.9.0	64KiB-1MiB	success	1
+3	source		dotty/tools/dotc/core/TypeApplications$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/TypeErasure$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/printing/Showable	28.9.0	0-4KiB	success	1
+3	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Constants$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+3	source		dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/DenotTransformers$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+3	source		dotty/tools/dotc/core/StdNames$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/ast/Trees$	28.9.0	64KiB-1MiB	success	1
+3	source		dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Types$	28.9.0	64KiB-1MiB	success	1
+3	source		dotty/tools/dotc/util/Spans$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+3	source		scala/annotation/Annotation	28.9.0	0-4KiB	success	1
+3	source		scala/unchecked	28.9.0	0-4KiB	success	1
+3	source		dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+3	source		dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/StdNames$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/NullOpsDecorator$	28.9.0	0-4KiB	success	1
+3	source		dotty/tools/dotc/core/Scopes$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Constants$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+3	source		dotty/tools/dotc/core/Phases$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/SymDenotations$	28.9.0	64KiB-1MiB	success	1
+3	source		dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/Denotations$	28.9.0	64KiB-1MiB	success	1
+3	source		dotty/tools/dotc/core/Periods$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/core/CheckRealizable$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/util/Stats$	28.9.0	4-64KiB	success	1
+3	source		dotty/tools/dotc/ast/tpd$	28.9.0	64KiB-1MiB	success	1
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Phases$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/Types$	28.9.0	64KiB-1MiB	success	1
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/TypeApplications$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	dotty/tools/dotc/core/TypeErasure$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Constants$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/DenotTransformers$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/StdNames$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/ast/Trees$	28.9.0	64KiB-1MiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/TypeUtils	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/core/Types$	28.9.0	64KiB-1MiB	success	1
+3	match	compiler/src/dotty/tools/dotc/ast/tpd.scala	dotty/tools/dotc/util/Spans$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/SymUtils	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Symbols$	28.9.0	64KiB-1MiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Flags$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Names$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/StdNames$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/NameOps$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/NullOpsDecorator$	28.9.0	0-4KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Scopes$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Constants$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Contexts$	28.9.0	64KiB-1MiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Phases$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Annotations$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/SymDenotations$	28.9.0	64KiB-1MiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Decorators$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Denotations$	28.9.0	64KiB-1MiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/Periods$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/core/CheckRealizable$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/util/Stats$	28.9.0	4-64KiB	success	1
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	dotty/tools/dotc/ast/tpd$	28.9.0	64KiB-1MiB	success	1

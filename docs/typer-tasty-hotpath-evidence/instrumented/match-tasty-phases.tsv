@@ -1,0 +1,10 @@
+run	file	callback_errors	constructor_accessor_exclusive_ns	constructor_accessor_ns	constructor_bare_calls	constructor_bare_errors	constructor_bare_ns	constructor_bare_resolved	constructor_bare_unresolved	definition_selection_ns	index_ns	member_bare_calls	member_bare_errors	member_bare_ns	member_bare_resolved	member_bare_unresolved	member_projection_exclusive_ns	member_projection_ns	parent_alias_calls	parent_alias_errors	parent_alias_ns	parent_alias_resolved	parent_alias_unresolved	parent_bare_calls	parent_bare_errors	parent_bare_ns	parent_bare_resolved	parent_bare_unresolved	parent_resolution_exclusive_ns	parent_resolution_ns	parse_ns
+1	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	0	2525	2525	0	0	0	0	0	119235	9281867	1	0	4608	0	1	2101087430	2101092038	0	0	0	0	0	0	0	0	0	0	6767367	6767367	937136
+1	compiler/src/dotty/tools/dotc/ast/tpd.scala	0	1932	1932	0	0	0	0	0	157868	11205585	0	0	0	0	0	2121428143	2121428143	0	0	0	0	0	0	0	0	0	0	6457301	6457301	1078375
+1	compiler/src/dotty/tools/dotc/core/Types.scala	0	2854	2854	0	0	0	0	0	105850	6783751	2	0	5521	0	2	3228269094	3228274615	0	0	0	0	0	0	0	0	0	0	3471845	3471845	1128956
+2	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	0	2424	2424	0	0	0	0	0	112041	8799855	1	0	5801	0	1	2108746839	2108752640	0	0	0	0	0	0	0	0	0	0	6978101	6978101	935234
+2	compiler/src/dotty/tools/dotc/ast/tpd.scala	0	1882	1882	0	0	0	0	0	150303	10894146	0	0	0	0	0	2128715062	2128715062	0	0	0	0	0	0	0	0	0	0	6654299	6654299	1057772
+2	compiler/src/dotty/tools/dotc/core/Types.scala	0	2675	2675	0	0	0	0	0	103655	6768094	2	0	5952	0	2	3216180939	3216186891	0	0	0	0	0	0	0	0	0	0	3443423	3443423	1135978
+3	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	0	1604	1604	0	0	0	0	0	110920	9223082	1	0	4689	0	1	2062434531	2062439220	0	0	0	0	0	0	0	0	0	0	6572114	6572114	936564
+3	compiler/src/dotty/tools/dotc/ast/tpd.scala	0	2174	2174	0	0	0	0	0	152766	10515805	0	0	0	0	0	2132745053	2132745053	0	0	0	0	0	0	0	0	0	0	6641275	6641275	1072621
+3	compiler/src/dotty/tools/dotc/core/Types.scala	0	1783	1783	0	0	0	0	0	101443	6808202	2	0	5841	0	2	3228514968	3228520809	0	0	0	0	0	0	0	0	0	0	3442336	3442336	1136781

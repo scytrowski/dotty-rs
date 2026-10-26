@@ -159,6 +159,7 @@ def parse_run(log: str) -> dict:
         "repeated_requests": [],
         "classload_timings": {}, "match_classload_timings": [],
         "tasty_phases": {}, "match_tasty_phases": [], "tasty_resources": [], "match_tasty_resources": [],
+        "tasty_resolution": [], "match_tasty_resolution": [],
         "resolver_roots": [], "resolver_root_phases": [], "resolver_cache": {}, "match_resolver_cache": [],
     }
     for line in log.splitlines():
@@ -214,6 +215,8 @@ def parse_run(log: str) -> dict:
             result["tasty_phases"] = {key: int(value) for key, value in kvs(line).items()}
         elif line.startswith("AUDIT_TASTY_RESOURCE "):
             result["tasty_resources"].append(kvs(line))
+        elif line.startswith("AUDIT_TASTY_RESOLUTION "):
+            result["tasty_resolution"].append(kvs(line)["event"])
         elif line.startswith("AUDIT_RESOLVER_ROOT_PHASE "):
             values = kvs(line)
             values.setdefault("scope", "source")
@@ -240,6 +243,11 @@ def parse_run(log: str) -> dict:
             values = kvs(line)
             result["match_tasty_resources"].append(
                 {"file": values.pop("file"), **values}
+            )
+        elif line.startswith("AUDIT_MATCH_TASTY_RESOLUTION "):
+            values = kvs(line)
+            result["match_tasty_resolution"].append(
+                {"file": values["file"], "event": values["event"]}
             )
         elif line.startswith("AUDIT_RESOLVER_STAGE "):
             result["resolver_stages"].append(kvs(line))
@@ -719,6 +727,24 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
                 resource_name, version, size_bucket, outcome = parts
                 tasty_resource_rows.append(f"{run_index}\t{scope}\t{record.get('file', '')}\t{resource_name}\t{version}\t{size_bucket}\t{outcome}\t{record.get('count', '0')}")
     (out_dir / "tasty-resources.tsv").write_text("\n".join(tasty_resource_rows) + "\n", encoding="utf-8")
+    resolution_rows = ["run\tscope\tfile\tkind\tcategory\tcallback_key\tcandidate\toutcome\telapsed_ns"]
+    for run_index, run in enumerate(runs, 1):
+        scoped = [("source", "", event) for event in run.get("tasty_resolution", [])]
+        scoped.extend(("match", row["file"], row["event"]) for row in run.get("match_tasty_resolution", []))
+        for scope, file, event in scoped:
+            fields = event.split("|")
+            if fields[0] == "callback" and len(fields) == 5:
+                _, category, key_hex, outcome, elapsed_ns = fields
+                callback_key = bytes.fromhex(key_hex).decode("utf-8")
+                resolution_rows.append(f"{run_index}\t{scope}\t{file}\tcallback\t{category}\t{callback_key}\t\t{outcome}\t{elapsed_ns}")
+            elif fields[0] == "probe" and len(fields) == 6:
+                _, category, key_hex, candidate_hex, outcome, elapsed_ns = fields
+                callback_key = bytes.fromhex(key_hex).decode("utf-8")
+                candidate = bytes.fromhex(candidate_hex).decode("utf-8")
+                resolution_rows.append(f"{run_index}\t{scope}\t{file}\tprobe\t{category}\t{callback_key}\t{candidate}\t{outcome}\t{elapsed_ns}")
+            else:
+                fail(f"malformed TASTy resolution event: {event!r}")
+    (out_dir / "tasty-resolution.tsv").write_text("\n".join(resolution_rows) + "\n", encoding="utf-8")
     (out_dir / "methods.tsv").write_text("\n".join(method_rows) + "\n", encoding="utf-8")
     outcome_rows = ["run\tfile\ttree\tresult"] + [
         f"{run_index}\t{path}\t{tree}\t{result}"

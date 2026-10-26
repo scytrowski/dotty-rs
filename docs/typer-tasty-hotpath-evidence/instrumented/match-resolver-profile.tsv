@@ -1,0 +1,10 @@
+run	file	member_lookups	successes	misses	errors	rollbacks
+1	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	221	55	166	0	166
+1	compiler/src/dotty/tools/dotc/ast/tpd.scala	40	13	27	0	27
+1	compiler/src/dotty/tools/dotc/core/Types.scala	20	18	2	0	2
+2	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	221	55	166	0	166
+2	compiler/src/dotty/tools/dotc/ast/tpd.scala	40	13	27	0	27
+2	compiler/src/dotty/tools/dotc/core/Types.scala	20	18	2	0	2
+3	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	221	55	166	0	166
+3	compiler/src/dotty/tools/dotc/ast/tpd.scala	40	13	27	0	27
+3	compiler/src/dotty/tools/dotc/core/Types.scala	20	18	2	0	2
