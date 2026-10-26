@@ -1,12 +1,20 @@
-# Scala 3.9 cross-class factory audit
+# Scala 3.9 cross-class factory TASTy support
 
-This is the audit requested by [issue #1690](https://github.com/scytrowski/dotty-rs/issues/1690). It records existing behavior; it does not add factory support to the TASTy pickler or change typer/JVM production code.
+This document records the Scala/JVM audit requested by [issue #1690](https://github.com/scytrowski/dotty-rs/issues/1690) and the bounded TASTy producer slice added by [issue #1693](https://github.com/scytrowski/dotty-rs/issues/1693). The source typer and JVM bytecode writer remain unchanged.
 
 ## Pinned source and oracle
 
 The Scala source checkout was at `777528f19a58e794c9954a42f433373472ec57f8` (`3.9.0-bin-SNAPSHOT-git-777528f`), and compilation/runtime checks used Temurin JDK `21.0.8+9`. Scala was invoked with `-release 21`, producing classfile major version 65. The source-pipeline fixture [`CounterFactory.scala`](../tests/fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala) now contains both the issue's `create` method and its independent `identity` method in the same class. The pinned Scala oracle artifacts retain `CounterIdentity.scala` as a separate identity-only control, allowing the existing ABI and TASTy evidence to remain independently inspectable.
 
-In this environment, the checked-out `dist/.../bin/scalac` launchers were incomplete (`sbt` was not installed and the staged Scala launcher lacked its compiler runtime). The already-built pinned compiler and libraries worked directly. This reproduces the oracle from the Scala checkout's staged Maven artifacts:
+The Scala 3.9 compiler revision and Java runtime were verified directly for the #1693 consumer gate:
+
+```text
+Scala compiler: 3.9.0-bin-SNAPSHOT-git-777528f
+Scala revision: 777528f19a58e794c9954a42f433373472ec57f8
+Java runtime:   Temurin 21.0.8+9 (2025-07-15)
+```
+
+The pinned source-oracle evidence below remains reproducible from the staged Maven artifacts:
 
 ```sh
 SCALA_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source
@@ -63,7 +71,7 @@ The method-specific TASTy walk pins the cross-class relationships, rather than j
 
 Issue #1691 adds `validate_cross_class_factory_proof` in the source-to-output coordination layer. It retains the borrowed semantic store, source and typed arenas, both source indexes, and complete JVM unit in `ValidatedCrossClassFactoryProof`; its getters expose canonical class/constructor/method/formal symbols, exact source and typed RHS roots, and the JVM descriptor. The factory check requires the exact source `Apply(Select(New(Counter), <init>), [seed])`, every mapped source expression root, the typed canonical constructor/formal targets, the public primary `(I)V` plan, and the JVM method descriptor `(I)Lexample/Counter;`. It checks declared result `TypeRefTarget::Symbol(Counter)` and the typed factory result target independently because the current typer can allocate equivalent reference types at distinct `TypeId`s. The independent identity proof accepts `identity` beside `create` in `CounterFactory` (and retains the standalone `CounterIdentity` fixture), requires a typed `Ident` targeting its own canonical formal, and checks descriptor `(Lexample/Counter;)Lexample/Counter;`. Its method body proof does not require a constructor call.
 
-The proof consumes already-produced frontend/JVM state and is read-only. It does not call the paired TASTy producer, because that producer currently rejects reference-valued method results before returning a batch receipt. Its result is source/typed identity evidence only; it does not claim that reference-result TASTy or constructor-call TASTy is serializable. Rejections are reported at the source-shape, source-identity, semantic-identity, typed-binding, or JVM-plan stage. The focused regressions also supply an empty source-to-typed index, a mismatched `SourceId`, a JVM batch with `Counter` or `create` removed, the wrong identity/factory source shape, and a private primary constructor; each is rejected by its corresponding typed error category.
+The original #1691 proof consumed already-produced frontend/JVM state and was read-only; at that stage the paired TASTy producer rejected reference-valued results. #1692 added reference-result serialization, and #1693 adds the bounded constructor body described below. The proof still reports failures at the source-shape, source-identity, semantic-identity, typed-binding, or JVM-plan stage. Focused regressions supply an empty source-to-typed index, a mismatched `SourceId`, a JVM batch with `Counter` or `create` removed, the wrong identity/factory source shape, and a private primary constructor; each is rejected by its corresponding typed error category.
 
 The following IDs are from one test session with `SourceId(1690)` and are diagnostic snapshots only. Arena IDs are session-local; semantic relationships are the contract, not these numbers.
 
@@ -79,20 +87,15 @@ The following IDs are from one test session with `SourceId(1690)` and are diagno
 
 An independent identity-only session with `SourceId(1691)` also produced `CounterIdentity=SymbolId(40)`, `identity=SymbolId(49)`, parameter `SymbolId(50)`, source RHS `TreeId(23)`, typed body root `TreeId(5)`, and result `TypeId(54)`. The two result TypeIds differ even though both canonical signatures identify `Counter`.
 
-## First rejection boundary
+## Rust TASTy constructor output (#1693)
 
-The existing JVM-only source path accepts and emits both methods. The focused test checks the emitted descriptors and instruction sequences for `create` and `identity`; with `DOTTY_CLASSFILE_REQUIRE_JDK=1`, it also compiles a Java 21 client and executes the factory result under `java -Xverify:all`.
+The Rust paired producer now emits the actual typed `create(seed)` body for the complete `Counter`/`CounterFactory` source batch. Validation accepts only `Apply(Select(New(Counter), Counter.<init>), [seed])`: both source and typed expression roots and spans must correspond, the selected term reference must be the canonical primary constructor owned by the planned public sibling class, its completed signature must be `(Int)Counter`, and the argument must be the original Int formal owned by `create`. The sibling class must be an ordinary public class in the same package with one accessible primary constructor; secondary, defaulted, using, varargs, generic, abstract, trait/object, private, nested and external constructor cases remain unsupported.
 
-The paired JVM/TASTy batch planner runs the same source frontend, completes both typed bodies, and validates the complete JVM unit before it reaches the cross-contract check. With #1692, the identity-only source passes this check and emits a complete `CounterIdentity.tasty`. The positive test checks its class-valued result syntax and original formal reference. When `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE` is set, it also asks pinned Scala 3.9 `-from-tasty` to rebuild both Rust-produced `Counter` and `CounterIdentity` sidecars, checks `(Lexample/Counter;)Lexample/Counter;` with `javap`, and runs a Java 21 `-Xverify:all` identity client.
+The sidecar encodes the method body as `APPLY(SELECTin(NEW(Counter)), [seed])`. The signed constructor name is `<init>` with result `example.Counter` and one `scala.Int` term parameter. The `NEW` type and `SELECTin` owner type refer to the same canonical class type; the argument `TERMREFdirect` targets the method's own `seed` `PARAM`. The factory sidecar contains no cloned `Counter` or constructor declaration. The paired classfile retains descriptor `(I)Lexample/Counter;` and the verifier checks `new/dup/iload_1/invokespecial/areturn` plus both constant-pool owners against the same planned sibling class.
 
-The constructor-body control still fails while validating the real typed body:
+`paired_tasty_planning_emits_the_canonical_factory_new_body` checks the genuine one-session source pipeline, decoded Rust sidecar tree, constructor signature, exact argument formal, JVM descriptor and bytecode. With `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`, it also invokes the pinned Scala 3.9 decompiler and `-from-tasty` reader with both Rust-produced sidecars, then checks the rebuilt factory descriptor with `javap`. This is a TASTy interoperability gate; linked Rust artifact runtime is tracked separately by #1695.
 
-```text
-phase: "JVM/TASTy cross-contract validation"
-reason: TastyPlan(BodyType { tree: TreeId(...), ty: TypeId(...) })
-```
-
-The regression keeps `create` unsupported at the body stage: the pickler does not replace `new Counter(seed)` with a fake direct return or invent constructor trees. The bounded reference-result case only accepts the exact source-declared class symbol from the same validated batch, and only when the typed RHS is the matching method formal. Primitive method output and the existing class-valued formal signature remain unchanged.
+The existing identity control remains separate: `identity(counter: Counter): Counter = counter` emits a direct formal reference and no `NEW` or constructor `APPLY`. Both result forms use the same exact planned class type and remain covered by the pinned Scala consumer checks.
 
 ## Scala consumer and classpath controls
 
@@ -122,30 +125,38 @@ This matrix combines observed failure-stage probes in the focused tests with the
 | External class without a planned class artifact | JVM projection rejects the external/unplanned target; it does not guess a class plan from a descriptor. Missing source class symbols instead fail at typer lookup. |
 | Wrong-owner TypeRef, malformed class info, or invalid package chain | JVM metadata/projection rejects the class/type identity before emission (`UnsupportedJvmReferenceType`, `InvalidJvmClassInfo`, or `InvalidPackageOwnerChain`/`InvalidJvmName`). See `method_signature_projection_requires_exact_class_and_package_identity`, `rejects_malformed_class_info_instead_of_guessing_class_shape`, and `rejects_nested_and_invalid_package_owner_chains`. |
 | Identity returning its exact planned class-valued formal | Source and JVM/TASTy validation accept the reference result; `new` is not involved. The opt-in Scala consumer check is described above. |
-| Factory result from `new Counter(seed)` | Source typing and JVM unit validation succeed; TASTy body validation rejects the unsupported constructor expression with `TastyPlan(BodyType { .. })`. |
+| Factory result from `new Counter(seed)` | The exact public planned primary `(Int)Counter` constructor and direct `seed` argument are serialized and validated against the linked JVM descriptor and instructions. |
+| Private/unplanned/stale constructor target or a wrong sibling class | Source/typed expression validation rejects the owner, canonical source declaration, or planned-class proof before TASTy bytes are returned. |
+| Wrong result type, constructor argument expression, or nested `new` | TASTy expression validation rejects the shape before complete sidecars are published. |
 | One nested `new` as a constructor argument, or sibling allocations | JVM source lowering accepts the bounded shapes and JDK verification passes; see `nested_new_constructor_arguments_lower_lifo_and_verify_initialized_values`. Deeper nesting or a third simultaneously pending allocation is rejected by source lowering / the class-aware verifier before class publication. |
 | Cross-class reference field initialized by an approved direct `new` | JVM-only source path supports a planned private reference field with a bounded initializer. Factory-valued/nested/branch-valued reference field initialization is rejected by JVM codegen. The identity result proof does not claim support for serializing factory-valued field initializers. |
 | Classfile-only Scala classpath or stale/missing TASTy sidecar | Pinned Scala 3.9 loader rejects the Scala class with the missing-sidecar diagnostic. |
 | TASTy-only Scala classpath | Scala compiler can typecheck; execution cannot load a missing JVM class until `-from-tasty` or another compiler provides it. |
 
-The existing Scala consumer audit also measures missing, misplaced, corrupt, and stale-UUID sidecars: [`jvm-tasty-cross-class.md`](jvm-tasty-cross-class.md) records each observed diagnostic and first stage. #1692 adds the opt-in Scala consumer test for identity-only Rust sidecars; factory construction and linked batch artifact publication remain later increments.
+The existing Scala consumer audit also measures missing, misplaced, corrupt, and stale-UUID sidecars: [`jvm-tasty-cross-class.md`](jvm-tasty-cross-class.md) records each observed diagnostic and first stage. #1692 added the reference-result Scala consumer test; #1693 adds the separate constructor decompile/reader gate. Full linked Rust factory runtime and the broader release gate remain later increments.
 
 ## Follow-up dependency map
 
-Issues #1690–#1692 provide the pinned source/runtime oracle, canonical source/typed identity proof, and the first reference-result TASTy case. Remaining implementation proceeds in this dependency order:
+Issues #1690–#1693 provide the pinned source/runtime oracle, canonical source/typed identity proof, reference-result TASTy and the bounded constructor application. Remaining implementation proceeds in this dependency order:
 
-1. **#1693** — constructor `New`/`SELECTin`/`<init>` TASTy encoding and exact owner/formal bindings.
-2. **#1694** — batch cross-class TASTy validation and linked artifacts.
-3. **#1695** — JDK verification and runtime factory client.
-4. **#1696** — independent Scala consumer and sidecar/classpath behavior.
-5. **#1697** — final release gate after the preceding compatibility layers pass.
+1. **#1694** — full linked artifact publication and fail-closed batch consistency.
+2. **#1695** — strict JDK runtime factory client for Rust-produced artifacts.
+3. **#1696** — wider independent Scala consumer and sidecar/classpath behavior.
+4. **#1697** — final release gate after the preceding compatibility layers pass.
 
-These later increments are not completed by the identity result test. The Rust paired producer continues to reject constructor `New` before serializing that method body.
+These later increments are not completed by the focused #1693 consumer test; it checks Scala decompilation/rebuild and ABI, not linked Rust factory execution.
 
 ## Rust regression commands
 
 ```sh
 cargo test --test jvm_tasty_cross_class_factories --locked
+SCALA39_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source \
+DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 \
+JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
+PATH="/home/vdrake6/.jdks/jdk-21/bin:$PATH" \
+cargo test --test jvm_tasty_cross_class_factories \
+  paired_tasty_planning_emits_the_canonical_factory_new_body \
+  --locked -- --nocapture
 DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --test jvm_source_compilation \
   factory_return_and_identity_control_reach_the_real_jvm_source_pipeline \
   --locked -- --nocapture

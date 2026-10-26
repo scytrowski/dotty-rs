@@ -2,11 +2,13 @@
 
 This crate implements **read-only plan validation, semantic type/reference
 projection, declaration skeletons and complete literal, formal-reference,
-same-class call, conditional and bounded block bodies** for Scala 3.9.0 TASTy
+same-class call, conditional, bounded block and audited cross-class constructor
+bodies** for Scala 3.9.0 TASTy
 (28.9.0). `ValidatedPicklePlan::pickle()` returns owned `PickledTasty`
 bytes with the actual existing typed RHS. Independent Scala compilation of this
 producer's output is covered by the pinned opt-in oracle for the `Answer`,
-`Parameters`, same-class `References`, `Operations` call and `Blocks` fixtures.
+`Parameters`, same-class `References`, `Operations` call, `Blocks` and bounded
+cross-class factory constructor fixtures.
 
 `PicklePlan` borrows the canonical semantic store, Definitions, untyped/typed ASTs,
 source semantic index and a `SourceTypedBindings` provider. Source metadata is
@@ -64,10 +66,18 @@ call to one public, concrete, non-generic method with an explicit empty value
 clause on that exact formal, when both classes and the target method are
 present in the same validated source/JVM/TASTy batch. The selected target must
 be the canonical `TermRef`; its owner type shares the formal's class type node.
-Arbitrary receivers, external or unplanned targets, overloaded/private/abstract
-methods, arguments, type applications, other reference-valued method results,
-constructors, and multiple class formals remain unsupported. A direct `new`
-expression is still rejected during body validation.
+One cross-class constructor body is also supported: `new C(seed)` where `C` is
+the exact public, concrete, non-generic sibling class in the validated batch,
+its one accessible primary constructor has signature `(Int)C`, and `seed` is
+the factory method's canonical Int formal. The pickler validates the source and
+typed `Apply(Select(New(C), <init>), [seed])` roots, constructor owner/signature,
+and target sidecar provenance before emitting `APPLY(SELECTin(NEW(...)), [seed])`.
+It does not copy the sibling constructor declaration into the factory sidecar.
+Other receivers, external or unplanned targets, overloaded/private/abstract
+methods, other constructor arities/types, secondary/default/using/varargs or
+generic constructors, nested allocations, and multiple class formals remain
+unsupported. Constructors outside this exact source-defined shape fail with
+typed validation errors before bytes are returned.
 A method may have no value clause, one explicit
 empty clause, or one plain clause of ordinary Int or Boolean
 parameters. Parameter IDs, ownership, source scope, types and order must agree

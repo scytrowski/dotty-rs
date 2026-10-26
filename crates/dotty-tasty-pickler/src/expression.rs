@@ -8,7 +8,7 @@ use dotty_core::{
 };
 use dotty_tasty::tasty::{
     APPLY_TAG, ASSIGN_TAG, AstField, AstLabel, AstNode, FALSECONST_TAG, IF_TAG, INTCONST_TAG,
-    SimpleTerm, TRUECONST_TAG, TermValue, UNITCONST_TAG, WHILE_TAG,
+    NEW_TAG, SimpleTerm, TRUECONST_TAG, TermValue, UNITCONST_TAG, WHILE_TAG,
 };
 
 use crate::{
@@ -377,6 +377,72 @@ fn lower_expression_inner(
                 tree: application.function,
             })?;
         budget.visit(application.function, depth)?;
+        if let TreeKind::Select(selection) = &function.kind
+            && let Some(Type::TermRef {
+                target: TermRefTarget::Symbol(constructor),
+                ..
+            }) = store.types.try_get(function.ty)
+            && ast
+                .try_get(selection.qualifier)
+                .is_some_and(|receiver| matches!(receiver.kind, TreeKind::New(_)))
+        {
+            if application.args.len() != 1 {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::BodyExpression,
+                    symbol: Some(method),
+                });
+            }
+            let constructor = *constructor;
+            let class = store
+                .symbols
+                .contains(constructor)
+                .then(|| store.symbols.get(constructor).owner)
+                .flatten()
+                .ok_or(PickleError::InvalidSymbol {
+                    symbol: constructor,
+                })?;
+            let receiver =
+                ast.try_get(selection.qualifier)
+                    .ok_or(PickleError::InvalidTypedTree {
+                        tree: selection.qualifier,
+                    })?;
+            let TreeKind::New(new_expression) = &receiver.kind else {
+                unreachable!("constructor selection shape was checked above")
+            };
+            budget.visit(selection.qualifier, depth)?;
+            let type_tree =
+                ast.try_get(new_expression.tpt)
+                    .ok_or(PickleError::InvalidTypedTree {
+                        tree: new_expression.tpt,
+                    })?;
+            let receiver_type = context.planned_class_type_syntax(class, type_tree.ty)?;
+            let new_expression = context.wire_node(AstNode::Ast {
+                tag: NEW_TAG,
+                child: receiver_type,
+            })?;
+            let selected_constructor = context.same_source_constructor_select_in(
+                class,
+                constructor,
+                new_expression,
+                type_tree.ty,
+            )?;
+            let argument = lower_expression_inner(
+                store,
+                ast,
+                application.args[0],
+                method,
+                parameters,
+                ExpressionState { depth, budget },
+                context,
+            )?;
+            return context.wire_node(AstNode::Length {
+                tag: APPLY_TAG,
+                fields: vec![
+                    AstField::Tree(selected_constructor),
+                    AstField::Tree(argument),
+                ],
+            });
+        }
         if application.args.is_empty() {
             let TreeKind::Select(selection) = &function.kind else {
                 return Err(PickleError::Unsupported {

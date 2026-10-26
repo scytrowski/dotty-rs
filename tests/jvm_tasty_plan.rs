@@ -17,6 +17,8 @@ const CROSS_CLASS_READER_LITERAL: &str =
 const CROSS_CLASS_READER_CALL: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader.scala");
 const CROSS_CLASS_IDENTITY_RESULT: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterIdentitySource.scala");
+const CROSS_CLASS_FACTORY_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 struct WithoutPlannedClasses<'a>(&'a dyn SourceTypedBindings);
@@ -666,7 +668,7 @@ fn same_batch_class_formal_emits_reader_owned_counter_type_without_cloning_count
 }
 
 #[test]
-fn same_batch_class_result_emits_identity_tasty_and_keeps_allocation_unsupported() {
+fn same_batch_class_result_emits_identity_tasty_and_rejects_nonformal_constructor_arguments() {
     with_paired_jvm_tasty_batch_plan(
         CROSS_CLASS_IDENTITY_RESULT,
         "tests/fixtures/jvm_tasty_cross_class_factories/CounterIdentitySource.scala",
@@ -889,13 +891,15 @@ fn same_batch_class_result_emits_identity_tasty_and_keeps_allocation_unsupported
         &construction_source,
         "CounterIdentitySource.scala",
         SourceId::from_index(1693),
-        |_| panic!("unsupported New must not return a completed batch"),
+        |_| panic!("constructor literals are outside the validated source slice"),
     );
     let Err(PairedPlanError::BatchClass { phase, reason, .. }) = construction else {
-        panic!("unsupported New must fail before a completed batch: {construction:?}");
+        panic!(
+            "an unsupported constructor argument must fail before a completed batch: {construction:?}"
+        );
     };
     assert_eq!(phase, "JVM/TASTy cross-contract validation");
-    assert!(reason.contains("TastyPlan(BodyType"), "{reason}");
+    assert!(reason.contains("TastyPlan(Unsupported"), "{reason}");
 }
 
 #[test]
@@ -1053,6 +1057,154 @@ fn cross_class_call_rejects_a_missing_source_to_typed_body_binding() {
                 matches!(error, PickleError::BodyBinding { tree, .. } if tree == selected_function),
                 "unexpected rejection for stale nested typed root: {error:?}"
             );
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn constructor_body_rejects_missing_type_tree_binding_and_inconsistent_new_types() {
+    with_paired_jvm_tasty_batch_plan(
+        CROSS_CLASS_FACTORY_SOURCE,
+        "tests/fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala",
+        SourceId::from_index(1693),
+        |batch| {
+            let source_plan = batch.classes[1].tasty_plan.plan();
+            let create_tree = source_plan
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    ClassMemberPicklePlan::Method {
+                        source_tree,
+                        symbol,
+                        ..
+                    } if source_plan
+                        .store
+                        .names
+                        .resolve(source_plan.store.symbols.get(*symbol).name.text())
+                        == "create" =>
+                    {
+                        Some(*source_tree)
+                    }
+                    _ => None,
+                })
+                .expect("the factory plan contains create");
+            let TreeKind::DefDef(create) = &source_plan.source_ast.get(create_tree).kind else {
+                panic!("create is a source method");
+            };
+            let body = create
+                .rhs
+                .expect("create has a constructor application body");
+            let TreeKind::Apply(application) = &source_plan.source_ast.get(body).kind else {
+                panic!("create returns an application");
+            };
+            let TreeKind::Select(selection) =
+                &source_plan.source_ast.get(application.function).kind
+            else {
+                panic!("constructor application selects the primary constructor");
+            };
+            let source_new_id = selection.qualifier;
+            let TreeKind::New(source_new) = &source_plan.source_ast.get(source_new_id).kind else {
+                panic!("selected constructor receiver is new");
+            };
+            let source_type_id = source_new.tpt;
+            let expected_typed_type = source_plan
+                .typed_bindings
+                .typed_at(source_plan.source.id, source_type_id)
+                .expect("the frontend binds the new expression type tree");
+
+            let missing_type_binding = WithoutTypedTree {
+                inner: source_plan.typed_bindings,
+                missing: source_type_id,
+            };
+            let missing_plan = ClassStatePicklePlan {
+                store: source_plan.store,
+                definitions: source_plan.definitions,
+                source_ast: source_plan.source_ast,
+                typed_ast: source_plan.typed_ast,
+                source_index: source_plan.source_index,
+                typed_bindings: &missing_type_binding,
+                source: source_plan.source.clone(),
+                class: source_plan.class,
+                class_tree: source_plan.class_tree,
+                constructor: source_plan.constructor.clone(),
+                members: source_plan.members,
+            };
+            let Err(error) = missing_plan.validate().unwrap().pickle() else {
+                panic!("missing source-to-typed type-tree evidence must reject");
+            };
+            assert!(
+                matches!(error, PickleError::BodyBinding { tree, .. } if tree == source_type_id),
+                "missing constructor type-tree binding rejected unexpectedly: {error:?}"
+            );
+
+            let replacement = source_plan
+                .typed_ast
+                .iter()
+                .map(|(tree, _)| tree)
+                .find(|tree| *tree != expected_typed_type)
+                .expect("the typed arena contains a distinct replacement tree");
+            let substituted_type_binding = WithStaleTypedTree {
+                inner: source_plan.typed_bindings,
+                stale: source_type_id,
+                replacement,
+            };
+            let substituted_plan = ClassStatePicklePlan {
+                store: source_plan.store,
+                definitions: source_plan.definitions,
+                source_ast: source_plan.source_ast,
+                typed_ast: source_plan.typed_ast,
+                source_index: source_plan.source_index,
+                typed_bindings: &substituted_type_binding,
+                source: source_plan.source.clone(),
+                class: source_plan.class,
+                class_tree: source_plan.class_tree,
+                constructor: source_plan.constructor.clone(),
+                members: source_plan.members,
+            };
+            let Err(error) = substituted_plan.validate().unwrap().pickle() else {
+                panic!("a substituted constructor type-tree binding must reject");
+            };
+            assert!(
+                matches!(error, PickleError::BodyBinding { tree, .. } if tree == source_type_id),
+                "substituted constructor type-tree binding rejected unexpectedly: {error:?}"
+            );
+
+            let typed_new_id = source_plan
+                .typed_bindings
+                .typed_at(source_plan.source.id, source_new_id)
+                .expect("the frontend binds the new expression");
+            let typed_body_id = source_plan
+                .typed_bindings
+                .typed_at(source_plan.source.id, body)
+                .expect("the frontend binds the constructor application");
+            for invalid_type in [
+                source_plan.definitions.int,
+                source_plan.definitions.object_type,
+            ] {
+                let mut typed_ast = cloned_typed_ast(source_plan.typed_ast);
+                typed_ast.get_mut(typed_new_id).ty = invalid_type;
+                let invalid_new_type_plan = ClassStatePicklePlan {
+                    store: source_plan.store,
+                    definitions: source_plan.definitions,
+                    source_ast: source_plan.source_ast,
+                    typed_ast: &typed_ast,
+                    source_index: source_plan.source_index,
+                    typed_bindings: source_plan.typed_bindings,
+                    source: source_plan.source.clone(),
+                    class: source_plan.class,
+                    class_tree: source_plan.class_tree,
+                    constructor: source_plan.constructor.clone(),
+                    members: source_plan.members,
+                };
+                let Err(error) = invalid_new_type_plan.validate().unwrap().pickle() else {
+                    panic!("an inconsistent typed New result must reject: {invalid_type:?}");
+                };
+                assert!(
+                    matches!(error, PickleError::BodyType { tree, .. } if tree == typed_body_id),
+                    "inconsistent typed New result rejected unexpectedly: {error:?}"
+                );
+            }
         },
     )
     .unwrap();
