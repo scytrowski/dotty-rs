@@ -28,6 +28,16 @@ class OrdinarySelectionTests(unittest.TestCase):
             ["library/src/scala/A.scala#tree=12", "library/src/scala/A.scala#tree=3"],
         )
 
+    def test_reads_identity_column_from_cohort_tsv(self):
+        self.assertEqual(
+            self.load(
+                "identity\tstatus\n"
+                "library/src/scala/A.scala#tree=3\tblocked\n"
+                "library/src/scala/A.scala#tree=12\ttyped\n"
+            ),
+            ["library/src/scala/A.scala#tree=12", "library/src/scala/A.scala#tree=3"],
+        )
+
     def test_rejects_malformed_and_duplicate_identities(self):
         for value in (
             "library/src/scala/A.scala",

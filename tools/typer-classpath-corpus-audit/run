@@ -12,6 +12,7 @@ Usage: tools/typer-classpath-corpus-audit/run [--verify-determinism] [OUTPUT_PAT
        tools/typer-classpath-corpus-audit/run --focused-manifest MANIFEST [--verify-determinism] [OUTPUT_PATH]
        tools/typer-classpath-corpus-audit/run --focused-cohort package-term|object-module [--verify-determinism] [OUTPUT_PATH]
        tools/typer-classpath-corpus-audit/run --method-kind ordinary --method-manifest MANIFEST [--verify-determinism] [OUTPUT_PATH]
+       tools/typer-classpath-corpus-audit/run --method-kind ordinary --method-manifest MANIFEST --require-typed-cohort COHORT.tsv [--verify-determinism] [OUTPUT_PATH]
        tools/typer-classpath-corpus-audit/run --focused-manifest MANIFEST --compare-legacy-profile [OUTPUT_PATH]
 
 By default, run the pinned audit once and write its report. Pass
@@ -39,6 +40,7 @@ focused_manifest=""
 focused_cohort=""
 method_kind=""
 method_manifest=""
+required_typed_cohort=""
 compare_legacy_profile=0
 while (($#)); do
     case "$1" in
@@ -78,6 +80,14 @@ while (($#)); do
                 exit 2
             fi
             method_manifest="$2"
+            shift
+            ;;
+        --require-typed-cohort)
+            if (($# < 2)) || [[ -z "$2" ]]; then
+                usage >&2
+                exit 2
+            fi
+            required_typed_cohort="$2"
             shift
             ;;
         --compare-legacy-profile)
@@ -129,6 +139,10 @@ fi
 if [[ -n "$method_manifest" && "$method_kind" != ordinary ]] \
     || [[ "$method_kind" == ordinary && -z "$method_manifest" ]]; then
     printf '%s\n' '--method-manifest requires --method-kind ordinary' >&2
+    exit 2
+fi
+if [[ -n "$required_typed_cohort" && "$method_kind" != ordinary ]]; then
+    printf '%s\n' '--require-typed-cohort requires --method-kind ordinary' >&2
     exit 2
 fi
 if [[ -n "$method_kind" && ( -n "$focused_manifest" || -n "$focused_cohort" || "$import_prefix_profile" == 1 ) ]]; then
@@ -232,6 +246,13 @@ if [[ "$method_kind" == ordinary ]]; then
         printf 'ordinary method manifest does not exist: %s\n' "$method_manifest" >&2
         exit 2
     fi
+    if [[ -n "$required_typed_cohort" && "$required_typed_cohort" != /* ]]; then
+        required_typed_cohort="$repo_root/$required_typed_cohort"
+    fi
+    if [[ -n "$required_typed_cohort" && ! -f "$required_typed_cohort" ]]; then
+        printf 'required typed cohort does not exist: %s\n' "$required_typed_cohort" >&2
+        exit 2
+    fi
     PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/ordinary_selection.py" \
         "$method_manifest" --root "$scala_root" >"$tmp_dir/ordinary-method-selection.txt"
     export DOTTY_ORDINARY_METHOD_SELECTION="$tmp_dir/ordinary-method-selection.txt"
@@ -279,6 +300,10 @@ if [[ "$method_kind" == ordinary ]]; then
     esac
     cp "$tmp_dir/first.ordinary-report.tsv" "$output_path"
     printf 'ordinary method report written to %s\n' "$output_path"
+    if [[ -n "$required_typed_cohort" ]]; then
+        PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/verify_ordinary_cohort.py" \
+            "$required_typed_cohort" "$output_path"
+    fi
     exit 0
 fi
 if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then

@@ -1,7 +1,7 @@
 use super::{audit_classpath_from_environment, audit_symbol_path, git_revision};
 use dotty_classloader::classloader::{ClasspathSymbolResolver, LoadingSession};
-use dotty_core::ast::TreeKind;
-use dotty_core::types::{TermRefTarget, Type};
+use dotty_core::ast::{Modifier, TreeKind, Untyped, UntypedNode};
+use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceDefinition, SourceId, SourceText, SymbolFlags,
     SymbolInfo, SymbolKind,
@@ -12,12 +12,473 @@ use dotty_parser::parse_compilation_unit;
 use dotty_typer::SourceTyper;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn source_line(text: &str, start: usize) -> usize {
     text.get(..start)
         .map(|prefix| prefix.bytes().filter(|byte| *byte == b'\n').count() + 1)
         .unwrap_or(0)
+}
+
+fn ast_feature(kind: &TreeKind<Untyped>) -> Option<&'static str> {
+    match kind {
+        TreeKind::Apply(_) | TreeKind::TypeApply(_) => Some("calls"),
+        TreeKind::Select(_) => Some("selections"),
+        TreeKind::Ident(_) => Some("identifiers"),
+        TreeKind::Literal(_) => Some("literals"),
+        TreeKind::ValDef(_) => Some("local_values"),
+        TreeKind::DefDef(_) => Some("nested_methods"),
+        TreeKind::Block(_) => Some("nested_scopes"),
+        TreeKind::Import(_) => Some("local_imports"),
+        TreeKind::If(_) => Some("branches"),
+        TreeKind::Match(_) => Some("matches"),
+        TreeKind::Try(_) => Some("tries"),
+        TreeKind::Closure(_) => Some("closures"),
+        TreeKind::While(_) => Some("loops"),
+        TreeKind::PhaseSpecific(
+            UntypedNode::Function(_)
+            | UntypedNode::FunctionWithMods(_)
+            | UntypedNode::PolyFunction(_),
+        ) => Some("closures"),
+        TreeKind::PhaseSpecific(UntypedNode::ParsedTry(_)) => Some("tries"),
+        TreeKind::PhaseSpecific(UntypedNode::ForYield(_) | UntypedNode::ForDo(_)) => {
+            Some("for_comprehensions")
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn inventory_candidates() {
+    const PINNED_SCALA_REVISION: &str = "777528f19a58e794c9954a42f433373472ec57f8";
+    let scala_root =
+        PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT required"));
+    assert_eq!(
+        git_revision(&scala_root),
+        PINNED_SCALA_REVISION,
+        "ordinary candidate inventory requires the pinned Scala 3.9.0 source revision"
+    );
+    let output = PathBuf::from(
+        std::env::var_os("DOTTY_ORDINARY_CANDIDATE_INVENTORY")
+            .expect("DOTTY_ORDINARY_CANDIDATE_INVENTORY required"),
+    );
+    let source_root = scala_root.join("library/src/scala");
+    let mut files = Vec::new();
+    collect_scala_sources(&source_root, &mut files);
+    files.sort();
+
+    let mut records = Vec::<(usize, String, u32, String)>::new();
+    let mut parse_diagnostics = 0usize;
+    let mut naming_failures = 0usize;
+    let mut eligible = 0usize;
+    let mut excluded_reasons = BTreeMap::<&'static str, usize>::new();
+    for path in &files {
+        let relative_path = path
+            .strip_prefix(&scala_root)
+            .expect("source file is under the pinned Scala root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text = fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("cannot read Scala source {relative_path}: {error}"));
+        let source = SourceId::from_index(0);
+        let mut store = SemanticStore::new();
+        let _definitions = Definitions::bootstrap(&mut store);
+        let scanner = ContextualScanner::new(&text)
+            .unwrap_or_else(|error| panic!("cannot scan {relative_path}: {error}"));
+        let parsed = parse_compilation_unit(
+            SourceText::new(&text).expect("Scala source should be valid UTF-8"),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        parse_diagnostics += parsed.diagnostics.len();
+        let mut packages = Packages::new();
+        let index = match name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            &relative_path,
+            &mut store,
+            &mut packages,
+        ) {
+            Ok(index) => index,
+            Err(_) => {
+                naming_failures += 1;
+                continue;
+            }
+        };
+
+        let import_count = parsed
+            .ast
+            .iter()
+            .filter(|(_, node)| matches!(node.kind, TreeKind::Import(_)))
+            .count();
+        let mut declaration_counts = BTreeMap::<(String, String), usize>::new();
+        for (tree, node) in parsed.ast.iter() {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                continue;
+            };
+            let Some(method) = index.symbol_at(source, tree) else {
+                continue;
+            };
+            let symbol = store.symbols.get(method);
+            let owner_path = symbol
+                .owner
+                .map(|owner| audit_symbol_path(&store, owner))
+                .unwrap_or_default();
+            let method_name = store
+                .names
+                .resolve(definition.name.as_name().text())
+                .to_owned();
+            *declaration_counts
+                .entry((owner_path, method_name))
+                .or_default() += 1;
+        }
+
+        for (tree, node) in parsed.ast.iter() {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                continue;
+            };
+            let Some(method) = index.symbol_at(source, tree) else {
+                continue;
+            };
+            let symbol = store.symbols.get(method);
+            let canonical = matches!(
+                index.definition_of(method),
+                Some(SourceDefinition::Canonical {
+                    source: canonical_source,
+                    tree: canonical_tree
+                }) if canonical_source == source && canonical_tree == tree
+            );
+            let owner_kind = symbol.owner.map(|owner| store.symbols.get(owner).kind);
+            if let Some(reason) = member_exclusion(
+                symbol.kind,
+                symbol.flags,
+                owner_kind,
+                definition.rhs.is_some(),
+                canonical,
+            ) {
+                *excluded_reasons.entry(reason).or_default() += 1;
+                continue;
+            }
+
+            let owner_path = symbol
+                .owner
+                .map(|owner| audit_symbol_path(&store, owner))
+                .unwrap_or_default();
+            let method_name = store
+                .names
+                .resolve(definition.name.as_name().text())
+                .to_owned();
+            let range = node.position.map(|position| position.span().range());
+            let Some(range) = range else {
+                continue;
+            };
+            let line = source_line(&text, range.start() as usize);
+            let rhs_range = definition
+                .rhs
+                .and_then(|rhs| parsed.ast.try_get(rhs))
+                .and_then(|rhs| rhs.position)
+                .map(|position| position.span().range());
+            let rhs_text = rhs_range
+                .and_then(|range| text.get(range.start() as usize..range.end() as usize))
+                .unwrap_or_default();
+            let has_placeholder = rhs_text.contains("???")
+                || rhs_text.contains("NotImplementedError")
+                || rhs_text.contains("??? :");
+            let mut rhs_nodes = Vec::<(u32, u32)>::new();
+            let mut counts = BTreeMap::<&'static str, usize>::new();
+            if let Some(rhs_range) = rhs_range {
+                for (_, rhs_node) in parsed.ast.iter() {
+                    let Some(position) = rhs_node.position else {
+                        continue;
+                    };
+                    let node_range = position.span().range();
+                    if rhs_range.start() > node_range.start() || node_range.end() > rhs_range.end()
+                    {
+                        continue;
+                    }
+                    rhs_nodes.push((node_range.start(), node_range.end()));
+                    let feature = ast_feature(&rhs_node.kind);
+                    if let Some(feature) = feature {
+                        *counts.entry(feature).or_default() += 1;
+                    }
+                }
+            }
+            rhs_nodes.sort_by_key(|(start, end)| (*start, std::cmp::Reverse(*end)));
+            let mut nesting_ends = Vec::<u32>::new();
+            let mut max_depth = 0usize;
+            for (start, end) in &rhs_nodes {
+                while nesting_ends
+                    .last()
+                    .is_some_and(|parent_end| parent_end < start)
+                {
+                    nesting_ends.pop();
+                }
+                nesting_ends.push(*end);
+                max_depth = max_depth.max(nesting_ends.len());
+            }
+            let type_parameters = definition.type_params.len();
+            let value_parameters = definition
+                .value_param_clauses
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>();
+            let defaults = definition
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .filter(|parameter| {
+                    parsed.ast.try_get(**parameter).is_some_and(|node| {
+                        matches!(&node.kind, TreeKind::ValDef(parameter) if parameter.rhs.is_some())
+                    })
+                })
+                .count();
+            let nested_scopes = counts.get("nested_scopes").copied().unwrap_or(0);
+            let result_inferred = parsed
+                .ast
+                .try_get(definition.tpt)
+                .is_some_and(|tpt| matches!(tpt.kind, TreeKind::TypeTree(_)));
+            let body_size = rhs_nodes.len();
+            let external_ref_syntax_candidates = parsed
+                .ast
+                .iter()
+                .filter(|(_, candidate)| {
+                    let Some(position) = candidate.position else {
+                        return false;
+                    };
+                    let candidate_range = position.span().range();
+                    range.start() <= candidate_range.start()
+                        && candidate_range.end() <= range.end()
+                        && matches!(
+                            candidate.kind,
+                            TreeKind::Ident(_)
+                                | TreeKind::Select(_)
+                                | TreeKind::AppliedTypeTree(_)
+                                | TreeKind::SingletonTypeTree(_)
+                                | TreeKind::TypeBoundsTree(_)
+                        )
+                })
+                .count();
+            let calls = counts.get("calls").copied().unwrap_or(0);
+            let selections = counts.get("selections").copied().unwrap_or(0);
+            let nested_methods = counts.get("nested_methods").copied().unwrap_or(0);
+            let control_flow = counts.get("branches").copied().unwrap_or(0)
+                + counts.get("matches").copied().unwrap_or(0) * 2
+                + counts.get("tries").copied().unwrap_or(0) * 2
+                + counts.get("closures").copied().unwrap_or(0) * 2
+                + counts.get("loops").copied().unwrap_or(0) * 2;
+            let control_flow =
+                control_flow + counts.get("for_comprehensions").copied().unwrap_or(0) * 2;
+            let score = body_size
+                + max_depth * 4
+                + type_parameters * 8
+                + value_parameters * 2
+                + calls * 3
+                + selections * 3
+                + nested_methods * 10
+                + control_flow * 4
+                + defaults * 12
+                + nested_scopes * 2
+                + usize::from(result_inferred) * 4
+                + import_count.min(5)
+                + declaration_counts
+                    .get(&(owner_path.clone(), method_name.clone()))
+                    .copied()
+                    .unwrap_or(1)
+                    .saturating_sub(1)
+                    * 8
+                + usize::from(has_placeholder) * 100;
+            let tier = if score <= 24 {
+                "A0"
+            } else if score <= 55 {
+                "A1"
+            } else {
+                "edge"
+            };
+            let overload_count = declaration_counts
+                .get(&(owner_path.clone(), method_name.clone()))
+                .copied()
+                .unwrap_or(1)
+                .saturating_sub(1);
+            let feature_text = counts
+                .iter()
+                .map(|(key, value)| (*key, *value))
+                .chain(std::iter::once(("imports", import_count)))
+                .chain(std::iter::once(("same_name_overloads", overload_count)))
+                .chain(std::iter::once((
+                    "placeholder",
+                    usize::from(has_placeholder),
+                )))
+                .filter(|(_, value)| *value > 0)
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let feature_text = if feature_text.is_empty() {
+                "none".to_owned()
+            } else {
+                feature_text
+            };
+            let identity = format!("{relative_path}#tree={}", tree.index());
+            let row = format!(
+                "{identity}\t{owner_path}\t{method_name}\t{line}\t{}..{}\t{score}\t{tier}\t{body_size}\t{max_depth}\t{type_parameters}\t{value_parameters}\t{}\t{}\t{}\t{nested_scopes}\t{external_ref_syntax_candidates}\t{overload_count}\t{feature_text}",
+                range.start(),
+                range.end(),
+                if result_inferred {
+                    "inferred"
+                } else {
+                    "explicit"
+                },
+                defaults,
+                if has_contextual_value_parameter(&parsed.ast, definition) {
+                    "contextual"
+                } else {
+                    "ordinary"
+                },
+            );
+            records.push((score, relative_path.clone(), tree.index(), row));
+            eligible += 1;
+        }
+    }
+    records.sort_by(|left, right| (&left.0, &left.1, &left.2).cmp(&(&right.0, &right.1, &right.2)));
+    let mut report = format!(
+        "scala_revision\t{PINNED_SCALA_REVISION}\nsource_scope\tlibrary/src/scala\nfiles_seen\t{}\nparse_diagnostics\t{parse_diagnostics}\nnamer_failed_files\t{naming_failures}\neligible_ordinary_methods\t{eligible}\n",
+        files.len()
+    );
+    report.push_str("exclusions\n");
+    for (reason, count) in excluded_reasons {
+        report.push_str(&format!("{reason}\t{count}\n"));
+    }
+    report.push_str("\nmethod\towner_path\tmethod_name\tline\trange\trank_score\ttier\trhs_nodes\trhs_depth\ttype_params\tvalue_params\tresult_mode\tdefault_params\tparameter_kind\tnested_scopes\texternal_ref_syntax_candidates\tsame_name_overloads\tfeatures\n");
+    for (_, _, _, row) in records {
+        report.push_str(&row);
+        report.push('\n');
+    }
+    fs::write(&output, report).unwrap_or_else(|error| {
+        panic!(
+            "cannot write ordinary method candidate inventory {}: {error}",
+            output.display()
+        )
+    });
+}
+
+fn has_contextual_value_parameter(
+    ast: &dotty_core::ast::AstArena<Untyped>,
+    definition: &dotty_core::ast::DefDef<Untyped>,
+) -> bool {
+    definition
+        .value_param_clauses
+        .iter()
+        .flatten()
+        .any(|parameter| {
+            ast.try_get(*parameter).is_some_and(|node| {
+                matches!(
+                    &node.kind,
+                    TreeKind::ValDef(parameter)
+                        if parameter.metadata.modifiers.contains(&Modifier::Implicit)
+                            || parameter.metadata.modifiers.contains(&Modifier::Given)
+                )
+            })
+        })
+}
+
+fn method_result_shape(store: &SemanticStore, method: dotty_core::SymbolId) -> String {
+    let &SymbolInfo::Complete(mut ty) = store.symbols.info(method) else {
+        return String::new();
+    };
+    loop {
+        match store.types.get(ty) {
+            Type::Poly(poly) => ty = poly.result,
+            Type::Method(method) => ty = method.result,
+            _ => return stable_type_shape(store, ty, 0),
+        }
+    }
+}
+
+fn stable_type_shape(store: &SemanticStore, ty: dotty_core::TypeId, depth: usize) -> String {
+    if depth >= 16 {
+        return "<depth-limit>".to_owned();
+    }
+    match store.types.get(ty) {
+        Type::TypeRef { target, .. } => match target {
+            TypeRefTarget::Symbol(symbol) => audit_symbol_path(store, *symbol),
+            TypeRefTarget::Name(name) => store.names.resolve(name.as_name().text()).to_owned(),
+        },
+        Type::Applied { tycon, args } => format!(
+            "{}[{}]",
+            stable_type_shape(store, *tycon, depth + 1),
+            args.iter()
+                .map(|argument| stable_type_shape(store, *argument, depth + 1))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Type::Constant(constant) => format!("constant:{constant:?}"),
+        Type::ParamRef { index, .. } => format!("typeparam#{index}"),
+        Type::JavaArray { element } => {
+            format!("Array[{}]", stable_type_shape(store, *element, depth + 1))
+        }
+        Type::ByName { result } => {
+            format!("=> {}", stable_type_shape(store, *result, depth + 1))
+        }
+        Type::Repeated { element } => {
+            format!(
+                "Repeated[{}]",
+                stable_type_shape(store, *element, depth + 1)
+            )
+        }
+        Type::And { left, right } => format!(
+            "{} & {}",
+            stable_type_shape(store, *left, depth + 1),
+            stable_type_shape(store, *right, depth + 1)
+        ),
+        Type::Or { left, right } => format!(
+            "{} | {}",
+            stable_type_shape(store, *left, depth + 1),
+            stable_type_shape(store, *right, depth + 1)
+        ),
+        Type::NoType => "<no-type>".to_owned(),
+        Type::Error(_) => "<error>".to_owned(),
+        Type::NoPrefix => "<no-prefix>".to_owned(),
+        Type::TermRef { .. } => "<term-ref>".to_owned(),
+        Type::ThisType { class } => format!("{}.this", audit_symbol_path(store, *class)),
+        Type::SuperType { .. } => "<super>".to_owned(),
+        Type::Bounds { .. } => "<bounds>".to_owned(),
+        Type::AliasingBounds { alias } => stable_type_shape(store, *alias, depth + 1),
+        Type::Flexible { underlying } => stable_type_shape(store, *underlying, depth + 1),
+        Type::Refined { .. } => "<refined>".to_owned(),
+        Type::Recursive { .. } => "<recursive>".to_owned(),
+        Type::RecThis { .. } => "<recursive-this>".to_owned(),
+        Type::Method(_) => "<method>".to_owned(),
+        Type::Poly(_) => "<poly>".to_owned(),
+        Type::TypeLambda(_) => "<type-lambda>".to_owned(),
+        Type::Match(_) => "<match-type>".to_owned(),
+        Type::MatchCase { .. } => "<match-case>".to_owned(),
+        Type::Annotated { underlying, .. } => stable_type_shape(store, *underlying, depth + 1),
+        Type::Wildcard { .. } => "<wildcard>".to_owned(),
+        Type::ClassInfo(_) => "<class-info>".to_owned(),
+    }
+}
+
+fn collect_scala_sources(directory: &Path, output: &mut Vec<PathBuf>) {
+    let mut entries = fs::read_dir(directory)
+        .unwrap_or_else(|error| {
+            panic!(
+                "cannot read Scala source directory {}: {error}",
+                directory.display()
+            )
+        })
+        .map(|entry| entry.expect("directory entry should be readable").path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            collect_scala_sources(&path, output);
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "scala")
+        {
+            output.push(path);
+        }
+    }
 }
 
 pub(super) fn run() {
@@ -234,6 +695,7 @@ pub(super) fn run() {
 
             attempts += 1;
             let outcome = typer.type_method_definition(tree);
+            let mut typed_tree_identity = String::new();
             let status = match outcome {
                 Ok(typed_tree) => {
                     let typed_method = typer.source_typed_index().get(source, tree);
@@ -268,7 +730,11 @@ pub(super) fn run() {
                             });
                     if complete {
                         typed += 1;
-                        "typed".to_owned()
+                        typed_tree_identity = typed_tree.index().to_string();
+                        format!(
+                            "typed::result={}",
+                            method_result_shape(typer.store(), method)
+                        )
                     } else {
                         blocked += 1;
                         "blocked::missing_typed_method_subtree_mapping".to_owned()
@@ -290,12 +756,27 @@ pub(super) fn run() {
                 complexity.to_string(),
                 status,
                 tree_index.to_string(),
+                typed_tree_identity,
             ]);
         }
     }
-    assert!(rows.iter().all(|row| row.len() == 10));
+    for row in &mut rows {
+        if row.len() == 10 {
+            row.push(String::new());
+        }
+        let status = &mut row[8];
+        let actual_result = status
+            .strip_prefix("typed::result=")
+            .map(str::to_owned)
+            .unwrap_or_else(|| "not_available".to_owned());
+        if actual_result != "not_available" {
+            *status = "typed".to_owned();
+        }
+        row.insert(7, actual_result);
+    }
+    assert!(rows.iter().all(|row| row.len() == 12));
     rows.sort();
-    println!("ORDINARY_METHOD_REPORT_BEGIN");
+    println!("\nORDINARY_METHOD_REPORT_BEGIN");
     println!("schema=1");
     println!("pinned_scala_revision={PINNED_SCALA_REVISION}");
     println!("selected={}", identities.len());
@@ -305,7 +786,7 @@ pub(super) fn run() {
     println!("excluded={excluded}");
     println!("not_attempted={not_attempted}");
     println!(
-        "method\towner_path\tmethod_name\tline\trange\tmodifiers\texpected_result\tcomplexity\tstatus\tattempted_tree"
+        "method\towner_path\tmethod_name\tline\trange\tmodifiers\texpected_result\tactual_result\tcomplexity\tstatus\tsource_tree\ttyped_tree"
     );
     for row in rows {
         println!("{}", row.join("\t"));
@@ -345,8 +826,8 @@ fn member_exclusion(
 #[cfg(test)]
 mod tests {
     use super::super::collect_local_nodes;
-    use super::{member_exclusion, source_line};
-    use dotty_core::ast::TreeKind;
+    use super::{ast_feature, has_contextual_value_parameter, member_exclusion, source_line};
+    use dotty_core::ast::{TreeKind, UntypedNode};
     use dotty_core::{
         Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolKind,
     };
@@ -396,6 +877,67 @@ mod tests {
             ),
             Some("synthetic_or_forwarder")
         );
+    }
+
+    #[test]
+    fn candidate_profile_counts_source_lambdas_tries_and_for_comprehensions() {
+        let source_text = "object C { def mapped(xs: List[Int]) = xs.map(x => try x catch { case _: Exception => 0 }); def values(xs: List[Int]) = for (x <- xs) yield x; def scoped = { import scala.util.Try; val local = 1; local } }";
+        let source = SourceId::from_index(0);
+        let mut store = SemanticStore::new();
+        let _definitions = Definitions::bootstrap(&mut store);
+        let scanner = ContextualScanner::new(source_text).unwrap();
+        let parsed = parse_compilation_unit(
+            SourceText::new(source_text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        let features = parsed
+            .ast
+            .iter()
+            .filter_map(|(_, node)| ast_feature(&node.kind))
+            .collect::<Vec<_>>();
+
+        assert!(features.contains(&"closures"));
+        assert!(features.contains(&"tries"));
+        assert!(features.contains(&"for_comprehensions"));
+        assert!(features.contains(&"nested_scopes"));
+        assert!(features.contains(&"local_imports"));
+        assert!(parsed.ast.iter().any(|(_, node)| matches!(
+            &node.kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        )));
+    }
+
+    #[test]
+    fn candidate_parameter_kind_uses_parameter_contextual_modifiers() {
+        let source_text = "object C { def contextual(using value: Int): Int = value; implicit def ordinary(value: Int): Int = value }";
+        let source = SourceId::from_index(0);
+        let mut store = SemanticStore::new();
+        let _definitions = Definitions::bootstrap(&mut store);
+        let scanner = ContextualScanner::new(source_text).unwrap();
+        let parsed = parse_compilation_unit(
+            SourceText::new(source_text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        let kinds = parsed
+            .ast
+            .iter()
+            .filter_map(|(_, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                let name = store.names.resolve(definition.name.as_name().text());
+                (!matches!(name, "<init>" | "$init$")).then_some((
+                    name,
+                    has_contextual_value_parameter(&parsed.ast, definition),
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(kinds, [("contextual", true), ("ordinary", false)]);
     }
 
     #[test]
