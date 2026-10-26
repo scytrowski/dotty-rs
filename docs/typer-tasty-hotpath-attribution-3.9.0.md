@@ -7,7 +7,7 @@ four-file manifest `typer-hot-path-profile-manifest-3.9.0.tsv`, Scala checkout
 revision `777528f19a58e794c9954a42f433373472ec57f8`, Scala 3.9.0 artifacts,
 Temurin JDK 21.0.8, and the same host/build profile for three serial warm
 samples on fresh main (`c31bba059c00a7a13f6a80ed689f90762808100a`) and three
-samples with the opt-in TASTy observer (`28fa9a50f88a207ed34d256d8654145bc5c55b41`).
+samples with the opt-in TASTy observer (`04e954c6309e605213c209cd9e82ffdce79382bb`).
 Cargo/test concurrency was one. The exact six method observations, three match
 probes, and their outcomes are retained in the evidence directories below.
 
@@ -15,18 +15,21 @@ The observer separately times TASTy parse, AST address indexing, definition
 selection, parent resolution, constructor/accessor extraction, and member
 projection. Parent alias/bare and constructor/member bare callbacks retain a
 stable textual key, elapsed time, outcome, and each candidate classpath probe.
-Resource rows include binary identity, TASTy version, size bucket, outcome,
-and observation count. Timers are opt-in with classload profile collection;
-there is no production-default profiling.
+A callback error is recorded on that exact invocation, so repeated keys retain
+separate unresolved/error outcomes. Callback/probe key strings are built only
+when profile collection is active; the normal unprofiled path does not allocate
+those keys. Resource rows include binary identity, TASTy version, size bucket,
+outcome, and observation count. Profiling is opt-in with classload profile
+collection; there is no production-default profiling.
 
 ## Results
 
 | Measure | Fresh main | Detailed observer | Difference |
 |---|---:|---:|---:|
-| Mean measured Cargo wall time | 19,442.7 ms | 19,037.0 ms | -405.7 ms (-2.1%) |
-| Mean child CPU user time | 17.63 s | 17.19 s | -0.44 s |
-| Mean child CPU system time | 1.75 s | 1.74 s | -0.01 s |
-| Maximum sampled process-tree RSS | 117,792,768 bytes | 119,238,656 bytes | +1,445,888 bytes |
+| Mean measured Cargo wall time | 19,442.7 ms | 19,122.3 ms | -320.4 ms (-1.6%) |
+| Mean child CPU user time | 17.63 s | 17.38 s | -0.25 s |
+| Mean child CPU system time | 1.75 s | 1.63 s | -0.12 s |
+| Maximum sampled process-tree RSS | 117,792,768 bytes | 119,234,560 bytes | +1,441,792 bytes |
 | Selected method observations | 6 | 6 | same |
 | Selected match probes | 3 | 3 | same |
 
@@ -40,14 +43,14 @@ Across the three instrumented repetitions, phase totals were:
 
 | Profile scope | Parse | AST index | Definition selection | Parent resolution | Constructor/accessor | Member projection |
 |---|---:|---:|---:|---:|---:|---:|
-| Source method loads | 10.3 ms | 84.2 ms | 1.2 ms | 51.1 ms | 0.02 ms | 24.16 s |
-| Match-probe loads | 9.5 ms | 81.5 ms | 1.1 ms | 48.4 ms | 0.02 ms | 22.77 s |
+| Source method loads | 10.39 ms | 82.62 ms | 1.14 ms | 50.83 ms | 0.029 ms | 24.280 s |
+| Match-probe loads | 9.55 ms | 78.87 ms | 1.15 ms | 51.14 ms | 0.020 ms | 22.717 s |
 
 These are inclusive attribution totals across classload observations and may
 overlap; they are not disjoint CPU intervals. In the match profile the resolver
-recorded 41 module-completion calls per run (123 total) and 8.575440, 8.733201,
-and 8.686223 seconds of delegated completion time in runs 1–3 respectively
-(25.995 seconds total).
+recorded 41 module-completion calls per run (123 total) and 8.489011, 8.509768,
+and 8.581413 seconds of delegated completion time in runs 1–3 respectively
+(25.580192 seconds total).
 
 The instrumented callback TSV records per-key outcomes and every candidate
 probe. Across the three match-probe files and three repetitions, member
@@ -73,9 +76,11 @@ The checked-in normalized TSVs omit the large raw run logs:
 - [Fresh-main baseline evidence](typer-tasty-hotpath-evidence/baseline/)
 - [Instrumented evidence](typer-tasty-hotpath-evidence/instrumented/)
 
-`run-timings.tsv` contains per-run wall/CPU/RSS data. `methods.tsv`,
+`run-timings.tsv` contains per-run wall/CPU/RSS data.
+`method-identities.tsv` is the normalized, timing-free method selection;
 `method-outcomes.tsv`, `match-probes.tsv`, and `match-probe-counts.tsv` retain
-the exact selection and outcome comparison. The instrumented directory also
+the exact outcomes and per-run match selection. `methods.tsv` preserves
+per-method timings, which naturally vary between runs. The instrumented directory also
 contains `tasty-phases.tsv`, `match-tasty-phases.tsv`, `tasty-resources.tsv`,
 and `tasty-resolution.tsv` with phase, resource, callback-key, and individual
 classpath-probe observations. `variant-comparison.tsv` records the paired
@@ -100,7 +105,7 @@ byte-for-byte; timing-bearing files intentionally retain their observed values.
   `93b52921a5efb10ac0dcf9e3c955fa209fc83687df897d6ab034af967e2f5088`.
 - Host: AMD Ryzen 9 7940HS with Radeon 780M Graphics; Cargo test profile;
   Cargo/test concurrency fixed at one.
-- Instrumented implementation source: `28fa9a50f88a207ed34d256d8654145bc5c55b41`.
+- Instrumented implementation source: `04e954c6309e605213c209cd9e82ffdce79382bb`.
   The audit parser in `sequential_profile.py` additionally writes the stable
   callback/probe TSV represented in this PR.
 
