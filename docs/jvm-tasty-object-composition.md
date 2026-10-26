@@ -283,14 +283,98 @@ lowering. It adds no bytecode emitter or verifier-state model. The JDK harness
 uses only the original Rust-generated classfiles; Scala's independent
 classpath/TASTy consumer remains the separate #1721 check.
 
+## Issue #1721: pinned Scala 3.9 object-composition consumer
+
+The strict opt-in test `jvm_tasty_object_composition_scala_consumer` emits two
+complete Rust batches from the exact `CounterOwner.scala` source above, using
+distinct source sessions, and publishes each four-file batch into a new empty
+root. Both batches have identical ordered paths and byte-identical classfiles
+and sidecars. They decode as classfile 65.0 and TASTy 28.9.0, with a distinct
+16-byte class-to-sidecar UUID for each class. Only the Rust batch root and the
+pinned Scala 3.9 runtime libraries are on the independent client's compile
+classpath. Pinned compiler JARs launch scalac and contain no
+`example/Counter.class` or `example/CounterOwner.class` entries.
+
+The only Scala client source is
+[`Consumer.scala`](../tests/fixtures/jvm_tasty_object_composition/Consumer.scala).
+It constructs owners with named seeds 7 and 42, checks the independent values,
+and returns 742. The pinned compiler emits only `Consumer.class` and
+`Consumer$.class` into a separate empty directory; `javap` confirms constant
+pool references to `CounterOwner.<init>(I)V` and `CounterOwner.read()I`. A
+separate Java driver invokes the Scala client, and `java -Xverify:all` runs it
+against each original Rust batch. Both runs print `742`. SHA-256 and byte
+comparisons of every Rust classfile and sidecar before and after compilation
+and execution confirm that Scala did not replace or rebuild either runtime
+dependency.
+
+TASTy lookup is demonstrated independently for both methods. For each class,
+the test removes `Counter.get()I` or `CounterOwner.read()I` from a copy of the
+classfile while preserving its original TASTy sidecar and link; the isolated
+probe still compiles. The matching classfile-only control fails with a missing
+member diagnostic. These intentionally inconsistent classfile/TASTy controls
+are compile-only and are never executed. Additional per-class controls reject
+missing, misplaced, corrupt, and UUID-mismatched sidecars under `-Werror`.
+Changing the classfile attribute name from `TASTY` to `TASTX`, removing the
+sidecar, and removing the TASTy-only method makes that method unavailable.
+Scala 3.9 selects a neighboring `.tasty` directly when it exists and does not
+load the classfile, so its `TASTY` attribute is not consulted during member
+lookup. Missing-classfile controls can still compile from TASTy, but Java
+execution correctly fails with `NoClassDefFoundError`.
+
+The Rust-produced `CounterOwner.tasty` decompiles to the private immutable
+`inner: example.Counter` field with the real `new example.Counter(seed)`
+initializer and `read(): Int = CounterOwner.this.inner.get()` body. The
+separate `Counter.tasty` declares the source `get` method. Running the pinned
+`-from-tasty` reader on an isolated sidecar-only copy reconstructs
+`CounterOwner.class`; its bytecode contains the field read and virtual method
+dispatch. A separate verified Java harness then runs that reconstructed owner
+with only the original Rust `Counter.class` dependency and returns `742`. This
+runtime is isolated from both positive client runs, whose classpaths contain
+the original Rust `CounterOwner.class`. The original Rust batch validators
+check the canonical constructor, field, and method owners and descriptors.
+
+The local strict run used Scala 3.9.0 source revision
+`777528f19a58e794c9954a42f433373472ec57f8` and Eclipse Temurin JDK 21.0.8.
+The independent client source SHA-256 is
+`0f53a121823ad917230d23cd4e9a8e3444ec150e34ace0de9e6c114d2c1ba159`. The
+first Rust batch artifacts were:
+
+| Artifact | SHA-256 | Class TASTY UUID bytes |
+| --- | --- | --- |
+| `Counter.class` | `15758239b1d5a6dcb73e2ea705c0ad77494ca37813a8d8cc9aa09595f62d621e` | `00d9381a49fab3ac0000000000008193` |
+| `Counter.tasty` | `8a1022221260fc99d1fdd8e40b855d7931f5b958a419aac072230ddce262eaba` | same as `Counter.class` |
+| `CounterOwner.class` | `2f824c65b0bc646208d33fab91c98d2fbd95852d4c7993d5a7c00c0f82f89150` | `005d992e804ee7d30000000000008197` |
+| `CounterOwner.tasty` | `9954cba73d3af80e314da391b490cd76c442de21add1dea844f7575723b88b5a` | same as `CounterOwner.class` |
+
+The pinned compiler dependencies were hash-checked before use:
+`scala3-compiler_3-3.9.0.jar` `3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a`,
+`scala3-library_3-3.9.0.jar` `9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba`,
+`scala-library-3.9.0.jar` `b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd`,
+`tasty-core_3-3.9.0.jar` `66e12dda98bb23e864f3a31f8527c8338bf47bce9b85cc380b368c69c1ba8d0f`,
+`scala3-interfaces-3.9.0.jar` `64dfde1d2c6309d65a01c5f3ea836137eb84338dcadeb16f85764561ef4e10db`,
+`scala-asm-9.9.0-scala-1.jar` `75ac366e8ecb691e06a7e85041eed0f67919a646e5262fa0901225698c104375`,
+`compiler-interface-1.12.0.jar` `92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3`,
+and `util-interface-1.11.5.jar` `1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af`.
+Representative diagnostics are the Scala “out of sync with its TASTy file”
+warning promoted to an error for a UUID mismatch, “This `.tasty` file is
+missing” for a missing or misplaced sidecar, “could not be read … not a TASTy
+file” for a corrupted sidecar, and a missing `read`/`get` member in the
+classfile-only controls.
+
+The required command is
+`DOTTY_REQUIRE_SCALA_TASTY_OBJECT_COMPOSITION_CONSUMER=1 cargo test -p dotty --test jvm_tasty_object_composition_scala_consumer --locked -- --nocapture`.
+The dedicated Scala 3.9 workflow sets the flag and runs this test alongside the
+existing consumer gates. A missing JDK, Scala source checkout, revision, or
+cached compiler dependency is therefore a test failure in CI, not a silent
+skip.
+
 ## Next ownership boundary
 
 The #1715 evidence-only audit is superseded by the #1716 metadata/type proof,
 #1717 initializer serialization, #1718 TASTy receiver-call support, #1719
-linked JVM/TASTy batch, and #1720 verified Java runtime gate. Scala's
-independent consumer validation remains in #1721, and complete linked
-source-to-JVM/TASTy end-to-end coverage remains in #1722. Any typer blocker
-still belongs to the Typer owner.
+linked JVM/TASTy batch, #1720 verified Java runtime gate, and #1721 pinned
+Scala consumer proof. Complete linked source-to-JVM/TASTy end-to-end coverage
+remains in #1722. Any typer blocker still belongs to the Typer owner.
 
 ## Checks run
 
@@ -298,5 +382,6 @@ still belongs to the Typer owner.
 - `DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +stable test -p dotty --test jvm_source_compilation exact_tasty_object_composition_fixture_emits_reference_field_and_executes --locked -- --nocapture`
 - Exact Scala 3.9 source compilation, independent Scala client compilation, `javap -v -p -c`, and `java -Xverify:all -ea` with the pinned source checkout and Temurin JDK listed above.
 - `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 cargo test --test jvm_tasty_cross_class_factories class_state_plan_emits_reference_field_receiver_and_scala_executes --locked -- --nocapture` with the pinned Scala 3.9 checkout and Java 21.
+- `DOTTY_REQUIRE_SCALA_TASTY_OBJECT_COMPOSITION_CONSUMER=1 cargo test --locked --test jvm_tasty_object_composition_scala_consumer -- --nocapture` with Scala 3.9.0 revision `777528f19a58e794c9954a42f433373472ec57f8` and Temurin JDK 21.0.8.
 
 These are focused checks only. The complete repository gate results are reported with the PR.

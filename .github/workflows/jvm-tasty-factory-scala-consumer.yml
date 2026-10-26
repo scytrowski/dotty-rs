@@ -110,6 +110,7 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_OBJECT_COMPOSITION_CONSUMER: '1'
           DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
         run: |
           cargo +1.98.1 test \
@@ -117,6 +118,7 @@ jobs:
             --test jvm_tasty_multiclass_scala_consumer \
             --test jvm_tasty_cross_class_scala_consumer \
             --test jvm_tasty_factory_scala_consumer \
+            --test jvm_tasty_object_composition_scala_consumer \
             --test jvm_tasty_cross_class_factories \
             --test tasty_source_pickling \
             --locked -- --nocapture
