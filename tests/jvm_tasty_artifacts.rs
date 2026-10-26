@@ -3,7 +3,7 @@ use dotty_classfile::classfile::{ClassFile, Reader};
 use dotty_classfile::tasty_link::TastyLinkId;
 use dotty_core::SourceId;
 use dotty_jvm::emit_class;
-use dotty_jvm_tasty_contract::validate_classfile_tasty_link;
+use dotty_jvm_tasty_contract::{JvmTastyContractError, validate_classfile_tasty_link};
 use dotty_tasty::tasty::{DefinitionBody, TastyFile};
 
 use dotty::jvm_tasty_artifacts::{
@@ -440,6 +440,26 @@ fn primitive_root_call_does_not_masquerade_as_a_cross_class_batch_call() {
     assert_eq!(batch.classes().len(), 2);
     assert_eq!(batch.classes()[0].classfile_path(), "example/Counter.class");
     assert_eq!(batch.classes()[1].classfile_path(), "example/Gauge.class");
+}
+
+#[test]
+fn nested_cross_class_call_is_rejected_outside_the_bounded_invocation_shape() {
+    let source = COUNTER_READER.replace("counter.get()", "counter.get() + 1");
+    let error = emit_paired_jvm_tasty_batch(
+        &source,
+        "tests/fixtures/jvm_tasty_cross_class/Reader.scala",
+        SourceId::from_index(1678),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        PairedBatchArtifactError::Contract(JvmTastyContractError::BatchArtifact {
+            class_index: 1,
+            phase: "cross-class invocation",
+            ..
+        })
+    ));
 }
 
 #[test]

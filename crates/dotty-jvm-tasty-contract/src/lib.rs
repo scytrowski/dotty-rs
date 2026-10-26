@@ -14,7 +14,7 @@ use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::PoolRefError;
 use dotty_classfile::reader::Reader as ClassFileReader;
 use dotty_classfile::tasty_link::{TastyLinkError, TastyLinkId};
-use dotty_core::ast::{TreeKind, Untyped};
+use dotty_core::ast::{AstArena, TreeKind, Untyped};
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, SymbolOrigin, Visibility};
 use dotty_core::types::{MethodKind, MethodType, TermRefTarget, Type};
 use dotty_core::{Definitions, SemanticStore, SourceId, SymbolId, TreeId, Typed};
@@ -926,12 +926,36 @@ fn validate_cross_class_call_code(
             return Err(format!("method {caller:?} has a stale typed body"));
         };
         let TreeKind::Apply(application) = &root_tree.kind else {
+            if typed_tree_has_sibling_call(
+                root,
+                tasty.typed_ast,
+                tasty.store,
+                tasty.class,
+                &all_metadata,
+                &mut Vec::new(),
+            ) {
+                return Err(format!(
+                    "method {caller:?} contains a cross-class call outside the bounded direct-call shape"
+                ));
+            }
             continue;
         };
         let Some(function_tree) = tasty.typed_ast.try_get(application.function) else {
             return Err(format!("method {caller:?} has a stale selected function"));
         };
         let TreeKind::Select(_) = &function_tree.kind else {
+            if typed_tree_has_sibling_call(
+                root,
+                tasty.typed_ast,
+                tasty.store,
+                tasty.class,
+                &all_metadata,
+                &mut Vec::new(),
+            ) {
+                return Err(format!(
+                    "method {caller:?} contains a cross-class call outside the bounded direct-call shape"
+                ));
+            }
             continue;
         };
         let Some(Type::TermRef {
@@ -939,6 +963,18 @@ fn validate_cross_class_call_code(
             ..
         }) = tasty.store.types.try_get(function_tree.ty)
         else {
+            if typed_tree_has_sibling_call(
+                root,
+                tasty.typed_ast,
+                tasty.store,
+                tasty.class,
+                &all_metadata,
+                &mut Vec::new(),
+            ) {
+                return Err(format!(
+                    "method {caller:?} contains a cross-class call outside the bounded direct-call shape"
+                ));
+            }
             return Err(format!(
                 "method {caller:?} selection has no canonical method target"
             ));
@@ -948,6 +984,27 @@ fn validate_cross_class_call_code(
             return Err(format!("selected method {target:?} has no declaring owner"));
         };
         if owner == tasty.class {
+            if application.args.iter().any(|argument| {
+                typed_tree_has_sibling_call(
+                    *argument,
+                    tasty.typed_ast,
+                    tasty.store,
+                    tasty.class,
+                    &all_metadata,
+                    &mut Vec::new(),
+                )
+            }) || typed_tree_has_sibling_call(
+                application.function,
+                tasty.typed_ast,
+                tasty.store,
+                tasty.class,
+                &all_metadata,
+                &mut Vec::new(),
+            ) {
+                return Err(format!(
+                    "method {caller:?} contains a cross-class call outside the bounded direct-call shape"
+                ));
+            }
             continue;
         }
         // Primitive operations and other external calls may appear at the
@@ -957,6 +1014,18 @@ fn validate_cross_class_call_code(
             .iter()
             .find(|metadata| metadata.identity().symbol() == owner)
         else {
+            if typed_tree_has_sibling_call(
+                root,
+                tasty.typed_ast,
+                tasty.store,
+                tasty.class,
+                &all_metadata,
+                &mut Vec::new(),
+            ) {
+                return Err(format!(
+                    "method {caller:?} contains a cross-class call outside the bounded direct-call shape"
+                ));
+            }
             continue;
         };
         if application.kind != dotty_core::ast::ApplyKind::Regular || !application.args.is_empty() {
@@ -1072,6 +1141,177 @@ fn validate_cross_class_call_code(
         }
     }
     Ok(())
+}
+
+fn typed_tree_has_sibling_call(
+    root: TreeId<Typed>,
+    ast: &AstArena<Typed>,
+    store: &SemanticStore,
+    caller_class: SymbolId,
+    planned_classes: &[JvmClassMetadata],
+    visited: &mut Vec<TreeId<Typed>>,
+) -> bool {
+    if visited.contains(&root) {
+        return false;
+    }
+    visited.push(root);
+    let Some(tree) = ast.try_get(root) else {
+        return false;
+    };
+    if let TreeKind::Apply(application) = &tree.kind
+        && let Some(function) = ast.try_get(application.function)
+        && let TreeKind::Select(_) = &function.kind
+        && let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(target),
+            ..
+        }) = store.types.try_get(function.ty)
+        && let Some(owner) = store.symbols.get(*target).owner
+        && owner != caller_class
+        && planned_classes
+            .iter()
+            .any(|metadata| metadata.identity().symbol() == owner)
+    {
+        return true;
+    }
+    typed_tree_children(&tree.kind).into_iter().any(|child| {
+        typed_tree_has_sibling_call(child, ast, store, caller_class, planned_classes, visited)
+    })
+}
+
+fn typed_tree_children(kind: &TreeKind<Typed>) -> Vec<TreeId<Typed>> {
+    match kind {
+        TreeKind::Select(selection) => vec![selection.qualifier],
+        TreeKind::Super(super_tree) => vec![super_tree.qual],
+        TreeKind::Apply(application) => std::iter::once(application.function)
+            .chain(application.args.iter().copied())
+            .collect(),
+        TreeKind::TypeApply(application) => std::iter::once(application.function)
+            .chain(application.args.iter().copied())
+            .collect(),
+        TreeKind::New(new_tree) => vec![new_tree.tpt],
+        TreeKind::Typed(expression) => vec![expression.expr, expression.tpt],
+        TreeKind::NamedArg(argument) => vec![argument.arg],
+        TreeKind::Assign(assignment) => vec![assignment.lhs, assignment.rhs],
+        TreeKind::Block(block) => block
+            .stats
+            .iter()
+            .copied()
+            .chain(std::iter::once(block.expr))
+            .collect(),
+        TreeKind::If(expression) => vec![
+            expression.cond,
+            expression.then_branch,
+            expression.else_branch,
+        ],
+        TreeKind::Match(expression) => std::iter::once(expression.selector)
+            .chain(expression.cases.iter().copied())
+            .collect(),
+        TreeKind::CaseDef(case) => std::iter::once(case.pattern)
+            .chain(case.guard)
+            .chain(std::iter::once(case.body))
+            .collect(),
+        TreeKind::Return(expression) => expression.expr.into_iter().collect(),
+        TreeKind::While(expression) => vec![expression.cond, expression.body],
+        TreeKind::Try(expression) => std::iter::once(expression.expr)
+            .chain(expression.cases.iter().copied())
+            .chain(expression.finalizer)
+            .collect(),
+        TreeKind::Closure(closure) => closure
+            .env
+            .iter()
+            .copied()
+            .chain(std::iter::once(closure.method))
+            .chain(closure.tpt)
+            .collect(),
+        TreeKind::ValDef(definition) => definition.rhs.into_iter().collect(),
+        TreeKind::DefDef(definition) => definition.rhs.into_iter().collect(),
+        TreeKind::TypeDef(definition) => vec![definition.rhs],
+        TreeKind::Template(template) => std::iter::once(template.constructor)
+            .chain(template.parents.iter().copied())
+            .chain(template.self_val)
+            .chain(template.body.iter().copied())
+            .collect(),
+        TreeKind::PackageDef(package) => std::iter::once(package.name)
+            .chain(package.stats.iter().copied())
+            .collect(),
+        TreeKind::Import(import) => std::iter::once(import.expr)
+            .chain(
+                import
+                    .selectors
+                    .iter()
+                    .flat_map(|selector| selector.renamed),
+            )
+            .chain(import.selectors.iter().flat_map(|selector| selector.bound))
+            .collect(),
+        TreeKind::Export(export) => std::iter::once(export.expr)
+            .chain(
+                export
+                    .selectors
+                    .iter()
+                    .flat_map(|selector| selector.renamed),
+            )
+            .chain(export.selectors.iter().flat_map(|selector| selector.bound))
+            .collect(),
+        TreeKind::SingletonTypeTree(singleton) => vec![singleton.reference],
+        TreeKind::AppliedTypeTree(applied) => std::iter::once(applied.tpt)
+            .chain(applied.args.iter().copied())
+            .collect(),
+        TreeKind::RefinedTypeTree(refined) => std::iter::once(refined.tpt)
+            .chain(refined.refinements.iter().copied())
+            .collect(),
+        TreeKind::LambdaTypeTree(lambda) => lambda
+            .type_params
+            .iter()
+            .copied()
+            .chain(std::iter::once(lambda.body))
+            .collect(),
+        TreeKind::MatchTypeTree(matched) => matched
+            .bound
+            .into_iter()
+            .chain(std::iter::once(matched.selector))
+            .chain(matched.cases.iter().copied())
+            .collect(),
+        TreeKind::ByNameTypeTree(by_name) => vec![by_name.result],
+        TreeKind::TypeBoundsTree(bounds) => bounds
+            .low
+            .into_iter()
+            .chain(bounds.high)
+            .chain(bounds.alias)
+            .collect(),
+        TreeKind::Bind(binding) => vec![binding.body],
+        TreeKind::Alternative(alternative) => alternative.alternatives.clone(),
+        TreeKind::UnApply(unapply) => std::iter::once(unapply.function)
+            .chain(unapply.implicits.iter().copied())
+            .chain(unapply.patterns.iter().copied())
+            .collect(),
+        TreeKind::Annotated(annotated) => vec![annotated.expr, annotated.annotation],
+        TreeKind::Quote(quote) => std::iter::once(quote.body)
+            .chain(quote.tags.iter().copied())
+            .collect(),
+        TreeKind::Splice(splice) => vec![splice.expr],
+        TreeKind::QuotePattern(pattern) => pattern
+            .bindings
+            .iter()
+            .copied()
+            .chain(std::iter::once(pattern.body))
+            .chain(std::iter::once(pattern.quotes))
+            .collect(),
+        TreeKind::SplicePattern(pattern) => std::iter::once(pattern.body)
+            .chain(pattern.type_args.iter().copied())
+            .chain(pattern.args.iter().copied())
+            .collect(),
+        TreeKind::Inlined(inlined) => inlined
+            .bindings
+            .iter()
+            .copied()
+            .chain(std::iter::once(inlined.expansion))
+            .collect(),
+        TreeKind::Ident(_)
+        | TreeKind::This(_)
+        | TreeKind::Literal(_)
+        | TreeKind::TypeTree(_)
+        | TreeKind::PhaseSpecific(_) => Vec::new(),
+    }
 }
 
 fn validate_constructor(
