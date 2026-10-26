@@ -20,8 +20,8 @@ use dotty_tasty::file::TastyFile;
 use dotty_tasty::tasty::{DefinitionBody, DefinitionTail, RenderedParamSig, RenderedSignedName};
 use dotty_tasty::term::{AstRefKind, RawTree};
 use dotty_tasty_pickler::{
-    ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, PickleError,
-    PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
+    ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, PrimaryConstructorInputPlan,
+    SourceMetadata, SourceTypedBindings,
 };
 use dotty_typer::SourceTyper;
 
@@ -513,27 +513,18 @@ fn scala_39_oracle_pins_private_reference_val_tasty_and_jvm_abi() {
 }
 
 #[test]
-fn paired_producer_advances_private_val_to_cross_contract_boundary() {
-    let error = with_paired_jvm_tasty_batch_plan(
+fn paired_producer_accepts_reference_field_receiver_cross_contract() {
+    with_paired_jvm_tasty_batch_plan(
         SOURCE,
         "CounterOwner.scala",
         SourceId::from_index(1715),
-        |_| (),
+        |batch| assert_eq!(batch.classes.len(), 2),
     )
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        PairedPlanError::BatchClass {
-            class_index: 1,
-            phase: "JVM/TASTy cross-contract validation",
-            reason,
-            ..
-        } if reason.starts_with("TastyPlan(Reference")
-    ));
+    .expect("the validated field receiver TASTy shape passes the paired batch contract");
 }
 
 #[test]
-fn one_real_source_session_preserves_identity_and_reports_next_receiver_blocker() {
+fn one_real_source_session_preserves_identity_and_emits_cross_class_field_receiver() {
     let source_id = SourceId::from_index(1715);
     let source = SourceText::new(SOURCE).unwrap();
     let scanner = ContextualScanner::new(SOURCE).unwrap();
@@ -807,12 +798,43 @@ fn one_real_source_session_preserves_identity_and_reports_next_receiver_blocker(
     };
     let validated = plan.validate().unwrap();
     assert_eq!(validated.same_batch_reference_fields().count(), 1);
+    let output = validated
+        .pickle()
+        .expect("the validated owner field can receive Counter.get");
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let read_body = index
+        .iter_nodes_with_tag(DEFDEF_TAG)
+        .find_map(|node| {
+            let body = index.get(node.offset as u32)?.decode_defdef_body().ok()?;
+            (file.names().render(body.name).ok()? == "read").then_some(body)
+        })
+        .expect("CounterOwner TASTy contains read");
+    let RawTree::LengthNode(read_apply_node) = read_body.rhs.unwrap() else {
+        panic!("read body applies Counter.get");
+    };
+    assert_eq!(read_apply_node.tag, APPLY_TAG);
+    let read_apply = read_apply_node.decode_apply().unwrap();
+    assert!(read_apply.arguments.is_empty());
+    let RawTree::LengthNode(read_select_node) = read_apply.function else {
+        panic!("read applies the selected Counter method");
+    };
+    assert_eq!(read_select_node.tag, SELECTIN_TAG);
+    let read_select = read_select_node.decode_select_in().unwrap();
     assert!(matches!(
-        validated.pickle(),
-        Err(PickleError::Reference {
-            symbol,
-            reason: dotty_tasty_pickler::ReferenceError::Owner,
-        }) if symbol == inner
+        file.names().render_signed_name(read_select.name).unwrap(),
+        Some(RenderedSignedName::Signed { original, signature })
+            if original == "get" && signature.result == "scala.Int" && signature.parameters.is_empty()
+    ));
+    let inner_select = read_select.qualifier.decode_select().unwrap();
+    assert_eq!(inner_select.tag, SELECT_TAG);
+    assert_eq!(file.names().render(inner_select.name).unwrap(), "inner");
+    assert!(matches!(
+        inner_select.qualifier,
+        RawTree::Ast {
+            tag: QUALTHIS_TAG,
+            ..
+        }
     ));
 }
 

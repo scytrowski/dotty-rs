@@ -1,4 +1,5 @@
 use dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_batch;
+use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::ConstantPoolEntry;
@@ -18,6 +19,7 @@ const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 const FACTORY_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
 const REFERENCE_FIELD_SOURCE: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass CounterOwner(seed: Int):\n  private val inner: Counter = new Counter(seed)\n  def constant(): Int = 0\n";
+const REFERENCE_FIELD_READ_SOURCE: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass CounterOwner(seed: Int):\n  private val inner: Counter = new Counter(seed)\n  def read(): Int = inner.get()\n";
 const COUNTER_CLASS: &[u8] =
     include_bytes!("fixtures/jvm_tasty_cross_class_factories/scala39/example/Counter.class");
 const COUNTER_TASTY: &[u8] =
@@ -534,6 +536,32 @@ fn paired_tasty_planning_emits_the_canonical_reference_field_new_body() {
 }
 
 #[test]
+fn class_state_plan_emits_reference_field_receiver_and_scala_executes_it() {
+    with_paired_jvm_tasty_batch_plan(
+        REFERENCE_FIELD_READ_SOURCE,
+        "CounterOwner.scala",
+        SourceId::from_index(1718),
+        |batch| {
+            assert_eq!(batch.classes.len(), 2);
+            let counter = batch.classes[0]
+                .tasty_plan
+                .pickle()
+                .expect("Counter TASTy is complete");
+            let owner = batch.classes[1]
+                .tasty_plan
+                .pickle()
+                .expect("CounterOwner TASTy includes its canonical field receiver call");
+            TastyFile::parse_and_validate_scala_3_9(counter.bytes()).unwrap();
+            TastyFile::parse_and_validate_scala_3_9(owner.bytes()).unwrap();
+            if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+                run_reference_field_read_oracle(counter.bytes(), owner.bytes());
+            }
+        },
+    )
+    .unwrap();
+}
+
+#[test]
 fn paired_tasty_planning_rejects_constructor_shapes_outside_the_exact_slice() {
     let cases = [
         (
@@ -735,7 +763,6 @@ fn run_reference_field_oracle(counter_tasty: &[u8], owner_tasty: &[u8]) {
         decompiled.contains("new example.Counter(seed)"),
         "Scala decompiler did not recover the field constructor initializer: {decompiled}"
     );
-
     let from_tasty = Command::new(&compiler)
         .arg("-from-tasty")
         .arg("-classpath")
@@ -760,6 +787,146 @@ fn run_reference_field_oracle(counter_tasty: &[u8], owner_tasty: &[u8]) {
         .expect("inspect Scala-rebuilt owner constructor descriptor");
     assert!(javap.status.success());
     assert!(String::from_utf8_lossy(&javap.stdout).contains("(I)V"));
+    fs::remove_dir_all(temporary).unwrap();
+}
+
+fn run_reference_field_read_oracle(counter_tasty: &[u8], owner_tasty: &[u8]) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala root for explicit oracle"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let version = Command::new(&compiler)
+        .arg("-version")
+        .output()
+        .expect("query pinned Scala compiler version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"));
+
+    let temporary_root = std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir);
+    let temporary = temporary_root.join(format!(
+        "dotty-issue-1718-reference-read-oracle-{}",
+        std::process::id()
+    ));
+    fs::remove_dir_all(&temporary).ok();
+    let candidate = temporary.join("candidate/example");
+    let compiled = temporary.join("compiled");
+    let client = temporary.join("client");
+    fs::create_dir_all(&candidate).unwrap();
+    fs::create_dir_all(&compiled).unwrap();
+    fs::create_dir_all(&client).unwrap();
+    let counter_path = candidate.join("Counter.tasty");
+    let owner_path = candidate.join("CounterOwner.tasty");
+    fs::write(&counter_path, counter_tasty).unwrap();
+    fs::write(&owner_path, owner_tasty).unwrap();
+
+    let decompile = Command::new(&compiler)
+        .arg("-decompile")
+        .arg("-classpath")
+        .arg(temporary.join("candidate"))
+        .arg(&counter_path)
+        .arg(&owner_path)
+        .output()
+        .expect("decompile Rust-produced Counter and CounterOwner sidecars");
+    assert!(
+        decompile.status.success(),
+        "Scala decompiler rejected the linked sidecars: {}",
+        String::from_utf8_lossy(&decompile.stderr)
+    );
+    let decompiled = strip_ansi(&String::from_utf8_lossy(&decompile.stdout));
+    assert!(
+        decompiled.contains("new example.Counter(seed)"),
+        "Scala decompiler did not recover the field initializer: {decompiled}"
+    );
+    assert!(
+        decompiled.contains("inner.get()"),
+        "Scala decompiler did not recover the cross-class field receiver call: {decompiled}"
+    );
+
+    let from_tasty = Command::new(&compiler)
+        .arg("-from-tasty")
+        .arg("-classpath")
+        .arg(temporary.join("candidate"))
+        .arg("-d")
+        .arg(&compiled)
+        .arg(&counter_path)
+        .arg(&owner_path)
+        .output()
+        .expect("consume Rust-produced reference-field sidecars with pinned Scala");
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected the field receiver call: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    let javap = Command::new("javap")
+        .arg("-classpath")
+        .arg(&compiled)
+        .arg("-c")
+        .arg("-s")
+        .arg("example.CounterOwner")
+        .output()
+        .expect("inspect Scala-rebuilt owner constructor and receiver call");
+    assert!(javap.status.success());
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    assert!(javap_output.contains("(I)V"));
+    assert!(javap_output.contains("read();"));
+    assert!(javap_output.contains("()I"));
+    assert!(javap_output.contains("getfield"));
+    assert!(javap_output.contains("invokevirtual"));
+
+    let client_source = temporary.join("CounterOwnerClient.scala");
+    fs::write(
+        &client_source,
+        "package example\nobject CounterOwnerClient:\n  def main(args: Array[String]): Unit =\n    val owner = new CounterOwner(7)\n    assert(owner.read() == 7)\n",
+    )
+    .unwrap();
+    let compile_client_classpath =
+        std::env::join_paths([temporary.join("candidate"), temporary.join("compiled")]).unwrap();
+    let compiled_client = Command::new(&compiler)
+        .arg("-classpath")
+        .arg(compile_client_classpath)
+        .arg("-d")
+        .arg(&client)
+        .arg(&client_source)
+        .output()
+        .expect("compile Scala client against rebuilt sidecars");
+    assert!(
+        compiled_client.status.success(),
+        "Scala client failed to compile against rebuilt sidecars: {}",
+        String::from_utf8_lossy(&compiled_client.stderr)
+    );
+    let scala3_library = scala_root.join(
+        "dist/target/universal/stage/maven2/org/scala-lang/scala3-library_3/3.9.0-bin-SNAPSHOT/scala3-library_3-3.9.0-bin-SNAPSHOT.jar",
+    );
+    let scala_library = scala_root.join(
+        "dist/target/universal/stage/maven2/org/scala-lang/scala-library/3.9.0-bin-SNAPSHOT/scala-library-3.9.0-bin-SNAPSHOT.jar",
+    );
+    let runtime_classpath =
+        std::env::join_paths([client, compiled, scala3_library, scala_library]).unwrap();
+    let execution = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(runtime_classpath)
+        .arg("example.CounterOwnerClient")
+        .output()
+        .expect("run Scala client against the rebuilt sidecars");
+    assert!(
+        execution.status.success(),
+        "Scala client failed to execute the rebuilt field receiver: {}",
+        String::from_utf8_lossy(&execution.stderr)
+    );
     fs::remove_dir_all(temporary).unwrap();
 }
 

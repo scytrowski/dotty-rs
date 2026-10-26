@@ -200,28 +200,37 @@ emission. Mutable reference fields, external or unplanned targets,
 factory/nested/branch initializers, and mismatched source or typed identities
 remain rejected.
 
-The #1715 fixture's cross-class `inner.get()` method body is a later,
-independent blocker: its field proof succeeds, but paired JVM/TASTy
-cross-contract validation still rejects that method shape. A small
-constant-method control verifies the new reference-field ABI metadata path
-without claiming support for cross-class receiver method bodies in TASTy.
+Issue #1718 extends class-state TASTy validation and emission to the exact
+same-batch immutable reference field as the receiver of a supported cross-class
+no-argument `Int` method call. For `CounterOwner.read(): Int = inner.get()`,
+the emitted TASTy uses `SELECT(inner, QUALTHIS(...))` as the qualifier of the
+canonical `SELECTin(get)` and `APPLY`. The field must be the validated private
+immutable field, its type must point at the planned sibling class, and `get`
+must be the exact planned canonical method. Mutable fields, shadowed names,
+unplanned or forged identities, and mismatched source/typed bindings remain
+rejected.
 
-The supported boundary still excludes cross-class receiver calls from the
-field (`inner.get()`); that is the separate #1718 increment. This work does not
-expand the Typer or JVM backend.
+The strict pinned Scala 3.9 regression decompiles the Rust-produced sidecars,
+consumes them with `-from-tasty`, checks the rebuilt bytecode has `getfield`
+and `invokevirtual`, then compiles and executes a Scala client under Java 21
+verification. This establishes the TASTy producer shape and Scala consumer
+behavior. The paired batch contract also accepts the resulting plan, but this
+increment does not separately claim runtime correctness for Rust-emitted
+`.class` files and does not expand the Typer or JVM backend.
 
 ## Next ownership boundary
 
-The #1715 evidence-only audit is superseded by the #1716 metadata/type proof
-and #1717 initializer serialization. The pinned Scala 3.9 consumer must accept
-the linked sidecars and recover the constructor initializer. Cross-class
-receiver calls remain outside this increment. Any typer blocker still belongs
-to the Typer owner.
+The #1715 evidence-only audit is superseded by the #1716 metadata/type proof,
+#1717 initializer serialization, and #1718 class-state TASTy receiver-call
+support. The pinned Scala 3.9 consumer accepts and executes the TASTy-level
+case; linked Rust JVM class emission remains a separate boundary. Any typer
+blocker still belongs to the Typer owner.
 
 ## Checks run
 
 - `cargo +1.98.1 test -p dotty --test jvm_tasty_object_composition --locked -- --nocapture`
 - `DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +stable test -p dotty --test jvm_source_compilation exact_tasty_object_composition_fixture_emits_reference_field_and_executes --locked -- --nocapture`
 - Exact Scala 3.9 source compilation, independent Scala client compilation, `javap -v -p -c`, and `java -Xverify:all -ea` with the pinned source checkout and Temurin JDK listed above.
+- `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 cargo test --test jvm_tasty_cross_class_factories class_state_plan_emits_reference_field_receiver_and_scala_executes --locked -- --nocapture` with the pinned Scala 3.9 checkout and Java 21.
 
 These are focused checks only. The complete repository gate results are reported with the PR.
