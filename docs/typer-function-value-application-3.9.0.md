@@ -37,13 +37,13 @@ canonical `scala.FunctionN` resolver, requires TASTy provenance, selects the
 real public `apply` member, and routes arguments through ordinary method
 application and checking.
 
-The compact classpath fixture preserves the actual `apply` symbol and parameter
-clause, but its TASTy reduction encodes the class type parameter references as
-`Error` types. For canonical ordinary functions only, the typer instantiates
-the Scala `FunctionN.apply` contract from the receiver's already-resolved type
-arguments. It fails closed if the member shape is not a plain method with the
-expected arity or if the reduced signature is not uniformly unresolved. This
-does not create a symbol or privilege a same-spelled source class. Contextual,
+The classpath loader now preserves class-level parameter references found in a
+TASTy method signature as distinct unresolved markers; it does not collapse
+them together with missing dependencies or malformed references. For
+canonical ordinary functions only, the typer substitutes receiver arguments
+when every `apply` slot carries the exact corresponding class-parameter
+marker. Other unresolved signatures fail closed. The real `apply` symbol is
+retained, and no same-spelled source class is privileged. Contextual,
 polymorphic, and higher-arity families remain deferred.
 
 ## Scala oracle
@@ -85,14 +85,15 @@ source class named `Function1` also confirms that spelling alone does not
 select the canonical classpath path.
 
 The before/after audit retains exactly the same two source identities in the
-TSV. It still reports `ApplicationCalleeNotMethod` for both local methods and
-`methods_typed=0`; this change therefore does not claim either whole local
-method now types. The focused audit reports the first failure for each local
-method and does not identify which nested application produced it. In the
-Scala oracle body, the same expression also contains `seq.apply(...)`, whose
-external generic member instantiation remains unsupported. The direct
-`FunctionN.apply` regression passes, but the audit provides no evidence that
-these full roots have advanced past that other blocker.
+TSV and still reports `ApplicationCalleeNotMethod` for both local methods and
+`methods_typed=0`; neither whole local method types. A new nested generic
+control mirrors `op(acc, seq(at))` and asserts the failure tree is the inner
+`seq(at)` call. The outer canonical Function2 call has already resolved its
+real `apply` member and its type arguments; the remaining blocker is generic
+external member instantiation for `IndexedSeq.apply`. Thus the focused audit's
+unchanged outer method category masks progress past the Function-value
+application blocker. This issue does not expand into general external generic
+member instantiation.
 
 The after-audit was run with `--verify-determinism`; its two normalized reports
 matched byte-for-byte. It used the same single-file manifest, pinned Scala

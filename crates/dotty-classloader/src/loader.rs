@@ -2960,6 +2960,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 .unwrap_or_else(|| {
                     self.unresolved_tasty_type("type parameter reference is out of range")
                 }),
+            Some(tasty_symbol::DecodedTastyType::ClassParamRef(index)) => {
+                let message = self.store.names.intern(&format!(
+                    "unresolved .tasty class type parameter reference: #{index}"
+                ));
+                self.store.types.alloc(Type::Error(ErrorType { message }))
+            }
             Some(tasty_symbol::DecodedTastyType::Applied { tycon, arguments }) => {
                 let tycon = self.lower_tasty_type(owner, Some(tycon), type_parameters);
                 let args = arguments

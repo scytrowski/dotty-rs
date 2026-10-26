@@ -1,3 +1,3 @@
-identity	enclosing_method	local_method	method_line	attempt_tree	call_line	function_value	canonical_target	before_blocker	before_typed	after_blocker	after_typed
-library/src/scala/collection/IterableOnce.scala#tree=2043	foldl	loop	708	2051	710	op:(B,X)=>B	scala.Function2.apply	ApplicationCalleeNotMethod	false	ApplicationCalleeNotMethod	false
-library/src/scala/collection/IterableOnce.scala#tree=2097	foldr	loop	715	2111	717	op:(X,B)=>B	scala.Function2.apply	ApplicationCalleeNotMethod	false	ApplicationCalleeNotMethod	false
+identity	enclosing_method	local_method	method_line	attempt_tree	call_line	function_value	canonical_target	before_blocker_site	before_blocker	before_typed	after_blocker_site	after_blocker	after_typed
+library/src/scala/collection/IterableOnce.scala#tree=2043	foldl	loop	708	2051	710	op:(B,X)=>B	scala.Function2.apply	op.apply	ApplicationCalleeNotMethod	false	seq.apply	ApplicationCalleeNotMethod	false
+library/src/scala/collection/IterableOnce.scala#tree=2097	foldr	loop	715	2111	717	op:(X,B)=>B	scala.Function2.apply	op.apply	ApplicationCalleeNotMethod	false	seq.apply	ApplicationCalleeNotMethod	false

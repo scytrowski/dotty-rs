@@ -220,21 +220,24 @@ impl SourceTyper<'_> {
         let class_origin = declaration.origin;
         let class_owner = declaration.owner;
         let canonical_function = if matches!(class_origin, SymbolOrigin::Tasty(_)) {
-            let Some(arity) = applied_arity else {
-                return Ok((function, callable));
-            };
-            let canonical = self.source_function_class(
-                SourceFunctionKind::Ordinary,
-                arity,
-                request.tree_index,
-            )?;
-            (canonical == class
-                && class_kind == SymbolKind::Trait
-                && class_owner.is_some_and(|owner| {
-                    self.store.symbols.contains(owner)
-                        && self.store.symbols.get(owner).kind == SymbolKind::Package
-                }))
-            .then_some(class)
+            applied_arity
+                .map(|arity| {
+                    self.source_function_class(
+                        SourceFunctionKind::Ordinary,
+                        arity,
+                        request.tree_index,
+                    )
+                })
+                .transpose()?
+                .filter(|canonical| {
+                    *canonical == class
+                        && class_kind == SymbolKind::Trait
+                        && class_owner.is_some_and(|owner| {
+                            self.store.symbols.contains(owner)
+                                && self.store.symbols.get(owner).kind == SymbolKind::Package
+                        })
+                })
+                .map(|_| class)
         } else {
             None
         };
@@ -370,30 +373,37 @@ impl SourceTyper<'_> {
             });
         }
         if method.kind != MethodKind::Plain
-            || method.params.iter().any(|parameter| {
-                !matches!(self.store.types.try_get(parameter.ty), Some(Type::Error(_)))
+            || method.params.iter().enumerate().any(|(index, parameter)| {
+                !self.is_tasty_class_parameter_marker(parameter.ty, index)
             })
-            || !matches!(
-                self.store.types.try_get(method.result),
-                Some(Type::Error(_))
-            )
+            || !self.is_tasty_class_parameter_marker(method.result, arity)
         {
             return Err(TyperError::MemberTypeUnavailable {
                 symbol: candidate.symbol,
             });
         }
 
-        // The Scala 3.9 TASTy summary currently retains FunctionN.apply's
-        // member identity and clause shape but reduces its class type
-        // parameter references to Error types. For the exact canonical
-        // FunctionN class, the language contract fixes apply's signature to
-        // (T1, ..., Tn) => R. Instantiate that contract from the receiver's
-        // already-resolved type arguments while retaining the real member.
+        // The TASTy decoder retains each exact class-parameter reference in
+        // an explicit unresolved marker. Only those markers may be
+        // instantiated here; ordinary Error types (including missing
+        // dependencies and malformed references) remain failures.
         for (parameter, ty) in method.params.iter_mut().zip(&type_arguments) {
             parameter.ty = *ty;
         }
         method.result = type_arguments[arity];
         Ok(self.store.types.alloc(Type::Method(method)))
+    }
+
+    pub(in crate::typer) fn is_tasty_class_parameter_marker(
+        &self,
+        ty: TypeId,
+        index: usize,
+    ) -> bool {
+        let Some(Type::Error(error)) = self.store.types.try_get(ty) else {
+            return false;
+        };
+        self.store.names.resolve(error.message)
+            == format!("unresolved .tasty class type parameter reference: #{index}")
     }
 
     fn is_plain_private_source_method(&self, symbol: SymbolId) -> bool {

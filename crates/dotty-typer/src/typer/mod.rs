@@ -31103,7 +31103,7 @@ mod tests {
         };
 
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class Function1 { def apply(value: Int): Int = value }; class Use { def invoke(function: Int => Int, value: Int): Int = function(value); def invoke2(function: (Int, Int) => Int, left: Int, right: Int): Int = function(left, right); def generic[A, B](function: A => B, value: A): B = function(value); def sourceShadow(function: Function1, value: Int): Int = function(value); def wrong(function: Int => Int, value: String): Int = function(value); def wrongArity(function: (Int, Int) => Int, left: Int): Int = function(left) }",
+            "class Function1 { def apply(value: Int): Int = value }; class Use { def invoke(function: Int => Int, value: Int): Int = function(value); def invoke2(function: (Int, Int) => Int, left: Int, right: Int): Int = function(left, right); def generic[A, B](function: A => B, value: A): B = function(value); def sourceShadow(function: Function1, value: Int): Int = function(value); def wrong(function: Int => Int, value: String): Int = function(value); def wrongArity(function: (Int, Int) => Int, left: Int): Int = function(left); def nested[X, B](function: (B, X) => B, seq: IndexedSeq[X], at: Int, acc: B): B = function(acc, seq(at)) }",
         );
         let invoke = method_definition_and_rhs(&parsed, &store, &index, source, "invoke");
         let invoke2 = method_definition_and_rhs(&parsed, &store, &index, source, "invoke2");
@@ -31112,6 +31112,7 @@ mod tests {
             method_definition_and_rhs(&parsed, &store, &index, source, "sourceShadow");
         let wrong = method_definition_and_rhs(&parsed, &store, &index, source, "wrong");
         let wrong_arity = method_definition_and_rhs(&parsed, &store, &index, source, "wrongArity");
+        let nested = method_definition_and_rhs(&parsed, &store, &index, source, "nested");
         let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../dotty-tasty/tests/fixtures/scala3-library");
         let resolver = ClasspathSymbolResolver::new(
@@ -31131,6 +31132,20 @@ mod tests {
             &packages,
         )
         .with_resolver(Box::new(resolver));
+        let unrelated_error = typer.store.types.alloc(Type::Error(dotty_core::ErrorType {
+            message: typer
+                .store
+                .names
+                .intern("missing dependency for external signature"),
+        }));
+        assert!(!typer.is_tasty_class_parameter_marker(unrelated_error, 0));
+        let class_parameter_marker = typer.store.types.alloc(Type::Error(dotty_core::ErrorType {
+            message: typer
+                .store
+                .names
+                .intern("unresolved .tasty class type parameter reference: #0"),
+        }));
+        assert!(typer.is_tasty_class_parameter_marker(class_parameter_marker, 0));
         let mut results = Vec::new();
         for (method, rhs) in [invoke, invoke2, generic, source_shadow] {
             let context = typer.expression_context_for(method).unwrap();
@@ -31181,6 +31196,24 @@ mod tests {
             wrong_arity.is_err(),
             "wrong Function2 arity must be rejected"
         );
+        let nested_context = typer.expression_context_for(nested.0).unwrap();
+        let nested_result = typer.type_expression(nested.1, nested_context);
+        let TreeKind::Apply(outer_application) = &parsed.ast.get(nested.1).kind else {
+            panic!("nested source expression should be an application");
+        };
+        let nested_sequence_application = outer_application.args[1];
+        assert!(matches!(
+            &parsed.ast.get(nested_sequence_application).kind,
+            TreeKind::Apply(_)
+        ));
+        assert!(
+            matches!(
+                nested_result,
+                Err(TyperError::ApplicationCalleeNotMethod { tree_index, .. })
+                    if tree_index == nested_sequence_application.index()
+            ),
+            "the remaining root blocker should be the external seq.apply call: {nested_result:?}"
+        );
         assert_eq!(typer.source_typed_index().get(source, wrong_rhs), None);
         assert_eq!(
             typer.source_typed_index().get(source, wrong_arity_rhs),
@@ -31192,6 +31225,121 @@ mod tests {
             retry.is_ok(),
             "a valid call should succeed after failures: {retry:?}"
         );
+    }
+
+    #[test]
+    fn classpath_tasty_module_apply_keeps_ordinary_apply_resolution() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("import scala.Some; object Use { def create = Some(1) }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "create");
+        let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let resolver = ClasspathSymbolResolver::new(
+            CompositeClassPath::new(vec![
+                Box::new(DirectoryClassPath::new(library_root)),
+                Box::new(JavaObjectStubPath),
+            ]),
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let context = typer.expression_context_for(method).unwrap();
+        let result = typer.type_expression(rhs, context);
+        assert!(result.is_ok(), "classpath module apply failed: {result:?}");
+    }
+
+    #[test]
+    fn canonical_function_signature_with_unrelated_errors_is_rejected() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+        use dotty_core::SymbolInfo;
+
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Use { def valid(function: Int => Int, value: Int): Int = function(value); def invalid(function: Int => Int, value: Int): Int = function(value) }",
+        );
+        let valid = method_definition_and_rhs(&parsed, &store, &index, source, "valid");
+        let invalid = method_definition_and_rhs(&parsed, &store, &index, source, "invalid");
+        let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let resolver = ClasspathSymbolResolver::new(
+            CompositeClassPath::new(vec![
+                Box::new(DirectoryClassPath::new(library_root)),
+                Box::new(JavaObjectStubPath),
+            ]),
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let valid_context = typer.expression_context_for(valid.0).unwrap();
+        let typed = typer.type_expression(valid.1, valid_context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("function call should remain an Apply tree");
+        };
+        let function_type = typer.typed_ast().get(application.function).ty;
+        let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(apply_symbol),
+            ..
+        }) = typer.store().types.try_get(function_type)
+        else {
+            panic!("the call should select canonical Function1.apply");
+        };
+        let apply_symbol = *apply_symbol;
+        let SymbolInfo::Complete(original_info) = *typer.store.symbols.info(apply_symbol) else {
+            panic!("Function1.apply should have a complete signature");
+        };
+        let Some(Type::Method(mut malformed)) = typer.store.types.try_get(original_info).cloned()
+        else {
+            panic!("Function1.apply should be a plain method");
+        };
+        let missing = typer
+            .store
+            .names
+            .intern("unresolved .tasty member type: missing dependency");
+        for parameter in &mut malformed.params {
+            parameter.ty = typer
+                .store
+                .types
+                .alloc(Type::Error(dotty_core::ErrorType { message: missing }));
+        }
+        malformed.result = typer
+            .store
+            .types
+            .alloc(Type::Error(dotty_core::ErrorType { message: missing }));
+        let malformed_info = typer.store.types.alloc(Type::Method(malformed));
+        typer
+            .store
+            .symbols
+            .set_info(apply_symbol, SymbolInfo::Complete(malformed_info));
+
+        let invalid_context = typer.expression_context_for(invalid.0).unwrap();
+        let result = typer.type_expression(invalid.1, invalid_context);
+        assert!(result.is_err(), "unrelated Error slots must not be guessed");
+        assert_eq!(typer.source_typed_index().get(source, invalid.1), None);
+        typer
+            .store
+            .symbols
+            .set_info(apply_symbol, SymbolInfo::Complete(original_info));
     }
 
     #[test]
