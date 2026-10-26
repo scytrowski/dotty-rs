@@ -449,6 +449,100 @@ fn reference_field_receiver_artifact_rejects_a_forged_fieldref_and_missing_final
                 }) if reason.contains("getfield does not reference CONSTANT_Fieldref")
             ));
 
+            let mut wrong_seed = artifacts.clone();
+            let owner_artifact = wrong_seed
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/CounterOwner.class")
+                .unwrap();
+            let constructor_code = {
+                let mut reader = Reader::new(&owner_artifact.classfile_bytes);
+                let class = ClassFile::decode(&mut reader).unwrap();
+                let constructor = class
+                    .methods
+                    .iter()
+                    .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "<init>")
+                    .unwrap();
+                let [Attribute::Code(code)] = constructor.attributes.as_slice() else {
+                    panic!("CounterOwner constructor has one Code attribute");
+                };
+                code.code.to_vec()
+            };
+            assert_eq!(
+                constructor_code[9], 0x1b,
+                "constructor loads seed with iload_1"
+            );
+            let [constructor_offset] = owner_artifact
+                .classfile_bytes
+                .windows(constructor_code.len())
+                .enumerate()
+                .filter_map(|(index, bytes)| (bytes == constructor_code).then_some(index))
+                .collect::<Vec<_>>()[..]
+            else {
+                panic!("CounterOwner constructor Code occurs once in class bytes");
+            };
+            owner_artifact.classfile_bytes[constructor_offset + 9] = 0x03;
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_seed),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "reference-field initializer",
+                    reason,
+                    ..
+                }) if reason.contains("iload_1")
+            ));
+
+            let mut wrong_field_store = artifacts.clone();
+            let owner_artifact = wrong_field_store
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/CounterOwner.class")
+                .unwrap();
+            let (constructor_code, read_method_ref) = {
+                let mut reader = Reader::new(&owner_artifact.classfile_bytes);
+                let class = ClassFile::decode(&mut reader).unwrap();
+                let constructor = class
+                    .methods
+                    .iter()
+                    .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "<init>")
+                    .unwrap();
+                let [Attribute::Code(constructor_code)] = constructor.attributes.as_slice() else {
+                    panic!("CounterOwner constructor has one Code attribute");
+                };
+                let read = class
+                    .methods
+                    .iter()
+                    .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "read")
+                    .unwrap();
+                let [Attribute::Code(read_code)] = read.attributes.as_slice() else {
+                    panic!("CounterOwner.read has one Code attribute");
+                };
+                (
+                    constructor_code.code.to_vec(),
+                    u16::from_be_bytes([read_code.code[5], read_code.code[6]]),
+                )
+            };
+            let [constructor_offset] = owner_artifact
+                .classfile_bytes
+                .windows(constructor_code.len())
+                .enumerate()
+                .filter_map(|(index, bytes)| (bytes == constructor_code).then_some(index))
+                .collect::<Vec<_>>()[..]
+            else {
+                panic!("CounterOwner constructor Code occurs once in class bytes");
+            };
+            owner_artifact.classfile_bytes[constructor_offset + 14..constructor_offset + 16]
+                .copy_from_slice(&read_method_ref.to_be_bytes());
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_field_store),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "reference-field initializer",
+                    reason,
+                    ..
+                }) if reason.contains("putfield does not reference CONSTANT_Fieldref")
+            ));
+
             let mut mutable_field = artifacts;
             let owner_artifact = mutable_field
                 .classfiles
