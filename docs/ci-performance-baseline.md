@@ -51,7 +51,7 @@ For these five runs, the CI elapsed median was **9m55s**, with a range of **9m12
 | `cargo test --workspace --all-targets --locked` step | 7m20s | 4m42s–7m32s |
 | JVM verification command | 2m36s | 1m51s–2m43s |
 
-These are GitHub step wall times, not CPU measurements. In [CI run 40415404197](https://github.com/scytrowski/dotty-rs/actions/runs/40415404197), the cache restore was 5,269,214,731 bytes (about 5.27 GB or 5,025 MiB). Cargo reported `Finished test profile ... in 4m 35s`; the `Run tests` step ended 1m42s later. The remaining time includes test execution and process/log overhead. A second available CI log, [40412150151](https://github.com/scytrowski/dotty-rs/actions/runs/40412150151), also shows a primary-key hit for the same-size archive and a Cargo compile time of 5m10s. Both cache hits were followed by “not saving cache.” Across these two archived logs, Cargo compile time had a 4m52.5s median (4m35s–5m10s). The run-level log archive did not include Rust-check job logs for the other three selected runs, so their cache outcome and Cargo compile/runtime split are unknown. The five-run step medians above remain available from the Actions job timing API.
+These are GitHub step wall times, not CPU measurements. In [CI run 40415404197](https://github.com/scytrowski/dotty-rs/actions/runs/40415404197), the cache restore was 5,269,214,731 bytes (about 5.27 GB or 5,025 MiB). Cargo reported `Finished test profile ... in 4m 35s`; the `Run tests` step ended about 1m43s later. The remaining time includes test execution and process/log overhead. A second available CI log, [40412150151](https://github.com/scytrowski/dotty-rs/actions/runs/40412150151), also shows a primary-key hit for the same-size archive and a Cargo compile time of 5m10s. Both cache hits were followed by “not saving cache.” Across these two archived logs, Cargo compile time had a 4m52.5s median (4m35s–5m10s). The run-level log archive did not include Rust-check job logs for the other three selected runs, so their cache outcome and Cargo compile/runtime split are unknown. The five-run step medians above remain available from the Actions job timing API.
 
 ### Specialty workflows with recurring PR samples
 
@@ -83,7 +83,7 @@ Across these five observed PR updates, the all-triggered-workflow critical-path 
 | Typer full corpus | Current YAML and associated report-generation path inspected. | Current manual workflow has no successful sample. Do not dispatch it on a hosted runner for this issue. |
 | Lexer compatibility | Two manual runs exist: [38140224461](https://github.com/scytrowski/dotty-rs/actions/runs/38140224461) and [38140097123](https://github.com/scytrowski/dotty-rs/actions/runs/38140097123), both failed. | No successful duration; failed runs are not treated as representative cost samples. |
 | Parser oracle | No recorded run. | No timing sample. |
-| TASTy compatibility | One successful [run 35215208912](https://github.com/scytrowski/dotty-rs/actions/runs/35215208912) on 2026-09-17; observed run elapsed was 4m54s. | One observation only; there is no median or tail estimate. |
+| TASTy compatibility | One successful [run 35215208912](https://github.com/scytrowski/dotty-rs/actions/runs/35215208912) on 2026-09-17; observed job elapsed was 4m53s. | One observation only; there is no median or tail estimate. |
 
 ## Cargo compile timing artifact
 
