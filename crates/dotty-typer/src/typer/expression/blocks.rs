@@ -1375,7 +1375,7 @@ impl SourceTyper<'_> {
         }))
     }
 
-    pub(in crate::typer) fn type_local_method_definition(
+    pub(in crate::typer) fn type_source_method_definition(
         &mut self,
         tree: TreeId<Untyped>,
         definition: &dotty_core::ast::DefDef<Untyped>,
@@ -1386,13 +1386,15 @@ impl SourceTyper<'_> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
             return Ok(typed);
         }
-        let method = self.local_methods.symbol_at(self.source, tree).ok_or(
-            TyperError::LocalBlockDeclarationDeferred {
+        let method = self
+            .local_methods
+            .symbol_at(self.source, tree)
+            .or_else(|| self.index.symbol_at(self.source, tree))
+            .ok_or(TyperError::LocalBlockDeclarationDeferred {
                 source: self.source,
                 tree_index: tree.index(),
                 kind: "method definition",
-            },
-        )?;
+            })?;
         let signature = match *self.store.symbols.info(method) {
             SymbolInfo::Complete(signature) => signature,
             SymbolInfo::Missing => self.complete_symbol_inner(method, info_journal)?,
@@ -1453,6 +1455,7 @@ impl SourceTyper<'_> {
             let parameter_symbol = self
                 .local_methods
                 .type_parameter_symbol_at(self.source, *type_parameter_tree)
+                .or_else(|| self.index.symbol_at(self.source, *type_parameter_tree))
                 .ok_or(TyperError::MethodParameterSymbolMissing {
                     method,
                     parameter_tree_index: type_parameter_tree.index(),
@@ -1632,6 +1635,7 @@ impl SourceTyper<'_> {
                 let parameter_symbol = self
                     .local_methods
                     .parameter_symbol_at(self.source, *parameter_tree)
+                    .or_else(|| self.index.symbol_at(self.source, *parameter_tree))
                     .ok_or(TyperError::MethodParameterSymbolMissing {
                         method,
                         parameter_tree_index: parameter_tree.index(),
@@ -1682,8 +1686,7 @@ impl SourceTyper<'_> {
             })?;
         let method_context = self.expression_context_for(method)?;
         let declaration_context = self
-            .local_methods
-            .declaration_context(method)
+            .method_declaration_context(method)
             .ok_or(TyperError::DeclarationContextMissing { symbol: method })?;
         let method_scope = self.method_scope(method)?;
         if !definition.type_params.is_empty() {
@@ -1693,6 +1696,7 @@ impl SourceTyper<'_> {
                 .map(|parameter_tree| {
                     self.local_methods
                         .type_parameter_symbol_at(self.source, *parameter_tree)
+                        .or_else(|| self.index.symbol_at(self.source, *parameter_tree))
                         .ok_or(TyperError::MethodParameterSymbolMissing {
                             method,
                             parameter_tree_index: parameter_tree.index(),
@@ -1927,7 +1931,7 @@ impl SourceTyper<'_> {
                     kind: "extension methods",
                 });
             }
-            let typed = self.type_local_method_definition(
+            let typed = self.type_source_method_definition(
                 method_tree,
                 &definition,
                 method_node.position,
@@ -1960,7 +1964,7 @@ impl SourceTyper<'_> {
             if let TreeKind::DefDef(definition) = &source_stat.kind
                 && definition.rhs.is_some()
             {
-                let typed = self.type_local_method_definition(
+                let typed = self.type_source_method_definition(
                     stat,
                     definition,
                     source_stat.position,

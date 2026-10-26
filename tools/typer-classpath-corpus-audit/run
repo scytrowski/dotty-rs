@@ -11,6 +11,7 @@ Usage: tools/typer-classpath-corpus-audit/run [--verify-determinism] [OUTPUT_PAT
        tools/typer-classpath-corpus-audit/run --import-prefix-profile --source-file RELATIVE_PATH
        tools/typer-classpath-corpus-audit/run --focused-manifest MANIFEST [--verify-determinism] [OUTPUT_PATH]
        tools/typer-classpath-corpus-audit/run --focused-cohort package-term|object-module [--verify-determinism] [OUTPUT_PATH]
+       tools/typer-classpath-corpus-audit/run --method-kind ordinary --method-manifest MANIFEST [--verify-determinism] [OUTPUT_PATH]
        tools/typer-classpath-corpus-audit/run --focused-manifest MANIFEST --compare-legacy-profile [OUTPUT_PATH]
 
 By default, run the pinned audit once and write its report. Pass
@@ -22,6 +23,9 @@ Scala source file and prints its resolver trace without generating a cohort repo
 those source files and writes a separate FOCUSED / PARTIAL report.
 --focused-cohort selects stable path/tree identities from a pinned historical
 cohort and writes a separate FOCUSED / PARTIAL report.
+--method-kind ordinary enables the separate complete-member audit. Its manifest
+contains exact Scala-root-relative path#tree identities and is validated before
+the typer test runs. It does not use or change the historical local audit.
 --compare-legacy-profile runs the legacy file-only profile once on the same
 selected files and records wall time, method/resolver counts, and peak RSS.
 USAGE
@@ -33,6 +37,8 @@ output_path=""
 source_file=""
 focused_manifest=""
 focused_cohort=""
+method_kind=""
+method_manifest=""
 compare_legacy_profile=0
 while (($#)); do
     case "$1" in
@@ -56,6 +62,22 @@ while (($#)); do
                 exit 2
             fi
             focused_cohort="$2"
+            shift
+            ;;
+        --method-kind)
+            if (($# < 2)) || [[ -z "$2" ]]; then
+                usage >&2
+                exit 2
+            fi
+            method_kind="$2"
+            shift
+            ;;
+        --method-manifest)
+            if (($# < 2)) || [[ -z "$2" ]]; then
+                usage >&2
+                exit 2
+            fi
+            method_manifest="$2"
             shift
             ;;
         --compare-legacy-profile)
@@ -98,6 +120,19 @@ if [[ -n "$source_file" && "$verify_determinism" == 1 ]]; then
 fi
 if [[ -n "$focused_manifest" && -n "$focused_cohort" ]]; then
     printf '%s\n' '--focused-manifest and --focused-cohort are mutually exclusive' >&2
+    exit 2
+fi
+if [[ -n "$method_kind" && "$method_kind" != ordinary ]]; then
+    printf 'unsupported method kind: %s\n' "$method_kind" >&2
+    exit 2
+fi
+if [[ -n "$method_manifest" && "$method_kind" != ordinary ]] \
+    || [[ "$method_kind" == ordinary && -z "$method_manifest" ]]; then
+    printf '%s\n' '--method-manifest requires --method-kind ordinary' >&2
+    exit 2
+fi
+if [[ -n "$method_kind" && ( -n "$focused_manifest" || -n "$focused_cohort" || "$import_prefix_profile" == 1 ) ]]; then
+    printf '%s\n' 'ordinary method audit cannot be combined with a historical focused or import-prefix mode' >&2
     exit 2
 fi
 if [[ ( -n "$focused_manifest" || -n "$focused_cohort" ) && "$import_prefix_profile" == 1 ]]; then
@@ -159,7 +194,9 @@ if [[ -n "$source_file" ]]; then
 fi
 
 if [[ -z "$output_path" ]]; then
-    if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
+    if [[ "$method_kind" == ordinary ]]; then
+        output_path="$repo_root/docs/typer-ordinary-method-audit-current.tsv"
+    elif [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
         output_path="$repo_root/docs/typer-focused-audit-current-3.9.0.md"
     elif [[ "$import_prefix_profile" == 1 ]]; then
         output_path="$repo_root/docs/typer-classpath-import-prefix-profile-current-3.9.0.md"
@@ -184,6 +221,65 @@ fi
 run_names=(first)
 if [[ "$verify_determinism" == 1 ]]; then
     run_names+=(second)
+fi
+if [[ "$method_kind" == ordinary ]]; then
+    export CARGO_BUILD_JOBS=1
+    export RUST_TEST_THREADS=1
+    if [[ "$method_manifest" != /* ]]; then
+        method_manifest="$repo_root/$method_manifest"
+    fi
+    if [[ ! -f "$method_manifest" ]]; then
+        printf 'ordinary method manifest does not exist: %s\n' "$method_manifest" >&2
+        exit 2
+    fi
+    PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/ordinary_selection.py" \
+        "$method_manifest" --root "$scala_root" >"$tmp_dir/ordinary-method-selection.txt"
+    export DOTTY_ORDINARY_METHOD_SELECTION="$tmp_dir/ordinary-method-selection.txt"
+    if ! (
+        cd "$repo_root"
+        cargo test -p dotty-typer --test local_definition_audit --locked --no-run
+    ) >"$tmp_dir/build.log" 2>&1; then
+        cat "$tmp_dir/build.log" >&2
+        exit 1
+    fi
+    for run in "${run_names[@]}"; do
+        if ! (
+            cd "$repo_root"
+            cargo test -p dotty-typer --test local_definition_audit --locked \
+                pinned_scala39_ordinary_member_method_audit -- --ignored --nocapture
+        ) >"$tmp_dir/$run.log" 2>&1; then
+            cat "$tmp_dir/$run.log" >&2
+            exit 1
+        fi
+        sed -n '/^ORDINARY_METHOD_REPORT_BEGIN$/,/^ORDINARY_METHOD_REPORT_END$/p' "$tmp_dir/$run.log" \
+            | sed '1d;$d' >"$tmp_dir/$run.ordinary-report.tsv"
+        if [[ ! -s "$tmp_dir/$run.ordinary-report.tsv" ]]; then
+            cat "$tmp_dir/$run.log" >&2
+            printf 'ordinary method report markers were missing\n' >&2
+            exit 1
+        fi
+    done
+    if [[ "$verify_determinism" == 1 ]] \
+        && ! cmp -s "$tmp_dir/first.ordinary-report.tsv" "$tmp_dir/second.ordinary-report.tsv"; then
+        diff -u "$tmp_dir/first.ordinary-report.tsv" "$tmp_dir/second.ordinary-report.tsv" >&2 || true
+        printf 'ordinary method report was not deterministic\n' >&2
+        exit 1
+    fi
+    if command -v realpath >/dev/null 2>&1; then
+        output_path="$(realpath -m -- "$output_path")"
+    fi
+    case "$output_path" in
+        "$repo_root"/docs/typer-classpath-corpus-audit-*|\
+        "$repo_root"/docs/typer-focused-audit-*|\
+        "$repo_root"/docs/typer-name-resolution-1566-*|\
+        "$repo_root"/docs/typer-stdlib-local-method-sample-*)
+            printf '%s\n' 'ordinary output must not overwrite a historical local or corpus audit artifact' >&2
+            exit 2
+            ;;
+    esac
+    cp "$tmp_dir/first.ordinary-report.tsv" "$output_path"
+    printf 'ordinary method report written to %s\n' "$output_path"
+    exit 0
 fi
 if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
     export CARGO_BUILD_JOBS=1

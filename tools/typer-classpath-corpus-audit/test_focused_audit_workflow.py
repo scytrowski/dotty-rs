@@ -3,6 +3,22 @@ from pathlib import Path
 
 
 class FocusedAuditWorkflowTests(unittest.TestCase):
+    def test_ordinary_member_mode_is_separate_from_frozen_local_cohorts(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        runner = (repo / "tools/typer-classpath-corpus-audit/run").read_text(encoding="utf-8")
+        audit = (
+            repo / "crates/dotty-typer/tests/support/ordinary_member_audit_support.rs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("--method-kind ordinary --method-manifest MANIFEST", runner)
+        self.assertIn("pinned_scala39_ordinary_member_method_audit", runner)
+        self.assertIn("DOTTY_ORDINARY_METHOD_SELECTION", audit)
+        self.assertIn("type_method_definition", audit)
+        ordinary_mode = runner.split('if [[ "$method_kind" == ordinary ]]; then', 1)[1].split(
+            'if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]', 1
+        )[0]
+        self.assertNotIn("DOTTY_AUDIT_FOCUSED_METHODS", ordinary_mode)
+
     def test_runner_temp_is_scoped_to_steps_not_job_environment(self) -> None:
         repo = Path(__file__).resolve().parents[2]
         workflow = (repo / ".github/workflows/typer-focused-audit.yml").read_text(encoding="utf-8")

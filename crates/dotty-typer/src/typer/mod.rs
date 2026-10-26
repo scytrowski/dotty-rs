@@ -361,6 +361,129 @@ impl<'a> SourceTyper<'a> {
         result
     }
 
+    /// Types one canonical source method definition, including its signature,
+    /// parameter declarations, result type, and body, into this driver's typed
+    /// arena. The definition must be a named class, trait, or module-class
+    /// member recorded by the source semantic index. Local methods continue to
+    /// be typed as part of their containing block.
+    ///
+    /// Failed attempts roll back typed nodes and semantic mutations. A
+    /// successful attempt records the source-to-typed mapping for the method
+    /// definition and each typed source child.
+    pub fn type_method_definition(
+        &mut self,
+        tree: TreeId<Untyped>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let node = self
+            .arena
+            .try_get(tree)
+            .ok_or(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            })?;
+        let TreeKind::DefDef(definition) = &node.kind else {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                kind: "method definition",
+            });
+        };
+        if definition.rhs.is_none() {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                kind: "method definition without body",
+            });
+        }
+        let has_parameter_default = |definition: &dotty_core::ast::DefDef<Untyped>| {
+            definition
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .any(|parameter| {
+                    self.arena.try_get(*parameter).is_some_and(|node| {
+                        matches!(&node.kind, TreeKind::ValDef(parameter) if parameter.rhs.is_some())
+                    })
+                })
+        };
+        let rhs_range = definition
+            .rhs
+            .and_then(|rhs| self.arena.try_get(rhs))
+            .and_then(|rhs| rhs.position)
+            .map(|position| position.span().range());
+        let has_default_in_body = rhs_range.is_some_and(|rhs_range| {
+            self.arena.iter().any(|(nested_tree, nested_node)| {
+                nested_tree != tree
+                    && nested_node.position.is_some_and(|position| {
+                        let range = position.span().range();
+                        rhs_range.start() <= range.start() && range.end() <= rhs_range.end()
+                    })
+                    && matches!(&nested_node.kind, TreeKind::DefDef(nested) if has_parameter_default(nested))
+            })
+        });
+        if has_parameter_default(definition) || has_default_in_body {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                kind: "method definition containing unsupported default parameter arguments",
+            });
+        }
+        let definition = definition.clone();
+        let position = node.position;
+        let method = self
+            .index
+            .symbol_at(self.source, tree)
+            .filter(|method| {
+                matches!(
+                    self.index.definition_of(*method),
+                    Some(SourceDefinition::Canonical { source, tree: definition_tree })
+                        if source == self.source && definition_tree == tree
+                )
+            })
+            .ok_or(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                kind: "method definition without a canonical source symbol",
+            })?;
+        let symbol = self.store.symbols.get(method);
+        if symbol.kind != SymbolKind::Method
+            || symbol.flags.contains(SymbolFlags::EXTENSION)
+            || !symbol.owner.is_some_and(|owner| {
+                self.store.symbols.contains(owner)
+                    && matches!(
+                        self.store.symbols.get(owner).kind,
+                        SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                    )
+            })
+        {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                kind: "unsupported source method owner or shape",
+            });
+        }
+        if let Some(typed) = self.typed_index.get(self.source, tree) {
+            return match &self.typed_arena.get(typed).kind {
+                TreeKind::DefDef(_) => Ok(typed),
+                _ => Err(TyperError::LocalBlockDeclarationDeferred {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    kind: "existing source mapping is not a typed method definition",
+                }),
+            };
+        }
+
+        self.run_expression_transaction(|typer, info_journal, new_mappings| {
+            typer.type_source_method_definition(
+                tree,
+                &definition,
+                position,
+                info_journal,
+                new_mappings,
+            )
+        })
+    }
+
     fn enclosing_method_type_scope(
         &self,
         context: ExpressionContext,
@@ -1833,6 +1956,342 @@ mod tests {
         );
         let ty = typer.complete_symbol(symbol).unwrap();
         (ty, definitions)
+    }
+
+    #[test]
+    fn ordinary_member_method_definition_gets_a_real_typed_defdef_mapping() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            include_str!("../../tests/fixtures/ordinary-member-audit/MemberOnly.scala"),
+        );
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                matches!(&node.kind, TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "answer")
+                .then_some(tree)
+            })
+            .expect("class contains the member method");
+        let method = index
+            .symbol_at(source, method_tree)
+            .expect("namer entered the member method");
+        assert_eq!(method_tree.index(), 2, "fixture source identity is stable");
+        let method_range = parsed.ast.get(method_tree).position.unwrap().span().range();
+        assert_eq!((method_range.start(), method_range.end()), (22, 42));
+        let owner = store.symbols.get(method).owner.unwrap();
+        assert_eq!(
+            store.names.resolve(store.symbols.get(owner).name.text()),
+            "MemberOnly$"
+        );
+        let source_rhs = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => definition.rhs.unwrap(),
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed_method = typer.type_method_definition(method_tree).unwrap();
+        let typed_definition = typer.source_typed_index().get(source, method_tree).unwrap();
+        assert_eq!(typed_method, typed_definition);
+        let TreeKind::DefDef(definition) = &typer.typed_ast().get(typed_method).kind else {
+            panic!("member method should map to a typed DefDef");
+        };
+        assert_eq!(
+            typer.source_typed_index().get(source, source_rhs),
+            definition.rhs
+        );
+        assert_eq!(typer.typed_ast().get(definition.tpt).ty, definitions.int);
+        assert_eq!(
+            typer.store().symbols.info(method),
+            &SymbolInfo::Complete(definitions.int)
+        );
+    }
+
+    #[test]
+    fn inferred_member_method_types_and_bad_method_body_rolls_back_for_retry() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def inferred = 42; def invalid: String = 42 }");
+        let method_tree = |name: &str| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == name =>
+                    {
+                        Some(tree)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let inferred_tree = method_tree("inferred");
+        let invalid_tree = method_tree("invalid");
+        let inferred_symbol = index.symbol_at(source, inferred_tree).unwrap();
+        let invalid_symbol = index.symbol_at(source, invalid_tree).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed_inferred = typer.type_method_definition(inferred_tree).unwrap();
+        assert!(matches!(
+            typer.typed_ast().get(typed_inferred).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(
+            typer.store().symbols.info(inferred_symbol),
+            &SymbolInfo::Complete(definitions.int)
+        );
+
+        assert!(typer.type_method_definition(invalid_tree).is_err());
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, invalid_tree)
+                .is_none()
+        );
+        assert_eq!(
+            typer.store().symbols.info(invalid_symbol),
+            &SymbolInfo::Missing
+        );
+        assert!(typer.type_method_definition(invalid_tree).is_err());
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, invalid_tree)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ordinary_member_typing_preserves_trait_and_overload_tree_identity() {
+        let source_text = "trait T {\n  def traitValue: Int = 1\n}\nobject O {\n  def convert(value: Int): Int = value\n  def convert(value: Boolean): Int = 1\n}";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let method_trees = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                let method = index.symbol_at(source, tree)?;
+                let symbol = store.symbols.get(method);
+                (definition.rhs.is_some()
+                    && symbol.kind == SymbolKind::Method
+                    && symbol.owner.is_some_and(|owner| {
+                        matches!(
+                            store.symbols.get(owner).kind,
+                            SymbolKind::Trait | SymbolKind::ModuleClass
+                        )
+                    }))
+                .then_some(tree)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(method_trees.len(), 3);
+        assert_eq!(
+            method_trees
+                .iter()
+                .map(|tree| tree.index())
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for method_tree in method_trees {
+            let typed_method = typer.type_method_definition(method_tree).unwrap();
+            assert_eq!(
+                typer.source_typed_index().get(source, method_tree),
+                Some(typed_method)
+            );
+            assert!(matches!(
+                typer.typed_ast().get(typed_method).kind,
+                TreeKind::DefDef(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn ordinary_member_typing_rejects_a_definition_without_its_namer_identity() {
+        let (parsed, mut store, packages, definitions, _index, source) =
+            parse_and_name("class C { def answer: Int = 42 }");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "answer" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let missing_index = SourceSemanticIndex::new();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &missing_index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(typer.type_method_definition(method_tree).is_err());
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, method_tree)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ordinary_member_typing_rejects_untyped_parameter_defaults() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def invalidBoolean(x: Int = true): Int = 1; def invalidName(x: Int = missing): Int = 1; def valid(x: Int = 1): Int = 1 }",
+        );
+        let method_tree = |name: &str| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == name =>
+                    {
+                        Some(tree)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let methods = [
+            (method_tree("invalidBoolean"), "invalidBoolean"),
+            (method_tree("invalidName"), "invalidName"),
+            (method_tree("valid"), "valid"),
+        ];
+        let symbols = methods
+            .iter()
+            .map(|(tree, _)| index.symbol_at(source, *tree).unwrap())
+            .collect::<Vec<_>>();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for ((tree, name), symbol) in methods.into_iter().zip(symbols) {
+            assert!(
+                matches!(
+                    typer.type_method_definition(tree),
+                    Err(TyperError::LocalBlockDeclarationDeferred {
+                        kind: "method definition containing unsupported default parameter arguments",
+                        ..
+                    })
+                ),
+                "method {name} must remain explicitly unsupported until defaults are typed"
+            );
+            assert!(typer.source_typed_index().get(source, tree).is_none());
+            assert_eq!(typer.store().symbols.info(symbol), &SymbolInfo::Missing);
+        }
+    }
+
+    #[test]
+    fn ordinary_member_typing_rejects_defaults_in_nested_local_methods() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "object O { def enclosing: Int = { def nested(x: Int = true): Int = 1; 1 } }",
+        );
+        let enclosing = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "enclosing" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let enclosing_symbol = index.symbol_at(source, enclosing).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_method_definition(enclosing),
+            Err(TyperError::LocalBlockDeclarationDeferred {
+                kind: "method definition containing unsupported default parameter arguments",
+                ..
+            })
+        ));
+        assert!(typer.source_typed_index().get(source, enclosing).is_none());
+        assert_eq!(
+            typer.store().symbols.info(enclosing_symbol),
+            &SymbolInfo::Missing
+        );
+    }
+
+    #[test]
+    fn ordinary_member_typing_keeps_missing_result_type_blocked() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def answer: UnknownResult = 42 }");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "answer" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let method = index.symbol_at(source, method_tree).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(typer.type_method_definition(method_tree).is_err());
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, method_tree)
+                .is_none()
+        );
+        assert_eq!(typer.store().symbols.info(method), &SymbolInfo::Missing);
     }
 
     #[test]

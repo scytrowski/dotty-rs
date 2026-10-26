@@ -1,0 +1,10 @@
+schema=1
+pinned_scala_revision=777528f19a58e794c9954a42f433373472ec57f8
+selected=1
+attempted=1
+typed=1
+blocked=0
+excluded=0
+not_attempted=0
+method	owner_path	method_name	line	range	modifiers	expected_result	complexity	status	attempted_tree
+crates/dotty-typer/tests/fixtures/ordinary-member-audit/MemberOnly.scala#tree=2	MemberOnly$	answer	2	22..42	[]	Int	1	typed	2
