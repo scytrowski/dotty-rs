@@ -2,6 +2,13 @@
 
 This document records the bounded audit for [issue #1652](https://github.com/scytrowski/dotty-rs/issues/1652) and the subsequent planning, validation, and in-memory emission steps. It freezes the observed output for **one source file containing two independent top-level ordinary classes**. The oracle does not establish a general Scala packaging rule beyond this fixture.
 
+This fixture's Counter and Gauge are independent: neither class refers to the
+other. The separate
+[cross-class Counter/Reader acceptance record](jvm-tasty-cross-class.md)
+covers a planned method reference from `Reader` to `Counter`, and its final
+end-to-end acceptance gate is tracked by
+[issue #1678](https://github.com/scytrowski/dotty-rs/issues/1678).
+
 The exact producer input is [`CounterGauge.scala`](../tests/fixtures/jvm_tasty_multiclass/CounterGauge.scala), SHA-256 `e560545eeb46fad4cb6e41a0a86e4b6932bbf221856780ade6fd4492a694f60c`. Scala 3.9.0 was checked out at revision [`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8). The compiler reported `3.9.0-bin-SNAPSHOT-git-777528f`, built from that checkout; the staged `scala3-compiler_3` jar SHA-256 was `b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f`. The compiler ran on Temurin JDK `21.0.8+9`. Its default class-file version is 61; the Rust JVM backend's current target, major 65, remains an independent setting.
 
 ## Observed output and link map

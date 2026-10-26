@@ -1,8 +1,12 @@
 # Scala 3.9 cross-class TASTy and selected-call audit
 
-Issue #1671 is a characterization of the current JVM/TASTy boundary. It does
-not enable code generation through the paired JVM/TASTy planner and does not
-change typing behavior.
+This document records the bounded cross-class Counter/Reader work from
+[#1671](https://github.com/scytrowski/dotty-rs/issues/1671) through
+[#1678](https://github.com/scytrowski/dotty-rs/issues/1678). The early sections
+preserve the original format and semantic characterization; the later sections
+record the completed linked Rust batch, pinned Scala consumer, verified JVM
+execution, and final acceptance mapping. The result does not change general
+typing behavior or establish unrestricted Scala/JVM compatibility.
 
 ## Pinned oracle
 
@@ -288,3 +292,50 @@ JDK tools, or a failed consumer/control is an error; it cannot be reported as a
 successful structural-only run. This issue proves bounded interoperability for
 this linked Counter/Reader shape. It does not claim general Scala dependency
 compatibility or change source typing and production code generation.
+
+## Final cross-class acceptance gate (#1678)
+
+The final gate composes the narrowly scoped proofs above and retains the
+previous independent-class and one-class baselines. It does not add a second
+source pipeline or reconstruct symbols between phases.
+
+| Acceptance evidence | Regression gate |
+| --- | --- |
+| One source session, canonical `Counter`, `Reader.read`, formal parameter, selected `Counter.get`, and exact source-to-typed roots | `tests/jvm_tasty_cross_class_audit.rs::cross_class_call_is_pickled_as_a_bounded_select_in_application`; `tests/jvm_source_compilation.rs::cross_class_reader_call_compiles_and_runs_with_a_planned_counter` |
+| Complete ordered four-artifact batch, classfile major 65, TASTy 28.9.0, per-class UUID links, exact ABI/Methodref, and byte-identical fresh sessions | `tests/jvm_tasty_artifacts.rs::counter_reader_emits_four_complete_linked_cross_class_artifacts`; `tests/jvm_tasty_artifacts.rs::fresh_batch_sessions_produce_byte_identical_complete_manifests` |
+| A bad second class or sidecar rejects the whole batch; staged publication validates before exposure and cleans handled failures | `tests/jvm_tasty_artifacts.rs::unsupported_second_class_rejects_the_entire_batch`; `tests/jvm_tasty_artifacts.rs::malformed_second_sidecar_fails_before_creating_staging_or_destination`; `tests/jvm_tasty_artifacts.rs::batch_publisher_cleans_every_staged_artifact_on_handled_failures` |
+| Original Rust `Reader.class` executes its `invokevirtual` against Rust `Counter.class`; state mutation and independent instances work | `tests/jvm_tasty_artifacts.rs::linked_counter_reader_batch_executes_on_verified_jdk21` |
+| Scala 3.9 reads both Rust TASTy sidecars, rejects classfile-only/missing/stale/misplaced/corrupt controls, and runs the unchanged Rust batch with result `713` | `tests/jvm_tasty_cross_class_scala_consumer.rs::pinned_scala_consumes_cross_class_tasty_and_runs_original_rust_batch` with `DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER=1` |
+| Prior independent two-class and single-class consumers remain green | `jvm_tasty_multiclass_scala_consumer` with `DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER=1`; `jvm_tasty_scala_consumer` with `DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1` |
+
+The bounded source and semantic negative cases remain in the existing source,
+typer, backend-plan, and pickler tests summarized in the [negative-case
+matrix](#negative-case-evidence). The Java-only runtime harness also checks
+`7`, `13`, and `-42`, plus independent Counter state; the Scala consumer checks
+`7` then `13` and independent instances. Corrupt or deliberately inconsistent
+artifacts are used only as compile-time controls, never as runtime inputs.
+
+Run the strict external gates and the mandatory JVM verification gate with the
+pinned Scala 3.9.0/JDK 21 environment configured as described above:
+
+```sh
+DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER=1 cargo test \
+  --test jvm_tasty_cross_class_scala_consumer --locked -- --nocapture
+DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER=1 cargo test \
+  --test jvm_tasty_multiclass_scala_consumer --locked -- --nocapture
+DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1 cargo test \
+  --test jvm_tasty_scala_consumer --locked -- --nocapture
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  --test jvm_tasty_artifacts \
+  --test jvm_stateful_class_contract \
+  --locked -- --nocapture
+```
+
+These focused checks are followed by the repository-wide formatter, boundary,
+Clippy, rustdoc, workspace test, and diff checks in `AGENTS.md`. Hosted CI runs
+the required JDK gate and general Rust checks. The strict pinned Scala consumer
+remains an opt-in local gate because it requires the pinned Scala source and
+cached artifacts. No Scala corpus audit is part of this acceptance scope.
