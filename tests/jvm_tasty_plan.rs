@@ -2063,11 +2063,64 @@ fn private_immutable_same_batch_reference_field_has_read_only_type_proof() {
             };
             assert_eq!(fragment.names.render(package).unwrap(), "example");
 
-            assert!(matches!(
-                owner.tasty_plan.pickle(),
-                Err(PickleError::UnsupportedTypeReference { ty })
-                    if ty == proof.declared_type()
-            ));
+            let output = owner
+                .tasty_plan
+                .pickle()
+                .expect("the validated direct constructor initializer is serializable");
+            let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+            let package = file
+                .asts()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .decode_package()
+                .unwrap();
+            assert_eq!(package.stats.len(), 1, "Counter stays in its own sidecar");
+            let DefinitionBody::TypeDef {
+                type_or_template, ..
+            } = package
+                .stats
+                .get(0)
+                .unwrap()
+                .decode_definition_body()
+                .unwrap()
+            else {
+                panic!("the owner sidecar contains its own class declaration")
+            };
+            let RawTree::LengthNode(template_node) = type_or_template else {
+                panic!("the owner declaration contains a template node")
+            };
+            let template = template_node.decode_template_structure().unwrap();
+            let field = template
+                .stats
+                .iter()
+                .find_map(|tree| match tree {
+                    RawTree::LengthNode(node) if node.tag == VALDEF_TAG => {
+                        Some(node.decode_definition_body().unwrap())
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let DefinitionBody::ValDef { name, rhs, .. } = field else {
+                panic!("the private immutable field is emitted")
+            };
+            assert_eq!(file.names().render(name).unwrap(), "inner");
+            let rhs = rhs.expect("the field keeps its real initializer");
+            let RawTree::LengthNode(rhs) = rhs else {
+                panic!("the field initializer is a constructor application")
+            };
+            let application = rhs.decode_apply().unwrap();
+            assert_eq!(application.arguments.len(), 1);
+            let RawTree::LengthNode(selection) = application.function else {
+                panic!("the constructor application has a selected constructor")
+            };
+            let selection = selection.decode_select_in().unwrap();
+            let RawTree::Ast { tag, .. } = selection.qualifier else {
+                panic!("the selected constructor is qualified by NEW")
+            };
+            assert_eq!(tag, NEW_TAG);
+            assert_eq!(selection.tag, SELECTIN_TAG);
+            assert!(matches!(application.arguments[0], RawTree::Leaf(ref term) if term.tag == TERMREFDIRECT_TAG));
         },
     )
     .unwrap();
@@ -2091,6 +2144,46 @@ fn pending_reference_field_proof_rejects_mutable_and_non_direct_initializers() {
             ..
         })
     ));
+
+    for (name, source) in [
+        (
+            "private[this] field",
+            SAME_BATCH_REFERENCE_FIELD.replace(
+                "private val inner: Counter",
+                "private[this] val inner: Counter",
+            ),
+        ),
+        (
+            "public field",
+            SAME_BATCH_REFERENCE_FIELD.replace("private val inner: Counter", "val inner: Counter"),
+        ),
+        (
+            "private primary constructor",
+            SAME_BATCH_REFERENCE_FIELD.replace(
+                "class Counter(start: Int)",
+                "class Counter private (start: Int)",
+            ),
+        ),
+        (
+            "secondary constructor selected instead of the primary constructor",
+            SAME_BATCH_REFERENCE_FIELD.replace(
+                "class Counter(start: Int):",
+                "class Counter(start: Int, extra: Boolean):\n  def this(start: Int) = this(start, false)",
+            ),
+        ),
+        (
+            "computed constructor argument",
+            SAME_BATCH_REFERENCE_FIELD.replace("new Counter(seed)", "new Counter(seed + 1)"),
+        ),
+    ] {
+        let result = with_paired_jvm_tasty_batch_plan(
+            &source,
+            "CounterOwner.scala",
+            SourceId::from_index(1717),
+            |_| (),
+        );
+        assert!(result.is_err(), "{name} must not produce a TASTy batch");
+    }
 
     let factory = "package example\nclass Counter(seed: Int)\nclass CounterFactory:\n  def make(seed: Int): Counter = new Counter(seed)\nclass CounterOwner(seed: Int):\n  private val inner: Counter = new CounterFactory().make(seed)\n  def constant(): Int = 0\n";
     let factory_error = with_paired_jvm_tasty_batch_plan(
@@ -2143,6 +2236,76 @@ fn pending_reference_field_proof_rejects_mutable_and_non_direct_initializers() {
             "{name} is not a pending direct-new initializer: {error:?}"
         );
     }
+}
+
+#[test]
+fn reference_field_proof_rejects_a_forged_constructor_parameter_target() {
+    let source = "package example\nclass Counter(start: Int)\nclass CounterOwner(seed: Int, other: Int):\n  private val inner: Counter = new Counter(seed)\n  private val second: Counter = new Counter(other)\n  def constant(): Int = 0\n";
+    with_paired_jvm_tasty_batch_plan(
+        source,
+        "CounterOwner.scala",
+        SourceId::from_index(1717),
+        |batch| {
+            let owner = &batch.classes[1];
+            let plan = owner.tasty_plan.plan();
+            let proofs = owner
+                .tasty_plan
+                .same_batch_reference_fields()
+                .collect::<Vec<_>>();
+            let seed_proof = proofs
+                .iter()
+                .find(|proof| {
+                    plan.store
+                        .names
+                        .resolve(plan.store.symbols.get(proof.field()).name.text())
+                        == "inner"
+                })
+                .expect("inner has a reference-field proof");
+            let other_proof = proofs
+                .iter()
+                .find(|proof| {
+                    plan.store
+                        .names
+                        .resolve(plan.store.symbols.get(proof.field()).name.text())
+                        == "second"
+                })
+                .expect("second has a reference-field proof");
+            let argument = |root| {
+                let TreeKind::Apply(application) = &plan.typed_ast.get(root).kind else {
+                    panic!("direct field initializer is an application");
+                };
+                application.args[0]
+            };
+            let seed_argument = argument(seed_proof.typed_initializer());
+            let other_argument = argument(other_proof.typed_initializer());
+            let other_reference = plan.typed_ast.get(other_argument).ty;
+
+            let mut forged_typed_ast = cloned_typed_ast(plan.typed_ast);
+            forged_typed_ast.get_mut(seed_argument).ty = other_reference;
+
+            let forged_plan = ClassStatePicklePlan {
+                store: plan.store,
+                definitions: plan.definitions,
+                source_ast: plan.source_ast,
+                typed_ast: &forged_typed_ast,
+                source_index: plan.source_index,
+                typed_bindings: plan.typed_bindings,
+                source: plan.source.clone(),
+                class: plan.class,
+                class_tree: plan.class_tree,
+                constructor: plan.constructor.clone(),
+                members: plan.members,
+            };
+            assert!(matches!(
+                forged_plan.validate(),
+                Err(PickleError::Unsupported {
+                    feature: dotty_tasty_pickler::UnsupportedFeature::UnsafeFieldInitializer,
+                    ..
+                })
+            ));
+        },
+    )
+    .unwrap();
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! TASTy emission for the validated private primitive class-state slice.
+//! TASTy emission for the validated bounded class-state slice.
 
 use dotty_core::ast::{DefParamClauseOrder, TreeKind};
 use dotty_core::{MethodKind, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, Type};
@@ -205,7 +205,7 @@ impl ValidatedClassStatePlan<'_, '_> {
         validate_class_state_method_bodies(self.plan())
     }
 
-    /// Emit complete Scala 3.9 TASTy for the validated private primitive fields.
+    /// Emit complete Scala 3.9 TASTy for the validated class-state fields.
     pub fn pickle(&self) -> Result<PickledTasty, PickleError> {
         self.pickle_with_limits(PickleLimits::default())
     }
@@ -218,11 +218,6 @@ impl ValidatedClassStatePlan<'_, '_> {
 
     fn assemble_class_state(&self, limits: PickleLimits) -> Result<Assembly, PickleError> {
         let p = self.plan();
-        if let Some(field) = self.same_batch_reference_fields().next() {
-            return Err(PickleError::UnsupportedTypeReference {
-                ty: field.declared_type(),
-            });
-        }
         let constructor_tree = p.source_ast.try_get(p.constructor.source_tree).ok_or(
             PickleError::InvalidSourceTree {
                 tree: p.constructor.source_tree,
@@ -540,12 +535,28 @@ impl ValidatedClassStatePlan<'_, '_> {
                     }
                     let record = p.store.symbols.get(field.symbol);
                     let name = context.intern_name(record.name)?;
-                    let type_syntax = context.primitive_type_syntax(field.declared_type)?;
+                    let reference_field = self
+                        .same_batch_reference_fields()
+                        .find(|proof| proof.field() == field.symbol);
+                    let type_syntax = if let Some(proof) = reference_field {
+                        context.same_batch_reference_field_type_syntax(&proof)?
+                    } else {
+                        context.primitive_type_syntax(field.declared_type)?
+                    };
+                    // A validated direct `new` field initializer is evaluated
+                    // in the primary constructor's parameter environment.
+                    // Its proof binds the exact source and typed roots and
+                    // checks the argument's canonical constructor parameter.
+                    let expression_owner = if reference_field.is_some() {
+                        p.constructor.symbol
+                    } else {
+                        field.symbol
+                    };
                     let initializer = crate::expression::lower_expression(
                         p.store,
                         p.typed_ast,
                         field.typed_initializer,
-                        field.symbol,
+                        expression_owner,
                         &constructor_parameters,
                         limits.projection,
                         &mut context,

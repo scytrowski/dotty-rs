@@ -6,7 +6,7 @@ use dotty_classfile::reader::Reader as ClassReader;
 use dotty_core::SourceId;
 use dotty_tasty::ast::{
     APPLY_TAG, DEFDEF_TAG, IDENTTPT_TAG, NEW_TAG, PARAM_TAG, SELECTIN_TAG, SHAREDTYPE_TAG,
-    TERMREFDIRECT_TAG, TERMREFPKG_TAG, TYPEREF_TAG,
+    TERMREFDIRECT_TAG, TERMREFPKG_TAG, TYPEREF_TAG, VALDEF_TAG,
 };
 use dotty_tasty::file::TastyFile;
 use std::fs;
@@ -17,6 +17,7 @@ const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 const FACTORY_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
+const REFERENCE_FIELD_SOURCE: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass CounterOwner(seed: Int):\n  private val inner: Counter = new Counter(seed)\n  def constant(): Int = 0\n";
 const COUNTER_CLASS: &[u8] =
     include_bytes!("fixtures/jvm_tasty_cross_class_factories/scala39/example/Counter.class");
 const COUNTER_TASTY: &[u8] =
@@ -438,6 +439,101 @@ fn paired_tasty_planning_emits_the_canonical_factory_new_body() {
 }
 
 #[test]
+fn paired_tasty_planning_emits_the_canonical_reference_field_new_body() {
+    let artifacts = emit_paired_jvm_tasty_batch(
+        REFERENCE_FIELD_SOURCE,
+        "CounterOwner.scala",
+        SourceId::from_index(1717),
+    )
+    .expect("the audited immutable reference field emits a complete linked batch");
+    let counter = artifacts
+        .classes()
+        .iter()
+        .find(|class| class.tasty_path() == "example/Counter.tasty")
+        .expect("the Counter dependency sidecar is emitted");
+    let owner = artifacts
+        .classes()
+        .iter()
+        .find(|class| class.tasty_path() == "example/CounterOwner.tasty")
+        .expect("the owner sidecar is emitted");
+    let tasty = assert_pinned_tasty(owner.tasty_bytes());
+    let package = tasty
+        .asts()
+        .unwrap()
+        .get(0)
+        .unwrap()
+        .decode_package()
+        .unwrap();
+    assert_eq!(
+        package.stats.len(),
+        1,
+        "the owner sidecar has no local Counter clone"
+    );
+    let dotty_tasty::tasty::DefinitionBody::TypeDef {
+        type_or_template, ..
+    } = package
+        .stats
+        .get(0)
+        .unwrap()
+        .decode_definition_body()
+        .unwrap()
+    else {
+        panic!("the owner sidecar contains CounterOwner")
+    };
+    let dotty_tasty::term::RawTree::LengthNode(template_node) = type_or_template else {
+        panic!("CounterOwner contains a template")
+    };
+    let template = template_node.decode_template_structure().unwrap();
+    let field = template
+        .stats
+        .iter()
+        .find_map(|tree| match tree {
+            dotty_tasty::term::RawTree::LengthNode(node) if node.tag == VALDEF_TAG => {
+                Some(node.decode_definition_body().unwrap())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let dotty_tasty::tasty::DefinitionBody::ValDef { name, rhs, .. } = field else {
+        panic!("CounterOwner contains its immutable inner field")
+    };
+    assert_eq!(tasty.names().render(name).unwrap(), "inner");
+    let Some(dotty_tasty::term::RawTree::LengthNode(rhs)) = rhs else {
+        panic!("inner has a constructor initializer")
+    };
+    let application = rhs.decode_apply().unwrap();
+    assert_eq!(application.arguments.len(), 1);
+    let dotty_tasty::term::RawTree::LengthNode(selection_node) = application.function else {
+        panic!("the initializer applies the selected Counter constructor")
+    };
+    let selection = selection_node.decode_select_in().unwrap();
+    let signed = tasty
+        .names()
+        .render_signed_name(selection.name)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        signed,
+        dotty_tasty::tasty::RenderedSignedName::Signed { original, signature }
+            if original == "<init>"
+                && signature.result == "example.Counter"
+                && signature.parameters == [dotty_tasty::name_table::RenderedParamSig::TermParameter("scala.Int".to_owned())]
+    ));
+    assert!(matches!(
+        selection.qualifier,
+        dotty_tasty::term::RawTree::Ast { tag: NEW_TAG, .. }
+    ));
+    let argument_references = application.arguments[0].ast_refs();
+    assert!(matches!(
+        argument_references.as_slice(),
+        [reference] if reference.kind == dotty_tasty::term::AstRefKind::TermRefDirect
+    ));
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        run_reference_field_oracle(counter.tasty_bytes(), owner.tasty_bytes());
+    }
+}
+
+#[test]
 fn paired_tasty_planning_rejects_constructor_shapes_outside_the_exact_slice() {
     let cases = [
         (
@@ -577,6 +673,93 @@ fn run_factory_constructor_oracle(counter_tasty: &[u8], factory_tasty: &[u8]) {
         "Scala-rebuilt factory has the wrong descriptor: {}",
         String::from_utf8_lossy(&javap.stdout)
     );
+    fs::remove_dir_all(temporary).unwrap();
+}
+
+fn run_reference_field_oracle(counter_tasty: &[u8], owner_tasty: &[u8]) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala root for explicit oracle"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let version = Command::new(&compiler)
+        .arg("-version")
+        .output()
+        .expect("query pinned Scala compiler version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"));
+
+    let temporary_root = std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir);
+    let temporary = temporary_root.join(format!(
+        "dotty-issue-1717-reference-field-oracle-{}",
+        std::process::id()
+    ));
+    fs::remove_dir_all(&temporary).ok();
+    let candidate = temporary.join("candidate/example");
+    let compiled = temporary.join("compiled");
+    fs::create_dir_all(&candidate).unwrap();
+    fs::create_dir_all(&compiled).unwrap();
+    let counter_path = candidate.join("Counter.tasty");
+    let owner_path = candidate.join("CounterOwner.tasty");
+    fs::write(&counter_path, counter_tasty).unwrap();
+    fs::write(&owner_path, owner_tasty).unwrap();
+
+    let decompile = Command::new(&compiler)
+        .arg("-decompile")
+        .arg("-classpath")
+        .arg(temporary.join("candidate"))
+        .arg(&counter_path)
+        .arg(&owner_path)
+        .output()
+        .expect("decompile Rust-produced Counter and CounterOwner sidecars");
+    assert!(
+        decompile.status.success(),
+        "Scala decompiler rejected the linked sidecars: {}",
+        String::from_utf8_lossy(&decompile.stderr)
+    );
+    let decompiled = strip_ansi(&String::from_utf8_lossy(&decompile.stdout));
+    assert!(
+        decompiled.contains("new example.Counter(seed)"),
+        "Scala decompiler did not recover the field constructor initializer: {decompiled}"
+    );
+
+    let from_tasty = Command::new(&compiler)
+        .arg("-from-tasty")
+        .arg("-classpath")
+        .arg(temporary.join("candidate"))
+        .arg("-d")
+        .arg(&compiled)
+        .arg(&counter_path)
+        .arg(&owner_path)
+        .output()
+        .expect("consume Rust-produced reference field sidecars with pinned Scala");
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected the field constructor initializer: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    let javap = Command::new("javap")
+        .arg("-classpath")
+        .arg(&compiled)
+        .arg("-s")
+        .arg("example.CounterOwner")
+        .output()
+        .expect("inspect Scala-rebuilt owner constructor descriptor");
+    assert!(javap.status.success());
+    assert!(String::from_utf8_lossy(&javap.stdout).contains("(I)V"));
     fs::remove_dir_all(temporary).unwrap();
 }
 
