@@ -395,20 +395,37 @@ impl<'a> SourceTyper<'a> {
                 kind: "method definition without body",
             });
         }
-        if definition
-            .value_param_clauses
-            .iter()
-            .flatten()
-            .any(|parameter| {
-                self.arena.try_get(*parameter).is_some_and(|node| {
-                    matches!(&node.kind, TreeKind::ValDef(parameter) if parameter.rhs.is_some())
+        let has_parameter_default = |definition: &dotty_core::ast::DefDef<Untyped>| {
+            definition
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .any(|parameter| {
+                    self.arena.try_get(*parameter).is_some_and(|node| {
+                        matches!(&node.kind, TreeKind::ValDef(parameter) if parameter.rhs.is_some())
+                    })
                 })
+        };
+        let rhs_range = definition
+            .rhs
+            .and_then(|rhs| self.arena.try_get(rhs))
+            .and_then(|rhs| rhs.position)
+            .map(|position| position.span().range());
+        let has_default_in_body = rhs_range.is_some_and(|rhs_range| {
+            self.arena.iter().any(|(nested_tree, nested_node)| {
+                nested_tree != tree
+                    && nested_node.position.is_some_and(|position| {
+                        let range = position.span().range();
+                        rhs_range.start() <= range.start() && range.end() <= rhs_range.end()
+                    })
+                    && matches!(&nested_node.kind, TreeKind::DefDef(nested) if has_parameter_default(nested))
             })
-        {
+        });
+        if has_parameter_default(definition) || has_default_in_body {
             return Err(TyperError::LocalBlockDeclarationDeferred {
                 source: self.source,
                 tree_index: tree.index(),
-                kind: "method definition with default parameter arguments",
+                kind: "method definition containing unsupported default parameter arguments",
             });
         }
         let definition = definition.clone();
@@ -2189,7 +2206,7 @@ mod tests {
                 matches!(
                     typer.type_method_definition(tree),
                     Err(TyperError::LocalBlockDeclarationDeferred {
-                        kind: "method definition with default parameter arguments",
+                        kind: "method definition containing unsupported default parameter arguments",
                         ..
                     })
                 ),
@@ -2198,6 +2215,47 @@ mod tests {
             assert!(typer.source_typed_index().get(source, tree).is_none());
             assert_eq!(typer.store().symbols.info(symbol), &SymbolInfo::Missing);
         }
+    }
+
+    #[test]
+    fn ordinary_member_typing_rejects_defaults_in_nested_local_methods() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "object O { def enclosing: Int = { def nested(x: Int = true): Int = 1; 1 } }",
+        );
+        let enclosing = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "enclosing" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let enclosing_symbol = index.symbol_at(source, enclosing).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_method_definition(enclosing),
+            Err(TyperError::LocalBlockDeclarationDeferred {
+                kind: "method definition containing unsupported default parameter arguments",
+                ..
+            })
+        ));
+        assert!(typer.source_typed_index().get(source, enclosing).is_none());
+        assert_eq!(
+            typer.store().symbols.info(enclosing_symbol),
+            &SymbolInfo::Missing
+        );
     }
 
     #[test]
