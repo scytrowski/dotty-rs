@@ -27,8 +27,8 @@ use dotty_tasty_pickler::{ClassMemberPicklePlan, PickleError, ValidatedClassStat
 
 mod factory_reference;
 pub use factory_reference::{
-    ValidatedSameBatchConstructorReference, ValidatedSameBatchReferenceReturn,
-    validate_same_batch_factory_result,
+    SameBatchSourceEvidence, ValidatedSameBatchConstructorReference,
+    ValidatedSameBatchReferenceReturn, validate_same_batch_factory_result,
 };
 
 /// A typed, read-only failure while proving one JVM class and TASTy plan agree.

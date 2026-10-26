@@ -13519,10 +13519,12 @@ fn same_source_factory_proof_preserves_create_constructor_and_identity_roots() {
         let proof = dotty_jvm_tasty_contract::validate_same_batch_factory_result(
             unit,
             definitions,
-            source_id,
-            ast,
-            index,
-            typed_index,
+            dotty_jvm_tasty_contract::SameBatchSourceEvidence {
+                source: source_id,
+                source_ast: ast,
+                source_index: index,
+                typed_index,
+            },
             counter,
             factory,
         )
@@ -13597,10 +13599,12 @@ fn same_source_factory_proof_preserves_create_constructor_and_identity_roots() {
             dotty_jvm_tasty_contract::validate_same_batch_factory_result(
                 unit,
                 definitions,
-                source_id,
-                ast,
-                index,
-                &stale_bindings,
+                dotty_jvm_tasty_contract::SameBatchSourceEvidence {
+                    source: source_id,
+                    source_ast: ast,
+                    source_index: index,
+                    typed_index: &stale_bindings,
+                },
                 counter,
                 factory,
             ),
@@ -13615,10 +13619,12 @@ fn same_source_factory_proof_preserves_create_constructor_and_identity_roots() {
             dotty_jvm_tasty_contract::validate_same_batch_factory_result(
                 unit,
                 definitions,
-                source_id,
-                ast,
-                index,
-                typed_index,
+                dotty_jvm_tasty_contract::SameBatchSourceEvidence {
+                    source: source_id,
+                    source_ast: ast,
+                    source_index: index,
+                    typed_index,
+                },
                 factory,
                 factory,
             ),
@@ -13635,10 +13641,12 @@ fn same_source_factory_proof_preserves_create_constructor_and_identity_roots() {
             dotty_jvm_tasty_contract::validate_same_batch_factory_result(
                 unit,
                 definitions,
-                source_id,
-                ast,
-                index,
-                typed_index,
+                dotty_jvm_tasty_contract::SameBatchSourceEvidence {
+                    source: source_id,
+                    source_ast: ast,
+                    source_index: index,
+                    typed_index,
+                },
                 counter,
                 factory,
             ),
@@ -13676,10 +13684,12 @@ fn same_source_factory_proof_rejects_private_primary_constructor_before_emission
             dotty_jvm_tasty_contract::validate_same_batch_factory_result(
                 unit,
                 definitions,
-                source_id,
-                ast,
-                index,
-                typed_index,
+                dotty_jvm_tasty_contract::SameBatchSourceEvidence {
+                    source: source_id,
+                    source_ast: ast,
+                    source_index: index,
+                    typed_index,
+                },
                 counter,
                 factory,
             )

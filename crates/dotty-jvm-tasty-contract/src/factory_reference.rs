@@ -110,6 +110,18 @@ pub struct ValidatedSameBatchReferenceReturn {
     descriptor: String,
 }
 
+/// Original source evidence that accompanies one canonical JVM unit.
+pub struct SameBatchSourceEvidence<'source> {
+    /// Source identity recorded by the namer and typer.
+    pub source: SourceId,
+    /// Original parsed source AST from that session.
+    pub source_ast: &'source AstArena<Untyped>,
+    /// Canonical declaration/reference identities from that session.
+    pub source_index: &'source SourceSemanticIndex,
+    /// Exact source-to-typed root mappings from that session.
+    pub typed_index: &'source SourceTypedIndex,
+}
+
 impl ValidatedSameBatchReferenceReturn {
     /// Exact declared source method symbol.
     pub const fn method(&self) -> SymbolId {
@@ -143,13 +155,16 @@ impl ValidatedSameBatchReferenceReturn {
 pub fn validate_same_batch_factory_result<'proof, 'unit>(
     unit: &'proof JvmCompilationUnit<'unit>,
     definitions: &Definitions,
-    source: SourceId,
-    source_ast: &'proof AstArena<Untyped>,
-    source_index: &'proof SourceSemanticIndex,
-    typed_index: &'proof SourceTypedIndex,
+    evidence: SameBatchSourceEvidence<'proof>,
     counter: SymbolId,
     factory: SymbolId,
 ) -> Result<ValidatedSameBatchConstructorReference<'proof, 'unit>, JvmTastyContractError> {
+    let SameBatchSourceEvidence {
+        source,
+        source_ast,
+        source_index,
+        typed_index,
+    } = evidence;
     let root = source_ast
         .iter()
         .find_map(|(id, tree)| matches!(tree.kind, TreeKind::PackageDef(_)).then_some(id))
@@ -418,6 +433,19 @@ pub fn validate_same_batch_factory_result<'proof, 'unit>(
         ));
     }
 
+    let context = FactoryProofContext {
+        unit,
+        definitions,
+        source,
+        source_ast,
+        source_index,
+        typed_index,
+        counter,
+        factory,
+        factory_metadata,
+        counter_metadata,
+    };
+
     let create = declared_method(
         unit.store,
         source_ast,
@@ -434,67 +462,14 @@ pub fn validate_same_batch_factory_result<'proof, 'unit>(
         factory,
         "identity",
     )?;
-    let (create_typed, create_result, create_descriptor) = validate_method_signature(
-        unit,
-        definitions,
-        source_index,
-        typed_index,
-        source,
-        factory_metadata,
-        counter_metadata,
-        factory,
-        counter,
-        create,
-        "seed",
-        true,
-    )?;
-    let (identity_typed, identity_result, identity_descriptor) = validate_method_signature(
-        unit,
-        definitions,
-        source_index,
-        typed_index,
-        source,
-        factory_metadata,
-        counter_metadata,
-        factory,
-        counter,
-        identity,
-        "counter",
-        false,
-    )?;
-    let (
-        seed,
-        source_new,
-        source_select,
-        source_apply,
-        source_argument,
-        typed_new,
-        typed_select,
-        typed_apply,
-        typed_argument,
-    ) = validate_constructor_body(
-        unit,
-        definitions,
-        source_ast,
-        source_index,
-        typed_index,
-        source,
-        factory,
-        counter,
-        constructor,
-        create,
-        create_typed,
-        create_result,
-    )?;
+    let (create_typed, create_result, create_descriptor) =
+        validate_method_signature(&context, create, "seed", true)?;
+    let (identity_typed, identity_result, identity_descriptor) =
+        validate_method_signature(&context, identity, "counter", false)?;
+    let constructor_body =
+        validate_constructor_body(&context, constructor, create, create_typed, create_result)?;
     let identity_proof = validate_reference_return(
-        unit,
-        definitions,
-        source_ast,
-        source_index,
-        typed_index,
-        source,
-        factory,
-        counter,
+        &context,
         identity,
         identity_typed,
         identity_result,
@@ -510,15 +485,15 @@ pub fn validate_same_batch_factory_result<'proof, 'unit>(
         factory,
         constructor,
         create: create.method,
-        seed,
-        source_new,
-        source_select,
-        source_apply,
-        source_argument,
-        typed_new,
-        typed_select,
-        typed_apply,
-        typed_argument,
+        seed: constructor_body.seed,
+        source_new: constructor_body.source_new,
+        source_select: constructor_body.source_select,
+        source_apply: constructor_body.source_apply,
+        source_argument: constructor_body.source_argument,
+        typed_new: constructor_body.typed_new,
+        typed_select: constructor_body.typed_select,
+        typed_apply: constructor_body.typed_apply,
+        typed_argument: constructor_body.typed_argument,
         result_type: create_result,
         method_descriptor: create_descriptor,
         constructor_descriptor: constructor_metadata.descriptor().as_str().to_owned(),
@@ -533,6 +508,31 @@ struct MethodSource {
     rhs: TreeId<Untyped>,
     parameter_tree: TreeId<Untyped>,
     parameter: SymbolId,
+}
+
+struct FactoryProofContext<'proof, 'unit> {
+    unit: &'proof JvmCompilationUnit<'unit>,
+    definitions: &'proof Definitions,
+    source: SourceId,
+    source_ast: &'proof AstArena<Untyped>,
+    source_index: &'proof SourceSemanticIndex,
+    typed_index: &'proof SourceTypedIndex,
+    counter: SymbolId,
+    factory: SymbolId,
+    factory_metadata: &'proof JvmClassMetadata,
+    counter_metadata: &'proof JvmClassMetadata,
+}
+
+struct ConstructorBodyProof {
+    seed: SymbolId,
+    source_new: TreeId<Untyped>,
+    source_select: TreeId<Untyped>,
+    source_apply: TreeId<Untyped>,
+    source_argument: TreeId<Untyped>,
+    typed_new: TreeId<Typed>,
+    typed_select: TreeId<Typed>,
+    typed_apply: TreeId<Typed>,
+    typed_argument: TreeId<Typed>,
 }
 
 fn declared_method(
@@ -599,7 +599,7 @@ fn declared_method(
             "method has no source body",
         ));
     };
-    if definition.type_params.len() != 0
+    if !definition.type_params.is_empty()
         || definition.value_param_clauses.len() != 1
         || definition.value_param_clauses[0].len() != 1
         || definition
@@ -654,19 +654,20 @@ fn declared_method(
 }
 
 fn validate_method_signature(
-    unit: &JvmCompilationUnit<'_>,
-    definitions: &Definitions,
-    index: &SourceSemanticIndex,
-    typed_index: &SourceTypedIndex,
-    source: SourceId,
-    factory_metadata: &JvmClassMetadata,
-    counter_metadata: &JvmClassMetadata,
-    factory: SymbolId,
-    counter: SymbolId,
+    context: &FactoryProofContext<'_, '_>,
     method: MethodSource,
     formal_name: &str,
     int_formal: bool,
 ) -> Result<(TreeId<Typed>, TypeId, String), JvmTastyContractError> {
+    let unit = context.unit;
+    let definitions = context.definitions;
+    let index = context.source_index;
+    let typed_index = context.typed_index;
+    let source = context.source;
+    let factory_metadata = context.factory_metadata;
+    let counter_metadata = context.counter_metadata;
+    let factory = context.factory;
+    let counter = context.counter;
     let fail = |stage, reason| {
         mismatch(
             factory,
@@ -827,32 +828,20 @@ fn validate_method_signature(
 }
 
 fn validate_constructor_body(
-    unit: &JvmCompilationUnit<'_>,
-    definitions: &Definitions,
-    ast: &AstArena<Untyped>,
-    index: &SourceSemanticIndex,
-    typed_index: &SourceTypedIndex,
-    source: SourceId,
-    factory: SymbolId,
-    counter: SymbolId,
+    context: &FactoryProofContext<'_, '_>,
     constructor: SymbolId,
     method: MethodSource,
     typed_rhs: TreeId<Typed>,
     result_type: TypeId,
-) -> Result<
-    (
-        SymbolId,
-        TreeId<Untyped>,
-        TreeId<Untyped>,
-        TreeId<Untyped>,
-        TreeId<Untyped>,
-        TreeId<Typed>,
-        TreeId<Typed>,
-        TreeId<Typed>,
-        TreeId<Typed>,
-    ),
-    JvmTastyContractError,
-> {
+) -> Result<ConstructorBodyProof, JvmTastyContractError> {
+    let unit = context.unit;
+    let definitions = context.definitions;
+    let ast = context.source_ast;
+    let index = context.source_index;
+    let typed_index = context.typed_index;
+    let source = context.source;
+    let factory = context.factory;
+    let counter = context.counter;
     let fail = |stage, reason| JvmTastyContractError::FactoryReferenceMismatch {
         class: factory,
         method: Some(method.method),
@@ -957,33 +946,34 @@ fn validate_constructor_body(
             "source New/Select/Apply/seed roots do not map to exact typed roots",
         ));
     }
-    Ok((
-        method.parameter,
-        source_select_node.qualifier,
-        source_apply_node.function,
-        method.rhs,
-        source_apply_node.args[0],
+    Ok(ConstructorBodyProof {
+        seed: method.parameter,
+        source_new: source_select_node.qualifier,
+        source_select: source_apply_node.function,
+        source_apply: method.rhs,
+        source_argument: source_apply_node.args[0],
         typed_new,
         typed_select,
-        typed_rhs,
-        argument,
-    ))
+        typed_apply: typed_rhs,
+        typed_argument: argument,
+    })
 }
 
 fn validate_reference_return(
-    unit: &JvmCompilationUnit<'_>,
-    definitions: &Definitions,
-    ast: &AstArena<Untyped>,
-    index: &SourceSemanticIndex,
-    typed_index: &SourceTypedIndex,
-    source: SourceId,
-    factory: SymbolId,
-    counter: SymbolId,
+    context: &FactoryProofContext<'_, '_>,
     method: MethodSource,
     typed_rhs: TreeId<Typed>,
     result_type: TypeId,
     descriptor: String,
 ) -> Result<ValidatedSameBatchReferenceReturn, JvmTastyContractError> {
+    let unit = context.unit;
+    let definitions = context.definitions;
+    let ast = context.source_ast;
+    let index = context.source_index;
+    let typed_index = context.typed_index;
+    let source = context.source;
+    let factory = context.factory;
+    let counter = context.counter;
     let fail = |stage, reason| {
         mismatch(
             factory,
