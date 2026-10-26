@@ -129,6 +129,19 @@ Independent source sessions produce byte-identical four-file manifests.
 This is a bounded in-memory library/test path; file publication and executing
 the generated Reader method are covered by separate contracts.
 
+Issue [#1676](https://github.com/scytrowski/dotty-rs/issues/1676) executes the
+actual four artifacts returned by `emit_paired_jvm_tasty_batch`. The JDK test
+stages both Rust classfiles and their sidecars in a fresh directory, compiles
+only a Java harness, then runs it with `java -Xverify:all`. `javap -p -s -c
+-v` verifies Reader's major version 65, instance method descriptor
+`(Lexample/Counter;)I`, and `invokevirtual example/Counter.get:()I`. Runtime
+checks read values 7, 13, and -42 after mutations, then confirms that a second
+Counter remains independent (values -5 and 99). The test compares the staged
+classfile bytes with the original Rust artifacts after execution, so Java
+compilation cannot replace either class. This remains a JDK-only runtime check
+and does not claim Scala TASTy consumer compatibility; that is issue
+[#1677](https://github.com/scytrowski/dotty-rs/issues/1677).
+
 The #1673 signature test and #1674 full-body test have opt-in pinned Scala
 3.9.0 `-from-tasty` checks controlled by
 `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1` and `SCALA39_ROOT`. The #1674 check
@@ -182,8 +195,12 @@ cargo test --test jvm_tasty_artifacts counter_reader_emits_four_complete_linked_
 cargo test --test jvm_tasty_contract cross_class_call_artifact_rejects_a_different_methodref --locked
 DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --test jvm_source_compilation \
   cross_class_reader_call_compiles_and_runs_with_a_planned_counter --locked
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --test jvm_tasty_artifacts \
+  linked_counter_reader_batch_executes_on_verified_jdk21 --locked
 ```
 
-The latter requires JDK 21 `java`, `javac`, and `javap` on `PATH`. The full
-workspace quality checks remain the repository gates described in
+Both runtime tests require JDK 21 `java`, `javac`, and `javap` on `PATH`; the
+artifact-batch test is included in the mandatory JDK CI job and fails rather
+than skipping when `DOTTY_CLASSFILE_REQUIRE_JDK=1` and a tool is missing. The
+full workspace quality checks remain the repository gates described in
 `AGENTS.md`; no Scala corpus was rebuilt for this bounded audit.
