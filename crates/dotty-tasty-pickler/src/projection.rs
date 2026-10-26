@@ -895,7 +895,42 @@ impl<'a> EncodingContext<'a> {
                     info: field_record.info,
                 });
             };
-            if field_type != context.definitions.int && field_type != context.definitions.boolean {
+            let primitive_field = field_type == context.definitions.int
+                || field_type == context.definitions.boolean;
+            let same_package_reference_field = field_record.flags.is_empty()
+                && matches!(
+                    context.store.types.try_get(field_type),
+                    Some(Type::TypeRef {
+                        prefix,
+                        target: TypeRefTarget::Symbol(target),
+                    }) if *target != class
+                        && context.store.symbols.contains(*target)
+                        && {
+                            let target_record = context.store.symbols.get(*target);
+                            let package = class_record.owner;
+                            target_record.kind == SymbolKind::Class
+                                && target_record.origin == SymbolOrigin::Source(context.source)
+                                && target_record.owner == package
+                                && target_record.visibility == Visibility::Public
+                                && target_record.flags.is_empty()
+                                && target_record.annotations.is_empty()
+                                && package.is_some_and(|package| matches!(
+                                    context.store.types.try_get(*prefix),
+                                    Some(Type::TypeRef {
+                                        prefix: package_prefix,
+                                        target: TypeRefTarget::Symbol(type_package),
+                                    }) if *package_prefix == context.definitions.no_prefix
+                                        && *type_package == package
+                                ))
+                                && matches!(
+                                    context.source_index.definition_of(*target),
+                                    Some(dotty_core::SourceDefinition::Canonical { source, tree })
+                                        if source == context.source
+                                            && context.source_index.symbol_at(source, tree) == Some(*target)
+                                )
+                        }
+                );
+            if !primitive_field && !same_package_reference_field {
                 return Err(PickleError::UnsupportedTypeReference { ty: field_type });
             }
             let package = class_record
