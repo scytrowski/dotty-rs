@@ -278,6 +278,10 @@ pub fn validate_cross_class_method_ref(
     validate_canonical_definition(source_index, source_id, counter_formal_tree, counter_formal)?;
     if store.symbols.get(counter_formal).kind != SymbolKind::Parameter
         || store.symbols.get(counter_formal).owner != Some(reader_read)
+        || store
+            .names
+            .resolve(store.symbols.get(counter_formal).name.text())
+            != "counter"
     {
         return Err(CrossClassMethodRefError::SemanticIdentity(
             "counter must be a Reader.read-owned parameter",
@@ -530,7 +534,16 @@ fn class_declarations<'a>(
             "class declaration scope is not the canonical source scope",
         ));
     }
-    Ok(store.scopes.get(info.declarations))
+    let declarations = store.scopes.get(info.declarations);
+    if declarations.entered_symbols().any(|member| {
+        let symbol = store.symbols.get(member);
+        symbol.kind == SymbolKind::TypeParameter && symbol.owner == Some(class)
+    }) {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "generic classes are outside the cross-class reference proof",
+        ));
+    }
+    Ok(declarations)
 }
 
 fn find_method<'a>(
@@ -596,9 +609,13 @@ fn validate_public_concrete_method(
     let symbol = store.symbols.get(method);
     if symbol.kind != SymbolKind::Method
         || symbol.visibility != dotty_core::Visibility::Public
-        || symbol
-            .flags
-            .contains(SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC | SymbolFlags::ERASED)
+        || symbol.flags.contains(
+            SymbolFlags::ABSTRACT
+                | SymbolFlags::SYNTHETIC
+                | SymbolFlags::ERASED
+                | SymbolFlags::STATIC
+                | SymbolFlags::EXTENSION,
+        )
     {
         return Err(CrossClassMethodRefError::SemanticIdentity(match label {
             "Counter.get" => "Counter.get must be public, concrete, and source-defined",
