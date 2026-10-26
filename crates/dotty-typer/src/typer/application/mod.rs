@@ -195,12 +195,12 @@ impl SourceTyper<'_> {
         request: ApplicationRequest<'_>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<(TreeId<Typed>, TypeId), TyperError> {
-        let (class, receiver) = match self.store.types.try_get(callable) {
+        let (class, receiver, applied_arity) = match self.store.types.try_get(callable) {
             Some(Type::TypeRef {
                 target: TypeRefTarget::Symbol(class),
                 ..
-            }) => (*class, callable),
-            Some(Type::Applied { tycon, .. }) => {
+            }) => (*class, callable, None),
+            Some(Type::Applied { tycon, args }) => {
                 let Some(Type::TypeRef {
                     target: TypeRefTarget::Symbol(class),
                     ..
@@ -208,7 +208,7 @@ impl SourceTyper<'_> {
                 else {
                     return Ok((function, callable));
                 };
-                (*class, callable)
+                (*class, callable, Some(args.len().saturating_sub(1)))
             }
             _ => return Ok((function, callable)),
         };
@@ -216,13 +216,36 @@ impl SourceTyper<'_> {
             return Ok((function, callable));
         }
         let declaration = self.store.symbols.get(class);
-        let receiver = match declaration.kind {
+        let class_kind = declaration.kind;
+        let class_origin = declaration.origin;
+        let class_owner = declaration.owner;
+        let canonical_function = if matches!(class_origin, SymbolOrigin::Tasty(_)) {
+            let Some(arity) = applied_arity else {
+                return Ok((function, callable));
+            };
+            let canonical = self.source_function_class(
+                SourceFunctionKind::Ordinary,
+                arity,
+                request.tree_index,
+            )?;
+            (canonical == class
+                && class_kind == SymbolKind::Trait
+                && class_owner.is_some_and(|owner| {
+                    self.store.symbols.contains(owner)
+                        && self.store.symbols.get(owner).kind == SymbolKind::Package
+                }))
+            .then_some(class)
+        } else {
+            None
+        };
+        let receiver = match class_kind {
             SymbolKind::ModuleClass => self.this_type_receiver_view(callable)?,
             SymbolKind::Class | SymbolKind::Trait
-                if matches!(declaration.origin, SymbolOrigin::Source(_)) =>
+                if matches!(class_origin, SymbolOrigin::Source(_)) =>
             {
                 receiver
             }
+            SymbolKind::Trait if canonical_function == Some(class) => receiver,
             _ => return Ok((function, callable)),
         };
         let apply_name = Name::new(self.store.names.intern("apply"), Namespace::Term);
@@ -241,6 +264,9 @@ impl SourceTyper<'_> {
             };
         };
         if self.store.symbols.get(candidate.symbol).kind != SymbolKind::Method {
+            return Ok((function, callable));
+        }
+        if canonical_function == Some(class) && candidate.declaring_class != class {
             return Ok((function, callable));
         }
         let declaration = self.store.symbols.get(candidate.symbol);
@@ -267,7 +293,11 @@ impl SourceTyper<'_> {
             return Ok((function, callable));
         }
 
-        let member_type = self.member_type_on_journaled(candidate, info_journal)?;
+        let member_type = if canonical_function == Some(class) {
+            self.canonical_function_member_type(candidate, class, applied_arity.unwrap())?
+        } else {
+            self.member_type_on_journaled(candidate, info_journal)?
+        };
         let is_callable_method = match self.store.types.try_get(member_type) {
             Some(Type::Method(_)) => true,
             Some(Type::Poly(poly)) => {
@@ -290,6 +320,80 @@ impl SourceTyper<'_> {
         let selected_function = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .select(function, apply_name, false, selected_type, position);
         Ok((selected_function, member_type))
+    }
+
+    fn canonical_function_member_type(
+        &mut self,
+        candidate: &MemberCandidate,
+        class: SymbolId,
+        arity: usize,
+    ) -> Result<TypeId, TyperError> {
+        if candidate.declaring_class != class || !self.store.symbols.contains(candidate.symbol) {
+            return Err(TyperError::MemberTypeUnavailable {
+                symbol: candidate.symbol,
+            });
+        }
+        let SymbolInfo::Complete(declaration) = *self.store.symbols.info(candidate.symbol) else {
+            return Err(TyperError::MemberTypeUnavailable {
+                symbol: candidate.symbol,
+            });
+        };
+        let (mut method, type_arguments) = match (
+            self.store.types.try_get(declaration),
+            self.store.types.try_get(candidate.receiver_view),
+        ) {
+            (
+                Some(Type::Method(method)),
+                Some(Type::Applied {
+                    tycon,
+                    args: type_arguments,
+                }),
+            ) if matches!(
+                self.store.types.try_get(*tycon),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(receiver_class),
+                    ..
+                }) if *receiver_class == class
+            ) =>
+            {
+                (method.clone(), type_arguments.clone())
+            }
+            _ => {
+                return Err(TyperError::MemberTypeUnavailable {
+                    symbol: candidate.symbol,
+                });
+            }
+        };
+        if method.params.len() != arity || type_arguments.len() != arity + 1 {
+            return Err(TyperError::MemberTypeUnavailable {
+                symbol: candidate.symbol,
+            });
+        }
+        if method.kind != MethodKind::Plain
+            || method.params.iter().any(|parameter| {
+                !matches!(self.store.types.try_get(parameter.ty), Some(Type::Error(_)))
+            })
+            || !matches!(
+                self.store.types.try_get(method.result),
+                Some(Type::Error(_))
+            )
+        {
+            return Err(TyperError::MemberTypeUnavailable {
+                symbol: candidate.symbol,
+            });
+        }
+
+        // The Scala 3.9 TASTy summary currently retains FunctionN.apply's
+        // member identity and clause shape but reduces its class type
+        // parameter references to Error types. For the exact canonical
+        // FunctionN class, the language contract fixes apply's signature to
+        // (T1, ..., Tn) => R. Instantiate that contract from the receiver's
+        // already-resolved type arguments while retaining the real member.
+        for (parameter, ty) in method.params.iter_mut().zip(&type_arguments) {
+            parameter.ty = *ty;
+        }
+        method.result = type_arguments[arity];
+        Ok(self.store.types.alloc(Type::Method(method)))
     }
 
     fn is_plain_private_source_method(&self, symbol: SymbolId) -> bool {
