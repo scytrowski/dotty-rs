@@ -239,15 +239,18 @@ pub fn validate_cross_class_method_ref(
             "both declarations must be public ordinary classes",
         ));
     }
-    let package_owner = store.symbols.get(counter_class).owner;
-    if package_owner.is_some_and(|owner| !store.symbols.contains(owner)) {
+    let package_owner = store.symbols.get(counter_class).owner.ok_or(
+        CrossClassMethodRefError::SemanticIdentity(
+            "Counter and Reader must have the exact same package owner",
+        ),
+    )?;
+    if !store.symbols.contains(package_owner) {
         return Err(CrossClassMethodRefError::SemanticIdentity(
             "class package owner is stale",
         ));
     }
-    if package_owner.is_none()
-        || store.symbols.get(reader_class).owner != package_owner
-        || package_owner.is_some_and(|owner| store.symbols.get(owner).kind != SymbolKind::Package)
+    if store.symbols.get(reader_class).owner != Some(package_owner)
+        || store.symbols.get(package_owner).kind != SymbolKind::Package
     {
         return Err(CrossClassMethodRefError::SemanticIdentity(
             "Counter and Reader must have the exact same package owner",
@@ -327,9 +330,12 @@ pub fn validate_cross_class_method_ref(
             "counter formal type is not complete",
         ));
     };
-    if !matches!(
-        store.types.try_get(formal_type),
-        Some(Type::TypeRef { target: TypeRefTarget::Symbol(target), .. }) if *target == counter_class
+    if !is_canonical_class_type_ref(
+        store,
+        formal_type,
+        counter_class,
+        package_owner,
+        definitions.no_prefix,
     ) {
         return Err(CrossClassMethodRefError::SemanticIdentity(
             "counter formal must refer to the planned Counter class identity",
@@ -481,6 +487,11 @@ pub fn validate_cross_class_method_ref(
         .ok_or(CrossClassMethodRefError::TypedBinding(
             "Counter.get body has no source-to-typed binding",
         ))?;
+    if typed_ast.try_get(counter_get_body).is_none() {
+        return Err(CrossClassMethodRefError::TypedBinding(
+            "Counter.get typed body root is stale",
+        ));
+    }
     let counter_method_plan = unique_class_plan(jvm_unit, counter_class, "Counter")?;
     let reader_method_plan = unique_class_plan(jvm_unit, reader_class, "Reader")?;
     let counter_get_plan = validate_planned_method(
@@ -746,6 +757,30 @@ fn has_any_flag(flags: SymbolFlags, excluded: SymbolFlags) -> bool {
     !flags.intersection(excluded).is_empty()
 }
 
+fn is_canonical_class_type_ref(
+    store: &SemanticStore,
+    ty: dotty_core::TypeId,
+    class: SymbolId,
+    package: SymbolId,
+    no_prefix: dotty_core::TypeId,
+) -> bool {
+    let Some(Type::TypeRef {
+        prefix,
+        target: TypeRefTarget::Symbol(target),
+    }) = store.types.try_get(ty)
+    else {
+        return false;
+    };
+    *target == class
+        && matches!(
+            store.types.try_get(*prefix),
+            Some(Type::TypeRef {
+                prefix: package_prefix,
+                target: TypeRefTarget::Symbol(package_target),
+            }) if *package_prefix == no_prefix && *package_target == package
+        )
+}
+
 fn complete_method_type<'a>(
     store: &'a SemanticStore,
     method: SymbolId,
@@ -834,8 +869,8 @@ fn validate_planned_method<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::has_any_flag;
-    use dotty_core::SymbolFlags;
+    use super::{has_any_flag, is_canonical_class_type_ref};
+    use dotty_core::{Definitions, SemanticStore, SymbolFlags, Type, TypeRefTarget};
 
     #[test]
     fn excluded_class_and_method_flags_are_checked_individually() {
@@ -869,5 +904,40 @@ mod tests {
         }
         assert!(!has_any_flag(SymbolFlags::EMPTY, class_mask));
         assert!(!has_any_flag(SymbolFlags::EMPTY, method_mask));
+    }
+
+    #[test]
+    fn canonical_class_type_rejects_an_unrelated_prefix() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let class = definitions.object_class;
+        let package = definitions.any_class;
+        let package_prefix = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(package),
+        });
+        let correct = store.types.alloc(Type::TypeRef {
+            prefix: package_prefix,
+            target: TypeRefTarget::Symbol(class),
+        });
+        let wrong_prefix = store.types.alloc(Type::TypeRef {
+            prefix: definitions.int,
+            target: TypeRefTarget::Symbol(class),
+        });
+
+        assert!(is_canonical_class_type_ref(
+            &store,
+            correct,
+            class,
+            package,
+            definitions.no_prefix
+        ));
+        assert!(!is_canonical_class_type_ref(
+            &store,
+            wrong_prefix,
+            class,
+            package,
+            definitions.no_prefix
+        ));
     }
 }

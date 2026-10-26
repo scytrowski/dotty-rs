@@ -544,6 +544,40 @@ fn cross_class_call_types_canonically_before_the_paired_planner_rejects_it() {
         CrossClassMethodRefError::TypedBinding("Reader.read typed body root is stale")
     );
 
+    let mut stale_counter_body_ast = clone_typed_ast(typer.typed_ast());
+    let checkpoint = stale_counter_body_ast.checkpoint();
+    let stale_counter_body =
+        stale_counter_body_ast.alloc(stale_counter_body_ast.get(typed_get_rhs).clone());
+    stale_counter_body_ast.rollback_to(checkpoint);
+    let mut stale_counter_body_index = typer.source_typed_index().clone();
+    stale_counter_body_index.remove(source_id, get_rhs);
+    stale_counter_body_index
+        .insert(source_id, get_rhs, stale_counter_body)
+        .unwrap();
+    let mut stale_counter_body_classes = jvm_unit.classes.clone();
+    stale_counter_body_classes[0].methods[0].body = Some(stale_counter_body);
+    let stale_counter_body_unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: &stale_counter_body_ast,
+        classes: stale_counter_body_classes,
+    };
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: &stale_counter_body_ast,
+            source_index: &index,
+            source_typed_index: &stale_counter_body_index,
+            jvm_unit: &stale_counter_body_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::TypedBinding("Counter.get typed body root is stale")
+    );
+
     let mut stale_child_ast = clone_typed_ast(typer.typed_ast());
     let checkpoint = stale_child_ast.checkpoint();
     let stale_child = stale_child_ast.alloc(stale_child_ast.get(typed_rhs).clone());

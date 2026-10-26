@@ -73,11 +73,14 @@ plan, or a JVM unit from another semantic store before any artifact operation.
 This proves source/typed provenance only and does not enable paired TASTy
 signature or call-body encoding.
 
-The formal completes to `TypeRef(SymbolId(39))`. Typing the body succeeds. Its
-typed root maps from the exact source RHS through `SourceTypedIndex`; the
-selected function's `TermRef` targets `SymbolId(45)`, and the typed receiver is
-an `Ident("counter")` whose `TermRef` targets `SymbolId(50)`. No spelling-based
-target reconstruction is involved.
+The formal completes to the canonical package-qualified
+`TypeRef(SymbolId(39))`; an unrelated type prefix is rejected even if the
+target symbol is correct. Typing the body succeeds. Its typed root maps from
+the exact source RHS through `SourceTypedIndex`; the selected function's
+`TermRef` target is `SymbolId(45)` and its prefix matches the typed receiver
+type. The receiver is an `Ident("counter")` whose unqualified `TermRef` target
+is `SymbolId(50)`. Stale source/typed roots and missing Counter.get typed bodies
+return typed errors. No spelling-based target reconstruction is involved.
 
 The whole-source JVM backend path emits both classes from that frontend
 pipeline. A Java harness constructs the generated Counter and calls the
