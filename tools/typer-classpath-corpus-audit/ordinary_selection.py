@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from pathlib import Path
 import re
 import sys
@@ -35,9 +36,20 @@ def load_selection(manifest: Path, scala_root: Path) -> list[str]:
         (root / "compiler" / "src").resolve(strict=True),
     ]
     try:
-        lines = manifest.read_text(encoding="utf-8").splitlines()
+        content = manifest.read_text(encoding="utf-8")
     except OSError as error:
         raise SelectionError(f"cannot read selection {manifest}: {error}") from error
+
+    if content.startswith("identity\t"):
+        try:
+            rows = csv.DictReader(content.splitlines(), delimiter="\t")
+            lines = [row["identity"] for row in rows]
+        except (csv.Error, KeyError, TypeError) as error:
+            raise SelectionError(f"cannot read identity column from {manifest}: {error}") from error
+        if any(not identity for identity in lines):
+            raise SelectionError(f"selection {manifest} contains an empty identity")
+    else:
+        lines = content.splitlines()
 
     selected: set[str] = set()
     for number, raw in enumerate(lines, 1):
