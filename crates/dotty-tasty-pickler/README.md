@@ -48,6 +48,15 @@ plan, and serialize as the Scala 3.9 named `SELECT` with a class-typed
 receiver. An unqualified reference uses `QUALTHIS`, while an explicit `this`
 selection preserves the oracle's `THIS(TYPEREFsymbol(...))` shape; forward
 references do not create synthetic AST addresses.
+Method signatures may additionally contain one plain formal whose type is a
+public, ordinary, non-generic top-level class in the same validated source/JVM
+batch and package. The batch binding must provide that canonical class
+identity; the pickler checks its source declaration, owner, declaration scope,
+`ClassInfo`, and the formal's exact `TypeRef` and source syntax. The formal is
+emitted as a method-owned `PARAM` with the pinned external-to-sidecar
+`TYPEREF`/`TERMREFpkg` class type. This does not copy the sibling class into
+the current sidecar or enable reference-typed method results, constructors,
+multiple class formals, type applications, or cross-class call bodies.
 A method may have no value clause, one explicit
 empty clause, or one plain clause of ordinary Int or Boolean
 parameters. Parameter IDs, ownership, source scope, types and order must agree
