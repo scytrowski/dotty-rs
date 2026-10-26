@@ -27,6 +27,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[path = "support/ordinary_member_audit_support.rs"]
+mod ordinary_member_audit_support;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ResolverMetrics {
     timing_enabled: bool,
@@ -7400,6 +7403,12 @@ fn merge_counts<K: Ord>(target: &mut BTreeMap<K, usize>, source: BTreeMap<K, usi
     for (key, count) in source {
         *target.entry(key).or_default() += count;
     }
+}
+
+#[test]
+#[ignore = "run tools/typer-classpath-corpus-audit/run --method-kind ordinary with pinned Scala inputs"]
+fn pinned_scala39_ordinary_member_method_audit() {
+    ordinary_member_audit_support::run();
 }
 
 #[test]
