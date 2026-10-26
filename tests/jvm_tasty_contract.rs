@@ -30,6 +30,8 @@ use dotty_typer::SourceTyper;
 const COUNTER: &str = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n";
 const COUNTER_GAUGE: &str = include_str!("fixtures/jvm_tasty_multiclass/CounterGauge.scala");
 const COUNTER_READER: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader.scala");
+const COUNTER_FACTORY: &str =
+    include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
 const THREE_CLASSES: &str = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass Gauge(start: Int):\n  private var reading: Int = start\n  def get(): Int = reading\n  def set(value: Int): Unit = reading = value\n\nclass Thermometer(start: Int):\n  private var temperature: Int = start\n  def get(): Int = temperature\n  def set(value: Int): Unit = temperature = value\n";
 
 #[test]
@@ -345,6 +347,107 @@ fn cross_class_call_artifact_rejects_a_different_methodref() {
                     reason: "missing expected class-file path",
                     path,
                 }) if path == "example/Reader.class"
+            ));
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn factory_batch_contract_rejects_wrong_result_abi_target_and_partial_pairs() {
+    with_paired_jvm_tasty_batch_plan(
+        COUNTER_FACTORY,
+        "tests/fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala",
+        SourceId::from_index(1694),
+        |source_batch| {
+            let plans = source_batch
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(source_batch.jvm_unit, &plans).unwrap();
+            assert!(source_batch.factory_proof.is_some());
+            let valid = encode_batch_for_contract_test(&source_batch);
+            validate_jvm_tasty_batch_artifacts(&validated, valid.clone()).unwrap();
+
+            let mut wrong_result = valid.clone();
+            let factory = wrong_result
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/CounterFactory.class")
+                .unwrap();
+            let mut reader = Reader::new(&factory.classfile_bytes);
+            let mut class = ClassFile::decode(&mut reader).unwrap();
+            let constructor_descriptor = class
+                .methods
+                .iter()
+                .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "<init>")
+                .unwrap()
+                .descriptor_index;
+            let create_index = class
+                .methods
+                .iter()
+                .position(|method| class.constant_pool.utf8(method.name_index).unwrap() == "create")
+                .unwrap();
+            class.methods[create_index].descriptor_index = constructor_descriptor;
+            factory.classfile_bytes = class.encode().unwrap();
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_result),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "member ABI",
+                    ..
+                })
+            ));
+
+            let mut wrong_allocation_owner = valid.clone();
+            let factory = wrong_allocation_owner
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/CounterFactory.class")
+                .unwrap();
+            let (code_bytes, wrong_owner) = {
+                let mut reader = Reader::new(&factory.classfile_bytes);
+                let class = ClassFile::decode(&mut reader).unwrap();
+                let create = class
+                    .methods
+                    .iter()
+                    .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "create")
+                    .unwrap();
+                let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                    panic!("factory create has one Code attribute");
+                };
+                (code.code.to_vec(), class.this_class.0)
+            };
+            let allocation = factory
+                .classfile_bytes
+                .windows(code_bytes.len())
+                .position(|window| window == code_bytes)
+                .expect("the factory create instructions appear in the class bytes");
+            factory.classfile_bytes[allocation + 1..allocation + 3]
+                .copy_from_slice(&wrong_owner.to_be_bytes());
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_allocation_owner),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "cross-class invocation",
+                    ..
+                })
+            ));
+
+            let mut missing_counter = valid.clone();
+            missing_counter
+                .classfiles
+                .retain(|artifact| artifact.classfile_path != "example/Counter.class");
+            missing_counter
+                .sidecars
+                .retain(|artifact| artifact.tasty_path != "example/Counter.tasty");
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, missing_counter),
+                Err(JvmTastyContractError::BatchArtifactPaths {
+                    reason: "missing expected class-file path",
+                    path,
+                }) if path == "example/Counter.class"
             ));
         },
     )

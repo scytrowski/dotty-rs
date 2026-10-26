@@ -1,6 +1,6 @@
 # Scala 3.9 cross-class factory TASTy support
 
-This document records the Scala/JVM audit requested by [issue #1690](https://github.com/scytrowski/dotty-rs/issues/1690) and the bounded TASTy producer slice added by [issue #1693](https://github.com/scytrowski/dotty-rs/issues/1693). The source typer and JVM bytecode writer remain unchanged.
+This document records the Scala/JVM audit requested by [issue #1690](https://github.com/scytrowski/dotty-rs/issues/1690), the bounded TASTy producer slice added by [issue #1693](https://github.com/scytrowski/dotty-rs/issues/1693), and its complete linked batch integration from [issue #1694](https://github.com/scytrowski/dotty-rs/issues/1694). The source typer and JVM bytecode writer remain unchanged.
 
 ## Pinned source and oracle
 
@@ -97,6 +97,12 @@ The sidecar encodes the method body as `APPLY(SELECTin(NEW(Counter)), [seed])`. 
 
 The existing identity control remains separate: `identity(counter: Counter): Counter = counter` emits a direct formal reference and no `NEW` or constructor `APPLY`. Both result forms use the same exact planned class type and remain covered by the pinned Scala consumer checks.
 
+## Linked JVM/TASTy source batch (#1694)
+
+The complete paired producer now retains the validated factory identity proof in `PairedJvmTastyBatchPlan` for the canonical `Counter`/`CounterFactory` source pair. Before returning that plan, it checks that the proof's exact source RHS, typed binding, and JVM method body are the same roots used by the Factory TASTy plan. A mismatch fails batch planning with a typed `BatchUnit` error. The ordinary artifact validator then validates the complete ordered output set and each classfile's link to its own TASTy header before returning the batch.
+
+`factory_emits_four_complete_linked_artifacts_from_one_source_session` checks the two `.class` and two `.tasty` outputs, class names and order, Java 21 classfile version, TASTy 28.9 headers, per-class UUID links, exact method descriptors, and factory allocation bytecode. It repeats emission in a fresh source session and compares all four byte outputs and both links for determinism. `factory_batch_contract_rejects_wrong_result_abi_target_and_partial_pairs` proves the artifact gate rejects an incorrect result descriptor, allocation targeting the factory itself, and a missing class/TASTy pair. The existing Counter/Gauge and Counter/Reader artifact tests remain unchanged.
+
 ## Scala consumer and classpath controls
 
 [`FactoryClient.scala`](../tests/fixtures/jvm_tasty_cross_class_factories/FactoryClient.scala) and [`IdentityClient.scala`](../tests/fixtures/jvm_tasty_cross_class_factories/IdentityClient.scala) compile with Scala 3.9 against the oracle classfiles and run successfully on Java 21. Additional classpath probes observed:
@@ -137,12 +143,11 @@ The existing Scala consumer audit also measures missing, misplaced, corrupt, and
 
 ## Follow-up dependency map
 
-Issues #1690–#1693 provide the pinned source/runtime oracle, canonical source/typed identity proof, reference-result TASTy and the bounded constructor application. Remaining implementation proceeds in this dependency order:
+Issues #1690–#1694 provide the pinned source/runtime oracle, canonical source/typed identity proof, reference-result TASTy, bounded constructor application, and complete linked batch publication. Remaining implementation proceeds in this dependency order:
 
-1. **#1694** — full linked artifact publication and fail-closed batch consistency.
-2. **#1695** — strict JDK runtime factory client for Rust-produced artifacts.
-3. **#1696** — wider independent Scala consumer and sidecar/classpath behavior.
-4. **#1697** — final release gate after the preceding compatibility layers pass.
+1. **#1695** — strict JDK runtime factory client for Rust-produced artifacts.
+2. **#1696** — wider independent Scala consumer and sidecar/classpath behavior.
+3. **#1697** — final release gate after the preceding compatibility layers pass.
 
 These later increments are not completed by the focused #1693 consumer test; it checks Scala decompilation/rebuild and ABI, not linked Rust factory execution.
 
@@ -150,6 +155,7 @@ These later increments are not completed by the focused #1693 consumer test; it 
 
 ```sh
 cargo test --test jvm_tasty_cross_class_factories --locked
+cargo test --test jvm_tasty_plan --test jvm_tasty_contract --test jvm_tasty_artifacts --locked
 SCALA39_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source \
 DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 \
 JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
