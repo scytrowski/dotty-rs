@@ -58,11 +58,29 @@ and Reader.read's `counter` formal `SymbolId(50)`. These numeric IDs describe
 this test session only; the test asserts semantic identity and ownership
 relationships rather than treating allocation order as a contract.
 
-The formal completes to `TypeRef(SymbolId(39))`. Typing the body succeeds. Its
-typed root maps from the exact source RHS through `SourceTypedIndex`; the
-selected function's `TermRef` targets `SymbolId(45)`, and the typed receiver is
-an `Ident("counter")` whose `TermRef` targets `SymbolId(50)`. No spelling-based
-target reconstruction is involved.
+The root API `validate_cross_class_method_ref` builds a borrowed, read-only
+`ValidatedCrossClassMethodRef` from that same source index, typed bindings,
+semantic store, typed arena, and complete JVM unit. It verifies the exact
+`Reader.read` formal type target, both class declaration scopes, public
+`Counter.get(): Int`, typed `Select` target, receiver `TermRef`,
+source-to-typed roots, and matching JVM method plans. The proof exposes the
+canonical class, method, formal, and typed-root IDs plus descriptor `()I`;
+its borrows keep those identities tied to the supplied session. As with other
+arena-backed IDs, callers must pass the source index, typed bindings, ASTs, and
+JVM unit from one session; equal numeric IDs cannot authenticate a foreign
+same-slot arena. It rejects a missing planned class, a substituted method
+plan, or a JVM unit from another semantic store before any artifact operation.
+This proves source/typed provenance only and does not enable paired TASTy
+signature or call-body encoding.
+
+The formal completes to the canonical package-qualified
+`TypeRef(SymbolId(39))`; an unrelated type prefix is rejected even if the
+target symbol is correct. Typing the body succeeds. Its typed root maps from
+the exact source RHS through `SourceTypedIndex`; the selected function's
+`TermRef` target is `SymbolId(45)` and its prefix matches the typed receiver
+type. The receiver is an `Ident("counter")` whose unqualified `TermRef` target
+is `SymbolId(50)`. Stale source/typed roots and missing Counter.get typed bodies
+return typed errors. No spelling-based target reconstruction is involved.
 
 The whole-source JVM backend path emits both classes from that frontend
 pipeline. A Java harness constructs the generated Counter and calls the

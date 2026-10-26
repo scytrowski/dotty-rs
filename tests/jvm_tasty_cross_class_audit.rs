@@ -1,8 +1,9 @@
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::reader::Reader as ClassReader;
-use dotty_core::ast::TreeKind;
-use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText};
+use dotty_core::ast::{AstArena, TreeKind};
+use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText, Typed, Untyped};
+use dotty_jvm::{JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmMethodPlan};
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
@@ -14,6 +15,9 @@ use dotty_tasty::tasty::{Attribute as TastyAttribute, DefinitionBody, RawName, T
 use dotty_tasty::term::RawTree;
 use dotty_typer::SourceTyper;
 
+use dotty::jvm_tasty_cross_class::{
+    CrossClassMethodRefError, CrossClassMethodRefInput, validate_cross_class_method_ref,
+};
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 
 const COUNTER_CLASS: &[u8] =
@@ -25,6 +29,22 @@ const READER_CLASS: &[u8] =
 const READER_TASTY: &[u8] =
     include_bytes!("fixtures/jvm_tasty_cross_class/scala39/example/Reader.tasty");
 const SOURCE: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader.scala");
+
+fn clone_typed_ast(ast: &AstArena<Typed>) -> AstArena<Typed> {
+    let mut clone = AstArena::new();
+    for (expected, tree) in ast.iter() {
+        assert_eq!(clone.alloc(tree.clone()), expected);
+    }
+    clone
+}
+
+fn clone_untyped_ast(ast: &AstArena<Untyped>) -> AstArena<Untyped> {
+    let mut clone = AstArena::new();
+    for (expected, tree) in ast.iter() {
+        assert_eq!(clone.alloc(tree.clone()), expected);
+    }
+    clone
+}
 
 const COUNTER_UUID: [u8; 16] = [
     0x00, 0xd4, 0x56, 0x67, 0xbf, 0x83, 0x69, 0xe8, 0x00, 0x62, 0x9f, 0x05, 0xd0, 0xf0, 0x8f, 0x1b,
@@ -374,9 +394,11 @@ fn cross_class_call_types_canonically_before_the_paired_planner_rejects_it() {
     let TreeKind::Apply(typed_apply) = &typer.typed_ast().get(typed_rhs).kind else {
         panic!("typed Reader.read body remains an application");
     };
+    let typed_select_id = typed_apply.function;
     let TreeKind::Select(typed_select) = &typer.typed_ast().get(typed_apply.function).kind else {
         panic!("typed application selects Counter.get");
     };
+    let typed_receiver_id = typed_select.qualifier;
     assert!(matches!(
         typer.store().types.get(typer.typed_ast().get(typed_apply.function).ty),
         dotty_core::Type::TermRef {
@@ -399,6 +421,411 @@ fn cross_class_call_types_canonically_before_the_paired_planner_rejects_it() {
             ..
         } if *symbol == counter_parameter
     ));
+
+    let TreeKind::DefDef(get_definition) = &parsed.ast.get(get_tree).kind else {
+        panic!("Counter.get is a source method");
+    };
+    let get_rhs = get_definition.rhs.expect("Counter.get has a body");
+    let get_context = typer.expression_context_for(get_symbol).unwrap();
+    let typed_get_rhs = typer
+        .type_expression(get_rhs, get_context)
+        .expect("Counter.get body types in the same source session");
+    assert_eq!(
+        typer.source_typed_index().get(source_id, get_rhs),
+        Some(typed_get_rhs)
+    );
+
+    let jvm_unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: typer.typed_ast(),
+        classes: vec![
+            JvmClassPlan {
+                class: counter,
+                methods: vec![JvmMethodPlan {
+                    method: get_symbol,
+                    parameters: vec![],
+                    locals: vec![],
+                    body: Some(typed_get_rhs),
+                }],
+                fields: vec![],
+                initialization: JvmClassInitializationPlan::Unsupported,
+            },
+            JvmClassPlan {
+                class: reader,
+                methods: vec![JvmMethodPlan {
+                    method: read_symbol,
+                    parameters: vec![counter_parameter],
+                    locals: vec![],
+                    body: Some(typed_rhs),
+                }],
+                fields: vec![],
+                initialization: JvmClassInitializationPlan::Unsupported,
+            },
+        ],
+    };
+    let proof = validate_cross_class_method_ref(CrossClassMethodRefInput {
+        source_id,
+        source_root: parsed.root,
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: typer.typed_ast(),
+        source_index: &index,
+        source_typed_index: typer.source_typed_index(),
+        jvm_unit: &jvm_unit,
+    })
+    .expect("one-session source and planned-class identities validate");
+    assert_eq!(proof.source_id(), source_id);
+    assert_eq!(proof.counter_class(), counter);
+    assert_eq!(proof.reader_class(), reader);
+    assert_eq!(proof.counter_get(), get_symbol);
+    assert_eq!(proof.reader_read(), read_symbol);
+    assert_eq!(proof.counter_formal(), counter_parameter);
+    assert_eq!(proof.source_rhs(), rhs);
+    assert_eq!(proof.typed_rhs(), typed_rhs);
+    assert_eq!(proof.typed_select(), typed_select_id);
+    assert_eq!(proof.typed_receiver(), typed_receiver_id);
+    assert_eq!(proof.method_descriptor(), "()I");
+
+    let mut wrong_prefix_ast = clone_typed_ast(typer.typed_ast());
+    wrong_prefix_ast.get_mut(typed_receiver_id).ty = definitions.int;
+    let wrong_prefix_unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: &wrong_prefix_ast,
+        classes: jvm_unit.classes.clone(),
+    };
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: &wrong_prefix_ast,
+            source_index: &index,
+            source_typed_index: typer.source_typed_index(),
+            jvm_unit: &wrong_prefix_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::TypedBinding(
+            "typed receiver and selected method must retain canonical symbol targets"
+        )
+    );
+
+    let mut stale_typed_ast = clone_typed_ast(typer.typed_ast());
+    let checkpoint = stale_typed_ast.checkpoint();
+    let stale_rhs = stale_typed_ast.alloc(stale_typed_ast.get(typed_rhs).clone());
+    stale_typed_ast.rollback_to(checkpoint);
+    let mut stale_source_typed_index = typer.source_typed_index().clone();
+    stale_source_typed_index.remove(source_id, rhs);
+    stale_source_typed_index
+        .insert(source_id, rhs, stale_rhs)
+        .unwrap();
+    let stale_jvm_unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: &stale_typed_ast,
+        classes: jvm_unit.classes.clone(),
+    };
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: &stale_typed_ast,
+            source_index: &index,
+            source_typed_index: &stale_source_typed_index,
+            jvm_unit: &stale_jvm_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::TypedBinding("Reader.read typed body root is stale")
+    );
+
+    let mut stale_counter_body_ast = clone_typed_ast(typer.typed_ast());
+    let checkpoint = stale_counter_body_ast.checkpoint();
+    let stale_counter_body =
+        stale_counter_body_ast.alloc(stale_counter_body_ast.get(typed_get_rhs).clone());
+    stale_counter_body_ast.rollback_to(checkpoint);
+    let mut stale_counter_body_index = typer.source_typed_index().clone();
+    stale_counter_body_index.remove(source_id, get_rhs);
+    stale_counter_body_index
+        .insert(source_id, get_rhs, stale_counter_body)
+        .unwrap();
+    let mut stale_counter_body_classes = jvm_unit.classes.clone();
+    stale_counter_body_classes[0].methods[0].body = Some(stale_counter_body);
+    let stale_counter_body_unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: &stale_counter_body_ast,
+        classes: stale_counter_body_classes,
+    };
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: &stale_counter_body_ast,
+            source_index: &index,
+            source_typed_index: &stale_counter_body_index,
+            jvm_unit: &stale_counter_body_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::TypedBinding("Counter.get typed body root is stale")
+    );
+
+    let mut stale_counter_source_ast = clone_untyped_ast(&parsed.ast);
+    let checkpoint = stale_counter_source_ast.checkpoint();
+    let stale_counter_source_rhs =
+        stale_counter_source_ast.alloc(stale_counter_source_ast.get(get_rhs).clone());
+    stale_counter_source_ast.rollback_to(checkpoint);
+    let TreeKind::DefDef(stale_counter_source_definition) =
+        &mut stale_counter_source_ast.get_mut(get_tree).kind
+    else {
+        unreachable!("Counter.get is a source method")
+    };
+    stale_counter_source_definition.rhs = Some(stale_counter_source_rhs);
+    let mut stale_counter_source_index = typer.source_typed_index().clone();
+    stale_counter_source_index.remove(source_id, get_rhs);
+    stale_counter_source_index
+        .insert(source_id, stale_counter_source_rhs, typed_get_rhs)
+        .unwrap();
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &stale_counter_source_ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &index,
+            source_typed_index: &stale_counter_source_index,
+            jvm_unit: &jvm_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::SourceShape("Counter.get source body root is stale")
+    );
+
+    let mut stale_child_ast = clone_typed_ast(typer.typed_ast());
+    let checkpoint = stale_child_ast.checkpoint();
+    let stale_child = stale_child_ast.alloc(stale_child_ast.get(typed_rhs).clone());
+    stale_child_ast.rollback_to(checkpoint);
+    let TreeKind::Apply(stale_child_apply) = &mut stale_child_ast.get_mut(typed_rhs).kind else {
+        unreachable!("the typed source root is an Apply")
+    };
+    stale_child_apply.function = stale_child;
+    let TreeKind::Apply(source_apply) = &parsed.ast.get(rhs).kind else {
+        unreachable!("the source body root is an Apply")
+    };
+    let mut stale_child_index = typer.source_typed_index().clone();
+    stale_child_index.remove(source_id, source_apply.function);
+    stale_child_index
+        .insert(source_id, source_apply.function, stale_child)
+        .unwrap();
+    let stale_child_unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: &stale_child_ast,
+        classes: jvm_unit.classes.clone(),
+    };
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: &stale_child_ast,
+            source_index: &index,
+            source_typed_index: &stale_child_index,
+            jvm_unit: &stale_child_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::TypedBinding("typed selected function root is stale")
+    );
+
+    let mut stale_source_ast = clone_untyped_ast(&parsed.ast);
+    let checkpoint = stale_source_ast.checkpoint();
+    let stale_source_child = stale_source_ast.alloc(stale_source_ast.get(rhs).clone());
+    stale_source_ast.rollback_to(checkpoint);
+    let TreeKind::Apply(stale_source_apply) = &mut stale_source_ast.get_mut(rhs).kind else {
+        unreachable!("the source body root is an Apply")
+    };
+    stale_source_apply.function = stale_source_child;
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &stale_source_ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &index,
+            source_typed_index: typer.source_typed_index(),
+            jvm_unit: &jvm_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::SourceShape(
+            "Reader.read selected function is not present in the source AST"
+        )
+    );
+
+    let missing_counter = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: typer.typed_ast(),
+        classes: vec![jvm_unit.classes[1].clone()],
+    };
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &index,
+            source_typed_index: typer.source_typed_index(),
+            jvm_unit: &missing_counter,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::JvmPlan("canonical Counter is absent from the complete JVM unit")
+    );
+
+    let wrong_target = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: typer.typed_ast(),
+        classes: vec![
+            JvmClassPlan {
+                class: counter,
+                methods: jvm_unit.classes[1].methods.clone(),
+                fields: vec![],
+                initialization: JvmClassInitializationPlan::Unsupported,
+            },
+            jvm_unit.classes[1].clone(),
+        ],
+    };
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &index,
+            source_typed_index: typer.source_typed_index(),
+            jvm_unit: &wrong_target,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::JvmPlan(
+            "canonical Counter.get is absent from Counter's JVM plan"
+        )
+    );
+
+    let mut missing_typed_rhs = typer.source_typed_index().clone();
+    missing_typed_rhs.remove(source_id, rhs);
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &index,
+            source_typed_index: &missing_typed_rhs,
+            jvm_unit: &jvm_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::TypedBinding("Reader.read body has no source-to-typed binding")
+    );
+
+    let wrong_formal_plan = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: typer.typed_ast(),
+        classes: vec![
+            jvm_unit.classes[0].clone(),
+            JvmClassPlan {
+                class: reader,
+                methods: vec![JvmMethodPlan {
+                    method: read_symbol,
+                    parameters: vec![],
+                    locals: vec![],
+                    body: Some(typed_rhs),
+                }],
+                fields: vec![],
+                initialization: JvmClassInitializationPlan::Unsupported,
+            },
+        ],
+    };
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &index,
+            source_typed_index: typer.source_typed_index(),
+            jvm_unit: &wrong_formal_plan,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::JvmPlan(
+            "planned method identity, formal order, or typed body does not match source"
+        )
+    );
+
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id: SourceId::from_index(source_id.index() + 1),
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &index,
+            source_typed_index: typer.source_typed_index(),
+            jvm_unit: &jvm_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::SourceIdentity("Counter has no canonical source symbol")
+    );
+
+    let foreign_store = SemanticStore::new();
+    let foreign_typed_ast = dotty_core::ast::TypedAst::new();
+    let foreign_unit = JvmCompilationUnit {
+        store: &foreign_store,
+        typed_ast: &foreign_typed_ast,
+        classes: vec![],
+    };
+    assert_eq!(
+        validate_cross_class_method_ref(CrossClassMethodRefInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &index,
+            source_typed_index: typer.source_typed_index(),
+            jvm_unit: &foreign_unit,
+        })
+        .err()
+        .unwrap(),
+        CrossClassMethodRefError::SemanticIdentity("JVM unit uses a different semantic store")
+    );
     drop(typer);
 
     let batch = with_paired_jvm_tasty_batch_plan(SOURCE, "Reader.scala", source_id, |_| ());
