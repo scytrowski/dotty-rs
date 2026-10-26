@@ -897,16 +897,17 @@ struct CrossClassMethodRef {
     name: String,
     descriptor: String,
     constructor: bool,
+    receiver_field: Option<SymbolId>,
 }
 
 fn validate_cross_class_call_code(
     class_file: &ClassFile<'_>,
     proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
 ) -> Result<(), String> {
-    // The paired pickler admits a direct same-batch zero-argument call or the
-    // bounded primary-constructor application only. Keep the binary check
-    // equally narrow instead of accepting a plausible but differently owned
-    // or shaped invocation from classfile bytes.
+    // The paired pickler admits a direct same-batch zero-argument call through
+    // a method parameter or an exact validated reference field, plus the
+    // bounded primary-constructor application. Keep the binary check equally
+    // narrow instead of accepting a differently owned or shaped invocation.
     let tasty = proof.tasty_plan.plan();
     let all_metadata = proof
         .jvm_unit
@@ -1073,6 +1074,7 @@ fn validate_cross_class_call_code(
                     name: "<init>".to_owned(),
                     descriptor: descriptor.to_owned(),
                     constructor: true,
+                    receiver_field: None,
                 });
                 continue;
             }
@@ -1112,6 +1114,25 @@ fn validate_cross_class_call_code(
             name: target_metadata.1.name().to_owned(),
             descriptor: expected_descriptor,
             constructor: false,
+            receiver_field: match &function_tree.kind {
+                TreeKind::Select(selection) => tasty
+                    .typed_ast
+                    .try_get(selection.qualifier)
+                    .and_then(|receiver| match tasty.store.types.try_get(receiver.ty) {
+                        Some(Type::TermRef {
+                            target: TermRefTarget::Symbol(symbol),
+                            ..
+                        }) => Some(*symbol),
+                        _ => None,
+                    })
+                    .filter(|receiver| {
+                        proof
+                            .tasty_plan
+                            .same_batch_reference_fields()
+                            .any(|field| field.field() == *receiver)
+                    }),
+                _ => None,
+            },
         });
     }
 
@@ -1186,6 +1207,66 @@ fn validate_cross_class_call_code(
             dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
                 code.code[6],
                 code.code[7],
+            ]))
+        } else if let Some(field_symbol) = call.receiver_field {
+            if code.code.len() != 8
+                || code.code[0] != 0x2a
+                || code.code[1] != 0xb4
+                || code.code[4] != 0xb6
+                || code.code[7] != 0xac
+            {
+                return Err(format!(
+                    "caller method {:?} does not contain the bounded aload_0/getfield/invokevirtual/ireturn shape",
+                    call.caller
+                ));
+            }
+            let field_reference =
+                dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+                    code.code[2],
+                    code.code[3],
+                ]));
+            let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+                class_index,
+                name_and_type_index,
+            }) = class_file.constant_pool.get(field_reference)
+            else {
+                return Err(format!(
+                    "caller method {:?} getfield does not reference CONSTANT_Fieldref",
+                    call.caller
+                ));
+            };
+            let actual_field_owner = class_file
+                .constant_pool
+                .class_name(*class_index)
+                .map_err(|error| format!("invalid getfield owner: {error:?}"))?;
+            let actual_field = class_file
+                .constant_pool
+                .name_and_type(*name_and_type_index)
+                .map_err(|error| format!("invalid getfield name/descriptor: {error:?}"))?;
+            let expected_field = proof
+                .metadata
+                .fields()
+                .iter()
+                .find(|field| field.symbol() == field_symbol)
+                .ok_or_else(|| {
+                    format!("receiver field {field_symbol:?} is absent from checked JVM metadata")
+                })?;
+            if actual_field_owner != proof.internal_name()
+                || actual_field != (expected_field.name(), expected_field.descriptor())
+            {
+                return Err(format!(
+                    "caller method {:?} loads field {:?} through {:?}, expected {}.{}:{}",
+                    call.caller,
+                    field_symbol,
+                    actual_field,
+                    proof.internal_name(),
+                    expected_field.name(),
+                    expected_field.descriptor()
+                ));
+            }
+            dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+                code.code[5],
+                code.code[6],
             ]))
         } else {
             if code.code.len() != 5
