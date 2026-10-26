@@ -689,6 +689,77 @@ fn reference_field_owner_emits_a_complete_deterministic_linked_batch() {
         classes.push(class);
     }
 
+    for (class, expected_name, expected_fields, expected_methods) in [
+        (
+            &classes[0],
+            "example/Counter",
+            vec![("current", "I", true, false)],
+            vec![("<init>", "(I)V"), ("get", "()I"), ("set", "(I)V")],
+        ),
+        (
+            &classes[1],
+            "example/CounterOwner",
+            vec![("inner", "Lexample/Counter;", true, true)],
+            vec![("<init>", "(I)V"), ("read", "()I")],
+        ),
+    ] {
+        assert_eq!(
+            class.constant_pool.class_name(class.this_class).unwrap(),
+            expected_name
+        );
+        assert_eq!(
+            class
+                .constant_pool
+                .class_name(class.super_class.unwrap())
+                .unwrap(),
+            "java/lang/Object"
+        );
+        assert_eq!(class.fields.len(), expected_fields.len());
+        for (field, (name, descriptor, private, final_field)) in
+            class.fields.iter().zip(expected_fields)
+        {
+            assert_eq!(class.constant_pool.utf8(field.name_index).unwrap(), name);
+            assert_eq!(
+                class.constant_pool.utf8(field.descriptor_index).unwrap(),
+                descriptor
+            );
+            assert_eq!(
+                field
+                    .access_flags
+                    .contains(dotty_classfile::access_flags::ACC_PRIVATE),
+                private
+            );
+            assert_eq!(
+                field
+                    .access_flags
+                    .contains(dotty_classfile::access_flags::ACC_FINAL),
+                final_field
+            );
+            assert!(
+                !field
+                    .access_flags
+                    .contains(dotty_classfile::access_flags::ACC_STATIC),
+                "source instance fields remain instance fields"
+            );
+        }
+        assert!(class.methods.iter().all(|method| {
+            method
+                .access_flags
+                .contains(dotty_classfile::access_flags::ACC_PUBLIC)
+        }));
+        assert_eq!(
+            class
+                .methods
+                .iter()
+                .map(|method| (
+                    class.constant_pool.utf8(method.name_index).unwrap(),
+                    class.constant_pool.utf8(method.descriptor_index).unwrap(),
+                ))
+                .collect::<Vec<_>>(),
+            expected_methods
+        );
+    }
+
     let owner = &classes[1];
     let constructor = owner
         .methods
@@ -699,6 +770,10 @@ fn reference_field_owner_emits_a_complete_deterministic_linked_batch() {
         panic!("CounterOwner constructor has exactly one Code attribute");
     };
     assert_eq!(constructor_code.code.len(), 17);
+    assert_eq!(constructor_code.max_stack, 4);
+    assert_eq!(constructor_code.max_locals, 2);
+    assert!(constructor_code.exception_table.is_empty());
+    assert!(constructor_code.attributes.is_empty());
     assert_eq!(
         &constructor_code.code[..2],
         &[0x2a, 0xb7],
@@ -839,6 +914,10 @@ fn reference_field_owner_emits_a_complete_deterministic_linked_batch() {
         panic!("CounterOwner.read has exactly one Code attribute");
     };
     assert_eq!(code.code.len(), 8);
+    assert_eq!(code.max_stack, 1);
+    assert_eq!(code.max_locals, 1);
+    assert!(code.exception_table.is_empty());
+    assert!(code.attributes.is_empty());
     assert_eq!(&code.code[..2], &[0x2a, 0xb4], "aload_0; getfield");
     assert_eq!(code.code[4], 0xb6, "invokevirtual Counter.get");
     assert_eq!(code.code[7], 0xac, "ireturn");
@@ -895,18 +974,34 @@ fn reference_field_owner_batch_executes_on_verified_jdk21() {
     )
     .unwrap();
     let output = TestDirectory::new("reference-field-owner-jdk-runtime");
-    for pair in batch.classes() {
-        let classfile = output.path().join(pair.classfile_path());
-        let tasty = output.path().join(pair.tasty_path());
-        std::fs::create_dir_all(classfile.parent().unwrap()).unwrap();
-        std::fs::write(&classfile, pair.classfile_bytes()).unwrap();
-        std::fs::write(&tasty, pair.tasty_bytes()).unwrap();
-    }
+    let classes = output.path().join("classes");
+    let published = publish_paired_batch(&classes, &batch, None).unwrap();
+    assert_eq!(
+        published
+            .iter()
+            .map(|path| path.strip_prefix(&classes).unwrap().to_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "example/Counter.class",
+            "example/Counter.tasty",
+            "example/CounterOwner.class",
+            "example/CounterOwner.tasty",
+        ]
+    );
+    let classfile_paths = batch
+        .classes()
+        .iter()
+        .map(|pair| classes.join(pair.classfile_path()))
+        .collect::<Vec<_>>();
+    let original_hashes = classfile_paths
+        .iter()
+        .map(|path| sha256sum(path))
+        .collect::<Vec<_>>();
 
     let javap = Command::new("javap")
         .args([
             "-classpath",
-            output.path().to_str().unwrap(),
+            classes.to_str().unwrap(),
             "-p",
             "-s",
             "-c",
@@ -944,15 +1039,23 @@ fn reference_field_owner_batch_executes_on_verified_jdk21() {
     }
 
     let harness = output.path().join("CounterOwnerRuntimeHarness.java");
+    let harness_classes = output.path().join("harness-classes");
+    std::fs::create_dir(&harness_classes).unwrap();
     std::fs::write(
         &harness,
         r#"public final class CounterOwnerRuntimeHarness {
     public static void main(String[] args) {
-        example.CounterOwner first = new example.CounterOwner(7);
-        example.CounterOwner second = new example.CounterOwner(42);
-        expect(first.read(), 7);
-        expect(second.read(), 42);
-        System.out.println("independent owners=7,42");
+        int[] seeds = {7, 42, 0, -3};
+        example.CounterOwner[] owners = new example.CounterOwner[seeds.length];
+        for (int index = 0; index < seeds.length; index++) {
+            owners[index] = new example.CounterOwner(seeds[index]);
+        }
+        for (int repetition = 0; repetition < 3; repetition++) {
+            for (int index = 0; index < seeds.length; index++) {
+                expect(owners[index].read(), seeds[index]);
+            }
+        }
+        System.out.println("independent owners=7,42,0,-3; repeated=3");
     }
 
     private static void expect(int actual, int expected) {
@@ -966,9 +1069,9 @@ fn reference_field_owner_batch_executes_on_verified_jdk21() {
     .unwrap();
     let javac = Command::new("javac")
         .arg("-classpath")
-        .arg(output.path())
+        .arg(&classes)
         .arg("-d")
-        .arg(output.path())
+        .arg(&harness_classes)
         .arg(&harness)
         .output()
         .expect("start JDK 21 javac for the Rust CounterOwner harness");
@@ -978,9 +1081,10 @@ fn reference_field_owner_batch_executes_on_verified_jdk21() {
         String::from_utf8_lossy(&javac.stderr)
     );
 
+    let classpath = std::env::join_paths([harness_classes.as_path(), classes.as_path()]).unwrap();
     let java = Command::new("java")
         .args(["-Xverify:all", "-ea", "-classpath"])
-        .arg(output.path())
+        .arg(classpath)
         .arg("CounterOwnerRuntimeHarness")
         .output()
         .expect("start JDK 21 verifier and Rust CounterOwner harness");
@@ -992,8 +1096,35 @@ fn reference_field_owner_batch_executes_on_verified_jdk21() {
     );
     assert_eq!(
         String::from_utf8_lossy(&java.stdout).trim(),
-        "independent owners=7,42"
+        "independent owners=7,42,0,-3; repeated=3"
     );
+
+    for (index, (path, pair)) in classfile_paths.iter().zip(batch.classes()).enumerate() {
+        assert_eq!(sha256sum(path), original_hashes[index]);
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            pair.classfile_bytes(),
+            "javac/java must not replace the original Rust-produced classfile"
+        );
+    }
+}
+
+fn sha256sum(path: &std::path::Path) -> String {
+    let output = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .expect("start sha256sum for original Rust classfile");
+    assert!(
+        output.status.success(),
+        "sha256sum failed for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .expect("sha256sum prints a digest")
+        .to_owned()
 }
 
 #[test]
