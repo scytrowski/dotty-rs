@@ -39,7 +39,6 @@ pub struct ValidatedSameBatchConstructorReference<'proof, 'unit> {
     result_type: TypeId,
     method_descriptor: String,
     constructor_descriptor: String,
-    identity: ValidatedSameBatchReferenceReturn,
 }
 
 impl ValidatedSameBatchConstructorReference<'_, '_> {
@@ -90,10 +89,6 @@ impl ValidatedSameBatchConstructorReference<'_, '_> {
     /// Exact JVM descriptor derived from the primary constructor.
     pub fn constructor_descriptor(&self) -> &str {
         &self.constructor_descriptor
-    }
-    /// Independent direct reference-return proof for `identity(counter) = counter`.
-    pub const fn identity(&self) -> &ValidatedSameBatchReferenceReturn {
-        &self.identity
     }
 }
 
@@ -454,27 +449,10 @@ pub fn validate_same_batch_factory_result<'proof, 'unit>(
         factory,
         "create",
     )?;
-    let identity = declared_method(
-        unit.store,
-        source_ast,
-        source_index,
-        source,
-        factory,
-        "identity",
-    )?;
     let (create_typed, create_result, create_descriptor) =
         validate_method_signature(&context, create, "seed", true)?;
-    let (identity_typed, identity_result, identity_descriptor) =
-        validate_method_signature(&context, identity, "counter", false)?;
     let constructor_body =
         validate_constructor_body(&context, constructor, create, create_typed, create_result)?;
-    let identity_proof = validate_reference_return(
-        &context,
-        identity,
-        identity_typed,
-        identity_result,
-        identity_descriptor,
-    )?;
     Ok(ValidatedSameBatchConstructorReference {
         _unit: unit,
         _source_ast: source_ast,
@@ -497,8 +475,118 @@ pub fn validate_same_batch_factory_result<'proof, 'unit>(
         result_type: create_result,
         method_descriptor: create_descriptor,
         constructor_descriptor: constructor_metadata.descriptor().as_str().to_owned(),
-        identity: identity_proof,
     })
+}
+
+/// Independently validate a direct reference-return method in the same source
+/// and JVM batch. This proof does not require or imply a constructor call.
+pub fn validate_same_batch_reference_return<'proof, 'unit>(
+    unit: &'proof JvmCompilationUnit<'unit>,
+    definitions: &'proof Definitions,
+    evidence: SameBatchSourceEvidence<'proof>,
+    counter: SymbolId,
+    factory: SymbolId,
+) -> Result<ValidatedSameBatchReferenceReturn, JvmTastyContractError> {
+    let SameBatchSourceEvidence {
+        source,
+        source_ast,
+        source_index,
+        typed_index,
+    } = evidence;
+    let root = source_ast
+        .iter()
+        .find_map(|(id, tree)| matches!(tree.kind, TreeKind::PackageDef(_)).then_some(id))
+        .ok_or_else(|| mismatch(counter, None, None, "source unit", "missing package root"))?;
+    let TreeKind::PackageDef(package) = &source_ast.get(root).kind else {
+        unreachable!()
+    };
+    if package.stats.len() != unit.classes.len() {
+        return Err(mismatch(
+            counter,
+            None,
+            Some(root),
+            "complete source batch",
+            "JVM unit does not contain every top-level source class",
+        ));
+    }
+    for (tree, class_plan) in package.stats.iter().zip(&unit.classes) {
+        let Some(TreeKind::TypeDef(_)) = source_ast.try_get(*tree).map(|node| &node.kind) else {
+            return Err(mismatch(
+                class_plan.class,
+                None,
+                Some(*tree),
+                "complete source batch",
+                "all top-level siblings must be ordinary classes",
+            ));
+        };
+        if source_index.symbol_at(source, *tree) != Some(class_plan.class) {
+            return Err(mismatch(
+                class_plan.class,
+                None,
+                Some(*tree),
+                "complete source batch",
+                "source declaration identity/order differs from the JVM unit",
+            ));
+        }
+    }
+    if !unit.classes.iter().any(|plan| plan.class == counter)
+        || !unit.classes.iter().any(|plan| plan.class == factory)
+    {
+        return Err(mismatch(
+            counter,
+            None,
+            None,
+            "batch class",
+            "Counter and CounterFactory must both be planned in this complete JVM unit",
+        ));
+    }
+    let metadata = unit
+        .metadata(definitions)
+        .map_err(JvmTastyContractError::JvmPlan)?;
+    let class_metadata = |class: SymbolId, role: &'static str| {
+        metadata
+            .iter()
+            .find(|item| item.identity().symbol() == class)
+            .ok_or_else(|| mismatch(class, None, None, "JVM metadata", role))
+    };
+    let counter_metadata = class_metadata(counter, "Counter metadata is absent")?;
+    let factory_metadata = class_metadata(factory, "CounterFactory metadata is absent")?;
+    validate_public_concrete_class(unit.store, source_index, source, counter)?;
+    validate_public_concrete_class(unit.store, source_index, source, factory)?;
+    if counter_metadata.identity().internal_name() != "example/Counter"
+        || factory_metadata.identity().internal_name() != "example/CounterFactory"
+    {
+        return Err(mismatch(
+            counter,
+            None,
+            None,
+            "class path",
+            "expected exact example.Counter and example.CounterFactory source roles",
+        ));
+    }
+    let context = FactoryProofContext {
+        unit,
+        definitions,
+        source,
+        source_ast,
+        source_index,
+        typed_index,
+        counter,
+        factory,
+        factory_metadata,
+        counter_metadata,
+    };
+    let identity = declared_method(
+        unit.store,
+        source_ast,
+        source_index,
+        source,
+        factory,
+        "identity",
+    )?;
+    let (typed_rhs, result_type, descriptor) =
+        validate_method_signature(&context, identity, "counter", false)?;
+    validate_reference_return(&context, identity, typed_rhs, result_type, descriptor)
 }
 
 #[derive(Clone, Copy)]
@@ -883,7 +971,17 @@ fn validate_constructor_body(
         .typed_ast
         .try_get(typed_new)
         .ok_or_else(|| fail("create typed shape", "New tree is stale"))?;
-    if !matches!(&new_tree.kind, TreeKind::New(_))
+    let TreeKind::New(typed_new_node) = &new_tree.kind else {
+        return Err(fail(
+            "create typed shape",
+            "constructor receiver must retain a typed New node",
+        ));
+    };
+    let typed_new_type = unit
+        .typed_ast
+        .try_get(typed_new_node.tpt)
+        .ok_or_else(|| fail("create typed shape", "typed New type tree is stale"))?;
+    if !is_exact_reference(unit.store, definitions, typed_new_type.ty, counter)
         || !is_exact_reference(unit.store, definitions, new_tree.ty, counter)
         || !matches!(unit.store.types.try_get(select_tree.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(target), .. }) if *target == constructor)
         || !is_exact_reference(unit.store, definitions, root.ty, counter)
@@ -920,7 +1018,7 @@ fn validate_constructor_body(
             "source constructor function must be Select",
         ));
     };
-    let Some(TreeKind::New(_)) = ast
+    let Some(TreeKind::New(source_new_node)) = ast
         .try_get(source_select_node.qualifier)
         .map(|tree| &tree.kind)
     else {
@@ -929,6 +1027,14 @@ fn validate_constructor_body(
             "source constructor receiver must be New",
         ));
     };
+    let counter_name = unit.store.symbols.get(counter).name.text();
+    if !matches!(ast.try_get(source_new_node.tpt).map(|tree| &tree.kind), Some(TreeKind::Ident(type_name)) if unit.store.names.try_resolve(type_name.name.text()) == unit.store.names.try_resolve(counter_name))
+    {
+        return Err(fail(
+            "create source target",
+            "source New type must name the exact Counter class selected by the typed New",
+        ));
+    }
     if !matches!(
         unit.store.names.try_resolve(source_select_node.name.text()),
         Some("<init>")

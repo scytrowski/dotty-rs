@@ -139,7 +139,7 @@ The audit does not mark those successor requirements complete. The Scala oracle 
 
 ## #1691 source/JVM identity proof
 
-`dotty-jvm-tasty-contract::validate_same_batch_factory_result` now accepts the
+`dotty-jvm-tasty-contract::validate_same_batch_factory_result` accepts the
 complete JVM unit plus the original source AST, source semantic index, and
 source-to-typed index. It verifies that the ordered top-level source classes
 are exactly the JVM unit classes, then checks the original public `Counter`
@@ -155,11 +155,15 @@ inventing nested mappings. The signature result `TypeId` is retained exactly,
 and the semantic target and JVM metadata establish
 `(I)Lexample/Counter;` with the primary constructor descriptor `(I)V`.
 
-`identity(counter: Counter): Counter = counter` has a separate proof record
-for its method, formal, direct typed `Ident`, declared result `TypeId`, and
-`(Lexample/Counter;)Lexample/Counter;` descriptor. It is not used as evidence
-for constructor selection. Missing batch classes, wrong class roles, and
-stale source-to-typed RHS mappings fail with a stage-specific typed error.
+`validate_same_batch_reference_return` independently proves
+`identity(counter: Counter): Counter = counter`. Its proof records the
+method, formal, direct typed `Ident`, declared result `TypeId`, and
+`(Lexample/Counter;)Lexample/Counter;` descriptor. It does not require a
+`create` method or constructor proof and is never used as evidence for
+constructor selection. The constructor proof also checks the original source
+`New` type tree against the exact typed `Counter` allocation. Missing batch
+classes, wrong class roles, and stale source-to-typed RHS mappings fail with a
+stage-specific typed error.
 
 This is a read-only source/JVM contract. It emits neither TASTy nor classfile
 bytes and does not change the Typer or the paired TASTy producer. The true-source

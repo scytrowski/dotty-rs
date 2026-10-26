@@ -29,6 +29,7 @@ mod factory_reference;
 pub use factory_reference::{
     SameBatchSourceEvidence, ValidatedSameBatchConstructorReference,
     ValidatedSameBatchReferenceReturn, validate_same_batch_factory_result,
+    validate_same_batch_reference_return,
 };
 
 /// A typed, read-only failure while proving one JVM class and TASTy plan agree.

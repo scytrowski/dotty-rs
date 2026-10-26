@@ -7,7 +7,7 @@ use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::reader::Reader;
-use dotty_core::ast::{AstArena, DefDef, Template, TreeKind, Typed, Untyped};
+use dotty_core::ast::{AstArena, DefDef, Ident, Template, TreeKind, Typed, Untyped};
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolId, SymbolKind,
@@ -13571,7 +13571,55 @@ fn same_source_factory_proof_preserves_create_constructor_and_identity_roots() {
             Some(proof.seed_parameter())
         );
 
-        let identity = proof.identity();
+        let new_type_tree = match ast.get(source_new).kind {
+            TreeKind::New(new) => new.tpt,
+            _ => unreachable!(),
+        };
+        let mut mismatched_source_ast = AstArena::new();
+        for (tree_id, tree) in ast.iter() {
+            let mut copied = tree.clone();
+            if tree_id == new_type_tree {
+                copied.kind = TreeKind::Ident(Ident {
+                    name: unit.store.symbols.get(factory).name,
+                    backquoted: false,
+                });
+            }
+            assert_eq!(mismatched_source_ast.alloc(copied), tree_id);
+        }
+        assert!(matches!(
+            dotty_jvm_tasty_contract::validate_same_batch_factory_result(
+                unit,
+                definitions,
+                dotty_jvm_tasty_contract::SameBatchSourceEvidence {
+                    source: source_id,
+                    source_ast: &mismatched_source_ast,
+                    source_index: index,
+                    typed_index,
+                },
+                counter,
+                factory,
+            ),
+            Err(
+                dotty_jvm_tasty_contract::JvmTastyContractError::FactoryReferenceMismatch {
+                    stage: "create source target",
+                    ..
+                }
+            )
+        ));
+
+        let identity = dotty_jvm_tasty_contract::validate_same_batch_reference_return(
+            unit,
+            definitions,
+            dotty_jvm_tasty_contract::SameBatchSourceEvidence {
+                source: source_id,
+                source_ast: ast,
+                source_index: index,
+                typed_index,
+            },
+            counter,
+            factory,
+        )
+        .expect("identity return is an independent reference-only proof");
         assert_eq!(
             unit.store.symbols.get(identity.method()).owner,
             Some(factory)
@@ -13663,6 +13711,53 @@ fn same_source_factory_proof_preserves_create_constructor_and_identity_roots() {
         &mut observe_source,
     )
     .expect("canonical factory source compiles through the real JVM pipeline");
+    assert!(observed);
+    assert_eq!(artifacts.len(), 2);
+}
+
+#[test]
+fn same_source_identity_reference_proof_does_not_require_a_factory_constructor_method() {
+    let source = "package example\nclass Counter(start: Int)\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
+    let output = TestOutputDirectory::new("same-source-identity-reference-only-proof");
+    let source_id = SourceId::from_index(1693);
+    let mut observed = false;
+    let mut observe_source = |ast: &AstArena<Untyped>,
+                              index: &SourceSemanticIndex,
+                              typed_index: &SourceTypedIndex,
+                              unit: &mut JvmCompilationUnit<'_>,
+                              definitions: &Definitions| {
+        observed = true;
+        let counter = audit_class_named(unit, "Counter");
+        let factory = audit_class_named(unit, "CounterFactory");
+        let proof = dotty_jvm_tasty_contract::validate_same_batch_reference_return(
+            unit,
+            definitions,
+            dotty_jvm_tasty_contract::SameBatchSourceEvidence {
+                source: source_id,
+                source_ast: ast,
+                source_index: index,
+                typed_index,
+            },
+            counter,
+            factory,
+        )
+        .expect("the reference-return proof is independent of create and constructor calls");
+        assert_eq!(unit.store.symbols.get(proof.method()).owner, Some(factory));
+        assert_eq!(
+            unit.store.symbols.get(proof.parameter()).owner,
+            Some(proof.method())
+        );
+        assert_eq!(proof.descriptor(), "(Lexample/Counter;)Lexample/Counter;");
+    };
+    let artifacts = compile_source_batch_with_factory_proof_observer(
+        source,
+        "IdentityOnlyFactory.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe_source,
+    )
+    .expect("identity-only source compiles without requiring create");
     assert!(observed);
     assert_eq!(artifacts.len(), 2);
 }
