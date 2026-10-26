@@ -18,6 +18,8 @@ use std::process::Command;
 const COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
 const COUNTER_GAUGE: &str = include_str!("fixtures/jvm_tasty_multiclass/CounterGauge.scala");
 const COUNTER_READER: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader.scala");
+const COUNTER_FACTORY: &str =
+    include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
 
 #[test]
 fn counter_emits_complete_class_and_tasty_with_the_same_real_header_uuid() {
@@ -198,6 +200,145 @@ fn batch_emits_the_complete_ordered_class_and_tasty_manifest() {
         );
         validate_classfile_tasty_link(&class_file, pair.tasty_bytes()).unwrap();
     }
+}
+
+#[test]
+fn factory_emits_four_complete_linked_artifacts_from_one_source_session() {
+    let batch = emit_paired_jvm_tasty_batch(
+        COUNTER_FACTORY,
+        "tests/fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala",
+        SourceId::from_index(1694),
+    )
+    .unwrap();
+    let second = emit_paired_jvm_tasty_batch(
+        COUNTER_FACTORY,
+        "tests/fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala",
+        SourceId::from_index(1695),
+    )
+    .unwrap();
+    assert_eq!(batch.classes().len(), 2);
+    assert_ne!(batch.source_id(), second.source_id());
+
+    let expected = [
+        (
+            "example/Counter",
+            "example/Counter.class",
+            "example/Counter.tasty",
+            [("<init>", "(I)V"), ("get", "()I"), ("set", "(I)V")].as_slice(),
+        ),
+        (
+            "example/CounterFactory",
+            "example/CounterFactory.class",
+            "example/CounterFactory.tasty",
+            [
+                ("<init>", "()V"),
+                ("create", "(I)Lexample/Counter;"),
+                ("identity", "(Lexample/Counter;)Lexample/Counter;"),
+            ]
+            .as_slice(),
+        ),
+    ];
+    for (index, (pair, (internal_name, classfile_path, tasty_path, expected_methods))) in
+        batch.classes().iter().zip(expected).enumerate()
+    {
+        let second_pair = &second.classes()[index];
+        assert_eq!(pair.classfile_path(), classfile_path);
+        assert_eq!(pair.tasty_path(), tasty_path);
+        assert_eq!(pair.source_id(), batch.source_id());
+        assert_eq!(pair.classfile_bytes(), second_pair.classfile_bytes());
+        assert_eq!(pair.tasty_bytes(), second_pair.tasty_bytes());
+        assert_eq!(pair.tasty_link_id(), second_pair.tasty_link_id());
+
+        let tasty = TastyFile::parse_and_validate_scala_3_9(pair.tasty_bytes()).unwrap();
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version,
+            ),
+            (28, 9, 0)
+        );
+        assert_eq!(
+            pair.tasty_link_id(),
+            TastyLinkId::from_bytes(tasty.header().uuid)
+        );
+
+        let mut reader = Reader::new(pair.classfile_bytes());
+        let class_file = ClassFile::decode(&mut reader).unwrap();
+        assert!(reader.is_at_end());
+        assert_eq!(
+            (class_file.version.major, class_file.version.minor),
+            (65, 0)
+        );
+        assert_eq!(
+            class_file
+                .constant_pool
+                .class_name(class_file.this_class)
+                .unwrap(),
+            internal_name
+        );
+        assert_eq!(
+            class_file.tasty_link_id().unwrap(),
+            Some(pair.tasty_link_id())
+        );
+        validate_classfile_tasty_link(&class_file, pair.tasty_bytes()).unwrap();
+
+        let package = tasty
+            .asts()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .decode_package()
+            .unwrap();
+        assert_eq!(package.stats.len(), 1);
+        let DefinitionBody::TypeDef { name, .. } = package
+            .stats
+            .get(0)
+            .unwrap()
+            .decode_definition_body()
+            .unwrap()
+        else {
+            panic!("each sidecar owns its corresponding source declaration");
+        };
+        assert_eq!(
+            tasty.names().render(name).unwrap(),
+            internal_name.rsplit('/').next().unwrap()
+        );
+
+        let mut methods = class_file
+            .methods
+            .iter()
+            .map(|method| {
+                (
+                    class_file.constant_pool.utf8(method.name_index).unwrap(),
+                    class_file
+                        .constant_pool
+                        .utf8(method.descriptor_index)
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        methods.sort();
+        let mut expected_methods = expected_methods.to_vec();
+        expected_methods.sort();
+        assert_eq!(methods, expected_methods);
+    }
+
+    let factory = &batch.classes()[1];
+    let mut reader = Reader::new(factory.classfile_bytes());
+    let class_file = ClassFile::decode(&mut reader).unwrap();
+    let create = class_file
+        .methods
+        .iter()
+        .find(|method| class_file.constant_pool.utf8(method.name_index).unwrap() == "create")
+        .unwrap();
+    let [Attribute::Code(code)] = create.attributes.as_slice() else {
+        panic!("factory create has one Code attribute");
+    };
+    assert_eq!(
+        code.code,
+        [0xbb, 0x00, 0x0e, 0x59, 0x1b, 0xb7, 0x00, 0x11, 0xb0]
+    );
 }
 
 #[test]

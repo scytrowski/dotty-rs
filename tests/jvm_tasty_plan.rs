@@ -538,6 +538,71 @@ fn counter_and_gauge_have_one_ordered_shared_batch_session() {
 }
 
 #[test]
+fn counter_factory_batch_binds_the_canonical_identity_proof_to_both_plans() {
+    with_paired_jvm_tasty_batch_plan(
+        CROSS_CLASS_FACTORY_SOURCE,
+        "tests/fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala",
+        SourceId::from_index(1694),
+        |batch| {
+            let proof = batch
+                .factory_proof
+                .as_ref()
+                .expect("the Counter/CounterFactory batch retains its constructor proof");
+            assert_eq!(
+                proof.kind(),
+                dotty::jvm_tasty_cross_class::CrossClassFactoryProofKind::Factory
+            );
+            assert_eq!(proof.descriptor(), "(I)Lexample/Counter;");
+            assert_eq!(proof.counter_class(), batch.classes[0].class);
+            assert_eq!(proof.owner_class(), batch.classes[1].class);
+
+            let factory_plan = batch
+                .classes
+                .iter()
+                .find(|class| class.class == proof.owner_class())
+                .unwrap()
+                .tasty_plan
+                .plan();
+            let method_tree = factory_plan
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    ClassMemberPicklePlan::Method {
+                        symbol,
+                        source_tree,
+                    } if *symbol == proof.method() => Some(*source_tree),
+                    _ => None,
+                })
+                .expect("the proved method is in the factory TASTy plan");
+            let TreeKind::DefDef(method) = &factory_plan.source_ast.get(method_tree).kind else {
+                panic!("the factory plan retains the source method definition");
+            };
+            let source_rhs = method.rhs.unwrap();
+            assert_eq!(source_rhs, proof.source_rhs());
+            assert_eq!(
+                factory_plan
+                    .typed_bindings
+                    .typed_at(batch.source_id, source_rhs),
+                Some(proof.typed_rhs())
+            );
+            assert!(
+                batch
+                    .jvm_unit
+                    .classes
+                    .iter()
+                    .find(|class| class.class == proof.owner_class())
+                    .unwrap()
+                    .methods
+                    .iter()
+                    .any(|method| method.method == proof.method()
+                        && method.body == Some(proof.typed_rhs()))
+            );
+        },
+    )
+    .unwrap();
+}
+
+#[test]
 fn same_batch_class_formal_emits_reader_owned_counter_type_without_cloning_counter() {
     with_paired_jvm_tasty_batch_plan(
         CROSS_CLASS_READER_LITERAL,

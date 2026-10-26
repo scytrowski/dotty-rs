@@ -26,6 +26,10 @@ use dotty_tasty_pickler::{
 };
 use dotty_typer::{SourceTyper, TyperError};
 
+use crate::jvm_tasty_cross_class::{
+    CrossClassFactoryProofInput, CrossClassFactoryProofKind, validate_cross_class_factory_proof,
+};
+
 /// Errors are tagged by the frontend or producer stage that rejected the
 /// source. The debug-form payload retains the stage's exact diagnostic data.
 #[derive(Debug)]
@@ -118,6 +122,10 @@ pub struct PairedJvmTastyBatchPlan<'batch> {
     pub classes: &'batch [PairedJvmTastyBatchClass<'batch>],
     /// Source identity shared by every class in this compilation unit.
     pub source_id: SourceId,
+    /// Canonical source/typed factory proof when this batch contains the
+    /// audited `Counter` and `CounterFactory` source pair.
+    pub factory_proof:
+        Option<crate::jvm_tasty_cross_class::ValidatedCrossClassFactoryProof<'batch>>,
 }
 
 struct BatchClassSource {
@@ -1028,6 +1036,97 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let factory_proof = if is_counter_factory_source(&parsed.ast, parsed.root, typer.store()) {
+        let proof = validate_cross_class_factory_proof(
+            CrossClassFactoryProofInput {
+                source_id,
+                source_root: parsed.root,
+                store: typer.store(),
+                definitions: &definitions,
+                source_ast: &parsed.ast,
+                typed_ast: typer.typed_ast(),
+                source_index: &index,
+                source_typed_index: typer.source_typed_index(),
+                jvm_unit: &jvm_unit,
+            },
+            CrossClassFactoryProofKind::Factory,
+        )
+        .map_err(|error| PairedPlanError::BatchUnit {
+            phase: "cross-class factory identity proof",
+            reason: format!("{error:?}"),
+        })?;
+        let factory_tasty_plan = validated_tasty
+            .iter()
+            .find(|plan| plan.plan().class == proof.owner_class())
+            .ok_or_else(|| PairedPlanError::BatchUnit {
+                phase: "cross-class factory identity proof",
+                reason: "validated TASTy batch omits the proved factory class".to_owned(),
+            })?;
+        let factory_tasty = factory_tasty_plan.plan();
+        let method_source_tree = factory_tasty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                ClassMemberPicklePlan::Method {
+                    symbol,
+                    source_tree,
+                } if *symbol == proof.method() => Some(*source_tree),
+                _ => None,
+            })
+            .ok_or_else(|| PairedPlanError::BatchUnit {
+                phase: "cross-class factory identity proof",
+                reason: "proved factory method is absent from its TASTy plan".to_owned(),
+            })?;
+        let TreeKind::DefDef(method_definition) =
+            &factory_tasty.source_ast.get(method_source_tree).kind
+        else {
+            return Err(PairedPlanError::BatchUnit {
+                phase: "cross-class factory identity proof",
+                reason: "proved factory method has no source definition".to_owned(),
+            });
+        };
+        let source_rhs = method_definition
+            .rhs
+            .ok_or_else(|| PairedPlanError::BatchUnit {
+                phase: "cross-class factory identity proof",
+                reason: "proved factory method has no source body".to_owned(),
+            })?;
+        let tasty_typed_rhs = factory_tasty
+            .typed_bindings
+            .typed_at(source_id, source_rhs)
+            .ok_or_else(|| PairedPlanError::BatchUnit {
+                phase: "cross-class factory identity proof",
+                reason: "proved factory body has no TASTy typed binding".to_owned(),
+            })?;
+        let jvm_method = jvm_unit
+            .classes
+            .iter()
+            .find(|class| class.class == proof.owner_class())
+            .and_then(|class| {
+                class
+                    .methods
+                    .iter()
+                    .find(|method| method.method == proof.method())
+            })
+            .ok_or_else(|| PairedPlanError::BatchUnit {
+                phase: "cross-class factory identity proof",
+                reason: "proved factory method is absent from the complete JVM unit".to_owned(),
+            })?;
+        if source_rhs != proof.source_rhs()
+            || tasty_typed_rhs != proof.typed_rhs()
+            || jvm_method.body != Some(proof.typed_rhs())
+        {
+            return Err(PairedPlanError::BatchUnit {
+                phase: "cross-class factory identity proof",
+                reason: "source proof, Factory TASTy plan, and JVM method do not share the exact typed root"
+                    .to_owned(),
+            });
+        }
+        Some(proof)
+    } else {
+        None
+    };
+
     let mut classfile_paths = std::collections::HashSet::with_capacity(drafts.len());
     let mut tasty_paths = std::collections::HashSet::with_capacity(drafts.len());
     let classes = drafts
@@ -1062,5 +1161,28 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         jvm_unit: &jvm_unit,
         classes: &classes,
         source_id,
+        factory_proof,
     }))
+}
+
+fn is_counter_factory_source(
+    source_ast: &dotty_core::ast::AstArena<Untyped>,
+    source_root: TreeId<Untyped>,
+    store: &SemanticStore,
+) -> bool {
+    let Some(TreeKind::PackageDef(package)) =
+        source_ast.try_get(source_root).map(|tree| &tree.kind)
+    else {
+        return false;
+    };
+    let [counter, factory] = package.stats.as_slice() else {
+        return false;
+    };
+    let class_name = |tree| match source_ast.try_get(tree).map(|tree| &tree.kind) {
+        Some(TreeKind::TypeDef(definition)) => {
+            store.names.resolve(definition.name.as_name().text())
+        }
+        _ => "",
+    };
+    class_name(*counter) == "Counter" && class_name(*factory) == "CounterFactory"
 }
