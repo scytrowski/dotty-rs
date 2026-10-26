@@ -8,9 +8,22 @@ The seven existing workflows are listed below. `CI`, `JVM TASTy factory Scala co
 
 The active GitHub ruleset for the default branch currently contains only the `non_fast_forward` rule. It does not define required status checks. Therefore, the automatically triggered pull request workflows below are observed PR checks, but GitHub does not enforce them as required checks under this ruleset. Confirm this policy before describing any status as a required merge gate.
 
+Workflow-level concurrency is part of the latency context. CI cancels an older run for the same workflow/ref; Scala consumer, Typer focused, and Cargo timings allow an existing run to finish; the manual compatibility workflows cancel an older run for the same ref. All job layouts are single-job workflows except CI, which has two independent parallel jobs. None uses a matrix or cross-job `needs` dependency. The full-corpus workflow has one `audit` job, conditionally created only when the dispatch input is `run-full-audit`.
+
+| Workflow | Concurrency group | `cancel-in-progress` | Job shape |
+| --- | --- | --- | --- |
+| CI | `ci-${{ github.workflow }}-${{ github.ref }}` | `true` | `checks` and `classfile-jvm-encoder`, independent and parallel. |
+| JVM TASTy factory Scala consumer | `jvm-tasty-factory-scala-consumer-${{ github.event.pull_request.number || github.ref }}` | `false` | One `consume-factory` job. |
+| Typer focused audit | `typer-focused-audit-${{ github.event.pull_request.number || github.ref }}` | `false` | One `focused-audit` job. |
+| Typer full corpus audit | `typer-full-corpus-audit-${{ github.ref }}` | `false` | One conditional `audit` job. |
+| Lexer compatibility | `lexer-compatibility-${{ github.ref }}` | `true` | One `verify` job. |
+| Scala parser oracle | `parser-oracle-${{ github.ref }}` | `true` | One `parser-oracle` job. |
+| TASTy compatibility | `tasty-compatibility-${{ github.ref }}` | `true` | One `verify` job. |
+| CI Cargo compile timings | `ci-cargo-timings-${{ github.ref }}` | `false` | One `cargo-timings` job. |
+
 | Workflow | Trigger and gate status | Main cost centers and artifacts | Sampling in the existing history |
 | --- | --- | --- | --- |
-| [CI](../.github/workflows/ci.yml) | Push to `main`, every PR targeting `main`, or manual dispatch. Two jobs run in parallel. Automatic PR check; not ruleset-required. | `Rust checks`: workflow lint, Cargo cache restore/save, stable toolchain install, fmt, boundary guard, Clippy, rustdoc, workspace tests. `Classfile JVM encoder gate`: JDK 21 setup, Cargo cache, Java verification tests. No workflow artifact upload. | Five recent successful PR runs are measured below. |
+| [CI](../.github/workflows/ci.yml) | Push to `main`, every PR targeting `main`, or manual dispatch. Two jobs run in parallel. Automatic PR check; not ruleset-required. | `Rust checks`: workflow lint, Cargo cache restore/save, stable toolchain install, fmt, boundary guard, Clippy, rustdoc, workspace tests. `Classfile JVM encoder gate`: JDK 21 setup, Cargo cache, Java verification tests. No workflow artifact upload. | Four recent single-attempt successful PR runs are measured below; a retried successful run is detailed separately. |
 | [JVM TASTy factory Scala consumer](../.github/workflows/jvm-tasty-factory-scala-consumer.yml) | PRs targeting `main` that touch its explicit source/test/oracle/doc paths, or manual dispatch. Automatic path-filtered PR check; not ruleset-required. | Pinned Scala 3.9.0 source checkout and `sbt dist/universal:stage`, pinned JDK/Rust, verified Maven artifacts, Scala/TASTy consumer tests, then Java 21 verification. Caches Coursier and Cargo outputs. No report artifact. | Five recent successful PR runs are measured below. |
 | [Typer focused audit](../.github/workflows/typer-focused-audit.yml) | PRs targeting `main` that touch the listed typer/classloader/TASTy/audit paths, or manual dispatch. Automatic path-filtered PR check; not ruleset-required. | Pinned Scala/JDK/Rust setup, verified Scala dependencies, deterministic focused audit. Uploads environment, timings, reports, and intermediates for 30 days. Runs serially with one Cargo build job and one test thread. | Five recent successful PR runs are measured below. |
 | [Typer full corpus audit](../.github/workflows/typer-full-corpus-audit.yml) | Manual dispatch only; `run_full_audit` defaults to `do-not-run`; the audit job runs only for `run-full-audit`. Not a PR check. | Pinned Scala/JDK/Rust, dependencies, two sequential full audits and reconciliation; timeout is six hours. Uploads reports, sidecars, inputs, and intermediates for 30 days. No Cargo cache is configured. | No successful run of the current manual workflow was found. Historical workflow records are failed push events from an earlier configuration. No hosted full-corpus audit was launched for this baseline. |
@@ -23,9 +36,9 @@ The hosted full-corpus job remains opt-in and was not dispatched. The failure-on
 
 ## Existing successful samples
 
-All five CI, Scala-consumer, and focused-audit samples below are successful PR runs from 2026-10-26 on `ubuntu-latest`. The main Rust checks use the repository's Rust 1.98.1 toolchain file; the CI JVM gate explicitly invokes `+stable`, whose cache-key step records 1.99.1 in these samples. The Scala consumer and focused audit pin Rust 1.98.1, Scala source revision `777528f19a58e794c9954a42f433373472ec57f8`, and JDK 21.0.8. Times use GitHub's run creation timestamp as the start proxy and the last job completion as the end. Queue delay is shown separately from job execution.
+Four single-attempt CI samples and five Scala-consumer and focused-audit samples below are successful PR runs from 2026-10-26 on `ubuntu-latest`. A fifth CI workflow completed successfully only after a failed JVM-gate attempt; it is reported separately and excluded from successful single-attempt CI distributions and the cross-workflow critical-path sample. The main Rust checks use the repository's Rust 1.98.1 toolchain file; the CI JVM gate explicitly invokes `+stable`, whose cache-key step records 1.99.1 in these samples. The Scala consumer and focused audit pin Rust 1.98.1, Scala source revision `777528f19a58e794c9954a42f433373472ec57f8`, and JDK 21.0.8. Times use GitHub's run creation timestamp as the start proxy and the last job completion as the end. Queue delay is shown separately from job execution.
 
-Only successful runs are used in the summary distributions; cancelled and failed runs remain visible in Actions history and are not counted as successful samples. Of the archived logs available for the five CI samples, two Rust-job logs show warm primary-key hits and three Rust-job logs are unavailable. Two Scala-consumer logs show cache misses followed by cache saves; one Typer-focused log shows the same miss/save pattern. The remaining specialty logs are unavailable. These are incidental cache states, not a controlled cold/warm comparison; the new timing workflow has not yet produced a timing artifact.
+Only successful single-attempt runs are used in the summary distributions; cancelled and failed attempts remain visible in Actions history and are not counted as successful samples. Of the archived logs available for the four single-attempt CI samples, two Rust-job logs show warm primary-key hits and two Rust-job logs are unavailable. Two Scala-consumer logs show cache misses followed by cache saves; one Typer-focused log shows the same miss/save pattern. The remaining specialty logs are unavailable. These are incidental cache states, not a controlled cold/warm comparison; the new timing workflow has not yet produced a timing artifact.
 
 ### Main CI jobs
 
@@ -33,25 +46,26 @@ Only successful runs are used in the summary distributions; cancelled and failed
 | --- | ---: | ---: | ---: | ---: |
 | [40415404197](https://github.com/scytrowski/dotty-rs/actions/runs/40415404197) (`d9f4cab`) | 9m47s | 2m13s | 3s | 9m50s |
 | [40412150151](https://github.com/scytrowski/dotty-rs/actions/runs/40412150151) (`2c2c868`) | 10m05s | 3m13s | 3s | 10m08s |
-| [40410953298](https://github.com/scytrowski/dotty-rs/actions/runs/40410953298) (`f7e6bd1`) | 9m55s | 2m54s | 2s | 14m20s |
 | [40407343107](https://github.com/scytrowski/dotty-rs/actions/runs/40407343107) (`e1d2eee`) | 7m43s | 3m02s | 89s | 9m12s |
 | [40407034274](https://github.com/scytrowski/dotty-rs/actions/runs/40407034274) (`387c9c6`) | 9m48s | 2m45s | 7s | 9m55s |
 
-For these five runs, the CI elapsed median was **9m55s**, with a range of **9m12s–14m20s**. Rust checks took a median **9m48s** (7m43s–10m05s); the JVM encoder job took a median **2m45s** (2m13s–3m13s). The elapsed value is the latest finishing parallel job, not the sum of both jobs. Run `40410953298` illustrates why the last job matters: the JVM job began 11m26s after the workflow was created and completed at 14m20s, after Rust checks had finished.
+Across these four single-attempt runs, CI elapsed median was **9m53s**, with a range of **9m12s–10m08s**. Rust checks took a median **9m48s** (7m43s–10m05s); the JVM encoder job took a median **2m54s** (2m13s–3m13s). The elapsed value is the latest finishing parallel job, not the sum of both jobs.
 
-| Rust checks step, across the same five runs | Median | Range |
+Run [40410953298](https://github.com/scytrowski/dotty-rs/actions/runs/40410953298) (`f7e6bd1`) ultimately succeeded after a retry and is excluded from those distributions. Attempt 1 started both jobs within 3s of run creation: Rust checks completed successfully at 22:24:57Z, while the JVM encoder gate failed at 22:17:28Z. Attempt 2 was created at 22:26:23Z; its JVM gate started 3s later and completed successfully at 22:29:20Z. Thus the JVM gate's runner queue was 2s on attempt 1 and 3s on attempt 2, while the end-to-end successful run elapsed 14m20s from initial creation to final completion. This elapsed includes the failed attempt and the interval before retry; it is not a runner-queue or single-attempt duration.
+
+| Rust checks step, across the same four single-attempt runs | Median | Range |
 | --- | ---: | ---: |
 | Runner setup | 1s | 1s–1s |
-| Repository checkout | 2s | 2s–3s |
-| Cargo registry/build-cache restore step | 1m36s | 1m17s–2m20s |
+| Repository checkout | 2.5s | 2s–3s |
+| Cargo registry/build-cache restore step | 1m51s | 1m19s–2m20s |
 | Post-cache action step | 3s | 2s–3s |
-| Install stable Rust toolchain | 10s | 9s–11s |
-| Clippy | 22s | 15s–22s |
-| Rustdoc | 9s | 7s–10s |
-| `cargo test --workspace --all-targets --locked` step | 7m20s | 4m42s–7m32s |
-| JVM verification command | 2m36s | 1m51s–2m43s |
+| Install stable Rust toolchain | 9.5s | 9s–10s |
+| Clippy | 21s | 15s–22s |
+| Rustdoc | 9.5s | 7s–10s |
+| `cargo test --workspace --all-targets --locked` step | 6m50s | 4m42s–7m23s |
+| JVM verification command | 2m35s | 1m51s–2m43s |
 
-These are GitHub step wall times, not CPU measurements. In [CI run 40415404197](https://github.com/scytrowski/dotty-rs/actions/runs/40415404197), the cache restore was 5,269,214,731 bytes (about 5.27 GB or 5,025 MiB). Cargo reported `Finished test profile ... in 4m 35s`; the `Run tests` step ended about 1m43s later. The remaining time includes test execution and process/log overhead. A second available CI log, [40412150151](https://github.com/scytrowski/dotty-rs/actions/runs/40412150151), also shows a primary-key hit for the same-size archive and a Cargo compile time of 5m10s. Both cache hits were followed by “not saving cache.” Across these two archived logs, Cargo compile time had a 4m52.5s median (4m35s–5m10s). The run-level log archive did not include Rust-check job logs for the other three selected runs, so their cache outcome and Cargo compile/runtime split are unknown. The five-run step medians above remain available from the Actions job timing API.
+These are GitHub step wall times, not CPU measurements. In [CI run 40415404197](https://github.com/scytrowski/dotty-rs/actions/runs/40415404197), the cache restore was 5,269,214,731 bytes (about 5.27 GB or 5,025 MiB). Cargo reported `Finished test profile ... in 4m 35s`; the `Run tests` step ended about 1m43s later. The remaining time includes test execution and process/log overhead. A second available CI log, [40412150151](https://github.com/scytrowski/dotty-rs/actions/runs/40412150151), also shows a primary-key hit for the same-size archive and a Cargo compile time of 5m10s. Both cache hits were followed by “not saving cache.” Across these two archived logs, Cargo compile time had a 4m52.5s median (4m35s–5m10s). The run-level log archive did not include Rust-check job logs for the other two selected runs, so their cache outcome and Cargo compile/runtime split are unknown. The four-run step medians above remain available from the Actions job timing API.
 
 ### Specialty workflows with recurring PR samples
 
@@ -64,17 +78,16 @@ The specialty workflow run elapsed medians include time between run creation and
 
 ### Pull-request critical path across concurrently triggered workflows
 
-The following five PR heads have successful CI and Scala-consumer runs. Typer appears only when its path filter matched. For each head, the critical path is from the earliest workflow creation timestamp to the latest completion among the automatic PR workflows that actually ran. It is not the sum of parallel workflow durations.
+The following four PR heads have single-attempt successful CI and successful Scala-consumer runs. Typer appears only when its path filter matched. The retried `f7e6bd1` CI run is excluded here; its 14m20s end-to-end elapsed is reported above. For each head, the critical path is from the earliest workflow creation timestamp to the latest completion among the automatic PR workflows that actually ran. It is not the sum of parallel workflow durations.
 
 | PR head | CI | Scala consumer | Typer focused | Last automatic check / critical path |
 | --- | ---: | ---: | ---: | --- |
 | `d9f4cab` | [9m50s](https://github.com/scytrowski/dotty-rs/actions/runs/40415404197) | [11m25s](https://github.com/scytrowski/dotty-rs/actions/runs/40415404272) | [3m50s](https://github.com/scytrowski/dotty-rs/actions/runs/40415404244) | Scala consumer, **11m25s** |
 | `2c2c868` | [10m08s](https://github.com/scytrowski/dotty-rs/actions/runs/40412150151) | [10m49s](https://github.com/scytrowski/dotty-rs/actions/runs/40412150338) | Not triggered | Scala consumer, **10m49s** |
-| `f7e6bd1` | [14m20s](https://github.com/scytrowski/dotty-rs/actions/runs/40410953298) | [13m28s](https://github.com/scytrowski/dotty-rs/actions/runs/40410952824) | [3m32s](https://github.com/scytrowski/dotty-rs/actions/runs/40410953050) | CI JVM job, **14m20s** |
 | `e1d2eee` | [9m12s](https://github.com/scytrowski/dotty-rs/actions/runs/40407343107) | [18m50s](https://github.com/scytrowski/dotty-rs/actions/runs/40407343386) | Not triggered | Scala consumer, **18m50s** |
 | `387c9c6` | [9m55s](https://github.com/scytrowski/dotty-rs/actions/runs/40407034274) | [10m12s](https://github.com/scytrowski/dotty-rs/actions/runs/40407034283) | [2m59s](https://github.com/scytrowski/dotty-rs/actions/runs/40407034265) | Scala consumer, **10m12s** |
 
-Across these five observed PR updates, the all-triggered-workflow critical-path median was **11m25s**, with a maximum of **18m50s**. Run creation is only a proxy for the exact PR-update timestamp; the links allow rechecking the associated run records. These are samples, not an SLO or a regression threshold.
+Across these four observed PR updates, the all-triggered-workflow critical-path median was **11m07s**, with a maximum of **18m50s**. Run creation is only a proxy for the exact PR-update timestamp; the links allow rechecking the associated run records. These are samples, not an SLO or a regression threshold.
 
 ## Manually dispatched workflow observations
 
@@ -107,7 +120,7 @@ The generated `target/cargo-timings/` HTML report and `environment.tsv` are uplo
 ## Prioritized hypotheses to test in follow-up issues
 
 1. **Large cache transfer:** the observed CI Cargo cache was 5.27 GB and one restore took 140s. Measure transfer size, restore time, and useful cache contents before changing cache keys or paths.
-2. **Compilation within the full test step:** one successful run reports 4m35s in Cargo's test profile build; the full CI test step has a 7m20s five-run median. Use the uploaded Cargo timing report to locate expensive crates before proposing build-profile or test-graph changes.
+2. **Compilation within the full test step:** one successful run reports 4m35s in Cargo's test profile build; the full CI test step has a 6m50s four-run median. Use the uploaded Cargo timing report to locate expensive crates before proposing build-profile or test-graph changes.
 3. **Pinned Scala staging:** Scala source staging has a 5m42s median and up to 7m36s in five consumer samples. Separate sbt staging, cache restore, and Rust consumer tests before changing this flow.
-4. **Queueing and gate fan-out:** a measured Scala consumer waited 5m31s before its job began, and one CI JVM job waited 11m26s. Track runner queue separately; queue time must not be attributed to compiler cost.
+4. **Queueing and gate fan-out:** a measured Scala consumer waited 5m31s before its job began. CI runs two parallel jobs and cancels older runs on the same workflow/ref; the retried CI example took 14m20s end to end, including its failed first JVM-gate attempt and retry interval, while the JVM-gate attempts had 2s and 3s of runner queue. Track queue separately from retries and compiler cost.
 5. **Manual compatibility coverage:** lexer, parser, and TASTy workflows have inadequate successful-run samples for cost comparisons. Gather normal opt-in samples only when those workflows are intentionally run; do not turn them into extra PR compilation without an explicit design decision.
