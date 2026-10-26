@@ -2,6 +2,32 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
+## Issue closeout: the full-method target was not reached
+
+The #1566 goal of fully typing at least one real Scala 3.9.0 local method was
+not achieved. The closeout audit is intentionally an outcome report, not a
+claim that this acceptance target passed. Further implementation is stopped
+for this issue; the measured partial progress and remaining blockers are kept
+for future, separately scoped work.
+
+The final source snapshot is `main` at
+`1b71f494fb6db882a42f31378a24ae6551986be0`. A fresh deterministic run of the
+frozen `package-term` cohort used the pinned Scala revision
+`777528f19a58e794c9954a42f433373472ec57f8`, Scala 3.9.0 artifacts, and JDK
+21.0.8. Both runs processed all 60 files and 369 methods, had zero parser and
+namer failures, and typed 0/369 methods. Their normalized reports and
+per-method TSVs matched byte-for-byte. The current first-blocker distribution
+is recorded in the [focused audit report](typer-name-resolution-1566-closeout-3.9.0.md)
+and the compact [per-method snapshot](typer-name-resolution-1566-closeout-3.9.0.tsv).
+
+The earlier `e06c4ee` to `bfc4759` per-method before/after reconciliation
+remains in [`typer-name-resolution-1566-cohort-3.9.0.tsv`](typer-name-resolution-1566-cohort-3.9.0.tsv);
+the increment-specific tables below retain later blocker transitions. Those
+transitions are real progress but do not change the closeout result: no method
+in the frozen cohort is fully typed. Existing positive/negative Scala 3.9.0
+oracle fixtures for the bounded behavior changes remain linked from their
+respective increment sections below.
+
 ## Latest increment: select a module's unique `apply` method
 
 This increment starts from merged `main` at
