@@ -17,11 +17,15 @@ def read_tsv(path: Path) -> list[dict[str, str]]:
 def parse_report(path: Path) -> dict[str, dict[str, str]]:
     lines = path.read_text(encoding="utf-8").splitlines()
     try:
-        header_index = lines.index(
-            "method\towner_path\tmethod_name\tline\trange\tmodifiers\t"
-            "expected_result\tcomplexity\tstatus\tattempted_tree"
+        header_index = next(
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(
+                "method\towner_path\tmethod_name\tline\trange\tmodifiers\t"
+                "expected_result\tactual_result\tcomplexity\tstatus\tsource_tree\ttyped_tree"
+            )
         )
-    except ValueError as error:
+    except (StopIteration, ValueError) as error:
         raise ValueError(f"{path}: ordinary audit header is missing") from error
     rows = csv.DictReader(lines[header_index:], delimiter="\t")
     return {row["method"]: row for row in rows}
@@ -40,10 +44,20 @@ def verify(cohort_path: Path, report_path: Path) -> list[str]:
             failures.append(f"{identity}: missing from ordinary audit report")
             continue
         status = audit["status"]
-        if not status.startswith("typed::result="):
+        if status != "typed" or not audit["typed_tree"]:
             failures.append(f"{identity}: expected fully typed, got {status}")
             continue
-        actual_result = status.removeprefix("typed::result=")
+        if audit["source_tree"] != row["source_tree"]:
+            failures.append(
+                f"{identity}: source-tree mapping changed; expected {row['source_tree']}, "
+                f"got {audit['source_tree']}"
+            )
+        if audit["typed_tree"] != row["typed_tree"]:
+            failures.append(
+                f"{identity}: typed-tree mapping changed; expected {row['typed_tree']}, "
+                f"got {audit['typed_tree']}"
+            )
+        actual_result = audit["actual_result"]
         if actual_result != row["oracle_result"]:
             failures.append(
                 f"{identity}: result shape changed; expected {row['oracle_result']}, "

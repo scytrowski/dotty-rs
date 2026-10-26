@@ -28,6 +28,8 @@ fn ast_feature(kind: &TreeKind<Untyped>) -> Option<&'static str> {
         TreeKind::Literal(_) => Some("literals"),
         TreeKind::ValDef(_) => Some("local_values"),
         TreeKind::DefDef(_) => Some("nested_methods"),
+        TreeKind::Block(_) => Some("nested_scopes"),
+        TreeKind::Import(_) => Some("local_imports"),
         TreeKind::If(_) => Some("branches"),
         TreeKind::Match(_) => Some("matches"),
         TreeKind::Try(_) => Some("tries"),
@@ -231,11 +233,32 @@ pub(super) fn inventory_candidates() {
                     })
                 })
                 .count();
+            let nested_scopes = counts.get("nested_scopes").copied().unwrap_or(0);
             let result_inferred = parsed
                 .ast
                 .try_get(definition.tpt)
                 .is_some_and(|tpt| matches!(tpt.kind, TreeKind::TypeTree(_)));
             let body_size = rhs_nodes.len();
+            let external_ref_syntax_candidates = parsed
+                .ast
+                .iter()
+                .filter(|(_, candidate)| {
+                    let Some(position) = candidate.position else {
+                        return false;
+                    };
+                    let candidate_range = position.span().range();
+                    range.start() <= candidate_range.start()
+                        && candidate_range.end() <= range.end()
+                        && matches!(
+                            candidate.kind,
+                            TreeKind::Ident(_)
+                                | TreeKind::Select(_)
+                                | TreeKind::AppliedTypeTree(_)
+                                | TreeKind::SingletonTypeTree(_)
+                                | TreeKind::TypeBoundsTree(_)
+                        )
+                })
+                .count();
             let calls = counts.get("calls").copied().unwrap_or(0);
             let selections = counts.get("selections").copied().unwrap_or(0);
             let nested_methods = counts.get("nested_methods").copied().unwrap_or(0);
@@ -255,6 +278,7 @@ pub(super) fn inventory_candidates() {
                 + nested_methods * 10
                 + control_flow * 4
                 + defaults * 12
+                + nested_scopes * 2
                 + usize::from(result_inferred) * 4
                 + import_count.min(5)
                 + declaration_counts
@@ -296,7 +320,7 @@ pub(super) fn inventory_candidates() {
             };
             let identity = format!("{relative_path}#tree={}", tree.index());
             let row = format!(
-                "{identity}\t{owner_path}\t{method_name}\t{line}\t{}..{}\t{score}\t{tier}\t{body_size}\t{max_depth}\t{type_parameters}\t{value_parameters}\t{}\t{}\t{}\t{feature_text}",
+                "{identity}\t{owner_path}\t{method_name}\t{line}\t{}..{}\t{score}\t{tier}\t{body_size}\t{max_depth}\t{type_parameters}\t{value_parameters}\t{}\t{}\t{}\t{nested_scopes}\t{external_ref_syntax_candidates}\t{overload_count}\t{feature_text}",
                 range.start(),
                 range.end(),
                 if result_inferred {
@@ -324,7 +348,7 @@ pub(super) fn inventory_candidates() {
     for (reason, count) in excluded_reasons {
         report.push_str(&format!("{reason}\t{count}\n"));
     }
-    report.push_str("\nmethod\towner_path\tmethod_name\tline\trange\trank_score\ttier\trhs_nodes\trhs_depth\ttype_params\tvalue_params\tresult_mode\tdefault_params\tparameter_kind\tfeatures\n");
+    report.push_str("\nmethod\towner_path\tmethod_name\tline\trange\trank_score\ttier\trhs_nodes\trhs_depth\ttype_params\tvalue_params\tresult_mode\tdefault_params\tparameter_kind\tnested_scopes\texternal_ref_syntax_candidates\tsame_name_overloads\tfeatures\n");
     for (_, _, _, row) in records {
         report.push_str(&row);
         report.push('\n');
@@ -671,6 +695,7 @@ pub(super) fn run() {
 
             attempts += 1;
             let outcome = typer.type_method_definition(tree);
+            let mut typed_tree_identity = String::new();
             let status = match outcome {
                 Ok(typed_tree) => {
                     let typed_method = typer.source_typed_index().get(source, tree);
@@ -705,6 +730,7 @@ pub(super) fn run() {
                             });
                     if complete {
                         typed += 1;
+                        typed_tree_identity = typed_tree.index().to_string();
                         format!(
                             "typed::result={}",
                             method_result_shape(typer.store(), method)
@@ -730,10 +756,25 @@ pub(super) fn run() {
                 complexity.to_string(),
                 status,
                 tree_index.to_string(),
+                typed_tree_identity,
             ]);
         }
     }
-    assert!(rows.iter().all(|row| row.len() == 10));
+    for row in &mut rows {
+        if row.len() == 10 {
+            row.push(String::new());
+        }
+        let status = &mut row[8];
+        let actual_result = status
+            .strip_prefix("typed::result=")
+            .map(str::to_owned)
+            .unwrap_or_else(|| "not_available".to_owned());
+        if actual_result != "not_available" {
+            *status = "typed".to_owned();
+        }
+        row.insert(7, actual_result);
+    }
+    assert!(rows.iter().all(|row| row.len() == 12));
     rows.sort();
     println!("\nORDINARY_METHOD_REPORT_BEGIN");
     println!("schema=1");
@@ -745,7 +786,7 @@ pub(super) fn run() {
     println!("excluded={excluded}");
     println!("not_attempted={not_attempted}");
     println!(
-        "method\towner_path\tmethod_name\tline\trange\tmodifiers\texpected_result\tcomplexity\tstatus\tattempted_tree"
+        "method\towner_path\tmethod_name\tline\trange\tmodifiers\texpected_result\tactual_result\tcomplexity\tstatus\tsource_tree\ttyped_tree"
     );
     for row in rows {
         println!("{}", row.join("\t"));
@@ -840,7 +881,7 @@ mod tests {
 
     #[test]
     fn candidate_profile_counts_source_lambdas_tries_and_for_comprehensions() {
-        let source_text = "object C { def mapped(xs: List[Int]) = xs.map(x => try x catch { case _: Exception => 0 }); def values(xs: List[Int]) = for (x <- xs) yield x }";
+        let source_text = "object C { def mapped(xs: List[Int]) = xs.map(x => try x catch { case _: Exception => 0 }); def values(xs: List[Int]) = for (x <- xs) yield x; def scoped = { import scala.util.Try; val local = 1; local } }";
         let source = SourceId::from_index(0);
         let mut store = SemanticStore::new();
         let _definitions = Definitions::bootstrap(&mut store);
@@ -860,6 +901,8 @@ mod tests {
         assert!(features.contains(&"closures"));
         assert!(features.contains(&"tries"));
         assert!(features.contains(&"for_comprehensions"));
+        assert!(features.contains(&"nested_scopes"));
+        assert!(features.contains(&"local_imports"));
         assert!(parsed.ast.iter().any(|(_, node)| matches!(
             &node.kind,
             TreeKind::PhaseSpecific(UntypedNode::Function(_))
