@@ -11,6 +11,10 @@ report for the frozen `package-term` cohort, not a full-corpus claim.
 - Scala artifacts: 3.9.0
 - JDK: 21.0.8
 - Cohort: the existing 60-file, 369-method `package-term` cohort
+- Frozen primary cohort: five `path#tree` roots in
+  [`typer-name-resolution-1566-primary-3.9.0.tsv`](typer-name-resolution-1566-primary-3.9.0.tsv)
+  compared from baseline `e06c4ee` through intermediate `bfc4759` to final
+  source `1b71f49`.
 
 ## Outcome
 
@@ -38,9 +42,21 @@ The largest first-blocker groups were:
 
 The complete compact method snapshot is in
 [`typer-name-resolution-1566-closeout-3.9.0.tsv`](typer-name-resolution-1566-closeout-3.9.0.tsv).
+In the five-method primary cohort, `ScalaVersion.scala#tree=234` advances
+from `ApplicationCalleeNotMethod` to `UnsupportedExpression::InterpolatedString`:
+the `Failure.apply` call is reached, but the method still does not type
+completely. `InlineInfoAttribute.scala#tree=212` also records intermediate
+expression progress through its bounded array, equality, bitwise, and
+no-`else` behavior; its enclosing method remains blocked at a later
+`MemberNotFound`. The other three selected roots retain their prior blocker.
 For older before/after results and blocker transitions, see the linked
 increment records in
 [`typer-name-resolution-progress-3.9.0.md`](typer-name-resolution-progress-3.9.0.md).
+The bounded source semantics have pinned Scala 3.9 positive and negative
+oracle fixtures for
+[universal equality](../crates/dotty-typer/tests/fixtures/universal-equality/UniversalEquality.oracle.md),
+[`Int.&`](../crates/dotty-typer/tests/fixtures/int-bitwise-and/IntBitwiseAnd.oracle.md),
+and [conditionals without `else`](../crates/dotty-typer/tests/fixtures/if-without-else/IfWithoutElse.oracle.md).
 
 ## Reproduction
 
