@@ -12,14 +12,14 @@ impl SourceTyper<'_> {
     ) -> Result<Option<SymbolId>, TyperError> {
         let contexts = self.source_context_chain(context, tree_index)?;
         let mut local_type_candidates = Vec::new();
-        for (local_context, scope) in self.active_local_type_scopes.iter().rev() {
-            if !contexts.contains(local_context) {
+        for active_scope in self.active_local_type_scopes.iter().rev() {
+            if !active_scope.applies_to(&contexts, context, position) {
                 continue;
             }
             let candidates = self
                 .store
                 .scopes
-                .get(*scope)
+                .get(active_scope.scope)
                 .lookup_all(&name)
                 .iter()
                 .copied()
