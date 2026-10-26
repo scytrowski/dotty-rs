@@ -455,6 +455,113 @@ fn factory_batch_contract_rejects_wrong_result_abi_target_and_partial_pairs() {
 }
 
 #[test]
+fn factory_batch_contract_rejects_missing_dup_wrong_seed_slot_and_constructor_ref() {
+    with_paired_jvm_tasty_batch_plan(
+        COUNTER_FACTORY,
+        "tests/fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala",
+        SourceId::from_index(1695),
+        |source_batch| {
+            let plans = source_batch
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(source_batch.jvm_unit, &plans).unwrap();
+            let valid = encode_batch_for_contract_test(&source_batch);
+            let factory_bytes = &valid
+                .classfiles
+                .iter()
+                .find(|artifact| artifact.classfile_path == "example/CounterFactory.class")
+                .unwrap()
+                .classfile_bytes;
+
+            let mut missing_dup = valid.clone();
+            replace_factory_code_bytes(&mut missing_dup, "create", 3, &[0x00]);
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, missing_dup),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "cross-class invocation",
+                    ..
+                })
+            ));
+
+            let mut wrong_seed_slot = valid.clone();
+            replace_factory_code_bytes(&mut wrong_seed_slot, "create", 4, &[0x1a]);
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_seed_slot),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "cross-class invocation",
+                    ..
+                })
+            ));
+
+            let mut reader = Reader::new(factory_bytes);
+            let factory = ClassFile::decode(&mut reader).unwrap();
+            let constructor = factory
+                .methods
+                .iter()
+                .find(|method| factory.constant_pool.utf8(method.name_index).unwrap() == "<init>")
+                .unwrap();
+            let [Attribute::Code(constructor_code)] = constructor.attributes.as_slice() else {
+                panic!("Factory constructor has one Code attribute");
+            };
+            assert_eq!(&constructor_code.code[..2], &[0x2a, 0xb7]);
+            let wrong_constructor_ref = [constructor_code.code[2], constructor_code.code[3]];
+            let mut wrong_constructor = valid.clone();
+            replace_factory_code_bytes(&mut wrong_constructor, "create", 6, &wrong_constructor_ref);
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_constructor),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "cross-class invocation",
+                    ..
+                })
+            ));
+        },
+    )
+    .unwrap();
+}
+
+fn replace_factory_code_bytes(
+    artifacts: &mut JvmTastyBatchArtifacts,
+    method_name: &str,
+    code_offset: usize,
+    replacement: &[u8],
+) {
+    let artifact = artifacts
+        .classfiles
+        .iter_mut()
+        .find(|artifact| artifact.classfile_path == "example/CounterFactory.class")
+        .unwrap();
+    let mut reader = Reader::new(&artifact.classfile_bytes);
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let method = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == method_name)
+        .unwrap();
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("Factory method has one Code attribute");
+    };
+    let code_bytes = code.code.to_vec();
+    drop(class);
+    assert!(code_offset + replacement.len() <= code_bytes.len());
+    let offsets = artifact
+        .classfile_bytes
+        .windows(code_bytes.len())
+        .enumerate()
+        .filter_map(|(offset, bytes)| (bytes == code_bytes).then_some(offset))
+        .collect::<Vec<_>>();
+    let [offset] = offsets.as_slice() else {
+        panic!("Factory method Code bytes occur once in the encoded class");
+    };
+    artifact.classfile_bytes[*offset + code_offset..*offset + code_offset + replacement.len()]
+        .copy_from_slice(replacement);
+}
+
+#[test]
 fn whole_source_sequence_rejects_joint_truncation_and_joint_reordering() {
     with_paired_jvm_tasty_batch_plan(
         THREE_CLASSES,
