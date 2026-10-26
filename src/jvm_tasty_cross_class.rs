@@ -214,6 +214,12 @@ pub fn validate_cross_class_method_ref(
         || store.symbols.get(reader_class).kind != SymbolKind::Class
         || store.symbols.get(counter_class).visibility != dotty_core::Visibility::Public
         || store.symbols.get(reader_class).visibility != dotty_core::Visibility::Public
+        || store.symbols.get(counter_class).flags.contains(
+            SymbolFlags::CASE | SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
+        )
+        || store.symbols.get(reader_class).flags.contains(
+            SymbolFlags::CASE | SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
+        )
     {
         return Err(CrossClassMethodRefError::SemanticIdentity(
             "both declarations must be public ordinary classes",
@@ -614,7 +620,9 @@ fn validate_public_concrete_method(
                 | SymbolFlags::SYNTHETIC
                 | SymbolFlags::ERASED
                 | SymbolFlags::STATIC
-                | SymbolFlags::EXTENSION,
+                | SymbolFlags::EXTENSION
+                | SymbolFlags::GIVEN
+                | SymbolFlags::IMPLICIT,
         )
     {
         return Err(CrossClassMethodRefError::SemanticIdentity(match label {
