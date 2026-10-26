@@ -324,16 +324,25 @@ pub fn validate_jvm_tasty_class<'proof, 'unit, 'plan, 'session>(
         });
     }
 
-    let jvm_metadata = jvm_unit
+    let all_jvm_metadata = jvm_unit
         .metadata(tasty.definitions)
-        .map_err(JvmTastyContractError::JvmPlan)?
+        .map_err(JvmTastyContractError::JvmPlan)?;
+    let jvm_metadata = all_jvm_metadata
+        .iter()
         .into_iter()
         .find(|metadata| metadata.identity().symbol() == tasty.class)
+        .cloned()
         .ok_or(JvmTastyContractError::JvmClassMissing { class: tasty.class })?;
 
     validate_constructor(jvm_unit.store, tasty, class_plan, &jvm_metadata)?;
     validate_fields(jvm_unit.store, tasty, class_plan, &jvm_metadata)?;
-    validate_methods(jvm_unit.store, tasty, class_plan, &jvm_metadata)?;
+    validate_methods(
+        jvm_unit.store,
+        tasty,
+        class_plan,
+        &jvm_metadata,
+        &all_jvm_metadata,
+    )?;
 
     Ok(ValidatedJvmTastyClass {
         jvm_unit,
@@ -1028,6 +1037,7 @@ fn validate_methods(
     tasty: &dotty_tasty_pickler::ClassStatePicklePlan<'_>,
     jvm_class: &dotty_jvm::JvmClassPlan,
     metadata: &JvmClassMetadata,
+    all_metadata: &[JvmClassMetadata],
 ) -> Result<(), JvmTastyContractError> {
     let mut expected = Vec::new();
     for member in tasty.members {
@@ -1093,8 +1103,9 @@ fn validate_methods(
             .iter()
             .map(|parameter| parameter.symbol())
             .collect::<Vec<_>>();
-        let expected_descriptor = source_method_descriptor(store, tasty.definitions, symbol)
-            .ok_or(JvmTastyContractError::UnsupportedSourceShape { symbol })?;
+        let expected_descriptor =
+            source_method_descriptor(store, tasty.definitions, symbol, all_metadata)
+                .ok_or(JvmTastyContractError::UnsupportedSourceShape { symbol })?;
         if parameters != jvm_plan.parameters
             || parameters != actual_parameters
             || expected_descriptor != binary.descriptor().as_str()
@@ -1176,6 +1187,7 @@ fn source_method_descriptor(
     store: &SemanticStore,
     definitions: &Definitions,
     method: SymbolId,
+    planned_classes: &[JvmClassMetadata],
 ) -> Option<String> {
     let SymbolInfo::Complete(mut ty) = store.symbols.get(method).info else {
         return None;
@@ -1195,7 +1207,17 @@ fn source_method_descriptor(
                     return None;
                 }
                 for parameter in params {
-                    parameters.push(primitive_descriptor(definitions, parameter.ty)?);
+                    let descriptor = primitive_descriptor(definitions, parameter.ty)
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            planned_class_descriptor(
+                                store,
+                                definitions,
+                                parameter.ty,
+                                planned_classes,
+                            )
+                        })?;
+                    parameters.push(descriptor);
                 }
                 ty = *result;
             }
@@ -1210,6 +1232,45 @@ fn source_method_descriptor(
         _ => return None,
     };
     Some(format!("({}){result}", parameters.concat()))
+}
+
+fn planned_class_descriptor(
+    store: &SemanticStore,
+    definitions: &Definitions,
+    ty: dotty_core::TypeId,
+    planned_classes: &[JvmClassMetadata],
+) -> Option<String> {
+    let Some(Type::TypeRef {
+        prefix,
+        target: dotty_core::TypeRefTarget::Symbol(class),
+    }) = store.types.try_get(ty)
+    else {
+        return None;
+    };
+    let Some(Type::TypeRef {
+        prefix: package_prefix,
+        target: dotty_core::TypeRefTarget::Symbol(package),
+    }) = store.types.try_get(*prefix)
+    else {
+        return None;
+    };
+    if *package_prefix != definitions.no_prefix
+        || !store.symbols.contains(*class)
+        || !store.symbols.contains(*package)
+    {
+        return None;
+    }
+    let class_symbol = store.symbols.get(*class);
+    if class_symbol.kind != SymbolKind::Class
+        || class_symbol.owner != Some(*package)
+        || class_symbol.origin == SymbolOrigin::Builtin
+    {
+        return None;
+    }
+    let metadata = planned_classes
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == *class)?;
+    Some(format!("L{};", metadata.identity().internal_name()))
 }
 
 fn source_constructor_descriptor(

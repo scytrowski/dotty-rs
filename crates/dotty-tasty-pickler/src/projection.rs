@@ -74,6 +74,7 @@ pub struct EncodingContext<'a> {
     local_values_by_typed_declaration: HashMap<TreeId<Typed>, SymbolId>,
     local_value_symbols: HashSet<SymbolId>,
     external: HashMap<SymbolId, (NameRef, NameRef)>,
+    same_source_external: HashSet<SymbolId>,
     types: HashMap<TypeId, AstLabel>,
     active: HashSet<TypeId>,
 }
@@ -121,6 +122,7 @@ impl<'a> EncodingContext<'a> {
             local_values_by_typed_declaration: HashMap::new(),
             local_value_symbols: HashSet::new(),
             external: HashMap::new(),
+            same_source_external: HashSet::new(),
             types: HashMap::new(),
             active: HashSet::new(),
         };
@@ -1165,6 +1167,90 @@ impl<'a> EncodingContext<'a> {
             Ok(())
         })
     }
+
+    /// Registers a checked class from the same source batch for signature
+    /// projection. The caller supplies the complete producer batch's class
+    /// identities; this method additionally verifies canonical source
+    /// provenance, same-package ownership, declaration scope, and ClassInfo.
+    pub(crate) fn register_planned_source_class(
+        &mut self,
+        symbol: SymbolId,
+        source_tree: dotty_core::TreeId<dotty_core::Untyped>,
+        planned_classes: &[SymbolId],
+    ) -> Result<(), PickleError> {
+        self.run(|c| {
+            c.charge(1)?;
+            if !planned_classes.contains(&symbol)
+                || c.declarations.contains_key(&symbol)
+                || c.source_index.symbol_at(c.source, source_tree) != Some(symbol)
+                || c.source_index.definition_of(symbol)
+                    != Some(SourceDefinition::Canonical {
+                        source: c.source,
+                        tree: source_tree,
+                    })
+            {
+                return Err(reference(symbol, ReferenceError::NotRegistered));
+            }
+            c.namespace(symbol, true)?;
+            let sibling = c.symbol(symbol)?;
+            if sibling.kind != SymbolKind::Class
+                || sibling.origin != SymbolOrigin::Source(c.source)
+                || sibling.visibility != Visibility::Public
+                || !sibling.flags.is_empty()
+                || !sibling.annotations.is_empty()
+            {
+                return Err(reference(symbol, ReferenceError::Metadata));
+            }
+            let owner = sibling
+                .owner
+                .ok_or(reference(symbol, ReferenceError::Owner))?;
+            let sibling_name = sibling.name;
+            let current_class = c
+                .declarations
+                .keys()
+                .copied()
+                .find(|&candidate| {
+                    c.store.symbols.contains(candidate)
+                        && c.store.symbols.get(candidate).kind == SymbolKind::Class
+                })
+                .ok_or(reference(symbol, ReferenceError::NotRegistered))?;
+            if c.symbol(current_class)?.owner != Some(owner) {
+                return Err(reference(symbol, ReferenceError::Owner));
+            }
+            let class_type = c.complete(symbol)?;
+            let Type::ClassInfo(info) = c.ty(class_type)? else {
+                return Err(PickleError::MalformedType {
+                    ty: class_type,
+                    role: crate::TypeRole::ClassInfo,
+                });
+            };
+            if info.class != symbol
+                || info.prefix != c.definitions.no_prefix
+                || info.parents.as_slice() != [c.definitions.object_type]
+                || info.self_type.is_some()
+                || c.source_index.scope_of(symbol) != Some(info.declarations)
+                || c.class_scope(symbol)? != info.declarations
+                || c.store
+                    .scopes
+                    .get(info.declarations)
+                    .entered_symbols()
+                    .any(|member| {
+                        c.store.symbols.contains(member)
+                            && c.store.symbols.get(member).kind == SymbolKind::TypeParameter
+                    })
+            {
+                return Err(PickleError::MalformedType {
+                    ty: class_type,
+                    role: crate::TypeRole::ClassInfo,
+                });
+            }
+            let package = c.package_name(owner)?;
+            let name = c.utf8(c.text(sibling_name.text())?)?;
+            c.external.insert(symbol, (package, name));
+            c.same_source_external.insert(symbol);
+            Ok(())
+        })
+    }
     fn builtin_ref(&mut self, builtin: Builtin) -> Result<AstLabel, PickleError> {
         let symbol = self.builtin(builtin)?;
         let package = if builtin == Builtin::Object {
@@ -1283,18 +1369,22 @@ impl<'a> EncodingContext<'a> {
                         self.external_inner(*symbol)?
                     } else {
                         self.check_prefix(*symbol, *prefix)?;
-                        let &(_, name) = self
-                            .external
-                            .get(symbol)
-                            .ok_or(reference(*symbol, ReferenceError::NotRegistered))?;
-                        let child = self.lower(*prefix, depth + 1)?;
-                        self.wire
-                            .push(AstNode::NatAst {
-                                tag: TYPEREF_TAG,
-                                value: AstOperand::Nat(name),
-                                child,
-                            })
-                            .map_err(construction)?
+                        if self.same_source_external.contains(symbol) {
+                            self.external_inner(*symbol)?
+                        } else {
+                            let &(_, name) = self
+                                .external
+                                .get(symbol)
+                                .ok_or(reference(*symbol, ReferenceError::NotRegistered))?;
+                            let child = self.lower(*prefix, depth + 1)?;
+                            self.wire
+                                .push(AstNode::NatAst {
+                                    tag: TYPEREF_TAG,
+                                    value: AstOperand::Nat(name),
+                                    child,
+                                })
+                                .map_err(construction)?
+                        }
                     }
                 }
             }
