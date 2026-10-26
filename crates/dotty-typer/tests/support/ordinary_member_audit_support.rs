@@ -274,6 +274,11 @@ pub(super) fn inventory_candidates() {
                 .map(|(key, value)| format!("{key}={value}"))
                 .collect::<Vec<_>>()
                 .join(",");
+            let feature_text = if feature_text.is_empty() {
+                "none".to_owned()
+            } else {
+                feature_text
+            };
             let identity = format!("{relative_path}#tree={}", tree.index());
             let row = format!(
                 "{identity}\t{owner_path}\t{method_name}\t{line}\t{}..{}\t{score}\t{tier}\t{body_size}\t{max_depth}\t{type_parameters}\t{value_parameters}\t{}\t{}\t{}\t{feature_text}",

@@ -95,7 +95,7 @@ library/src/scala/collection/mutable/Map.scala#tree=156	scala.collection.mutable
 library/src/scala/collection/mutable/SeqMap.scala#tree=41	scala.collection.mutable.SeqMap	mapFactory	38	1062..1114	7	A0	1	1	0	0	explicit	0	ordinary	identifiers=1,imports=2
 library/src/scala/collection/mutable/SortedSet.scala#tree=34	scala.collection.mutable.SortedSet	unsorted	30	739..775	7	A0	1	1	0	0	explicit	0	ordinary	imports=2
 library/src/scala/collection/mutable/SortedSet.scala#tree=39	scala.collection.mutable.SortedSet	sortedIterableFactory	32	779..859	7	A0	1	1	0	0	explicit	0	ordinary	identifiers=1,imports=2
-library/src/scala/deriving/Mirror.scala#tree=53	scala.deriving.Mirror$.Singleton	fromProduct	38	1052..1110	7	A0	1	1	0	1	explicit	0	ordinary	
+library/src/scala/deriving/Mirror.scala#tree=53	scala.deriving.Mirror$.Singleton	fromProduct	38	1052..1110	7	A0	1	1	0	1	explicit	0	ordinary	none
 library/src/scala/deriving/Mirror.scala#tree=76	scala.deriving.Mirror$.SingletonProxy	fromProduct	47	1419..1478	7	A0	1	1	0	1	explicit	0	ordinary	identifiers=1
 library/src/scala/ref/ReferenceWrapper.scala#tree=75	scala.ref.ReferenceWrapper	self	30	825..879	7	A0	1	1	0	0	explicit	0	ordinary	identifiers=1,imports=2
 library/src/scala/runtime/NonLocalReturnControl.scala#tree=31	scala.runtime.NonLocalReturnControl	fillInStackTrace	21	735..790	7	A0	1	1	0	0	explicit	0	ordinary	imports=2

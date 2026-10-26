@@ -14,7 +14,7 @@ eligible methods, with no parse diagnostics and no file-level namer failures.
 The generated inventory is
 [`typer-stdlib-method-inventory-3.9.0.tsv`](typer-stdlib-method-inventory-3.9.0.tsv);
 its SHA-256 is
-`637d2c4962a0876a8e34bd1a2d1d87d0157ebf7d3765e859e197b971d8a85cef`.
+`99b66d17313c68d5061a8d7646887eaeee0035903d1a76597c5338f755638ecb`.
 
 The inventory score is a deterministic syntax-based ranking aid, not a claim
 that a method is semantically easy. Its formula is:
