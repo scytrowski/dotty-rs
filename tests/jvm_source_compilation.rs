@@ -13464,6 +13464,22 @@ fn factory_return_and_identity_control_reach_the_real_jvm_source_pipeline() {
 }
 
 #[test]
+fn private_factory_constructor_is_rejected_by_jvm_call_site_visibility() {
+    let output = TestOutputDirectory::new("private-factory-constructor-probe");
+    let error = compile_source_classes(
+        "package example\nclass Counter private (start: Int)\nclass CounterFactory:\n  def create(seed: Int): Counter = new Counter(seed)\n",
+        "PrivateFactory.scala",
+        output.path(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        PipelineFailure::Codegen(JvmCodegenError::InaccessibleJvmConstructor { .. })
+    ));
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
 fn parameterized_direct_super_constructors_preserve_source_arguments_and_verify() {
     let first_output = TestOutputDirectory::new("parameterized-super-first");
     let second_output = TestOutputDirectory::new("parameterized-super-second");
