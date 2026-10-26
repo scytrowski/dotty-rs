@@ -1,0 +1,26 @@
+identity	owner	method	source_line	rank_score	tier	features	source_result	baseline_status	first_blocker	gate	oracle_result
+library/src/scala/Option.scala#tree=118	scala.Option	isEmpty	179	14	A0	identifiers=1,imports=3	Boolean	blocked	MemberNotFound	observe	
+library/src/scala/Option.scala#tree=122	scala.Option	isDefined	193	13	A0	identifiers=1,imports=3	Boolean	typed		required_typed	Boolean
+library/src/scala/Option.scala#tree=129	scala.Option	knownSize	195	24	A0	branches=1,identifiers=1,imports=3	Int	typed		required_typed	Int
+library/src/scala/Option.scala#tree=214	scala.Option	map	278	56	edge	branches=1,calls=2,identifiers=4,selections=1,imports=3	Option[B]	blocked	MemberLookup	observe	
+library/src/scala/Option.scala#tree=329	scala.Option	nonEmpty	395	8	A0	identifiers=1,imports=3	Boolean	blocked	AmbiguousTypeName	observe	
+library/src/scala/Option.scala#tree=56	scala.Option$	empty	44	16	A0	identifiers=1,imports=3	Option[A]	blocked	ExpectedExpressionConformanceUnsupported	observe	
+library/src/scala/util/Either.scala#tree=19	scala.util.Either	left	205	28	A1	calls=1,identifiers=1,selections=1,imports=2		blocked	MemberLookup	observe	
+library/src/scala/util/Either.scala#tree=31	scala.util.Either	right	211	28	A1	calls=1,identifiers=1,selections=1,imports=2		blocked	MemberLookup	observe	
+library/src/scala/util/Either.scala#tree=505	scala.util.Left	isLeft	556	11	A0	literals=1,imports=2		typed		required_typed	Boolean
+library/src/scala/util/Either.scala#tree=508	scala.util.Left	isRight	557	11	A0	literals=1,imports=2		typed		required_typed	Boolean
+library/src/scala/util/Either.scala#tree=84	scala.util.Either	swap	252	60	edge	calls=4,identifiers=8,matches=1,imports=2	Either[B, A]	blocked	MemberLookup	observe	
+library/src/scala/util/Try.scala#tree=1035	scala.util.Failure	toOption	284	10	A0	identifiers=1,imports=5	Option[T]	blocked	MemberLookup	observe	
+library/src/scala/util/Try.scala#tree=1098	scala.util.Success	get	294	14	A0	identifiers=1,imports=5		typed		required_typed	scala.util.Success.T
+library/src/scala/util/Try.scala#tree=626	scala.util.Failure	isFailure	255	10	A0	literals=1,imports=5	Boolean	typed		required_typed	Boolean
+library/src/scala/util/Try.scala#tree=629	scala.util.Failure	isSuccess	256	10	A0	literals=1,imports=5	Boolean	typed		required_typed	Boolean
+library/src/scala/Tuple.scala#tree=23	scala.Tuple	toArray	13	35	A1	calls=1,identifiers=1,selections=2,imports=5	Array[Object]	blocked	ApplicationArgumentConformanceUnsupported	observe	
+library/src/scala/Enumeration.scala#tree=172	scala.Enumeration	maxId	153	14	A0	identifiers=1,imports=6		typed		required_typed	Int
+library/src/scala/Enumeration.scala#tree=459	scala.Enumeration.Value	hashCode	246	18	A0	identifiers=1,selections=1,imports=6	Int	blocked	UnstableSelectionPrefix	observe	
+library/src/scala/Enumeration.scala#tree=700	scala.Enumeration.ValueSet	knownSize	306	18	A0	identifiers=1,selections=1,imports=6	Int	blocked	SymbolResolution	observe	
+library/src/scala/Predef.scala#tree=204	scala.Predef$	identity	234	20	A0	identifiers=1,imports=11	A	typed		required_typed	typeparam#0
+library/src/scala/Predef.scala#tree=239	scala.Predef$	locally	284	20	A0	identifiers=1,imports=11	T	typed		required_typed	typeparam#0
+library/src/scala/Predef.scala#tree=614	scala.Predef$.SeqCharSequence	charAt	457	21	A0	calls=1,identifiers=2,imports=11	Char	blocked	TermNameNotFound	observe	
+library/src/scala/Function1.scala#tree=86	scala.Function1	compose	80	59	edge	calls=2,closures=1,identifiers=3,local_values=1,imports=1	A => R	blocked	UnsupportedFunctionLiteralParameter	observe	
+library/src/scala/Function1.scala#tree=111	scala.Function1	andThen	88	59	edge	calls=2,closures=1,identifiers=3,local_values=1,imports=1	T1 => A	blocked	UnsupportedFunctionLiteralParameter	observe	
+library/src/scala/collection/Iterator.scala#tree=1037	scala.collection.Iterator	length	494	10	A0	identifiers=1,imports=8	Int	blocked	MemberLookup	observe	
