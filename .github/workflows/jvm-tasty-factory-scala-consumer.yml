@@ -73,8 +73,11 @@ jobs:
           test -d "$JAVA_HOME/jmods"
           mkdir -p "$COURSIER_MAVEN_ROOT"
 
+      - name: Install sbt runner
+        uses: sbt/setup-sbt@v1
+
       - name: Stage the pinned Scala source compiler
-        run: cd "$SCALA39_ROOT" && ./sbt "dist/universal:stage"
+        run: cd "$SCALA39_ROOT" && sbt "dist/universal:stage"
 
       - name: Download and verify pinned Scala compiler artifacts
         shell: bash
