@@ -18,7 +18,7 @@ use dotty_typer::SourceTyper;
 use dotty::jvm_tasty_cross_class::{
     CrossClassMethodRefError, CrossClassMethodRefInput, validate_cross_class_method_ref,
 };
-use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
+use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 
 const COUNTER_CLASS: &[u8] =
     include_bytes!("fixtures/jvm_tasty_cross_class/scala39/example/Counter.class");
@@ -282,7 +282,7 @@ fn scala_39_oracle_records_reader_jvm_link_and_per_class_tasty_links() {
 }
 
 #[test]
-fn cross_class_call_types_canonically_before_the_paired_planner_rejects_it() {
+fn cross_class_call_remains_rejected_at_tasty_body_validation() {
     let source_id = SourceId::from_index(1671);
     let source = SourceText::new(SOURCE).unwrap();
     let scanner = ContextualScanner::new(SOURCE).unwrap();
@@ -831,11 +831,11 @@ fn cross_class_call_types_canonically_before_the_paired_planner_rejects_it() {
     let batch = with_paired_jvm_tasty_batch_plan(SOURCE, "Reader.scala", source_id, |_| ());
     assert!(matches!(
         batch,
-        Err(PairedPlanError::BatchClass {
+        Err(dotty::jvm_tasty_plan::PairedPlanError::BatchClass {
             class_index: 1,
-            phase: "JVM class-plan validation",
+            phase: "JVM/TASTy cross-contract validation",
             reason,
             ..
-        }) if reason.contains("ReferenceClassNotInJvmPlan")
+        }) if reason.contains("Unsupported { feature: BodyExpression")
     ));
 }

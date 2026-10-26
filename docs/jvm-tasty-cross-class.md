@@ -88,15 +88,30 @@ generated Reader under `java -Xverify:all`; the test also reverses the two
 source declarations and repeats compilation and execution successfully. This
 establishes JVM-only cross-class execution for the characterized fixture.
 
-The separate paired JVM/TASTy batch planner currently stops on Reader at
-`JVM class-plan validation`, class index 1, with
-`ReferenceClassNotInJvmPlan { class: SymbolId(39) }`. Its per-class validation
-currently presents a class-only JVM plan to this cross-class reference. As a
-result, this path does not reach Reader's pickler-plan validation, TASTy
-encoding, cross-ABI proof, or linked-batch assembly. No result for those later
-stages is inferred from the JVM-only execution or from Scala's oracle output.
-The current paired-batch behavior remains an explicit unsupported boundary;
-this audit does not change it.
+The paired batch planner now validates each class against the complete JVM
+unit, so a same-unit sibling can participate in a method signature. Issue
+[#1673](https://github.com/scytrowski/dotty-rs/issues/1673) adds the
+characterization source at
+[`tests/fixtures/jvm_tasty_cross_class/ReaderLiteral.scala`](../tests/fixtures/jvm_tasty_cross_class/ReaderLiteral.scala),
+where `Reader.read(counter: Counter): Int = 0`. Its real one-session TASTy plan
+emits the Reader-owned `PARAM counter` with the pinned external-to-sidecar
+`TYPEREF Counter` qualified by `TERMREFpkg example`. The Reader sidecar still
+declares only Reader; it does not copy Counter declarations. The corresponding
+JVM metadata is checked as `(Lexample/Counter;)I` against the full planned
+class unit.
+
+The original `counter.get()` source remains a body-stage pending case. It now
+passes complete-unit JVM validation and rejects at
+`JVM/TASTy cross-contract validation` with the pickler's unsupported
+`BodyExpression` error. The call's TASTy SELECT/APPLY shape remains #1674; no
+literal substitution or omitted body is accepted.
+
+The #1673 integration test also has an opt-in pinned Scala 3.9.0 `-from-tasty`
+check controlled by `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1` and
+`SCALA39_ROOT`. It compiles the matching Counter fixture, stages only its class
+and sidecar beside the Rust-produced Reader sidecar, and checks the rebuilt
+`Reader.read(example.Counter)` signature. This verifies the signature slice;
+it does not claim that the original `counter.get()` body can be encoded.
 
 ## Negative-case evidence
 

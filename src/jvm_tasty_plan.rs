@@ -9,8 +9,8 @@ use std::fmt;
 
 use dotty_core::ast::{TreeKind, Untyped, VisibilitySyntax};
 use dotty_core::{
-    Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolId, SymbolInfo,
-    SymbolKind, TreeId,
+    Definitions, Packages, SemanticStore, SourceId, SourceText, SourceTypedIndex, SymbolFlags,
+    SymbolId, SymbolInfo, SymbolKind, TreeId,
 };
 use dotty_jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmFieldPlan,
@@ -22,7 +22,7 @@ use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_d
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty_pickler::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, PickleError,
-    PrimaryConstructorInputPlan, SourceMetadata, ValidatedClassStatePlan,
+    PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
 };
 use dotty_typer::{SourceTyper, TyperError};
 
@@ -126,6 +126,25 @@ struct BatchClassSource {
     constructor_tree: TreeId<Untyped>,
     constructor: SymbolId,
     constructor_parameters: Vec<Vec<SymbolId>>,
+}
+
+struct BatchSourceTypedBindings<'a> {
+    index: &'a SourceTypedIndex,
+    planned_classes: Vec<SymbolId>,
+}
+
+impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
+    fn typed_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<TreeId<dotty_core::Typed>> {
+        self.index.get(source, tree)
+    }
+
+    fn planned_class_symbols(&self) -> &[SymbolId] {
+        &self.planned_classes
+    }
 }
 
 struct BatchClassDraft {
@@ -923,22 +942,6 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         typed_ast: typer.typed_ast(),
         classes: drafts.iter().map(|draft| draft.jvm_plan.clone()).collect(),
     };
-    for (class_index, draft) in drafts.iter().enumerate() {
-        let class_unit = JvmCompilationUnit {
-            store: jvm_unit.store,
-            typed_ast: jvm_unit.typed_ast,
-            classes: vec![draft.jvm_plan.clone()],
-        };
-        let _metadata =
-            class_unit
-                .metadata(&definitions)
-                .map_err(|error| PairedPlanError::BatchClass {
-                    class_index,
-                    declaration_index: draft.source.tree.index() as usize,
-                    phase: "JVM class-plan validation",
-                    reason: format!("{error:?}"),
-                })?;
-    }
     let _metadata =
         jvm_unit
             .metadata(&definitions)
@@ -946,8 +949,14 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                 phase: "complete JVM unit validation",
                 reason: format!("{error:?}"),
             })?;
-    let typed_bindings =
-        |source, tree: TreeId<Untyped>| typer.source_typed_index().get(source, tree);
+    let planned_classes = drafts
+        .iter()
+        .map(|draft| draft.source.class)
+        .collect::<Vec<_>>();
+    let typed_bindings = BatchSourceTypedBindings {
+        index: typer.source_typed_index(),
+        planned_classes,
+    };
     let tasty_inputs = drafts
         .iter()
         .map(|draft| ClassStatePicklePlan {

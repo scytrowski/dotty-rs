@@ -4,9 +4,35 @@ use dotty::jvm_tasty_plan::{
 use dotty_core::ast::TreeKind;
 use dotty_core::{SourceId, SymbolId};
 use dotty_jvm::JvmClassInitializationPlan;
-use dotty_tasty_pickler::ClassMemberPicklePlan;
+use dotty_tasty::tasty::*;
+use dotty_tasty_pickler::{
+    ClassMemberPicklePlan, ClassStatePicklePlan, PickleError, SourceTypedBindings,
+};
 
 const COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
+const CROSS_CLASS_READER_LITERAL: &str =
+    include_str!("fixtures/jvm_tasty_cross_class/ReaderLiteral.scala");
+const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
+
+struct WithoutPlannedClasses<'a>(&'a dyn SourceTypedBindings);
+
+impl SourceTypedBindings for WithoutPlannedClasses<'_> {
+    fn typed_at(
+        &self,
+        source: dotty_core::SourceId,
+        tree: dotty_core::TreeId<dotty_core::Untyped>,
+    ) -> Option<dotty_core::TreeId<dotty_core::Typed>> {
+        self.0.typed_at(source, tree)
+    }
+
+    fn local_value_bindings(
+        &self,
+        source: dotty_core::SourceId,
+        method: SymbolId,
+    ) -> Vec<dotty_tasty_pickler::LocalValueBinding> {
+        self.0.local_value_bindings(source, method)
+    }
+}
 
 #[test]
 fn counter_plans_share_one_source_session_and_exact_typed_roots() {
@@ -402,6 +428,345 @@ fn counter_and_gauge_have_one_ordered_shared_batch_session() {
 }
 
 #[test]
+fn same_batch_class_formal_emits_reader_owned_counter_type_without_cloning_counter() {
+    with_paired_jvm_tasty_batch_plan(
+        CROSS_CLASS_READER_LITERAL,
+        "tests/fixtures/jvm_tasty_cross_class/ReaderLiteral.scala",
+        SourceId::from_index(1673),
+        |batch| {
+            let [counter, reader] = batch.classes else {
+                panic!("fixture has Counter and Reader plans");
+            };
+            assert_eq!(counter.class, batch.jvm_unit.classes[0].class);
+            assert_eq!(reader.class, batch.jvm_unit.classes[1].class);
+            let read = reader
+                .compatibility
+                .jvm_metadata()
+                .methods()
+                .iter()
+                .find(|method| {
+                    batch.jvm_unit.store.names.try_resolve(
+                        batch
+                            .jvm_unit
+                            .store
+                            .symbols
+                            .get(method.symbol())
+                            .name
+                            .text(),
+                    ) == Some("read")
+                })
+                .unwrap();
+            assert_eq!(read.descriptor().as_str(), "(Lexample/Counter;)I");
+            let output = reader
+                .tasty_plan
+                .pickle()
+                .expect("Counter-typed signature is supported");
+            let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+            let package = file
+                .asts()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .decode_package()
+                .unwrap();
+            assert_eq!(
+                file.names().render(package.path_name().unwrap()).unwrap(),
+                "example"
+            );
+            assert_eq!(package.stats.len(), 1);
+            let DefinitionBody::TypeDef { name, .. } = package
+                .stats
+                .get(0)
+                .unwrap()
+                .decode_definition_body()
+                .unwrap()
+            else {
+                panic!("Reader sidecar contains exactly the Reader class");
+            };
+            assert_eq!(file.names().render(name).unwrap(), "Reader");
+            let address_index = file.ast_address_index().unwrap();
+            let parameter_nodes = address_index
+                .iter()
+                .filter(|node| node.tag == PARAM_TAG)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                parameter_nodes.len(),
+                1,
+                "Reader.read owns exactly its counter formal"
+            );
+            let formal = parameter_nodes[0].decode_parameter().unwrap();
+            assert_eq!(file.names().render(formal.name()).unwrap(), "counter");
+            let body = formal.decode_body().unwrap();
+            assert_eq!(body.type_tree.nodes()[0].tag, IDENTTPT_TAG);
+            assert!(
+                body.type_tree
+                    .nodes()
+                    .iter()
+                    .any(|node| node.tag == TYPEREF_TAG)
+            );
+            assert!(
+                body.type_tree
+                    .nodes()
+                    .iter()
+                    .any(|node| node.tag == TERMREFPKG_TAG)
+            );
+            assert!(
+                !body
+                    .type_tree
+                    .nodes()
+                    .iter()
+                    .any(|node| node.tag == TYPEREFDIRECT_TAG)
+            );
+            assert!(
+                body.type_tree
+                    .name_refs()
+                    .iter()
+                    .any(|name| file.names().render(*name).unwrap() == "Counter")
+            );
+            assert!(
+                body.type_tree
+                    .name_refs()
+                    .iter()
+                    .any(|name| file.names().render(*name).unwrap() == "example")
+            );
+
+            let source_plan = reader.tasty_plan.plan();
+            let without_classes = WithoutPlannedClasses(source_plan.typed_bindings);
+            let rejected_plan = ClassStatePicklePlan {
+                store: source_plan.store,
+                definitions: source_plan.definitions,
+                source_ast: source_plan.source_ast,
+                typed_ast: source_plan.typed_ast,
+                source_index: source_plan.source_index,
+                typed_bindings: &without_classes,
+                source: source_plan.source.clone(),
+                class: source_plan.class,
+                class_tree: source_plan.class_tree,
+                constructor: source_plan.constructor.clone(),
+                members: source_plan.members,
+            };
+            assert!(matches!(
+                rejected_plan.validate().unwrap().pickle(),
+                Err(PickleError::UnsupportedTypeReference { .. })
+            ));
+            if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+                run_reader_signature_oracle(output.bytes());
+            }
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn class_typed_method_formal_is_limited_to_one_parameter() {
+    for parameters in [
+        "counter: Counter, other: Counter",
+        "counter: Counter, value: Int",
+    ] {
+        let source = CROSS_CLASS_READER_LITERAL.replace("counter: Counter", parameters);
+        let result = with_paired_jvm_tasty_batch_plan(
+            &source,
+            "tests/fixtures/jvm_tasty_cross_class/ReaderLiteral.scala",
+            SourceId::from_index(1673),
+            |_| (),
+        );
+        let Err(dotty::jvm_tasty_plan::PairedPlanError::BatchClass { phase, reason, .. }) = result
+        else {
+            panic!("unsupported multi-formal shape must reject before bytes exist");
+        };
+        assert_eq!(phase, "JVM/TASTy cross-contract validation");
+        assert!(reason.contains("MalformedType"), "{reason}");
+    }
+}
+
+#[test]
+fn malformed_sibling_class_trees_are_rejected_before_pickling() {
+    with_paired_jvm_tasty_batch_plan(
+        CROSS_CLASS_READER_LITERAL,
+        "tests/fixtures/jvm_tasty_cross_class/ReaderLiteral.scala",
+        SourceId::from_index(1673),
+        |batch| {
+            let source_plan = batch.classes[1].tasty_plan.plan();
+            let sibling = batch.classes[0].class;
+            let Some(dotty_core::SourceDefinition::Canonical {
+                source: _,
+                tree: sibling_tree,
+            }) = source_plan.source_index.definition_of(sibling)
+            else {
+                panic!("Counter has a canonical source tree");
+            };
+
+            let mut missing_template = dotty_core::ast::AstArena::new();
+            for (_, tree) in source_plan.source_ast.iter() {
+                missing_template.alloc(tree.clone());
+            }
+            let TreeKind::TypeDef(definition) = &mut missing_template.get_mut(sibling_tree).kind
+            else {
+                panic!("Counter source tree is a type definition");
+            };
+            definition.rhs = sibling_tree;
+            let plan = ClassStatePicklePlan {
+                store: source_plan.store,
+                definitions: source_plan.definitions,
+                source_ast: &missing_template,
+                typed_ast: source_plan.typed_ast,
+                source_index: source_plan.source_index,
+                typed_bindings: source_plan.typed_bindings,
+                source: source_plan.source.clone(),
+                class: source_plan.class,
+                class_tree: source_plan.class_tree,
+                constructor: source_plan.constructor.clone(),
+                members: source_plan.members,
+            };
+            assert!(matches!(
+                plan.validate(),
+                Err(PickleError::SourceShape { .. })
+            ));
+
+            let mut generic_constructor = dotty_core::ast::AstArena::new();
+            for (_, tree) in source_plan.source_ast.iter() {
+                generic_constructor.alloc(tree.clone());
+            }
+            let TreeKind::TypeDef(definition) = &generic_constructor.get(sibling_tree).kind else {
+                panic!("Counter source tree is a type definition");
+            };
+            let TreeKind::Template(template) = &generic_constructor.get(definition.rhs).kind else {
+                panic!("Counter has a template");
+            };
+            let constructor_tree = template.constructor;
+            let TreeKind::DefDef(constructor) =
+                &mut generic_constructor.get_mut(constructor_tree).kind
+            else {
+                panic!("Counter template has a primary constructor");
+            };
+            constructor.type_params.push(sibling_tree);
+            let plan = ClassStatePicklePlan {
+                store: source_plan.store,
+                definitions: source_plan.definitions,
+                source_ast: &generic_constructor,
+                typed_ast: source_plan.typed_ast,
+                source_index: source_plan.source_index,
+                typed_bindings: source_plan.typed_bindings,
+                source: source_plan.source.clone(),
+                class: source_plan.class,
+                class_tree: source_plan.class_tree,
+                constructor: source_plan.constructor.clone(),
+                members: source_plan.members,
+            };
+            assert!(matches!(
+                plan.validate(),
+                Err(PickleError::Unsupported {
+                    feature: dotty_tasty_pickler::UnsupportedFeature::TypeParameters,
+                    ..
+                })
+            ));
+        },
+    )
+    .unwrap();
+}
+
+fn run_reader_signature_oracle(reader_tasty: &[u8]) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala root for explicit oracle"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let version = Command::new(&compiler)
+        .arg("-version")
+        .output()
+        .expect("query pinned Scala compiler version");
+    assert!(version.status.success());
+    assert!(
+        String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"),
+        "unexpected pinned compiler version: {}",
+        String::from_utf8_lossy(&version.stdout)
+    );
+
+    let temporary_root = std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir);
+    let temporary = temporary_root.join(format!(
+        "dotty-issue-1673-reader-oracle-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temporary);
+    let oracle_classes = temporary.join("oracle");
+    let candidate = temporary.join("candidate/example");
+    let compiled = temporary.join("compiled");
+    fs::create_dir_all(&oracle_classes).unwrap();
+    fs::create_dir_all(&candidate).unwrap();
+    fs::create_dir_all(&compiled).unwrap();
+    let source_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/jvm_tasty_cross_class/ReaderLiteral.scala");
+    let oracle = Command::new(&compiler)
+        .arg("-d")
+        .arg(&oracle_classes)
+        .arg(&source_path)
+        .output()
+        .expect("compile matching Counter dependency with pinned Scala");
+    assert!(
+        oracle.status.success(),
+        "Scala dependency compile failed: {}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    fs::copy(
+        oracle_classes.join("example/Counter.class"),
+        candidate.join("Counter.class"),
+    )
+    .unwrap();
+    fs::copy(
+        oracle_classes.join("example/Counter.tasty"),
+        candidate.join("Counter.tasty"),
+    )
+    .unwrap();
+    fs::write(candidate.join("Reader.tasty"), reader_tasty).unwrap();
+
+    let from_tasty = Command::new(&compiler)
+        .arg("-from-tasty")
+        .arg("-classpath")
+        .arg(temporary.join("candidate"))
+        .arg("-d")
+        .arg(&compiled)
+        .arg(candidate.join("Reader.tasty"))
+        .output()
+        .expect("read Rust-produced Reader.tasty with pinned Scala");
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected Reader signature: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    let classpath = format!(
+        "{}:{}",
+        compiled.display(),
+        temporary.join("candidate").display()
+    );
+    let javap = Command::new("javap")
+        .arg("-classpath")
+        .arg(&classpath)
+        .arg("example.Reader")
+        .output()
+        .expect("inspect Scala-rebuilt Reader method descriptor");
+    assert!(javap.status.success());
+    assert!(
+        String::from_utf8_lossy(&javap.stdout).contains("read(example.Counter)"),
+        "compiled Reader has unexpected signature: {}",
+        String::from_utf8_lossy(&javap.stdout)
+    );
+    fs::remove_dir_all(temporary).unwrap();
+}
+
+#[test]
 fn a_bad_second_class_rejects_the_entire_batch_with_class_context() {
     let source = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\nclass Gauge(start: Int):\n  private val reading: Int = start\n  def get(): Int = reading\n";
     assert!(matches!(
@@ -435,18 +800,10 @@ fn jvm_failure_in_second_class_is_attributed_to_that_source_class() {
         |_| panic!("an invalid Gauge method must reject the whole batch"),
     )
     .expect_err("256 instance parameters exceed the JVM slot limit");
-    let PairedPlanError::BatchClass {
-        class_index,
-        declaration_index,
-        phase,
-        reason,
-    } = error
-    else {
-        panic!("expected a class-specific JVM validation error, got {error:?}");
+    let PairedPlanError::BatchUnit { phase, reason } = error else {
+        panic!("expected complete-unit JVM validation error, got {error:?}");
     };
-    assert_eq!(class_index, 1);
-    assert!(declaration_index > 0);
-    assert_eq!(phase, "JVM class-plan validation");
+    assert_eq!(phase, "complete JVM unit validation");
     assert!(reason.contains("TooManyParameterSlots"));
 }
 
@@ -524,3 +881,6 @@ fn unsupported_immutable_field_is_rejected_from_source_facts() {
         ))
     ));
 }
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;

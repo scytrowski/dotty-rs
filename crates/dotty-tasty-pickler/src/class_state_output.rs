@@ -274,6 +274,42 @@ impl ValidatedClassStatePlan<'_, '_> {
             limits.projection,
         )?;
         context.reserve_declaration(p.class)?;
+        for member in p.members {
+            let ClassMemberPicklePlan::Method { symbol, .. } = *member else {
+                continue;
+            };
+            let signature_id = complete_type(p.store, symbol)?;
+            let parameters = match p.store.types.try_get(signature_id) {
+                Some(Type::Method(signature)) => signature.params.as_slice(),
+                Some(_) => &[],
+                None => return Err(PickleError::InvalidType { ty: signature_id }),
+            };
+            for parameter in parameters {
+                let Some(Type::TypeRef {
+                    target: dotty_core::TypeRefTarget::Symbol(class),
+                    ..
+                }) = p.store.types.try_get(parameter.ty)
+                else {
+                    continue;
+                };
+                if !p.typed_bindings.planned_class_symbols().contains(class) || *class == p.class {
+                    continue;
+                }
+                let Some(dotty_core::SourceDefinition::Canonical { source, tree }) =
+                    p.source_index.definition_of(*class)
+                else {
+                    return Err(PickleError::SourceDefinition { symbol: *class });
+                };
+                if source != p.source.id {
+                    return Err(PickleError::SourceDefinition { symbol: *class });
+                }
+                context.register_planned_source_class(
+                    *class,
+                    tree,
+                    p.typed_bindings.planned_class_symbols(),
+                )?;
+            }
+        }
         context.reserve_declaration(p.constructor.symbol)?;
         for (source_clause, symbols) in constructor_definition
             .value_param_clauses
@@ -615,9 +651,21 @@ impl ValidatedClassStatePlan<'_, '_> {
                             };
                             let primitive_parameter =
                                 expected == p.definitions.int || expected == p.definitions.boolean;
+                            let planned_class_parameter = match p.store.types.try_get(expected) {
+                                Some(Type::TypeRef {
+                                    target: dotty_core::TypeRefTarget::Symbol(class),
+                                    ..
+                                }) if *class != p.class
+                                    && p.typed_bindings.planned_class_symbols().contains(class) =>
+                                {
+                                    Some(*class)
+                                }
+                                _ => None,
+                            };
                             if parameter_ty != expected
-                                || !primitive_parameter
-                                || !matches!(p.store.types.try_get(expected), Some(Type::TypeRef { prefix, target: dotty_core::TypeRefTarget::Symbol(_) }) if *prefix == p.definitions.no_prefix)
+                                || (!primitive_parameter && planned_class_parameter.is_none())
+                                || (primitive_parameter
+                                    && !matches!(p.store.types.try_get(expected), Some(Type::TypeRef { prefix, target: dotty_core::TypeRefTarget::Symbol(_) }) if *prefix == p.definitions.no_prefix))
                                 || parameter_record.kind != SymbolKind::Parameter
                                 || parameter_record.owner != Some(symbol)
                                 || parameter_record.origin != SymbolOrigin::Source(p.source.id)
@@ -631,19 +679,33 @@ impl ValidatedClassStatePlan<'_, '_> {
                                     != parameter.name.as_name()
                                 || parameter_types[signature_index].erased
                                 || parameter_types[signature_index].varargs
-                                || p.store.names.try_resolve(parameter_type.name.text())
-                                    != Some(if expected == p.definitions.int {
-                                        "Int"
-                                    } else {
-                                        "Boolean"
-                                    })
+                                || (primitive_parameter
+                                    && p.store.names.try_resolve(parameter_type.name.text())
+                                        != Some(if expected == p.definitions.int {
+                                            "Int"
+                                        } else {
+                                            "Boolean"
+                                        }))
+                                || planned_class_parameter.is_some_and(|class| {
+                                    p.store.symbols.get(class).name != parameter_type.name
+                                })
                             {
                                 return Err(PickleError::UnsupportedTypeReference { ty: expected });
                             }
                             signature_index += 1;
                             parameter_ids.push(parameter_symbol);
                             let parameter_name = context.intern_name(*parameter.name.as_name())?;
-                            let parameter_type = context.primitive_type_syntax(expected)?;
+                            let parameter_type = if primitive_parameter {
+                                context.primitive_type_syntax(expected)?
+                            } else {
+                                let name = context.intern_name(parameter_type.name)?;
+                                let child = context.lower_type(expected)?;
+                                context.wire_node(AstNode::NatAst {
+                                    tag: IDENTTPT_TAG,
+                                    value: AstOperand::Nat(name),
+                                    child,
+                                })?
+                            };
                             context.bind_declaration(
                                 parameter_symbol,
                                 AstNode::Length {
