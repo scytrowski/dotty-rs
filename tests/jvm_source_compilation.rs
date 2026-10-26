@@ -2,6 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use dotty::jvm_tasty_cross_class::{
+    CrossClassFactoryProofInput, CrossClassFactoryProofKind, validate_cross_class_factory_proof,
+};
 use dotty_classfile::access_flags::{ACC_PRIVATE, ACC_PUBLIC};
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
@@ -10,8 +13,8 @@ use dotty_classfile::reader::Reader;
 use dotty_core::ast::{AstArena, DefDef, Template, TreeKind, Typed, Untyped};
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
-    Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolId, SymbolKind,
-    TreeId, Visibility,
+    Definitions, Packages, SemanticStore, SourceId, SourceText, SourceTypedIndex, SymbolFlags,
+    SymbolId, SymbolKind, TreeId, Visibility,
 };
 use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
@@ -39,7 +42,9 @@ type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
 type SourceSemanticObserver<'observer> = dyn for<'a> FnMut(
         &AstArena<Untyped>,
+        TreeId<Untyped>,
         &SourceSemanticIndex,
+        &SourceTypedIndex,
         &mut JvmCompilationUnit<'a>,
         &Definitions,
     ) + 'observer;
@@ -691,7 +696,14 @@ fn compile_source_batch_with_typer_failure_observer(
         classes: plans,
     };
     if let Some(observe) = observe_source.as_mut() {
-        observe(&parsed.ast, &index, &mut unit, &definitions);
+        observe(
+            &parsed.ast,
+            parsed.root,
+            &index,
+            typer.source_typed_index(),
+            &mut unit,
+            &definitions,
+        );
     }
     if let Some(observe) = observe.as_mut() {
         observe(&mut unit, &definitions);
@@ -1602,7 +1614,7 @@ fn canonical_long_descriptors_and_category_two_parameter_slots_are_projected() {
         output.path(),
         SourceId::from_index(1514),
         SourceUnitCardinality::ExactlyOne,
-        &mut |_, _, unit, definitions| {
+        &mut |_, _, _, _, unit, definitions| {
             observed = true;
             let class = audit_class_named(unit, "LongDescriptors");
             let metadata = unit
@@ -2252,7 +2264,9 @@ class NumericMetadata(initialF: Float, initialD: Double):
     let output = TestOutputDirectory::new("float-double-metadata-only");
     let mut observed = false;
     let mut observe = |_: &AstArena<Untyped>,
+                       _: TreeId<Untyped>,
                        _: &SourceSemanticIndex,
+                       _: &SourceTypedIndex,
                        unit: &mut JvmCompilationUnit<'_>,
                        definitions: &Definitions| {
         observed = true;
@@ -3930,7 +3944,7 @@ fn long_category_two_audit_emits_fields_and_control_flow() {
         output.path(),
         SourceId::from_index(1513),
         SourceUnitCardinality::AtLeastTwo,
-        &mut |_, _, unit, definitions| {
+        &mut |_, _, _, _, unit, definitions| {
             observed = true;
             let metadata = unit
                 .metadata(definitions)
@@ -4791,7 +4805,9 @@ fn object_graph_construction_audit_emits_after_frontend_identity_validation() {
     let mut observed = false;
     let source_id = SourceId::from_index(1492);
     let mut inspect = |ast: &AstArena<Untyped>,
+                       _: TreeId<Untyped>,
                        index: &SourceSemanticIndex,
+                       _: &SourceTypedIndex,
                        unit: &mut JvmCompilationUnit<'_>,
                        definitions: &Definitions| {
         observed = true;
@@ -5634,7 +5650,7 @@ class TokenChild extends TokenParent(7)
         output.path(),
         SourceId::from_index(1611),
         SourceUnitCardinality::AtLeastTwo,
-        &mut |_, _, unit, definitions| {
+        &mut |_, _, _, _, unit, definitions| {
             observed_metadata = Some(
                 unit.metadata(definitions)
                     .expect("validated hierarchy metadata retains effective accessors"),
@@ -6089,7 +6105,7 @@ fn full_inherited_accessor_hierarchy_verifies_end_to_end_on_jvm() {
         output.path(),
         SourceId::from_index(1615),
         SourceUnitCardinality::AtLeastTwo,
-        &mut |_, _, unit, definitions| {
+        &mut |_, _, _, _, unit, definitions| {
             let base_class = audit_class_named(unit, "Base");
             let middle_class = audit_class_named(unit, "Middle");
             let leaf_class = audit_class_named(unit, "Leaf");
@@ -6644,7 +6660,7 @@ fn effective_accessor_dispatch_projects_constructor_body_and_long_accessors_read
         output.path(),
         SourceId::from_index(1609),
         SourceUnitCardinality::AtLeastTwo,
-        &mut |_, _, unit, definitions| {
+        &mut |_, _, _, _, unit, definitions| {
             observed_metadata = Some(
                 unit.metadata(definitions)
                     .expect("read-only metadata projects the bounded accessor hierarchy"),
@@ -11930,7 +11946,9 @@ fn constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends(
     let source_id = SourceId::from_index(1559);
     let mut checked_source_bindings = false;
     let mut observe_source = |ast: &AstArena<Untyped>,
+                              _source_root: TreeId<Untyped>,
                               index: &SourceSemanticIndex,
+                              _source_typed_index: &SourceTypedIndex,
                               unit: &mut JvmCompilationUnit<'_>,
                               definitions: &Definitions| {
         let metadata = unit
@@ -13318,6 +13336,12 @@ fn factory_return_and_identity_control_reach_the_real_jvm_source_pipeline() {
             "create",
         ),
         (
+            FACTORY_CROSS_CLASS_SOURCE,
+            SourceId::from_index(1690),
+            "CounterFactory",
+            "identity",
+        ),
+        (
             IDENTITY_CROSS_CLASS_SOURCE,
             SourceId::from_index(1691),
             "CounterIdentity",
@@ -13327,9 +13351,11 @@ fn factory_return_and_identity_control_reach_the_real_jvm_source_pipeline() {
         let output = TestOutputDirectory::new("factory-cross-class-source");
         let mut observed = false;
         let mut observe_source = |ast: &AstArena<Untyped>,
+                                  source_root: TreeId<Untyped>,
                                   index: &SourceSemanticIndex,
+                                  source_typed_index: &SourceTypedIndex,
                                   unit: &mut JvmCompilationUnit<'_>,
-                                  _definitions: &Definitions| {
+                                  definitions: &Definitions| {
             observed = true;
             let counter = audit_class_named(unit, "Counter");
             let owner = audit_class_named(unit, class_name);
@@ -13367,6 +13393,202 @@ fn factory_return_and_identity_control_reach_the_real_jvm_source_pipeline() {
                 .symbol_at(source_id, parameter_tree)
                 .expect("method parameter has its canonical source symbol");
             assert_eq!(unit.store.symbols.get(parameter).owner, Some(method));
+            let proof = validate_cross_class_factory_proof(
+                CrossClassFactoryProofInput {
+                    source_id,
+                    source_root,
+                    store: unit.store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: unit.typed_ast,
+                    source_index: index,
+                    source_typed_index,
+                    jvm_unit: unit,
+                },
+                if method_name == "create" {
+                    CrossClassFactoryProofKind::Factory
+                } else {
+                    CrossClassFactoryProofKind::Identity
+                },
+            )
+            .expect("read-only canonical factory/identity proof validates");
+            assert_eq!(proof.source_id(), source_id);
+            assert_eq!(proof.owner_class(), owner);
+            assert_eq!(proof.method(), method);
+            assert_eq!(proof.method_formal(), parameter);
+            assert_eq!(proof.typed_rhs(), typed_root);
+            assert_eq!(
+                proof.descriptor(),
+                if method_name == "create" {
+                    "(I)Lexample/Counter;"
+                } else {
+                    "(Lexample/Counter;)Lexample/Counter;"
+                }
+            );
+            if method_name == "create" {
+                let empty_typed_index = SourceTypedIndex::new();
+                let wrong_mapping = validate_cross_class_factory_proof(
+                    CrossClassFactoryProofInput {
+                        source_id,
+                        source_root,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: unit.typed_ast,
+                        source_index: index,
+                        source_typed_index: &empty_typed_index,
+                        jvm_unit: unit,
+                    },
+                    CrossClassFactoryProofKind::Factory,
+                )
+                .err()
+                .expect("missing source-to-typed mapping is rejected");
+                assert!(matches!(
+                    wrong_mapping,
+                    dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::TypedBinding(_)
+                ));
+
+                let TreeKind::PackageDef(package) = &ast.get(source_root).kind else {
+                    panic!("factory source root remains a package");
+                };
+                let mut missing_scopes = SourceSemanticIndex::new();
+                for class_tree in &package.stats {
+                    let class = index
+                        .symbol_at(source_id, *class_tree)
+                        .expect("top-level source class has its canonical symbol");
+                    missing_scopes
+                        .record_symbol(source_id, *class_tree, class)
+                        .expect("canonical class identity can be replayed");
+                }
+                let missing_scope = validate_cross_class_factory_proof(
+                    CrossClassFactoryProofInput {
+                        source_id,
+                        source_root,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: unit.typed_ast,
+                        source_index: &missing_scopes,
+                        source_typed_index,
+                        jvm_unit: unit,
+                    },
+                    CrossClassFactoryProofKind::Factory,
+                )
+                .err()
+                .expect("canonical class mappings without declaration scopes are rejected");
+                assert!(matches!(
+                    missing_scope,
+                    dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::SourceIdentity(_)
+                ));
+
+                let stale_source = validate_cross_class_factory_proof(
+                    CrossClassFactoryProofInput {
+                        source_id: SourceId::from_index(source_id.index() + 1),
+                        source_root,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: unit.typed_ast,
+                        source_index: index,
+                        source_typed_index,
+                        jvm_unit: unit,
+                    },
+                    CrossClassFactoryProofKind::Factory,
+                )
+                .err()
+                .expect("a mismatched source identity is rejected");
+                assert!(matches!(
+                    stale_source,
+                    dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::SourceIdentity(_)
+                ));
+
+                let missing_counter = JvmCompilationUnit {
+                    store: unit.store,
+                    typed_ast: unit.typed_ast,
+                    classes: unit
+                        .classes
+                        .iter()
+                        .filter(|plan| plan.class != counter)
+                        .cloned()
+                        .collect(),
+                };
+                let unplanned_target = validate_cross_class_factory_proof(
+                    CrossClassFactoryProofInput {
+                        source_id,
+                        source_root,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: unit.typed_ast,
+                        source_index: index,
+                        source_typed_index,
+                        jvm_unit: &missing_counter,
+                    },
+                    CrossClassFactoryProofKind::Factory,
+                )
+                .err()
+                .expect("an unplanned Counter target is rejected");
+                assert!(matches!(
+                    unplanned_target,
+                    dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::JvmPlan(_)
+                ));
+
+                let mut missing_method_plans = unit.classes.clone();
+                let owner_plan = missing_method_plans
+                    .iter_mut()
+                    .find(|plan| plan.class == owner)
+                    .expect("factory owner plan exists");
+                owner_plan
+                    .methods
+                    .retain(|candidate| candidate.method != method);
+                let missing_method_unit = JvmCompilationUnit {
+                    store: unit.store,
+                    typed_ast: unit.typed_ast,
+                    classes: missing_method_plans,
+                };
+                let unplanned_method = validate_cross_class_factory_proof(
+                    CrossClassFactoryProofInput {
+                        source_id,
+                        source_root,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: unit.typed_ast,
+                        source_index: index,
+                        source_typed_index,
+                        jvm_unit: &missing_method_unit,
+                    },
+                    CrossClassFactoryProofKind::Factory,
+                )
+                .err()
+                .expect("a source method absent from the JVM plan is rejected");
+                assert!(matches!(
+                    unplanned_method,
+                    dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::JvmPlan(_)
+                ));
+            }
+            if class_name == "CounterIdentity" {
+                let wrong_source_kind = validate_cross_class_factory_proof(
+                    CrossClassFactoryProofInput {
+                        source_id,
+                        source_root,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: unit.typed_ast,
+                        source_index: index,
+                        source_typed_index,
+                        jvm_unit: unit,
+                    },
+                    CrossClassFactoryProofKind::Factory,
+                )
+                .err()
+                .expect("a factory proof rejects the standalone identity-control owner");
+                assert!(matches!(
+                    wrong_source_kind,
+                    dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::SourceShape(_)
+                ));
+            }
             if method_name == "create" {
                 let counter_tree = ast
                     .iter()
@@ -13466,12 +13688,44 @@ fn factory_return_and_identity_control_reach_the_real_jvm_source_pipeline() {
 #[test]
 fn private_factory_constructor_is_rejected_by_jvm_call_site_visibility() {
     let output = TestOutputDirectory::new("private-factory-constructor-probe");
-    let error = compile_source_classes(
-        "package example\nclass Counter private (start: Int)\nclass CounterFactory:\n  def create(seed: Int): Counter = new Counter(seed)\n",
+    let source = "package example\nclass Counter private (start: Int)\nclass CounterFactory:\n  def create(seed: Int): Counter = new Counter(seed)\n";
+    let source_id = SourceId::from_index(1692);
+    let mut proof_error = None;
+    let mut observe = |ast: &AstArena<Untyped>,
+                       source_root: TreeId<Untyped>,
+                       source_index: &SourceSemanticIndex,
+                       source_typed_index: &SourceTypedIndex,
+                       unit: &mut JvmCompilationUnit<'_>,
+                       definitions: &Definitions| {
+        proof_error = validate_cross_class_factory_proof(
+            CrossClassFactoryProofInput {
+                source_id,
+                source_root,
+                store: unit.store,
+                definitions,
+                source_ast: ast,
+                typed_ast: unit.typed_ast,
+                source_index,
+                source_typed_index,
+                jvm_unit: unit,
+            },
+            CrossClassFactoryProofKind::Factory,
+        )
+        .err();
+    };
+    let error = compile_source_batch_with_source_observer(
+        source,
         "PrivateFactory.scala",
         output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe,
     )
     .unwrap_err();
+    assert!(matches!(
+        proof_error,
+        Some(dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::SemanticIdentity(_))
+    ));
     assert!(matches!(
         error,
         PipelineFailure::Codegen(JvmCodegenError::InaccessibleJvmConstructor { .. })
@@ -20655,7 +20909,9 @@ fn public_body_accessors_initialize_and_emit_verified_getters_and_setters() {
     let output = TestOutputDirectory::new("public-body-field-initialization");
     let mut observed = false;
     let mut observe = |ast: &AstArena<Untyped>,
+                       _: TreeId<Untyped>,
                        index: &SourceSemanticIndex,
+                       _: &SourceTypedIndex,
                        unit: &mut JvmCompilationUnit<'_>,
                        definitions: &Definitions| {
         observed = true;
