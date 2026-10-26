@@ -39,9 +39,9 @@ impl std::error::Error for CrossClassMethodRefError {}
 /// Borrowed inputs from one frontend/JVM planning session.
 ///
 /// The source root must be the package tree that owns the two planned classes.
-/// All IDs are interpreted only through these borrowed session stores and
-/// indexes; equal numeric IDs from a different session are not accepted as
-/// evidence.
+/// All IDs are interpreted through these borrowed session stores and indexes.
+/// Arena IDs do not authenticate their originating arena, so callers must
+/// supply every input from the same frontend session.
 pub struct CrossClassMethodRefInput<'session> {
     /// Source identity used by the parser and namer.
     pub source_id: SourceId,
@@ -195,6 +195,8 @@ pub fn validate_cross_class_method_ref(
             "source declarations must be Counter followed by Reader",
         ));
     }
+    validate_plain_class_source(source_ast, *counter_tree)?;
+    validate_plain_class_source(source_ast, *reader_tree)?;
     let counter_class = source_index.symbol_at(source_id, *counter_tree).ok_or(
         CrossClassMethodRefError::SourceIdentity("Counter has no canonical source symbol"),
     )?;
@@ -407,7 +409,7 @@ pub fn validate_cross_class_method_ref(
         ))?;
     let counter_method_plan = unique_class_plan(jvm_unit, counter_class, "Counter")?;
     let reader_method_plan = unique_class_plan(jvm_unit, reader_class, "Reader")?;
-    validate_planned_method(
+    let counter_get_plan = validate_planned_method(
         jvm_unit,
         counter_method_plan,
         counter_get,
@@ -423,6 +425,18 @@ pub fn validate_cross_class_method_ref(
         Some(typed_rhs),
         "Reader.read",
     )?;
+    let descriptor = counter_get_plan
+        .descriptor(store, counter_class, definitions)
+        .map_err(|_| {
+            CrossClassMethodRefError::JvmPlan(
+                "Counter.get JVM descriptor cannot be derived from its canonical plan",
+            )
+        })?;
+    if descriptor.as_str() != "()I" {
+        return Err(CrossClassMethodRefError::JvmPlan(
+            "Counter.get JVM plan does not have the exact ()I descriptor",
+        ));
+    }
 
     Ok(ValidatedCrossClassMethodRef {
         _store: store,
@@ -456,6 +470,38 @@ fn validate_canonical_definition(
     {
         return Err(CrossClassMethodRefError::SourceIdentity(
             "symbol is not the canonical identity for this exact source tree",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_plain_class_source(
+    source_ast: &AstArena<Untyped>,
+    class_tree: TreeId<Untyped>,
+) -> Result<(), CrossClassMethodRefError> {
+    let TreeKind::TypeDef(definition) = &source_ast.get(class_tree).kind else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "top-level declaration must be an ordinary class",
+        ));
+    };
+    let TreeKind::Template(template) = &source_ast.get(definition.rhs).kind else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "class declaration must have an ordinary template",
+        ));
+    };
+    if !template.parents.is_empty() || template.self_val.is_some() {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "cross-class reference proof excludes explicit parents and self types",
+        ));
+    }
+    let TreeKind::DefDef(constructor) = &source_ast.get(template.constructor).kind else {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "class primary constructor must be a source method",
+        ));
+    };
+    if !constructor.type_params.is_empty() {
+        return Err(CrossClassMethodRefError::SourceShape(
+            "generic classes are outside the cross-class reference proof",
         ));
     }
     Ok(())
@@ -600,14 +646,14 @@ fn unique_class_plan<'a>(
     Ok(plan)
 }
 
-fn validate_planned_method(
+fn validate_planned_method<'a>(
     jvm_unit: &JvmCompilationUnit<'_>,
-    class_plan: &JvmClassPlan,
+    class_plan: &'a JvmClassPlan,
     method: SymbolId,
     parameters: &[SymbolId],
     body: Option<TreeId<Typed>>,
     label: &'static str,
-) -> Result<(), CrossClassMethodRefError> {
+) -> Result<&'a dotty_jvm::JvmMethodPlan, CrossClassMethodRefError> {
     let total_occurrences = jvm_unit
         .classes
         .iter()
@@ -640,5 +686,5 @@ fn validate_planned_method(
             "planned method identity, formal order, or typed body does not match source",
         ));
     }
-    Ok(())
+    Ok(plan)
 }

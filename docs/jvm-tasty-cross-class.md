@@ -65,10 +65,13 @@ semantic store, typed arena, and complete JVM unit. It verifies the exact
 `Counter.get(): Int`, typed `Select` target, receiver `TermRef`,
 source-to-typed roots, and matching JVM method plans. The proof exposes the
 canonical class, method, formal, and typed-root IDs plus descriptor `()I`;
-its borrows keep those identities tied to the session. It rejects a missing
-planned class, a substituted method plan, or a JVM unit from another semantic
-store before any artifact operation. This proves source/typed provenance only
-and does not enable paired TASTy signature or call-body encoding.
+its borrows keep those identities tied to the supplied session. As with other
+arena-backed IDs, callers must pass the source index, typed bindings, ASTs, and
+JVM unit from one session; equal numeric IDs cannot authenticate a foreign
+same-slot arena. It rejects a missing planned class, a substituted method
+plan, or a JVM unit from another semantic store before any artifact operation.
+This proves source/typed provenance only and does not enable paired TASTy
+signature or call-body encoding.
 
 The formal completes to `TypeRef(SymbolId(39))`. Typing the body succeeds. Its
 typed root maps from the exact source RHS through `SourceTypedIndex`; the
