@@ -1043,6 +1043,70 @@ impl<'a> EncodingContext<'a> {
         })
     }
 
+    /// Lowers the single supported same-source external call shape. The
+    /// receiver and owner type are already validated by the source/typed plan;
+    /// this boundary still checks the canonical sibling and exact signature.
+    pub(crate) fn same_source_method_select_in(
+        &mut self,
+        class: SymbolId,
+        method: SymbolId,
+        receiver: AstLabel,
+        owner_type: TypeId,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|c| {
+            if !c.same_source_external.contains(&class) {
+                return Err(reference(class, ReferenceError::NotRegistered));
+            }
+            let class_record = c.symbol(class)?;
+            let method_record = c.symbol(method)?;
+            if class_record.kind != SymbolKind::Class
+                || method_record.kind != SymbolKind::Method
+                || method_record.owner != Some(class)
+                || method_record.origin != dotty_core::SymbolOrigin::Source(c.source)
+                || method_record.visibility != dotty_core::Visibility::Public
+                || !method_record.flags.is_empty()
+                || !method_record.annotations.is_empty()
+                || c.source_index.definition_of(method).is_none()
+            {
+                return Err(reference(method, ReferenceError::Metadata));
+            }
+            let SymbolInfo::Complete(signature_type) = method_record.info else {
+                return Err(PickleError::IncompleteSymbol {
+                    symbol: method,
+                    info: method_record.info,
+                });
+            };
+            let Type::Method(signature) = c.ty(signature_type)? else {
+                return Err(PickleError::MalformedType {
+                    ty: signature_type,
+                    role: crate::TypeRole::Parameter,
+                });
+            };
+            if signature.kind != dotty_core::MethodKind::Plain
+                || !signature.params.is_empty()
+                || signature.result != c.definitions.int
+            {
+                return Err(reference(method, ReferenceError::Metadata));
+            }
+            let method_name = c.utf8(c.text(method_record.name.text())?)?;
+            let scala = c.utf8("scala")?;
+            let int = c.utf8("Int")?;
+            let int_type = c.intern(NameKey::Qualified(scala, int))?;
+            let signed = c.intern(NameKey::SignedMany(method_name, int_type, Vec::new()))?;
+            let owner_type = c.lower_same_source_class_type(class, owner_type)?;
+            c.wire
+                .push(AstNode::Length {
+                    tag: SELECTIN_TAG,
+                    fields: vec![
+                        AstField::Nat(signed),
+                        AstField::Tree(receiver),
+                        AstField::Tree(owner_type),
+                    ],
+                })
+                .map_err(construction)
+        })
+    }
+
     fn same_class_method_select_inner(
         &mut self,
         class: SymbolId,
@@ -1308,6 +1372,40 @@ impl<'a> EncodingContext<'a> {
     /// Lowers a semantic type, memoized by exact TypeId, never by spelling.
     pub fn lower_type(&mut self, ty: TypeId) -> Result<AstLabel, PickleError> {
         self.run(|c| c.lower(ty, 0))
+    }
+
+    fn lower_same_source_class_type(
+        &mut self,
+        class: SymbolId,
+        fallback: TypeId,
+    ) -> Result<AstLabel, PickleError> {
+        match self.ty(fallback)? {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == class => {}
+            _ => return Err(reference(class, ReferenceError::Owner)),
+        }
+        let shared = self.types.iter().find_map(|(&ty, &label)| {
+            matches!(
+                self.store.types.try_get(ty),
+                Some(Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(symbol),
+                }) if *symbol == class
+            )
+            .then_some(label)
+        });
+        if let Some(target) = shared {
+            self.wire
+                .push(AstNode::Reference {
+                    tag: SHAREDTYPE_TAG,
+                    target,
+                })
+                .map_err(construction)
+        } else {
+            self.lower(fallback, 0)
+        }
     }
     fn lower(&mut self, ty: TypeId, depth: usize) -> Result<AstLabel, PickleError> {
         self.charge(1)?;

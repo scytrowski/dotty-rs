@@ -12,6 +12,7 @@ use dotty_tasty_pickler::{
 const COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
 const CROSS_CLASS_READER_LITERAL: &str =
     include_str!("fixtures/jvm_tasty_cross_class/ReaderLiteral.scala");
+const CROSS_CLASS_READER_CALL: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader.scala");
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 struct WithoutPlannedClasses<'a>(&'a dyn SourceTypedBindings);
@@ -23,6 +24,30 @@ impl SourceTypedBindings for WithoutPlannedClasses<'_> {
         tree: dotty_core::TreeId<dotty_core::Untyped>,
     ) -> Option<dotty_core::TreeId<dotty_core::Typed>> {
         self.0.typed_at(source, tree)
+    }
+
+    fn local_value_bindings(
+        &self,
+        source: dotty_core::SourceId,
+        method: SymbolId,
+    ) -> Vec<dotty_tasty_pickler::LocalValueBinding> {
+        self.0.local_value_bindings(source, method)
+    }
+}
+
+struct WithoutPlannedMethods<'a>(&'a dyn SourceTypedBindings);
+
+impl SourceTypedBindings for WithoutPlannedMethods<'_> {
+    fn typed_at(
+        &self,
+        source: dotty_core::SourceId,
+        tree: dotty_core::TreeId<dotty_core::Untyped>,
+    ) -> Option<dotty_core::TreeId<dotty_core::Typed>> {
+        self.0.typed_at(source, tree)
+    }
+
+    fn planned_class_symbols(&self) -> &[SymbolId] {
+        self.0.planned_class_symbols()
     }
 
     fn local_value_bindings(
@@ -552,6 +577,46 @@ fn same_batch_class_formal_emits_reader_owned_counter_type_without_cloning_count
             if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
                 run_reader_signature_oracle(output.bytes());
             }
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn cross_class_call_requires_the_exact_planned_target_method() {
+    with_paired_jvm_tasty_batch_plan(
+        CROSS_CLASS_READER_CALL,
+        "tests/fixtures/jvm_tasty_cross_class/Reader.scala",
+        SourceId::from_index(1674),
+        |batch| {
+            let source_plan = batch.classes[1].tasty_plan.plan();
+            let without_methods = WithoutPlannedMethods(source_plan.typed_bindings);
+            let plan = ClassStatePicklePlan {
+                store: source_plan.store,
+                definitions: source_plan.definitions,
+                source_ast: source_plan.source_ast,
+                typed_ast: source_plan.typed_ast,
+                source_index: source_plan.source_index,
+                typed_bindings: &without_methods,
+                source: source_plan.source.clone(),
+                class: source_plan.class,
+                class_tree: source_plan.class_tree,
+                constructor: source_plan.constructor.clone(),
+                members: source_plan.members,
+            };
+            let Err(error) = plan.validate().unwrap().pickle() else {
+                panic!("missing planned method must be rejected");
+            };
+            assert!(
+                matches!(
+                    error,
+                    PickleError::Reference {
+                        reason: dotty_tasty_pickler::ReferenceError::NotRegistered,
+                        ..
+                    }
+                ),
+                "unexpected rejection: {error:?}"
+            );
         },
     )
     .unwrap();

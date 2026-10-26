@@ -1,3 +1,7 @@
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::reader::Reader as ClassReader;
@@ -52,6 +56,97 @@ const COUNTER_UUID: [u8; 16] = [
 const READER_UUID: [u8; 16] = [
     0x00, 0x70, 0xa0, 0x42, 0xf9, 0xd1, 0xe6, 0xef, 0x00, 0x95, 0x57, 0xa1, 0xd0, 0x2e, 0x6a, 0x1c,
 ];
+const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
+
+fn run_cross_class_call_oracle(reader_tasty: &[u8]) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala root for explicit oracle"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let version = Command::new(&compiler)
+        .arg("-version")
+        .output()
+        .expect("query pinned Scala compiler version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"));
+
+    let temp_root = std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir);
+    let temporary = temp_root.join(format!("dotty-issue-1674-oracle-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temporary);
+    let oracle = temporary.join("oracle");
+    let candidate = temporary.join("candidate/example");
+    let compiled = temporary.join("compiled");
+    fs::create_dir_all(&oracle).unwrap();
+    fs::create_dir_all(&candidate).unwrap();
+    fs::create_dir_all(&compiled).unwrap();
+    let source_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/jvm_tasty_cross_class/Reader.scala");
+    let oracle_compile = Command::new(&compiler)
+        .arg("-d")
+        .arg(&oracle)
+        .arg(&source_path)
+        .output()
+        .expect("compile matching Counter with pinned Scala");
+    assert!(
+        oracle_compile.status.success(),
+        "Scala fixture compile failed: {}",
+        String::from_utf8_lossy(&oracle_compile.stderr)
+    );
+    for artifact in ["Counter.class", "Counter.tasty"] {
+        fs::copy(
+            oracle.join("example").join(artifact),
+            candidate.join(artifact),
+        )
+        .unwrap();
+    }
+    fs::write(candidate.join("Reader.tasty"), reader_tasty).unwrap();
+    let from_tasty = Command::new(&compiler)
+        .arg("-from-tasty")
+        .arg("-classpath")
+        .arg(temporary.join("candidate"))
+        .arg("-d")
+        .arg(&compiled)
+        .arg(candidate.join("Reader.tasty"))
+        .output()
+        .expect("read Rust-produced Reader.tasty with pinned Scala");
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected cross-class call: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    let javap = Command::new("javap")
+        .arg("-classpath")
+        .arg(format!(
+            "{}:{}",
+            compiled.display(),
+            temporary.join("candidate").display()
+        ))
+        .args(["-p", "-s", "example.Reader"])
+        .output()
+        .expect("inspect Scala-rebuilt Reader class");
+    assert!(javap.status.success());
+    let output = String::from_utf8_lossy(&javap.stdout);
+    assert!(output.contains("int read(example.Counter)"), "{output}");
+    assert!(
+        output.contains("descriptor: (Lexample/Counter;)I"),
+        "{output}"
+    );
+    let _ = fs::remove_dir_all(temporary);
+}
 
 fn decode_class(bytes: &[u8]) -> ClassFile<'_> {
     let mut reader = ClassReader::new(bytes);
@@ -282,8 +377,8 @@ fn scala_39_oracle_records_reader_jvm_link_and_per_class_tasty_links() {
 }
 
 #[test]
-fn cross_class_call_remains_rejected_at_tasty_body_validation() {
-    let source_id = SourceId::from_index(1671);
+fn cross_class_call_is_pickled_as_a_bounded_select_in_application() {
+    let source_id = SourceId::from_index(1674);
     let source = SourceText::new(SOURCE).unwrap();
     let scanner = ContextualScanner::new(SOURCE).unwrap();
     assert!(scanner.diagnostics().is_empty());
@@ -828,14 +923,36 @@ fn cross_class_call_remains_rejected_at_tasty_body_validation() {
     );
     drop(typer);
 
-    let batch = with_paired_jvm_tasty_batch_plan(SOURCE, "Reader.scala", source_id, |_| ());
-    assert!(matches!(
-        batch,
-        Err(dotty::jvm_tasty_plan::PairedPlanError::BatchClass {
-            class_index: 1,
-            phase: "JVM/TASTy cross-contract validation",
-            reason,
-            ..
-        }) if reason.contains("Unsupported { feature: BodyExpression")
-    ));
+    with_paired_jvm_tasty_batch_plan(SOURCE, "Reader.scala", source_id, |batch| {
+        let reader = &batch.classes[1];
+        let output = reader
+            .tasty_plan
+            .pickle()
+            .expect("the canonical same-batch Counter.get call is supported");
+        let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+        let package = file
+            .asts()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .decode_package()
+            .unwrap();
+        assert_eq!(
+            package.stats.len(),
+            1,
+            "Reader sidecar has no Counter clone"
+        );
+        let address_index = file.ast_address_index().unwrap();
+        let tags = address_index
+            .iter()
+            .map(|node| node.tag)
+            .collect::<Vec<_>>();
+        assert!(tags.iter().filter(|&&tag| tag == APPLY_TAG).count() >= 1);
+        assert!(tags.contains(&SELECTIN_TAG));
+        assert_eq!(tags.iter().filter(|&&tag| tag == PARAM_TAG).count(), 1);
+        if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+            run_cross_class_call_oracle(output.bytes());
+        }
+    })
+    .expect("the full same-source batch and TASTy cross-contract validates");
 }

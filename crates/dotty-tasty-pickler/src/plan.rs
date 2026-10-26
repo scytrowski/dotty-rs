@@ -48,6 +48,12 @@ pub trait SourceTypedBindings {
         &[]
     }
 
+    /// Canonical methods included in the complete source/JVM/TASTy batch.
+    /// Cross-class body references must resolve to one of these exact symbols.
+    fn planned_method_symbols(&self) -> &[SymbolId] {
+        &[]
+    }
+
     /// Exact source/typed/symbol/scope proofs for method-local value declarations.
     /// Producers that support local values must return the canonical frontend
     /// bindings; the pickler never reconstructs them from names.
