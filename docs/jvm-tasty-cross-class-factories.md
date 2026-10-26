@@ -97,6 +97,27 @@ The sidecar encodes the method body as `APPLY(SELECTin(NEW(Counter)), [seed])`. 
 
 The existing identity control remains separate: `identity(counter: Counter): Counter = counter` emits a direct formal reference and no `NEW` or constructor `APPLY`. Both result forms use the same exact planned class type and remain covered by the pinned Scala consumer checks.
 
+## Rust TASTy reference-field initializer (#1717)
+
+The validated class-state pickler also emits the bounded
+`private val inner: Counter = new Counter(seed)` field initializer when
+`Counter` is a public same-batch class with its accessible primary `(Int)V`
+constructor. `CounterOwner.tasty` owns the `VALDEF` and the actual
+`APPLY(SELECTin(NEW(Counter)), [seed])` tree. The constructor signed name is
+`<init>` with result `example.Counter` and one `scala.Int` term parameter; the
+argument is a direct reference to `CounterOwner.<init>`'s source `seed`
+formal. The owner sidecar does not declare a local copy of `Counter` or its
+constructor.
+
+`paired_tasty_planning_emits_the_canonical_reference_field_new_body` checks
+the complete paired output and decoded field tree. Under the existing strict
+Scala 3.9 consumer job, `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1` also decompiles
+both sidecars, requires `-from-tasty` to rebuild them, and checks the owner
+constructor descriptor. `inner.get()` remains a separate #1718 receiver-call
+increment; mutable, non-private, unplanned, inaccessible-constructor,
+factory-valued, computed-argument, nested, and branch initializers remain
+outside this slice.
+
 ## Linked JVM/TASTy source batch (#1694)
 
 The complete paired producer now retains the validated factory identity proof in `PairedJvmTastyBatchPlan` for the canonical `Counter`/`CounterFactory` source pair. Before returning that plan, it checks that the proof's exact source RHS, typed binding, and JVM method body are the same roots used by the Factory TASTy plan. A mismatch fails batch planning with a typed `BatchUnit` error. The ordinary artifact validator then validates the complete ordered output set and each classfile's link to its own TASTy header before returning the batch.

@@ -2145,6 +2145,39 @@ fn pending_reference_field_proof_rejects_mutable_and_non_direct_initializers() {
         })
     ));
 
+    for (name, source) in [
+        (
+            "private[this] field",
+            SAME_BATCH_REFERENCE_FIELD.replace(
+                "private val inner: Counter",
+                "private[this] val inner: Counter",
+            ),
+        ),
+        (
+            "public field",
+            SAME_BATCH_REFERENCE_FIELD.replace("private val inner: Counter", "val inner: Counter"),
+        ),
+        (
+            "private primary constructor",
+            SAME_BATCH_REFERENCE_FIELD.replace(
+                "class Counter(start: Int)",
+                "class Counter private (start: Int)",
+            ),
+        ),
+        (
+            "computed constructor argument",
+            SAME_BATCH_REFERENCE_FIELD.replace("new Counter(seed)", "new Counter(seed + 1)"),
+        ),
+    ] {
+        let result = with_paired_jvm_tasty_batch_plan(
+            &source,
+            "CounterOwner.scala",
+            SourceId::from_index(1717),
+            |_| (),
+        );
+        assert!(result.is_err(), "{name} must not produce a TASTy batch");
+    }
+
     let factory = "package example\nclass Counter(seed: Int)\nclass CounterFactory:\n  def make(seed: Int): Counter = new Counter(seed)\nclass CounterOwner(seed: Int):\n  private val inner: Counter = new CounterFactory().make(seed)\n  def constant(): Int = 0\n";
     let factory_error = with_paired_jvm_tasty_batch_plan(
         factory,
