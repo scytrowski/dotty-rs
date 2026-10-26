@@ -184,16 +184,62 @@ This matrix combines observed failure-stage probes in the focused tests with the
 | Classfile-only Scala classpath or stale/missing TASTy sidecar | Pinned Scala 3.9 loader rejects the Scala class with the missing-sidecar diagnostic. |
 | TASTy-only Scala classpath | Scala compiler can typecheck; execution cannot load a missing JVM class until `-from-tasty` or another compiler provides it. |
 
-The existing Scala consumer audit also measures missing, misplaced, corrupt, and stale-UUID sidecars: [`jvm-tasty-cross-class.md`](jvm-tasty-cross-class.md) records each observed diagnostic and first stage. #1692 added the reference-result Scala consumer test; #1693 adds the separate constructor decompile/reader gate; #1695 verifies the original Rust classfiles on Java 21. Scala consumption of the Rust-produced linked TASTy and the broader release gate remain separate increments.
+The existing Scala consumer audit also measures missing, misplaced, corrupt, and stale-UUID sidecars: [`jvm-tasty-cross-class.md`](jvm-tasty-cross-class.md) records each observed diagnostic and first stage. #1692 added the reference-result Scala consumer test; #1693 adds the separate constructor decompile/reader gate; #1695 verifies the original Rust classfiles on Java 21. The strict #1696 consumer uses the Rust-produced linked TASTy and original Rust classes.
 
 ## Follow-up dependency map
 
-Issues #1690–#1695 provide the pinned Scala source oracle, canonical source/typed identity proof, reference-result TASTy, bounded constructor application, complete linked batch publication, and strict Java 21 execution of the original Rust classes. Remaining implementation proceeds in this dependency order:
+Issues #1690–#1696 provide the pinned Scala source oracle, canonical source/typed identity proof, reference-result TASTy, bounded constructor application, complete linked batch publication, strict Java 21 execution, and the independent Scala consumer. Issue #1697 closes the release gate by running these layers together and preserving prior consumer gates.
 
-1. **#1696** — Scala 3.9 consumer uses Rust factory TASTy and original Rust classes.
-2. **#1697** — final release gate after the preceding compatibility layers pass.
+1. **#1697** — strict linked factory release gate.
 
-These later increments are not completed by the focused #1693 consumer test; it checks Scala decompilation/rebuild and ABI, not linked Rust factory execution.
+### Strict linked factory release gate (#1697)
+
+The `JVM TASTy factory Scala consumer` workflow is the aggregate gate. It checks out Scala revision `777528f19a58e794c9954a42f433373472ec57f8`, stages that source compiler for the factory constructor `-decompile`/`-from-tasty` oracle, verifies the eight Scala 3.9.0 Maven artifact hashes in [`provenance.json`](../tests/fixtures/tasty_pickler/provenance.json), and uses Temurin JDK `21.0.8+9` with Rust `1.98.1`. It makes the one-class Counter, independent Counter/Gauge, Reader/Counter, and CounterFactory/Counter Scala consumers mandatory. The same strict step runs the paired factory constructor oracle and the semantic pickler `-from-tasty` oracle. A second step sets `DOTTY_CLASSFILE_REQUIRE_JDK=1` and runs the classfile, JVM source, linked artifact publisher, and stateful class JDK gate. Workspace formatting, lint, rustdoc, tests, and frontend dependency checks remain enforced by the general CI workflow.
+
+The mandatory producer input is one Scala source session, [`CounterFactoryRuntime.scala`](../tests/fixtures/jvm_tasty_cross_class_factories/CounterFactoryRuntime.scala); it declares mutable `Counter` state and `CounterFactory.create(seed)` returning `new Counter(seed)`. The independent Scala client is [`FactoryConsumer.scala`](../tests/fixtures/jvm_tasty_cross_class_factories/FactoryConsumer.scala). Their SHA-256 provenance is respectively `d8f39e95d3a8503409eb39e692aa3c0eda3123428ec5a1d7e6cf56b9aa400a00` and `eac836d574ab779256dae5f87161366976d1374e97ee1b0b9596ca71ad913bff`. The Rust test creates two fresh semantic sessions, validates four complete linked artifacts and their ordered paths, and compares all bytes and UUIDs. The publisher rejects duplicate and ASCII case-insensitive colliding paths before staging; malformed sidecars, incorrect links, unsafe paths, preexisting output, and injected staged failures have focused controls. Cleanup assertions cover handled errors only; the publisher does not promise crash-atomic multi-file I/O.
+
+The strict Scala client compiles against only each Rust batch plus Scala runtime libraries. It resolves `Factory.create` and `Counter.get` from their matching Rust TASTy sidecars; classfile-only controls reject those members, while UUID mismatch and missing/corrupt/misplaced sidecar controls fail at the Scala loader. The compiled client runs against the original Rust classfiles with `java -Xverify:all`, reads initial values 7 and 2, mutates the first Counter to 42, leaves the second at 2, and reports 42. The test compares SHA-256 and bytes of both original Rust classfiles before and after Scala/JVM execution. The separate #1695 Java-only harness checks 7, 13, and -42.
+
+Pinned consumer evidence recorded by #1696 for the Rust batch is:
+
+| Class | Class SHA-256 | TASTy SHA-256 | TASTY UUID |
+| --- | --- | --- | --- |
+| `Counter` | `827ae5af5932752105e82918df61cbac2d9fc9eeae4e451b71bc3f5f4641b7c6` | `711b949785f948786bb2a796f646cdaf53121476f0e5ee11db4f556505e2635f` | `00a3d0f572713eac0000000000008193` |
+| `CounterFactory` | `6708e19958c8c8f085a4916ff298c7d1cc4c8e47f406bfb5aa0991a78d7cae38` | `f7ca66c9cd8f3df9467f5dc19686f3958025e6bb5de7b0ba971358198f5dfb32` | `00557cce1fd3e1c10000000000008194` |
+
+This is a bounded compatibility slice: no typer changes, secondary/overloaded or generic constructors, nested/reference-valued constructor arguments, external members, cross-class inheritance, general Scala ABI, public compilation API/CLI, or full hosted Scala corpus claim. Existing unsupported shapes fail through the documented source/TASTy/JVM validation layer rather than being synthesized.
+
+The local aggregate consumer/oracle command uses Scala source revision `777528f19a58e794c9954a42f433373472ec57f8`, Scala compiler artifacts pinned by `provenance.json`, Java `21.0.8`, and Rust `1.98.1`:
+
+```sh
+DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1 \
+DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER=1 \
+DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER=1 \
+DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER=1 \
+DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 \
+SCALA39_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source \
+JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
+COURSIER_MAVEN_ROOT=/home/vdrake6/dotty-rs/target-fs2/coursier/https/repo1.maven.org/maven2 \
+TMPDIR="$PWD/target/tmp" \
+cargo +1.98.1 test -p dotty \
+  --test jvm_tasty_scala_consumer \
+  --test jvm_tasty_multiclass_scala_consumer \
+  --test jvm_tasty_cross_class_scala_consumer \
+  --test jvm_tasty_factory_scala_consumer \
+  --test jvm_tasty_cross_class_factories \
+  --test tasty_source_pickling --locked -- --nocapture
+
+DOTTY_CLASSFILE_REQUIRE_JDK=1 \
+JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
+PATH="/home/vdrake6/.jdks/jdk-21/bin:$PATH" \
+TMPDIR="$PWD/target/tmp" \
+cargo +stable test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  --test jvm_tasty_artifacts \
+  --test jvm_stateful_class_contract --locked -- --nocapture
+```
 
 ## Rust regression commands
 

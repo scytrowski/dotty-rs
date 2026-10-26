@@ -1052,6 +1052,18 @@ fn batch_publisher_rejects_unsafe_or_conflicting_paths_before_writing() {
         })
     ));
     assert!(!duplicate_destination.exists());
+
+    let mut case_collisions = batch_publish_pairs(&batch);
+    case_collisions[1].classfile_path = "example/counter.class";
+    let case_collision_destination = base.path().join("case-collision");
+    assert!(matches!(
+        publish_batch_pairs(&case_collision_destination, &case_collisions, None),
+        Err(BatchPublishError::InvalidManifest {
+            phase: "artifact paths",
+            ..
+        })
+    ));
+    assert!(!case_collision_destination.exists());
     assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
 }
 
