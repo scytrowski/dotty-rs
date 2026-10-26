@@ -103,6 +103,14 @@ The complete paired producer now retains the validated factory identity proof in
 
 `factory_emits_four_complete_linked_artifacts_from_one_source_session` checks the two `.class` and two `.tasty` outputs, class names and order, Java 21 classfile version, TASTy 28.9 headers, per-class UUID links, exact method descriptors, and factory allocation bytecode. It repeats emission in a fresh source session and compares all four byte outputs and both links for determinism. `factory_batch_contract_rejects_wrong_result_abi_target_and_partial_pairs` proves the artifact gate rejects an incorrect result descriptor, allocation targeting the factory itself, and a missing class/TASTy pair. The existing Counter/Gauge and Counter/Reader artifact tests remain unchanged.
 
+## Rust-produced factory runtime (#1695)
+
+`rust_factory_counter_batch_executes_with_verified_reference_returns_on_jdk21` compiles the exact two-class source above in two fresh frontend sessions, compares each class/TASTy pair byte-for-byte, and runs the first session's original Rust classfiles. The temporary runtime classpath contains only `example/Counter.class`, `example/CounterFactory.class`, and their sidecars; `javac` writes the throwing Java harness to a separate classpath root. The test decodes both classfiles and checks their public class names, major version 65, exact declared methods and fields, public constructors, `(I)Lexample/Counter;` factory descriptor, public `(I)V` Counter constructor, and absence of Factory backing fields or `get` methods.
+
+The decoded `Factory.create` Code has `max_stack=3` and `max_locals=2` (`this` in local 0, `seed` in local 1). Its instruction flow is `new Counter; dup; iload_1; invokespecial Counter.<init>:(I)V; areturn`; both allocation and constructor references resolve to the exact `example/Counter` class. `javap -v -p -c` reports the same descriptor and Methodref. JDK execution uses Temurin `21.0.8+9` and `java -Xverify:all`. The harness checks values 7 and 2 from two Factory instances, mutates the first Counter to 13 and then -42 while the second remains 2, and confirms a further `create(0)` returns a fresh initialized instance. Each original classfile's SHA-256 and exact bytes are compared before and after harness compilation/execution, so javac/java cannot silently replace the Rust artifacts.
+
+`factory_batch_contract_rejects_missing_dup_wrong_seed_slot_and_constructor_ref` mutates the emitted class bytes to remove `dup`, load the wrong local, or target the Factory's own Object constructor; each malformed batch is rejected by the artifact contract. Existing source regressions reject wrong constructor arity/type and a private sibling constructor before returning a batch. These checks establish runtime behavior for Rust-produced JVM classes only; Scala's use of the Rust TASTy remains the separate #1696 gate.
+
 ## Scala consumer and classpath controls
 
 [`FactoryClient.scala`](../tests/fixtures/jvm_tasty_cross_class_factories/FactoryClient.scala) and [`IdentityClient.scala`](../tests/fixtures/jvm_tasty_cross_class_factories/IdentityClient.scala) compile with Scala 3.9 against the oracle classfiles and run successfully on Java 21. Additional classpath probes observed:
@@ -139,15 +147,14 @@ This matrix combines observed failure-stage probes in the focused tests with the
 | Classfile-only Scala classpath or stale/missing TASTy sidecar | Pinned Scala 3.9 loader rejects the Scala class with the missing-sidecar diagnostic. |
 | TASTy-only Scala classpath | Scala compiler can typecheck; execution cannot load a missing JVM class until `-from-tasty` or another compiler provides it. |
 
-The existing Scala consumer audit also measures missing, misplaced, corrupt, and stale-UUID sidecars: [`jvm-tasty-cross-class.md`](jvm-tasty-cross-class.md) records each observed diagnostic and first stage. #1692 added the reference-result Scala consumer test; #1693 adds the separate constructor decompile/reader gate. Full linked Rust factory runtime and the broader release gate remain later increments.
+The existing Scala consumer audit also measures missing, misplaced, corrupt, and stale-UUID sidecars: [`jvm-tasty-cross-class.md`](jvm-tasty-cross-class.md) records each observed diagnostic and first stage. #1692 added the reference-result Scala consumer test; #1693 adds the separate constructor decompile/reader gate; #1695 verifies the original Rust classfiles on Java 21. Scala consumption of the Rust-produced linked TASTy and the broader release gate remain separate increments.
 
 ## Follow-up dependency map
 
-Issues #1690–#1694 provide the pinned source/runtime oracle, canonical source/typed identity proof, reference-result TASTy, bounded constructor application, and complete linked batch publication. Remaining implementation proceeds in this dependency order:
+Issues #1690–#1695 provide the pinned Scala source oracle, canonical source/typed identity proof, reference-result TASTy, bounded constructor application, complete linked batch publication, and strict Java 21 execution of the original Rust classes. Remaining implementation proceeds in this dependency order:
 
-1. **#1695** — strict JDK runtime factory client for Rust-produced artifacts.
-2. **#1696** — wider independent Scala consumer and sidecar/classpath behavior.
-3. **#1697** — final release gate after the preceding compatibility layers pass.
+1. **#1696** — Scala 3.9 consumer uses Rust factory TASTy and original Rust classes.
+2. **#1697** — final release gate after the preceding compatibility layers pass.
 
 These later increments are not completed by the focused #1693 consumer test; it checks Scala decompilation/rebuild and ABI, not linked Rust factory execution.
 
@@ -156,6 +163,12 @@ These later increments are not completed by the focused #1693 consumer test; it 
 ```sh
 cargo test --test jvm_tasty_cross_class_factories --locked
 cargo test --test jvm_tasty_plan --test jvm_tasty_contract --test jvm_tasty_artifacts --locked
+DOTTY_CLASSFILE_REQUIRE_JDK=1 \
+JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
+PATH="/home/vdrake6/.jdks/jdk-21/bin:$PATH" \
+cargo test -p dotty --test jvm_tasty_artifacts \
+  rust_factory_counter_batch_executes_with_verified_reference_returns_on_jdk21 \
+  --locked -- --nocapture
 SCALA39_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source \
 DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 \
 JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
