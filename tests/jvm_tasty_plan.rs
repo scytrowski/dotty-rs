@@ -8,7 +8,8 @@ use dotty_core::{
 use dotty_jvm::JvmClassInitializationPlan;
 use dotty_tasty::tasty::*;
 use dotty_tasty_pickler::{
-    ClassMemberPicklePlan, ClassStatePicklePlan, PickleError, SourceTypedBindings,
+    ClassMemberPicklePlan, ClassStatePicklePlan, EncodingContext, PickleError, ProjectionLimits,
+    SourceTypedBindings,
 };
 
 const COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
@@ -19,6 +20,7 @@ const CROSS_CLASS_IDENTITY_RESULT: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterIdentitySource.scala");
 const CROSS_CLASS_FACTORY_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
+const SAME_BATCH_REFERENCE_FIELD: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass CounterOwner(seed: Int):\n  private val inner: Counter = new Counter(seed)\n  def constant(): Int = 0\n";
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 struct WithoutPlannedClasses<'a>(&'a dyn SourceTypedBindings);
@@ -1909,6 +1911,238 @@ fn batch_planner_requires_at_least_two_classes() {
             "at least two ordinary top-level classes"
         ))
     ));
+}
+
+#[test]
+fn private_immutable_same_batch_reference_field_has_read_only_type_proof() {
+    with_paired_jvm_tasty_batch_plan(
+        SAME_BATCH_REFERENCE_FIELD,
+        "CounterOwner.scala",
+        SourceId::from_index(1716),
+        |batch| {
+            assert_eq!(batch.classes.len(), 2);
+            let owner = &batch.classes[1];
+            let plan = owner.tasty_plan.plan();
+            let proofs = owner
+                .tasty_plan
+                .same_batch_reference_fields()
+                .collect::<Vec<_>>();
+            let [proof] = proofs.as_slice() else {
+                panic!("the exact immutable reference field has one proof");
+            };
+            assert_eq!(proof.owner_class(), owner.class);
+            assert_eq!(proof.target_class(), batch.classes[0].class);
+            let Type::TypeRef { prefix, target } = plan.store.types.get(proof.declared_type())
+            else {
+                panic!("the field retains a canonical named class type");
+            };
+            assert_eq!(*target, TypeRefTarget::Symbol(batch.classes[0].class));
+            assert!(matches!(
+                plan.store.types.get(*prefix),
+                Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(package),
+                } if *prefix == plan.definitions.no_prefix
+                    && Some(*package) == plan.store.symbols.get(batch.classes[0].class).owner
+            ));
+            assert_eq!(
+                plan.typed_bindings
+                    .typed_at(plan.source.id, proof.source_initializer()),
+                Some(proof.typed_initializer())
+            );
+            let field_symbol = plan.store.symbols.get(proof.field());
+            assert_eq!(field_symbol.owner, Some(owner.class));
+            assert_eq!(field_symbol.flags, dotty_core::SymbolFlags::EMPTY);
+            assert_eq!(field_symbol.visibility, dotty_core::Visibility::Private);
+
+            let without_classes = WithoutPlannedClasses(plan.typed_bindings);
+            let missing_class_proof = ClassStatePicklePlan {
+                store: plan.store,
+                definitions: plan.definitions,
+                source_ast: plan.source_ast,
+                typed_ast: plan.typed_ast,
+                source_index: plan.source_index,
+                typed_bindings: &without_classes,
+                source: plan.source.clone(),
+                class: plan.class,
+                class_tree: plan.class_tree,
+                constructor: plan.constructor.clone(),
+                members: plan.members,
+            };
+            assert!(matches!(
+                missing_class_proof.validate(),
+                Err(PickleError::UnsupportedTypeReference { ty })
+                    if ty == proof.declared_type()
+            ));
+
+            let without_initializer = WithoutTypedTree {
+                inner: plan.typed_bindings,
+                missing: proof.source_initializer(),
+            };
+            let missing_initializer_binding = ClassStatePicklePlan {
+                store: plan.store,
+                definitions: plan.definitions,
+                source_ast: plan.source_ast,
+                typed_ast: plan.typed_ast,
+                source_index: plan.source_index,
+                typed_bindings: &without_initializer,
+                source: plan.source.clone(),
+                class: plan.class,
+                class_tree: plan.class_tree,
+                constructor: plan.constructor.clone(),
+                members: plan.members,
+            };
+            assert!(matches!(
+                missing_initializer_binding.validate(),
+                Err(PickleError::FieldInitializerBinding {
+                    source_tree,
+                    actual: None,
+                    ..
+                }) if source_tree == proof.source_initializer()
+            ));
+
+            let mut context = EncodingContext::new(
+                plan.store,
+                plan.definitions,
+                plan.source_index,
+                plan.source.id,
+                ProjectionLimits::default(),
+            )
+            .unwrap();
+            let owner_declaration = context.reserve_declaration(owner.class).unwrap();
+            let owner_name = context
+                .intern_name(plan.store.symbols.get(owner.class).name)
+                .unwrap();
+            let owner_body = context.constructor_return_type().unwrap();
+            context
+                .bind_declaration(
+                    owner.class,
+                    AstNode::Length {
+                        tag: TYPEDEF_TAG,
+                        fields: vec![AstField::Nat(owner_name), AstField::Tree(owner_body)],
+                    },
+                )
+                .unwrap();
+            let type_syntax = context
+                .same_batch_reference_field_type_syntax(proof)
+                .unwrap();
+            let fragment = context.finish(&[type_syntax, owner_declaration]).unwrap();
+            let offset = fragment.ast.address(type_syntax).unwrap() as usize;
+            let projected = RawTree::decode_with_base_offset(
+                &mut Reader::new(&fragment.ast.bytes()[offset..]),
+                offset,
+            )
+            .unwrap();
+            let RawTree::NatAst {
+                tag: IDENTTPT_TAG,
+                value: type_name,
+                child,
+                ..
+            } = projected
+            else {
+                panic!("reference field projection starts with IDENTtpt");
+            };
+            assert_eq!(fragment.names.render(type_name).unwrap(), "Counter");
+            let RawTree::NatAst {
+                tag: TYPEREF_TAG,
+                value: class_name,
+                child,
+                ..
+            } = *child
+            else {
+                panic!("reference field type projects to TYPEREF");
+            };
+            assert_eq!(fragment.names.render(class_name).unwrap(), "Counter");
+            let RawTree::Leaf(SimpleTerm {
+                tag: TERMREFPKG_TAG,
+                value: TermValue::NameRef(package),
+                ..
+            }) = *child
+            else {
+                panic!("same-batch reference carries its Scala package prefix");
+            };
+            assert_eq!(fragment.names.render(package).unwrap(), "example");
+
+            assert!(matches!(
+                owner.tasty_plan.pickle(),
+                Err(PickleError::UnsupportedTypeReference { ty })
+                    if ty == proof.declared_type()
+            ));
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn pending_reference_field_proof_rejects_mutable_and_non_direct_initializers() {
+    let mutable = SAME_BATCH_REFERENCE_FIELD.replace(
+        "private val inner: Counter = new Counter(seed)",
+        "private var inner: Counter = new Counter(seed)",
+    );
+    assert!(matches!(
+        with_paired_jvm_tasty_batch_plan(
+            &mutable,
+            "CounterOwner.scala",
+            SourceId::from_index(1717),
+            |_| ()
+        ),
+        Err(PairedPlanError::BatchClass {
+            phase: "TASTy plan validation",
+            ..
+        })
+    ));
+
+    let factory = "package example\nclass Counter(seed: Int)\nclass CounterFactory:\n  def make(seed: Int): Counter = new Counter(seed)\nclass CounterOwner(seed: Int):\n  private val inner: Counter = new CounterFactory().make(seed)\n  def constant(): Int = 0\n";
+    let factory_error = with_paired_jvm_tasty_batch_plan(
+        factory,
+        "CounterOwner.scala",
+        SourceId::from_index(1718),
+        |_| (),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            factory_error,
+            PairedPlanError::BatchUnit {
+                phase: "complete JVM unit validation",
+                ..
+            }
+        ),
+        "factory-valued initializer is not a pending direct-new initializer: {factory_error:?}"
+    );
+
+    for (name, initializer) in [
+        ("nested", "new Counter(new Counter(seed).get())"),
+        (
+            "branch",
+            "if seed == 0 then new Counter(seed) else new Counter(seed)",
+        ),
+    ] {
+        let source = SAME_BATCH_REFERENCE_FIELD.replace("new Counter(seed)", initializer);
+        let error = with_paired_jvm_tasty_batch_plan(
+            &source,
+            "CounterOwner.scala",
+            SourceId::from_index(1718),
+            |_| (),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PairedPlanError::BatchUnit {
+                    phase: "complete JVM unit validation",
+                    ..
+                }
+            ) || matches!(
+                error,
+                PairedPlanError::BatchClass {
+                    phase: "TASTy plan validation",
+                    ..
+                }
+            ),
+            "{name} is not a pending direct-new initializer: {error:?}"
+        );
+    }
 }
 
 #[test]

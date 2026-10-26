@@ -10,7 +10,7 @@ use std::fmt;
 use dotty_core::ast::{TreeKind, Untyped, VisibilitySyntax};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SourceTypedIndex, SymbolFlags,
-    SymbolId, SymbolInfo, SymbolKind, TreeId,
+    SymbolId, SymbolInfo, SymbolKind, TreeId, Type, TypeRefTarget,
 };
 use dotty_jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmFieldPlan,
@@ -714,6 +714,10 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         }
     }
 
+    let planned_class_symbols = source_classes
+        .iter()
+        .map(|source_class| source_class.class)
+        .collect::<Vec<_>>();
     let mut drafts = Vec::with_capacity(source_classes.len());
     for (class_index, source_class) in source_classes.into_iter().enumerate() {
         let TreeKind::TypeDef(class_definition) = &parsed.ast.get(source_class.tree).kind else {
@@ -759,19 +763,62 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                             "field is not owned by its declaring class".to_owned(),
                         ));
                     }
-                    if !typer
-                        .store()
-                        .symbols
-                        .get(field)
-                        .flags
-                        .contains(SymbolFlags::MUTABLE)
-                        || field_definition.metadata.visibility
-                            != Some(VisibilitySyntax::Private { qualifier: None })
-                    {
+                    let field_flags = typer.store().symbols.get(field).flags;
+                    let private = field_definition.metadata.visibility
+                        == Some(VisibilitySyntax::Private { qualifier: None });
+                    let mutable_private = private
+                        && field_flags == SymbolFlags::MUTABLE
+                        && field_definition.metadata.modifiers.as_slice()
+                            == [dotty_core::ast::Modifier::Var];
+                    let immutable_reference_candidate = private
+                        && field_flags.is_empty()
+                        && field_definition.metadata.modifiers.is_empty()
+                        && field_definition.rhs.is_some();
+                    if !mutable_private && !immutable_reference_candidate {
                         return Err(fail(
                             "member planning",
-                            "only unqualified private mutable fields are supported".to_owned(),
+                            "only unqualified private mutable fields and initialized private immutable same-batch reference fields are supported".to_owned(),
                         ));
+                    }
+                    if immutable_reference_candidate {
+                        typer.complete_symbol(field).map_err(|error| {
+                            PairedPlanError::BatchClass {
+                                class_index,
+                                declaration_index: member_index,
+                                phase: "field typing",
+                                reason: format!("{error:?}"),
+                            }
+                        })?;
+                        let SymbolInfo::Complete(field_type) =
+                            typer.store().symbols.get(field).info
+                        else {
+                            return Err(fail(
+                                "field typing",
+                                "field type did not complete".to_owned(),
+                            ));
+                        };
+                        let field_type_is_planned_sibling = matches!(typer.store().types.try_get(field_type),
+                                Some(Type::TypeRef {
+                                    prefix,
+                                    target: TypeRefTarget::Symbol(target),
+                                }) if *target != source_class.class
+                                    && planned_class_symbols.contains(target)
+                                    && typer.store().symbols.get(*target).owner
+                                        == typer.store().symbols.get(source_class.class).owner
+                                    && matches!(typer.store().types.try_get(*prefix),
+                                        Some(Type::TypeRef {
+                                            prefix: package_prefix,
+                                            target: TypeRefTarget::Symbol(package),
+                                        }) if *package_prefix == definitions.no_prefix
+                                            && Some(*package)
+                                                == typer.store().symbols.get(*target).owner));
+                        if !field_type_is_planned_sibling {
+                            return Err(fail(
+                                "member planning",
+                                "private immutable fields require a canonical same-batch class TypeRef"
+                                    .to_owned(),
+                            ));
+                        }
                     }
                     typer
                         .complete_symbol(field)

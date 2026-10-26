@@ -148,11 +148,14 @@ The independent errors above locate separate bottlenecks: the root batch planner
 
 ## Negative and unsupported shapes retained
 
-The new source probe records the **first paired-producer** boundary for required same-source variations. Because `CounterOwner.inner` is currently rejected during batch member planning, the rows marked `member planning` do not claim a later typer, pickler, or linkage result for that source variant. Direct pickler validation and the JVM-only path are separate probes.
+The original #1715 source probe records the **first paired-producer** boundary
+for required same-source variations. The table is historical; #1716 advances
+the baseline field beyond the generic member-planning check, as described
+below.
 
 | Exact source variation | First observed result | Focused evidence |
 | --- | --- | --- |
-| Baseline `private val inner: Counter = new Counter(seed)` | Batch class 1, declaration 0, `member planning`: `only unqualified private mutable fields are supported`. | `paired_producer_reports_private_val_at_the_current_batch_planning_boundary`. |
+| Baseline `private val inner: Counter = new Counter(seed)` | Historical #1715 result: generic member-planning rejection. #1716 now accepts field planning and produces one read-only reference-field proof. In the original fixture, the later `read(): Int = inner.get()` still fails JVM/TASTy cross-contract validation with `TastyPlan(Reference { reason: Owner })`. | `paired_producer_advances_private_val_to_cross_contract_boundary`; direct proof and constant-method contract controls are in `jvm_tasty_plan.rs` and `jvm_tasty_contract.rs`. |
 | Change `inner` to private `var`, keep `inner.get()` | Batch class 1, declaration 1, `method body typing`: `UnstableSelectionPrefix`. The typer fails before the paired field-plan check. | `paired_producer_reports_first_failure_for_required_negative_shapes`; `docs/jvm-reference-fields-constructors.md` documents the direct mutable-field receiver boundary. |
 | Remove the `inner` initializer | Batch class 1, declaration 0, `member planning`: the same private mutable field check fires before a missing-initializer check. | `paired_producer_reports_first_failure_for_required_negative_shapes`. |
 | Use `foreign.Counter`/`new foreign.Counter` while sibling `example.Counter` exists | Batch class 1, declaration 0, `member planning`: the same field gate fires first. This run therefore does not claim that the later planned-class/package check was reached. | `paired_producer_reports_first_failure_for_required_negative_shapes`. |
@@ -165,13 +168,55 @@ The new source probe records the **first paired-producer** boundary for required
 | Unplanned/stale constructor/field identity | Not reached through the paired private-val shape because member planning fails first. Existing JVM-only initializer and JVM/TASTy validation tests reject foreign identities before output. | `field_metadata_rejects_reference_fields_outside_the_unit_and_self_initialization` and `jvm_tasty_artifacts.rs`. |
 | Incomplete class/TASTy pair, UUID mismatch, unsafe or mismatched package path | Paired artifact validation rejects malformed links/paths and does not publish a partial batch; these are post-plan artifact controls, not source-body errors. | Paired-artifact and batch-publisher controls in `jvm_tasty_artifacts.rs`. |
 
-The table reports the first boundary actually observed by the named probe. Where an earlier private-val field gate prevents a later condition from being tested through the paired path, the JVM-only/direct-pickler evidence is labeled separately instead of presenting a hypothetical later diagnostic as the source variant's first error.
+The historical table reports the first boundary observed before #1716. Where
+that earlier private-val field gate prevented a later condition from being
+tested, the JVM-only/direct-pickler evidence is labeled separately.
+
+The table above is the historical #1715 audit snapshot. Issue #1716 advances
+the baseline private immutable reference field through the batch planner and
+read-only class-state proof; its current behavior is recorded below. Negative
+cases remain rejected, though some now fail at the more specific TASTy proof
+boundary rather than the old generic member-planning gate.
 
 The JVM-only and TASTy producer gates are different evidence surfaces. A passing `CounterOwner` classfile test cannot be used as evidence that its `VALDEF`, `NEW`, constructor selection, or receiver call can be emitted into Rust-produced TASTy.
 
+## Issue #1716: read-only reference-field metadata
+
+The next increment accepts a narrow source-semantic proof for an unqualified
+`private val inner: Counter` when `Counter` is a distinct public ordinary class
+in the same planned source batch. The proof retains the canonical field and
+target class symbols, the exact package-prefixed `TypeRef`, the owner and
+visibility/immutability facts, the source declaration, and the source-to-typed
+initializer roots. Type syntax projection follows the pinned Scala shape
+`IDENTtpt Counter → TYPEREF Counter → TERMREFpkg example`.
+
+The initializer remains pending. Planning checks that its exact source and
+typed roots are bound and that the source shape is a direct `new Counter(seed)`
+whose selected constructor is owned by the target class and whose result
+identifies that class. The proof does not serialize that tree.
+`ValidatedClassStatePlan::pickle` continues to return `UnsupportedTypeReference`
+for this reference-field plan; `NEW` initializer serialization belongs to
+issue #1717. Mutable reference fields, external or unplanned targets,
+factory/nested/branch initializers, and mismatched source or typed identities
+remain rejected at their observed first planning boundary.
+
+The #1715 fixture's cross-class `inner.get()` method body is a later,
+independent blocker: its field proof succeeds, but paired JVM/TASTy
+cross-contract validation still rejects that method shape. A small
+constant-method control verifies the new reference-field ABI metadata path
+without claiming support for cross-class receiver method bodies in TASTy.
+
+This distinction is metadata/type evidence only. It does not establish a
+Rust-produced `CounterOwner.tasty` field or initializer, and it does not expand
+the supported TASTy output subset.
+
 ## Next ownership boundary
 
-This issue is complete as an evidence-only audit. A follow-up that enables the paired source form must separately address: (1) batch collection/planning of immutable private fields; (2) read-only class-state validation for canonical reference `TypeRef`s and approved `new` initializers; (3) TASTy type/reference/initializer encoding and signed constructor identity; and (4) cross-class linked-artifact proof plus Scala 3.9 consumer verification. Any typer blocker must go to the Typer owner; this audit does not change the typer, JVM backend, TASTy format, or producer.
+The #1715 evidence-only audit is superseded for the narrow metadata/type proof
+by #1716. Remaining producer work includes serializing the approved `NEW`
+initializer and class-state declarations, proving the linked cross-class
+artifacts, and running the pinned Scala 3.9 consumer. Any typer blocker still
+belongs to the Typer owner.
 
 ## Checks run
 

@@ -1,8 +1,9 @@
 //! Read-only consistency proofs for the audited JVM / Scala 3 TASTy overlap.
 //!
 //! This crate is the acyclic coordination layer between `dotty-jvm` and
-//! `dotty-tasty-pickler`. It accepts only a validated private primitive
-//! class-state plan and a JVM unit from the same canonical session. A proof
+//! `dotty-tasty-pickler`. It accepts validated private primitive class-state
+//! plans and metadata-only private same-batch reference-field proofs from a
+//! JVM unit in the same canonical session. A proof
 //! checks semantic identities, source-to-typed roots, names, and the bounded
 //! erased ABI; it does not encode, publish, or claim Scala-consumable artifacts.
 
@@ -257,8 +258,9 @@ impl ValidatedJvmTastyClass<'_, '_, '_, '_> {
 
 /// Prove the audited class/member ABI agreement for the TASTy plan's class.
 ///
-/// This intentionally supports the source-private mutable primitive-field
-/// class-state subset. Unsupported source constructs fail closed. The proof
+/// This intentionally supports the source-private primitive-field class-state
+/// subset and read-only metadata proofs for private immutable same-batch
+/// reference fields. Unsupported source constructs fail closed. The proof
 /// must be paired later with actual pickled bytes and a classfile TASTY link;
 /// those byte-level checks belong to the artifact publication stage.
 pub fn validate_jvm_tasty_class<'proof, 'unit, 'plan, 'session>(
@@ -335,7 +337,13 @@ pub fn validate_jvm_tasty_class<'proof, 'unit, 'plan, 'session>(
         .ok_or(JvmTastyContractError::JvmClassMissing { class: tasty.class })?;
 
     validate_constructor(jvm_unit.store, tasty, class_plan, &jvm_metadata)?;
-    validate_fields(jvm_unit.store, tasty, class_plan, &jvm_metadata)?;
+    validate_fields(
+        jvm_unit.store,
+        tasty_plan,
+        class_plan,
+        &jvm_metadata,
+        all_jvm_metadata.as_slice(),
+    )?;
     validate_methods(
         jvm_unit.store,
         tasty,
@@ -1457,10 +1465,12 @@ fn validate_constructor(
 
 fn validate_fields(
     store: &SemanticStore,
-    tasty: &dotty_tasty_pickler::ClassStatePicklePlan<'_>,
+    tasty_plan: &ValidatedClassStatePlan<'_, '_>,
     jvm_class: &dotty_jvm::JvmClassPlan,
     metadata: &JvmClassMetadata,
+    planned_class_metadata: &[JvmClassMetadata],
 ) -> Result<(), JvmTastyContractError> {
+    let tasty = tasty_plan.plan();
     let tasty_fields = tasty
         .members
         .iter()
@@ -1502,7 +1512,11 @@ fn validate_fields(
             });
         };
         let symbol = store.symbols.get(field.symbol);
-        let mutable = symbol.flags.contains(SymbolFlags::MUTABLE);
+        let mutable = symbol.flags == SymbolFlags::MUTABLE;
+        let immutable_reference = symbol.flags.is_empty()
+            && tasty_plan
+                .same_batch_reference_fields()
+                .any(|proof| proof.field() == field.symbol);
         validate_symbol_source(store, field.symbol, tasty.source.id, Some(tasty.class))?;
         let rhs = match &tasty.source_ast.get(field.source_tree).kind {
             TreeKind::ValDef(definition) => definition.rhs,
@@ -1520,6 +1534,17 @@ fn validate_fields(
             });
         }
         let expected_descriptor = primitive_descriptor(tasty.definitions, field.declared_type)
+            .map(str::to_owned)
+            .or_else(|| {
+                immutable_reference.then(|| {
+                    planned_class_descriptor(
+                        store,
+                        tasty.definitions,
+                        field.declared_type,
+                        planned_class_metadata,
+                    )
+                })?
+            })
             .ok_or(JvmTastyContractError::UnsupportedSourceShape {
                 symbol: field.symbol,
             })?;
@@ -1528,7 +1553,7 @@ fn validate_fields(
         if symbol.owner != Some(tasty.class)
             || symbol.kind != SymbolKind::Field
             || symbol.visibility != Visibility::Private
-            || !mutable
+            || (!mutable && !immutable_reference)
             || jvm_field.source_visibility != JvmFieldSourceVisibility::PlainPrivate
             || binary_field.descriptor() != expected_descriptor
             || binary_field.owner() != tasty.class

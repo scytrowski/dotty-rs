@@ -513,7 +513,7 @@ fn scala_39_oracle_pins_private_reference_val_tasty_and_jvm_abi() {
 }
 
 #[test]
-fn paired_producer_reports_private_val_at_the_current_batch_planning_boundary() {
+fn paired_producer_advances_private_val_to_cross_contract_boundary() {
     let error = with_paired_jvm_tasty_batch_plan(
         SOURCE,
         "CounterOwner.scala",
@@ -523,8 +523,12 @@ fn paired_producer_reports_private_val_at_the_current_batch_planning_boundary() 
     .unwrap_err();
     assert!(matches!(
         error,
-        PairedPlanError::BatchClass { class_index: 1, declaration_index: 0, phase: "member planning", reason }
-            if reason == "only unqualified private mutable fields are supported"
+        PairedPlanError::BatchClass {
+            class_index: 1,
+            phase: "JVM/TASTy cross-contract validation",
+            reason,
+            ..
+        } if reason.starts_with("TastyPlan(Reference")
     ));
 }
 
@@ -801,10 +805,9 @@ fn one_real_source_session_preserves_object_composition_identity_and_reports_pic
         },
         members: &owner_members,
     };
-    let pickler_error = match plan.validate() {
-        Err(error) => error,
-        Ok(_) => panic!("class-state pickler unexpectedly accepts reference field"),
-    };
+    let validated = plan.validate().unwrap();
+    assert_eq!(validated.same_batch_reference_fields().count(), 1);
+    let pickler_error = validated.pickle().unwrap_err();
     assert!(
         matches!(pickler_error, PickleError::UnsupportedTypeReference { ty } if ty == inner_type)
     );
@@ -937,8 +940,77 @@ fn paired_producer_reports_first_failure_for_required_negative_shapes() {
                         declaration_index: 0,
                         phase: "member planning",
                         reason,
-                    } if reason == "only unqualified private mutable fields are supported"
-                ),
+                    } if reason == "only unqualified private mutable fields and initialized private immutable same-batch reference fields are supported"
+                ) || matches!(name, "local_shadow" | "unrelated_receiver")
+                    && matches!(
+                        &error,
+                        PairedPlanError::BatchClass {
+                            class_index: 1,
+                            phase: "JVM/TASTy cross-contract validation",
+                            reason,
+                            ..
+                        } if reason.starts_with("TastyPlan(Unsupported { feature: BodyExpression")
+                    )
+                    || name == "duplicate_field"
+                        && matches!(
+                            &error,
+                            PairedPlanError::BatchClass {
+                                class_index: 1,
+                                phase: "method body typing",
+                                reason,
+                                ..
+                            } if reason.starts_with("AmbiguousTermReference")
+                        )
+                    || matches!(
+                        name,
+                        "wrong_reference_type" | "missing_counter" | "foreign_counter"
+                    ) && matches!(
+                        &error,
+                        PairedPlanError::BatchClass {
+                            class_index: 1,
+                            phase: "field typing",
+                            reason,
+                            ..
+                        } if reason.starts_with("TypeNameNotFound")
+                    )
+                    || name == "wrong_constructor_argument"
+                        && matches!(
+                            &error,
+                            PairedPlanError::BatchClass {
+                                class_index: 1,
+                                phase: "field initializer typing",
+                                reason,
+                                ..
+                            } if reason.starts_with("ApplicationArgumentTypeMismatch")
+                        )
+                    || name == "nested_new_initializer"
+                        && matches!(
+                            &error,
+                            PairedPlanError::BatchClass {
+                                class_index: 1,
+                                phase: "TASTy plan validation",
+                                reason,
+                                ..
+                            } if reason.starts_with("Unsupported { feature: UnsafeFieldInitializer")
+                        )
+                    || name == "branch_valued_initializer"
+                        && matches!(
+                            &error,
+                            PairedPlanError::BatchUnit {
+                                phase: "complete JVM unit validation",
+                                reason,
+                            } if reason.starts_with("UnsupportedJvmReferenceFieldInitializer")
+                        )
+                    || name == "factory_valued_initializer"
+                        && matches!(
+                            &error,
+                            PairedPlanError::BatchClass {
+                                class_index: 1,
+                                phase: "field initializer typing",
+                                reason,
+                                ..
+                            } if reason.starts_with("TermNameNotFound")
+                        ),
                 "{name} must report the first current batch boundary: {error:?}"
             );
         }
