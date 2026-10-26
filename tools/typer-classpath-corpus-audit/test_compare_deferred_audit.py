@@ -1,5 +1,7 @@
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,9 +14,12 @@ from compare_deferred_audit import (
     scalar,
     sprint_start_gate_baseline,
 )
+from test_fanout_policy import pinned_report_profiles
 
 
-def report(depth=3, fanout=8, name='B'):
+def report(depth=3, fanout=8, name='B', high_profiles=None, high_count=None):
+    high_profiles = high_profiles or []
+    high_count = len(high_profiles) if high_count is None else high_count
     return f'''resolver_metrics:
   external_class_symbol_successes=358
 audit_v1_comparison:
@@ -22,6 +27,9 @@ audit_v1_comparison:
 dependency_load_profile:
   p95_dependency_depth={depth}
   max_distinct_fully_completed_classes_per_request={fanout}
+  completed_fanout_over_16_requests={high_count}
+  high_completed_fanout_profiles:
+{''.join('    high_fanout_profile=' + line + chr(10) for line in high_profiles)}
 resolver_581_comparison:
   member_requests_by_enclosing_method:
     f.scala#tree=1::p.f: requests=1, distinct_request_outcomes=1
@@ -34,9 +42,42 @@ class DeferredAuditComparisonTests(unittest.TestCase):
         self.assertEqual(gate(report(), report()), (3, 8))
         with self.assertRaisesRegex(ValueError, 'lost'):
             gate(report(), report(name='C'))
-        for text in (report(depth=7), report(fanout=17)):
-            with self.assertRaisesRegex(ValueError, 'reduction'):
-                gate(report(), text)
+        with self.assertRaisesRegex(ValueError, 'depth gate'):
+            gate(report(), report(depth=7))
+        with self.assertRaisesRegex(ValueError, 'profile evidence is missing'):
+            gate(report(), report(fanout=17))
+        for rows in (pinned_report_profiles(), ["unknown high-fanout profile"]):
+            with self.assertRaisesRegex(ValueError, 'row count .* differs from aggregate count 0'):
+                gate(report(), report(fanout=8, high_profiles=rows, high_count=0))
+
+    def test_gate_accepts_only_oracle_verified_high_fanout_exceptions(self):
+        self.assertEqual(
+            gate(report(fanout=16), report(fanout=29, high_profiles=pinned_report_profiles())),
+            (3, 29),
+        )
+        with self.assertRaisesRegex(ValueError, 'depth gate'):
+            gate(
+                report(fanout=16),
+                report(depth=7, fanout=29, high_profiles=pinned_report_profiles()),
+            )
+
+    def test_cli_reports_raw_and_proven_fanout_separately(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            baseline_path = Path(temp_dir) / 'baseline.md'
+            current_path = Path(temp_dir) / 'current.md'
+            baseline_path.write_text(report(fanout=16), encoding='utf-8')
+            current_path.write_text(
+                report(fanout=29, high_profiles=pinned_report_profiles()), encoding='utf-8')
+            output = io.StringIO()
+            with patch('sys.argv', [
+                'compare_deferred_audit.py', str(current_path), '--baseline', str(baseline_path)
+            ]):
+                with redirect_stdout(output):
+                    self.assertEqual(main(), 0)
+            rendered = output.getvalue()
+            self.assertIn('raw maximum completed fanout 29', rendered)
+            self.assertIn('raw completed=29; proven hierarchy=29; unexpected=0', rendered)
+            self.assertIn('max depth=7; distinct identities=55', rendered)
 
     def test_success_counts_and_denominator_cannot_regress_silently(self):
         with self.assertRaisesRegex(ValueError, 'count regressed'):

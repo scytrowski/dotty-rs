@@ -16402,6 +16402,64 @@ fn print_import_prefix_reconciliation(rows: &[ImportPrefixReconciliation]) {
     }
 }
 
+fn dependency_profile_line(observation: &DependencyObservation) -> String {
+    let edges = observation
+        .profile
+        .dependency_edges
+        .iter()
+        .map(|edge| {
+            let reason = match edge.reason {
+                dotty_classloader::classloader::ClassLoadDependencyReason::Hierarchy => "hierarchy",
+                dotty_classloader::classloader::ClassLoadDependencyReason::MemberTypeIdentity => "member_type_identity",
+                dotty_classloader::classloader::ClassLoadDependencyReason::EnclosingOwnerIdentity => "enclosing_owner_identity",
+                dotty_classloader::classloader::ClassLoadDependencyReason::EnclosingOwnerCompletion => "enclosing_owner_completion",
+            };
+            format!("{reason}:{}>{}:{}", edge.owner, edge.dependency, edge.requests)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "root={}::file={}::method={}::request={}::depth={}::distinct_classes={}::full_completions={}::shells_created={}::shells_reused={}::member_type_references={}::hierarchy_loads={}::completed_cache_hits={}::module_completion_calls={}::module_completion_successes={}::module_completion_errors={}::identity_shells=[{}]::completed_classes=[{}]::classes=[{}]::dependency_edges=[{}]",
+        observation.profile.root,
+        observation.file,
+        observation.method,
+        observation.request,
+        observation.profile.max_dependency_depth,
+        observation.profile.classes.len(),
+        observation.profile.full_completions,
+        observation.profile.shells_created,
+        observation.profile.shells_reused,
+        observation.profile.member_type_references,
+        observation.profile.hierarchy_loads,
+        observation.profile.completed_cache_hits,
+        observation.profile.module_completion_calls,
+        observation.profile.module_completion_successes,
+        observation.profile.module_completion_errors,
+        observation
+            .profile
+            .identity_shells
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(","),
+        observation
+            .profile
+            .completed_classes
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(","),
+        observation
+            .profile
+            .classes
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(","),
+        edges
+    )
+}
+
 fn print_dependency_profiles(metrics: &ResolverMetrics) {
     let mut depths = metrics
         .dependency_profiles
@@ -16557,6 +16615,23 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
     println!("  median_dependency_depth={median_depth:.1}");
     println!("  p95_dependency_depth={p95_depth}");
     println!("  max_distinct_classes_touched_by_one_request={max_classes}");
+    let high_fanout = metrics
+        .dependency_profiles
+        .iter()
+        .filter(|observation| observation.profile.completed_classes.len() > 16)
+        .collect::<Vec<_>>();
+    println!("  completed_fanout_over_16_requests={}", high_fanout.len());
+    println!("  high_completed_fanout_profiles:");
+    if high_fanout.len() <= 10 {
+        for observation in &high_fanout {
+            println!(
+                "    high_fanout_profile={}",
+                dependency_profile_line(observation)
+            );
+        }
+    } else {
+        println!("    high_fanout_evidence_omitted=true");
+    }
     print_classload_profile_timings(&metrics.dependency_profiles, None);
 
     let mut observed_by_method: BTreeMap<&str, (BTreeSet<&str>, BTreeSet<&str>)> = BTreeMap::new();
@@ -16615,60 +16690,7 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
     });
     println!("  largest_top_level_loads:");
     for observation in largest.into_iter().take(10) {
-        println!(
-            "    root={}::file={}::method={}::request={}::depth={}::distinct_classes={}::full_completions={}::shells_created={}::shells_reused={}::member_type_references={}::hierarchy_loads={}::completed_cache_hits={}::module_completion_calls={}::module_completion_successes={}::module_completion_errors={}::identity_shells=[{}]::completed_classes=[{}]::classes=[{}]::dependency_edges=[{}]",
-            observation.profile.root,
-            observation.file,
-            observation.method,
-            observation.request,
-            observation.profile.max_dependency_depth,
-            observation.profile.classes.len(),
-            observation.profile.full_completions,
-            observation.profile.shells_created,
-            observation.profile.shells_reused,
-            observation.profile.member_type_references,
-            observation.profile.hierarchy_loads,
-            observation.profile.completed_cache_hits,
-            observation.profile.module_completion_calls,
-            observation.profile.module_completion_successes,
-            observation.profile.module_completion_errors,
-            observation
-                .profile
-                .identity_shells
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(","),
-            observation
-                .profile
-                .completed_classes
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(","),
-            observation
-                .profile
-                .classes
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(","),
-            observation
-                .profile
-                .dependency_edges
-                .iter()
-                .map(|edge| {
-                    let reason = match edge.reason {
-                        dotty_classloader::classloader::ClassLoadDependencyReason::Hierarchy => "hierarchy",
-                        dotty_classloader::classloader::ClassLoadDependencyReason::MemberTypeIdentity => "member_type_identity",
-                        dotty_classloader::classloader::ClassLoadDependencyReason::EnclosingOwnerIdentity => "enclosing_owner_identity",
-                        dotty_classloader::classloader::ClassLoadDependencyReason::EnclosingOwnerCompletion => "enclosing_owner_completion",
-                    };
-                    format!("{reason}:{}>{}:{}", edge.owner, edge.dependency, edge.requests)
-                })
-                .collect::<Vec<_>>()
-                .join(",")
-        );
+        println!("    {}", dependency_profile_line(observation));
     }
 }
 
