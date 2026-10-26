@@ -1,0 +1,10 @@
+run	file	status	package_calls	member_calls	module_identity_calls	module_completion_calls	class_completion_calls	classfile_completion_calls	tasty_completion_calls	package_inner_us	member_inner_us	module_identity_inner_us	module_completion_inner_us	class_completion_inner_us	classfile_completion_inner_us	tasty_completion_inner_us	rollback_count	rollback_operation_observations	rollback_member_observations	classpath_requests	classpath_inner_calls	classpath_positive	classpath_negative	classpath_errors	classpath_negative_cache_hits	classpath_returned_bytes	classpath_inner_wall_us
+1	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	captured	387	221	680	10	0	0	0	208	14146	497	2460263	0	0	0	166	690	0	1510	256	254	2	0	1254	35032325	2974
+1	compiler/src/dotty/tools/dotc/ast/tpd.scala	captured	22	40	867	13	0	0	0	37	11989	651	2651007	0	0	0	17	880	0	1430	407	404	3	0	1023	48446130	4109
+1	compiler/src/dotty/tools/dotc/core/Types.scala	captured	156	20	3486	18	0	0	0	149	10191	2387	3377741	0	0	0	5	3507	0	1202	231	231	0	0	971	10332107	2611
+2	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	captured	387	221	680	10	0	0	0	206	13745	504	2520433	0	0	0	166	690	0	1510	256	254	2	0	1254	35032325	2819
+2	compiler/src/dotty/tools/dotc/ast/tpd.scala	captured	22	40	867	13	0	0	0	36	13297	655	2661732	0	0	0	17	880	0	1430	407	404	3	0	1023	48446130	4111
+2	compiler/src/dotty/tools/dotc/core/Types.scala	captured	156	20	3486	18	0	0	0	157	10532	2441	3327603	0	0	0	5	3507	0	1202	231	231	0	0	971	10332107	2615
+3	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	captured	387	221	680	10	0	0	0	213	14182	513	2573916	0	0	0	166	690	0	1510	256	254	2	0	1254	35032325	3071
+3	compiler/src/dotty/tools/dotc/ast/tpd.scala	captured	22	40	867	13	0	0	0	49	13445	690	2645467	0	0	0	17	880	0	1430	407	404	3	0	1023	48446130	4324
+3	compiler/src/dotty/tools/dotc/core/Types.scala	captured	156	20	3486	18	0	0	0	155	10072	2505	3362030	0	0	0	5	3507	0	1202	231	231	0	0	971	10332107	2559

@@ -1,0 +1,10 @@
+run	file	class_completion_attempts	class_completion_errors	class_completion_nested_classload_ns	class_completion_successes	completion_attempts	completion_errors	completion_successes	module_cache_misses	negative_member_hits	positive_module_hits
+1	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	0	0	0	0	10	0	10	0	0	0
+1	compiler/src/dotty/tools/dotc/ast/tpd.scala	0	0	0	0	13	0	13	0	0	0
+1	compiler/src/dotty/tools/dotc/core/Types.scala	0	0	0	0	17	0	17	0	0	0
+2	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	0	0	0	0	10	0	10	0	0	0
+2	compiler/src/dotty/tools/dotc/ast/tpd.scala	0	0	0	0	13	0	13	0	0	0
+2	compiler/src/dotty/tools/dotc/core/Types.scala	0	0	0	0	17	0	17	0	0	0
+3	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	0	0	0	0	10	0	10	0	0	0
+3	compiler/src/dotty/tools/dotc/ast/tpd.scala	0	0	0	0	13	0	13	0	0	0
+3	compiler/src/dotty/tools/dotc/core/Types.scala	0	0	0	0	17	0	17	0	0	0

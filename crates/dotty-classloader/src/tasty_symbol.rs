@@ -19,6 +19,7 @@ use dotty_tasty::tasty::{
 };
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::time::Instant;
 
 /// The class-level facts reconstructable from a `.tasty` file without full
 /// type-checking: enough to enter a `dotty-core` `Symbol` and recurse into
@@ -61,6 +62,124 @@ pub(crate) struct DecodedTastyClass {
 pub(crate) struct DecodedTastyIdentity {
     pub flags: ClassAccessFlags,
     pub visibility: Option<DeclaredVisibility>,
+}
+
+/// Low-overhead timing and outcome counters for one opt-in classloader TASTy
+/// decode. Durations are exclusive across the listed stages; resolver
+/// callbacks are separately timed and remain nested inside their caller stage.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TastyDecodeProfile {
+    pub format_version: Option<String>,
+    pub outcome: String,
+    pub parse_ns: u128,
+    pub index_ns: u128,
+    pub definition_selection_ns: u128,
+    pub parent_resolution_ns: u128,
+    pub parent_resolution_exclusive_ns: u128,
+    pub constructor_accessor_ns: u128,
+    pub constructor_accessor_exclusive_ns: u128,
+    pub member_projection_ns: u128,
+    pub member_projection_exclusive_ns: u128,
+    pub callback_errors: usize,
+    pub parent_alias_callbacks: TastyCallbackProfile,
+    pub parent_bare_callbacks: TastyCallbackProfile,
+    pub constructor_accessor_callbacks: TastyCallbackProfile,
+    pub member_bare_callbacks: TastyCallbackProfile,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TastyCallbackProfile {
+    pub calls: usize,
+    pub resolved: usize,
+    pub unresolved: usize,
+    pub errors: usize,
+    pub elapsed_ns: u128,
+    pub observations: Vec<TastyCallbackObservation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TastyCallbackObservation {
+    pub key: String,
+    pub outcome: String,
+    pub elapsed_ns: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TastyResolverResult<T> {
+    Value(T),
+    Error(T),
+}
+
+trait IntoTastyResolverResult<T> {
+    fn into_tasty_resolver_result(self) -> TastyResolverResult<T>;
+}
+
+impl<T> IntoTastyResolverResult<Option<T>> for Option<T> {
+    fn into_tasty_resolver_result(self) -> TastyResolverResult<Option<T>> {
+        TastyResolverResult::Value(self)
+    }
+}
+
+impl<T> IntoTastyResolverResult<Option<T>> for TastyResolverResult<Option<T>> {
+    fn into_tasty_resolver_result(self) -> TastyResolverResult<Option<T>> {
+        self
+    }
+}
+
+struct ProfileTimer<'a> {
+    target: Option<&'a mut u128>,
+    started: Option<Instant>,
+}
+
+impl<'a> ProfileTimer<'a> {
+    fn new(target: Option<&'a mut u128>) -> Self {
+        let started = target.as_ref().map(|_| Instant::now());
+        Self { target, started }
+    }
+}
+
+impl Drop for ProfileTimer<'_> {
+    fn drop(&mut self) {
+        if let (Some(target), Some(started)) = (&mut self.target, self.started) {
+            **target += started.elapsed().as_nanos();
+        }
+    }
+}
+
+fn profile_callback<T>(
+    key: impl FnOnce() -> String,
+    callback: impl FnOnce() -> TastyResolverResult<Option<T>>,
+    profile: Option<&mut TastyCallbackProfile>,
+) -> Option<T> {
+    let Some(profile) = profile else {
+        return match callback() {
+            TastyResolverResult::Value(value) | TastyResolverResult::Error(value) => value,
+        };
+    };
+    let started = Instant::now();
+    let (result, failed) = match callback() {
+        TastyResolverResult::Value(result) => (result, false),
+        TastyResolverResult::Error(result) => (result, true),
+    };
+    profile.calls += 1;
+    let outcome = if failed {
+        profile.errors += 1;
+        "error"
+    } else if result.is_some() {
+        profile.resolved += 1;
+        "resolved"
+    } else {
+        profile.unresolved += 1;
+        "unresolved"
+    };
+    let elapsed_ns = started.elapsed().as_nanos();
+    profile.elapsed_ns += elapsed_ns;
+    profile.observations.push(TastyCallbackObservation {
+        key: key(),
+        outcome: outcome.to_owned(),
+        elapsed_ns,
+    });
+    result
 }
 
 /// The authoritative top-level module identities found in one `.tasty`
@@ -475,6 +594,7 @@ pub(crate) fn decode(
         },
         false,
         false,
+        None,
     )
 }
 
@@ -494,7 +614,36 @@ pub(crate) fn decode_with_resolvers(
         &mut resolve_bare,
         true,
         false,
+        None,
     )
+}
+
+pub(crate) fn decode_with_resolvers_profiled(
+    bytes: &[u8],
+    requested: &BinaryName,
+    mut resolve_alias: impl FnMut(&BinaryName, &str) -> TastyResolverResult<Option<BinaryName>>,
+    mut resolve_bare: impl FnMut(&str, &str) -> TastyResolverResult<Option<BinaryName>>,
+    profile: &mut TastyDecodeProfile,
+) -> Result<DecodedTastyClass, TastyDecodeError> {
+    let result = decode_impl(
+        bytes,
+        requested,
+        &mut resolve_alias,
+        &mut resolve_bare,
+        true,
+        false,
+        Some(profile),
+    );
+    profile.outcome = if profile.callback_errors > 0 {
+        "callback_error".to_owned()
+    } else {
+        match &result {
+            Ok(_) => "success".to_owned(),
+            Err(TastyDecodeError::UnresolvedSupertype(_)) => "unresolved_parent".to_owned(),
+            Err(_) => "error".to_owned(),
+        }
+    };
+    result
 }
 
 /// Decodes the exact top-level `ModuleClass` established by
@@ -515,7 +664,36 @@ pub(crate) fn decode_module_class_with_resolvers(
         &mut resolve_bare,
         true,
         true,
+        None,
     )
+}
+
+pub(crate) fn decode_module_class_with_resolvers_profiled(
+    bytes: &[u8],
+    requested: &BinaryName,
+    mut resolve_alias: impl FnMut(&BinaryName, &str) -> TastyResolverResult<Option<BinaryName>>,
+    mut resolve_bare: impl FnMut(&str, &str) -> TastyResolverResult<Option<BinaryName>>,
+    profile: &mut TastyDecodeProfile,
+) -> Result<DecodedTastyClass, TastyDecodeError> {
+    let result = decode_impl(
+        bytes,
+        requested,
+        &mut resolve_alias,
+        &mut resolve_bare,
+        true,
+        true,
+        Some(profile),
+    );
+    profile.outcome = if profile.callback_errors > 0 {
+        "callback_error".to_owned()
+    } else {
+        match &result {
+            Ok(_) => "success".to_owned(),
+            Err(TastyDecodeError::UnresolvedSupertype(_)) => "unresolved_parent".to_owned(),
+            Err(_) => "error".to_owned(),
+        }
+    };
+    result
 }
 
 /// Profiles every parent of the requested top-level TASTy definition using
@@ -919,16 +1097,42 @@ fn symbol_flags(tail: &[DefinitionTail<'_>]) -> SymbolFlags {
     })
 }
 
-fn decode_impl(
+fn decode_impl<ResolveAlias, ResolveBare, AliasResult, BareResult>(
     bytes: &[u8],
     requested: &BinaryName,
-    mut resolve_alias: impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
-    mut resolve_bare: impl FnMut(&str, &str) -> Option<BinaryName>,
+    mut resolve_alias: ResolveAlias,
+    mut resolve_bare: ResolveBare,
     strict_superclass: bool,
     module_class: bool,
-) -> Result<DecodedTastyClass, TastyDecodeError> {
-    let file = parse_classloader_tasty(bytes)?;
-    let index = file.ast_address_index()?;
+    mut profile: Option<&mut TastyDecodeProfile>,
+) -> Result<DecodedTastyClass, TastyDecodeError>
+where
+    ResolveAlias: FnMut(&BinaryName, &str) -> AliasResult,
+    ResolveBare: FnMut(&str, &str) -> BareResult,
+    AliasResult: IntoTastyResolverResult<Option<BinaryName>>,
+    BareResult: IntoTastyResolverResult<Option<BinaryName>>,
+{
+    let parsed = {
+        let timer = ProfileTimer::new(profile.as_deref_mut().map(|profile| &mut profile.parse_ns));
+        let parsed = parse_classloader_tasty(bytes);
+        drop(timer);
+        parsed?
+    };
+    if let Some(profile) = profile.as_deref_mut() {
+        let header = parsed.header();
+        profile.format_version = Some(format!(
+            "{}.{}.{}",
+            header.major_version, header.minor_version, header.experimental_version
+        ));
+    }
+    let file = parsed;
+    let index_result = {
+        let timer = ProfileTimer::new(profile.as_deref_mut().map(|profile| &mut profile.index_ns));
+        let index = file.ast_address_index();
+        drop(timer);
+        index
+    };
+    let index = index_result?;
     let requested_internal = requested.as_internal();
     let simple_name = requested_internal
         .rsplit('/')
@@ -939,6 +1143,11 @@ fn decode_impl(
         None => "",
     };
 
+    let definition_selection_timer = ProfileTimer::new(
+        profile
+            .as_deref_mut()
+            .map(|profile| &mut profile.definition_selection_ns),
+    );
     let mut matching_nodes = index.iter().filter(|node| {
             if node.tag != TYPEDEF_TAG {
                 return false;
@@ -997,63 +1206,133 @@ fn decode_impl(
         .find(|child| child.tag == TEMPLATE_TAG)
         .map(|child| child.offset)
         .ok_or(TastyDecodeError::NoTemplateBody)?;
+    drop(definition_selection_timer);
 
-    let mut parents = template.parents.iter().enumerate();
-    let super_class = match parents.next() {
-        Some((parent_index, parent)) => {
-            let resolved = resolve_parent_name_with_alias(
-                &file,
-                parent,
-                package,
-                &mut resolve_alias,
-                &mut resolve_bare,
-            );
-            match (resolved, strict_superclass) {
-                (Some(parent), _) => parent,
-                (None, false) => BinaryName::from_internal("java/lang/Object"),
-                (None, true) => {
-                    return Err(TastyDecodeError::UnresolvedSupertype(Box::new(
-                        unresolved_parent_reference(
+    let mut parent_alias_callbacks = TastyCallbackProfile::default();
+    let mut parent_bare_callbacks = TastyCallbackProfile::default();
+    let collect_callback_profile = profile.is_some();
+    let parent_resolution = {
+        let timer = ProfileTimer::new(
+            profile
+                .as_deref_mut()
+                .map(|profile| &mut profile.parent_resolution_ns),
+        );
+        let result = {
+            let mut profiled_alias = |owner: &BinaryName, alias: &str| {
+                profile_callback(
+                    || format!("alias|{}|{alias}", owner.as_internal()),
+                    || resolve_alias(owner, alias).into_tasty_resolver_result(),
+                    collect_callback_profile.then_some(&mut parent_alias_callbacks),
+                )
+            };
+            let mut profiled_bare = |package: &str, simple_name: &str| {
+                profile_callback(
+                    || format!("bare|{package}|{simple_name}"),
+                    || resolve_bare(package, simple_name).into_tasty_resolver_result(),
+                    collect_callback_profile.then_some(&mut parent_bare_callbacks),
+                )
+            };
+            (|| {
+                let mut parents = template.parents.iter().enumerate();
+                let super_class = match parents.next() {
+                    Some((parent_index, parent)) => {
+                        let resolved = resolve_parent_name_with_alias(
                             &file,
                             parent,
-                            parent_index,
                             package,
-                            template_wire_address,
-                        ),
-                    )));
+                            &mut profiled_alias,
+                            &mut profiled_bare,
+                        );
+                        match (resolved, strict_superclass) {
+                            (Some(parent), _) => parent,
+                            (None, false) => BinaryName::from_internal("java/lang/Object"),
+                            (None, true) => {
+                                return Err(TastyDecodeError::UnresolvedSupertype(Box::new(
+                                    unresolved_parent_reference(
+                                        &file,
+                                        parent,
+                                        parent_index,
+                                        package,
+                                        template_wire_address,
+                                    ),
+                                )));
+                            }
+                        }
+                    }
+                    None if module_class => {
+                        return Err(TastyDecodeError::MissingModuleSuperclass);
+                    }
+                    None => BinaryName::from_internal("java/lang/Object"),
+                };
+
+                let mut interfaces = Vec::new();
+                for (parent_index, parent) in parents {
+                    let resolution = resolve_parent_name_with_alias(
+                        &file,
+                        parent,
+                        package,
+                        &mut profiled_alias,
+                        &mut profiled_bare,
+                    );
+                    interfaces.push(resolution.ok_or_else(|| {
+                        TastyDecodeError::UnresolvedSupertype(Box::new(
+                            unresolved_parent_reference(
+                                &file,
+                                parent,
+                                parent_index,
+                                package,
+                                template_wire_address,
+                            ),
+                        ))
+                    })?);
                 }
-            }
-        }
-        None if module_class => return Err(TastyDecodeError::MissingModuleSuperclass),
-        None => BinaryName::from_internal("java/lang/Object"),
+                Ok((super_class, interfaces))
+            })()
+        };
+        drop(timer);
+        result
     };
-
-    let mut interfaces = Vec::new();
-    for (parent_index, parent) in parents {
-        let resolution = resolve_parent_name_with_alias(
-            &file,
-            parent,
-            package,
-            &mut resolve_alias,
-            &mut resolve_bare,
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.callback_errors += parent_alias_callbacks.errors + parent_bare_callbacks.errors;
+        profile.parent_alias_callbacks = parent_alias_callbacks;
+        profile.parent_bare_callbacks = parent_bare_callbacks;
+        profile.parent_resolution_exclusive_ns = profile.parent_resolution_ns.saturating_sub(
+            profile.parent_alias_callbacks.elapsed_ns + profile.parent_bare_callbacks.elapsed_ns,
         );
-        interfaces.push(resolution.ok_or_else(|| {
-            TastyDecodeError::UnresolvedSupertype(Box::new(unresolved_parent_reference(
-                &file,
-                parent,
-                parent_index,
-                package,
-                template_wire_address,
-            )))
-        })?);
     }
+    let (super_class, interfaces) = parent_resolution?;
 
-    let mut fields = decode_constructor_accessor_fields(
-        &file,
-        &template.term_params,
-        package,
-        &mut resolve_bare,
-    )?;
+    let mut constructor_bare_callbacks = TastyCallbackProfile::default();
+    let fields_result = {
+        let timer = ProfileTimer::new(
+            profile
+                .as_deref_mut()
+                .map(|profile| &mut profile.constructor_accessor_ns),
+        );
+        let mut profiled_bare = |package: &str, simple_name: &str| {
+            profile_callback(
+                || format!("bare|{package}|{simple_name}"),
+                || resolve_bare(package, simple_name).into_tasty_resolver_result(),
+                collect_callback_profile.then_some(&mut constructor_bare_callbacks),
+            )
+        };
+        let fields = decode_constructor_accessor_fields(
+            &file,
+            &template.term_params,
+            package,
+            &mut profiled_bare,
+        );
+        drop(timer);
+        fields
+    };
+    if let Some(profile) = profile.as_deref_mut() {
+        profile.callback_errors += constructor_bare_callbacks.errors;
+        profile.constructor_accessor_callbacks = constructor_bare_callbacks;
+        profile.constructor_accessor_exclusive_ns = profile
+            .constructor_accessor_ns
+            .saturating_sub(profile.constructor_accessor_callbacks.elapsed_ns);
+    }
+    let mut fields = fields_result?;
     let class_type_parameters = template
         .type_params
         .iter()
@@ -1072,13 +1351,38 @@ fn decode_impl(
             Some((address, u32::try_from(parameter_index).ok()?))
         })
         .collect::<HashMap<_, _>>();
-    let (stats_fields, methods) = decode_members(
-        &file,
-        &template.stats,
-        package,
-        &class_type_parameters,
-        &mut resolve_bare,
-    )?;
+    let mut member_bare_callbacks = TastyCallbackProfile::default();
+    let members_result = {
+        let timer = ProfileTimer::new(
+            profile
+                .as_deref_mut()
+                .map(|profile| &mut profile.member_projection_ns),
+        );
+        let mut profiled_bare = |package: &str, simple_name: &str| {
+            profile_callback(
+                || format!("bare|{package}|{simple_name}"),
+                || resolve_bare(package, simple_name).into_tasty_resolver_result(),
+                collect_callback_profile.then_some(&mut member_bare_callbacks),
+            )
+        };
+        let members = decode_members(
+            &file,
+            &template.stats,
+            package,
+            &class_type_parameters,
+            &mut profiled_bare,
+        );
+        drop(timer);
+        members
+    };
+    if let Some(profile) = profile {
+        profile.callback_errors += member_bare_callbacks.errors;
+        profile.member_bare_callbacks = member_bare_callbacks;
+        profile.member_projection_exclusive_ns = profile
+            .member_projection_ns
+            .saturating_sub(profile.member_bare_callbacks.elapsed_ns);
+    }
+    let (stats_fields, methods) = members_result?;
     fields.extend(stats_fields);
 
     Ok(DecodedTastyClass {
@@ -3791,6 +4095,57 @@ fn render_member_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
 mod tests {
     use super::*;
     use dotty_tasty::tasty::{AstChildNode, SimpleTerm, Writer};
+
+    #[test]
+    fn callback_profile_keeps_error_status_per_repeated_invocation() {
+        let key = || "bare|example|T".to_owned();
+        let mut profile = TastyCallbackProfile::default();
+
+        assert_eq!(
+            profile_callback(
+                key,
+                || TastyResolverResult::Value(None::<BinaryName>),
+                Some(&mut profile),
+            ),
+            None
+        );
+        assert_eq!(
+            profile_callback(
+                key,
+                || TastyResolverResult::Error(None::<BinaryName>),
+                Some(&mut profile),
+            ),
+            None
+        );
+
+        assert_eq!(profile.calls, 2);
+        assert_eq!(profile.unresolved, 1);
+        assert_eq!(profile.errors, 1);
+        assert_eq!(
+            profile
+                .observations
+                .iter()
+                .map(|observation| observation.outcome.as_str())
+                .collect::<Vec<_>>(),
+            ["unresolved", "error"]
+        );
+    }
+
+    #[test]
+    fn callback_profile_does_not_build_keys_when_disabled() {
+        let key_built = std::cell::Cell::new(false);
+        let result = profile_callback(
+            || {
+                key_built.set(true);
+                "bare|example|T".to_owned()
+            },
+            || TastyResolverResult::Value(None::<BinaryName>),
+            None,
+        );
+
+        assert_eq!(result, None);
+        assert!(!key_built.get());
+    }
 
     fn tsv_cell(value: &str) -> String {
         if value.is_empty() {

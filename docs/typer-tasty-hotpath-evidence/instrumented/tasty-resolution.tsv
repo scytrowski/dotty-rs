@@ -1,0 +1,73 @@
+run	scope	file	kind	category	callback_key	candidate	outcome	elapsed_ns
+1	source		callback	member_bare	bare|dotty/tools/dotc/core|paramNeeded		unresolved	53270
+1	source		probe	bare	bare|dotty/tools/dotc/core|paramNeeded	dotty/tools/dotc/core/paramNeeded	missing	17593
+1	source		probe	bare	bare|dotty/tools/dotc/core|paramNeeded	scala/paramNeeded	missing	14628
+1	source		probe	bare	bare|dotty/tools/dotc/core|paramNeeded	java/lang/paramNeeded	missing	12694
+1	source		callback	member_bare	bare|dotty/tools/dotc/util|T		unresolved	35847
+1	source		callback	member_bare	bare|dotty/tools/dotc/util|T		unresolved	2084
+1	source		probe	bare	bare|dotty/tools/dotc/util|T	dotty/tools/dotc/util/T	missing	14668
+1	source		probe	bare	bare|dotty/tools/dotc/util|T	scala/T	missing	8877
+1	source		probe	bare	bare|dotty/tools/dotc/util|T	java/lang/T	missing	9298
+1	source		probe	bare	bare|dotty/tools/dotc/util|T	dotty/tools/dotc/util/T	missing	230
+1	source		probe	bare	bare|dotty/tools/dotc/util|T	scala/T	missing	181
+1	source		probe	bare	bare|dotty/tools/dotc/util|T	java/lang/T	missing	160
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	callback	member_bare	bare|dotty/tools/dotc/core|paramNeeded		unresolved	6863
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	probe	bare	bare|dotty/tools/dotc/core|paramNeeded	dotty/tools/dotc/core/paramNeeded	missing	1492
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	probe	bare	bare|dotty/tools/dotc/core|paramNeeded	scala/paramNeeded	missing	270
+1	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	probe	bare	bare|dotty/tools/dotc/core|paramNeeded	java/lang/paramNeeded	missing	381
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	callback	member_bare	bare|dotty/tools/dotc/util|T		unresolved	4348
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	callback	member_bare	bare|dotty/tools/dotc/util|T		unresolved	1773
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	dotty/tools/dotc/util/T	missing	631
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	scala/T	missing	301
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	java/lang/T	missing	481
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	dotty/tools/dotc/util/T	missing	201
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	scala/T	missing	181
+1	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	java/lang/T	missing	150
+2	source		callback	member_bare	bare|dotty/tools/dotc/core|paramNeeded		unresolved	44383
+2	source		probe	bare	bare|dotty/tools/dotc/core|paramNeeded	dotty/tools/dotc/core/paramNeeded	missing	17283
+2	source		probe	bare	bare|dotty/tools/dotc/core|paramNeeded	scala/paramNeeded	missing	12824
+2	source		probe	bare	bare|dotty/tools/dotc/core|paramNeeded	java/lang/paramNeeded	missing	11392
+2	source		callback	member_bare	bare|dotty/tools/dotc/util|T		unresolved	34635
+2	source		callback	member_bare	bare|dotty/tools/dotc/util|T		unresolved	2004
+2	source		probe	bare	bare|dotty/tools/dotc/util|T	dotty/tools/dotc/util/T	missing	14166
+2	source		probe	bare	bare|dotty/tools/dotc/util|T	scala/T	missing	8336
+2	source		probe	bare	bare|dotty/tools/dotc/util|T	java/lang/T	missing	9317
+2	source		probe	bare	bare|dotty/tools/dotc/util|T	dotty/tools/dotc/util/T	missing	241
+2	source		probe	bare	bare|dotty/tools/dotc/util|T	scala/T	missing	160
+2	source		probe	bare	bare|dotty/tools/dotc/util|T	java/lang/T	missing	170
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	callback	member_bare	bare|dotty/tools/dotc/core|paramNeeded		unresolved	4949
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	probe	bare	bare|dotty/tools/dotc/core|paramNeeded	dotty/tools/dotc/core/paramNeeded	missing	912
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	probe	bare	bare|dotty/tools/dotc/core|paramNeeded	scala/paramNeeded	missing	461
+2	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	probe	bare	bare|dotty/tools/dotc/core|paramNeeded	java/lang/paramNeeded	missing	421
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	callback	member_bare	bare|dotty/tools/dotc/util|T		unresolved	3907
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	callback	member_bare	bare|dotty/tools/dotc/util|T		unresolved	1733
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	dotty/tools/dotc/util/T	missing	461
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	scala/T	missing	401
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	java/lang/T	missing	280
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	dotty/tools/dotc/util/T	missing	210
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	scala/T	missing	130
+2	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	java/lang/T	missing	151
+3	source		callback	member_bare	bare|dotty/tools/dotc/core|paramNeeded		unresolved	64721
+3	source		probe	bare	bare|dotty/tools/dotc/core|paramNeeded	dotty/tools/dotc/core/paramNeeded	missing	32772
+3	source		probe	bare	bare|dotty/tools/dotc/core|paramNeeded	scala/paramNeeded	missing	14537
+3	source		probe	bare	bare|dotty/tools/dotc/core|paramNeeded	java/lang/paramNeeded	missing	13054
+3	source		callback	member_bare	bare|dotty/tools/dotc/util|T		unresolved	37080
+3	source		callback	member_bare	bare|dotty/tools/dotc/util|T		unresolved	2104
+3	source		probe	bare	bare|dotty/tools/dotc/util|T	dotty/tools/dotc/util/T	missing	15138
+3	source		probe	bare	bare|dotty/tools/dotc/util|T	scala/T	missing	9668
+3	source		probe	bare	bare|dotty/tools/dotc/util|T	java/lang/T	missing	9408
+3	source		probe	bare	bare|dotty/tools/dotc/util|T	dotty/tools/dotc/util/T	missing	240
+3	source		probe	bare	bare|dotty/tools/dotc/util|T	scala/T	missing	150
+3	source		probe	bare	bare|dotty/tools/dotc/util|T	java/lang/T	missing	180
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	callback	member_bare	bare|dotty/tools/dotc/core|paramNeeded		unresolved	5050
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	probe	bare	bare|dotty/tools/dotc/core|paramNeeded	dotty/tools/dotc/core/paramNeeded	missing	791
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	probe	bare	bare|dotty/tools/dotc/core|paramNeeded	scala/paramNeeded	missing	381
+3	match	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	probe	bare	bare|dotty/tools/dotc/core|paramNeeded	java/lang/paramNeeded	missing	271
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	callback	member_bare	bare|dotty/tools/dotc/util|T		unresolved	4218
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	callback	member_bare	bare|dotty/tools/dotc/util|T		unresolved	1883
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	dotty/tools/dotc/util/T	missing	731
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	scala/T	missing	350
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	java/lang/T	missing	250
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	dotty/tools/dotc/util/T	missing	210
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	scala/T	missing	150
+3	match	compiler/src/dotty/tools/dotc/core/Types.scala	probe	bare	bare|dotty/tools/dotc/util|T	java/lang/T	missing	131

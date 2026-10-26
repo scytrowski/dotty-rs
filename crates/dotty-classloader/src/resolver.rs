@@ -4189,6 +4189,8 @@ mod tests {
             .expect("failed module completion should publish its load profile");
         assert_eq!(profile.tasty_decode_calls, 1);
         assert!(profile.tasty_decode_ns > 0);
+        assert!(profile.tasty_decode_counters["parse_ns"] > 0);
+        assert_eq!(profile.tasty_decode_counters["index_ns"], 0);
         assert_eq!(profile.module_completion_errors, 1);
         assert_eq!(profile.module_completion_successes, 0);
     }
