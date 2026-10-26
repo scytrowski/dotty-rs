@@ -368,6 +368,40 @@ existing consumer gates. A missing JDK, Scala source checkout, revision, or
 cached compiler dependency is therefore a test failure in CI, not a silent
 skip.
 
+## Issue #1722: final linked object-composition release gate
+
+The final gate composes the preceding proofs without broadening the supported
+source subset. `reference_field_owner_emits_a_complete_deterministic_linked_batch`
+uses the exact fixture to emit two complete batches from different `SourceId`s
+and compares all four artifact paths, bytes, classfile/TASTy versions and
+per-class UUID links. `one_real_source_session_preserves_identity_and_emits_cross_class_field_receiver`
+checks the original frontend session, canonical field/constructor/method
+symbols and exact source-to-typed RHS roots. The paired batch planner and
+artifact validator return output only after both classfiles and both sidecars
+pass the linked ABI checks.
+
+`reference_field_batch_publication_rejects_partial_and_faulted_results` runs
+the safe publisher against that exact `Counter`/`CounterOwner` batch. It
+rejects a missing class pair, a corrupt Owner sidecar, a duplicate output path
+and a stale Owner classfile UUID before creating a destination. It also injects
+failures after each of the four staged files, before promotion and after
+promotion, and confirms the destination and private staging tree are removed
+for each handled failure. A preexisting destination containing a sentinel is
+rejected without changing the sentinel or its inventory. The publisher offers
+best-effort cleanup for handled errors; it does not guarantee multi-file
+filesystem crash atomicity.
+
+The remaining acceptance rows are covered by the focused regressions above:
+the object-composition JVM/TASTy contract mutation test rejects wrong field
+descriptors and dispatch owners; the source negative matrix asserts the first
+producer failure for unsupported shapes; the JDK 21 runtime gate executes
+unchanged Rust classfiles; and the strict Scala 3.9 consumer compiles against
+both Rust sidecars and runs the client with result `742`. The hosted Scala
+workflow includes the prior single-class, multiclass, cross-class, factory and
+object-composition strict gates. None of these results claim arbitrary object
+graphs, external classes, mutable reference fields or a full Scala corpus
+audit.
+
 ## Next ownership boundary
 
 The #1715 evidence-only audit is superseded by the #1716 metadata/type proof,
@@ -378,6 +412,11 @@ remains in #1722. Any typer blocker still belongs to the Typer owner.
 
 ## Checks run
 
+- `cargo test -p dotty --test jvm_tasty_artifacts reference_field_batch_publication_rejects_partial_and_faulted_results --locked -- --nocapture`
+- `cargo test -p dotty --test jvm_tasty_artifacts --test jvm_tasty_contract --test jvm_tasty_object_composition --locked -- --nocapture` with `DOTTY_CLASSFILE_REQUIRE_JDK=1`.
+- Strict pinned Scala 3.9 single-class, multiclass, cross-class, factory and object-composition consumer gates plus `tasty_source_pickling`, with each corresponding required environment flag enabled.
+- `DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test -p dotty-classfile --test classfile_jvm_encoder -p dotty-jvm --lib -p dotty --test jvm_source_compilation --test jvm_tasty_artifacts --test jvm_stateful_class_contract --locked -- --nocapture`
+- `cargo fmt --all -- --check`, `python3 tools/check-frontend-boundaries.py`, `git diff --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked`, and `cargo test --workspace --all-targets --locked`.
 - `cargo +1.98.1 test -p dotty --test jvm_tasty_object_composition --locked -- --nocapture`
 - `DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +stable test -p dotty --test jvm_source_compilation exact_tasty_object_composition_fixture_emits_reference_field_and_executes --locked -- --nocapture`
 - Exact Scala 3.9 source compilation, independent Scala client compilation, `javap -v -p -c`, and `java -Xverify:all -ea` with the pinned source checkout and Temurin JDK listed above.
