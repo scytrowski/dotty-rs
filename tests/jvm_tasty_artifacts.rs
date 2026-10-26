@@ -22,6 +22,7 @@ const COUNTER_FACTORY: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
+const COUNTER_FACTORY_REFERENCE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def create(counter: Counter): Counter = counter\n";
 
 #[test]
 fn counter_emits_complete_class_and_tasty_with_the_same_real_header_uuid() {
@@ -395,6 +396,33 @@ fn primitive_create_method_does_not_activate_the_counter_factory_proof() {
             .utf8(create.descriptor_index)
             .unwrap(),
         "(I)I"
+    );
+}
+
+#[test]
+fn reference_returning_create_formal_keeps_the_existing_identity_shape() {
+    let batch = emit_paired_jvm_tasty_batch(
+        COUNTER_FACTORY_REFERENCE_CREATE,
+        "tests/fixtures/jvm_tasty_cross_class_factories/CounterFactoryReferenceCreate.scala",
+        SourceId::from_index(1698),
+    )
+    .unwrap();
+
+    assert_eq!(batch.classes().len(), 2);
+    let factory = &batch.classes()[1];
+    let mut reader = Reader::new(factory.classfile_bytes());
+    let class_file = ClassFile::decode(&mut reader).unwrap();
+    let create = class_file
+        .methods
+        .iter()
+        .find(|method| class_file.constant_pool.utf8(method.name_index).unwrap() == "create")
+        .unwrap();
+    assert_eq!(
+        class_file
+            .constant_pool
+            .utf8(create.descriptor_index)
+            .unwrap(),
+        "(Lexample/Counter;)Lexample/Counter;"
     );
 }
 

@@ -1205,11 +1205,35 @@ fn is_counter_factory_source(
         else {
             return false;
         };
-        store.names.resolve(definition.name.as_name().text()) == "create"
-            && matches!(
+        if store.names.resolve(definition.name.as_name().text()) != "create"
+            || !matches!(
                 source_ast.try_get(definition.tpt).map(|tree| &tree.kind),
                 Some(TreeKind::Ident(result))
                     if store.names.resolve(result.name.text()) == "Counter"
             )
+        {
+            return false;
+        }
+
+        let Some(source_rhs) = definition.rhs else {
+            return false;
+        };
+        let Some(TreeKind::Apply(application)) =
+            source_ast.try_get(source_rhs).map(|tree| &tree.kind)
+        else {
+            return false;
+        };
+        let Some(TreeKind::Select(selection)) = source_ast
+            .try_get(application.function)
+            .map(|tree| &tree.kind)
+        else {
+            return false;
+        };
+        matches!(
+            source_ast
+                .try_get(selection.qualifier)
+                .map(|tree| &tree.kind),
+            Some(TreeKind::New(_))
+        )
     })
 }
