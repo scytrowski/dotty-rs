@@ -398,6 +398,8 @@ pub struct ClassLoadProfile {
     pub tasty_decode_calls: usize,
     /// TASTy decoder time after subtracting resource accesses measured in its callbacks.
     pub tasty_decode_exclusive_ns: u128,
+    /// Sum of opt-in TASTy decoder phase timings and callback counts.
+    pub tasty_decode_counters: BTreeMap<String, u128>,
     /// Inclusive time in uncached loads, including decode, semantic projection, and dependencies.
     pub load_uncached_inclusive_ns: u128,
     /// Direct module completion attempts represented by this profile.
@@ -464,6 +466,7 @@ struct ActiveLoadProfile {
     tasty_decode_ns: u128,
     tasty_decode_calls: usize,
     tasty_decode_exclusive_ns: u128,
+    tasty_decode_counters: BTreeMap<String, u128>,
     nested_tasty_decode_ns: u128,
     load_uncached_inclusive_ns: u128,
     module_completion_calls: usize,
@@ -688,6 +691,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             tasty_decode_ns: profile.tasty_decode_ns,
             tasty_decode_calls: profile.tasty_decode_calls,
             tasty_decode_exclusive_ns: profile.tasty_decode_exclusive_ns,
+            tasty_decode_counters: profile.tasty_decode_counters,
             load_uncached_inclusive_ns: profile.load_uncached_inclusive_ns,
             module_completion_calls: profile.module_completion_calls,
             module_completion_successes: profile.module_completion_successes,
@@ -780,6 +784,109 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             if profile.depth > 0 {
                 profile.nested_tasty_decode_ns += exclusive_ns;
             }
+        }
+    }
+
+    fn record_tasty_decode_profile(
+        &mut self,
+        name: &BinaryName,
+        payload_bytes: usize,
+        detail: &tasty_symbol::TastyDecodeProfile,
+    ) {
+        let Some(profile) = self.active_load_profile.as_mut() else {
+            return;
+        };
+        let counters = &mut profile.tasty_decode_counters;
+        let size_bucket = match payload_bytes {
+            0..=4_095 => "0-4KiB",
+            4_096..=65_535 => "4-64KiB",
+            65_536..=1_048_575 => "64KiB-1MiB",
+            _ => ">1MiB",
+        };
+        let observation = format!(
+            "resource_observation:{}|{}|{}|{}",
+            name.as_internal(),
+            detail.format_version.as_deref().unwrap_or("invalid"),
+            size_bucket,
+            detail.outcome,
+        );
+        *counters.entry(observation).or_default() += 1;
+        for (key, value) in [
+            ("parse_ns", detail.parse_ns),
+            ("index_ns", detail.index_ns),
+            ("definition_selection_ns", detail.definition_selection_ns),
+            ("parent_resolution_ns", detail.parent_resolution_ns),
+            (
+                "parent_resolution_exclusive_ns",
+                detail.parent_resolution_exclusive_ns,
+            ),
+            ("constructor_accessor_ns", detail.constructor_accessor_ns),
+            (
+                "constructor_accessor_exclusive_ns",
+                detail.constructor_accessor_exclusive_ns,
+            ),
+            ("member_projection_ns", detail.member_projection_ns),
+            (
+                "member_projection_exclusive_ns",
+                detail.member_projection_exclusive_ns,
+            ),
+            (
+                "parent_alias_calls",
+                detail.parent_alias_callbacks.calls as u128,
+            ),
+            (
+                "parent_alias_resolved",
+                detail.parent_alias_callbacks.resolved as u128,
+            ),
+            (
+                "parent_alias_unresolved",
+                detail.parent_alias_callbacks.unresolved as u128,
+            ),
+            ("parent_alias_ns", detail.parent_alias_callbacks.elapsed_ns),
+            (
+                "parent_bare_calls",
+                detail.parent_bare_callbacks.calls as u128,
+            ),
+            (
+                "parent_bare_resolved",
+                detail.parent_bare_callbacks.resolved as u128,
+            ),
+            (
+                "parent_bare_unresolved",
+                detail.parent_bare_callbacks.unresolved as u128,
+            ),
+            ("parent_bare_ns", detail.parent_bare_callbacks.elapsed_ns),
+            (
+                "constructor_bare_calls",
+                detail.constructor_accessor_callbacks.calls as u128,
+            ),
+            (
+                "constructor_bare_resolved",
+                detail.constructor_accessor_callbacks.resolved as u128,
+            ),
+            (
+                "constructor_bare_unresolved",
+                detail.constructor_accessor_callbacks.unresolved as u128,
+            ),
+            (
+                "constructor_bare_ns",
+                detail.constructor_accessor_callbacks.elapsed_ns,
+            ),
+            (
+                "member_bare_calls",
+                detail.member_bare_callbacks.calls as u128,
+            ),
+            (
+                "member_bare_resolved",
+                detail.member_bare_callbacks.resolved as u128,
+            ),
+            (
+                "member_bare_unresolved",
+                detail.member_bare_callbacks.unresolved as u128,
+            ),
+            ("member_bare_ns", detail.member_bare_callbacks.elapsed_ns),
+        ] {
+            *counters.entry(key.to_owned()).or_default() += value;
         }
     }
 
@@ -1035,29 +1142,63 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         } else {
             decoded_cache.remove(name);
             let decode_started = self.collect_load_profiles.then(Instant::now);
-            let decoded = tasty_symbol::decode_module_class_with_resolvers(
-                resource.bytes(),
-                &identity.module_class_name,
-                |owner, alias| match resolve_tasty_alias(class_path, owner, alias) {
-                    Ok(target) => target,
-                    Err(error) => {
-                        alias_error.borrow_mut().get_or_insert(error);
-                        None
-                    }
-                },
-                |package, simple_name| match resolve_tasty_bare_reference(
-                    class_path,
-                    package,
-                    simple_name,
-                ) {
-                    Ok(target) => target,
-                    Err(error) => {
-                        alias_error.borrow_mut().get_or_insert(error);
-                        None
-                    }
-                },
-            );
+            let mut decode_profile = tasty_symbol::TastyDecodeProfile::default();
+            let decoded = if self.collect_load_profiles {
+                tasty_symbol::decode_module_class_with_resolvers_profiled(
+                    resource.bytes(),
+                    &identity.module_class_name,
+                    |owner, alias| match resolve_tasty_alias(class_path, owner, alias) {
+                        Ok(target) => target,
+                        Err(error) => {
+                            alias_error.borrow_mut().get_or_insert(error);
+                            None
+                        }
+                    },
+                    |package, simple_name| match resolve_tasty_bare_reference(
+                        class_path,
+                        package,
+                        simple_name,
+                    ) {
+                        Ok(target) => target,
+                        Err(error) => {
+                            alias_error.borrow_mut().get_or_insert(error);
+                            None
+                        }
+                    },
+                    &mut decode_profile,
+                )
+            } else {
+                tasty_symbol::decode_module_class_with_resolvers(
+                    resource.bytes(),
+                    &identity.module_class_name,
+                    |owner, alias| match resolve_tasty_alias(class_path, owner, alias) {
+                        Ok(target) => target,
+                        Err(error) => {
+                            alias_error.borrow_mut().get_or_insert(error);
+                            None
+                        }
+                    },
+                    |package, simple_name| match resolve_tasty_bare_reference(
+                        class_path,
+                        package,
+                        simple_name,
+                    ) {
+                        Ok(target) => target,
+                        Err(error) => {
+                            alias_error.borrow_mut().get_or_insert(error);
+                            None
+                        }
+                    },
+                )
+            };
             self.record_tasty_decode(decode_started, resource_before_decode);
+            if self.collect_load_profiles {
+                self.record_tasty_decode_profile(
+                    &identity.module_class_name,
+                    resource.bytes().len(),
+                    &decode_profile,
+                );
+            }
             if let Some(error) = alias_error.into_inner() {
                 return Err(error.into_class_load_error().0);
             }
@@ -2690,29 +2831,59 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let class_path = &self.class_path;
         let resource_before_decode = self.resource_lookup_total_ns();
         let decode_started = self.collect_load_profiles.then(Instant::now);
-        let decoded = tasty_symbol::decode_with_resolvers(
-            bytes,
-            name,
-            |owner, alias| match resolve_tasty_alias(class_path, owner, alias) {
-                Ok(target) => target,
-                Err(error) => {
-                    alias_error.borrow_mut().get_or_insert(error);
-                    None
-                }
-            },
-            |package, simple_name| match resolve_tasty_bare_reference(
-                class_path,
-                package,
-                simple_name,
-            ) {
-                Ok(target) => target,
-                Err(error) => {
-                    alias_error.borrow_mut().get_or_insert(error);
-                    None
-                }
-            },
-        );
+        let mut decode_profile = tasty_symbol::TastyDecodeProfile::default();
+        let decoded = if self.collect_load_profiles {
+            tasty_symbol::decode_with_resolvers_profiled(
+                bytes,
+                name,
+                |owner, alias| match resolve_tasty_alias(class_path, owner, alias) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        alias_error.borrow_mut().get_or_insert(error);
+                        None
+                    }
+                },
+                |package, simple_name| match resolve_tasty_bare_reference(
+                    class_path,
+                    package,
+                    simple_name,
+                ) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        alias_error.borrow_mut().get_or_insert(error);
+                        None
+                    }
+                },
+                &mut decode_profile,
+            )
+        } else {
+            tasty_symbol::decode_with_resolvers(
+                bytes,
+                name,
+                |owner, alias| match resolve_tasty_alias(class_path, owner, alias) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        alias_error.borrow_mut().get_or_insert(error);
+                        None
+                    }
+                },
+                |package, simple_name| match resolve_tasty_bare_reference(
+                    class_path,
+                    package,
+                    simple_name,
+                ) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        alias_error.borrow_mut().get_or_insert(error);
+                        None
+                    }
+                },
+            )
+        };
         self.record_tasty_decode(decode_started, resource_before_decode);
+        if self.collect_load_profiles {
+            self.record_tasty_decode_profile(name, bytes.len(), &decode_profile);
+        }
         if let Some(error) = alias_error.into_inner() {
             let (error, context) = error.into_class_load_error();
             self.dependency_failure_context = context;
