@@ -3,7 +3,7 @@ use dotty_classfile::classfile::{ClassFile, Reader};
 use dotty_classfile::tasty_link::TastyLinkId;
 use dotty_core::SourceId;
 use dotty_jvm::emit_class;
-use dotty_jvm_tasty_contract::{JvmTastyContractError, validate_classfile_tasty_link};
+use dotty_jvm_tasty_contract::validate_classfile_tasty_link;
 use dotty_tasty::tasty::{DefinitionBody, TastyFile};
 
 use dotty::jvm_tasty_artifacts::{
@@ -427,25 +427,19 @@ fn unsupported_second_class_rejects_the_entire_batch() {
 }
 
 #[test]
-fn unsupported_reader_body_rejects_the_counter_reader_batch() {
-    let source = COUNTER_READER.replace("counter.get()", "counter.get() + 1");
-    let error = emit_paired_jvm_tasty_batch(
-        &source,
-        "tests/fixtures/jvm_tasty_cross_class/Reader.scala",
-        SourceId::from_index(1677),
-    )
-    .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            PairedBatchArtifactError::Contract(JvmTastyContractError::BatchArtifact {
-                class_index: 1,
-                phase: "cross-class invocation",
-                ..
-            })
-        ),
-        "unexpected batch rejection: {error:?}"
+fn primitive_root_call_does_not_masquerade_as_a_cross_class_batch_call() {
+    let source = COUNTER_GAUGE.replacen(
+        "def get(): Int = current",
+        "def get(): Int = current + 1",
+        1,
     );
+    let batch =
+        emit_paired_jvm_tasty_batch(&source, "CounterGauge.scala", SourceId::from_index(1677))
+            .expect("primitive arithmetic in a batched source class remains supported");
+
+    assert_eq!(batch.classes().len(), 2);
+    assert_eq!(batch.classes()[0].classfile_path(), "example/Counter.class");
+    assert_eq!(batch.classes()[1].classfile_path(), "example/Gauge.class");
 }
 
 #[test]

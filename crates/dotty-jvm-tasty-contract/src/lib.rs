@@ -950,6 +950,15 @@ fn validate_cross_class_call_code(
         if owner == tasty.class {
             continue;
         }
+        // Primitive operations and other external calls may appear at the
+        // root of a method body. This batch contract only narrows and checks
+        // calls whose declaring class is another class in this batch.
+        let Some(target_class_metadata) = all_metadata
+            .iter()
+            .find(|metadata| metadata.identity().symbol() == owner)
+        else {
+            continue;
+        };
         if application.kind != dotty_core::ast::ApplyKind::Regular || !application.args.is_empty() {
             return Err(format!(
                 "cross-class method {target:?} is not a direct zero-argument call"
@@ -959,24 +968,16 @@ fn validate_cross_class_call_code(
             || target_info.origin != SymbolOrigin::Source(tasty.source.id)
             || !tasty.store.symbols.contains(owner)
             || tasty.store.symbols.get(owner).kind != SymbolKind::Class
-            || !all_metadata
-                .iter()
-                .any(|metadata| metadata.identity().symbol() == owner)
         {
             return Err(format!(
                 "cross-class target {target:?} is not a canonical planned source method"
             ));
         }
-        let target_metadata = all_metadata
+        let target_metadata = target_class_metadata
+            .methods()
             .iter()
-            .find(|metadata| metadata.identity().symbol() == owner)
-            .and_then(|metadata| {
-                metadata
-                    .methods()
-                    .iter()
-                    .find(|method| method.symbol() == *target)
-                    .map(|method| (metadata, method))
-            })
+            .find(|method| method.symbol() == *target)
+            .map(|method| (target_class_metadata, method))
             .ok_or_else(|| format!("cross-class target {target:?} is absent from its JVM plan"))?;
         let expected_descriptor =
             source_method_descriptor(tasty.store, tasty.definitions, *target, &all_metadata)
