@@ -218,13 +218,38 @@ behavior. The paired batch contract also accepts the resulting plan, but this
 increment does not separately claim runtime correctness for Rust-emitted
 `.class` files and does not expand the Typer or JVM backend.
 
+## Issue #1719: linked JVM/TASTy object-composition batch
+
+The paired artifact coordinator now emits the unchanged `Counter` and
+`CounterOwner` source from one frontend session as exactly four ordered owned
+artifacts: `Counter.class`, `Counter.tasty`, `CounterOwner.class`, and
+`CounterOwner.tasty`. The owner class has only its private final
+`inner:Lexample/Counter;` field. Its constructor directly calls
+`Object.<init>`, allocates one `Counter` with the original `seed`, and stores
+that value in `inner`; `read()I` loads `this.inner` and invokes the exact
+planned `Counter.get()I` method. The binary contract checks the actual
+`Fieldref` and `Methodref` owners, names, and descriptors against the canonical
+source symbols and validated same-batch field proof.
+
+The complete batch validates each classfile against its own TASTy 28.9 header
+and class-level link before returning any bytes. Two fresh source sessions
+produce byte-identical classfiles, sidecars, paths, and UUIDs. A nested
+cross-class call and forged receiver `Fieldref` or missing final field flag
+are rejected; a failure in the owner class does not return the already emitted
+Counter pair.
+
+`reference_field_owner_batch_executes_on_verified_jdk21` checks the decoded
+classfile layout and `javap` disassembly, then compiles a Java harness and runs
+both owners under `java -Xverify:all`. Scala's independent classpath consumer
+remains the separate #1721 check.
+
 ## Next ownership boundary
 
 The #1715 evidence-only audit is superseded by the #1716 metadata/type proof,
-#1717 initializer serialization, and #1718 class-state TASTy receiver-call
-support. The pinned Scala 3.9 consumer accepts and executes the TASTy-level
-case; linked Rust JVM class emission remains a separate boundary. Any typer
-blocker still belongs to the Typer owner.
+#1717 initializer serialization, #1718 TASTy receiver-call support, and #1719
+linked JVM/TASTy batch. Scala's independent consumer validation remains in
+#1721, and complete linked source-to-JVM/TASTy end-to-end coverage remains in
+#1722. Any typer blocker still belongs to the Typer owner.
 
 ## Checks run
 

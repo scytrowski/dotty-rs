@@ -22,6 +22,8 @@ const COUNTER_FACTORY: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
 const COUNTER_FACTORY_RUNTIME: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactoryRuntime.scala");
+const COUNTER_OWNER: &str =
+    include_str!("fixtures/jvm_tasty_object_composition/CounterOwner.scala");
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
 const COUNTER_FACTORY_REFERENCE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def create(counter: Counter): Counter = counter\n";
@@ -616,6 +618,401 @@ fn counter_reader_emits_four_complete_linked_cross_class_artifacts() {
             .unwrap(),
         ("get", "()I")
     );
+}
+
+#[test]
+fn reference_field_owner_emits_a_complete_deterministic_linked_batch() {
+    let first = emit_paired_jvm_tasty_batch(
+        COUNTER_OWNER,
+        "tests/fixtures/jvm_tasty_object_composition/CounterOwner.scala",
+        SourceId::from_index(1719),
+    )
+    .unwrap();
+    let second = emit_paired_jvm_tasty_batch(
+        COUNTER_OWNER,
+        "tests/fixtures/jvm_tasty_object_composition/CounterOwner.scala",
+        SourceId::from_index(1720),
+    )
+    .unwrap();
+    assert_ne!(first.source_id(), second.source_id());
+    assert_eq!(first.classes().len(), 2);
+    assert_eq!(second.classes().len(), 2);
+
+    let expected = [
+        (
+            "example/Counter.class",
+            "example/Counter.tasty",
+            "example/Counter",
+        ),
+        (
+            "example/CounterOwner.class",
+            "example/CounterOwner.tasty",
+            "example/CounterOwner",
+        ),
+    ];
+    let mut classes = Vec::new();
+    for ((pair, second_pair), (classfile_path, tasty_path, internal_name)) in
+        first.classes().iter().zip(second.classes()).zip(expected)
+    {
+        assert_eq!(pair.classfile_path(), classfile_path);
+        assert_eq!(pair.tasty_path(), tasty_path);
+        assert_eq!(pair.source_id(), first.source_id());
+        assert_eq!(pair.classfile_path(), second_pair.classfile_path());
+        assert_eq!(pair.tasty_path(), second_pair.tasty_path());
+        assert_eq!(pair.classfile_bytes(), second_pair.classfile_bytes());
+        assert_eq!(pair.tasty_bytes(), second_pair.tasty_bytes());
+        assert_eq!(pair.tasty_link_id(), second_pair.tasty_link_id());
+
+        let tasty = TastyFile::parse_and_validate_scala_3_9(pair.tasty_bytes()).unwrap();
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version,
+            ),
+            (28, 9, 0)
+        );
+        assert_eq!(
+            pair.tasty_link_id(),
+            TastyLinkId::from_bytes(tasty.header().uuid)
+        );
+        let mut reader = Reader::new(pair.classfile_bytes());
+        let class = ClassFile::decode(&mut reader).unwrap();
+        assert!(reader.is_at_end());
+        assert_eq!((class.version.major, class.version.minor), (65, 0));
+        assert_eq!(
+            class.constant_pool.class_name(class.this_class).unwrap(),
+            internal_name
+        );
+        assert_eq!(class.tasty_link_id().unwrap(), Some(pair.tasty_link_id()));
+        validate_classfile_tasty_link(&class, pair.tasty_bytes()).unwrap();
+        classes.push(class);
+    }
+
+    let owner = &classes[1];
+    let constructor = owner
+        .methods
+        .iter()
+        .find(|method| owner.constant_pool.utf8(method.name_index).unwrap() == "<init>")
+        .unwrap();
+    let [Attribute::Code(constructor_code)] = constructor.attributes.as_slice() else {
+        panic!("CounterOwner constructor has exactly one Code attribute");
+    };
+    assert_eq!(constructor_code.code.len(), 17);
+    assert_eq!(
+        &constructor_code.code[..2],
+        &[0x2a, 0xb7],
+        "aload_0; Object init"
+    );
+    assert_eq!(
+        &constructor_code.code[4..6],
+        &[0x2a, 0xbb],
+        "aload_0; new Counter"
+    );
+    assert_eq!(constructor_code.code[8], 0x59, "dup allocated Counter");
+    assert_eq!(
+        constructor_code.code[9], 0x1b,
+        "load original seed argument"
+    );
+    assert_eq!(
+        constructor_code.code[13], 0xb5,
+        "putfield inner exactly once"
+    );
+    assert_eq!(constructor_code.code[16], 0xb1, "return");
+    let super_ref = ConstantPoolIndex(u16::from_be_bytes([
+        constructor_code.code[2],
+        constructor_code.code[3],
+    ]));
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = owner.constant_pool.get(super_ref).unwrap()
+    else {
+        panic!("owner constructor calls Object.<init> through CONSTANT_Methodref");
+    };
+    assert_eq!(
+        owner.constant_pool.class_name(*class_index).unwrap(),
+        "java/lang/Object"
+    );
+    assert_eq!(
+        owner
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("<init>", "()V")
+    );
+    let new_ref = ConstantPoolIndex(u16::from_be_bytes([
+        constructor_code.code[6],
+        constructor_code.code[7],
+    ]));
+    let ConstantPoolEntry::Class { name_index } = owner.constant_pool.get(new_ref).unwrap() else {
+        panic!("owner constructor allocates Counter through CONSTANT_Class");
+    };
+    assert_eq!(
+        owner.constant_pool.utf8(*name_index).unwrap(),
+        "example/Counter"
+    );
+    let counter_constructor_ref = ConstantPoolIndex(u16::from_be_bytes([
+        constructor_code.code[11],
+        constructor_code.code[12],
+    ]));
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = owner.constant_pool.get(counter_constructor_ref).unwrap()
+    else {
+        panic!("new Counter invokes CONSTANT_Methodref <init>");
+    };
+    assert_eq!(
+        owner.constant_pool.class_name(*class_index).unwrap(),
+        "example/Counter"
+    );
+    assert_eq!(
+        owner
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("<init>", "(I)V")
+    );
+    let store_ref = ConstantPoolIndex(u16::from_be_bytes([
+        constructor_code.code[14],
+        constructor_code.code[15],
+    ]));
+    let ConstantPoolEntry::Fieldref {
+        class_index,
+        name_and_type_index,
+    } = owner.constant_pool.get(store_ref).unwrap()
+    else {
+        panic!("owner constructor stores through CONSTANT_Fieldref");
+    };
+    assert_eq!(
+        owner.constant_pool.class_name(*class_index).unwrap(),
+        "example/CounterOwner"
+    );
+    assert_eq!(
+        owner
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("inner", "Lexample/Counter;")
+    );
+    assert_eq!(owner.fields.len(), 1);
+    let field = &owner.fields[0];
+    assert_eq!(owner.constant_pool.utf8(field.name_index).unwrap(), "inner");
+    assert_eq!(
+        owner.constant_pool.utf8(field.descriptor_index).unwrap(),
+        "Lexample/Counter;"
+    );
+    assert!(
+        field
+            .access_flags
+            .contains(dotty_classfile::access_flags::ACC_PRIVATE)
+    );
+    assert!(
+        field
+            .access_flags
+            .contains(dotty_classfile::access_flags::ACC_FINAL)
+    );
+    assert!(
+        !field
+            .access_flags
+            .contains(dotty_classfile::access_flags::ACC_STATIC)
+    );
+    assert_eq!(
+        owner
+            .methods
+            .iter()
+            .map(|method| (
+                owner.constant_pool.utf8(method.name_index).unwrap(),
+                owner.constant_pool.utf8(method.descriptor_index).unwrap(),
+            ))
+            .collect::<Vec<_>>(),
+        [("<init>", "(I)V"), ("read", "()I")]
+    );
+
+    let read = owner
+        .methods
+        .iter()
+        .find(|method| owner.constant_pool.utf8(method.name_index).unwrap() == "read")
+        .unwrap();
+    let [Attribute::Code(code)] = read.attributes.as_slice() else {
+        panic!("CounterOwner.read has exactly one Code attribute");
+    };
+    assert_eq!(code.code.len(), 8);
+    assert_eq!(&code.code[..2], &[0x2a, 0xb4], "aload_0; getfield");
+    assert_eq!(code.code[4], 0xb6, "invokevirtual Counter.get");
+    assert_eq!(code.code[7], 0xac, "ireturn");
+    let field_ref = ConstantPoolIndex(u16::from_be_bytes([code.code[2], code.code[3]]));
+    let ConstantPoolEntry::Fieldref {
+        class_index,
+        name_and_type_index,
+    } = owner.constant_pool.get(field_ref).unwrap()
+    else {
+        panic!("read loads inner through CONSTANT_Fieldref");
+    };
+    assert_eq!(
+        owner.constant_pool.class_name(*class_index).unwrap(),
+        "example/CounterOwner"
+    );
+    assert_eq!(
+        owner
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("inner", "Lexample/Counter;")
+    );
+    let method_ref = ConstantPoolIndex(u16::from_be_bytes([code.code[5], code.code[6]]));
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = owner.constant_pool.get(method_ref).unwrap()
+    else {
+        panic!("read invokes Counter.get through CONSTANT_Methodref");
+    };
+    assert_eq!(
+        owner.constant_pool.class_name(*class_index).unwrap(),
+        "example/Counter"
+    );
+    assert_eq!(
+        owner
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("get", "()I")
+    );
+}
+
+#[test]
+fn reference_field_owner_batch_executes_on_verified_jdk21() {
+    if !require_jdk_21_or_skip() {
+        return;
+    }
+
+    let batch = emit_paired_jvm_tasty_batch(
+        COUNTER_OWNER,
+        "tests/fixtures/jvm_tasty_object_composition/CounterOwner.scala",
+        SourceId::from_index(1719),
+    )
+    .unwrap();
+    let output = TestDirectory::new("reference-field-owner-jdk-runtime");
+    for pair in batch.classes() {
+        let classfile = output.path().join(pair.classfile_path());
+        let tasty = output.path().join(pair.tasty_path());
+        std::fs::create_dir_all(classfile.parent().unwrap()).unwrap();
+        std::fs::write(&classfile, pair.classfile_bytes()).unwrap();
+        std::fs::write(&tasty, pair.tasty_bytes()).unwrap();
+    }
+
+    let javap = Command::new("javap")
+        .args([
+            "-classpath",
+            output.path().to_str().unwrap(),
+            "-p",
+            "-s",
+            "-c",
+            "-v",
+            "example.CounterOwner",
+        ])
+        .output()
+        .expect("start JDK 21 javap for the Rust CounterOwner class");
+    assert!(
+        javap.status.success(),
+        "javap rejected Rust CounterOwner.class:\n{}",
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap = String::from_utf8_lossy(&javap.stdout);
+    assert!(javap.contains("major version: 65"), "{javap}");
+    for expected in [
+        "private final example.Counter inner;",
+        "descriptor: Lexample/Counter;",
+        "public example.CounterOwner(int);",
+        "descriptor: (I)V",
+        "public int read();",
+        "descriptor: ()I",
+        "Method java/lang/Object.\"<init>\":()V",
+        "new           #",
+        "Method example/Counter.\"<init>\":(I)V",
+        "putfield      #",
+        "getfield      #",
+        "invokevirtual #",
+        "Method example/Counter.get:()I",
+    ] {
+        assert!(
+            javap.contains(expected),
+            "javap output omitted {expected:?}:\n{javap}"
+        );
+    }
+
+    let harness = output.path().join("CounterOwnerRuntimeHarness.java");
+    std::fs::write(
+        &harness,
+        r#"public final class CounterOwnerRuntimeHarness {
+    public static void main(String[] args) {
+        example.CounterOwner first = new example.CounterOwner(7);
+        example.CounterOwner second = new example.CounterOwner(42);
+        expect(first.read(), 7);
+        expect(second.read(), 42);
+        System.out.println("independent owners=7,42");
+    }
+
+    private static void expect(int actual, int expected) {
+        if (actual != expected) {
+            throw new AssertionError("expected " + expected + ", got " + actual);
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let javac = Command::new("javac")
+        .arg("-classpath")
+        .arg(output.path())
+        .arg("-d")
+        .arg(output.path())
+        .arg(&harness)
+        .output()
+        .expect("start JDK 21 javac for the Rust CounterOwner harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected the Rust CounterOwner batch:\n{}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+
+    let java = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(output.path())
+        .arg("CounterOwnerRuntimeHarness")
+        .output()
+        .expect("start JDK 21 verifier and Rust CounterOwner harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected or failed the Rust CounterOwner batch:\n{}\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "independent owners=7,42"
+    );
+}
+
+#[test]
+fn nested_reference_field_call_rejects_the_complete_batch() {
+    let source = COUNTER_OWNER.replace("inner.get()", "inner.get() + 1");
+    assert!(matches!(
+        emit_paired_jvm_tasty_batch(
+            &source,
+            "tests/fixtures/jvm_tasty_object_composition/CounterOwner.scala",
+            SourceId::from_index(1719),
+        ),
+        Err(PairedBatchArtifactError::Contract(
+            JvmTastyContractError::BatchArtifact {
+                class_index: 1,
+                phase: "cross-class invocation",
+                ..
+            }
+        ))
+    ));
 }
 
 #[test]

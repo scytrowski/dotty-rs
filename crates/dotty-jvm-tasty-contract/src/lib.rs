@@ -762,6 +762,8 @@ pub fn validate_jvm_tasty_batch_artifacts(
         }
         validate_decoded_class_abi(&class_file, &expected.proof)
             .map_err(|reason| artifact_error("member ABI", reason.into()))?;
+        validate_reference_field_constructor_code(&class_file, &expected.proof)
+            .map_err(|reason| artifact_error("reference-field initializer", reason))?;
         validate_cross_class_call_code(&class_file, &expected.proof)
             .map_err(|reason| artifact_error("cross-class invocation", reason))?;
     }
@@ -890,6 +892,167 @@ fn validate_decoded_class_abi(
     Ok(())
 }
 
+fn validate_reference_field_constructor_code(
+    class_file: &ClassFile<'_>,
+    proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
+) -> Result<(), String> {
+    let mut reference_fields = proof.tasty_plan.same_batch_reference_fields();
+    let Some(reference_field) = reference_fields.next() else {
+        return Ok(());
+    };
+    if reference_fields.next().is_some() {
+        return Err("more than one same-batch reference field initializer is unsupported".into());
+    }
+
+    let field = proof
+        .metadata
+        .fields()
+        .iter()
+        .find(|field| field.symbol() == reference_field.field())
+        .ok_or_else(|| {
+            "reference initializer field is absent from checked JVM metadata".to_owned()
+        })?;
+    let all_metadata = proof
+        .jvm_unit
+        .metadata(proof.tasty_plan.plan().definitions)
+        .map_err(|error| format!("cannot derive planned classes: {error:?}"))?;
+    let target = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == reference_field.target_class())
+        .ok_or_else(|| "reference initializer target is absent from the JVM batch".to_owned())?;
+    let target_constructor = target
+        .constructor()
+        .filter(|constructor| constructor.descriptor().as_str() == "(I)V")
+        .ok_or_else(|| "reference initializer target has no checked (I)V constructor".to_owned())?;
+    let owner_constructor = proof
+        .metadata
+        .constructor()
+        .filter(|constructor| constructor.descriptor().as_str() == "(I)V")
+        .ok_or_else(|| "reference initializer owner has no checked (I)V constructor".to_owned())?;
+    let constructor = class_file
+        .methods
+        .iter()
+        .find(|method| {
+            class_file.constant_pool.utf8(method.name_index).ok() == Some("<init>")
+                && class_file.constant_pool.utf8(method.descriptor_index).ok()
+                    == Some(owner_constructor.descriptor().as_str())
+        })
+        .ok_or_else(|| "reference initializer constructor is absent from class bytes".to_owned())?;
+    let [dotty_classfile::attribute::Attribute::Code(code)] = constructor.attributes.as_slice()
+    else {
+        return Err("reference initializer constructor has no unique Code attribute".into());
+    };
+
+    // This batch proof currently admits one direct `new Target(seed)` field
+    // initializer in a `(I)V` owner constructor. Check the entire method shape
+    // so a valid ABI cannot conceal a changed argument or extra initialization.
+    if code.code.len() != 17
+        || code.code[0] != 0x2a
+        || code.code[1] != 0xb7
+        || code.code[4] != 0x2a
+        || code.code[5] != 0xbb
+        || code.code[8] != 0x59
+        || code.code[9] != 0x1b
+        || code.code[10] != 0xb7
+        || code.code[13] != 0xb5
+        || code.code[16] != 0xb1
+    {
+        return Err(format!(
+            "constructor does not contain the bounded super/new/dup/iload_1/constructor/putfield/return shape: {:02x?}",
+            code.code
+        ));
+    }
+
+    let cp_index = |offset: usize| {
+        dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+            code.code[offset],
+            code.code[offset + 1],
+        ]))
+    };
+    let method_ref = |index, expected_owner: &str, expected_method: (&str, &str)| {
+        let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+            class_index,
+            name_and_type_index,
+        }) = class_file.constant_pool.get(index)
+        else {
+            return Err("constructor invocation does not reference CONSTANT_Methodref".to_owned());
+        };
+        let owner = class_file
+            .constant_pool
+            .class_name(*class_index)
+            .map_err(|error| format!("invalid constructor invocation owner: {error:?}"))?;
+        let method = class_file
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .map_err(|error| {
+                format!("invalid constructor invocation name/descriptor: {error:?}")
+            })?;
+        if owner != expected_owner || method != expected_method {
+            return Err(format!(
+                "constructor invocation targets {owner}.{}/{}, expected {}.{}{}",
+                method.0, method.1, expected_owner, expected_method.0, expected_method.1
+            ));
+        }
+        Ok(())
+    };
+
+    let expected_parent = proof
+        .metadata
+        .superclass()
+        .ok_or_else(|| "checked owner ABI has no direct parent".to_owned())?
+        .parent_internal_name();
+    method_ref(cp_index(2), expected_parent, ("<init>", "()V"))?;
+
+    let class_index = cp_index(6);
+    let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Class { name_index }) =
+        class_file.constant_pool.get(class_index)
+    else {
+        return Err("constructor new does not reference CONSTANT_Class".into());
+    };
+    let allocated_class = class_file
+        .constant_pool
+        .utf8(*name_index)
+        .map_err(|error| format!("invalid constructed class name: {error:?}"))?;
+    if allocated_class != target.identity().internal_name() {
+        return Err(format!(
+            "constructor allocates {allocated_class}, expected {}",
+            target.identity().internal_name()
+        ));
+    }
+    method_ref(
+        cp_index(11),
+        target.identity().internal_name(),
+        ("<init>", target_constructor.descriptor().as_str()),
+    )?;
+
+    let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+        class_index,
+        name_and_type_index,
+    }) = class_file.constant_pool.get(cp_index(14))
+    else {
+        return Err("constructor putfield does not reference CONSTANT_Fieldref".into());
+    };
+    let owner = class_file
+        .constant_pool
+        .class_name(*class_index)
+        .map_err(|error| format!("invalid initialized field owner: {error:?}"))?;
+    let initialized_field = class_file
+        .constant_pool
+        .name_and_type(*name_and_type_index)
+        .map_err(|error| format!("invalid initialized field name/descriptor: {error:?}"))?;
+    if owner != proof.internal_name() || initialized_field != (field.name(), field.descriptor()) {
+        return Err(format!(
+            "constructor initializes {owner}.{}:{}, expected {}.{}:{}",
+            initialized_field.0,
+            initialized_field.1,
+            proof.internal_name(),
+            field.name(),
+            field.descriptor()
+        ));
+    }
+    Ok(())
+}
+
 struct CrossClassMethodRef {
     caller: SymbolId,
     target: SymbolId,
@@ -897,16 +1060,17 @@ struct CrossClassMethodRef {
     name: String,
     descriptor: String,
     constructor: bool,
+    receiver_field: Option<SymbolId>,
 }
 
 fn validate_cross_class_call_code(
     class_file: &ClassFile<'_>,
     proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
 ) -> Result<(), String> {
-    // The paired pickler admits a direct same-batch zero-argument call or the
-    // bounded primary-constructor application only. Keep the binary check
-    // equally narrow instead of accepting a plausible but differently owned
-    // or shaped invocation from classfile bytes.
+    // The paired pickler admits a direct same-batch zero-argument call through
+    // a method parameter or an exact validated reference field, plus the
+    // bounded primary-constructor application. Keep the binary check equally
+    // narrow instead of accepting a differently owned or shaped invocation.
     let tasty = proof.tasty_plan.plan();
     let all_metadata = proof
         .jvm_unit
@@ -1073,6 +1237,7 @@ fn validate_cross_class_call_code(
                     name: "<init>".to_owned(),
                     descriptor: descriptor.to_owned(),
                     constructor: true,
+                    receiver_field: None,
                 });
                 continue;
             }
@@ -1112,6 +1277,25 @@ fn validate_cross_class_call_code(
             name: target_metadata.1.name().to_owned(),
             descriptor: expected_descriptor,
             constructor: false,
+            receiver_field: match &function_tree.kind {
+                TreeKind::Select(selection) => tasty
+                    .typed_ast
+                    .try_get(selection.qualifier)
+                    .and_then(|receiver| match tasty.store.types.try_get(receiver.ty) {
+                        Some(Type::TermRef {
+                            target: TermRefTarget::Symbol(symbol),
+                            ..
+                        }) => Some(*symbol),
+                        _ => None,
+                    })
+                    .filter(|receiver| {
+                        proof
+                            .tasty_plan
+                            .same_batch_reference_fields()
+                            .any(|field| field.field() == *receiver)
+                    }),
+                _ => None,
+            },
         });
     }
 
@@ -1186,6 +1370,66 @@ fn validate_cross_class_call_code(
             dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
                 code.code[6],
                 code.code[7],
+            ]))
+        } else if let Some(field_symbol) = call.receiver_field {
+            if code.code.len() != 8
+                || code.code[0] != 0x2a
+                || code.code[1] != 0xb4
+                || code.code[4] != 0xb6
+                || code.code[7] != 0xac
+            {
+                return Err(format!(
+                    "caller method {:?} does not contain the bounded aload_0/getfield/invokevirtual/ireturn shape",
+                    call.caller
+                ));
+            }
+            let field_reference =
+                dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+                    code.code[2],
+                    code.code[3],
+                ]));
+            let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+                class_index,
+                name_and_type_index,
+            }) = class_file.constant_pool.get(field_reference)
+            else {
+                return Err(format!(
+                    "caller method {:?} getfield does not reference CONSTANT_Fieldref",
+                    call.caller
+                ));
+            };
+            let actual_field_owner = class_file
+                .constant_pool
+                .class_name(*class_index)
+                .map_err(|error| format!("invalid getfield owner: {error:?}"))?;
+            let actual_field = class_file
+                .constant_pool
+                .name_and_type(*name_and_type_index)
+                .map_err(|error| format!("invalid getfield name/descriptor: {error:?}"))?;
+            let expected_field = proof
+                .metadata
+                .fields()
+                .iter()
+                .find(|field| field.symbol() == field_symbol)
+                .ok_or_else(|| {
+                    format!("receiver field {field_symbol:?} is absent from checked JVM metadata")
+                })?;
+            if actual_field_owner != proof.internal_name()
+                || actual_field != (expected_field.name(), expected_field.descriptor())
+            {
+                return Err(format!(
+                    "caller method {:?} loads field {:?} through {:?}, expected {}.{}:{}",
+                    call.caller,
+                    field_symbol,
+                    actual_field,
+                    proof.internal_name(),
+                    expected_field.name(),
+                    expected_field.descriptor()
+                ));
+            }
+            dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+                code.code[5],
+                code.code[6],
             ]))
         } else {
             if code.code.len() != 5

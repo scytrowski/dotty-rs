@@ -113,8 +113,9 @@ constructor.
 the complete paired output and decoded field tree. Under the existing strict
 Scala 3.9 consumer job, `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1` also decompiles
 both sidecars, requires `-from-tasty` to rebuild them, and checks the owner
-constructor descriptor. `inner.get()` remains a separate #1718 receiver-call
-increment; mutable, non-private, unplanned, inaccessible-constructor,
+constructor descriptor. `inner.get()` was added to TASTy in #1718 and
+integrated into the complete linked JVM/TASTy batch in #1719; mutable,
+non-private, unplanned, inaccessible-constructor,
 factory-valued, computed-argument, nested, and branch initializers remain
 outside this slice.
 
