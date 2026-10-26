@@ -1320,8 +1320,8 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                         // only. Inspect the same projection, not raw TASTy names or
                         // inherited members (this resolver returns declarations).
                         let wanted = store.names.resolve(request.name.text());
-                        !request.name.is_term()
-                            || (!cached
+                        request.name.is_term()
+                            && (!cached
                                 .decoded
                                 .fields
                                 .iter()
@@ -1382,6 +1382,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             selection_started,
         );
         if candidates.is_empty()
+            && request.name.is_term()
             && let Some(cache_key) = module_member_cache_key
         {
             // Module declarations come from immutable classpath TASTy. A
@@ -1498,6 +1499,83 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                         reason: error.to_string(),
                     }),
                 }
+            }
+            [] if store.symbols.get(resolved_owner).kind == SymbolKind::ModuleClass
+                && request.name.is_type() =>
+            {
+                let Some(identity) = self.session.module_for_class(resolved_owner).cloned() else {
+                    return Ok(None);
+                };
+                let simple_name = store.names.resolve(request.name.text()).to_owned();
+                let binary_name = BinaryName::from_internal(format!(
+                    "{}${simple_name}",
+                    identity.object_name.as_internal()
+                ));
+                if !binary_name.is_path_safe() {
+                    return Ok(None);
+                }
+                let symbol = match self.load_class(store, &binary_name) {
+                    Ok(symbol) => symbol,
+                    Err(ClassLoadError::NotFound(_)) => return Ok(None),
+                    Err(error) => {
+                        return Err(ResolutionError::Malformed {
+                            reason: error.to_string(),
+                        });
+                    }
+                };
+                let member = store.symbols.get(symbol);
+                if member.owner != Some(resolved_owner) {
+                    return Ok(None);
+                }
+                let Some(metadata) = self.session.metadata.get(&symbol) else {
+                    return Ok(None);
+                };
+                let nested_class_is_proven = metadata.inner_classes.iter().any(|entry| {
+                    let inner_matches = match &entry.inner_class {
+                        crate::symbol::ClassRef::Resolved(inner) => *inner == symbol,
+                        crate::symbol::ClassRef::Unresolved(name) => name == &binary_name,
+                    };
+                    let outer_matches = match &entry.outer_class {
+                        Some(crate::symbol::ClassRef::Resolved(outer)) => {
+                            self.session.identified.iter().any(|(name, candidate)| {
+                                candidate == outer && name == &identity.object_name
+                            })
+                        }
+                        Some(crate::symbol::ClassRef::Unresolved(name)) => {
+                            name == &identity.object_name
+                        }
+                        None => false,
+                    };
+                    inner_matches
+                        && outer_matches
+                        && entry.inner_name.as_deref() == Some(simple_name.as_str())
+                });
+                if !nested_class_is_proven {
+                    return Ok(None);
+                }
+                let Some(visibility) = identity.nested_type_visibilities.get(&simple_name).copied()
+                else {
+                    // Classfile InnerClasses access flags can widen Scala
+                    // protected/private declarations. Only project nested
+                    // types whose declaration visibility is present in the
+                    // authoritative module TASTy.
+                    return Ok(None);
+                };
+                let SymbolInfo::Complete(info) = member.info else {
+                    return Ok(None);
+                };
+                let Some(Type::ClassInfo(class_info)) = store.types.try_get(info) else {
+                    return Ok(None);
+                };
+                if class_info.class != symbol
+                    || !store.scopes.contains(class_info.declarations)
+                    || store.scopes.get(class_info.declarations).owner != Some(symbol)
+                {
+                    return Ok(None);
+                }
+                self.session.record_symbol_update(store, symbol);
+                store.symbols.get_mut(symbol).visibility = visibility;
+                Ok(Some(symbol))
             }
             [] => Ok(None),
             [symbol]
@@ -6661,6 +6739,255 @@ mod tests {
                 assert_eq!(store.symbols.get(constructor).owner, Some(class));
             }
         }
+    }
+
+    #[test]
+    fn module_prefix_resolves_nested_type_from_classfile_and_tasty_evidence() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(fixture_path(
+                "tests/fixtures/tasty_visibility",
+            ))),
+            Box::new(SyntheticTastyJdk),
+        ]);
+        let mut resolver =
+            ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("visibility package fixture should be present");
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let holder_name = Name::new(store.names.intern("Holder"), Namespace::Term);
+        let holder = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: holder_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .expect("Holder object should resolve from its TASTy");
+        let module_prefix = store.types.alloc(Type::TermRef {
+            prefix: package_prefix,
+            target: dotty_core::TermRefTarget::Symbol(holder),
+        });
+        let nested_name = Name::new(store.names.intern("InProtected"), Namespace::Type);
+        let nested = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: module_prefix,
+                    name: nested_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .expect("nested type should resolve from classfile evidence");
+        let module_class = resolver
+            .session
+            .module_for_object(holder)
+            .expect("Holder has canonical TASTy module identity")
+            .module_class;
+        assert_eq!(store.symbols.get(nested).owner, Some(module_class));
+        assert_eq!(
+            store.symbols.get(nested).visibility,
+            dotty_core::Visibility::ProtectedWithin(package)
+        );
+        assert!(matches!(
+            store.symbols.get(nested).info,
+            SymbolInfo::Complete(info)
+                if matches!(store.types.get(info), Type::ClassInfo(class_info)
+                    if class_info.class == nested
+                        && store.scopes.get(class_info.declarations).owner == Some(nested))
+        ));
+
+        let repeated = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: module_prefix,
+                    name: nested_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap();
+        assert_eq!(repeated, Some(nested));
+
+        let mark = store.checkpoint();
+        let absent_name = Name::new(store.names.intern("MissingNestedType"), Namespace::Type);
+        assert_eq!(
+            resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix: module_prefix,
+                        name: absent_name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(store.checkpoint(), mark);
+    }
+
+    #[test]
+    fn identity_only_nested_class_load_uses_the_proven_module_owner() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(fixture_path(
+                "tests/fixtures/tasty_visibility",
+            ))),
+            Box::new(SyntheticTastyJdk),
+        ]);
+        let mut loader = crate::loader::ClassLoader::with_definitions(
+            class_path,
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let nested_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Holder$InProtected");
+
+        let identity = loader
+            .ensure_class_identity(&nested_name)
+            .expect("identity-only loading should use Holder's TASTy-proven module owner");
+        let module = loader
+            .ensure_module_identity(&BinaryName::from_internal(
+                "me/cytrowski/tastyfixtures/visibility/Holder",
+            ))
+            .expect("Holder should have one canonical module identity");
+        let (class_path, session) = loader.into_parts();
+        assert_eq!(store.symbols.get(identity).owner, Some(module.module_class));
+        assert_eq!(store.symbols.get(identity).info, SymbolInfo::Missing);
+
+        let mut loader = crate::loader::ClassLoader::with_definitions(
+            class_path,
+            &mut store,
+            definitions,
+            session,
+        );
+        let loaded = loader
+            .load_class(&nested_name)
+            .expect("the identity shell should still complete through class loading");
+        drop(loader);
+
+        assert_eq!(store.symbols.get(identity).owner, Some(module.module_class));
+        assert_eq!(
+            loaded, identity,
+            "completion must preserve canonical identity"
+        );
+        let SymbolInfo::Complete(info) = store.symbols.get(loaded).info else {
+            panic!("nested class should have complete class info");
+        };
+        let Type::ClassInfo(class_info) = store.types.get(info) else {
+            panic!("nested class completion should produce ClassInfo");
+        };
+        assert_eq!(class_info.class, loaded);
+        assert!(store.scopes.contains(class_info.declarations));
+        assert_eq!(
+            store.scopes.get(class_info.declarations).owner,
+            Some(loaded)
+        );
+    }
+
+    #[test]
+    fn nested_type_visibility_updates_rollback_with_the_resolver_session() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(fixture_path(
+                "tests/fixtures/tasty_visibility",
+            ))),
+            Box::new(SyntheticTastyJdk),
+        ]);
+        let mut resolver =
+            ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let binary_name = Name::new(store.names.intern("Holder$InProtected"), Namespace::Type);
+        let preloaded = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: binary_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.symbols.get(preloaded).visibility,
+            dotty_core::Visibility::Public
+        );
+
+        let holder_name = Name::new(store.names.intern("Holder"), Namespace::Term);
+        let holder = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: holder_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let module_prefix = store.types.alloc(Type::TermRef {
+            prefix: package_prefix,
+            target: dotty_core::TermRefTarget::Symbol(holder),
+        });
+        let store_checkpoint = store.checkpoint();
+        let resolver_checkpoint = resolver.checkpoint();
+        let nested_name = Name::new(store.names.intern("InProtected"), Namespace::Type);
+        let nested = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: module_prefix,
+                    name: nested_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(nested, preloaded);
+        assert_eq!(
+            store.symbols.get(nested).visibility,
+            dotty_core::Visibility::ProtectedWithin(package)
+        );
+
+        resolver.rollback_to(&mut store, resolver_checkpoint);
+        store.rollback_to(store_checkpoint);
+        assert_eq!(
+            store.symbols.get(preloaded).visibility,
+            dotty_core::Visibility::Public
+        );
     }
 
     #[test]

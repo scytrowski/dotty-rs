@@ -312,6 +312,7 @@ mod tests {
                 companion_class: None,
                 object_name: name.clone(),
                 module_class_name,
+                nested_type_visibilities: HashMap::new(),
             },
         );
 

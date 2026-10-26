@@ -74,6 +74,7 @@ pub struct EncodingContext<'a> {
     local_values_by_typed_declaration: HashMap<TreeId<Typed>, SymbolId>,
     local_value_symbols: HashSet<SymbolId>,
     external: HashMap<SymbolId, (NameRef, NameRef)>,
+    same_source_external: HashSet<SymbolId>,
     types: HashMap<TypeId, AstLabel>,
     active: HashSet<TypeId>,
 }
@@ -121,6 +122,7 @@ impl<'a> EncodingContext<'a> {
             local_values_by_typed_declaration: HashMap::new(),
             local_value_symbols: HashSet::new(),
             external: HashMap::new(),
+            same_source_external: HashSet::new(),
             types: HashMap::new(),
             active: HashSet::new(),
         };
@@ -1041,6 +1043,70 @@ impl<'a> EncodingContext<'a> {
         })
     }
 
+    /// Lowers the single supported same-source external call shape. The
+    /// receiver and owner type are already validated by the source/typed plan;
+    /// this boundary still checks the canonical sibling and exact signature.
+    pub(crate) fn same_source_method_select_in(
+        &mut self,
+        class: SymbolId,
+        method: SymbolId,
+        receiver: AstLabel,
+        owner_type: TypeId,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|c| {
+            if !c.same_source_external.contains(&class) {
+                return Err(reference(class, ReferenceError::NotRegistered));
+            }
+            let class_record = c.symbol(class)?;
+            let method_record = c.symbol(method)?;
+            if class_record.kind != SymbolKind::Class
+                || method_record.kind != SymbolKind::Method
+                || method_record.owner != Some(class)
+                || method_record.origin != dotty_core::SymbolOrigin::Source(c.source)
+                || method_record.visibility != dotty_core::Visibility::Public
+                || !method_record.flags.is_empty()
+                || !method_record.annotations.is_empty()
+                || c.source_index.definition_of(method).is_none()
+            {
+                return Err(reference(method, ReferenceError::Metadata));
+            }
+            let SymbolInfo::Complete(signature_type) = method_record.info else {
+                return Err(PickleError::IncompleteSymbol {
+                    symbol: method,
+                    info: method_record.info,
+                });
+            };
+            let Type::Method(signature) = c.ty(signature_type)? else {
+                return Err(PickleError::MalformedType {
+                    ty: signature_type,
+                    role: crate::TypeRole::Parameter,
+                });
+            };
+            if signature.kind != dotty_core::MethodKind::Plain
+                || !signature.params.is_empty()
+                || signature.result != c.definitions.int
+            {
+                return Err(reference(method, ReferenceError::Metadata));
+            }
+            let method_name = c.utf8(c.text(method_record.name.text())?)?;
+            let scala = c.utf8("scala")?;
+            let int = c.utf8("Int")?;
+            let int_type = c.intern(NameKey::Qualified(scala, int))?;
+            let signed = c.intern(NameKey::SignedMany(method_name, int_type, Vec::new()))?;
+            let owner_type = c.lower_same_source_class_type(class, owner_type)?;
+            c.wire
+                .push(AstNode::Length {
+                    tag: SELECTIN_TAG,
+                    fields: vec![
+                        AstField::Nat(signed),
+                        AstField::Tree(receiver),
+                        AstField::Tree(owner_type),
+                    ],
+                })
+                .map_err(construction)
+        })
+    }
+
     fn same_class_method_select_inner(
         &mut self,
         class: SymbolId,
@@ -1165,6 +1231,90 @@ impl<'a> EncodingContext<'a> {
             Ok(())
         })
     }
+
+    /// Registers a checked class from the same source batch for signature
+    /// projection. The caller supplies the complete producer batch's class
+    /// identities; this method additionally verifies canonical source
+    /// provenance, same-package ownership, declaration scope, and ClassInfo.
+    pub(crate) fn register_planned_source_class(
+        &mut self,
+        symbol: SymbolId,
+        source_tree: dotty_core::TreeId<dotty_core::Untyped>,
+        planned_classes: &[SymbolId],
+    ) -> Result<(), PickleError> {
+        self.run(|c| {
+            c.charge(1)?;
+            if !planned_classes.contains(&symbol)
+                || c.declarations.contains_key(&symbol)
+                || c.source_index.symbol_at(c.source, source_tree) != Some(symbol)
+                || c.source_index.definition_of(symbol)
+                    != Some(SourceDefinition::Canonical {
+                        source: c.source,
+                        tree: source_tree,
+                    })
+            {
+                return Err(reference(symbol, ReferenceError::NotRegistered));
+            }
+            c.namespace(symbol, true)?;
+            let sibling = c.symbol(symbol)?;
+            if sibling.kind != SymbolKind::Class
+                || sibling.origin != SymbolOrigin::Source(c.source)
+                || sibling.visibility != Visibility::Public
+                || !sibling.flags.is_empty()
+                || !sibling.annotations.is_empty()
+            {
+                return Err(reference(symbol, ReferenceError::Metadata));
+            }
+            let owner = sibling
+                .owner
+                .ok_or(reference(symbol, ReferenceError::Owner))?;
+            let sibling_name = sibling.name;
+            let current_class = c
+                .declarations
+                .keys()
+                .copied()
+                .find(|&candidate| {
+                    c.store.symbols.contains(candidate)
+                        && c.store.symbols.get(candidate).kind == SymbolKind::Class
+                })
+                .ok_or(reference(symbol, ReferenceError::NotRegistered))?;
+            if c.symbol(current_class)?.owner != Some(owner) {
+                return Err(reference(symbol, ReferenceError::Owner));
+            }
+            let class_type = c.complete(symbol)?;
+            let Type::ClassInfo(info) = c.ty(class_type)? else {
+                return Err(PickleError::MalformedType {
+                    ty: class_type,
+                    role: crate::TypeRole::ClassInfo,
+                });
+            };
+            if info.class != symbol
+                || info.prefix != c.definitions.no_prefix
+                || info.parents.as_slice() != [c.definitions.object_type]
+                || info.self_type.is_some()
+                || c.source_index.scope_of(symbol) != Some(info.declarations)
+                || c.class_scope(symbol)? != info.declarations
+                || c.store
+                    .scopes
+                    .get(info.declarations)
+                    .entered_symbols()
+                    .any(|member| {
+                        c.store.symbols.contains(member)
+                            && c.store.symbols.get(member).kind == SymbolKind::TypeParameter
+                    })
+            {
+                return Err(PickleError::MalformedType {
+                    ty: class_type,
+                    role: crate::TypeRole::ClassInfo,
+                });
+            }
+            let package = c.package_name(owner)?;
+            let name = c.utf8(c.text(sibling_name.text())?)?;
+            c.external.insert(symbol, (package, name));
+            c.same_source_external.insert(symbol);
+            Ok(())
+        })
+    }
     fn builtin_ref(&mut self, builtin: Builtin) -> Result<AstLabel, PickleError> {
         let symbol = self.builtin(builtin)?;
         let package = if builtin == Builtin::Object {
@@ -1222,6 +1372,40 @@ impl<'a> EncodingContext<'a> {
     /// Lowers a semantic type, memoized by exact TypeId, never by spelling.
     pub fn lower_type(&mut self, ty: TypeId) -> Result<AstLabel, PickleError> {
         self.run(|c| c.lower(ty, 0))
+    }
+
+    fn lower_same_source_class_type(
+        &mut self,
+        class: SymbolId,
+        fallback: TypeId,
+    ) -> Result<AstLabel, PickleError> {
+        match self.ty(fallback)? {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == class => {}
+            _ => return Err(reference(class, ReferenceError::Owner)),
+        }
+        let shared = self.types.iter().find_map(|(&ty, &label)| {
+            matches!(
+                self.store.types.try_get(ty),
+                Some(Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(symbol),
+                }) if *symbol == class
+            )
+            .then_some(label)
+        });
+        if let Some(target) = shared {
+            self.wire
+                .push(AstNode::Reference {
+                    tag: SHAREDTYPE_TAG,
+                    target,
+                })
+                .map_err(construction)
+        } else {
+            self.lower(fallback, 0)
+        }
     }
     fn lower(&mut self, ty: TypeId, depth: usize) -> Result<AstLabel, PickleError> {
         self.charge(1)?;
@@ -1283,18 +1467,22 @@ impl<'a> EncodingContext<'a> {
                         self.external_inner(*symbol)?
                     } else {
                         self.check_prefix(*symbol, *prefix)?;
-                        let &(_, name) = self
-                            .external
-                            .get(symbol)
-                            .ok_or(reference(*symbol, ReferenceError::NotRegistered))?;
-                        let child = self.lower(*prefix, depth + 1)?;
-                        self.wire
-                            .push(AstNode::NatAst {
-                                tag: TYPEREF_TAG,
-                                value: AstOperand::Nat(name),
-                                child,
-                            })
-                            .map_err(construction)?
+                        if self.same_source_external.contains(symbol) {
+                            self.external_inner(*symbol)?
+                        } else {
+                            let &(_, name) = self
+                                .external
+                                .get(symbol)
+                                .ok_or(reference(*symbol, ReferenceError::NotRegistered))?;
+                            let child = self.lower(*prefix, depth + 1)?;
+                            self.wire
+                                .push(AstNode::NatAst {
+                                    tag: TYPEREF_TAG,
+                                    value: AstOperand::Nat(name),
+                                    child,
+                                })
+                                .map_err(construction)?
+                        }
                     }
                 }
             }

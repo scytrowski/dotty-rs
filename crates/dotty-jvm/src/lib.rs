@@ -326,6 +326,65 @@ pub struct JvmMethodDispatchMetadata {
     descriptor: JvmMethodDescriptor,
 }
 
+/// Getter or setter role of an effective JVM accessor method.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum JvmAccessorDispatchRole {
+    /// Public generated getter for a Scala `val` or `var`.
+    Getter,
+    /// Public generated setter for a Scala `var`.
+    Setter,
+}
+
+/// Canonical source identity behind a JVM method-shaped declaration.
+///
+/// Ordinary source methods retain their `Method` symbol; generated accessors
+/// retain the source `Field` and whether the entry is its getter or setter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmBinaryMethodOrigin {
+    /// A declared Scala method.
+    Method(SymbolId),
+    /// A generated method derived from a source field.
+    Accessor {
+        /// Canonical source field that owns this accessor.
+        field: SymbolId,
+        /// Whether this is the getter or mutable setter entrypoint.
+        role: JvmAccessorDispatchRole,
+    },
+}
+
+/// Which accessor-related inherited binary declaration collision occurred.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmAccessorCollisionKind {
+    /// A child source method occupies an inherited generated accessor slot.
+    SourceMethodRedefinesInheritedAccessor,
+    /// A child generated getter or setter occupies an inherited source method slot.
+    GeneratedAccessorRedefinesInheritedMethod,
+    /// A child generated getter or setter occupies an inherited final method slot.
+    GeneratedAccessorRedefinesInheritedFinalMethod,
+    /// A child generated getter or setter occupies an inherited accessor slot.
+    GeneratedAccessorRedefinesInheritedAccessor,
+    /// An accessor-related declaration has the inherited JVM parameter shape
+    /// but an incompatible result descriptor.
+    IncompatibleInheritedAccessorResult,
+}
+
+/// Read-only effective dispatch identity for one generated accessor method.
+///
+/// Accessors retain their canonical source field as provenance instead of
+/// inventing a source method symbol. Conflicting declarations remain separate
+/// entries so later validation can inspect the collision without treating it
+/// as an override.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmAccessorDispatchMetadata {
+    receiver_class: SymbolId,
+    declaring_class: SymbolId,
+    field: SymbolId,
+    role: JvmAccessorDispatchRole,
+    name: String,
+    descriptor: JvmMethodDescriptor,
+    access_flags: dotty_classfile::access_flags::MethodAccessFlags,
+}
+
 /// Class identity paired with declared method metadata and an effective
 /// dispatch view. `methods` remains in class-plan order and excludes inherited
 /// declarations; unit-aware projections populate `dispatch_methods`.
@@ -339,6 +398,7 @@ pub struct JvmClassMetadata {
     accessors: Vec<JvmAccessorMetadata>,
     methods: Vec<JvmMethodMetadata>,
     dispatch_methods: Vec<JvmMethodDispatchMetadata>,
+    dispatch_accessors: Vec<JvmAccessorDispatchMetadata>,
 }
 
 /// A frontend-issued binding from one canonical field to its exact typed
@@ -718,6 +778,11 @@ pub enum InvalidJvmClassInfoKind {
 pub enum JvmAccessorCallMetadataIssue {
     DuplicateField,
     OwnerMismatch,
+    ReceiverClassMissing,
+    EffectiveGetterMissing,
+    EffectiveGetterMismatch,
+    EffectiveSetterMissing,
+    EffectiveSetterMismatch,
     BindingMissing,
     BodyFieldProofMismatch,
     ValueTypeMismatch,
@@ -1530,8 +1595,23 @@ pub enum JvmCodegenError {
         name: String,
         descriptor: String,
     },
-    /// Constructor accessor signatures cannot yet participate in inherited
-    /// method collision and override validation.
+    /// A declared method and an inherited accessor, or a declared accessor
+    /// and inherited method/accessor, share one exact JVM method identity.
+    /// The descriptor is absent only for a conservative same-name check
+    /// against an unplanned source method.
+    InheritedJvmAccessorCollision {
+        class: SymbolId,
+        kind: JvmAccessorCollisionKind,
+        origin: JvmBinaryMethodOrigin,
+        parent: SymbolId,
+        parent_origin: JvmBinaryMethodOrigin,
+        name: String,
+        descriptor: Option<String>,
+        /// Inherited descriptor when checking a result-only mismatch.
+        parent_descriptor: Option<String>,
+    },
+    /// A descendant cannot add new generated accessor storage above inherited
+    /// accessors in the currently supported emission subset.
     UnsupportedJvmAccessorInheritance { class: SymbolId, parent: SymbolId },
     /// Two class symbols in one compilation unit project to the same internal name.
     DuplicateJvmClassIdentity {
@@ -1907,7 +1987,8 @@ impl JvmClassMetadata {
     }
 
     /// JVM-only backing-field and accessor-method signatures, in source order.
-    /// These are metadata only; class-file emission remains a later increment.
+    /// Emission uses these own-class entries only after validating the bounded
+    /// hierarchy and constructor proofs.
     pub fn accessors(&self) -> &[JvmAccessorMetadata] {
         &self.accessors
     }
@@ -1934,6 +2015,16 @@ impl JvmClassMetadata {
     /// so its dispatch view is empty.
     pub fn dispatch_methods(&self) -> &[JvmMethodDispatchMetadata] {
         &self.dispatch_methods
+    }
+
+    /// Effective generated getter/setter methods reachable on this receiver.
+    ///
+    /// Entries retain the declaring class and canonical source field. Getter
+    /// and setter roles are distinct, inherited entries are never copied into
+    /// [`Self::accessors`]. The view supplies evidence to the bounded emission
+    /// gate; it does not independently authorize class-file emission.
+    pub fn dispatch_accessors(&self) -> &[JvmAccessorDispatchMetadata] {
+        &self.dispatch_accessors
     }
 
     /// Validated instance field metadata in the class plan's source order.
@@ -2337,6 +2428,43 @@ impl JvmMethodDispatchMetadata {
     }
 }
 
+impl JvmAccessorDispatchMetadata {
+    /// Receiver class whose effective accessor view contains this entry.
+    pub const fn receiver_class(&self) -> SymbolId {
+        self.receiver_class
+    }
+
+    /// Class that declares the source field and generated accessor method.
+    pub const fn declaring_class(&self) -> SymbolId {
+        self.declaring_class
+    }
+
+    /// Canonical source field symbol; no source method symbol is fabricated.
+    pub const fn field(&self) -> SymbolId {
+        self.field
+    }
+
+    /// Whether the entry denotes the getter or setter role.
+    pub const fn role(&self) -> JvmAccessorDispatchRole {
+        self.role
+    }
+
+    /// JVM-safe generated accessor method name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Exact JVM method descriptor.
+    pub const fn descriptor(&self) -> &JvmMethodDescriptor {
+        &self.descriptor
+    }
+
+    /// Validated method access flags.
+    pub const fn access_flags(&self) -> dotty_classfile::access_flags::MethodAccessFlags {
+        self.access_flags
+    }
+}
+
 /// Lowers the supported value-producing leaves from the supplied typed AST.
 ///
 /// Int, Boolean, and Long literals become category-correct constant
@@ -2413,6 +2541,22 @@ pub fn emit_class(
     definitions: &Definitions,
 ) -> Result<GeneratedClass, JvmCodegenError> {
     emission::emit_class(unit, class_symbol, definitions)
+}
+
+/// Emits one selected class with an explicit Scala 3 TASTy sidecar link.
+///
+/// This opt-in path writes the supplied, already validated link identifier as
+/// the class-level `TASTY` attribute. It does not produce or validate the
+/// sidecar itself; callers coordinating a pair must validate the encoded
+/// TASTy header and class bytes together. [`emit_class`] remains unchanged and
+/// emits no Scala metadata.
+pub fn emit_class_with_tasty_link(
+    unit: &JvmCompilationUnit<'_>,
+    class_symbol: SymbolId,
+    definitions: &Definitions,
+    tasty_link: dotty_classfile::tasty_link::TastyLinkId,
+) -> Result<GeneratedClass, JvmCodegenError> {
+    emission::emit_class_with_tasty_link(unit, class_symbol, definitions, tasty_link)
 }
 
 impl JvmParameterLocal {

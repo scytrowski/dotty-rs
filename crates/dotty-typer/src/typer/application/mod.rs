@@ -153,17 +153,21 @@ impl SourceTyper<'_> {
                     resolved.argument_trees,
                 )
             } else {
-                let function = self.type_value_expression_inner(
+                // Keep a Java nullary method selection as a method reference
+                // here: explicit `f()` syntax must not be auto-applied before
+                // the application consumes it.
+                let function = self.type_expression_inner(
                     application.function,
                     context,
                     info_journal,
                     new_mappings,
                 )?;
+                self.validate_value_expression(application.function, function)?;
                 let function_type = self.typed_arena.get(function).ty;
                 let callable =
                     self.widen_expression_type_journaled(function_type, info_journal, 0)?;
                 let (function, callable) =
-                    self.resolve_module_apply_function(function, callable, request, info_journal)?;
+                    self.resolve_apply_function(function, callable, request, info_journal)?;
                 (function, callable, None, None)
             };
         self.type_resolved_application(
@@ -184,25 +188,43 @@ impl SourceTyper<'_> {
         )
     }
 
-    fn resolve_module_apply_function(
+    fn resolve_apply_function(
         &mut self,
         function: TreeId<Typed>,
         callable: TypeId,
         request: ApplicationRequest<'_>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<(TreeId<Typed>, TypeId), TyperError> {
-        let Some(Type::TypeRef {
-            target: TypeRefTarget::Symbol(module_class),
-            ..
-        }) = self.store.types.try_get(callable)
-        else {
-            return Ok((function, callable));
+        let (class, receiver) = match self.store.types.try_get(callable) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            }) => (*class, callable),
+            Some(Type::Applied { tycon, .. }) => {
+                let Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(class),
+                    ..
+                }) = self.store.types.try_get(*tycon)
+                else {
+                    return Ok((function, callable));
+                };
+                (*class, callable)
+            }
+            _ => return Ok((function, callable)),
         };
-        if self.store.symbols.get(*module_class).kind != SymbolKind::ModuleClass {
+        if !self.store.symbols.contains(class) {
             return Ok((function, callable));
         }
-
-        let receiver = self.this_type_receiver_view(callable)?;
+        let declaration = self.store.symbols.get(class);
+        let receiver = match declaration.kind {
+            SymbolKind::ModuleClass => self.this_type_receiver_view(callable)?,
+            SymbolKind::Class | SymbolKind::Trait
+                if matches!(declaration.origin, SymbolOrigin::Source(_)) =>
+            {
+                receiver
+            }
+            _ => return Ok((function, callable)),
+        };
         let apply_name = Name::new(self.store.names.intern("apply"), Namespace::Term);
         let candidates = self
             .lookup_members_journaled(receiver, apply_name, info_journal)
@@ -551,7 +573,10 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let function = match self.type_value_expression_inner(
+        // Type application still needs the callable method reference; Java
+        // nullary value adaptation happens only after explicit type arguments
+        // have been applied.
+        let function = match self.type_expression_inner(
             application.function,
             context,
             info_journal,

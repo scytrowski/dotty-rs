@@ -48,6 +48,20 @@ plan, and serialize as the Scala 3.9 named `SELECT` with a class-typed
 receiver. An unqualified reference uses `QUALTHIS`, while an explicit `this`
 selection preserves the oracle's `THIS(TYPEREFsymbol(...))` shape; forward
 references do not create synthetic AST addresses.
+Method signatures may additionally contain one plain formal whose type is a
+public, ordinary, non-generic top-level class in the same validated source/JVM
+batch and package. The batch binding must provide that canonical class
+identity; the pickler checks its source declaration, owner, declaration scope,
+`ClassInfo`, and the formal's exact `TypeRef` and source syntax. The formal is
+emitted as a method-owned `PARAM` with the pinned external-to-sidecar
+`TYPEREF`/`TERMREFpkg` class type. A method body may make a zero-argument
+call to one public, concrete, non-generic method with an explicit empty value
+clause on that exact formal, when both classes and the target method are
+present in the same validated source/JVM/TASTy batch. The selected target must
+be the canonical `TermRef`; its owner type shares the formal's class type node.
+Arbitrary receivers, external or unplanned targets, overloaded/private/abstract
+methods, arguments, type applications, reference-typed method results,
+constructors, and multiple class formals remain unsupported.
 A method may have no value clause, one explicit
 empty clause, or one plain clause of ordinary Int or Boolean
 parameters. Parameter IDs, ownership, source scope, types and order must agree
@@ -59,9 +73,11 @@ of that exact method; its emitted `TERMREFdirect` points to the bound `PARAM`
 declaration. Raw literal spellings are checked against the name-byte limit
 before decoding; malformed whole numbers and unsupported noninteger numbers
 yield typed errors.
-Call applications require the exact selected method's completed plain MethodType,
-ordered Int parameters, Int result, and corresponding canonical Int arguments;
-Boolean arguments and Boolean-returning calls remain unsupported.
+Same-class call applications require the exact selected method's completed
+plain MethodType, ordered Int parameters, Int result, and corresponding
+canonical Int arguments; Boolean arguments and Boolean-returning calls remain
+unsupported. The bounded cross-class call above requires an explicit empty
+argument clause and a zero-parameter Int-returning method.
 Conditional branch joins accept canonical Int, an Int singleton constant, or a
 validated Int formal reference. When the typed conditional itself has an Int
 singleton type, both branches must have that same singleton value.

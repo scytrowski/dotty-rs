@@ -218,9 +218,12 @@ production code.
 A minimal inheritance compile emitted `Parent.current()I` and
 `Parent.current_$eq(I)V` on the declaring class. `Child.read()I` invoked the
 symbolic method reference `Child.current:()I`, which resolves to the inherited
-getter; `Child` declared no field or accessor of its own. This pins only the
-observed binary owner for that Scala shape. Rust accessor inheritance, override
-validation, bridges, and broader inherited ABI behavior remain deferred.
+getter; `Child` declared no field or accessor of its own. The bounded Rust
+implementation now validates inherited accessor dispatch and compiles the
+two-edge `Base → Middle → Leaf` source fixture through Java 21 verification;
+see [`jvm-inherited-accessors.md`](jvm-inherited-accessors.md). Accessor
+overrides, bridge generation, traits, external or generic parents, and full
+Scala/TASTy ABI compatibility remain deferred.
 
 ```scala
 class Parent:

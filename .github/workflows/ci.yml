@@ -109,5 +109,6 @@ jobs:
             -p dotty-classfile --test classfile_jvm_encoder \
             -p dotty-jvm --lib \
             -p dotty --test jvm_source_compilation \
+            --test jvm_tasty_artifacts \
             --test jvm_stateful_class_contract \
             --locked -- --nocapture

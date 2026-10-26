@@ -269,6 +269,101 @@ impl SourceTyper<'_> {
             }
             return Ok(ty);
         }
+        if let TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) = &source_tree.kind {
+            const MAX_TUPLE_TYPE_ARITY: usize = 22;
+            if !(2..=MAX_TUPLE_TYPE_ARITY).contains(&tuple.elements.len()) {
+                return Err(TyperError::UnsupportedTypeTree {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    tree_kind: "tuple type arity",
+                });
+            }
+            let tuple_name_text = format!("Tuple{}", tuple.elements.len());
+            let tuple_name = dotty_core::Name::new(
+                self.store.names.intern(&tuple_name_text),
+                dotty_core::Namespace::Type,
+            );
+            let scala_package = match self.packages.symbol(&["scala"]) {
+                Some(package) => Some(package),
+                None => self.resolve_external_package(&["scala".to_owned()], tree.index())?,
+            }
+            .ok_or_else(|| TyperError::TypeNameNotFound {
+                source: self.source,
+                tree_index: tree.index(),
+                name: tuple_name,
+                position: source_tree.position,
+            })?;
+            let tuple_candidates = self
+                .packages
+                .scope_of(scala_package)
+                .map(|scope| {
+                    self.store
+                        .scopes
+                        .get(scope)
+                        .lookup_all(&tuple_name)
+                        .iter()
+                        .copied()
+                        .filter(|symbol| self.store.symbols.get(*symbol).kind == SymbolKind::Class)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let tuple_class = match tuple_candidates.as_slice() {
+                [class] => *class,
+                [] => {
+                    let package_prefix = self.package_type_prefix(scala_package);
+                    let request = MemberRequest {
+                        prefix: package_prefix,
+                        name: tuple_name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    };
+                    self.resolver
+                        .resolve_member(self.store, &request)
+                        .map_err(|error| TyperError::SymbolResolution {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            error,
+                        })?
+                        .filter(|symbol| {
+                            self.store.symbols.contains(*symbol)
+                                && self.store.symbols.get(*symbol).kind == SymbolKind::Class
+                        })
+                        .ok_or_else(|| TyperError::TypeNameNotFound {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            name: tuple_name,
+                            position: source_tree.position,
+                        })?
+                }
+                _ => {
+                    return Err(TyperError::AmbiguousTypeName {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        name: tuple_name,
+                        position: source_tree.position,
+                    });
+                }
+            };
+            let tuple_prefix = self.type_symbol_prefix(tuple_class);
+            let tycon = self.store.types.alloc(Type::TypeRef {
+                prefix: tuple_prefix,
+                target: TypeRefTarget::Symbol(tuple_class),
+            });
+            let mut args = Vec::with_capacity(tuple.elements.len());
+            for element in &tuple.elements {
+                args.push(self.type_of_tpt_inner_journaled(*element, context, info_journal)?);
+            }
+            let ty = self.store.types.alloc(Type::Applied { tycon, args });
+            if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
+                return Err(TyperError::DuplicateSourceTypeCacheEntry {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    existing,
+                    attempted: ty,
+                });
+            }
+            return Ok(ty);
+        }
         if let TreeKind::ByNameTypeTree(by_name) = &source_tree.kind {
             let result = self.type_of_tpt_inner_journaled(by_name.result, context, info_journal)?;
             let ty = self.store.types.alloc(Type::ByName { result });

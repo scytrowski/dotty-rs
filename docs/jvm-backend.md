@@ -714,6 +714,29 @@ body fields have no setter. Method bodies use the same typed lowering path as
 before. The file is encoded into an owned `GeneratedClass` only after every
 method and class-file structure has been built successfully.
 
+### Opt-in linked TASTy emission
+
+`dotty-jvm::emit_class_with_tasty_link` is an opt-in variant that accepts a
+typed `TastyLinkId` and adds only the audited class-level `TASTY` attribute.
+It does not depend on the TASTy producer and does not validate or create a
+sidecar. The standalone `emit_class` path continues to omit Scala metadata.
+
+The root `dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_class` coordinator
+is the bounded source integration for the audited Counter class. It uses the
+single-session plans from `jvm_tasty_plan`, serializes the complete TASTy
+first, validates its Scala 3.9.0 header, passes that producer-owned UUID to
+the opt-in JVM path, then decodes the class file and checks its version,
+internal name, member descriptors and access flags. It also verifies the
+class-level link against the exact TASTy bytes and returns both owned byte
+arrays with package-qualified relative paths. Any producer or validation
+failure returns an error before either artifact is exposed. It writes no files;
+the staged filesystem test adapter does not claim crash-atomic publication.
+
+This output is limited to source shapes accepted by the paired Counter
+contract. It does not add a production compiler driver, a general artifact
+publisher, or independent Scala-consumer interoperability; those boundaries
+remain in #1638 and later work.
+
 The frontend must set `JvmClassInitializationPlan::ImplicitNoArg` only after
 proving the source class has no constructor parameters or body, superclass
 arguments, fields, or template initialization expressions. A direct parent is
@@ -835,6 +858,17 @@ JDK harness checks reference identity and loop edge cases with
 `java -Xverify:all`. See
 [`jvm-reference-signatures.md`](jvm-reference-signatures.md) for the fixture's
 precise coverage and remaining limits.
+
+`InheritedAccessorHierarchy.scala` verifies constructor and class-body
+accessors inherited across `Base → Middle → Leaf` from real Scala source.
+Canonical Base field identities remain intact, only Base declares backing
+storage and generated public accessors, and caller Methodrefs use the static
+receiver class. The test checks exact constructor chaining and ordinary
+inherited method dispatch, plus byte-identical ordered class files from two
+fresh sessions. Decoded major-65 output is inspected with `javap -c -v -p` and
+executed by a Java 21 harness under `-Xverify:all`. Accessor overrides,
+bridges, traits, external or generic parents, and full Scala/TASTy ABI
+compatibility remain deferred.
 
 `typed_super_method_calls_lower_to_checked_invokespecial` uses actual Scala
 source for `Base`, `Derived`, and `Runner` in two independent frontend
@@ -1021,10 +1055,12 @@ getter signature, and a public `$eq` setter signature for `var` only. This
 projection uses the exact Scala 3.9.0 oracle evidence recorded in
 [`jvm-scala-accessors.md`](jvm-scala-accessors.md), preserves source order and
 canonical source IDs, and rejects field or binary method-signature collisions
-against planned fields and methods. Accessor-bearing inheritance edges are
-rejected with `UnsupportedJvmAccessorInheritance` until generated signatures
-participate in override and final-method validation. The projection does not
-add semantic symbols or ordinary source field initializers. Whole-class
+against planned fields and methods. Accessor inheritance is admitted for the
+bounded Object-rooted same-unit hierarchy after generated and ordinary method
+signatures pass collision and final-method validation. Descendants in that
+hierarchy cannot declare additional accessors yet; those edges return
+`UnsupportedJvmAccessorInheritance`. The projection does not add semantic
+symbols or ordinary source field initializers. Whole-class
 emission writes the checked private backing fields and constructor stores,
 then emits public getters and, for mutable accessors, public setters in
 constructor accessor order before explicitly planned source methods. Each
@@ -1042,8 +1078,9 @@ constructor binding or exact class-body source proof, field type, mutability,
 backing-field flags, and getter/setter signatures at each use. Ordinary
 private source fields retain their same-class `getfield`/`putfield` path;
 accessor call sites never reference another class's private backing field.
-Mutable local `var` receivers and accessor-bearing inheritance remain
-unsupported.
+Inherited accessor call-site lowering and mutable local `var` receivers remain
+unsupported, while the inherited classes themselves can be emitted in the
+validated subset.
 
 The root integration test
 `real_source_accessor_calls_dispatch_through_validated_getters_and_setters`
@@ -1169,8 +1206,9 @@ lookup, direct-parent `super` selection, and two-edge reference assignability
 through the bounded chain. Sibling joins without explicit checked context,
 unrelated/`Object`-only reference joins, nested allocation arguments, arbitrary
 effectful pre-super evaluation,
-branched constructors, qualified/trait super, and Scala ABI/TASTy emission also
-remain deferred.
+branched constructors, qualified/trait super, and general Scala ABI/TASTy
+emission remain deferred; the separate audited Counter pair path is documented
+above.
 
 The #1585 class-body accessor acceptance batch combines a body-only no-argument
 class (`Int`, mutable `Boolean`, and mutable `Double`), a parameterized class
@@ -1181,5 +1219,6 @@ no backing-field references, two-slot Long/Double behavior, and byte-identical
 ordered class files from two fresh frontend sessions. Its JDK 21 harness runs
 with `java -Xverify:all`; earlier focused tests retain typed rejection and
 zero-partial-artifact checks for invalid batches. This does not add support for
-private cross-class access, accessor inheritance, traits, generics, or combined
-Scala ABI/TASTy output.
+private cross-class access, inherited accessor call-site lowering,
+child-declared accessors above an accessor-bearing parent, traits, generics, or
+general combined Scala ABI/TASTy output outside the audited Counter pair path.

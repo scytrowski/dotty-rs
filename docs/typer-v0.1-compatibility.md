@@ -114,18 +114,20 @@ relation remains false. Constant alternatives also participate in the existing
 bounded union rules. Expression widening uses the same constant-to-builtin
 mapping as the relation.
 
-String constants support exact equality, but the current `Definitions` has no
-canonical String type, so string-to-String conformance remains unsupported.
-UTF-16-only strings and Class constants remain outside the supported relation
-subset and return `TypeRelationError::UnsupportedType`. `Class` constants are
-not treated as nominal class views. `require_stable_selection_prefix`
-continues to accept supported constant types as stable prefixes. TASTy decoding
-maps wire constant types to the same `Type::Constant` representation. Expected
-expression adaptation preserves an exact constant only when the normalized
-expected type contains a constant singleton, including a union alternative;
-all other expectations use normal expression widening before conformance.
-This is intentionally limited to literal constants and does not add general
-bidirectional typing.
+String constants support exact equality and resolve their underlying type
+through the canonical classfile-backed `java.lang.String` identity. If that
+class cannot be resolved or does not have the exact Java package owner chain,
+string literal typing remains deferred and String constant conformance remains
+unsupported. UTF-16-only strings share that underlying type, while Class
+constants remain outside the supported relation subset and return
+`TypeRelationError::UnsupportedType`. `Class` constants are not treated as
+nominal class views. `require_stable_selection_prefix` continues to accept
+supported constant types as stable prefixes. TASTy decoding maps wire constant
+types to the same `Type::Constant` representation. Expected expression
+adaptation preserves an exact constant only when the normalized expected type
+contains a constant singleton, including a union alternative; all other
+expectations use normal expression widening before conformance. This remains
+limited to literal constants and does not add general bidirectional typing.
 
 Source `null` expressions are represented by the canonical
 `Definitions.null_type` `TypeRef`, rather than `Type::Constant(Constant::Null)`.
@@ -808,14 +810,30 @@ compiles with an infinite-loop warning. Explicitly typed forward reference to a
 later lazy value compiles. This Typer increment conservatively returns
 `RecursiveLazyLocalValueInitializer` for direct self-reference in either type
 form because it does not model Scala's cycle inference or warning analysis.
-Forward references from an earlier local initializer to a later lazy
-declaration also remain unsupported; the Typer keeps the existing
-declaration-order scope and reports `TermNameNotFound`.
+Forward references from an earlier local lazy initializer to a later lazy
+declaration are supported when every direct statement in the containing block
+is a local `lazy val`. Explicit target types are available when the block is
+preindexed; inferred target types are completed on demand, including acyclic
+chains of inferred lazy values. A cycle encountered while inferring a forward
+target returns `RecursiveLazyLocalValueInitializer`, and chains deeper than 64
+inferred targets return `InferredLocalLazyTypeDepthExceeded`. Mixed blocks
+retain declaration-order behavior; this prevents later lazy declarations from
+becoming visible across eager initialization barriers or local method
+declarations. The pinned Scala 3.9.0 fixture `Forward.scala` covers explicit
+and single inferred forward references. A separate Rust regression covers an
+acyclic chain of inferred targets.
+
+The frozen classpath corpus profile records three inferred local lazy values
+across two declarations and two files, but those rows stop at enclosing
+resolution/classpath blockers before the declarations are typed. This focused
+change therefore has no measured corpus uplift; the full typer corpus result
+remains 0 / 3,297 fully typed local methods.
 
 Contextual search, contextual argument insertion, implicit conversions, and
 summon remain unsupported. `inline val` declarations and lazy pattern
-definitions remain deferred. Recursive lazy initializers and forward
-references to later lazy declarations remain unsupported as described above.
+definitions remain deferred. Recursive inferred lazy initializers remain
+unsupported and report `RecursiveLazyLocalValueInitializer`; the acyclic
+forward-reference subset is described above.
 Unsupported modifiers, duplicate modifiers, and unsupported or inconsistent
 modifier sets return `LocalValueModifierDeferred` with the source tree and
 complete modifier set.
@@ -1397,8 +1415,15 @@ inferred type for the source `TypeTree`. Short acyclic dependencies between
 inferred fields are supported; recursive dependencies and chains deeper than
 the fixed completion limit return typed errors. Mutable field reads and
 assignments use the inferred type, so incompatible assignments are rejected
-when the existing type relation can prove the mismatch. Lazy, inline, given,
-implicit, and module-class fields remain deferred, as do unsupported
+when the existing type relation can prove the mismatch. Inferred `lazy val`
+fields on ordinary source classes also use this path. Their `LAZY` flag is
+preserved; this types the value without synthesizing lazy initialization or
+runtime-lowering trees. Acyclic forward references to later lazy fields are
+supported, while recursive inference returns `RecursiveInferredFieldType`
+rather than Scala's E045 diagnostic. The pinned Scala oracle fixture is
+[`class-lazy-fields`](../crates/dotty-typer/tests/fixtures/class-lazy-fields/ClassLazyFields.scala).
+`inline`, `given`, `implicit`,
+module-class, and mutable lazy fields remain deferred, as do unsupported
 initializer expressions. Explicit field annotations continue through the
 declared-type completion path.
 

@@ -3,13 +3,13 @@
 use dotty_core::ast::{TreeKind, UntypedNode};
 use dotty_core::types::{ClassInfo, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
-    Definitions, MemberRequest, Name, Namespace, NoResolver, Packages, ResolutionError,
-    ResolverCheckpoint, SemanticStore, SourceId, SourceText, Symbol, SymbolFlags, SymbolInfo,
-    SymbolKind, SymbolLinks, SymbolOrigin, SymbolResolver, TreeId, Untyped, Visibility,
+    Constant, Definitions, MemberRequest, Name, Namespace, NoResolver, Packages, ResolutionError,
+    ResolverCheckpoint, Scope, SemanticStore, SourceId, SourceText, Symbol, SymbolFlags,
+    SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, SymbolResolver, TreeId, Untyped, Visibility,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
-use dotty_typer::{ExpressionContext, SourceTyper, TyperError};
+use dotty_typer::{ExpressionContext, SourceTyper, TypeRelationError, TyperError};
 
 const NULL_REFERENCE_IDENTITY_SOURCE: &str =
     include_str!("../../../tests/fixtures/jvm/NullReferenceIdentity.scala");
@@ -20,6 +20,58 @@ struct ScalaTypeResolver {
     requested_name: &'static str,
     result: dotty_core::SymbolId,
     member_requests: Vec<Name>,
+}
+
+struct JavaLangStringResolver {
+    java_package: dotty_core::SymbolId,
+    lang_package: dotty_core::SymbolId,
+    string_class: Option<dotty_core::SymbolId>,
+}
+
+impl SymbolResolver for JavaLangStringResolver {
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        ResolverCheckpoint::new(0)
+    }
+
+    fn rollback_to(&mut self, _store: &mut SemanticStore, _checkpoint: ResolverCheckpoint) {}
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<dotty_core::SymbolId>, ResolutionError> {
+        let prefix = match store.types.try_get(request.prefix) {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(prefix),
+                ..
+            })
+            | Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(prefix),
+                ..
+            }) => *prefix,
+            _ => return Ok(None),
+        };
+        let name = store.names.resolve(request.name.text());
+        Ok(if prefix == self.java_package && name == "lang" {
+            Some(self.lang_package)
+        } else if prefix == self.lang_package && name == "String" {
+            self.string_class
+        } else {
+            None
+        })
+    }
+
+    fn resolve_package(
+        &mut self,
+        _store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<dotty_core::SymbolId>, ResolutionError> {
+        Ok(match path {
+            ["java"] => Some(self.java_package),
+            ["java", "lang"] => Some(self.lang_package),
+            _ => None,
+        })
+    }
 }
 
 impl SymbolResolver for ScalaTypeResolver {
@@ -81,6 +133,244 @@ fn class_template(
         panic!("class definition contains a template")
     };
     template
+}
+
+#[test]
+fn string_concatenation_uses_the_canonical_java_string_operator_only() {
+    let text = concat!(
+        "class Token\n",
+        "object StringConcatenation:\n",
+        "  def concat(name: java.lang.String, desc: java.lang.String): java.lang.String = name + desc\n",
+        "  def explicit(name: java.lang.String, desc: java.lang.String): java.lang.String = name.+(desc)\n",
+        "  def literal: java.lang.String = \"literal\"\n",
+        "  def unrelated(left: Token, right: Token): Token = left + right\n",
+    );
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "string-concatenation.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let package_chain = packages.enter(&mut store, SymbolOrigin::Builtin, &["java", "lang"]);
+    let java_package = package_chain[0].symbol;
+    let lang_package = package_chain[1].symbol;
+    let declarations = store.scopes.alloc(Scope::new(None));
+    let class_name = Name::new(store.names.intern("String"), Namespace::Type);
+    let string_class = store.symbols.alloc(Symbol {
+        name: class_name,
+        owner: Some(lang_package),
+        kind: SymbolKind::Class,
+        flags: SymbolFlags::FINAL,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Classfile(store.origins.register_classfile()),
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    store.scopes.get_mut(declarations).owner = Some(string_class);
+    let class_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+        prefix: definitions.no_prefix,
+        class: string_class,
+        parents: Vec::new(),
+        declarations,
+        self_type: None,
+    }));
+    store.symbols.get_mut(string_class).info = SymbolInfo::Complete(class_info);
+    let method_and_body = |wanted: &str| {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == wanted).then(|| {
+                    (
+                        index.symbol_at(source, tree).unwrap(),
+                        definition.rhs.unwrap(),
+                    )
+                })
+            })
+            .unwrap_or_else(|| panic!("source should contain {wanted} method"))
+    };
+    let (concat_method, concat_body) = method_and_body("concat");
+    let (explicit_method, explicit_body) = method_and_body("explicit");
+    let (literal_method, literal_body) = method_and_body("literal");
+    let (unrelated_method, unrelated_body) = method_and_body("unrelated");
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(JavaLangStringResolver {
+        java_package,
+        lang_package,
+        string_class: Some(string_class),
+    }));
+
+    typer.complete_symbol(literal_method).unwrap();
+    let context = typer.expression_context_for(literal_method).unwrap();
+    let literal = typer
+        .type_expression(literal_body, context)
+        .expect("a string literal should use the canonical classfile-backed String type");
+    let literal_type = typer.typed_ast().get(literal).ty;
+    assert!(matches!(
+        typer.store().types.try_get(literal_type),
+        Some(Type::Constant(dotty_core::Constant::String(_)))
+    ));
+    let widened_literal = typer.widen_expression_type(literal_type).unwrap();
+    assert!(matches!(
+        typer.store().types.try_get(widened_literal),
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        }) if *class == string_class
+    ));
+    assert!(typer.conforms(literal_type, widened_literal).unwrap());
+
+    typer.complete_symbol(explicit_method).unwrap();
+    let context = typer.expression_context_for(explicit_method).unwrap();
+    let typed = typer
+        .type_expression(explicit_body, context)
+        .expect("explicit String.+ selection should work before any infix use");
+    assert!(matches!(
+        typer.store().types.try_get(typer.typed_ast().get(typed).ty),
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        }) if *class == string_class
+    ));
+
+    typer.complete_symbol(concat_method).unwrap();
+    let context = typer.expression_context_for(concat_method).unwrap();
+    let typed = typer
+        .type_expression(concat_body, context)
+        .expect("String + String should use Scala's canonical String.+ intrinsic");
+    assert!(matches!(
+        typer.store().types.try_get(typer.typed_ast().get(typed).ty),
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        }) if *class == string_class
+    ));
+    let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+        panic!("String concatenation should remain an ordinary typed application")
+    };
+    let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind else {
+        panic!("String concatenation should select its canonical member")
+    };
+    assert_eq!(typer.store().names.resolve(selection.name.text()), "+");
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(string_plus),
+        ..
+    } = typer
+        .store()
+        .types
+        .get(typer.typed_ast().get(application.function).ty)
+    else {
+        panic!("the selected String operator should carry a canonical symbol")
+    };
+    let operator = typer.store().symbols.get(*string_plus);
+    assert_eq!(operator.owner, Some(string_class));
+    assert_eq!(operator.origin, SymbolOrigin::Builtin);
+    assert_eq!(operator.kind, SymbolKind::Method);
+    assert!(matches!(
+        typer.store().types.try_get(match operator.info {
+            SymbolInfo::Complete(info) => info,
+            _ => panic!("the canonical String operator should have complete info"),
+        }),
+        Some(Type::Method(method))
+            if method.params.len() == 1
+                && method.params[0].ty == definitions.any_type
+                && method.result == typer.typed_ast().get(typed).ty
+    ));
+
+    typer.complete_symbol(unrelated_method).unwrap();
+    let context = typer.expression_context_for(unrelated_method).unwrap();
+    assert!(matches!(
+        typer.type_expression(unrelated_body, context),
+        Err(TyperError::MemberNotFound { name, .. })
+            if typer.store().names.resolve(name.text()) == "+"
+    ));
+}
+
+#[test]
+fn unresolved_string_relation_rolls_back_package_prefix_and_utf16_constants_are_supported() {
+    let text = "class C { def answer: Int = 42 }";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut package_registry = Packages::new();
+    let package_chain =
+        package_registry.enter(&mut store, SymbolOrigin::Builtin, &["java", "lang"]);
+    let java_package = package_chain[0].symbol;
+    let lang_package = package_chain[1].symbol;
+    let packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "unresolved-string-relation.scala",
+        &mut store,
+        &mut package_registry,
+    )
+    .unwrap();
+    let constant_string = store.names.intern("literal");
+    let string_constant = store
+        .types
+        .alloc(Type::Constant(Constant::String(constant_string)));
+    let utf16_constant = store
+        .types
+        .alloc(Type::Constant(Constant::StringUtf16(vec![0xD800])));
+    let checkpoint = store.checkpoint();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(JavaLangStringResolver {
+        java_package,
+        lang_package,
+        string_class: None,
+    }));
+
+    assert!(matches!(
+        typer.conforms(string_constant, definitions.int),
+        Err(TypeRelationError::UnsupportedType { .. })
+    ));
+    assert_eq!(typer.store().checkpoint(), checkpoint);
+    assert!(typer.conforms(utf16_constant, utf16_constant).unwrap());
 }
 
 #[test]

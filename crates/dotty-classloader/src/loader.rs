@@ -340,6 +340,7 @@ pub struct ModuleIdentity {
     pub companion_class: Option<SymbolId>,
     pub object_name: BinaryName,
     pub module_class_name: BinaryName,
+    pub nested_type_visibilities: HashMap<String, Visibility>,
 }
 
 /// Dependency work observed during one top-level class load.
@@ -819,7 +820,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// Class files and TASTy are decoded only far enough to determine the
     /// class kind and visibility. For nested JVM classes the enclosing
     /// class identity is also established from class-file metadata; `$` in
-    /// a name alone is never treated as evidence of nesting.
+    /// a name alone is never treated as evidence of nesting. If a Scala
+    /// object's forwarder facade has no class `TypeDef` in its TASTy, the
+    /// module-class identity is used only when that TASTy proves the object.
     pub fn ensure_class_identity(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadError> {
         self.dependency_failure_context = None;
         let store_checkpoint = self.store.checkpoint();
@@ -1247,12 +1250,26 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             }
             self.link_class_object_companions(name, class, object)?;
         }
+        let nested_type_visibilities = decoded
+            .nested_type_visibilities
+            .iter()
+            .map(|(nested_name, declared)| {
+                let binary_name =
+                    BinaryName::from_internal(format!("{}${nested_name}", name.as_internal()));
+                let visibility = declared
+                    .as_ref()
+                    .map(|declared| self.tasty_visibility(&binary_name, declared))
+                    .unwrap_or(Visibility::Public);
+                (nested_name.clone(), visibility)
+            })
+            .collect();
         let identity = ModuleIdentity {
             object,
             module_class,
             companion_class,
             object_name: name.clone(),
             module_class_name,
+            nested_type_visibilities,
         };
         self.session.cache_module(name.clone(), identity.clone());
         Ok(identity)
@@ -1541,7 +1558,20 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     &owner,
                     ClassLoadDependencyReason::EnclosingOwnerIdentity,
                 );
-                self.ensure_class_identity_inner(&owner, ancestry)
+                match self.ensure_class_identity_inner(&owner, ancestry) {
+                    Ok(owner) => Ok(owner),
+                    // Identity-only loading must recognize the same Scala
+                    // object facade as full class loading does in
+                    // `resolve_semantic_owner`: its TASTy proves a module,
+                    // but has no class TypeDef for the facade.
+                    Err(ClassLoadError::InvalidTastyFile(
+                        _,
+                        tasty_symbol::TastyDecodeError::MissingTypeDef,
+                    )) => self
+                        .ensure_module_identity(&owner)
+                        .map(|identity| identity.module_class),
+                    Err(error) => Err(error),
+                }
             })
             .transpose()?;
         let package = self.session.packages.resolve(self.store, name);
@@ -2794,9 +2824,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
     }
 
-    /// Lowers a [`tasty_symbol::DecodedTastyMethod`] into a `Type::Method`'s
-    /// `TypeId`, the `.tasty` counterpart of
-    /// [`Self::lower_method_descriptor`]. `<init>`'s result is always
+    /// Lowers a [`tasty_symbol::DecodedTastyMethod`] into its semantic
+    /// method shape, optionally wrapped in `Type::Poly`. A definition with
+    /// no clauses of either kind is represented as `Type::ByName` (TASTy's
+    /// `ExprType`). A type-parameter-only definition keeps its direct result
+    /// under `Type::Poly`; an explicit empty term clause remains an empty
+    /// `Type::Method`.
+    /// `<init>`'s result is always
     /// [`Definitions::unit`] rather than going through
     /// [`Self::lower_tasty_member_type`] — see the comment where
     /// `tasty_symbol::decode` gives it a `None` return type for why its
@@ -2811,9 +2845,66 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         owner: &BinaryName,
         method: &tasty_symbol::DecodedTastyMethod,
     ) -> TypeId {
+        let poly_binder = (!method.type_parameters.is_empty()).then(|| self.store.types.reserve());
+        let type_parameter_refs = poly_binder
+            .as_ref()
+            .map(|binder| {
+                (0..method.type_parameters.len())
+                    .map(|index| {
+                        self.store.types.alloc(Type::ParamRef {
+                            binder: binder.id(),
+                            index: index as u32,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let type_parameters = method
+            .type_parameters
+            .iter()
+            .map(|parameter| {
+                let (low, high) = if parameter.bounds_supported {
+                    let low = self.lower_tasty_type(
+                        owner,
+                        parameter.lower_bound.as_ref(),
+                        &type_parameter_refs,
+                    );
+                    let high = parameter
+                        .upper_bound
+                        .as_ref()
+                        .map_or(self.definitions.any_type, |ty| {
+                            self.lower_tasty_type(owner, Some(ty), &type_parameter_refs)
+                        });
+                    (low, high)
+                } else {
+                    let error =
+                        self.unresolved_tasty_type("unsupported method type parameter bounds");
+                    (error, error)
+                };
+                let bounds = self.store.types.alloc(Type::Bounds { low, high });
+                let text = self.store.names.intern(&parameter.name);
+                let declared_variance = match parameter.variance {
+                    Some(28) => Some(dotty_core::Variance::Covariant),
+                    Some(29) => Some(dotty_core::Variance::Contravariant),
+                    Some(32) => Some(dotty_core::Variance::Invariant),
+                    _ => None,
+                };
+                TypeParam {
+                    name: TypeName::new(text),
+                    bounds,
+                    declared_variance,
+                }
+            })
+            .collect::<Vec<_>>();
+
         let mut params = Vec::with_capacity(method.parameters.len());
         for parameter in &method.parameters {
-            let ty = self.lower_tasty_member_type(owner, parameter.declared_type.as_ref());
+            let ty = self.lower_tasty_type(
+                owner,
+                parameter.declared_type.as_ref(),
+                &type_parameter_refs,
+            );
             let text = self.store.names.intern(&parameter.name);
             params.push(MethodParam {
                 name: TermName::new(text),
@@ -2826,14 +2917,65 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let result = if method.name == "<init>" {
             self.definitions.unit
         } else {
-            self.lower_tasty_member_type(owner, method.return_type.as_ref())
+            self.lower_tasty_type(owner, method.return_type.as_ref(), &type_parameter_refs)
         };
 
-        self.store.types.alloc(Type::Method(MethodType {
-            params,
-            result,
-            kind: MethodKind::Plain,
-        }))
+        let method_type = if method.has_term_clause || method.name == "<init>" {
+            self.store.types.alloc(Type::Method(MethodType {
+                params,
+                result,
+                kind: MethodKind::Plain,
+            }))
+        } else if !method.type_parameters.is_empty() {
+            result
+        } else {
+            self.store.types.alloc(Type::ByName { result })
+        };
+
+        match poly_binder {
+            Some(binder) => self.store.types.fill(
+                binder,
+                Type::Poly(PolyType {
+                    params: type_parameters,
+                    result: method_type,
+                }),
+            ),
+            None => method_type,
+        }
+    }
+
+    fn lower_tasty_type(
+        &mut self,
+        owner: &BinaryName,
+        declared_type: Option<&tasty_symbol::DecodedTastyType>,
+        type_parameters: &[TypeId],
+    ) -> TypeId {
+        match declared_type {
+            Some(tasty_symbol::DecodedTastyType::Named(name)) => {
+                self.lower_tasty_member_type(owner, Some(name))
+            }
+            Some(tasty_symbol::DecodedTastyType::ParamRef(index)) => type_parameters
+                .get(*index as usize)
+                .copied()
+                .unwrap_or_else(|| {
+                    self.unresolved_tasty_type("type parameter reference is out of range")
+                }),
+            Some(tasty_symbol::DecodedTastyType::Applied { tycon, arguments }) => {
+                let tycon = self.lower_tasty_type(owner, Some(tycon), type_parameters);
+                let args = arguments
+                    .iter()
+                    .map(|argument| self.lower_tasty_type(owner, Some(argument), type_parameters))
+                    .collect();
+                self.store.types.alloc(Type::Applied { tycon, args })
+            }
+            None => self.lower_tasty_member_type(owner, None),
+        }
+    }
+
+    fn unresolved_tasty_type(&mut self, reason: &str) -> TypeId {
+        let text = format!("unresolved .tasty member type: {reason}");
+        let message = self.store.names.intern(&text);
+        self.store.types.alloc(Type::Error(ErrorType { message }))
     }
 
     fn load_uncached_class(
@@ -3304,12 +3446,27 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         &outer,
                         ClassLoadDependencyReason::EnclosingOwnerIdentity,
                     );
-                    self.ensure_class_identity(&outer).map_err(|source| {
-                        ClassLoadError::DependencyFailure {
-                            owner: name.clone(),
-                            dependency: outer,
-                            source: Rc::new(source),
-                        }
+                    let owner = match self.ensure_class_identity(&outer) {
+                        Ok(owner) => Ok(owner),
+                        // Scala nested classes in a top-level object can
+                        // record the object's static forwarder class as the
+                        // JVM `InnerClasses` owner. That name has TASTy for
+                        // the object, but no class `TypeDef`; use the
+                        // TASTy-proven module identity only for this exact
+                        // missing-class case. A `$` in the binary name is
+                        // not sufficient evidence by itself.
+                        Err(ClassLoadError::InvalidTastyFile(
+                            _,
+                            tasty_symbol::TastyDecodeError::MissingTypeDef,
+                        )) => self
+                            .ensure_module_identity(&outer)
+                            .map(|identity| identity.module_class),
+                        Err(error) => Err(error),
+                    };
+                    owner.map_err(|source| ClassLoadError::DependencyFailure {
+                        owner: name.clone(),
+                        dependency: outer,
+                        source: Rc::new(source),
                     })
                 }
             })
@@ -5675,6 +5832,187 @@ mod tests {
     }
 
     #[test]
+    fn lowers_scala39_some_apply_to_a_poly_method_with_exact_param_refs() {
+        let bytes = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library/scala/Some.tasty"),
+        )
+        .expect("pinned Some.tasty fixture should exist");
+        let decoded = tasty_symbol::decode_module_class_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("scala/Some$"),
+            |_, _| None,
+            |package, simple_name| {
+                Some(BinaryName::from_internal(format!(
+                    "{package}/{simple_name}"
+                )))
+            },
+        )
+        .expect("pinned Some module class should decode");
+        let apply = decoded
+            .methods
+            .iter()
+            .find(|method| method.name == "apply")
+            .expect("Some.apply should be present after generic decoding");
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let expected_any = loader.definitions.any_class;
+        let expected_nothing = loader.definitions.nothing_class;
+        let apply_type =
+            loader.lower_tasty_method(&BinaryName::from_internal("scala/Some$"), apply);
+        drop(loader);
+
+        let Type::Poly(poly) = store.types.get(apply_type) else {
+            panic!("Some.apply should lower to a Poly type");
+        };
+        assert_eq!(poly.params.len(), 1);
+        assert_eq!(
+            store.names.resolve(poly.params[0].name.as_name().text()),
+            "A"
+        );
+        assert_eq!(poly.params[0].declared_variance, None);
+        let Type::Bounds { low, high } = store.types.get(poly.params[0].bounds) else {
+            panic!("Some.apply's type parameter should retain its decoded bounds");
+        };
+        assert_eq!(
+            store.types.get(*low).reference_symbol(),
+            Some(expected_nothing)
+        );
+        assert_eq!(
+            store.types.get(*high).reference_symbol(),
+            Some(expected_any)
+        );
+        let Type::Method(method) = store.types.get(poly.result) else {
+            panic!("Some.apply's Poly result should be a method");
+        };
+        let expected = Type::ParamRef {
+            binder: apply_type,
+            index: 0,
+        };
+        assert_eq!(store.types.get(method.params[0].ty), &expected);
+        let Type::Applied { args, .. } = store.types.get(method.result) else {
+            panic!("Some.apply should retain the applied result type");
+        };
+        assert_eq!(args.len(), 1);
+        assert_eq!(store.types.get(args[0]), &expected);
+    }
+
+    #[test]
+    fn lowers_scala39_tasty_methods_with_absent_and_empty_term_clauses_distinctly() {
+        let bytes = semantic_unpickler_fixture_bytes("Methods.tasty");
+        let owner = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Methods");
+        let decoded = tasty_symbol::decode_with_resolvers(
+            &bytes,
+            &owner,
+            |_, _| None,
+            |package, simple_name| {
+                Some(BinaryName::from_internal(format!(
+                    "{package}/{simple_name}"
+                )))
+            },
+        )
+        .expect("pinned Scala 3.9 Methods TASTy should decode");
+        let method = |name: &str| {
+            decoded
+                .methods
+                .iter()
+                .find(|method| method.name == name)
+                .unwrap_or_else(|| panic!("Methods.{name} should be present"))
+        };
+        let nullary = method("nullary");
+        let empty = method("empty");
+        let one = method("one");
+        let type_only = method("typeOnly");
+        assert!(!nullary.has_term_clause);
+        assert!(empty.has_term_clause);
+        assert!(one.has_term_clause);
+        assert!(!type_only.has_term_clause);
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let nullary_type = loader.lower_tasty_method(&owner, nullary);
+        let empty_type = loader.lower_tasty_method(&owner, empty);
+        let one_type = loader.lower_tasty_method(&owner, one);
+        let type_only_type = loader.lower_tasty_method(&owner, type_only);
+        drop(loader);
+
+        assert!(matches!(store.types.get(nullary_type), Type::ByName { .. }));
+        let Type::Method(empty_method) = store.types.get(empty_type) else {
+            panic!("an explicit empty clause should remain a method type");
+        };
+        assert!(empty_method.params.is_empty());
+        let Type::Method(one_method) = store.types.get(one_type) else {
+            panic!("a non-empty term clause should remain a method type");
+        };
+        assert_eq!(one_method.params.len(), 1);
+        let Type::Poly(type_only_poly) = store.types.get(type_only_type) else {
+            panic!("typeOnly should retain its polymorphic wrapper");
+        };
+        let Type::ParamRef { binder, index } = store.types.get(type_only_poly.result) else {
+            panic!(
+                "typeOnly should retain its direct polymorphic result, got {:?}",
+                store.types.get(type_only_poly.result)
+            );
+        };
+        assert_eq!(*binder, type_only_type);
+        assert_eq!(*index, 0);
+    }
+
+    #[test]
+    fn lowers_unsupported_tasty_method_bounds_to_explicit_errors() {
+        let bytes = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library/scala/Some.tasty"),
+        )
+        .expect("pinned Some.tasty fixture should exist");
+        let decoded = tasty_symbol::decode_module_class_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("scala/Some$"),
+            |_, _| None,
+            |package, simple_name| {
+                Some(BinaryName::from_internal(format!(
+                    "{package}/{simple_name}"
+                )))
+            },
+        )
+        .expect("pinned Some module class should decode");
+        let mut apply = decoded
+            .methods
+            .iter()
+            .find(|method| method.name == "apply")
+            .expect("Some.apply should be present after generic decoding")
+            .clone();
+        apply.type_parameters[0].bounds_supported = false;
+        apply.type_parameters[0].lower_bound = None;
+        apply.type_parameters[0].upper_bound = None;
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let apply_type =
+            loader.lower_tasty_method(&BinaryName::from_internal("scala/Some$"), &apply);
+        drop(loader);
+
+        let Type::Poly(poly) = store.types.get(apply_type) else {
+            panic!("unsupported bounds should not drop the generic method")
+        };
+        let Type::Bounds { low, high } = store.types.get(poly.params[0].bounds) else {
+            panic!("generic method parameter should retain a bounds node")
+        };
+        assert_eq!(
+            low, high,
+            "unsupported bounds should stay explicit on both sides"
+        );
+        let Type::Error(error) = store.types.get(*low) else {
+            panic!("unsupported bounds should lower to an error, not Nothing..Any")
+        };
+        assert_eq!(
+            store.names.resolve(error.message),
+            "unresolved .tasty member type: unsupported method type parameter bounds"
+        );
+    }
+
+    #[test]
     fn static_nested_class_does_not_capture_an_outer_type_parameter() {
         let mut classes = enclosing_generics_classpath();
         let static_name = BinaryName::from_internal("enclosing_generics/Outer$Static");
@@ -6841,15 +7179,11 @@ mod tests {
         let SymbolInfo::Complete(make_info) = loader.store.symbols.get(make[0]).info else {
             panic!("method declaration should carry its decoded signature");
         };
-        let Type::Method(make_signature) = loader.store.types.get(make_info) else {
-            panic!("make should have a method type");
+        let Type::ByName { result } = loader.store.types.get(make_info) else {
+            panic!("a TASTy no-clause method should have an ExprType");
         };
         assert_eq!(
-            loader
-                .store
-                .types
-                .get(make_signature.result)
-                .reference_symbol(),
+            loader.store.types.get(*result).reference_symbol(),
             Some(class_identity)
         );
         assert!(
@@ -9209,6 +9543,32 @@ mod tests {
             )
             .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn scala_cloneable_package_alias_resolves_to_the_java_class() {
+        let tasty = HashMap::from([(
+            BinaryName::from_internal("scala/package"),
+            dotty_tasty_fixture_bytes("scala3-library/scala/package.tasty"),
+        )]);
+        let classes = HashMap::from([(
+            BinaryName::from_internal("java/lang/Cloneable"),
+            synthetic_class("java/lang/Cloneable", None),
+        )]);
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(tasty)),
+            Box::new(InMemoryClassPath(classes)),
+        ]);
+
+        assert_eq!(
+            resolve_tasty_alias(
+                &class_path,
+                &BinaryName::from_internal("scala/package$"),
+                "Cloneable"
+            )
+            .unwrap(),
+            Some(BinaryName::from_internal("java/lang/Cloneable"))
         );
     }
 

@@ -27,10 +27,24 @@ frames whose stack entry resolves through the constant pool to
 `javap -c -v` and runs the positive, zero, and negative runtime cases under
 `java -Xverify:all`.
 
+The focused #1615 regression
+`full_inherited_accessor_hierarchy_verifies_end_to_end_on_jvm` combines that
+verified two-edge constructor graph with inherited generated accessors from a
+real source fixture. Its `Base(val id)`, `Base.var current`, and
+`Base.val enabled` symbols remain canonical in typed source trees and JVM
+metadata. Middle and Leaf retain only their declared constructors and methods;
+`Middle.read/write` and Reader's Base-, Middle-, and Leaf-typed calls use the
+corresponding static receiver class in decoded getter/setter Methodrefs. The
+test checks exact direct-parent constructor owners, parent-only storage and
+public accessor declarations, Long Min/Max updates on independent instances,
+continued ordinary `Base.doubled` dispatch, class-file major version 65,
+`javap -c -v -p`, JDK 21 `-Xverify:all`, and full-batch byte equality across
+two fresh source sessions.
+
 ## Source evidence and current result
 
 The source program follows the issue's `Base -> Middle -> Leaf` shape, plus
-`Runner`. The test asserts canonical `SymbolId` relationships rather than
+`Reader`. The test asserts canonical `SymbolId` relationships rather than
 looking up a reconstructed hierarchy by printed class names:
 
 | Source declaration | Canonical parent identity | Constructor / method evidence |

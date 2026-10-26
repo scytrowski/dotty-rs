@@ -1,0 +1,11 @@
+selected_method	before_imported_subpackage	current_first_blocker	fully_typed	current_attempt
+compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala#tree=1968	SymbolResolution	ApplicationArgumentConformanceUnsupported	false	compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala#tree=1991
+compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala#tree=2025	SymbolResolution	ApplicationArgumentConformanceUnsupported	false	compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala#tree=2103
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=212	TypeNameNotFound	SymbolResolution	false	compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=420
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=226	TypeNameNotFound	SymbolResolution	false	compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=420
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=239	TypeNameNotFound	SymbolResolution	false	compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=420
+compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala#tree=1021	ImportQualifierNotFound	SymbolResolution	false	compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala#tree=1237
+compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala#tree=466	ImportQualifierNotFound	SymbolResolution	false	compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala#tree=1237
+compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala#tree=4750	ImportQualifierNotFound	SymbolResolution	false	compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala#tree=4827
+compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala#tree=4782	ImportQualifierNotFound	SymbolResolution	false	compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala#tree=4827
+compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala#tree=632	ImportQualifierNotFound	SymbolResolution	false	compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala#tree=1237

@@ -6,6 +6,7 @@ use dotty_classfile::access_flags::{ACC_PUBLIC, MethodAccessFlags};
 use dotty_classfile::bytecode::CodeBuilder;
 use dotty_classfile::class_file::ClassFileVersion;
 use dotty_classfile::class_file_builder::ClassFileBuilder;
+use dotty_classfile::tasty_link::TastyLinkId;
 use dotty_core::ids::SymbolId;
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolInfo, SymbolKind};
@@ -21,6 +22,24 @@ pub(super) fn emit_class(
     class_symbol: SymbolId,
     definitions: &dotty_core::definitions::Definitions,
 ) -> Result<GeneratedClass, JvmCodegenError> {
+    emit_class_with_optional_tasty_link(unit, class_symbol, definitions, None)
+}
+
+pub(super) fn emit_class_with_tasty_link(
+    unit: &JvmCompilationUnit<'_>,
+    class_symbol: SymbolId,
+    definitions: &dotty_core::definitions::Definitions,
+    tasty_link: TastyLinkId,
+) -> Result<GeneratedClass, JvmCodegenError> {
+    emit_class_with_optional_tasty_link(unit, class_symbol, definitions, Some(tasty_link))
+}
+
+fn emit_class_with_optional_tasty_link(
+    unit: &JvmCompilationUnit<'_>,
+    class_symbol: SymbolId,
+    definitions: &dotty_core::definitions::Definitions,
+    tasty_link: Option<TastyLinkId>,
+) -> Result<GeneratedClass, JvmCodegenError> {
     unit.validate()?;
     let plan = unit
         .classes
@@ -31,6 +50,7 @@ pub(super) fn emit_class(
         })?;
 
     let all_metadata = unit.metadata(definitions)?;
+    super::identity::validate_accessor_inheritance_for_emission(&all_metadata)?;
     let metadata = all_metadata
         .iter()
         .find(|metadata| metadata.identity().symbol() == class_symbol)
@@ -76,6 +96,11 @@ pub(super) fn emit_class(
     builder
         .set_access_flags(metadata.identity().access_flags())
         .map_err(|error| class_file_error(class_symbol, None, error))?;
+    if let Some(tasty_link) = tasty_link {
+        builder
+            .tasty_link(tasty_link)
+            .map_err(|error| class_file_error(class_symbol, None, error))?;
+    }
     let verification_hierarchy = unit
         .class_hierarchy(definitions)?
         .internal_name_edges()

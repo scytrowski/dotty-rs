@@ -3035,3 +3035,106 @@ public final class FloatingPointCfgHarness {
         String::from_utf8_lossy(&execution.stdout).contains("Float/Double CFG verification passed")
     );
 }
+
+#[test]
+fn tasty_linked_class_is_accepted_by_javap_and_jdk_verifier() {
+    if !require_jdk_or_skip() {
+        return;
+    }
+
+    let temp = TempDir::new();
+    let class_dir = temp.path().join("example");
+    fs::create_dir_all(&class_dir).unwrap();
+    let id = dotty_classfile::classfile::TastyLinkId::from_bytes([
+        0x00, 0x9d, 0x71, 0x1b, 0xcc, 0x01, 0x99, 0xe8, 0x00, 0xce, 0x94, 0x0d, 0xd0, 0x72, 0x1c,
+        0x1b,
+    ]);
+    let mut linked = ClassFileBuilder::new(
+        "example/Linked",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    linked
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    linked.tasty_link(id).unwrap();
+    linked
+        .add_static_method("answer", "()I", |code| {
+            code.iconst(42)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    let class_path = class_dir.join("Linked.class");
+    fs::write(&class_path, linked.encode().unwrap()).unwrap();
+
+    let class_path_string = temp.path().to_string_lossy().into_owned();
+    let javap = run(
+        "javap",
+        &[
+            "-v",
+            "-p",
+            "-classpath",
+            &class_path_string,
+            "example.Linked",
+        ],
+    );
+    assert!(
+        javap.status.success(),
+        "javap rejected linked class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    assert!(javap_output.contains("TASTY"), "{javap_output}");
+    assert!(javap_output.contains("length = 0x10"), "{javap_output}");
+    assert!(
+        javap_output.contains("9D 71 1B CC 01 99 E8"),
+        "{javap_output}"
+    );
+
+    let harness_path = temp.path().join("LinkedVerifier.java");
+    fs::write(
+        &harness_path,
+        "public class LinkedVerifier { public static void main(String[] args) { if (example.Linked.answer() != 42) throw new AssertionError(); System.out.println(\"linked class verified\"); } }\n",
+    )
+    .unwrap();
+    let harness_path = harness_path.to_string_lossy().into_owned();
+    let javac = run(
+        "javac",
+        &[
+            "--release",
+            "21",
+            "-classpath",
+            &class_path_string,
+            "-d",
+            &class_path_string,
+            &harness_path,
+        ],
+    );
+    assert!(
+        javac.status.success(),
+        "javac rejected linked-class harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let execution = run(
+        "java",
+        &[
+            "-Xverify:all",
+            "-classpath",
+            &class_path_string,
+            "LinkedVerifier",
+        ],
+    );
+    assert!(
+        execution.status.success(),
+        "java -Xverify:all rejected linked class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&execution.stdout),
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert!(String::from_utf8_lossy(&execution.stdout).contains("linked class verified"));
+}

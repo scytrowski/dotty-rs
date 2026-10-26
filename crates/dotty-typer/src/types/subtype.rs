@@ -5,7 +5,9 @@ use std::fmt;
 
 use dotty_core::Namespace;
 use dotty_core::types::{ClassInfo, Type, TypeRefTarget};
-use dotty_core::{Constant, ScopeId, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TypeId};
+use dotty_core::{
+    Constant, ResolutionError, ScopeId, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TypeId,
+};
 
 use crate::types::{SymbolInfoState, TypeNormalizeError, TypeNormalizer};
 use crate::{SourceTyper, TyperError};
@@ -24,6 +26,9 @@ pub enum TypeRelationError {
     Normalization(TypeNormalizeError),
     /// A type shape lies outside the relation supported by this typer slice.
     UnsupportedType { found: TypeId, expected: TypeId },
+    /// Resolving the canonical Java String type failed while relating a string
+    /// constant to another type.
+    StringTypeResolution { error: ResolutionError },
     /// A class symbol referenced by a nominal type is not in the store.
     UnknownClassSymbol { symbol: SymbolId },
     /// A nominal type reference targets a symbol that is not class-like or a
@@ -82,13 +87,14 @@ impl fmt::Display for TypeRelationError {
 impl std::error::Error for TypeRelationError {}
 
 impl SourceTyper<'_> {
-    /// Tests the supported nominal subtype relation without completing symbols.
+    /// Tests the supported nominal subtype relation without completing source symbols.
     ///
-    /// The relation reads already completed class information. Call
+    /// Nominal parent checks read already completed class information. Call
     /// [`SourceTyper::complete_symbol`] explicitly first when source class
     /// completion is desired. Supported `Type::Constant` values compare by
     /// exact payload and conform to their modeled builtin type. String
-    /// constants support exact equality but have no modeled underlying type.
+    /// constants resolve the exact classfile-backed Java String type on demand;
+    /// this may materialize classpath symbols but does not complete source symbols.
     /// `Or` uses the bounded union rules documented on [`Self::conforms`].
     /// Intersection, methodic, refined, recursive, match, wildcard, error, and
     /// name-designed structural types return
@@ -211,7 +217,11 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             }
             (_, Type::Constant(_)) => return Ok(false),
             (Type::Constant(constant), _) => {
-                let Some(underlying) = self.typer.constant_underlying_type(constant) else {
+                let Some(underlying) = self
+                    .typer
+                    .constant_underlying_type(constant)
+                    .map_err(|error| TypeRelationError::StringTypeResolution { error })?
+                else {
                     return Err(TypeRelationError::UnsupportedType { found, expected });
                 };
                 return self.is_subtype(underlying, expected);
@@ -233,6 +243,9 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
 
         let found_view = self.class_view(found)?;
         let expected_view = self.class_view(expected)?;
+        if found_view.class != expected_view.class && self.is_final_class(expected_view.class) {
+            return Ok(false);
+        }
         self.reject_unmodeled_external_generic(&found_view)?;
         self.reject_unmodeled_external_generic(&expected_view)?;
         self.check_view_arity(&found_view, &expected_view, found, expected)?;
@@ -258,6 +271,15 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             });
         }
         Ok(())
+    }
+
+    fn is_final_class(&self, symbol: SymbolId) -> bool {
+        if !self.typer.store.symbols.contains(symbol) {
+            return false;
+        }
+        let declaration = self.typer.store.symbols.get(symbol);
+        declaration.kind == SymbolKind::ModuleClass
+            || declaration.flags.contains(dotty_core::SymbolFlags::FINAL)
     }
 
     fn is_builtin_class(&self, ty: TypeId) -> bool {
@@ -816,7 +838,8 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                 | Constant::Long(_)
                 | Constant::FloatBits(_)
                 | Constant::DoubleBits(_)
-                | Constant::String(_),
+                | Constant::String(_)
+                | Constant::StringUtf16(_),
             ) => {}
             Type::Or { left, right } => {
                 children.push((left, true));

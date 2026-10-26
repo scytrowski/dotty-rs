@@ -33,12 +33,22 @@ APIs and supported language subsets are still evolving.
   joins, nested construction, reference field initialization, and chained call
   receivers. These are bounded features, not arbitrary Scala/JVM code generation.
 
-The source-to-class-file pipeline is assembled in
+The source-to-class-file pipeline is exercised in
 [`tests/jvm_source_compilation.rs`](tests/jvm_source_compilation.rs), with JVM
-verification and execution in CI. This test adapter is not a public compiler
-session API. The JVM backend and semantic TASTy pickler are separate output
-paths; the project does not yet provide a general combined `.class`/`.tasty`
-compiler pipeline.
+verification and execution in CI. The opt-in root `dotty::jvm_tasty_artifacts`
+library module emits an owned, decoded-and-validated Counter `.class`/`.tasty`
+pair or a complete in-memory batch for the audited two-class Counter/Gauge
+source shape. Batch emission uses one frontend session, links each class to
+the exact UUID from its TASTy header, and returns nothing unless every artifact
+passes whole-batch validation. Test-only publication stages complete batches
+with handled-error cleanup. Strict pinned Scala 3.9.0 gates verify both
+single-class and two-class TASTy-dependent lookup; the two-class gate compares
+all artifact bytes across fresh sessions and executes the unchanged Rust
+classes under `java -Xverify:all`. These bounded library and fixture paths are
+not a compiler driver/CLI or general Scala ABI support. See the
+[binary interoperability record](docs/jvm-tasty-binary-interop.md) and
+[multi-class audit](docs/jvm-tasty-multiclass.md) for exact versions, hashes,
+controls, and reproduction commands.
 
 Compatibility targets Scala **3.9.0**, pinned to source revision
 `777528f19a58e794c9954a42f433373472ec57f8`. The semantic pickler emits TASTy
@@ -62,7 +72,7 @@ revisions and are not measurements of the current checkout.
 | `dotty-classfile` | JVM class-file codec and bytecode builder |
 | `dotty-classloader` | Classpath discovery and binary loading |
 | `dotty-jvm` | Typed-semantic plans to JVM class files |
-| `dotty` (root) | Selected public re-exports and cross-component integration tests |
+| `dotty` (root) | Selected public re-exports, the bounded paired-plan/artifact coordinator, and integration tests |
 
 The root facade does not re-export every workspace crate: use crates such as
 `dotty-lexer`, `dotty-namer`, `dotty-jvm`, and `dotty-tasty-pickler` directly when

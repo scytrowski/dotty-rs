@@ -53,10 +53,11 @@ impl SourceTyper<'_> {
                 self.store.symbols.contains(owner)
                     && self.store.symbols.get(owner).kind == SymbolKind::Class
             });
-            let eligible_flags = !field.flags.contains(SymbolFlags::LAZY)
-                && !field.flags.contains(SymbolFlags::INLINE)
+            let eligible_flags = !field.flags.contains(SymbolFlags::INLINE)
                 && !field.flags.contains(SymbolFlags::GIVEN)
-                && !field.flags.contains(SymbolFlags::IMPLICIT);
+                && !field.flags.contains(SymbolFlags::IMPLICIT)
+                && !(field.flags.contains(SymbolFlags::LAZY)
+                    && field.flags.contains(SymbolFlags::MUTABLE));
             if field.kind == SymbolKind::Field && eligible_owner {
                 match self.index.definition_of(symbol) {
                     Some(SourceDefinition::Canonical { source, tree })

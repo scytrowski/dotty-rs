@@ -365,7 +365,7 @@ fn lower_expression_inner(
         );
     }
     if let TreeKind::Apply(application) = &tree.kind {
-        if application.kind != ApplyKind::Regular || application.args.is_empty() {
+        if application.kind != ApplyKind::Regular {
             return Err(PickleError::Unsupported {
                 feature: UnsupportedFeature::BodyExpression,
                 symbol: Some(method),
@@ -377,6 +377,98 @@ fn lower_expression_inner(
                 tree: application.function,
             })?;
         budget.visit(application.function, depth)?;
+        if application.args.is_empty() {
+            let TreeKind::Select(selection) = &function.kind else {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::BodyExpression,
+                    symbol: Some(method),
+                });
+            };
+            let Some(Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(target),
+            }) = store.types.try_get(function.ty)
+            else {
+                return Err(PickleError::BodyType {
+                    tree: application.function,
+                    ty: function.ty,
+                });
+            };
+            let target = *target;
+            let target_owner = store
+                .symbols
+                .contains(target)
+                .then(|| store.symbols.get(target).owner)
+                .flatten()
+                .ok_or(PickleError::InvalidSymbol { symbol: target })?;
+            let typed_receiver =
+                ast.try_get(selection.qualifier)
+                    .ok_or(PickleError::InvalidTypedTree {
+                        tree: selection.qualifier,
+                    })?;
+            let Some(Type::TermRef {
+                target: TermRefTarget::Symbol(receiver_symbol),
+                ..
+            }) = store.types.try_get(typed_receiver.ty)
+            else {
+                return Err(PickleError::BodyType {
+                    tree: selection.qualifier,
+                    ty: typed_receiver.ty,
+                });
+            };
+            let SymbolInfo::Complete(owner_type) = store.symbols.get(*receiver_symbol).info else {
+                return Err(PickleError::IncompleteSymbol {
+                    symbol: *receiver_symbol,
+                    info: store.symbols.get(*receiver_symbol).info,
+                });
+            };
+            if !matches!(
+                store.types.try_get(owner_type),
+                Some(Type::TypeRef {
+                    target: dotty_core::TypeRefTarget::Symbol(class),
+                    ..
+                }) if *class == target_owner
+            ) {
+                return Err(PickleError::Reference {
+                    symbol: target,
+                    reason: crate::ReferenceError::Owner,
+                });
+            }
+            if target_owner
+                == store
+                    .symbols
+                    .get(method)
+                    .owner
+                    .ok_or(PickleError::InvalidSymbol { symbol: method })?
+                || *prefix
+                    != ast
+                        .try_get(selection.qualifier)
+                        .ok_or(PickleError::InvalidTypedTree {
+                            tree: selection.qualifier,
+                        })?
+                        .ty
+            {
+                return Err(PickleError::Reference {
+                    symbol: target,
+                    reason: crate::ReferenceError::Owner,
+                });
+            }
+            let receiver = lower_expression_inner(
+                store,
+                ast,
+                selection.qualifier,
+                method,
+                parameters,
+                ExpressionState { depth, budget },
+                context,
+            )?;
+            let selected =
+                context.same_source_method_select_in(target_owner, target, receiver, owner_type)?;
+            return context.wire_node(AstNode::Length {
+                tag: APPLY_TAG,
+                fields: vec![AstField::Tree(selected)],
+            });
+        }
         if let TreeKind::Select(selection) = &function.kind
             && let Some(Type::TermRef {
                 target: TermRefTarget::Symbol(target),

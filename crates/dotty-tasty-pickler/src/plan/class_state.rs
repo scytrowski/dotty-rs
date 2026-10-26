@@ -239,6 +239,120 @@ impl ClassStateValidator<'_, '_> {
         Ok(())
     }
 
+    fn validate_planned_classes(&mut self) -> Result<(), PickleError> {
+        let p = self.plan;
+        let current = self.symbol(p.class)?;
+        let package = current.owner.ok_or(PickleError::Owner {
+            symbol: p.class,
+            expected: None,
+            actual: None,
+        })?;
+        let mut seen = HashSet::new();
+        let mut found_current = false;
+        for &class in p.typed_bindings.planned_class_symbols() {
+            self.charge(1)?;
+            if !seen.insert(class) {
+                return Err(PickleError::DuplicateDeclaration { symbol: class });
+            }
+            let record = self.symbol(class)?;
+            let Some(SourceDefinition::Canonical { source, tree }) =
+                p.source_index.definition_of(class)
+            else {
+                return Err(PickleError::SourceDefinition { symbol: class });
+            };
+            let source_tree = self.source_tree(tree)?;
+            let TreeKind::TypeDef(definition) = &source_tree.kind else {
+                return Err(PickleError::SourceShape {
+                    tree,
+                    expected: SourceRole::Class,
+                });
+            };
+            if source != p.source.id
+                || p.source_index.symbol_at(source, tree) != Some(class)
+                || record.kind != SymbolKind::Class
+                || record.origin != SymbolOrigin::Source(p.source.id)
+                || record.owner != Some(package)
+                || record.name != *definition.name.as_name()
+                || record.visibility != Visibility::Public
+                || !record.flags.is_empty()
+                || !record.annotations.is_empty()
+                || definition.variance.is_some()
+                || definition.metadata.visibility.is_some()
+                || !definition.metadata.modifiers.is_empty()
+                || !definition.metadata.annotations.is_empty()
+            {
+                return Err(PickleError::SourceDefinition { symbol: class });
+            }
+            let TreeKind::Template(template) = &self.source_tree(definition.rhs)?.kind else {
+                return Err(PickleError::SourceShape {
+                    tree: definition.rhs,
+                    expected: SourceRole::Template,
+                });
+            };
+            if !template.parents.is_empty()
+                || template.self_val.is_some()
+                || !template.metadata.derives.is_empty()
+                || !template.metadata.uses.is_empty()
+            {
+                return Err(PickleError::SourceDefinition { symbol: class });
+            }
+            let TreeKind::DefDef(constructor) = &self.source_tree(template.constructor)?.kind
+            else {
+                return Err(PickleError::SourceShape {
+                    tree: template.constructor,
+                    expected: SourceRole::Constructor,
+                });
+            };
+            if !constructor.type_params.is_empty() {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::TypeParameters,
+                    symbol: Some(class),
+                });
+            }
+            let class_type = self.completed(class)?;
+            let Type::ClassInfo(info) = self
+                .plan
+                .store
+                .types
+                .try_get(class_type)
+                .ok_or(PickleError::InvalidType { ty: class_type })?
+            else {
+                return Err(PickleError::MalformedType {
+                    ty: class_type,
+                    role: TypeRole::ClassInfo,
+                });
+            };
+            if info.class != class
+                || info.prefix != p.definitions.no_prefix
+                || info.parents.as_slice() != [p.definitions.object_type]
+                || info.self_type.is_some()
+                || p.source_index.scope_of(class) != Some(info.declarations)
+                || !self.plan.store.scopes.contains(info.declarations)
+                || self.plan.store.scopes.get(info.declarations).owner != Some(class)
+                || self
+                    .plan
+                    .store
+                    .scopes
+                    .get(info.declarations)
+                    .entered_symbols()
+                    .any(|member| {
+                        self.plan.store.symbols.contains(member)
+                            && self.plan.store.symbols.get(member).kind == SymbolKind::TypeParameter
+                    })
+            {
+                return Err(PickleError::MalformedType {
+                    ty: class_type,
+                    role: TypeRole::ClassInfo,
+                });
+            }
+            found_current |= class == p.class;
+        }
+        if !p.typed_bindings.planned_class_symbols().is_empty() && !found_current {
+            return Err(PickleError::SourceDefinition { symbol: p.class });
+        }
+        Ok(())
+    }
+
     fn source_identity(
         &self,
         symbol: SymbolId,
@@ -333,6 +447,7 @@ impl ClassStateValidator<'_, '_> {
         {
             return Err(PickleError::InvalidSourceName);
         }
+        self.validate_planned_classes()?;
         let class = self.symbol(p.class)?;
         if class.kind != SymbolKind::Class || class.origin != SymbolOrigin::Source(p.source.id) {
             return Err(PickleError::Kind {
@@ -1001,6 +1116,13 @@ pub struct ValidatedClassStatePlan<'p, 'a> {
 impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
     pub fn plan(&self) -> &'p ClassStatePicklePlan<'a> {
         self.plan
+    }
+
+    /// Canonical relative path intended for this class's `.tasty` artifact.
+    ///
+    /// This is a path projection only; it does not encode or publish bytes.
+    pub fn intended_tasty_path(&self) -> Result<String, PickleError> {
+        crate::class_state_output::intended_class_tasty_path(self.plan, 256)
     }
 }
 

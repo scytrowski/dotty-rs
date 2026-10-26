@@ -47,3 +47,10 @@ for tasty in "$work_dir"/me/cytrowski/tastyfixtures/visibility/*.tasty; do
   cp "$tasty" "$fixture_dir/me/cytrowski/tastyfixtures/visibility/"
   echo "regenerated $(basename "$tasty")"
 done
+
+# The resolver needs this classfile's InnerClasses metadata to verify that the
+# nested type is actually declared by Holder, while Holder's .tasty supplies
+# its canonical module identity. Keep the runtime fixture otherwise classfile-free.
+cp "$work_dir/me/cytrowski/tastyfixtures/visibility/Holder\$InProtected.class" \
+  "$fixture_dir/me/cytrowski/tastyfixtures/visibility/"
+echo "regenerated Holder\$InProtected.class"
