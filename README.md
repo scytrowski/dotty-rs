@@ -31,24 +31,29 @@ APIs and supported language subsets are still evolving.
   field state, planned-class references, construction, calls, and bounded
   same-unit inheritance. Source integration tests also cover sibling reference
   joins, nested construction, reference field initialization, and chained call
-  receivers. These are bounded features, not arbitrary Scala/JVM code generation.
+  receivers, and the bounded same-source `Reader.read(counter) = counter.get()`
+  cross-class call. The latter has a strict Scala 3.9 consumer gate and runs the
+  unchanged Rust classes on JDK 21. These are bounded features, not arbitrary
+  Scala/JVM code generation.
 
 The source-to-class-file pipeline is exercised in
 [`tests/jvm_source_compilation.rs`](tests/jvm_source_compilation.rs), with JVM
 verification and execution in CI. The opt-in root `dotty::jvm_tasty_artifacts`
 library module emits an owned, decoded-and-validated Counter `.class`/`.tasty`
-pair or a complete in-memory batch for the audited two-class Counter/Gauge
-source shape. Batch emission uses one frontend session, links each class to
+pair or a complete in-memory batch for the audited independent Counter/Gauge
+and linked Counter/Reader source shapes. Batch emission uses one frontend
+session, links each class to
 the exact UUID from its TASTy header, and returns nothing unless every artifact
 passes whole-batch validation. Test-only publication stages complete batches
 with handled-error cleanup. Strict pinned Scala 3.9.0 gates verify both
-single-class and two-class TASTy-dependent lookup; the two-class gate compares
-all artifact bytes across fresh sessions and executes the unchanged Rust
-classes under `java -Xverify:all`. These bounded library and fixture paths are
-not a compiler driver/CLI or general Scala ABI support. See the
+single-class, independent two-class, and cross-class TASTy-dependent lookup;
+the gates compare artifact bytes across fresh sessions and execute unchanged
+Rust classes under `java -Xverify:all`. These bounded library and fixture
+paths are not a compiler driver/CLI or general Scala ABI support. See the
 [binary interoperability record](docs/jvm-tasty-binary-interop.md) and
-[multi-class audit](docs/jvm-tasty-multiclass.md) for exact versions, hashes,
-controls, and reproduction commands.
+[independent multi-class audit](docs/jvm-tasty-multiclass.md) and
+[cross-class acceptance record](docs/jvm-tasty-cross-class.md) for exact
+versions, hashes, controls, and reproduction commands.
 
 Compatibility targets Scala **3.9.0**, pinned to source revision
 `777528f19a58e794c9954a42f433373472ec57f8`. The semantic pickler emits TASTy
