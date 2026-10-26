@@ -25,6 +25,12 @@ use dotty_jvm::{
 use dotty_tasty::tasty::{TastyFile, TastyFileError};
 use dotty_tasty_pickler::{ClassMemberPicklePlan, PickleError, ValidatedClassStatePlan};
 
+mod factory_reference;
+pub use factory_reference::{
+    ValidatedSameBatchConstructorReference, ValidatedSameBatchReferenceReturn,
+    validate_same_batch_factory_result,
+};
+
 /// A typed, read-only failure while proving one JVM class and TASTy plan agree.
 #[derive(Debug)]
 pub enum JvmTastyContractError {
@@ -101,6 +107,16 @@ pub enum JvmTastyContractError {
         class_index: usize,
         class: SymbolId,
         error: Box<JvmTastyContractError>,
+    },
+    /// A same-batch factory proof failed at a specific source/typed boundary.
+    FactoryReferenceMismatch {
+        class: SymbolId,
+        method: Option<SymbolId>,
+        constructor: Option<SymbolId>,
+        source_tree: Option<TreeId<Untyped>>,
+        typed_tree: Option<TreeId<Typed>>,
+        stage: &'static str,
+        reason: &'static str,
     },
     /// A batch artifact entry set has a duplicate, missing, or unexpected path.
     BatchArtifactPaths { reason: &'static str, path: String },

@@ -25,7 +25,7 @@ use dotty_namer::{
     SourceSemanticIndex, name_compilation_unit_with_diagnostics,
 };
 use dotty_parser::{ParseDiagnostic, parse_compilation_unit};
-use dotty_typer::{SourceTyper, TyperError};
+use dotty_typer::{SourceTypedIndex, SourceTyper, TyperError};
 
 const FIXTURE_DIRECTORY: &str = "tests/fixtures/jvm";
 const LINKAGE_COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
@@ -43,6 +43,13 @@ type SourceSemanticObserver<'observer> = dyn for<'a> FnMut(
         &mut JvmCompilationUnit<'a>,
         &Definitions,
     ) + 'observer;
+type FactoryProofObserver<'observer> = dyn for<'a> FnMut(
+        &AstArena<Untyped>,
+        &SourceSemanticIndex,
+        &SourceTypedIndex,
+        &mut JvmCompilationUnit<'a>,
+        &Definitions,
+    ) + 'observer;
 type TyperFailureObserver<'observer> =
     dyn for<'a> FnMut(&AstArena<Untyped>, &SourceTyper<'a>, &TyperError) + 'observer;
 type SourceFailureExpectation = (&'static str, &'static str, fn(&PipelineFailure) -> bool);
@@ -52,6 +59,7 @@ struct SourceBatchObservers<'observer> {
     batch: Option<&'observer mut SourceBatchObserver<'observer>>,
     typer_failure: Option<&'observer mut TyperFailureObserver<'observer>>,
     source: Option<&'observer mut SourceSemanticObserver<'observer>>,
+    factory_proof: Option<&'observer mut FactoryProofObserver<'observer>>,
 }
 
 #[derive(Debug)]
@@ -286,6 +294,27 @@ fn compile_source_batch_with_source_observer<'observer>(
     )
 }
 
+fn compile_source_batch_with_factory_proof_observer<'observer>(
+    source_text: &str,
+    source_file_name: &str,
+    output_directory: &Path,
+    source_id: SourceId,
+    cardinality: SourceUnitCardinality,
+    observe: &'observer mut FactoryProofObserver<'observer>,
+) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
+    compile_source_batch_with_typer_failure_observer(
+        source_text,
+        source_file_name,
+        output_directory,
+        source_id,
+        cardinality,
+        SourceBatchObservers {
+            factory_proof: Some(observe),
+            ..SourceBatchObservers::default()
+        },
+    )
+}
+
 fn compile_source_batch_with_typer_failure_observer(
     source_text: &str,
     source_file_name: &str,
@@ -298,6 +327,7 @@ fn compile_source_batch_with_typer_failure_observer(
         batch: mut observe,
         typer_failure: mut observe_typer_failure,
         source: mut observe_source,
+        factory_proof: mut observe_factory_proof,
     } = observers;
     let source = SourceText::new(source_text)
         .map_err(|error| PipelineFailure::SourceText(error.to_string()))?;
@@ -692,6 +722,15 @@ fn compile_source_batch_with_typer_failure_observer(
     };
     if let Some(observe) = observe_source.as_mut() {
         observe(&parsed.ast, &index, &mut unit, &definitions);
+    }
+    if let Some(observe) = observe_factory_proof.as_mut() {
+        observe(
+            &parsed.ast,
+            &index,
+            typer.source_typed_index(),
+            &mut unit,
+            &definitions,
+        );
     }
     if let Some(observe) = observe.as_mut() {
         observe(&mut unit, &definitions);
@@ -13461,6 +13500,208 @@ fn factory_return_and_identity_control_reach_the_real_jvm_source_pipeline() {
             verify_reference_factory_with_jdk(output.path());
         }
     }
+}
+
+#[test]
+fn same_source_factory_proof_preserves_create_constructor_and_identity_roots() {
+    let source = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Counter = new Counter(seed)\n";
+    let output = TestOutputDirectory::new("same-source-factory-reference-proof");
+    let source_id = SourceId::from_index(1691);
+    let mut observed = false;
+    let mut observe_source = |ast: &AstArena<Untyped>,
+                              index: &SourceSemanticIndex,
+                              typed_index: &SourceTypedIndex,
+                              unit: &mut JvmCompilationUnit<'_>,
+                              definitions: &Definitions| {
+        observed = true;
+        let counter = audit_class_named(unit, "Counter");
+        let factory = audit_class_named(unit, "CounterFactory");
+        let proof = dotty_jvm_tasty_contract::validate_same_batch_factory_result(
+            unit,
+            definitions,
+            source_id,
+            ast,
+            index,
+            typed_index,
+            counter,
+            factory,
+        )
+        .expect("source and typed identities are validated before output");
+        assert_eq!(proof.source_id(), source_id);
+        assert_eq!(proof.counter_class(), counter);
+        assert_eq!(proof.factory_class(), factory);
+        assert_eq!(
+            unit.store.symbols.get(proof.constructor()).owner,
+            Some(counter)
+        );
+        assert_eq!(
+            unit.store.symbols.get(proof.create_method()).owner,
+            Some(factory)
+        );
+        assert_eq!(
+            unit.store.symbols.get(proof.seed_parameter()).owner,
+            Some(proof.create_method())
+        );
+        assert_eq!(proof.method_descriptor(), "(I)Lexample/Counter;");
+        assert_eq!(proof.constructor_descriptor(), "(I)V");
+        assert_eq!(audit_type_symbol(unit, proof.result_type()), Some(counter));
+        let (source_new, source_select, source_apply) = proof.source_roots();
+        let (typed_new, typed_select, typed_apply) = proof.typed_roots();
+        assert_eq!(typed_index.get(source_id, source_apply), Some(typed_apply));
+        assert!(matches!(
+            &unit.typed_ast.get(typed_select).kind,
+            TreeKind::Select(_)
+        ));
+        assert_eq!(
+            audit_type_symbol(unit, unit.typed_ast.get(typed_apply).ty),
+            Some(counter)
+        );
+        assert_eq!(
+            audit_type_symbol(unit, unit.typed_ast.get(typed_new).ty),
+            Some(counter)
+        );
+        let (source_argument, typed_argument) = proof.argument_roots();
+        assert!(matches!(&ast.get(source_new).kind, TreeKind::New(_)));
+        assert!(matches!(&ast.get(source_select).kind, TreeKind::Select(_)));
+        assert!(matches!(&ast.get(source_argument).kind, TreeKind::Ident(_)));
+        assert_eq!(
+            term_type_target(unit, unit.typed_ast.get(typed_argument).ty),
+            Some(proof.seed_parameter())
+        );
+
+        let identity = proof.identity();
+        assert_eq!(
+            unit.store.symbols.get(identity.method()).owner,
+            Some(factory)
+        );
+        assert_eq!(
+            unit.store.symbols.get(identity.parameter()).owner,
+            Some(identity.method())
+        );
+        assert_eq!(
+            identity.descriptor(),
+            "(Lexample/Counter;)Lexample/Counter;"
+        );
+        assert_eq!(
+            audit_type_symbol(unit, identity.result_type()),
+            Some(counter)
+        );
+        assert!(matches!(
+            &unit.typed_ast.get(identity.typed_rhs()).kind,
+            TreeKind::Ident(_)
+        ));
+
+        let mut stale_bindings = typed_index.clone();
+        stale_bindings.remove(source_id, source_apply);
+        assert!(matches!(
+            dotty_jvm_tasty_contract::validate_same_batch_factory_result(
+                unit,
+                definitions,
+                source_id,
+                ast,
+                index,
+                &stale_bindings,
+                counter,
+                factory,
+            ),
+            Err(
+                dotty_jvm_tasty_contract::JvmTastyContractError::FactoryReferenceMismatch {
+                    stage: "source-to-typed binding",
+                    ..
+                }
+            )
+        ));
+        assert!(matches!(
+            dotty_jvm_tasty_contract::validate_same_batch_factory_result(
+                unit,
+                definitions,
+                source_id,
+                ast,
+                index,
+                typed_index,
+                factory,
+                factory,
+            ),
+            Err(dotty_jvm_tasty_contract::JvmTastyContractError::FactoryReferenceMismatch { .. })
+        ));
+        drop(proof);
+        let counter_plan_index = unit
+            .classes
+            .iter()
+            .position(|class| class.class == counter)
+            .expect("Counter class plan exists");
+        let removed_counter = unit.classes.remove(counter_plan_index);
+        assert!(matches!(
+            dotty_jvm_tasty_contract::validate_same_batch_factory_result(
+                unit,
+                definitions,
+                source_id,
+                ast,
+                index,
+                typed_index,
+                counter,
+                factory,
+            ),
+            Err(dotty_jvm_tasty_contract::JvmTastyContractError::FactoryReferenceMismatch { .. })
+        ));
+        unit.classes.insert(counter_plan_index, removed_counter);
+    };
+    let artifacts = compile_source_batch_with_factory_proof_observer(
+        source,
+        "CounterFactory.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe_source,
+    )
+    .expect("canonical factory source compiles through the real JVM pipeline");
+    assert!(observed);
+    assert_eq!(artifacts.len(), 2);
+}
+
+#[test]
+fn same_source_factory_proof_rejects_private_primary_constructor_before_emission() {
+    let source = "package example\nclass Counter private (start: Int)\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Counter = new Counter(seed)\n";
+    let output = TestOutputDirectory::new("same-source-private-factory-constructor");
+    let source_id = SourceId::from_index(1692);
+    let mut rejection = None;
+    let mut observe_source = |ast: &AstArena<Untyped>,
+                              index: &SourceSemanticIndex,
+                              typed_index: &SourceTypedIndex,
+                              unit: &mut JvmCompilationUnit<'_>,
+                              definitions: &Definitions| {
+        let counter = audit_class_named(unit, "Counter");
+        let factory = audit_class_named(unit, "CounterFactory");
+        rejection = Some(
+            dotty_jvm_tasty_contract::validate_same_batch_factory_result(
+                unit,
+                definitions,
+                source_id,
+                ast,
+                index,
+                typed_index,
+                counter,
+                factory,
+            )
+            .map(|_| "valid".to_owned())
+            .unwrap_or_else(|error| format!("{error:?}")),
+        );
+    };
+    let result = compile_source_batch_with_factory_proof_observer(
+        source,
+        "PrivateCounterFactory.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe_source,
+    );
+    assert!(
+        rejection
+            .as_deref()
+            .is_some_and(|message| message.contains("constructor identity/access")),
+        "the source proof rejects private constructor access: {rejection:?}; pipeline={result:?}"
+    );
+    assert!(matches!(result, Err(PipelineFailure::Codegen(_))));
 }
 
 #[test]
