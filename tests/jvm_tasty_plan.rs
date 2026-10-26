@@ -2063,11 +2063,64 @@ fn private_immutable_same_batch_reference_field_has_read_only_type_proof() {
             };
             assert_eq!(fragment.names.render(package).unwrap(), "example");
 
-            assert!(matches!(
-                owner.tasty_plan.pickle(),
-                Err(PickleError::UnsupportedTypeReference { ty })
-                    if ty == proof.declared_type()
-            ));
+            let output = owner
+                .tasty_plan
+                .pickle()
+                .expect("the validated direct constructor initializer is serializable");
+            let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+            let package = file
+                .asts()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .decode_package()
+                .unwrap();
+            assert_eq!(package.stats.len(), 1, "Counter stays in its own sidecar");
+            let DefinitionBody::TypeDef {
+                type_or_template, ..
+            } = package
+                .stats
+                .get(0)
+                .unwrap()
+                .decode_definition_body()
+                .unwrap()
+            else {
+                panic!("the owner sidecar contains its own class declaration")
+            };
+            let RawTree::LengthNode(template_node) = type_or_template else {
+                panic!("the owner declaration contains a template node")
+            };
+            let template = template_node.decode_template_structure().unwrap();
+            let field = template
+                .stats
+                .iter()
+                .find_map(|tree| match tree {
+                    RawTree::LengthNode(node) if node.tag == VALDEF_TAG => {
+                        Some(node.decode_definition_body().unwrap())
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let DefinitionBody::ValDef { name, rhs, .. } = field else {
+                panic!("the private immutable field is emitted")
+            };
+            assert_eq!(file.names().render(name).unwrap(), "inner");
+            let rhs = rhs.expect("the field keeps its real initializer");
+            let RawTree::LengthNode(rhs) = rhs else {
+                panic!("the field initializer is a constructor application")
+            };
+            let application = rhs.decode_apply().unwrap();
+            assert_eq!(application.arguments.len(), 1);
+            let RawTree::LengthNode(selection) = application.function else {
+                panic!("the constructor application has a selected constructor")
+            };
+            let selection = selection.decode_select_in().unwrap();
+            let RawTree::Ast { tag, .. } = selection.qualifier else {
+                panic!("the selected constructor is qualified by NEW")
+            };
+            assert_eq!(tag, NEW_TAG);
+            assert_eq!(selection.tag, SELECTIN_TAG);
+            assert!(matches!(application.arguments[0], RawTree::Leaf(ref term) if term.tag == TERMREFDIRECT_TAG));
         },
     )
     .unwrap();
