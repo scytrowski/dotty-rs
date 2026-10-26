@@ -280,17 +280,23 @@ def verify_high_fanout_profiles(lines: list[str], expected_count: int) -> list[V
         ):
             if actual[metric] != int(expected[metric]):
                 raise ValueError(f"{metric} differs from pinned List oracle: {method}")
+        class_names = _parse_names(actual["classes"])
+        identity_shells = _parse_names(actual["identity_shells"])
+        completed = _parse_names(actual["completed_classes"])
+        if not identity_shells <= class_names:
+            raise ValueError(
+                f"identity shells are absent from request class identities: "
+                f"{sorted(identity_shells - class_names)}"
+            )
         actual_classes = {
-            (name, str(int(name in _parse_names(actual["identity_shells"]))),
-             str(int(name in _parse_names(actual["completed_classes"]))))
-            for name in _parse_names(actual["classes"])
+            (name, str(int(name in identity_shells)), str(int(name in completed)))
+            for name in class_names
         }
         if actual_classes != expected_classes[method]:
             raise ValueError(f"visited/completed identities differ from pinned List oracle: {method}")
         actual_edges = _parse_edges(actual["dependency_edges"])
         if actual_edges != expected_edges[method]:
             raise ValueError(f"dependency graph differs from pinned List oracle: {method}")
-        completed = _parse_names(actual["completed_classes"])
         if len(completed) != actual["full_completions"]:
             raise ValueError(f"raw completed count differs from completed class set: {method}")
         proven, unexpected = verify_hierarchy_graph(

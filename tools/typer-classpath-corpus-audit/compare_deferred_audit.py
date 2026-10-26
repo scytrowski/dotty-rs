@@ -115,7 +115,11 @@ def gate(baseline, current, baseline_target_keys=None, baseline_class_successes=
             for line in section_lines(current, 'dependency_load_profile')
             if line.startswith('    high_fanout_profile=')
         ]
-        if high_count == 0 and fanout > LEGACY_COMPLETION_LIMIT:
+        if len(high_profiles) != high_count:
+            errors.append(
+                f'high-fanout evidence row count {len(high_profiles)} '
+                f'differs from aggregate count {high_count}')
+        elif high_count == 0 and fanout > LEGACY_COMPLETION_LIMIT:
             errors.append('high completion fanout profile evidence is missing')
         elif high_count > 0:
             verified_fanout = verify_high_fanout_profiles(high_profiles, high_count)

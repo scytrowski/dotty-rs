@@ -60,6 +60,15 @@ class FanoutPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "all pinned requests"):
             verify_high_fanout_profiles(lines, 5)
 
+    def test_rejects_identity_shells_missing_from_class_identities(self):
+        lines = pinned_report_profiles()
+        prefix, shells, rest = lines[0].partition("::identity_shells=[")
+        identities, suffix = rest.split("]::completed_classes=[", 1)
+        forged = ",".join(f"Forged{index}" for index in range(300))
+        lines[0] = f"{prefix}::identity_shells=[{identities},{forged}]::completed_classes=[{suffix}"
+        with self.assertRaisesRegex(ValueError, "identity shells are absent"):
+            verify_high_fanout_profiles(lines, 5)
+
     def test_accepts_a_wide_oracle_verified_acyclic_hierarchy_once(self):
         nodes = {f"Wide{index}" for index in range(40)}
         edges = {(f"Wide{index}", f"Wide{index + 1}") for index in range(39)}

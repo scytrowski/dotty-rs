@@ -17,8 +17,9 @@ from compare_deferred_audit import (
 from test_fanout_policy import pinned_report_profiles
 
 
-def report(depth=3, fanout=8, name='B', high_profiles=None):
+def report(depth=3, fanout=8, name='B', high_profiles=None, high_count=None):
     high_profiles = high_profiles or []
+    high_count = len(high_profiles) if high_count is None else high_count
     return f'''resolver_metrics:
   external_class_symbol_successes=358
 audit_v1_comparison:
@@ -26,7 +27,7 @@ audit_v1_comparison:
 dependency_load_profile:
   p95_dependency_depth={depth}
   max_distinct_fully_completed_classes_per_request={fanout}
-  completed_fanout_over_16_requests={len(high_profiles)}
+  completed_fanout_over_16_requests={high_count}
   high_completed_fanout_profiles:
 {''.join('    high_fanout_profile=' + line + chr(10) for line in high_profiles)}
 resolver_581_comparison:
@@ -45,6 +46,9 @@ class DeferredAuditComparisonTests(unittest.TestCase):
             gate(report(), report(depth=7))
         with self.assertRaisesRegex(ValueError, 'profile evidence is missing'):
             gate(report(), report(fanout=17))
+        for rows in (pinned_report_profiles(), ["unknown high-fanout profile"]):
+            with self.assertRaisesRegex(ValueError, 'row count .* differs from aggregate count 0'):
+                gate(report(), report(fanout=8, high_profiles=rows, high_count=0))
 
     def test_gate_accepts_only_oracle_verified_high_fanout_exceptions(self):
         self.assertEqual(

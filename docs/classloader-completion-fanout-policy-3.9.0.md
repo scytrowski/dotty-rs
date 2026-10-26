@@ -141,7 +141,7 @@ Validation completed:
 - Three serial focused Scala 3.9.0 profiles passed `check_fanout_policy.py`;
   each reported five pinned roots, maximum raw completions 29, zero unexpected
   completions, and identical evidence across runs.
-- Python audit suite: 101 tests passed.
+- Python audit suite: 102 tests passed.
 - `cargo test -p dotty-classloader --lib --locked`: 442 passed, 4 ignored.
 - Frontend dependency-boundary check, `cargo fmt --all -- --check`, and
   `git diff --check` passed.
@@ -152,6 +152,10 @@ Validation completed:
 ## Reproduction
 
 ```sh
+git worktree add --detach target/typer-list-fanout-source \
+  5a0503dc0ed4d0fdf7dd2d19add27dfdd3361acb
+(
+cd target/typer-list-fanout-source
 SCALA39_ROOT=/path/to/pinned/scala-3.9.0 \
 JAVA_HOME=/path/to/temurin-21.0.8 \
 SCALA39_JDK_RELEASE=21 \
@@ -160,9 +164,14 @@ TMPDIR="$PWD/target/tmp" CARGO_TARGET_DIR="$PWD/target" \
 CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
 python3 tools/typer-classpath-corpus-audit/sequential_profile.py \
   --manifest docs/typer-list-fanout-manifest-3.9.0.tsv \
-  --runs 3 --mode full --output-dir target/typer-list-fanout-current
+  --runs 3 --mode full --output-dir ../typer-list-fanout-current
+)
 python3 tools/typer-classpath-corpus-audit/check_fanout_policy.py \
   target/typer-list-fanout-current
+git worktree remove --force target/typer-list-fanout-source
 ```
 
-This reproducer does not run the 1,236-file source corpus.
+The detached worktree ensures the profile's recorded dotty-rs source SHA is the
+frozen `5a0503d` revision required by the checker; the checker itself runs from
+the current checkout so it can read the refreshed oracle. This reproducer does
+not run the 1,236-file source corpus.
