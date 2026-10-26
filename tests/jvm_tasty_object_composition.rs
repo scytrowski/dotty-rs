@@ -14,7 +14,7 @@ use dotty_parser::parse_compilation_unit;
 use dotty_tasty::ast::{
     APPLY_TAG, DEFDEF_TAG, IDENTTPT_TAG, LOCAL_TAG, MUTABLE_TAG, NEW_TAG, PARAM_TAG, PRIVATE_TAG,
     QUALTHIS_TAG, SELECT_TAG, SELECTIN_TAG, SHAREDTYPE_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG,
-    TYPEDEF_TAG, TYPEREF_TAG, VALDEF_TAG,
+    THIS_TAG, TYPEDEF_TAG, TYPEREF_TAG, TYPEREFSYMBOL_TAG, VALDEF_TAG,
 };
 use dotty_tasty::file::TastyFile;
 use dotty_tasty::tasty::{DefinitionBody, DefinitionTail, RenderedParamSig, RenderedSignedName};
@@ -391,18 +391,27 @@ fn scala_39_oracle_pins_private_reference_val_tasty_and_jvm_abi() {
         }]
     );
     assert_eq!(apply.arguments.len(), 1);
-    let seed_references = apply.arguments[0].ast_refs();
-    let [seed_reference] = seed_references.as_slice() else {
-        panic!("constructor argument has one canonical shared-type reference");
+    let seed_reference = apply.arguments[0].decode_reference().unwrap();
+    assert_eq!(seed_reference.tag, TERMREFSYMBOL_TAG);
+    assert_eq!(seed_reference.reference, 9);
+    let RawTree::Ast {
+        tag: THIS_TAG,
+        child: seed_prefix,
+        ..
+    } = seed_reference.qualifier
+    else {
+        panic!("seed term reference is qualified by THIS");
     };
-    assert_eq!(apply.arguments[0].nodes()[0].tag, TERMREFSYMBOL_TAG);
-    assert!(
-        apply.arguments[0]
-            .nodes()
-            .iter()
-            .any(|node| node.tag == SHAREDTYPE_TAG)
+    let seed_prefix = seed_prefix.decode_reference().unwrap();
+    assert_eq!(seed_prefix.tag, TYPEREFSYMBOL_TAG);
+    assert_eq!(seed_prefix.reference, 4);
+    assert_eq!(
+        seed_prefix.qualifier.ast_refs(),
+        [dotty_tasty::term::AstRef {
+            kind: AstRefKind::SharedType,
+            address: 51,
+        }]
     );
-    assert_eq!(seed_reference.kind, AstRefKind::SharedType);
     let constructor_address = index
         .iter_nodes_with_tag(DEFDEF_TAG)
         .find_map(|node| {
@@ -424,6 +433,16 @@ fn scala_39_oracle_pins_private_reference_val_tasty_and_jvm_abi() {
             .unwrap(),
         "seed"
     );
+    let seed_declaration_addresses = index
+        .iter_nodes_with_tag(PARAM_TAG)
+        .filter_map(|node| {
+            let node = index.get(node.offset as u32)?;
+            let parameter = node.decode_parameter().ok()?;
+            (owner_tasty.names().render(parameter.name()).ok()? == "seed")
+                .then_some(node.offset as u32)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(seed_declaration_addresses, [9, 33]);
     assert!(index.get(field_address).is_some());
     let class_names = index
         .iter_nodes_with_tag(TYPEDEF_TAG)
@@ -789,4 +808,139 @@ fn one_real_source_session_preserves_object_composition_identity_and_reports_pic
     assert!(
         matches!(pickler_error, PickleError::UnsupportedTypeReference { ty } if ty == inner_type)
     );
+}
+
+#[test]
+fn paired_producer_reports_first_failure_for_required_negative_shapes() {
+    let variants = [
+        (
+            "mutable_field",
+            SOURCE.replace(
+                "private val inner: Counter = new Counter(seed)",
+                "private var inner: Counter = new Counter(seed)",
+            ),
+        ),
+        (
+            "uninitialized_field",
+            SOURCE.replace(
+                "private val inner: Counter = new Counter(seed)",
+                "private val inner: Counter",
+            ),
+        ),
+        (
+            "private_this_field",
+            SOURCE.replace(
+                "private val inner: Counter = new Counter(seed)",
+                "private[this] val inner: Counter = new Counter(seed)",
+            ),
+        ),
+        (
+            "public_field",
+            SOURCE.replace(
+                "private val inner: Counter = new Counter(seed)",
+                "val inner: Counter = new Counter(seed)",
+            ),
+        ),
+        (
+            "protected_field",
+            SOURCE.replace(
+                "private val inner: Counter = new Counter(seed)",
+                "protected val inner: Counter = new Counter(seed)",
+            ),
+        ),
+        (
+            "local_shadow",
+            SOURCE.replace(
+                "def read(): Int = inner.get()",
+                "def read(): Int = { val inner = new Counter(0); inner.get() }",
+            ),
+        ),
+        (
+            "unrelated_receiver",
+            SOURCE.replace(
+                "def read(): Int = inner.get()",
+                "def read(): Int = new Counter(0).get()",
+            ),
+        ),
+        (
+            "duplicate_field",
+            SOURCE.replace(
+                "  def read(): Int = inner.get()",
+                "  private val inner: Counter = new Counter(seed)\n  def read(): Int = inner.get()",
+            ),
+        ),
+        (
+            "wrong_reference_type",
+            SOURCE.replace(
+                "private val inner: Counter = new Counter(seed)",
+                "private val inner: String = new Counter(seed)",
+            ),
+        ),
+        (
+            "wrong_constructor_argument",
+            SOURCE.replace("new Counter(seed)", "new Counter(true)"),
+        ),
+        (
+            "nested_new_initializer",
+            SOURCE.replace("new Counter(seed)", "new Counter(new Counter(seed).get())"),
+        ),
+        (
+            "factory_valued_initializer",
+            SOURCE.replace("new Counter(seed)", "Counter.make(seed)"),
+        ),
+        (
+            "branch_valued_initializer",
+            SOURCE.replace(
+                "new Counter(seed)",
+                "if seed == 0 then new Counter(seed) else new Counter(seed)",
+            ),
+        ),
+        (
+            "missing_counter",
+            format!(
+                "package example\nclass Other {{}}\nclass CounterOwner{}",
+                SOURCE.split_once("class CounterOwner").unwrap().1
+            ),
+        ),
+        (
+            "foreign_counter",
+            SOURCE.replace(
+                "private val inner: Counter = new Counter(seed)",
+                "private val inner: foreign.Counter = new foreign.Counter(seed)",
+            ),
+        ),
+    ];
+    for (name, source) in variants {
+        let error = with_paired_jvm_tasty_batch_plan(
+            &source,
+            "CounterOwner.scala",
+            SourceId::from_index(1716),
+            |_| (),
+        )
+        .unwrap_err();
+        if name == "mutable_field" {
+            assert!(matches!(
+                &error,
+                PairedPlanError::BatchClass {
+                    class_index: 1,
+                    declaration_index: 1,
+                    phase: "method body typing",
+                    reason,
+                } if reason.starts_with("UnstableSelectionPrefix")
+            ));
+        } else {
+            assert!(
+                matches!(
+                &error,
+                    PairedPlanError::BatchClass {
+                        class_index: 1,
+                        declaration_index: 0,
+                        phase: "member planning",
+                        reason,
+                    } if reason == "only unqualified private mutable fields are supported"
+                ),
+                "{name} must report the first current batch boundary: {error:?}"
+            );
+        }
+    }
 }

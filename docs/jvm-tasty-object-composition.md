@@ -4,12 +4,13 @@ This is the characterization-only result for [issue #1715](https://github.com/sc
 
 ## Pinned source and reproduction
 
-The Scala source checkout was exactly `777528f19a58e794c9954a42f433373472ec57f8` (`3.9.0-bin-SNAPSHOT-git-777528f`). The checked-in oracle artifacts were independently reproduced from an empty output directory with Eclipse Temurin `21.0.8+9` and `-release 21`. The source compiler JAR used for this run has SHA-256 `b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f`; the four staged runtime/format JAR hashes are recorded below. The workspace-pinned release artifact hashes remain in [`provenance.json`](../tests/fixtures/tasty_pickler/provenance.json).
+The Scala source checkout was exactly `777528f19a58e794c9954a42f433373472ec57f8` (`3.9.0-bin-SNAPSHOT-git-777528f`). The checked-in oracle artifacts were independently reproduced from an empty output directory with Eclipse Temurin `21.0.8+9` and `-release 21`. The mandatory source SHA-256 is `be5898658b6077d493bb8204b624a8702bcc9b6df6ea2642a05629f03bbc1466`; the independent client SHA-256 is `7252a7574c6f35edb1f363a4819ff868ddafe41b6ef186a711646eb19482fe43`. The source compiler JAR used for this run has SHA-256 `b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f`; the four staged runtime/format JAR hashes are recorded below. The workspace-pinned release artifact hashes remain in [`provenance.json`](../tests/fixtures/tasty_pickler/provenance.json).
 
 ```sh
 JAVA_HOME=/home/vdrake6/.jdks/jdk-21
 SCALA_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source
 export JAVA_HOME PATH="$JAVA_HOME/bin:$PATH"
+SCALA_LIBS="$SCALA_ROOT/dist/target/universal/stage/maven2/org/scala-lang/scala3-library_3/3.9.0-bin-SNAPSHOT/scala3-library_3-3.9.0-bin-SNAPSHOT.jar:$SCALA_ROOT/dist/target/universal/stage/maven2/org/scala-lang/scala-library/3.9.0-bin-SNAPSHOT/scala-library-3.9.0-bin-SNAPSHOT.jar"
 SCALA_CP="$(find "$SCALA_ROOT/dist/target/universal/stage/maven2" -type f -name '*.jar' -print | paste -sd:):$SCALA_ROOT/library/target/scala-library-bootstrapped/scala-library-3.9.0-bin-SNAPSHOT.jar:$SCALA_ROOT/library/target/scala3-library-bootstrapped/scala-3.9.0-bin-SNAPSHOT-nonbootstrapped/scala3-library_3-3.9.0-bin-SNAPSHOT.jar:$SCALA_ROOT/tasty/target/tasty-core-bootstrapped/scala-3.9.0-bin-SNAPSHOT-nonbootstrapped/tasty-core_3-3.9.0-bin-SNAPSHOT.jar"
 OUT="$PWD/target/issue-1715-oracle"
 mkdir -p "$OUT/classes" "$OUT/client"
@@ -20,12 +21,45 @@ java -cp "$SCALA_CP" dotty.tools.MainGenericCompiler \
   -classpath "$SCALA_CP:$OUT/classes" -release 21 -d "$OUT/client" \
   tests/fixtures/jvm_tasty_object_composition/CounterOwnerClient.scala
 javap -classpath "$OUT/classes" -v -p -c example.CounterOwner
+java -cp "$SCALA_CP" dotty.tools.MainGenericCompiler \
+  -print-tasty "$OUT/classes/example/CounterOwner.tasty"
 java -Xverify:all -ea \
   -classpath "$SCALA_ROOT/library/target/scala-library-bootstrapped/scala-library-3.9.0-bin-SNAPSHOT.jar:$SCALA_ROOT/library/target/scala3-library-bootstrapped/scala-3.9.0-bin-SNAPSHOT-nonbootstrapped/scala3-library_3-3.9.0-bin-SNAPSHOT.jar:$OUT/classes:$OUT/client" \
   client.CounterOwnerClient
 ```
 
 The client constructs owners with values 7 and 42 and checks each `read()`. It exits successfully on Java 21 with full bytecode verification. The source is unchanged from the issue's mandatory fixture in [`CounterOwner.scala`](../tests/fixtures/jvm_tasty_object_composition/CounterOwner.scala).
+
+Separate semantic classpath controls against this exact oracle pair produced:
+
+| Classpath root | Scala compile | JVM runtime |
+| --- | --- | --- |
+| `Counter.tasty`, `CounterOwner.tasty`, no classfiles | `CounterOwnerClient.scala` typechecks successfully through the two sidecars. | Fails on first use with `NoClassDefFoundError: example/CounterOwner`. |
+| `Counter.class`, `CounterOwner.class`, no sidecars | Fails at Scala class loading: `This .tasty file is missing.` | Not run because compilation fails. |
+
+The exact probes use the staged Scala 3.9 source compiler and the client already in the fixture. `$SCALA_LIBS` is the Scala 3.9 and Scala 2.13 library JAR pair from the compiler checkout; `$SCALA_CP` is the compiler/runtime classpath in the reproduction above.
+
+```sh
+ROOT="$PWD/target/issue-1715-classpath-controls"
+ORACLE="$PWD/target/issue-1715-oracle/classes/example"
+mkdir -p "$ROOT/tasty-only/example" "$ROOT/classfile-only/example" \
+  "$ROOT/tasty-client" "$ROOT/class-client"
+cp "$ORACLE/Counter.tasty" "$ORACLE/CounterOwner.tasty" "$ROOT/tasty-only/example/"
+cp "$ORACLE/Counter.class" "$ORACLE/CounterOwner.class" "$ROOT/classfile-only/example/"
+
+java -cp "$SCALA_CP" dotty.tools.MainGenericCompiler \
+  -classpath "$ROOT/tasty-only:$SCALA_LIBS" -release 21 -d "$ROOT/tasty-client" \
+  tests/fixtures/jvm_tasty_object_composition/CounterOwnerClient.scala
+java -Xverify:all -ea \
+  -classpath "$ROOT/tasty-only:$ROOT/tasty-client:$SCALA_LIBS" \
+  client.CounterOwnerClient
+
+java -cp "$SCALA_CP" dotty.tools.MainGenericCompiler \
+  -classpath "$ROOT/classfile-only:$SCALA_LIBS" -release 21 -d "$ROOT/class-client" \
+  tests/fixtures/jvm_tasty_object_composition/CounterOwnerClient.scala
+```
+
+The second compiler invocation is expected to exit nonzero with the missing-sidecar diagnostic; the first compiler invocation succeeds, and its subsequent Java invocation is expected to fail because the runtime root intentionally lacks classfiles. The checked-in structural test pins both sidecars and their classfile UUID links; these controls demonstrate the separate Scala member-discovery and JVM class-loading boundaries. They do not claim Rust-produced TASTy interoperability.
 
 | Oracle artifact | Bytes | SHA-256 | Class TASTY UUID |
 | --- | ---: | --- | --- |
@@ -50,14 +84,15 @@ The Scala 3.9 `-print-tasty` output and the lossless Rust decoder agree on the `
 | Address | Declaration or tree | Evidence |
 | ---: | --- | --- |
 | 4 | `TYPEDEF CounterOwner` | The sidecar owns this class and its `inner` field/read method. |
-| 30 | primary `<init>` `DEFDEF` | Its formal at local address 1 is `PARAM seed: Int`. |
+| 9 | template parameter `PARAM seed` | Scala emits a private/local template parameter declaration; it is distinct from the primary constructor formal below. |
+| 30 | primary `<init>` `DEFDEF` | Its formal is `PARAM seed: Int` at AST address 33. The template and constructor declarations share the source/name-table spelling but are distinct TASTy nodes. |
 | 44 | `VALDEF inner` | Tail has `PRIVATE`, `LOCAL`, no `MUTABLE`; type tree is `IDENTtpt Counter → TYPEREF Counter → TERMREFpkg example`. |
 | 53 | `inner` initializer `APPLY` | Its function is `SELECTin` address 55 for signed `<init>(scala.Int): example.Counter`; the qualifier is `NEW` address 58. |
 | 59–63 | `NEW Counter` / selected constructor owner type | `IDENTtpt Counter` shares the field's TASTy type address 49. The constructor signature names the exact public `(I)V` target. |
-| 65 | constructor argument term tree | The raw tree is `TERMREFsymbol` with its nested `THIS`, `TYPEREFsymbol` and `SHAREDtype` structure. The same-session Rust frontend separately proves it is the exact constructor-owned `seed` symbol; its classfile projection is `iload_1`. |
+| 65 | constructor argument term tree | The raw tree is `TERMREFsymbol 9`, so it targets the template `PARAM seed` at address 9, not the primary constructor formal at address 33. Its qualifier is `THIS(TYPEREFSYMBOL 4, SHAREDtype 51)`. The same-session Rust frontend separately proves that its source/typed argument is the exact constructor-owned `seed` symbol; Scala's field-initialization TASTy projection uses the distinct template parameter. Its classfile projection is `iload_1`. |
 | 74 | `DEFDEF read(): Int` | The body at 82 applies signed `get(): scala.Int` at 84; its qualifier selects `inner` at 87 through `QUALTHIS`. The selected `get` declaration is in `Counter.tasty`, not duplicated into the owner sidecar. |
 
-This distinction matters for source identity: the raw `TERMREFsymbol` argument is not a plain textual `seed` leaf. The exact source/typed relationship is checked through the real Rust frontend, and Scala's own TASTy reader successfully compiles the independent client against the sidecars.
+This distinction matters for source identity: the raw `TERMREFsymbol` argument is not a plain textual `seed` leaf, and its declaration address is not the constructor formal's address. The structural regression checks both seed `PARAM` addresses, the `TERMREFsymbol 9` target and its `THIS/TYPEREFSYMBOL 4/SHAREDtype 51` prefix. The exact constructor-owned source/typed relationship is checked separately through the real Rust frontend, and Scala's own TASTy reader successfully compiles the independent client against the sidecars.
 
 The Rust regression [`jvm_tasty_object_composition.rs`](../tests/jvm_tasty_object_composition.rs) checks the header/version and UUID link, field modifiers and type spelling, constructor `SELECTin` signed name and descriptor, raw argument/reference form, `read` qualifier/member selection and `Counter.get` sidecar declaration. It also runs one real Lexer → Parser → Namer → Typer source session and asserts that:
 
@@ -113,17 +148,24 @@ The independent errors above locate separate bottlenecks: the root batch planner
 
 ## Negative and unsupported shapes retained
 
-These remain controls, not newly accepted producer inputs. Existing stage checks and focused coverage stay in force:
+The new source probe records the **first paired-producer** boundary for required same-source variations. Because `CounterOwner.inner` is currently rejected during batch member planning, the rows marked `member planning` do not claim a later typer, pickler, or linkage result for that source variant. Direct pickler validation and the JVM-only path are separate probes.
 
-| Shape | Current rejecting boundary / evidence |
-| --- | --- |
-| `private[this]` field | JVM field planning requires plain unqualified `private`; visibility syntax is retained in the frontend. Covered by the field visibility controls in [`jvm_stateful_class_contract.rs`](../tests/jvm_stateful_class_contract.rs). |
-| Public/protected or otherwise unplanned field | The bounded JVM source field planner rejects unsupported visibility/ownership before emission; class-state TASTy validation also requires its private field subset. |
-| Private mutable reference field or uninitialized private `val` | JVM-only field behavior is separate. For paired class-state TASTy, a reference type fails `UnsupportedTypeReference`; a missing initializer fails the field-plan validation. This audit does not broaden either path. |
-| Initializer type mismatch, missing `Counter`, or wrong owner/package | The Typer's expected-type/name/owner resolution or the paired same-package planned-class check rejects the source before artifact publication. No name-only class match is accepted. |
-| Private/inaccessible, secondary, generic, or argument-mismatched constructor | The Typer and bounded primary-constructor planner reject these shapes; see the constructor controls in [`jvm_source_compilation.rs`](../tests/jvm_source_compilation.rs) and [`jvm-reference-fields-constructors.md`](jvm-reference-fields-constructors.md). |
-| Nested `new`, factory-valued or branch-valued reference field initializer | The JVM initializer planner/codegen rejects expressions outside the one direct planned `new`; the paired pickler currently rejects the reference field type even earlier. |
-| `this` escaping before the superclass call, stale/foreign field identities, mismatched TASTy UUID/package path, or incomplete class pair | Existing constructor verification, canonical-source validation and paired-artifact link/path checks reject these at their owning stages. No partial pair is published by the paired artifact validator. |
+| Exact source variation | First observed result | Focused evidence |
+| --- | --- | --- |
+| Baseline `private val inner: Counter = new Counter(seed)` | Batch class 1, declaration 0, `member planning`: `only unqualified private mutable fields are supported`. | `paired_producer_reports_private_val_at_the_current_batch_planning_boundary`. |
+| Change `inner` to private `var`, keep `inner.get()` | Batch class 1, declaration 1, `method body typing`: `UnstableSelectionPrefix`. The typer fails before the paired field-plan check. | `paired_producer_reports_first_failure_for_required_negative_shapes`; `docs/jvm-reference-fields-constructors.md` documents the direct mutable-field receiver boundary. |
+| Remove the `inner` initializer | Batch class 1, declaration 0, `member planning`: the same private mutable field check fires before a missing-initializer check. | `paired_producer_reports_first_failure_for_required_negative_shapes`. |
+| Use `foreign.Counter`/`new foreign.Counter` while sibling `example.Counter` exists | Batch class 1, declaration 0, `member planning`: the same field gate fires first. This run therefore does not claim that the later planned-class/package check was reached. | `paired_producer_reports_first_failure_for_required_negative_shapes`. |
+| Refer to absent `Counter` while retaining two ordinary batch classes | Batch class 1, declaration 0, `member planning`: the field gate fires before type/member resolution. | `paired_producer_reports_first_failure_for_required_negative_shapes`. |
+| Wrong field reference type, duplicate `inner` field, method-local `inner` shadowing, or a new unrelated receiver in `read` | Each paired-source variant first reaches batch class 1, declaration 0, `member planning` and is rejected by the same private mutable field check. These probes do not assert behavior beyond that first failure. | `paired_producer_reports_first_failure_for_required_negative_shapes`. |
+| Change `inner` visibility to `private[this]`, public, or protected | Batch class 1, declaration 0, `member planning`: the private mutable field gate rejects each form before field visibility/TASTy validation. The separate JVM-only path preserves and validates visibility syntax. | `paired_producer_reports_first_failure_for_required_negative_shapes`; `field_metadata_distinguishes_private_this_from_plain_private` in `jvm_stateful_class_contract.rs`. |
+| Direct `CounterOwner` class-state pickler plan for the unchanged typed private reference field | `ClassStatePicklePlan::validate` returns `UnsupportedTypeReference { ty: TypeId(52) }`, independent of the earlier paired batch planner error. Encoding and linked-pair publication are not reached. | `one_real_source_session_preserves_object_composition_identity_and_reports_pickler_gap`. |
+| Wrong initializer type, constructor argument type, nested `new`, factory-valued or branch-valued initializer, immutable field assignment, `this` escape, forward field read, or secondary/defaulted/`using` constructor | With the unchanged `private val` path, batch class 1, declaration 0, `member planning` is first and masks the later typer/codegen boundary. The existing JVM-only source suite has separate cases that assert the actual Typer or codegen error and no class artifacts. | `paired_producer_reports_first_failure_for_required_negative_shapes`; `unsupported_real_field_and_constructor_sources_fail_without_artifacts` in `jvm_source_compilation.rs`; `docs/jvm-reference-fields-constructors.md`. |
+| Wrong constructor arity or argument type; inaccessible/private primary constructor | The source path reports the typed arity/argument error or reaches JVM codegen and rejects call-site visibility, respectively. | Constructor controls in `jvm_source_compilation.rs`, including `private_primary_constructor_is_rejected_without_a_public_constructor_file`. |
+| Unplanned/stale constructor/field identity | Not reached through the paired private-val shape because member planning fails first. Existing JVM-only initializer and JVM/TASTy validation tests reject foreign identities before output. | `field_metadata_rejects_reference_fields_outside_the_unit_and_self_initialization` and `jvm_tasty_artifacts.rs`. |
+| Incomplete class/TASTy pair, UUID mismatch, unsafe or mismatched package path | Paired artifact validation rejects malformed links/paths and does not publish a partial batch; these are post-plan artifact controls, not source-body errors. | Paired-artifact and batch-publisher controls in `jvm_tasty_artifacts.rs`. |
+
+The table reports the first boundary actually observed by the named probe. Where an earlier private-val field gate prevents a later condition from being tested through the paired path, the JVM-only/direct-pickler evidence is labeled separately instead of presenting a hypothetical later diagnostic as the source variant's first error.
 
 The JVM-only and TASTy producer gates are different evidence surfaces. A passing `CounterOwner` classfile test cannot be used as evidence that its `VALDEF`, `NEW`, constructor selection, or receiver call can be emitted into Rust-produced TASTy.
 
