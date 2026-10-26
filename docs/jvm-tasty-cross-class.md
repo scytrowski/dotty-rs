@@ -112,6 +112,23 @@ It does not add `new`, fields, setters, overloads, nested calls, or arbitrary
 external class references. A batch without the exact planned method identity
 is rejected.
 
+Issue [#1675](https://github.com/scytrowski/dotty-rs/issues/1675) integrates the
+original `Counter + Reader` source through `emit_paired_jvm_tasty_batch` in one
+frontend session. The whole-source contract checks `Reader.read` against its
+canonical method and `Counter` parameter identities, including the
+`(Lexample/Counter;)I` classfile descriptor. Before the four in-memory outputs
+are returned, the artifact contract decodes both class files and sidecars,
+checks each 65.0/28.9.0 pair and its own UUID link, and checks the Reader
+`read` body contains exactly `aload_1; invokevirtual; ireturn`. That
+`invokevirtual` must resolve to the planned source `Counter.get` method's JVM
+owner, name, and descriptor. Reader's TASTy sidecar still owns only Reader;
+Counter's constructor, field, `get`, and `set` ABI remains unchanged. A missing
+Reader artifact, changed formal descriptor, mismatched Methodref, invalid
+second class, or failed sidecar validation rejects the complete batch.
+Independent source sessions produce byte-identical four-file manifests.
+This is a bounded in-memory library/test path; file publication and executing
+the generated Reader method are covered by separate contracts.
+
 The #1673 signature test and #1674 full-body test have opt-in pinned Scala
 3.9.0 `-from-tasty` checks controlled by
 `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1` and `SCALA39_ROOT`. The #1674 check
@@ -161,6 +178,8 @@ The focused Rust coverage is:
 
 ```sh
 cargo test --test jvm_tasty_cross_class_audit --locked
+cargo test --test jvm_tasty_artifacts counter_reader_emits_four_complete_linked_cross_class_artifacts --locked
+cargo test --test jvm_tasty_contract cross_class_call_artifact_rejects_a_different_methodref --locked
 DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --test jvm_source_compilation \
   cross_class_reader_call_compiles_and_runs_with_a_planned_counter --locked
 ```

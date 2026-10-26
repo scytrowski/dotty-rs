@@ -1,8 +1,10 @@
 use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 use dotty_classfile::access_flags::{ACC_FINAL, ACC_PRIVATE};
+use dotty_classfile::attribute::Attribute;
 use dotty_classfile::classfile::{
     ClassFile, ClassFileBuilder, ClassFileVersion, Reader, TastyLinkId,
 };
+use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_core::ast::TreeKind;
 use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolKind};
 use dotty_jvm::emit_class_with_tasty_link;
@@ -27,6 +29,7 @@ use dotty_typer::SourceTyper;
 
 const COUNTER: &str = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n";
 const COUNTER_GAUGE: &str = include_str!("fixtures/jvm_tasty_multiclass/CounterGauge.scala");
+const COUNTER_READER: &str = include_str!("fixtures/jvm_tasty_cross_class/Reader.scala");
 const THREE_CLASSES: &str = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass Gauge(start: Int):\n  private var reading: Int = start\n  def get(): Int = reading\n  def set(value: Int): Unit = reading = value\n\nclass Thermometer(start: Int):\n  private var temperature: Int = start\n  def get(): Int = temperature\n  def set(value: Int): Unit = temperature = value\n";
 
 #[test]
@@ -211,6 +214,137 @@ fn whole_batch_proves_distinct_class_abi_and_rejects_partial_or_swapped_artifact
                     reason: "unexpected extra TASTy sidecar",
                     ..
                 })
+            ));
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn cross_class_call_artifact_rejects_a_different_methodref() {
+    with_paired_jvm_tasty_batch_plan(
+        COUNTER_READER,
+        "tests/fixtures/jvm_tasty_cross_class/Reader.scala",
+        SourceId::from_index(1675),
+        |source_batch| {
+            let plans = source_batch
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(source_batch.jvm_unit, &plans).unwrap();
+            let mut artifacts = encode_batch_for_contract_test(&source_batch);
+            let reader_artifact = artifacts
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/Reader.class")
+                .unwrap();
+            let mut reader = Reader::new(&reader_artifact.classfile_bytes);
+            let class = ClassFile::decode(&mut reader).unwrap();
+            assert!(reader.is_at_end());
+
+            let read = class
+                .methods
+                .iter()
+                .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "read")
+                .unwrap();
+            let [Attribute::Code(read_code)] = read.attributes.as_slice() else {
+                panic!("Reader.read has one Code attribute");
+            };
+            let actual_index = u16::from_be_bytes([read_code.code[2], read_code.code[3]]);
+
+            let constructor = class
+                .methods
+                .iter()
+                .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "<init>")
+                .unwrap();
+            let [Attribute::Code(constructor_code)] = constructor.attributes.as_slice() else {
+                panic!("Reader constructor has one Code attribute");
+            };
+            assert_eq!(constructor_code.code[1], 0xb7);
+            let wrong_index =
+                u16::from_be_bytes([constructor_code.code[2], constructor_code.code[3]]);
+            assert_ne!(actual_index, wrong_index);
+            assert!(matches!(
+                class
+                    .constant_pool
+                    .get(ConstantPoolIndex(wrong_index))
+                    .unwrap(),
+                ConstantPoolEntry::Methodref { .. }
+            ));
+
+            let needle = [
+                0x2b,
+                0xb6,
+                actual_index.to_be_bytes()[0],
+                actual_index.to_be_bytes()[1],
+                0xac,
+            ];
+            let positions = reader_artifact
+                .classfile_bytes
+                .windows(needle.len())
+                .enumerate()
+                .filter_map(|(index, bytes)| (bytes == needle).then_some(index))
+                .collect::<Vec<_>>();
+            let [offset] = positions.as_slice() else {
+                panic!("Reader.read's exact invokevirtual byte sequence occurs once");
+            };
+            reader_artifact.classfile_bytes[offset + 2..offset + 4]
+                .copy_from_slice(&wrong_index.to_be_bytes());
+
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, artifacts),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "cross-class invocation",
+                    reason,
+                    ..
+                }) if reason.contains("expected example/Counter.get()I")
+            ));
+
+            let mut wrong_descriptor = encode_batch_for_contract_test(&source_batch);
+            let reader_artifact = wrong_descriptor
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/Reader.class")
+                .unwrap();
+            let mut reader = Reader::new(&reader_artifact.classfile_bytes);
+            let mut class = ClassFile::decode(&mut reader).unwrap();
+            let constructor_descriptor = class
+                .methods
+                .iter()
+                .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "<init>")
+                .unwrap()
+                .descriptor_index;
+            let read_index = class
+                .methods
+                .iter()
+                .position(|method| class.constant_pool.utf8(method.name_index).unwrap() == "read")
+                .unwrap();
+            class.methods[read_index].descriptor_index = constructor_descriptor;
+            reader_artifact.classfile_bytes = class.encode().unwrap();
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_descriptor),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "member ABI",
+                    ..
+                })
+            ));
+
+            let mut missing_reader = encode_batch_for_contract_test(&source_batch);
+            missing_reader
+                .classfiles
+                .retain(|artifact| artifact.classfile_path != "example/Reader.class");
+            missing_reader
+                .sidecars
+                .retain(|artifact| artifact.tasty_path != "example/Reader.tasty");
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, missing_reader),
+                Err(JvmTastyContractError::BatchArtifactPaths {
+                    reason: "missing expected class-file path",
+                    path,
+                }) if path == "example/Reader.class"
             ));
         },
     )

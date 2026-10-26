@@ -3,7 +3,7 @@ use dotty_classfile::classfile::{ClassFile, Reader};
 use dotty_classfile::tasty_link::TastyLinkId;
 use dotty_core::SourceId;
 use dotty_jvm::emit_class;
-use dotty_jvm_tasty_contract::validate_classfile_tasty_link;
+use dotty_jvm_tasty_contract::{JvmTastyContractError, validate_classfile_tasty_link};
 use dotty_tasty::tasty::{DefinitionBody, TastyFile};
 
 use dotty::jvm_tasty_artifacts::{
@@ -207,7 +207,22 @@ fn counter_reader_emits_four_complete_linked_cross_class_artifacts() {
         SourceId::from_index(1675),
     )
     .unwrap();
+    let second = emit_paired_jvm_tasty_batch(
+        COUNTER_READER,
+        "tests/fixtures/jvm_tasty_cross_class/Reader.scala",
+        SourceId::from_index(1676),
+    )
+    .unwrap();
     assert_eq!(batch.classes().len(), 2);
+    assert_ne!(batch.source_id(), second.source_id());
+    assert_eq!(batch.classes().len(), second.classes().len());
+    for (first, second) in batch.classes().iter().zip(second.classes()) {
+        assert_eq!(first.classfile_path(), second.classfile_path());
+        assert_eq!(first.classfile_bytes(), second.classfile_bytes());
+        assert_eq!(first.tasty_path(), second.tasty_path());
+        assert_eq!(first.tasty_bytes(), second.tasty_bytes());
+        assert_eq!(first.tasty_link_id(), second.tasty_link_id());
+    }
 
     let expected = [
         (
@@ -312,6 +327,11 @@ fn counter_reader_emits_four_complete_linked_cross_class_artifacts() {
             .access_flags
             .contains(dotty_classfile::access_flags::ACC_PRIVATE)
     );
+    assert!(
+        !counter.fields[0]
+            .access_flags
+            .contains(dotty_classfile::access_flags::ACC_FINAL)
+    );
 
     let reader = &decoded_classes[1];
     assert!(
@@ -323,6 +343,21 @@ fn counter_reader_emits_four_complete_linked_cross_class_artifacts() {
         .iter()
         .find(|method| reader.constant_pool.utf8(method.name_index).unwrap() == "read")
         .expect("Reader declares read");
+    let mut reader_methods = reader
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                reader.constant_pool.utf8(method.name_index).unwrap(),
+                reader.constant_pool.utf8(method.descriptor_index).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    reader_methods.sort();
+    assert_eq!(
+        reader_methods,
+        [("<init>", "()V"), ("read", "(Lexample/Counter;)I")]
+    );
     assert_eq!(
         reader.constant_pool.utf8(read.descriptor_index).unwrap(),
         "(Lexample/Counter;)I"
@@ -389,6 +424,28 @@ fn unsupported_second_class_rejects_the_entire_batch() {
             PairedPlanError::BatchClass { class_index: 1, .. }
         ))
     ));
+}
+
+#[test]
+fn unsupported_reader_body_rejects_the_counter_reader_batch() {
+    let source = COUNTER_READER.replace("counter.get()", "counter.get() + 1");
+    let error = emit_paired_jvm_tasty_batch(
+        &source,
+        "tests/fixtures/jvm_tasty_cross_class/Reader.scala",
+        SourceId::from_index(1677),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            PairedBatchArtifactError::Contract(JvmTastyContractError::BatchArtifact {
+                class_index: 1,
+                phase: "cross-class invocation",
+                ..
+            })
+        ),
+        "unexpected batch rejection: {error:?}"
+    );
 }
 
 #[test]

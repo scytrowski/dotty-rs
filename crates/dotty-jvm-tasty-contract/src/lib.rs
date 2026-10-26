@@ -16,7 +16,7 @@ use dotty_classfile::reader::Reader as ClassFileReader;
 use dotty_classfile::tasty_link::{TastyLinkError, TastyLinkId};
 use dotty_core::ast::{TreeKind, Untyped};
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, SymbolOrigin, Visibility};
-use dotty_core::types::{MethodKind, MethodType, Type};
+use dotty_core::types::{MethodKind, MethodType, TermRefTarget, Type};
 use dotty_core::{Definitions, SemanticStore, SourceId, SymbolId, TreeId, Typed};
 use dotty_jvm::{
     JvmClassInitializationPlan, JvmClassMetadata, JvmCodegenError, JvmCompilationUnit,
@@ -754,6 +754,8 @@ pub fn validate_jvm_tasty_batch_artifacts(
         }
         validate_decoded_class_abi(&class_file, &expected.proof)
             .map_err(|reason| artifact_error("member ABI", reason.into()))?;
+        validate_cross_class_call_code(&class_file, &expected.proof)
+            .map_err(|reason| artifact_error("cross-class invocation", reason))?;
     }
 
     if let Some((index, _)) = used_classfiles.iter().enumerate().find(|(_, used)| !**used) {
@@ -876,6 +878,197 @@ fn validate_decoded_class_abi(
     actual_methods.sort();
     if actual_methods != expected_methods {
         return Err("decoded methods differ from checked source ABI");
+    }
+    Ok(())
+}
+
+struct CrossClassMethodRef {
+    caller: SymbolId,
+    target: SymbolId,
+    owner_internal_name: String,
+    name: String,
+    descriptor: String,
+}
+
+fn validate_cross_class_call_code(
+    class_file: &ClassFile<'_>,
+    proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
+) -> Result<(), String> {
+    // The paired pickler admits the direct same-batch zero-argument call only.
+    // Keep the binary check equally narrow instead of accepting a plausible
+    // but differently owned or shaped invocation from classfile bytes.
+    let tasty = proof.tasty_plan.plan();
+    let all_metadata = proof
+        .jvm_unit
+        .metadata(tasty.definitions)
+        .map_err(|error| format!("cannot derive planned classes: {error:?}"))?;
+    let mut calls = Vec::new();
+
+    for member in tasty.members {
+        let ClassMemberPicklePlan::Method {
+            symbol: caller,
+            source_tree,
+        } = *member
+        else {
+            continue;
+        };
+        let TreeKind::DefDef(definition) = &tasty.source_ast.get(source_tree).kind else {
+            return Err(format!("method {caller:?} has no source definition"));
+        };
+        let Some(rhs) = definition.rhs else {
+            continue;
+        };
+        let root = tasty
+            .typed_bindings
+            .typed_at(tasty.source.id, rhs)
+            .ok_or_else(|| format!("method {caller:?} has no canonical typed body"))?;
+        let Some(root_tree) = tasty.typed_ast.try_get(root) else {
+            return Err(format!("method {caller:?} has a stale typed body"));
+        };
+        let TreeKind::Apply(application) = &root_tree.kind else {
+            continue;
+        };
+        let Some(function_tree) = tasty.typed_ast.try_get(application.function) else {
+            return Err(format!("method {caller:?} has a stale selected function"));
+        };
+        let TreeKind::Select(_) = &function_tree.kind else {
+            continue;
+        };
+        let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(target),
+            ..
+        }) = tasty.store.types.try_get(function_tree.ty)
+        else {
+            return Err(format!(
+                "method {caller:?} selection has no canonical method target"
+            ));
+        };
+        let target_info = tasty.store.symbols.get(*target);
+        let Some(owner) = target_info.owner else {
+            return Err(format!("selected method {target:?} has no declaring owner"));
+        };
+        if owner == tasty.class {
+            continue;
+        }
+        if application.kind != dotty_core::ast::ApplyKind::Regular || !application.args.is_empty() {
+            return Err(format!(
+                "cross-class method {target:?} is not a direct zero-argument call"
+            ));
+        }
+        if target_info.kind != SymbolKind::Method
+            || target_info.origin != SymbolOrigin::Source(tasty.source.id)
+            || !tasty.store.symbols.contains(owner)
+            || tasty.store.symbols.get(owner).kind != SymbolKind::Class
+            || !all_metadata
+                .iter()
+                .any(|metadata| metadata.identity().symbol() == owner)
+        {
+            return Err(format!(
+                "cross-class target {target:?} is not a canonical planned source method"
+            ));
+        }
+        let target_metadata = all_metadata
+            .iter()
+            .find(|metadata| metadata.identity().symbol() == owner)
+            .and_then(|metadata| {
+                metadata
+                    .methods()
+                    .iter()
+                    .find(|method| method.symbol() == *target)
+                    .map(|method| (metadata, method))
+            })
+            .ok_or_else(|| format!("cross-class target {target:?} is absent from its JVM plan"))?;
+        let expected_descriptor =
+            source_method_descriptor(tasty.store, tasty.definitions, *target, &all_metadata)
+                .ok_or_else(|| {
+                    format!("cross-class target {target:?} has an unsupported signature")
+                })?;
+        if target_metadata.1.descriptor().as_str() != expected_descriptor {
+            return Err(format!(
+                "cross-class target {target:?} descriptor differs from its source signature"
+            ));
+        }
+        calls.push(CrossClassMethodRef {
+            caller,
+            target: *target,
+            owner_internal_name: target_metadata.0.identity().internal_name().to_owned(),
+            name: target_metadata.1.name().to_owned(),
+            descriptor: expected_descriptor,
+        });
+    }
+
+    if calls.is_empty() {
+        return Ok(());
+    }
+    for call in calls {
+        let caller_metadata = proof
+            .metadata
+            .methods()
+            .iter()
+            .find(|method| method.symbol() == call.caller)
+            .ok_or_else(|| {
+                format!(
+                    "caller method {:?} is absent from its JVM plan",
+                    call.caller
+                )
+            })?;
+        let method = class_file
+            .methods
+            .iter()
+            .find(|method| {
+                class_file.constant_pool.utf8(method.name_index).ok()
+                    == Some(caller_metadata.name())
+                    && class_file.constant_pool.utf8(method.descriptor_index).ok()
+                        == Some(caller_metadata.descriptor().as_str())
+            })
+            .ok_or_else(|| format!("caller method {:?} is absent from class bytes", call.caller))?;
+        let [dotty_classfile::attribute::Attribute::Code(code)] = method.attributes.as_slice()
+        else {
+            return Err(format!(
+                "caller method {:?} has no unique Code attribute",
+                call.caller
+            ));
+        };
+        if code.code.len() != 5
+            || code.code[0] != 0x2b
+            || code.code[1] != 0xb6
+            || code.code[4] != 0xac
+        {
+            return Err(format!(
+                "caller method {:?} does not contain the bounded aload_1/invokevirtual/ireturn shape",
+                call.caller
+            ));
+        }
+        let reference = dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+            code.code[2],
+            code.code[3],
+        ]));
+        let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+            class_index,
+            name_and_type_index,
+        }) = class_file.constant_pool.get(reference)
+        else {
+            return Err(format!(
+                "caller method {:?} invokevirtual does not reference CONSTANT_Methodref",
+                call.caller
+            ));
+        };
+        let actual_owner = class_file
+            .constant_pool
+            .class_name(*class_index)
+            .map_err(|error| format!("invalid invokevirtual owner: {error:?}"))?;
+        let actual_method = class_file
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .map_err(|error| format!("invalid invokevirtual name/descriptor: {error:?}"))?;
+        if actual_owner != call.owner_internal_name
+            || actual_method != (call.name.as_str(), call.descriptor.as_str())
+        {
+            return Err(format!(
+                "caller method {:?} targets {:?}, expected {}.{}{}",
+                call.caller, call.target, call.owner_internal_name, call.name, call.descriptor
+            ));
+        }
     }
     Ok(())
 }
