@@ -533,7 +533,7 @@ fn paired_producer_advances_private_val_to_cross_contract_boundary() {
 }
 
 #[test]
-fn one_real_source_session_preserves_object_composition_identity_and_reports_pickler_gap() {
+fn one_real_source_session_preserves_identity_and_reports_next_receiver_blocker() {
     let source_id = SourceId::from_index(1715);
     let source = SourceText::new(SOURCE).unwrap();
     let scanner = ContextualScanner::new(SOURCE).unwrap();
@@ -807,10 +807,13 @@ fn one_real_source_session_preserves_object_composition_identity_and_reports_pic
     };
     let validated = plan.validate().unwrap();
     assert_eq!(validated.same_batch_reference_fields().count(), 1);
-    let pickler_error = validated.pickle().unwrap_err();
-    assert!(
-        matches!(pickler_error, PickleError::UnsupportedTypeReference { ty } if ty == inner_type)
-    );
+    assert!(matches!(
+        validated.pickle(),
+        Err(PickleError::Reference {
+            symbol,
+            reason: dotty_tasty_pickler::ReferenceError::Owner,
+        }) if symbol == inner
+    ));
 }
 
 #[test]
