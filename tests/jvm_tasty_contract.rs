@@ -36,6 +36,8 @@ const COUNTER_OWNER: &str =
     include_str!("fixtures/jvm_tasty_object_composition/CounterOwner.scala");
 const THREE_CLASSES: &str = "package example\n\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass Gauge(start: Int):\n  private var reading: Int = start\n  def get(): Int = reading\n  def set(value: Int): Unit = reading = value\n\nclass Thermometer(start: Int):\n  private var temperature: Int = start\n  def get(): Int = temperature\n  def set(value: Int): Unit = temperature = value\n";
 const SAME_BATCH_REFERENCE_FIELD: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\nclass CounterOwner(seed: Int):\n  private val inner: Counter = new Counter(seed)\n  def constant(): Int = 0\n";
+const SAME_BATCH_REFERENCE_ALIAS: &str =
+    include_str!("fixtures/jvm_tasty_constructor_injection/CounterOwner.scala");
 
 #[test]
 fn whole_batch_proves_distinct_class_abi_and_rejects_partial_or_swapped_artifacts() {
@@ -254,6 +256,184 @@ fn private_immutable_same_batch_reference_field_matches_jvm_batch_abi() {
                     .count(),
                 1
             );
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn constructor_reference_alias_proves_exact_parameter_abi_and_rejects_forged_loads() {
+    with_paired_jvm_tasty_batch_plan(
+        SAME_BATCH_REFERENCE_ALIAS,
+        "CounterOwner.scala",
+        SourceId::from_index(17561),
+        |source_batch| {
+            let plans = source_batch
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(source_batch.jvm_unit, &plans).unwrap();
+            let owner_plan = &source_batch.classes[1];
+            let reference_field = owner_plan
+                .tasty_plan
+                .same_batch_reference_fields()
+                .next()
+                .unwrap();
+            assert_eq!(
+                reference_field.target_class(),
+                source_batch.classes[0].class
+            );
+            let template_parameter = reference_field.template_parameter_alias().unwrap();
+            let owner_tasty = owner_plan.tasty_plan.plan();
+            let TreeKind::DefDef(constructor) = &owner_tasty
+                .source_ast
+                .get(owner_tasty.constructor.source_tree)
+                .kind
+            else {
+                panic!("owner has its original source constructor");
+            };
+            let parameter_tree = constructor.value_param_clauses[0][0];
+            let derived_parameter = owner_tasty.constructor.parameter_clauses[0][0];
+            assert_eq!(
+                owner_tasty
+                    .source_index
+                    .symbol_at(owner_tasty.source.id, parameter_tree),
+                Some(template_parameter)
+            );
+            assert_eq!(
+                owner_tasty.source_index.derived_symbol_at(
+                    owner_tasty.constructor.symbol,
+                    owner_tasty.source.id,
+                    parameter_tree
+                ),
+                Some(derived_parameter)
+            );
+            assert_ne!(template_parameter, derived_parameter);
+
+            let artifacts = encode_batch_for_contract_test(&source_batch);
+            validate_jvm_tasty_batch_artifacts(&validated, artifacts.clone()).unwrap();
+            let mut missing_owner_sidecar = artifacts.clone();
+            missing_owner_sidecar
+                .sidecars
+                .retain(|artifact| artifact.tasty_path != "example/CounterOwner.tasty");
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, missing_owner_sidecar),
+                Err(JvmTastyContractError::BatchArtifactPaths {
+                    reason: "missing expected TASTy sidecar path",
+                    path,
+                }) if path == "example/CounterOwner.tasty"
+            ));
+            let mut corrupt_owner_class = artifacts.clone();
+            corrupt_owner_class
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/CounterOwner.class")
+                .unwrap()
+                .classfile_bytes
+                .truncate(7);
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, corrupt_owner_class),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "class-file decode",
+                    ..
+                })
+            ));
+            let owner_artifact = artifacts
+                .classfiles
+                .iter()
+                .find(|artifact| artifact.classfile_path == "example/CounterOwner.class")
+                .unwrap();
+            let mut reader = Reader::new(&owner_artifact.classfile_bytes);
+            let class = ClassFile::decode(&mut reader).unwrap();
+            assert!(reader.is_at_end());
+            assert_eq!(class.fields.len(), 1);
+            assert_eq!(
+                class
+                    .constant_pool
+                    .utf8(class.fields[0].name_index)
+                    .unwrap(),
+                "inner"
+            );
+            assert_eq!(
+                class
+                    .constant_pool
+                    .utf8(class.fields[0].descriptor_index)
+                    .unwrap(),
+                "Lexample/Counter;"
+            );
+            assert!(class.fields[0].access_flags.contains(ACC_PRIVATE));
+            assert!(class.fields[0].access_flags.contains(ACC_FINAL));
+            let constructor = class
+                .methods
+                .iter()
+                .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "<init>")
+                .unwrap();
+            assert_eq!(
+                class
+                    .constant_pool
+                    .utf8(constructor.descriptor_index)
+                    .unwrap(),
+                "(Lexample/Counter;)V"
+            );
+            let [Attribute::Code(code)] = constructor.attributes.as_slice() else {
+                panic!("reference alias constructor has one Code attribute");
+            };
+            assert_eq!(code.max_locals, 2);
+            assert_eq!(code.code.len(), 10);
+            assert_eq!(code.code[0], 0x2a, "aload_0");
+            assert_eq!(code.code[1], 0xb7, "invokespecial");
+            assert_eq!(code.code[4], 0x2a, "aload_0 before putfield");
+            assert_eq!(code.code[5], 0x2b, "aload_1 preserves injected reference");
+            assert_eq!(code.code[6], 0xb5, "putfield");
+            assert_eq!(code.code[9], 0xb1);
+            let constructor_code = code.code.to_vec();
+            let field_ref = ConstantPoolIndex(u16::from_be_bytes([code.code[7], code.code[8]]));
+            let Some(ConstantPoolEntry::Fieldref {
+                class_index,
+                name_and_type_index,
+            }) = class.constant_pool.get(field_ref)
+            else {
+                panic!("alias initializer stores through a Fieldref");
+            };
+            assert_eq!(
+                class.constant_pool.class_name(*class_index).unwrap(),
+                "example/CounterOwner"
+            );
+            assert_eq!(
+                class
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .unwrap(),
+                ("inner", "Lexample/Counter;")
+            );
+
+            let mut forged_load = artifacts;
+            let owner = forged_load
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/CounterOwner.class")
+                .unwrap();
+            let [offset] = owner
+                .classfile_bytes
+                .windows(constructor_code.len())
+                .enumerate()
+                .filter_map(|(index, bytes)| (bytes == constructor_code).then_some(index))
+                .collect::<Vec<_>>()[..]
+            else {
+                panic!("alias constructor Code occurs exactly once in class bytes");
+            };
+            owner.classfile_bytes[offset + 5] = 0x2a;
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, forged_load),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "reference-field initializer",
+                    reason,
+                    ..
+                }) if reason.contains("bounded super/aload_0/aload_1/putfield/return alias shape")
+            ));
         },
     )
     .unwrap();

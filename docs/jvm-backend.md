@@ -727,17 +727,22 @@ Counter/CounterReader, and Counter/CounterOwner shapes. The paired batch path
 uses one complete source session, serializes each complete TASTy sidecar, links
 each classfile with that sidecar's producer-owned Scala 3.9.0 UUID, and checks
 the ordered complete manifest before returning any owned bytes. For the
-CounterOwner shape, its private final planned reference field, direct
-constructor initialization, and cross-class `read()I` dispatch are checked
-against exact source symbols and the decoded `Fieldref`/`Methodref` owners and
-descriptors. A producer or validation error returns no partial batch. The
-coordinator writes no files; the staged filesystem test adapter does not claim
-crash-atomic publication.
+CounterOwner shapes, the direct `new Counter(seed)` case retains its original
+constructor validation, and the constructor-injected alias case requires an
+exact public `(Lexample/Counter;)V` constructor plus the original immutable
+private `inner` field. Its bytecode proof checks the initialized argument is
+stored once after the direct-super call, with no target allocation, and checks
+`read()I` against the planned `Fieldref`/`Methodref` owners and descriptors.
+All four linked classfile/sidecar paths are validated as one source-ordered
+batch. A producer or validation error returns no partial batch. The coordinator
+writes no files; the staged filesystem test adapter does not claim crash-atomic
+publication.
 
 This remains a narrow library API, not a production compiler driver or general
-artifact publisher. Rust-produced JVM execution is covered for this fixture by
-the Java 21 verifier test; independent Scala consumption of the linked
-CounterOwner classfile/TASTy pair remains a separate compatibility gate.
+artifact publisher. Rust-produced JVM execution of the direct-`new` fixture is
+covered by the Java 21 verifier test. Runtime identity for the
+constructor-injected alias and independent Scala consumption of that linked
+pair are separate compatibility gates (#1757 and #1758).
 
 The frontend must set `JvmClassInitializationPlan::ImplicitNoArg` only after
 proving the source class has no constructor parameters or body, superclass
