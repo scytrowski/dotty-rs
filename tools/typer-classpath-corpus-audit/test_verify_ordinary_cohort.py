@@ -53,10 +53,19 @@ class OrdinaryCohortGateTests(unittest.TestCase):
             cohort, report = self.write_fixture(Path(temporary), "typed", "String")
             self.assertIn("result shape changed", MODULE.verify(cohort, report)[0])
 
-    def test_gate_rejects_a_changed_typed_tree_identity(self) -> None:
+    def test_gate_accepts_a_session_local_typed_tree_id_change(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cohort, report = self.write_fixture(Path(temporary), "typed", typed_tree="9")
-            self.assertIn("typed-tree mapping changed", MODULE.verify(cohort, report)[0])
+            self.assertEqual(MODULE.verify(cohort, report), [])
+
+    def test_gate_rejects_a_missing_typed_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cohort, report = self.write_fixture(Path(temporary), "typed")
+            report.write_text(
+                report.read_text(encoding="utf-8").replace("\t7\t2\n", "\t7\t-\n"),
+                encoding="utf-8",
+            )
+            self.assertIn("expected fully typed", MODULE.verify(cohort, report)[0])
 
 
 if __name__ == "__main__":
