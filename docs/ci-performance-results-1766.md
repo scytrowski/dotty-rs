@@ -8,7 +8,7 @@ This is a local profile experiment, not evidence that selective optimization imp
 
 ## Reproduction conditions
 
-- Source tree: merged main commit `c7d2f33c3898f43fb4b622d313369be4b8b7f5c8` (PR #1772; based on `bf69a070380ff9e3a6a48dcaa1670b695c9cf159`). The benchmark snapshot was assembled from that base plus the exact merged PR patch; only the allowed-depth classloader test and its performance note differ from the base.
+- Source tree: merged main commit `c7d2f33c3898f43fb4b622d313369be4b8b7f5c8` (PR #1772; based on `bf69a070380ff9e3a6a48dcaa1670b695c9cf159`). The Cargo source used for the benchmark was assembled from that base plus the exact classloader test hunk from the merged PR. The PR's other change is documentation-only and does not enter Cargo build inputs.
 - Host: Debian x86_64, kernel `6.12.74+deb13+1-amd64`, AMD Ryzen 9 7940HS, 16 logical CPUs, 29 GiB RAM.
 - Toolchain: `rustc 1.98.1 (48a229cea 2026-09-01)`, Cargo `1.98.1 (797e8a9bc 2026-08-05)`.
 - Cargo registry was warm. Each profile used a fresh, separate target directory; target builds were cold. `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_TEST_DEBUG=0`, and `--locked` were held constant. No `RUST_MIN_STACK` override was set.
