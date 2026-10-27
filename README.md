@@ -68,8 +68,12 @@ for all four Rust-produced files and their source, JVM ABI, and TASTy links.
 Its strict JDK 21 runtime gate proves the original Rust `CounterOwner` stores
 and reads the exact injected `Counter` instance. The pinned Scala 3.9 consumer
 now resolves both classes from their Rust TASTy sidecars, compiles an
-independent typed constructor client, and runs the unchanged Rust classes; the
-combined end-to-end release gate remains #1759.
+independent typed constructor client, and runs the unchanged Rust classes. The
+strict #1759 release gate runs the Scala consumer on the emitted Rust batch,
+checks constructor-parameter TASTy addresses, and verifies alias-batch
+publication failures before promoting the four linked artifacts. See the
+[constructor-injection release record](docs/jvm-tasty-constructor-injection.md)
+for the pinned toolchain, outputs, and reproduction commands.
 
 Compatibility targets Scala **3.9.0**, pinned to source revision
 `777528f19a58e794c9954a42f433373472ec57f8`. The semantic pickler emits TASTy
