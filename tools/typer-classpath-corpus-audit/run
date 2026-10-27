@@ -359,7 +359,11 @@ if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
     export DOTTY_AUDIT_FOCUSED_FILES="$tmp_dir/focused-files.txt"
     if ! (
         cd "$repo_root"
-        /usr/bin/time -v cargo test -p dotty-typer --test local_definition_audit --locked --no-run
+        if [[ -x /usr/bin/time ]]; then
+            /usr/bin/time -v cargo test -p dotty-typer --test local_definition_audit --locked --no-run
+        else
+            cargo test -p dotty-typer --test local_definition_audit --locked --no-run
+        fi
     ) >"$tmp_dir/build.log" 2>&1; then
         cat "$tmp_dir/build.log" >&2
         exit 1
