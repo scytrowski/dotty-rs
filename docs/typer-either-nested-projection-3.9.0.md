@@ -100,6 +100,74 @@ task-specific `target/issue-1747/oracle-script` directory. The audit reports
 and run logs used for the two-pass 25-method comparison were retained under
 `target/issue-1747/` during this work.
 
+To regenerate the exact 25-method ordinary-member TSV and retain both runs,
+from the dotty-rs repository root:
+
+```sh
+mkdir -p target/issue-1747/reports
+env PATH="/home/vdrake6/.jdks/jdk-21/bin:$PATH" \
+  JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
+  SCALA39_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source \
+  SCALA39_JDK_RELEASE=21 \
+  COURSIER_MAVEN_ROOT=/home/vdrake6/.codex/worktrees/bdf3/dotty-rs/target/worktrees/issue-1746/target/issue-1746/coursier/https/repo1.maven.org/maven2 \
+  DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1747/audit-tmp-repro" \
+  tools/typer-classpath-corpus-audit/run \
+    --method-kind ordinary \
+    --method-manifest docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv \
+    --verify-determinism \
+    target/issue-1747/reports/ordinary-reproduced.tsv
+```
+
+The manifest contains exactly 25 pinned `path#tree` identities. The audit
+forces one Cargo build/test thread, runs the ordinary-method request twice,
+compares the normalized reports internally, and writes retained logs and
+intermediate TSVs below the task-specific audit directory. To compare the
+outputs explicitly and validate the ten previously accepted roots:
+
+```sh
+run_dir="$(cat target/issue-1747/audit-tmp-repro/run-dir.txt)"
+cmp "$run_dir/first.ordinary-report.tsv" "$run_dir/second.ordinary-report.tsv"
+cmp target/issue-1747/reports/ordinary-reproduced.tsv \
+  "$run_dir/first.ordinary-report.tsv"
+python3 - <<'PY'
+import csv
+from pathlib import Path
+
+cohort = list(csv.DictReader(
+    Path("docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv").open(), delimiter="\t"
+))
+lines = Path("target/issue-1747/reports/ordinary-reproduced.tsv").read_text().splitlines()
+header = next(i for i, line in enumerate(lines) if line.startswith(
+    "method\towner_path\tmethod_name\tline\trange\tmodifiers\texpected_result\t"
+    "actual_result\tcomplexity\tstatus\tsource_tree\ttyped_tree"
+))
+report = {row["method"]: row for row in csv.DictReader(lines[header:], delimiter="\t")}
+typed_tree_shifts = []
+for row in cohort:
+    if row["gate"] != "required_typed":
+        continue
+    actual = report[row["identity"]]
+    assert actual["status"] == "typed"
+    assert actual["source_tree"] == row["source_tree"]
+    assert actual["actual_result"] == row["oracle_result"]
+    if actual["typed_tree"] != row["typed_tree"]:
+        typed_tree_shifts.append((row["identity"], row["typed_tree"], actual["typed_tree"]))
+expected_shifts = [
+    ("library/src/scala/Option.scala#tree=122", "3", "9"),
+    ("library/src/scala/Option.scala#tree=129", "9", "15"),
+]
+assert typed_tree_shifts == expected_shifts, typed_tree_shifts
+print("10 previously accepted roots remain typed with stable source IDs and result shapes.")
+print("Expected typed-tree arena ID shifts:", typed_tree_shifts)
+PY
+```
+
+Do not add `--require-typed-cohort` to this reproduction: its frozen verifier
+also compares arena-local `typed_tree` numbers and therefore exits nonzero for
+the two expected shifts above, despite those roots retaining typed status,
+source-tree identity, and result shape. The explicit semantic-preservation
+check above reports those shifts without changing the frozen manifest.
+
 ## Validation recorded for this audit PR
 
 - `cargo fmt --all -- --check` — passed.
