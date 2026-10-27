@@ -1071,8 +1071,8 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
 }
 
 #[test]
-fn identity_operators_reject_foreign_primitive_trait_and_generic_members() {
-    let source_text = "class Box:\n  def eq(other: Box): Boolean = true\nclass Overloaded:\n  def eq(other: Overloaded): Boolean = true\n  def eq(other: Int): Boolean = false\nclass WrongArity:\n  def eq(): Boolean = true\nclass Generic[A]\ntrait Marker\nclass Runner:\n  def foreign(a: Box, b: Box): Boolean = a eq b\n  def overloadedInfix(a: Overloaded, b: Overloaded): Boolean = a eq b\n  def overloadedDot(a: Overloaded, b: Overloaded): Boolean = a.eq(b)\n  def wrongArity(a: WrongArity, b: WrongArity): Boolean = a eq b\n  def primitive(a: Int, b: Int): Boolean = a eq b\n  def incompatible(a: Box, b: Int): Boolean = a eq b\n  def traitRef(a: Marker, b: Marker): Boolean = a eq b\n  def generic(a: Generic[Int], b: Generic[Int]): Boolean = a eq b\n  def objectRef(a: Object, b: Object): Boolean = a eq b\n  def universal(a: Box, b: Box): Boolean = a == b\n";
+fn identity_operators_reject_foreign_primitive_trait_and_overridden_members() {
+    let source_text = "class Box:\n  def eq(other: Box): Boolean = true\nclass Overloaded:\n  def eq(other: Overloaded): Boolean = true\n  def eq(other: Int): Boolean = false\nclass WrongArity:\n  def eq(): Boolean = true\nclass Generic[A]\nclass Parent:\n  def eq(other: Parent): Boolean = true\nclass Child extends Parent\ntrait Marker\nclass Runner:\n  def foreign(a: Box, b: Box): Boolean = a eq b\n  def overloadedInfix(a: Overloaded, b: Overloaded): Boolean = a eq b\n  def overloadedDot(a: Overloaded, b: Overloaded): Boolean = a.eq(b)\n  def wrongArity(a: WrongArity, b: WrongArity): Boolean = a eq b\n  def primitive(a: Int, b: Int): Boolean = a eq b\n  def incompatible(a: Box, b: Int): Boolean = a eq b\n  def traitRef(a: Marker, b: Marker): Boolean = a eq b\n  def generic(a: Generic[Int], b: Generic[Int]): Boolean = a eq b\n  def inherited(a: Child, b: Child): Boolean = a eq b\n  def objectRef(a: Object, b: Object): Boolean = a eq b\n  def anyRef(a: Any, b: Any): Boolean = a eq b\n  def universal(a: Box, b: Box): Boolean = a == b\n";
     let source = SourceId::from_index(1472);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -1112,7 +1112,9 @@ fn identity_operators_reject_foreign_primitive_trait_and_generic_members() {
                     | "incompatible"
                     | "traitRef"
                     | "generic"
+                    | "inherited"
                     | "objectRef"
+                    | "anyRef"
                     | "universal"
             )
             .then(|| {
@@ -1124,7 +1126,7 @@ fn identity_operators_reject_foreign_primitive_trait_and_generic_members() {
             })
         })
         .collect::<Vec<_>>();
-    assert_eq!(methods.len(), 10);
+    assert_eq!(methods.len(), 12);
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -1133,8 +1135,41 @@ fn identity_operators_reject_foreign_primitive_trait_and_generic_members() {
         definitions,
         &packages,
     );
+    let operators = definitions
+        .any_ref_identity_operator_symbols(typer.store())
+        .unwrap();
     for (name, method, rhs) in methods {
         let context = typer.expression_context_for(method).unwrap();
+        if name == "generic" {
+            let typed = typer
+                .type_expression(rhs, context)
+                .unwrap_or_else(|error| panic!("valid reference receiver {name}: {error:?}"));
+            assert_eq!(typer.typed_ast().get(typed).ty, definitions.boolean);
+            let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+                panic!("{name} identity call keeps an ordinary application")
+            };
+            let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind
+            else {
+                panic!("{name} identity call selects the canonical operator")
+            };
+            let operator_symbol = match typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty)
+            {
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } => *symbol,
+                other => panic!("unexpected {name} operator type: {other:?}"),
+            };
+            assert_eq!(operator_symbol, operators.eq);
+            assert!(matches!(
+                typer.typed_ast().get(selection.qualifier).kind,
+                TreeKind::Ident(_) | TreeKind::Select(_)
+            ));
+            continue;
+        }
         if name == "universal" {
             let typed = typer
                 .type_expression(rhs, context)
@@ -1143,11 +1178,24 @@ fn identity_operators_reject_foreign_primitive_trait_and_generic_members() {
             continue;
         }
         let error = typer.type_expression(rhs, context).unwrap_err();
-        match (name.as_str(), error) {
-            ("incompatible", TyperError::OverloadApplicationNoApplicable { .. }) => {}
-            (_, TyperError::MemberNotFound { .. }) => {}
-            (name, error) => panic!("unexpected {name} identity rejection: {error:?}"),
-        }
+        let retry = typer.type_expression(rhs, context).unwrap_err();
+        let is_expected_rejection = |error: &TyperError| {
+            matches!(
+                (name.as_str(), error),
+                (
+                    "incompatible",
+                    TyperError::OverloadApplicationNoApplicable { .. }
+                ) | (_, TyperError::MemberNotFound { .. })
+            )
+        };
+        assert!(
+            is_expected_rejection(&error),
+            "unexpected {name} identity rejection: {error:?}"
+        );
+        assert!(
+            is_expected_rejection(&retry),
+            "retry changed {name} identity rejection: {retry:?}"
+        );
         assert!(typer.source_typed_index().get(source, rhs).is_none());
     }
 }

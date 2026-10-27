@@ -66,7 +66,8 @@ impl SourceTyper<'_> {
         }
         let receiver = self.this_type_receiver_view(receiver)?;
         let mut candidates = if self.any_ref_identity_operator_name(operator) {
-            let Some(symbol) = self.any_ref_identity_symbol_for_receiver(receiver, operator) else {
+            let Some(symbol) = self.any_ref_identity_symbol_for_receiver(receiver, operator)?
+            else {
                 return Err(TyperError::MemberNotFound {
                     source: self.source,
                     tree_index,
@@ -74,12 +75,11 @@ impl SourceTyper<'_> {
                     name: operator,
                 });
             };
-            let source_members = self
-                .lookup_overload_members_journaled(receiver, operator, info_journal)
-                .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+            let source_shadows =
+                self.source_declares_member_in_source_hierarchy(receiver, operator)?;
             // A same-spelled source or trait declaration cannot stand in for
             // the compiler's final AnyRef identity symbol.
-            if !source_members.is_empty() {
+            if source_shadows {
                 return Err(TyperError::MemberNotFound {
                     source: self.source,
                     tree_index,
@@ -203,14 +203,19 @@ impl SourceTyper<'_> {
         let typed =
             self.type_value_expression_inner(argument_tree, context, info_journal, new_mappings)?;
         let own_type = self.typed_arena.get(typed).ty;
-        let widened_type = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
-        let widened_type =
-            if candidates.len() == 1 && self.is_any_ref_identity_symbol(candidates[0].symbol) {
-                self.any_ref_identity_argument_view(widened_type)
-                    .unwrap_or(widened_type)
+        let canonical_identity =
+            candidates.len() == 1 && self.is_any_ref_identity_symbol(candidates[0].symbol);
+        let widened_type = if canonical_identity {
+            if let Some(view) = self.any_ref_identity_argument_view(own_type)? {
+                view
             } else {
-                widened_type
-            };
+                let widened = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+                self.any_ref_identity_argument_view(widened)?
+                    .unwrap_or(widened)
+            }
+        } else {
+            self.widen_expression_type_journaled(own_type, info_journal, 0)?
+        };
         let widened_type = if self.any_equality_operator_name(operator) {
             self.dealias_source_aliases(widened_type, info_journal)?
         } else {
@@ -571,7 +576,7 @@ impl SourceTyper<'_> {
                 let java_class_qualifier = self.is_java_class_qualifier(qualifier);
                 if !java_class_qualifier && self.any_ref_identity_operator_name(selection.name) {
                     let Some(symbol) =
-                        self.any_ref_identity_symbol_for_receiver(receiver_view, selection.name)
+                        self.any_ref_identity_symbol_for_receiver(receiver_view, selection.name)?
                     else {
                         return Err(TyperError::MemberNotFound {
                             source: self.source,
@@ -580,16 +585,13 @@ impl SourceTyper<'_> {
                             name: selection.name,
                         });
                     };
-                    let source_members = self
-                        .lookup_overload_members_journaled(
-                            receiver_view,
-                            selection.name,
-                            info_journal,
-                        )
-                        .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+                    let source_shadows = self.source_declares_member_in_source_hierarchy(
+                        receiver_view,
+                        selection.name,
+                    )?;
                     // Do not let an overload set hide a source declaration
                     // that shadows the compiler-owned AnyRef identity member.
-                    if !source_members.is_empty() {
+                    if source_shadows {
                         return Err(TyperError::MemberNotFound {
                             source: self.source,
                             tree_index: function_tree.index(),
@@ -806,7 +808,7 @@ impl SourceTyper<'_> {
             // needed.
             let widened_type = if canonical_identity_application {
                 let widened = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
-                self.any_ref_identity_argument_view(widened)
+                self.any_ref_identity_argument_view(widened)?
                     .unwrap_or(widened)
             } else if matches!(
                 self.store.types.try_get(own_type),

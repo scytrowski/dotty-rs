@@ -582,11 +582,8 @@ impl SourceTyper<'_> {
                         self.widen_expression_type_journaled(prefix, info_journal, depth + 1)?;
                     let receiver = self.this_type_receiver_view(receiver)?;
                     let name = self.store.symbols.get(symbol).name;
-                    if self.any_ref_identity_symbol_for_receiver(receiver, name) == Some(symbol)
-                        && self
-                            .lookup_overload_members_journaled(receiver, name, info_journal)
-                            .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
-                            .is_empty()
+                    if self.any_ref_identity_symbol_for_receiver(receiver, name)? == Some(symbol)
+                        && !self.source_declares_member_in_source_hierarchy(receiver, name)?
                     {
                         return self.completed_expression_symbol_info(symbol, info_journal);
                     }

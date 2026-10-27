@@ -125,8 +125,27 @@ impl SourceTyper<'_> {
                 return Ok(Some(symbol));
             }
         }
+        let (source_package_candidates, external_package_candidates): (Vec<_>, Vec<_>) =
+            package_candidates.into_iter().partition(|symbol| {
+                matches!(
+                    self.store.symbols.get(*symbol).origin,
+                    SymbolOrigin::Source(_)
+                )
+            });
         if let Some(symbol) =
-            self.unique_type_candidate(&package_candidates, name, tree_index, position)?
+            self.unique_type_candidate(&source_package_candidates, name, tree_index, position)?
+        {
+            return Ok(Some(symbol));
+        }
+        if self
+            .definitions
+            .source_builtin_type(self.store, name)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        if let Some(symbol) =
+            self.unique_type_candidate(&external_package_candidates, name, tree_index, position)?
         {
             return Ok(Some(symbol));
         }
