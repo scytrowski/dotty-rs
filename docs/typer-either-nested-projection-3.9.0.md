@@ -50,7 +50,7 @@ Two deterministic passes of the unchanged 25-method audit produced identical
 normalized reports. Current main is **12/25 fully typed**; the complete
 per-method result is checked in at
 [`typer-either-nested-projection-3.9.0.tsv`](typer-either-nested-projection-3.9.0.tsv).
-The report is byte-identical to the #1764 PR-head audit.
+The checked-in TSV uses `-` in the final `typed_tree` field when a method has no typed tree, avoiding ambiguous trailing empty fields. The audit output itself is byte-identical to the #1764 PR-head report.
 
 | Root | Result on this base | First failure / note |
 | --- | --- | --- |
