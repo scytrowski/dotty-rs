@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 20959)
+Total output lines: 2470
+
 use dotty::jvm_tasty_plan::with_paired_jvm_tasty_class_plan;
 use dotty_classfile::classfile::{ClassFile, Reader};
 use dotty_classfile::tasty_link::TastyLinkId;
@@ -24,6 +27,8 @@ const COUNTER_FACTORY_RUNTIME: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactoryRuntime.scala");
 const COUNTER_OWNER: &str =
     include_str!("fixtures/jvm_tasty_object_composition/CounterOwner.scala");
+const COUNTER_OWNER_ALIAS: &str =
+    include_str!("fixtures/jvm_tasty_constructor_injection/CounterOwner.scala");
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
 const COUNTER_FACTORY_REFERENCE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def create(counter: Counter): Counter = counter\n";
@@ -962,6 +967,208 @@ fn reference_field_owner_emits_a_complete_deterministic_linked_batch() {
 }
 
 #[test]
+fn constructor_injected_reference_emits_complete_linked_batch_deterministically() {
+    let first = emit_paired_jvm_tasty_batch(
+        COUNTER_OWNER_ALIAS,
+        "CounterOwner.scala",
+        SourceId::from_index(17561),
+    )
+    .unwrap();
+    let second = emit_paired_jvm_tasty_batch(
+        COUNTER_OWNER_ALIAS,
+        "CounterOwner.scala",
+        SourceId::from_index(17562),
+    )
+    .unwrap();
+
+    assert_ne!(first.source_id(), second.source_id());
+    assert_eq!(first.classes().len(), 2);
+    assert_eq!(second.classes().len(), 2);
+    for (index, expected) in [
+        ("example/Counter.class", "example/Counter.tasty"),
+        ("example/CounterOwner.class", "example/CounterOwner.tasty"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let first = &first.classes()[index];
+        let second = &second.classes()[index];
+        assert_eq!((first.classfile_path(), first.tasty_path()), expected);
+        assert_eq!(first.classfile_bytes(), second.classfile_bytes());
+        assert_eq!(first.tasty_bytes(), second.tasty_bytes());
+        assert_eq!(first.tasty_link_id(), second.tasty_link_id());
+        let mut reader = Reader::new(first.classfile_bytes());
+        let class = ClassFile::decode(&mut reader).unwrap();
+        assert!(reader.is_at_end());
+        assert_eq!((class.version.major, class.version.minor), (65, 0));
+        assert_eq!(
+            class.constant_pool.class_name(class.this_class).unwrap(),
+            if index == 0 {
+                "example/Counter"
+            } else {
+                "example/CounterOwner"
+            }
+        );
+        validate_classfile_tasty_link(&class, first.tasty_bytes()).unwrap();
+    }
+
+    assert_eq!(
+        first
+            .classes()
+            .iter()
+            .flat_map(|pair| [pair.classfile_path(), pair.tasty_path()])
+            .collect::<Vec<_>>(),
+        [
+            "example/Counter.class",
+            "example/Counter.tasty",
+            "example/CounterOwner.class",
+            "example/CounterOwner.tasty",
+        ]
+    );
+    let stage = TestDirectory::new("constructor-injected-reference-batch");
+    let destination = stage.path().join("classes");
+    let published = publish_paired_batch(&destination, &first, None).unwrap();
+    assert_eq!(
+        published
+            .iter()
+            .map(|path| path.strip_prefix(&destination).unwrap().to_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "example/Counter.class",
+            "example/Counter.tasty",
+            "example/CounterOwner.class",
+            "example/CounterOwner.tasty",
+        ]
+    );
+    assert_eq!(read_relative_files(&destination).unwrap().len(), 4);
+    let owner = &first.classes()[1];
+    let mut reader = Reader::new(owner.classfile_bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    assert!(reader.is_at_end());
+    assert_eq!(class.fields.len(), 1);
+    assert_eq!(
+        class
+            .constant_pool
+            .utf8(class.fields[0].name_index)
+            .unwrap(),
+        "inner"
+    );
+    assert_eq!(
+        class
+            .constant_pool
+            .utf8(class.fields[0].descriptor_index)
+            .unwrap(),
+        "Lexample/Counter;"
+    );
+    assert!(
+        class.fields[0]
+            .access_flags
+            .contains(dotty_classfile::access_flags::ACC_PRIVATE)
+    );
+    assert!(
+        class.fields[0]
+            .access_flags
+            .contains(dotty_classfile::access_flags::ACC_FINAL)
+    );
+    let constructor = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "<init>")
+        .unwrap();
+    assert_eq!(
+        class
+            .constant_pool
+            .utf8(constructor.descriptor_index)
+            .unwrap(),
+        "(Lexample/Counter;)V"
+    );
+    let [Attribute::Code(constructor_code)] = constructor.attributes.as_slice() else {
+        panic!("injected-reference constructor has one Code attribute");
+    };
+    assert_eq!(constructor_code.max_locals, 2);
+    assert_eq!(
+        constructor_code
+            .code
+            .iter()
+            .filter(|byte| **byte == 0xbb)
+            .count(),
+        0,
+        "Owner constructor allocates no Counter"
+    );
+    assert_eq!(
+        constructor_code.code,
+        [
+            0x2a,
+            0xb7,
+            constructor_code.code[2],
+            constructor_code.code[3],
+            0x2a,
+            0x2b,
+            0xb5,
+            constructor_code.code[7],
+            constructor_code.code[8],
+            0xb1,
+        ]
+    );
+    let field_ref = ConstantPoolIndex(u16::from_be_bytes([
+        constructor_code.code[7],
+        constructor_code.code[8],
+    ]));
+    let ConstantPoolEntry::Fieldref {
+        class_index,
+        name_and_type_index,
+    } = class.constant_pool.get(field_ref).unwrap()
+    else {
+        panic!("constructor initializes inner through CONSTANT_Fieldref");
+    };
+    assert_eq!(
+        class.constant_pool.class_name(*class_index).unwrap(),
+        "example/CounterOwner"
+    );
+    assert_eq!(
+        class
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("inner", "Lexample/Counter;")
+    );
+    let read = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "read")
+        .unwrap();
+    assert_eq!(
+        class.constant_pool.utf8(read.descriptor_index).unwrap(),
+        "()I"
+    );
+    let [Attribute::Code(read_code)] = read.attributes.as_slice() else {
+        panic!("Owner.read has one Code attribute");
+    };
+    assert_eq!(&read_code.code[..2], &[0x2a, 0xb4]);
+    assert_eq!(read_code.code[4], 0xb6);
+    assert_eq!(read_code.code[7], 0xac);
+    let method_ref = ConstantPoolIndex(u16::from_be_bytes([read_code.code[5], read_code.code[6]]));
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = class.constant_pool.get(method_ref).unwrap()
+    else {
+        panic!("Owner.read calls Counter.get through CONSTANT_Methodref");
+    };
+    assert_eq!(
+        class.constant_pool.class_name(*class_index).unwrap(),
+        "example/Counter"
+    );
+    assert_eq!(
+        class
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("get", "()I")
+    );
+}
+
+#[test]
 fn reference_field_owner_batch_executes_on_verified_jdk21() {
     if !require_jdk_21_or_skip() {
         return;
@@ -985,121 +1192,7 @@ fn reference_field_owner_batch_executes_on_verified_jdk21() {
             "example/Counter.class",
             "example/Counter.tasty",
             "example/CounterOwner.class",
-            "example/CounterOwner.tasty",
-        ]
-    );
-    let classfile_paths = batch
-        .classes()
-        .iter()
-        .map(|pair| classes.join(pair.classfile_path()))
-        .collect::<Vec<_>>();
-    let original_hashes = classfile_paths
-        .iter()
-        .map(|path| sha256sum(path))
-        .collect::<Vec<_>>();
-
-    let javap = Command::new("javap")
-        .args([
-            "-classpath",
-            classes.to_str().unwrap(),
-            "-p",
-            "-s",
-            "-c",
-            "-v",
-            "example.CounterOwner",
-        ])
-        .output()
-        .expect("start JDK 21 javap for the Rust CounterOwner class");
-    assert!(
-        javap.status.success(),
-        "javap rejected Rust CounterOwner.class:\n{}",
-        String::from_utf8_lossy(&javap.stderr)
-    );
-    let javap = String::from_utf8_lossy(&javap.stdout);
-    assert!(javap.contains("major version: 65"), "{javap}");
-    for expected in [
-        "private final example.Counter inner;",
-        "descriptor: Lexample/Counter;",
-        "public example.CounterOwner(int);",
-        "descriptor: (I)V",
-        "public int read();",
-        "descriptor: ()I",
-        "Method java/lang/Object.\"<init>\":()V",
-        "new           #",
-        "Method example/Counter.\"<init>\":(I)V",
-        "putfield      #",
-        "getfield      #",
-        "invokevirtual #",
-        "Method example/Counter.get:()I",
-    ] {
-        assert!(
-            javap.contains(expected),
-            "javap output omitted {expected:?}:\n{javap}"
-        );
-    }
-
-    let harness = output.path().join("CounterOwnerRuntimeHarness.java");
-    let harness_classes = output.path().join("harness-classes");
-    std::fs::create_dir(&harness_classes).unwrap();
-    std::fs::write(
-        &harness,
-        r#"public final class CounterOwnerRuntimeHarness {
-    public static void main(String[] args) {
-        int[] seeds = {7, 42, 0, -3};
-        example.CounterOwner[] owners = new example.CounterOwner[seeds.length];
-        for (int index = 0; index < seeds.length; index++) {
-            owners[index] = new example.CounterOwner(seeds[index]);
-        }
-        for (int repetition = 0; repetition < 3; repetition++) {
-            for (int index = 0; index < seeds.length; index++) {
-                expect(owners[index].read(), seeds[index]);
-            }
-        }
-        System.out.println("independent owners=7,42,0,-3; repeated=3");
-    }
-
-    private static void expect(int actual, int expected) {
-        if (actual != expected) {
-            throw new AssertionError("expected " + expected + ", got " + actual);
-        }
-    }
-}
-"#,
-    )
-    .unwrap();
-    let javac = Command::new("javac")
-        .arg("-classpath")
-        .arg(&classes)
-        .arg("-d")
-        .arg(&harness_classes)
-        .arg(&harness)
-        .output()
-        .expect("start JDK 21 javac for the Rust CounterOwner harness");
-    assert!(
-        javac.status.success(),
-        "javac rejected the Rust CounterOwner batch:\n{}",
-        String::from_utf8_lossy(&javac.stderr)
-    );
-
-    let classpath = std::env::join_paths([harness_classes.as_path(), classes.as_path()]).unwrap();
-    let java = Command::new("java")
-        .args(["-Xverify:all", "-ea", "-classpath"])
-        .arg(classpath)
-        .arg("CounterOwnerRuntimeHarness")
-        .output()
-        .expect("start JDK 21 verifier and Rust CounterOwner harness");
-    assert!(
-        java.status.success(),
-        "java -Xverify:all rejected or failed the Rust CounterOwner batch:\n{}\n{}",
-        String::from_utf8_lossy(&java.stdout),
-        String::from_utf8_lossy(&java.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&java.stdout).trim(),
-        "independent owners=7,42,0,-3; repeated=3"
-    );
-
-    for (index, (path, pair)) in classfile_paths.iter().zip(batch.classes()).enumerate() {
+            "example/CounterOw…959 tokens truncated…e() {
         assert_eq!(sha256sum(path), original_hashes[index]);
         assert_eq!(
             std::fs::read(path).unwrap(),
