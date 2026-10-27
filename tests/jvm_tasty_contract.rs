@@ -745,6 +745,32 @@ fn reference_field_owner_batch_rejects_forged_constructor_and_dispatch_shapes() 
                 }) if reason.contains("expected example/CounterOwner.inner:Lexample/Counter;")
             ));
 
+            let mut wrong_declared_field_descriptor = artifacts.clone();
+            mutate_declared_field_descriptor(
+                &mut wrong_declared_field_descriptor,
+                "Lexample/Account;",
+            );
+            let owner_classfile = wrong_declared_field_descriptor
+                .classfiles
+                .iter()
+                .find(|artifact| artifact.classfile_path == "example/CounterOwner.class")
+                .unwrap();
+            let mut reader = Reader::new(&owner_classfile.classfile_bytes);
+            let owner = ClassFile::decode(&mut reader).unwrap();
+            assert_eq!(
+                owner.constant_pool.utf8(owner.fields[0].descriptor_index),
+                Ok("Lexample/Account;")
+            );
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_declared_field_descriptor),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 1,
+                    phase: "member ABI",
+                    reason,
+                    ..
+                }) if reason == "decoded fields differ from checked source ABI"
+            ));
+
             let mut wrong_dispatch_target = artifacts.clone();
             mutate_owner_method_code(
                 &mut wrong_dispatch_target,
@@ -932,6 +958,67 @@ fn mutate_fieldref_descriptor(
     let new_descriptor_index = ConstantPoolIndex(constant_pool_count);
     artifact.classfile_bytes[*entry_offset + 3..*entry_offset + 5]
         .copy_from_slice(&new_descriptor_index.0.to_be_bytes());
+}
+
+fn mutate_declared_field_descriptor(artifacts: &mut JvmTastyBatchArtifacts, descriptor: &str) {
+    let artifact = artifacts
+        .classfiles
+        .iter_mut()
+        .find(|artifact| artifact.classfile_path == "example/CounterOwner.class")
+        .unwrap();
+    let (descriptor_index, original, constant_pool_count) = {
+        let mut reader = Reader::new(&artifact.classfile_bytes);
+        let class = ClassFile::decode(&mut reader).unwrap();
+        let [field] = class.fields.as_slice() else {
+            panic!("CounterOwner has exactly one declared field");
+        };
+        (
+            field.descriptor_index,
+            class
+                .constant_pool
+                .utf8(field.descriptor_index)
+                .unwrap()
+                .to_owned(),
+            {
+                let mut reader = Reader::new(&artifact.classfile_bytes);
+                let header = reader.read_bytes(10).unwrap();
+                u16::from_be_bytes([header[8], header[9]])
+            },
+        )
+    };
+    assert!(descriptor.is_ascii());
+    assert_eq!(descriptor.len(), original.len());
+
+    let bytes = &mut artifact.classfile_bytes;
+    let mut cursor = 10usize;
+    let mut index = 1u16;
+    let mut replaced = false;
+    while index < constant_pool_count {
+        let tag = bytes[cursor];
+        cursor += 1;
+        match tag {
+            1 => {
+                let length = usize::from(u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]));
+                cursor += 2;
+                if index == descriptor_index.0 {
+                    assert_eq!(&bytes[cursor..cursor + length], original.as_bytes());
+                    bytes[cursor..cursor + length].copy_from_slice(descriptor.as_bytes());
+                    replaced = true;
+                }
+                cursor += length;
+            }
+            3 | 4 | 9 | 10 | 11 | 12 | 17 | 18 => cursor += 4,
+            5 | 6 => {
+                cursor += 8;
+                index += 1;
+            }
+            7 | 8 | 16 | 19 | 20 => cursor += 2,
+            15 => cursor += 3,
+            other => panic!("unexpected constant-pool tag {other}"),
+        }
+        index += 1;
+    }
+    assert!(replaced, "declared inner descriptor UTF8 was replaced");
 }
 
 #[test]

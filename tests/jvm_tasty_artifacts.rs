@@ -1128,6 +1128,116 @@ fn sha256sum(path: &std::path::Path) -> String {
 }
 
 #[test]
+fn reference_field_batch_publication_rejects_partial_and_faulted_results() {
+    let batch = emit_paired_jvm_tasty_batch(
+        COUNTER_OWNER,
+        "tests/fixtures/jvm_tasty_object_composition/CounterOwner.scala",
+        SourceId::from_index(1722),
+    )
+    .unwrap();
+    let pairs = batch_publish_pairs(&batch);
+    let base = TestDirectory::new("object-composition-publish-faults");
+
+    let missing_pair = base.path().join("missing-pair");
+    assert!(matches!(
+        publish_batch_pairs(&missing_pair, &pairs[..1], None),
+        Err(BatchPublishError::InvalidManifest {
+            phase: "manifest shape",
+            ..
+        })
+    ));
+    assert!(!missing_pair.exists());
+
+    let malformed_sidecar = [0u8; 0];
+    let mut malformed_pairs = pairs.clone();
+    malformed_pairs[1].tasty_bytes = &malformed_sidecar;
+    let malformed_destination = base.path().join("malformed-owner-sidecar");
+    assert!(matches!(
+        publish_batch_pairs(&malformed_destination, &malformed_pairs, None),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 1,
+            phase: "TASTy decode",
+            ..
+        })
+    ));
+    assert!(!malformed_destination.exists());
+
+    let mut duplicate_pairs = pairs.clone();
+    duplicate_pairs[1].classfile_path = duplicate_pairs[0].classfile_path;
+    let duplicate_destination = base.path().join("duplicate-path");
+    assert!(matches!(
+        publish_batch_pairs(&duplicate_destination, &duplicate_pairs, None),
+        Err(BatchPublishError::InvalidManifest {
+            phase: "artifact paths",
+            ..
+        })
+    ));
+    assert!(!duplicate_destination.exists());
+
+    let owner_link = batch.classes()[1].tasty_link_id();
+    let mut mismatched_classfile = pairs[1].classfile_bytes.to_vec();
+    let link_offset = mismatched_classfile
+        .windows(owner_link.as_bytes().len())
+        .position(|window| window == owner_link.as_bytes())
+        .expect("CounterOwner classfile contains its TASTy link UUID");
+    mismatched_classfile[link_offset] ^= 0x80;
+    let mut mismatched_pairs = pairs.clone();
+    mismatched_pairs[1].classfile_bytes = &mismatched_classfile;
+    let mismatched_destination = base.path().join("mismatched-owner-link");
+    assert!(matches!(
+        publish_batch_pairs(&mismatched_destination, &mismatched_pairs, None),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 1,
+            phase: "classfile/TASTy link",
+            ..
+        })
+    ));
+    assert!(!mismatched_destination.exists());
+
+    for (index, fault) in [
+        BatchPublishFault::AfterStagedFiles(1),
+        BatchPublishFault::AfterStagedFiles(2),
+        BatchPublishFault::AfterStagedFiles(3),
+        BatchPublishFault::AfterStagedFiles(4),
+        BatchPublishFault::BeforePromotion,
+        BatchPublishFault::AfterPromotion,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let destination = base.path().join(format!("injected-failure-{index}"));
+        assert!(matches!(
+            publish_paired_batch(&destination, &batch, Some(fault)),
+            Err(BatchPublishError::Io { .. })
+        ));
+        assert!(!destination.exists(), "fault case {index}");
+        assert_eq!(
+            std::fs::read_dir(base.path()).unwrap().count(),
+            0,
+            "fault case {index} must remove its private staging tree"
+        );
+    }
+
+    let existing_destination = base.path().join("existing-output");
+    std::fs::create_dir(&existing_destination).unwrap();
+    let sentinel = existing_destination.join("sentinel");
+    std::fs::write(&sentinel, b"preserve existing output").unwrap();
+    assert!(matches!(
+        publish_paired_batch(&existing_destination, &batch, None),
+        Err(BatchPublishError::DestinationExists { .. })
+    ));
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap(),
+        b"preserve existing output"
+    );
+    assert_eq!(
+        read_relative_files(&existing_destination).unwrap(),
+        ["sentinel"]
+    );
+    assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 1);
+}
+
+#[test]
 fn nested_reference_field_call_rejects_the_complete_batch() {
     let source = COUNTER_OWNER.replace("inner.get()", "inner.get() + 1");
     assert!(matches!(
