@@ -1713,6 +1713,168 @@ fn reference_field_batch_publication_rejects_partial_and_faulted_results() {
 }
 
 #[test]
+fn constructor_alias_batch_publication_rejects_invalid_pairs_and_partial_results() {
+    let batch = emit_paired_jvm_tasty_batch(
+        COUNTER_OWNER_ALIAS,
+        "tests/fixtures/jvm_tasty_constructor_injection/CounterOwner.scala",
+        SourceId::from_index(17591),
+    )
+    .unwrap();
+    let pairs = batch_publish_pairs(&batch);
+    let base = TestDirectory::new("constructor-alias-publish-faults");
+
+    let missing_pair = base.path().join("missing-pair");
+    assert!(matches!(
+        publish_batch_pairs(&missing_pair, &pairs[..1], None),
+        Err(BatchPublishError::InvalidManifest {
+            phase: "manifest shape",
+            ..
+        })
+    ));
+    assert!(!missing_pair.exists());
+
+    let mut foreign_source = pairs.clone();
+    foreign_source[1].source_id = SourceId::from_index(17592);
+    let foreign_source_destination = base.path().join("foreign-source");
+    assert!(matches!(
+        publish_batch_pairs(&foreign_source_destination, &foreign_source, None),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 1,
+            phase: "source identity",
+            ..
+        })
+    ));
+    assert!(!foreign_source_destination.exists());
+
+    let mut duplicate_class = pairs.clone();
+    duplicate_class[1].class = duplicate_class[0].class;
+    let duplicate_class_destination = base.path().join("duplicate-class");
+    assert!(matches!(
+        publish_batch_pairs(&duplicate_class_destination, &duplicate_class, None),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 1,
+            phase: "class identity",
+            ..
+        })
+    ));
+    assert!(!duplicate_class_destination.exists());
+
+    let mut duplicate_path = pairs.clone();
+    duplicate_path[1].classfile_path = duplicate_path[0].classfile_path;
+    let duplicate_path_destination = base.path().join("duplicate-path");
+    assert!(matches!(
+        publish_batch_pairs(&duplicate_path_destination, &duplicate_path, None),
+        Err(BatchPublishError::InvalidManifest {
+            phase: "artifact paths",
+            ..
+        })
+    ));
+    assert!(!duplicate_path_destination.exists());
+
+    let mut unsafe_path = pairs.clone();
+    unsafe_path[1].classfile_path = "../CounterOwner.class";
+    let unsafe_path_destination = base.path().join("unsafe-path");
+    assert!(matches!(
+        publish_batch_pairs(&unsafe_path_destination, &unsafe_path, None),
+        Err(BatchPublishError::InvalidManifest {
+            phase: "class-file path",
+            ..
+        })
+    ));
+    assert!(!unsafe_path_destination.exists());
+
+    let malformed_owner_class = [];
+    let mut malformed_class_pair = pairs.clone();
+    malformed_class_pair[1].classfile_bytes = &malformed_owner_class;
+    let malformed_class_destination = base.path().join("malformed-owner-class");
+    assert!(matches!(
+        publish_batch_pairs(&malformed_class_destination, &malformed_class_pair, None),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 1,
+            phase: "class-file decode",
+            ..
+        })
+    ));
+    assert!(!malformed_class_destination.exists());
+
+    let malformed_owner_sidecar = [];
+    let mut malformed_sidecar_pair = pairs.clone();
+    malformed_sidecar_pair[1].tasty_bytes = &malformed_owner_sidecar;
+    let malformed_sidecar_destination = base.path().join("malformed-owner-sidecar");
+    assert!(matches!(
+        publish_batch_pairs(
+            &malformed_sidecar_destination,
+            &malformed_sidecar_pair,
+            None
+        ),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 1,
+            phase: "TASTy decode",
+            ..
+        })
+    ));
+    assert!(!malformed_sidecar_destination.exists());
+
+    let owner_link = batch.classes()[1].tasty_link_id();
+    let mut stale_owner_class = pairs[1].classfile_bytes.to_vec();
+    let link_offset = stale_owner_class
+        .windows(owner_link.as_bytes().len())
+        .position(|window| window == owner_link.as_bytes())
+        .expect("CounterOwner classfile contains its TASTy link UUID");
+    stale_owner_class[link_offset] ^= 0x80;
+    let mut stale_link_pair = pairs.clone();
+    stale_link_pair[1].classfile_bytes = &stale_owner_class;
+    let stale_link_destination = base.path().join("stale-owner-link");
+    assert!(matches!(
+        publish_batch_pairs(&stale_link_destination, &stale_link_pair, None),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 1,
+            phase: "classfile/TASTy link",
+            ..
+        })
+    ));
+    assert!(!stale_link_destination.exists());
+
+    for (index, fault) in [
+        BatchPublishFault::AfterStagedFiles(1),
+        BatchPublishFault::AfterStagedFiles(2),
+        BatchPublishFault::AfterStagedFiles(3),
+        BatchPublishFault::AfterStagedFiles(4),
+        BatchPublishFault::BeforePromotion,
+        BatchPublishFault::AfterPromotion,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let destination = base.path().join(format!("injected-failure-{index}"));
+        assert!(matches!(
+            publish_paired_batch(&destination, &batch, Some(fault)),
+            Err(BatchPublishError::Io { .. })
+        ));
+        assert!(!destination.exists(), "fault case {index}");
+        assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
+    }
+
+    let existing_destination = base.path().join("existing-output");
+    std::fs::create_dir(&existing_destination).unwrap();
+    let sentinel = existing_destination.join("sentinel");
+    std::fs::write(&sentinel, b"preserve constructor alias output").unwrap();
+    assert!(matches!(
+        publish_paired_batch(&existing_destination, &batch, None),
+        Err(BatchPublishError::DestinationExists { .. })
+    ));
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap(),
+        b"preserve constructor alias output"
+    );
+    assert_eq!(
+        read_relative_files(&existing_destination).unwrap(),
+        ["sentinel"]
+    );
+    assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 1);
+}
+
+#[test]
 fn nested_reference_field_call_rejects_the_complete_batch() {
     let source = COUNTER_OWNER.replace("inner.get()", "inner.get() + 1");
     assert!(matches!(

@@ -482,6 +482,36 @@ example.Counter`, and JVM `NoClassDefFoundError: example/Counter` or
 `NoClassDefFoundError: example/CounterOwner` at the respective first failing
 layer.
 
+## Combined release gate (#1759)
+
+The strict Scala consumer gate carries one emitted `Counter`/`CounterOwner`
+batch through staging, Scala compilation, and execution. Its separate
+`Consumer.scala` is compiled by pinned Scala 3.9, then a small Java launcher
+runs that client with `java -Xverify:all` against the original Rust classfiles.
+The Scala client checks reference identity for both owners, observes mutations
+`7 → 42 → -9`, and confirms the independent `Counter(3)` owner remains at `3`.
+The consumer harness verifies both classes' pre/post hashes and classpath order;
+Scala-rebuilt owner output is used only for the isolated `-from-tasty` check.
+
+The alias batch now also has a publisher failure matrix using the same exact
+producer source. It rejects an incomplete pair list, foreign source session,
+duplicate class identity, duplicate/unsafe paths, malformed Owner classfile or
+sidecar, and a stale Owner TASTy link before creating the destination. Injected
+write failures after each of the four staged artifacts, before promotion, and
+after promotion leave no accepted destination. A pre-existing destination and
+its sentinel are preserved. These are handled-error guarantees; they do not
+claim cross-file crash atomicity.
+
+The release gates ran on PR #1790's merged tree (`04dbdd3`). GitHub Actions
+passed the strict Scala 3.9 release step, the pinned PARAM-address oracle, the
+JDK 21 verifier/publisher gate, formatting, frontend boundaries, Clippy,
+rustdoc, the full workspace test suite, and diff checks. The pinned toolchain
+was Scala `3.9.0` at revision
+`777528f19a58e794c9954a42f433373472ec57f8`, Eclipse Temurin `21.0.8+9`, and
+Rust/Cargo `1.98.1` (`rustc` commit `48a229cea`). The constructor-alias
+consumer's original Rust batch returned `-9`; its second independent owner
+returned `3` after the first Counter's mutations.
+
 Reproduce the strict independent Scala consumer with the pinned Scala checkout,
 JDK 21, and SHA-verified Maven cache configured:
 
@@ -503,6 +533,9 @@ focused repository checks are:
 cargo test -p dotty --test jvm_tasty_object_composition --locked
 cargo test -p dotty --test jvm_tasty_object_composition \
   constructor_injection_negative_matrix_pins_first_batch_rejection --locked
+cargo test -p dotty --test jvm_tasty_artifacts \
+  constructor_alias_batch_publication_rejects_invalid_pairs_and_partial_results \
+  --locked -- --nocapture
 SCALA39_ROOT=/path/to/pinned-scala JAVA_HOME=/path/to/temurin-21 \
 COURSIER_MAVEN_ROOT=/path/to/verified-maven-cache \
 DOTTY_REQUIRE_SCALA_TASTY_CONSTRUCTOR_INJECTION_CONSUMER=1 \
