@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 22222)
-Total output lines: 2294
-
 //! Read-only consistency proofs for the audited JVM / Scala 3 TASTy overlap.
 //!
 //! This crate is the acyclic coordination layer between `dotty-jvm` and
@@ -1025,7 +1022,228 @@ fn validate_reference_field_constructor_code(
     let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Class { name_index }) =
         class_file.constant_pool.get(class_index)
     else {
-        return Err("con…2222 tokens truncated…onstructor: bool,
+        return Err("constructor new does not reference CONSTANT_Class".into());
+    };
+    let allocated_class = class_file
+        .constant_pool
+        .utf8(*name_index)
+        .map_err(|error| format!("invalid constructed class name: {error:?}"))?;
+    if allocated_class != target.identity().internal_name() {
+        return Err(format!(
+            "constructor allocates {allocated_class}, expected {}",
+            target.identity().internal_name()
+        ));
+    }
+    method_ref(
+        cp_index(11),
+        target.identity().internal_name(),
+        ("<init>", target_constructor.descriptor().as_str()),
+    )?;
+
+    let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+        class_index,
+        name_and_type_index,
+    }) = class_file.constant_pool.get(cp_index(14))
+    else {
+        return Err("constructor putfield does not reference CONSTANT_Fieldref".into());
+    };
+    let owner = class_file
+        .constant_pool
+        .class_name(*class_index)
+        .map_err(|error| format!("invalid initialized field owner: {error:?}"))?;
+    let initialized_field = class_file
+        .constant_pool
+        .name_and_type(*name_and_type_index)
+        .map_err(|error| format!("invalid initialized field name/descriptor: {error:?}"))?;
+    if owner != proof.internal_name() || initialized_field != (field.name(), field.descriptor()) {
+        return Err(format!(
+            "constructor initializes {owner}.{}:{}, expected {}.{}:{}",
+            initialized_field.0,
+            initialized_field.1,
+            proof.internal_name(),
+            field.name(),
+            field.descriptor()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_reference_field_alias_constructor_code(
+    class_file: &ClassFile<'_>,
+    proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
+    field: &dotty_jvm::JvmFieldMetadata,
+    target: &JvmClassMetadata,
+    template_parameter: SymbolId,
+) -> Result<(), String> {
+    let target_descriptor = format!("L{};", target.identity().internal_name());
+    if field.descriptor() != target_descriptor {
+        return Err(format!(
+            "reference alias field descriptor is {}, expected {target_descriptor}",
+            field.descriptor()
+        ));
+    }
+    let expected_descriptor = format!("({target_descriptor})V");
+    let constructor_metadata = proof
+        .metadata
+        .constructor()
+        .filter(|constructor| constructor.descriptor().as_str() == expected_descriptor)
+        .ok_or_else(|| {
+            format!("reference alias owner has no checked {expected_descriptor} constructor")
+        })?;
+    if constructor_metadata.parameters().len() != 1
+        || !constructor_metadata.access_flags().is_public()
+    {
+        return Err("reference alias owner constructor must be public with one formal".into());
+    }
+
+    let tasty = proof.tasty_plan.plan();
+    let [constructor_clause] = tasty.constructor.parameter_clauses.as_slice() else {
+        return Err("reference alias TASTy plan must have one constructor clause".into());
+    };
+    let [derived_parameter] = constructor_clause.as_slice() else {
+        return Err("reference alias TASTy plan must have one constructor formal".into());
+    };
+    let TreeKind::DefDef(constructor_definition) =
+        &tasty.source_ast.get(tasty.constructor.source_tree).kind
+    else {
+        return Err("reference alias source constructor definition is absent".into());
+    };
+    let [source_clause] = constructor_definition.value_param_clauses.as_slice() else {
+        return Err("reference alias source constructor must have one clause".into());
+    };
+    let [source_parameter_tree] = source_clause.as_slice() else {
+        return Err("reference alias source constructor must have one formal".into());
+    };
+    let source_parameter = tasty
+        .source_index
+        .symbol_at(tasty.source.id, *source_parameter_tree)
+        .ok_or_else(|| "reference alias template formal has no canonical identity".to_owned())?;
+    let template_record = tasty.store.symbols.get(source_parameter);
+    let derived_record = tasty.store.symbols.get(*derived_parameter);
+    if source_parameter != template_parameter
+        || tasty.source_index.derived_symbol_at(
+            tasty.constructor.symbol,
+            tasty.source.id,
+            *source_parameter_tree,
+        ) != Some(*derived_parameter)
+        || constructor_metadata.parameters()[0].symbol() != *derived_parameter
+        || template_record.kind != SymbolKind::Parameter
+        || template_record.owner != Some(tasty.class)
+        || template_record.origin != SymbolOrigin::Source(tasty.source.id)
+        || derived_record.kind != SymbolKind::Parameter
+        || derived_record.owner != Some(tasty.constructor.symbol)
+        || derived_record.origin != SymbolOrigin::Source(tasty.source.id)
+        || tasty.source_index.definition_of(source_parameter)
+            != Some(SourceDefinition::Canonical {
+                source: tasty.source.id,
+                tree: *source_parameter_tree,
+            })
+    {
+        return Err(
+            "reference alias constructor formal does not preserve the exact template/derived source identities"
+                .into(),
+        );
+    }
+
+    let constructor = class_file
+        .methods
+        .iter()
+        .find(|method| {
+            class_file.constant_pool.utf8(method.name_index).ok() == Some("<init>")
+                && class_file.constant_pool.utf8(method.descriptor_index).ok()
+                    == Some(expected_descriptor.as_str())
+        })
+        .ok_or_else(|| "reference alias constructor is absent from class bytes".to_owned())?;
+    let [dotty_classfile::attribute::Attribute::Code(code)] = constructor.attributes.as_slice()
+    else {
+        return Err("reference alias constructor has no unique Code attribute".into());
+    };
+    // One reference formal occupies local 1 after `this`. This exact sequence
+    // proves the already-initialized incoming object is copied into the field
+    // once, after the superclass constructor, without allocating a target.
+    if code.code.len() != 10
+        || code.code[0] != 0x2a
+        || code.code[1] != 0xb7
+        || code.code[4] != 0x2a
+        || code.code[5] != 0x2b
+        || code.code[6] != 0xb5
+        || code.code[9] != 0xb1
+        || code.max_locals != 2
+        || code.max_stack != 2
+    {
+        return Err(format!(
+            "constructor does not contain the bounded super/aload_0/aload_1/putfield/return alias shape: {:02x?}",
+            code.code
+        ));
+    }
+    let cp_index = |offset: usize| {
+        dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+            code.code[offset],
+            code.code[offset + 1],
+        ]))
+    };
+    let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    }) = class_file.constant_pool.get(cp_index(2))
+    else {
+        return Err("reference alias super invocation is not CONSTANT_Methodref".into());
+    };
+    let parent = proof
+        .metadata
+        .superclass()
+        .ok_or_else(|| "checked owner ABI has no direct parent".to_owned())?
+        .parent_internal_name();
+    if class_file
+        .constant_pool
+        .class_name(*class_index)
+        .map_err(|error| format!("invalid alias superclass reference: {error:?}"))?
+        != parent
+        || class_file
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .map_err(|error| format!("invalid alias super constructor reference: {error:?}"))?
+            != ("<init>", "()V")
+    {
+        return Err(
+            "reference alias constructor does not call its checked direct superclass".into(),
+        );
+    }
+    let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+        class_index,
+        name_and_type_index,
+    }) = class_file.constant_pool.get(cp_index(7))
+    else {
+        return Err("reference alias putfield is not CONSTANT_Fieldref".into());
+    };
+    let owner = class_file
+        .constant_pool
+        .class_name(*class_index)
+        .map_err(|error| format!("invalid reference alias field owner: {error:?}"))?;
+    let initialized_field = class_file
+        .constant_pool
+        .name_and_type(*name_and_type_index)
+        .map_err(|error| format!("invalid reference alias field name/descriptor: {error:?}"))?;
+    if owner != proof.internal_name() || initialized_field != (field.name(), field.descriptor()) {
+        return Err(format!(
+            "constructor initializes {owner}.{}:{}, expected {}.{}:{}",
+            initialized_field.0,
+            initialized_field.1,
+            proof.internal_name(),
+            field.name(),
+            field.descriptor()
+        ));
+    }
+    Ok(())
+}
+
+struct CrossClassMethodRef {
+    caller: SymbolId,
+    target: SymbolId,
+    owner_internal_name: String,
+    name: String,
+    descriptor: String,
+    constructor: bool,
     receiver_field: Option<SymbolId>,
 }
 
