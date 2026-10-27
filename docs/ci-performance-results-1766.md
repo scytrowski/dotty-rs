@@ -48,6 +48,8 @@ The verbose rustc invocations show `-C opt-level=1` for both the `dotty_classloa
 
 ## Timing reports and commands
 
+The complete captured evidence is preserved in a compressed, base64-encoded tar archive: [issue-1766-evidence.tar.gz.base64](ci-performance-baseline/issue-1766-evidence.tar.gz.base64) (decoded archive SHA-256: `4a7379d2346e6990004a1eef6d96722a39f524228199332fa196d6ef8e0250a4`). Download the linked file and decode/extract it with `base64 -d issue-1766-evidence.tar.gz.base64 | tar -xz`. It contains full test stdout/stderr, build and run measurement records, Cargo artifact JSON streams, and verbose rustc command output used to verify profile flags.
+
 Cargo's clean-build timing reports are preserved alongside this note:
 
 - [Baseline opt-level 1](ci-performance-baseline/issue-1766-opt1-cold-cargo-timing.html)
