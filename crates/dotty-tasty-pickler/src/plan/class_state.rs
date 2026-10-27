@@ -44,12 +44,13 @@ struct SameBatchReferenceFieldData {
     target_class: SymbolId,
     target_class_tree: TreeId<Untyped>,
     type_name: Name,
+    template_parameter_alias: Option<SymbolId>,
 }
 
 /// Read-only proof for one private immutable field whose class type is another
-/// canonical public class in this plan's exact source batch. The initializer
-/// remains pending: this proof records its source and typed roots and result
-/// identity, but does not authorize expression serialization.
+/// canonical public class in this plan's exact source batch. The proof records
+/// its source and typed roots and validates the bounded initializer shape
+/// before the serializer emits the initializer.
 #[derive(Clone, Copy)]
 pub struct ValidatedSameBatchReferenceField<'p, 'a> {
     plan: &'p ClassStatePicklePlan<'a>,
@@ -77,7 +78,7 @@ impl ValidatedSameBatchReferenceField<'_, '_> {
         self.data.field.declared_type
     }
 
-    /// Original source initializer tree. It is pending and is not serialized.
+    /// Original source initializer tree bound to this validated proof.
     pub fn source_initializer(&self) -> TreeId<Untyped> {
         let TreeKind::ValDef(definition) =
             &self.plan.source_ast.get(self.data.field.source_tree).kind
@@ -90,6 +91,12 @@ impl ValidatedSameBatchReferenceField<'_, '_> {
     /// Exact typed initializer root bound to the source initializer.
     pub fn typed_initializer(&self) -> TreeId<Typed> {
         self.data.field.typed_initializer
+    }
+
+    /// Class-owned constructor-template parameter used by an audited alias
+    /// initializer. The typed source reference remains constructor-owned.
+    pub fn template_parameter_alias(&self) -> Option<SymbolId> {
+        self.data.template_parameter_alias
     }
 
     /// Source field declaration tree.
@@ -1219,6 +1226,7 @@ impl ClassStateValidator<'_, '_> {
             target_class,
             target_class_tree: tree,
             type_name: type_syntax,
+            template_parameter_alias: None,
         })
     }
 
@@ -1228,7 +1236,7 @@ impl ClassStateValidator<'_, '_> {
         constructor: &PrimaryConstructorInputPlan,
         target_class: SymbolId,
         source_rhs: TreeId<Untyped>,
-    ) -> Result<(), PickleError> {
+    ) -> Result<Option<SymbolId>, PickleError> {
         let plan = self.plan;
         let source_root = self.source_tree(source_rhs)?;
         let typed_root = self.typed_tree(field.typed_initializer)?;
@@ -1246,6 +1254,94 @@ impl ClassStateValidator<'_, '_> {
                 expected: field.typed_initializer,
                 actual: binding(source_rhs),
             });
+        }
+        if let (TreeKind::Ident(source_ident), TreeKind::Ident(typed_ident)) =
+            (&source_root.kind, &typed_root.kind)
+        {
+            let TreeKind::DefDef(constructor_definition) =
+                &self.source_tree(constructor.source_tree)?.kind
+            else {
+                return Err(PickleError::SourceShape {
+                    tree: constructor.source_tree,
+                    expected: SourceRole::Constructor,
+                });
+            };
+            if constructor_definition.value_param_clauses.len() != 1
+                || constructor.parameter_clauses.len() != 1
+                || constructor_definition.value_param_clauses[0].len() != 1
+                || constructor.parameter_clauses[0].len() != 1
+                || source_ident.name != typed_ident.name
+            {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::UnsafeFieldInitializer,
+                    symbol: Some(field.symbol),
+                });
+            }
+            let parameter_tree = constructor_definition.value_param_clauses[0][0];
+            let Some(template_parameter) =
+                plan.source_index.symbol_at(plan.source.id, parameter_tree)
+            else {
+                return Err(PickleError::SourceDefinition {
+                    symbol: constructor.symbol,
+                });
+            };
+            let constructor_parameter = constructor.parameter_clauses[0][0];
+            let derived_parameter = plan.source_index.derived_symbol_at(
+                constructor.symbol,
+                plan.source.id,
+                parameter_tree,
+            );
+            let source_definition = plan.source_index.definition_of(template_parameter);
+            let typed_target = match plan.store.types.try_get(typed_root.ty) {
+                Some(Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(target),
+                }) if *prefix == plan.definitions.no_prefix => Some(*target),
+                _ => None,
+            };
+            let parameter_type = self.completed(constructor_parameter)?;
+            let Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(parameter_class),
+                ..
+            }) = plan.store.types.try_get(parameter_type)
+            else {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::UnsafeFieldInitializer,
+                    symbol: Some(field.symbol),
+                });
+            };
+            let alias_name = source_ident.name;
+            let template_record = self.symbol(template_parameter)?;
+            let derived_record = self.symbol(constructor_parameter)?;
+            if source_ident.name != derived_record.name
+                || typed_target != Some(constructor_parameter)
+                || derived_parameter != Some(constructor_parameter)
+                || source_definition
+                    != Some(SourceDefinition::Canonical {
+                        source: plan.source.id,
+                        tree: parameter_tree,
+                    })
+                || template_record.kind != SymbolKind::Parameter
+                || template_record.owner != Some(plan.class)
+                || template_record.origin != SymbolOrigin::Source(plan.source.id)
+                || template_record.name != alias_name
+                || derived_record.kind != SymbolKind::Parameter
+                || derived_record.owner != Some(constructor.symbol)
+                || derived_record.origin != SymbolOrigin::Source(plan.source.id)
+                || derived_record.name != alias_name
+                || *parameter_class != target_class
+                || !self.same_type_ref_target(parameter_type, field.declared_type)
+                || source_root.position != typed_root.position
+                || source_root
+                    .position
+                    .is_none_or(|position| position.source() != plan.source.id)
+            {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::UnsafeFieldInitializer,
+                    symbol: Some(field.symbol),
+                });
+            }
+            return Ok(Some(template_parameter));
         }
         let (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply)) =
             (&source_root.kind, &typed_root.kind)
@@ -1425,7 +1521,7 @@ impl ClassStateValidator<'_, '_> {
                 actual: typed_root.ty,
             });
         }
-        Ok(())
+        Ok(None)
     }
 
     fn validate_field(
@@ -1550,20 +1646,25 @@ impl ClassStateValidator<'_, '_> {
         let source_initializer = self.source_tree(source_rhs)?;
         let typed = self.typed_tree(field.typed_initializer)?;
         if let Some(reference_field) = reference_field {
-            self.validate_pending_reference_initializer(
+            let template_parameter_alias = self.validate_pending_reference_initializer(
                 field,
                 constructor,
                 reference_field.target_class,
                 source_rhs,
             )?;
-            if !self.same_type_ref_target(typed.ty, field.declared_type) {
+            if template_parameter_alias.is_none()
+                && !self.same_type_ref_target(typed.ty, field.declared_type)
+            {
                 return Err(PickleError::FieldType {
                     symbol: field.symbol,
                     expected: field.declared_type,
                     actual: typed.ty,
                 });
             }
-            return Ok(Some(reference_field));
+            return Ok(Some(SameBatchReferenceFieldData {
+                template_parameter_alias,
+                ..reference_field
+            }));
         }
         match (&source_initializer.kind, &typed.kind) {
             (

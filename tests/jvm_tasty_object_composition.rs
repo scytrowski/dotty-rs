@@ -759,7 +759,7 @@ fn paired_producer_accepts_reference_field_receiver_cross_contract() {
 }
 
 #[test]
-fn constructor_reference_alias_preserves_source_identity_and_records_first_pickler_gaps() {
+fn constructor_reference_alias_preserves_source_identity_and_emits_source_tasty() {
     let source_id = SourceId::from_index(1751);
     let source = SourceText::new(REFERENCE_ALIAS_SOURCE).unwrap();
     let scanner = ContextualScanner::new(REFERENCE_ALIAS_SOURCE).unwrap();
@@ -1046,16 +1046,42 @@ fn constructor_reference_alias_preserves_source_identity_and_records_first_pickl
         },
         members: &owner_members,
     };
-    let direct_error = match class_plan.validate() {
-        Ok(_) => panic!("reference alias field plan remains unsupported in this audit"),
-        Err(error) => error,
+    let validated = class_plan
+        .validate()
+        .expect("the source-bound immutable reference alias is supported");
+    let reference_fields = validated.same_batch_reference_fields().collect::<Vec<_>>();
+    let [reference_field] = reference_fields.as_slice() else {
+        panic!("one immutable Counter alias is proved");
     };
+    assert_eq!(
+        reference_field.template_parameter_alias(),
+        Some(owner_template_parameter),
+        "the proof maps the typed constructor formal to the source-indexed class parameter"
+    );
+    let emitted = validated.pickle().unwrap();
+    let tasty = TastyFile::parse_and_validate_scala_3_9(emitted.bytes()).unwrap();
+    let tasty_index = tasty.ast_address_index().unwrap();
+    let alias = tasty_index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .find_map(|node| {
+            let body = tasty_index
+                .get(node.offset as u32)?
+                .decode_definition_body()
+                .ok()?;
+            let DefinitionBody::ValDef { name, rhs, .. } = body else {
+                return None;
+            };
+            (tasty.names().render(name).ok()? == "inner").then_some(rhs)
+        })
+        .expect("the emitted field declaration is present")
+        .expect("the alias has a source initializer")
+        .decode_reference()
+        .unwrap();
+    assert_eq!(alias.tag, TERMREFSYMBOL_TAG);
+    assert_eq!(alias.reference, 9);
     assert!(matches!(
-        direct_error,
-        dotty_tasty_pickler::PickleError::Unsupported {
-            feature: dotty_tasty_pickler::UnsupportedFeature::UnsafeFieldInitializer,
-            ..
-        }
+        alias.qualifier,
+        RawTree::Ast { tag: THIS_TAG, .. }
     ));
 
     let wrong_derived_formal = match (ClassStatePicklePlan {
@@ -1089,23 +1115,14 @@ fn constructor_reference_alias_preserves_source_identity_and_records_first_pickl
             if owner == owner_constructor
     ));
 
-    let paired_error = with_paired_jvm_tasty_batch_plan(
+    let paired = with_paired_jvm_tasty_batch_plan(
         REFERENCE_ALIAS_SOURCE,
         "CounterOwner.scala",
         SourceId::from_index(1752),
-        |_| (),
+        |batch| batch.classes[1].tasty_plan.pickle().unwrap(),
     )
-    .unwrap_err();
-    assert!(matches!(
-        paired_error,
-        PairedPlanError::BatchClass {
-            class_index: 1,
-            phase: "TASTy plan validation",
-            reason,
-            ..
-        }
-        if reason.contains("UnsafeFieldInitializer")
-    ));
+    .expect("paired source/TASTy planning accepts the exact alias fixture");
+    assert_eq!(paired.bytes(), emitted.bytes());
     assert_eq!(
         owner_parameter_tree,
         source_index

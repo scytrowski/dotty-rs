@@ -622,23 +622,28 @@ impl ValidatedClassStatePlan<'_, '_> {
                         context.primitive_type_syntax(field.declared_type)?
                     };
                     // A validated direct `new` field initializer is evaluated
-                    // in the primary constructor's parameter environment.
-                    // Its proof binds the exact source and typed roots and
-                    // checks the argument's canonical constructor parameter.
+                    // in the primary constructor's parameter environment. An
+                    // alias instead resolves through its canonical class-owned
+                    // template PARAM, as required by the Scala 3.9 field wire.
                     let expression_owner = if reference_field.is_some() {
                         p.constructor.symbol
                     } else {
                         field.symbol
                     };
-                    let initializer = crate::expression::lower_expression(
-                        p.store,
-                        p.typed_ast,
-                        field.typed_initializer,
-                        expression_owner,
-                        &constructor_parameters,
-                        limits.projection,
-                        &mut context,
-                    )?;
+                    let initializer =
+                        match reference_field.and_then(|proof| proof.template_parameter_alias()) {
+                            Some(template_parameter) => context
+                                .class_template_parameter_reference(p.class, template_parameter)?,
+                            None => crate::expression::lower_expression(
+                                p.store,
+                                p.typed_ast,
+                                field.typed_initializer,
+                                expression_owner,
+                                &constructor_parameters,
+                                limits.projection,
+                                &mut context,
+                            )?,
+                        };
                     let mut fields = vec![
                         AstField::Nat(name),
                         AstField::Tree(type_syntax),

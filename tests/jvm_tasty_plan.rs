@@ -22,6 +22,7 @@ const CROSS_CLASS_FACTORY_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
 const SAME_BATCH_REFERENCE_FIELD: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass CounterOwner(seed: Int):\n  private val inner: Counter = new Counter(seed)\n  def constant(): Int = 0\n";
 const SAME_BATCH_REFERENCE_CONSTRUCTOR: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass CounterOwner(counter: Counter):\n  def constant(): Int = 0\n";
+const SAME_BATCH_REFERENCE_ALIAS: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass CounterOwner(counter: Counter):\n  private val inner: Counter = counter\n  def read(): Int = inner.get()\n";
 // Frozen Rust output from main at fe8e21dd for SAME_BATCH_REFERENCE_FIELD.
 const COUNTER_BASE_TASTY: &[u8] =
     include_bytes!("fixtures/jvm_tasty_pickler_class_state/counter_base.tasty");
@@ -851,6 +852,217 @@ fn same_batch_reference_constructor_emits_distinct_counter_parameters() {
         },
     )
     .unwrap();
+}
+
+#[test]
+fn same_batch_reference_field_alias_targets_template_parameter_and_preserves_read() {
+    with_paired_jvm_tasty_batch_plan(
+        SAME_BATCH_REFERENCE_ALIAS,
+        "CounterOwner.scala",
+        SourceId::from_index(1754),
+        |batch| {
+            let [counter, owner] = batch.classes else {
+                panic!("fixture has Counter and CounterOwner plans");
+            };
+            let reference_fields = owner
+                .tasty_plan
+                .same_batch_reference_fields()
+                .collect::<Vec<_>>();
+            let [proof] = reference_fields.as_slice() else {
+                panic!("the immutable Counter alias has one reference-field proof");
+            };
+            let plan = owner.tasty_plan.plan();
+            let TreeKind::DefDef(constructor_definition) =
+                &plan.source_ast.get(plan.constructor.source_tree).kind
+            else {
+                panic!("Owner has the original primary constructor");
+            };
+            let template_parameter = plan
+                .source_index
+                .symbol_at(
+                    plan.source.id,
+                    constructor_definition.value_param_clauses[0][0],
+                )
+                .unwrap();
+            let constructor_parameter = plan.constructor.parameter_clauses[0][0];
+            let output = owner.tasty_plan.pickle().unwrap();
+            let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+            let index = file.ast_address_index().unwrap();
+            let parameters = index
+                .iter_nodes_with_tag(PARAM_TAG)
+                .filter_map(|node| {
+                    let parameter = index.get(node.offset as u32)?.decode_parameter().ok()?;
+                    (file.names().render(parameter.name()).ok()? == "counter")
+                        .then_some(node.offset)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                parameters.len(),
+                2,
+                "template and constructor each have a PARAM"
+            );
+            assert_eq!(
+                parameters[0], 9,
+                "template PARAM has the source oracle address"
+            );
+            assert_ne!(parameters[0], parameters[1]);
+            let field = index
+                .iter_nodes_with_tag(VALDEF_TAG)
+                .find_map(|node| {
+                    let body = index
+                        .get(node.offset as u32)?
+                        .decode_definition_body()
+                        .ok()?;
+                    let DefinitionBody::ValDef {
+                        name,
+                        type_tree,
+                        rhs,
+                        tail,
+                    } = body
+                    else {
+                        return None;
+                    };
+                    (file.names().render(name).ok()? == "inner").then_some((type_tree, rhs, tail))
+                })
+                .expect("Owner sidecar contains the original inner VALDEF");
+            let (type_tree, rhs, tail) = field;
+            assert!(
+                type_tree
+                    .name_refs()
+                    .iter()
+                    .any(|name| file.names().render(*name).unwrap() == "Counter")
+            );
+            assert!(
+                tail.iter()
+                    .any(|item| matches!(item, DefinitionTail::Modifier(PRIVATE_TAG)))
+            );
+            assert!(
+                tail.iter()
+                    .any(|item| matches!(item, DefinitionTail::Modifier(LOCAL_TAG)))
+            );
+            assert!(
+                !tail
+                    .iter()
+                    .any(|item| matches!(item, DefinitionTail::Modifier(MUTABLE_TAG)))
+            );
+            let reference = rhs
+                .expect("alias initializer is present")
+                .decode_reference()
+                .unwrap();
+            assert_eq!(reference.tag, TERMREFSYMBOL_TAG);
+            assert_eq!(
+                reference.reference, parameters[0] as u32,
+                "field RHS targets the template-owned PARAM"
+            );
+            let RawTree::Ast {
+                tag: THIS_TAG,
+                child: prefix,
+                ..
+            } = reference.qualifier
+            else {
+                panic!("field alias reference is qualified by this");
+            };
+            let prefix = prefix.decode_reference().unwrap();
+            assert_eq!(prefix.tag, TYPEREFSYMBOL_TAG);
+            assert_eq!(prefix.reference, 4, "this prefix is the owner class");
+            assert!(
+                !index.iter().any(|node| node.tag == NEW_TAG),
+                "Owner alias initializer must not synthesize a Counter allocation"
+            );
+            assert_eq!(proof.template_parameter_alias(), Some(template_parameter));
+            assert_ne!(template_parameter, constructor_parameter);
+            assert_eq!(counter.class, batch.classes[0].class);
+            let read = index
+                .iter_nodes_with_tag(DEFDEF_TAG)
+                .find_map(|node| {
+                    let body = index.get(node.offset as u32)?.decode_defdef_body().ok()?;
+                    (file.names().render(body.name).ok()? == "read").then_some(body)
+                })
+                .expect("Owner TASTy retains read");
+            let RawTree::LengthNode(read_apply_node) = read.rhs.unwrap() else {
+                panic!("read body applies Counter.get");
+            };
+            assert_eq!(read_apply_node.tag, APPLY_TAG);
+            let read_apply = read_apply_node.decode_apply().unwrap();
+            assert!(read_apply.arguments.is_empty());
+            let RawTree::LengthNode(read_select_node) = read_apply.function else {
+                panic!("read applies a selected Counter method");
+            };
+            assert_eq!(read_select_node.tag, SELECTIN_TAG);
+            let read_select = read_select_node.decode_select_in().unwrap();
+            assert!(matches!(
+                file.names().render_signed_name(read_select.name).unwrap(),
+                Some(RenderedSignedName::Signed { original, signature })
+                    if original == "get" && signature.result == "scala.Int" && signature.parameters.is_empty()
+            ));
+            let inner_select = read_select.qualifier.decode_select().unwrap();
+            assert_eq!(inner_select.tag, SELECT_TAG);
+            assert_eq!(file.names().render(inner_select.name).unwrap(), "inner");
+            assert!(matches!(
+                inner_select.qualifier,
+                RawTree::Ast { tag: QUALTHIS_TAG, .. }
+            ));
+            if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+                run_constructor_alias_oracle(
+                    batch.classes[0].tasty_plan.pickle().unwrap().bytes(),
+                    output.bytes(),
+                );
+            }
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn same_batch_reference_field_alias_rejects_unsupported_field_shapes_before_output() {
+    let variants = [
+        (
+            "mutable alias",
+            SAME_BATCH_REFERENCE_ALIAS.replace("private val inner", "private var inner"),
+        ),
+        (
+            "qualified private alias",
+            SAME_BATCH_REFERENCE_ALIAS.replace("private val inner", "private[this] val inner"),
+        ),
+        (
+            "wrong alias field type",
+            SAME_BATCH_REFERENCE_ALIAS
+                .replace(
+                    "class CounterOwner(counter: Counter):",
+                    "class Other(start: Int)\nclass CounterOwner(counter: Counter):",
+                )
+                .replace(
+                    "private val inner: Counter = counter",
+                    "private val inner: Other = counter",
+                ),
+        ),
+        (
+            "constructor accessor parameter",
+            SAME_BATCH_REFERENCE_ALIAS.replace(
+                "class CounterOwner(counter: Counter)",
+                "class CounterOwner(val counter: Counter)",
+            ),
+        ),
+        (
+            "multiple constructor clauses",
+            SAME_BATCH_REFERENCE_ALIAS.replace(
+                "class CounterOwner(counter: Counter)",
+                "class CounterOwner(counter: Counter)(other: Int)",
+            ),
+        ),
+    ];
+    for (index, (shape, source)) in variants.into_iter().enumerate() {
+        let result = with_paired_jvm_tasty_batch_plan(
+            &source,
+            "CounterOwner.scala",
+            SourceId::from_index(1755 + index as u32),
+            |_| (),
+        );
+        assert!(
+            result.is_err(),
+            "unsupported {shape} must reject before output"
+        );
+    }
 }
 
 #[test]
@@ -1799,6 +2011,142 @@ fn run_constructor_parameter_oracle(counter_tasty: &[u8], owner_tasty: &[u8]) {
         "Scala-rebuilt constructor has an unexpected descriptor: {}",
         String::from_utf8_lossy(&javap.stdout)
     );
+    fs::remove_dir_all(temporary).unwrap();
+}
+
+fn run_constructor_alias_oracle(counter_tasty: &[u8], owner_tasty: &[u8]) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala root for explicit oracle"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let version = Command::new(&compiler)
+        .arg("-version")
+        .output()
+        .expect("query pinned Scala compiler version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"));
+
+    let temporary = std::env::temp_dir().join(format!(
+        "dotty-issue-1754-alias-oracle-{}",
+        std::process::id()
+    ));
+    fs::remove_dir_all(&temporary).ok();
+    let candidate = temporary.join("candidate/example");
+    let compiled = temporary.join("compiled");
+    let client_dir = temporary.join("client");
+    fs::create_dir_all(&candidate).unwrap();
+    fs::create_dir_all(&compiled).unwrap();
+    fs::create_dir_all(&client_dir).unwrap();
+    fs::write(candidate.join("Counter.tasty"), counter_tasty).unwrap();
+    fs::write(candidate.join("CounterOwner.tasty"), owner_tasty).unwrap();
+
+    let decompile = Command::new(&compiler)
+        .arg("-decompile")
+        .arg(candidate.join("CounterOwner.tasty"))
+        .output()
+        .expect("decompile Rust-produced Owner TASTy with pinned Scala 3.9");
+    assert!(
+        decompile.status.success(),
+        "Scala -decompile rejected Rust-produced alias TASTy: {}",
+        String::from_utf8_lossy(&decompile.stderr)
+    );
+    let from_tasty = Command::new(&compiler)
+        .arg("-from-tasty")
+        .arg("-classpath")
+        .arg(temporary.join("candidate"))
+        .arg("-d")
+        .arg(&compiled)
+        .arg(candidate.join("Counter.tasty"))
+        .arg(candidate.join("CounterOwner.tasty"))
+        .output()
+        .expect("consume Rust-produced alias sidecars with pinned Scala 3.9");
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected constructor reference alias sidecars: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+
+    let consumer = temporary.join("CounterOwnerAliasClient.scala");
+    fs::write(
+        &consumer,
+        r#"package client
+object CounterOwnerAliasClient:
+  def main(args: Array[String]): Unit =
+    val original = new example.Counter(7)
+    val owner = new example.CounterOwner(original)
+    assert(owner.read() == 7)
+    original.set(42)
+    assert(owner.read() == 42)
+    original.set(-9)
+    assert(owner.read() == -9)
+    val independent = new example.Counter(3)
+    val otherOwner = new example.CounterOwner(independent)
+    original.set(11)
+    assert(owner.read() == 11)
+    assert(otherOwner.read() == 3)
+    println(s"alias-ok:${owner.read() - 20}")
+"#,
+    )
+    .unwrap();
+    let compile_client = Command::new(&compiler)
+        .arg("-classpath")
+        .arg(&compiled)
+        .arg("-d")
+        .arg(&client_dir)
+        .arg(&consumer)
+        .output()
+        .expect("compile independent alias client against Scala-rebuilt TASTy classes");
+    assert!(
+        compile_client.status.success(),
+        "Scala consumer rejected rebuilt constructor alias: {}",
+        String::from_utf8_lossy(&compile_client.stderr)
+    );
+
+    let mut classpath = vec![compiled, client_dir];
+    let staged = Command::new("find")
+        .arg(scala_root.join("dist/target/universal/stage/maven2"))
+        .args(["-type", "f", "-name", "*.jar", "-print"])
+        .output()
+        .expect("locate pinned Scala runtime jars");
+    assert!(staged.status.success());
+    classpath.extend(
+        String::from_utf8_lossy(&staged.stdout)
+            .lines()
+            .map(PathBuf::from),
+    );
+    classpath.extend([
+        scala_root.join("library/target/scala-library-bootstrapped/scala-library-3.9.0-bin-SNAPSHOT.jar"),
+        scala_root.join("library/target/scala3-library-bootstrapped/scala-3.9.0-bin-SNAPSHOT-nonbootstrapped/scala3-library_3-3.9.0-bin-SNAPSHOT.jar"),
+        scala_root.join("tasty/target/tasty-core-bootstrapped/scala-3.9.0-bin-SNAPSHOT-nonbootstrapped/tasty-core_3-3.9.0-bin-SNAPSHOT.jar"),
+    ]);
+    let classpath = std::env::join_paths(classpath).unwrap();
+    let java = std::env::var_os("JAVA_HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("bin/java"))
+        .unwrap_or_else(|| PathBuf::from("java"));
+    let runtime = Command::new(java)
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(classpath)
+        .arg("client.CounterOwnerAliasClient")
+        .output()
+        .expect("run Scala-reconstructed alias smoke test on the JDK");
+    assert!(
+        runtime.status.success(),
+        "Scala-reconstructed alias failed under -Xverify:all: {}",
+        String::from_utf8_lossy(&runtime.stderr)
+    );
+    assert!(String::from_utf8_lossy(&runtime.stdout).contains("alias-ok:-9"));
     fs::remove_dir_all(temporary).unwrap();
 }
 
