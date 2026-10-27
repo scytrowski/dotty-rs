@@ -583,7 +583,11 @@ impl SourceTyper<'_> {
                     let receiver = self.this_type_receiver_view(receiver)?;
                     let name = self.store.symbols.get(symbol).name;
                     if self.any_ref_identity_symbol_for_receiver(receiver, name)? == Some(symbol)
-                        && !self.source_declares_member_in_source_hierarchy(receiver, name)?
+                        && !self.source_declares_member_in_source_hierarchy(
+                            receiver,
+                            name,
+                            info_journal,
+                        )?
                     {
                         return self.completed_expression_symbol_info(symbol, info_journal);
                     }

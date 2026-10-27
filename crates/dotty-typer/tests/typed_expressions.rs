@@ -532,6 +532,104 @@ fn source_type_lookup_accepts_default_scala_alias_with_a_canonical_target_name()
 }
 
 #[test]
+fn same_package_binary_type_keeps_precedence_over_a_cached_scala_builtin_alias() {
+    let text = "package p { class Use { def value: Boolean } }";
+    let source = SourceId::from_index(1744);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "binary-builtin-precedence.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let package = packages.symbol(&["p"]).unwrap();
+    let package_scope = packages.scope_of(package).unwrap();
+    let scala_package = packages
+        .enter(&mut store, SymbolOrigin::Synthetic, &["scala"])
+        .last()
+        .unwrap()
+        .symbol;
+    let scala_scope = packages.scope_of(scala_package).unwrap();
+    let name = Name::new(store.names.intern("Boolean"), Namespace::Type);
+    let binary_in_package = store.symbols.alloc(Symbol {
+        name,
+        owner: Some(package),
+        kind: SymbolKind::Class,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    store
+        .scopes
+        .get_mut(package_scope)
+        .enter(name, binary_in_package);
+    let cached_scala_alias = store.symbols.alloc(Symbol {
+        name,
+        owner: Some(scala_package),
+        kind: SymbolKind::Class,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    store
+        .scopes
+        .get_mut(scala_scope)
+        .enter(name, cached_scala_alias);
+    let (type_tree, context) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "value").then(|| {
+                let symbol = index.symbol_at(source, tree)?;
+                Some((definition.tpt, index.declaration_context_of(symbol)?))
+            })?
+        })
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    let resolved = typer.type_of_tpt(type_tree, context).unwrap();
+
+    assert!(matches!(
+        typer.store().types.get(resolved),
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } if *symbol == binary_in_package
+    ));
+}
+
+#[test]
 fn source_float_and_double_literals_keep_exact_bits_and_canonical_types() {
     let text = "class Floating:\n  def floatZero(): Float = 0.0f\n  def floatOne(): Float = 1.0f\n  def floatValue(): Float = 1.5f\n  def doubleZero(): Double = 0.0\n  def doubleOne(): Double = 1.0\n  def doubleValue(): Double = 3.5\n";
     let source = SourceId::from_index(0);
@@ -1072,7 +1170,7 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
 
 #[test]
 fn identity_operators_reject_foreign_primitive_trait_and_overridden_members() {
-    let source_text = "class Box:\n  def eq(other: Box): Boolean = true\nclass Overloaded:\n  def eq(other: Overloaded): Boolean = true\n  def eq(other: Int): Boolean = false\nclass WrongArity:\n  def eq(): Boolean = true\nclass Generic[A]\nclass Parent:\n  def eq(other: Parent): Boolean = true\nclass Child extends Parent\ntrait Marker\nclass Runner:\n  def foreign(a: Box, b: Box): Boolean = a eq b\n  def overloadedInfix(a: Overloaded, b: Overloaded): Boolean = a eq b\n  def overloadedDot(a: Overloaded, b: Overloaded): Boolean = a.eq(b)\n  def wrongArity(a: WrongArity, b: WrongArity): Boolean = a eq b\n  def primitive(a: Int, b: Int): Boolean = a eq b\n  def incompatible(a: Box, b: Int): Boolean = a eq b\n  def traitRef(a: Marker, b: Marker): Boolean = a eq b\n  def generic(a: Generic[Int], b: Generic[Int]): Boolean = a eq b\n  def inherited(a: Child, b: Child): Boolean = a eq b\n  def objectRef(a: Object, b: Object): Boolean = a eq b\n  def anyRef(a: Any, b: Any): Boolean = a eq b\n  def universal(a: Box, b: Box): Boolean = a == b\n";
+    let source_text = "class Box:\n  def eq(other: Box): Boolean = true\nclass Overloaded:\n  def eq(other: Overloaded): Boolean = true\n  def eq(other: Int): Boolean = false\nclass WrongArity:\n  def eq(): Boolean = true\nclass Generic[A]\nclass Parent:\n  def eq(other: Parent): Boolean = true\nclass Child extends Parent\nobject parents:\n  class QualifiedParent:\n    def eq(other: QualifiedParent): Boolean = true\nimport parents.QualifiedParent as AliasedParent\nclass QualifiedChild extends parents.QualifiedParent\nclass AliasChild extends AliasedParent\ntrait Root\ntrait Left extends Root\ntrait Right extends Root\nclass Diamond extends Left, Right\ntrait Marker\nclass Runner:\n  def foreign(a: Box, b: Box): Boolean = a eq b\n  def overloadedInfix(a: Overloaded, b: Overloaded): Boolean = a eq b\n  def overloadedDot(a: Overloaded, b: Overloaded): Boolean = a.eq(b)\n  def wrongArity(a: WrongArity, b: WrongArity): Boolean = a eq b\n  def primitive(a: Int, b: Int): Boolean = a eq b\n  def incompatible(a: Box, b: Int): Boolean = a eq b\n  def traitRef(a: Marker, b: Marker): Boolean = a eq b\n  def generic(a: Generic[Int], b: Generic[Int]): Boolean = a eq b\n  def inherited(a: Child, b: Child): Boolean = a eq b\n  def qualified(a: QualifiedChild, b: QualifiedChild): Boolean = a eq b\n  def aliased(a: AliasChild, b: AliasChild): Boolean = a eq b\n  def diamond(a: Diamond, b: Diamond): Boolean = a eq b\n  def objectRef(a: Object, b: Object): Boolean = a eq b\n  def anyRef(a: Any, b: Any): Boolean = a eq b\n  def universal(a: Box, b: Box): Boolean = a == b\n";
     let source = SourceId::from_index(1472);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -1113,6 +1211,9 @@ fn identity_operators_reject_foreign_primitive_trait_and_overridden_members() {
                     | "traitRef"
                     | "generic"
                     | "inherited"
+                    | "qualified"
+                    | "aliased"
+                    | "diamond"
                     | "objectRef"
                     | "anyRef"
                     | "universal"
@@ -1126,7 +1227,7 @@ fn identity_operators_reject_foreign_primitive_trait_and_overridden_members() {
             })
         })
         .collect::<Vec<_>>();
-    assert_eq!(methods.len(), 12);
+    assert_eq!(methods.len(), 15);
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -1140,7 +1241,7 @@ fn identity_operators_reject_foreign_primitive_trait_and_overridden_members() {
         .unwrap();
     for (name, method, rhs) in methods {
         let context = typer.expression_context_for(method).unwrap();
-        if name == "generic" {
+        if matches!(name.as_str(), "generic" | "diamond") {
             let typed = typer
                 .type_expression(rhs, context)
                 .unwrap_or_else(|error| panic!("valid reference receiver {name}: {error:?}"));

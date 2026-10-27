@@ -173,6 +173,7 @@ impl SourceTyper<'_> {
                     self.index.source_context(*context_id).lexical_scope != *scope
                 })
             });
+        let mut deferred_parent_lookups = Vec::new();
         for (context_position, context_id) in contexts.iter().enumerate() {
             let source_context = self.index.source_context(*context_id);
             let candidates = self
@@ -227,27 +228,12 @@ impl SourceTyper<'_> {
                                 }
                             ) =>
                         {
-                            // External generic parents can make the inherited
-                            // field probe incomplete even when the requested name
-                            // resolves to a canonical package-level Scala object.
-                            // Accept that fallback only after the package and
-                            // module identity are validated; never infer it from
-                            // the spelling (for example, a lookalike `None`).
-                            let scala_package = self.packages.symbol(&["scala".to_owned()]);
-                            let source_shadow =
-                                self.source_declares_member_in_source_hierarchy(this_type, name)?;
-                            if !source_shadow
-                                && let Some(symbol) =
-                                    self.lookup_default_term_import(name, tree_index, position)?
-                                && self.store.symbols.contains(symbol)
-                                && self.store.symbols.get(symbol).kind == SymbolKind::Object
-                                && self.store.symbols.get(symbol).owner == scala_package
-                                && scala_package.is_some()
-                            {
-                                self.module_class_of_object(symbol)?;
-                                return Ok(vec![symbol]);
-                            }
-                            return Err(TyperError::MemberLookup(Box::new(error)));
+                            // Keep checking outer lexical scopes and imports
+                            // before considering a package default. Whether an
+                            // inherited field wins is checked without generic
+                            // parent adaptation after those contexts are known.
+                            deferred_parent_lookups.push((this_type, error));
+                            continue;
                         }
                         Err(error) => return Err(TyperError::MemberLookup(Box::new(error))),
                     }
@@ -271,6 +257,45 @@ impl SourceTyper<'_> {
                     return Ok(inherited);
                 }
             }
+        }
+        let mut deferred_parent_error = None;
+        for (receiver, deferred_error) in deferred_parent_lookups {
+            let inherited = self
+                .lookup_unadapted_members_journaled(receiver, name, info_journal)
+                .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
+                .into_iter()
+                .filter(|candidate| candidate.inheritance_depth > 0)
+                .filter(|candidate| {
+                    self.store.symbols.contains(candidate.symbol)
+                        && self.store.symbols.get(candidate.symbol).kind == SymbolKind::Field
+                        && self.store.symbols.get(candidate.symbol).visibility
+                            == dotty_core::symbols::Visibility::Public
+                        && !self
+                            .store
+                            .symbols
+                            .get(candidate.symbol)
+                            .flags
+                            .contains(SymbolFlags::STATIC)
+                })
+                .map(|candidate| candidate.symbol)
+                .collect::<Vec<_>>();
+            if !inherited.is_empty() {
+                return Ok(inherited);
+            }
+            deferred_parent_error.get_or_insert(deferred_error);
+        }
+        if let Some(deferred_error) = deferred_parent_error {
+            let scala_package = self.packages.symbol(&["scala".to_owned()]);
+            if let Some(symbol) = self.lookup_default_term_import(name, tree_index, position)?
+                && self.store.symbols.contains(symbol)
+                && self.store.symbols.get(symbol).kind == SymbolKind::Object
+                && self.store.symbols.get(symbol).owner == scala_package
+                && scala_package.is_some()
+            {
+                self.module_class_of_object(symbol)?;
+                return Ok(vec![symbol]);
+            }
+            return Err(TyperError::MemberLookup(Box::new(deferred_error)));
         }
         if let Some(symbol) = self.lookup_default_term_import(name, tree_index, position)? {
             return Ok(vec![symbol]);

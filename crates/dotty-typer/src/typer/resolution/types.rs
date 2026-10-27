@@ -137,17 +137,33 @@ impl SourceTyper<'_> {
         {
             return Ok(Some(symbol));
         }
+        let is_builtin = self
+            .definitions
+            .source_builtin_type(self.store, name)
+            .is_some();
+        let scala_package = is_builtin
+            .then(|| self.packages.symbol(&["scala".to_owned()]))
+            .flatten();
+        let external_package_candidates = external_package_candidates
+            .into_iter()
+            .filter(|symbol| {
+                scala_package.is_none_or(|package| {
+                    !self.store.symbols.contains(*symbol)
+                        || self.store.symbols.get(*symbol).owner != Some(package)
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Some(symbol) =
+            self.unique_type_candidate(&external_package_candidates, name, tree_index, position)?
+        {
+            return Ok(Some(symbol));
+        }
         if self
             .definitions
             .source_builtin_type(self.store, name)
             .is_some()
         {
             return Ok(None);
-        }
-        if let Some(symbol) =
-            self.unique_type_candidate(&external_package_candidates, name, tree_index, position)?
-        {
-            return Ok(Some(symbol));
         }
         self.lookup_default_type_import(name, tree_index, position)
     }

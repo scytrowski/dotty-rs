@@ -1095,7 +1095,7 @@ impl SourceTyper<'_> {
             if self
                 .any_ref_identity_symbol_for_receiver(receiver, name)?
                 .is_some()
-                && !self.source_declares_member_in_source_hierarchy(receiver, name)?
+                && !self.source_declares_member_in_source_hierarchy(receiver, name, info_journal)?
                 && let Some(symbol) = self.any_ref_identity_symbol_for_receiver(receiver, name)?
             {
                 let ty = self.store.types.alloc(Type::TermRef {
@@ -1107,12 +1107,14 @@ impl SourceTyper<'_> {
                         .select(qualifier, name, backquoted, ty, position),
                 );
             }
-            return Err(TyperError::MemberNotFound {
-                source: self.source,
-                tree_index,
-                receiver,
-                name,
-            });
+            if !self.is_external_class_identity_receiver(receiver) {
+                return Err(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index,
+                    receiver,
+                    name,
+                });
+            }
         }
 
         let mut candidates = self
@@ -1377,14 +1379,44 @@ impl SourceTyper<'_> {
         })
     }
 
+    /// Identifies an external class receiver for which canonical AnyRef
+    /// identity lookup is not yet modeled. Preserve ordinary member lookup's
+    /// explicit unsupported/error result for these classpath types instead of
+    /// changing it to an earlier `MemberNotFound` diagnostic.
+    pub(in crate::typer) fn is_external_class_identity_receiver(&self, receiver: TypeId) -> bool {
+        let class = match self.store.types.try_get(receiver) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            }) => Some(*class),
+            Some(Type::Applied { tycon, .. }) => match self.store.types.try_get(*tycon) {
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(class),
+                    ..
+                }) => Some(*class),
+                _ => None,
+            },
+            _ => None,
+        };
+        class.is_some_and(|class| {
+            self.store.symbols.contains(class)
+                && self.store.symbols.get(class).kind == SymbolKind::Class
+                && matches!(
+                    self.store.symbols.get(class).origin,
+                    SymbolOrigin::Classfile(_) | SymbolOrigin::Tasty(_)
+                )
+        })
+    }
+
     /// Checks only declarations owned by the current source hierarchy. The
     /// canonical `AnyRef.eq/ne` symbols are compiler members, so probing the
     /// full external hierarchy here can force unrelated generic classpath
     /// instantiation (for example `Option[A]`'s collection parents).
     pub(in crate::typer) fn source_declares_member_in_source_hierarchy(
-        &self,
+        &mut self,
         receiver: TypeId,
         name: Name,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<bool, TyperError> {
         let class = match self.store.types.try_get(receiver) {
             Some(Type::TypeRef {
@@ -1401,13 +1433,16 @@ impl SourceTyper<'_> {
             },
             _ => return Ok(false),
         };
-        let mut pending = vec![class];
+        let mut pending = vec![(class, Vec::new())];
         let mut visited = std::collections::HashSet::new();
-        while let Some(class) = pending.pop() {
-            if !visited.insert(class) {
-                // Malformed source inheritance must not expose a compiler
-                // member through a hierarchy whose shadowing is uncertain.
+        while let Some((class, ancestors)) = pending.pop() {
+            if ancestors.contains(&class) {
+                // A real cycle makes shadowing uncertain. A repeated node on
+                // a different path is a valid diamond and is handled below.
                 return Ok(true);
+            }
+            if !visited.insert(class) {
+                continue;
             }
             if !matches!(
                 self.index.definition_of(class),
@@ -1432,95 +1467,106 @@ impl SourceTyper<'_> {
             }) {
                 return Ok(true);
             }
-            pending.extend(self.source_parent_classes(class)?);
+            let Some(parents) = self.source_parent_classes(class, info_journal)? else {
+                // Do not select a compiler member when a source parent could
+                // not be resolved to its canonical source identity.
+                return Ok(true);
+            };
+            let mut next_ancestors = ancestors;
+            next_ancestors.push(class);
+            pending.extend(
+                parents
+                    .into_iter()
+                    .map(|parent| (parent, next_ancestors.clone())),
+            );
         }
         Ok(false)
     }
 
-    fn source_parent_classes(&self, class: SymbolId) -> Result<Vec<SymbolId>, TyperError> {
+    fn source_parent_classes(
+        &mut self,
+        class: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<Vec<SymbolId>>, TyperError> {
         let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(class)
         else {
-            return Ok(Vec::new());
+            return Ok(Some(Vec::new()));
         };
         if source != self.source {
-            return Ok(Vec::new());
+            return Ok(Some(Vec::new()));
         }
         let Some(Tree {
             kind: TreeKind::TypeDef(definition),
             ..
         }) = self.arena.try_get(tree)
         else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
         let Some(Tree {
             kind: TreeKind::Template(template),
             ..
         }) = self.arena.try_get(definition.rhs)
         else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
-        let contexts = self.source_context_chain(
-            self.index
-                .declaration_context_of(class)
-                .ok_or(TyperError::SourceClassTypeParametersProvenanceMissing { symbol: class })?,
-            tree.index(),
-        )?;
+        let context = self
+            .index
+            .declaration_context_of(class)
+            .ok_or(TyperError::SourceClassTypeParametersProvenanceMissing { symbol: class })?;
         let mut parents = Vec::new();
         for parent in &template.parents {
-            let mut current = *parent;
-            let Some(parent_name) = (loop {
-                let Some(node) = self.arena.try_get(current) else {
-                    break None;
+            // Parent arguments do not affect which class owns declarations.
+            // Resolve only the parent constructor so an unsupported or
+            // deferred external generic application does not obscure a
+            // qualified/import-aliased source parent identity.
+            let mut parent_constructor = *parent;
+            loop {
+                let Some(node) = self.arena.try_get(parent_constructor) else {
+                    return Ok(None);
                 };
                 match &node.kind {
-                    TreeKind::Ident(ident) if ident.name.is_type() => break Some(ident.name),
-                    TreeKind::Select(selection) if selection.name.is_type() => {
-                        break Some(selection.name);
+                    TreeKind::AppliedTypeTree(applied) => parent_constructor = applied.tpt,
+                    TreeKind::TypeApply(application) => parent_constructor = application.function,
+                    TreeKind::Apply(application) => parent_constructor = application.function,
+                    TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                        parent_constructor = parens.inner;
                     }
-                    TreeKind::AppliedTypeTree(applied) => current = applied.tpt,
-                    TreeKind::TypeApply(application) => current = application.function,
-                    TreeKind::Apply(application) => current = application.function,
-                    _ => break None,
-                }
-            }) else {
-                continue;
-            };
-            let mut candidates = Vec::new();
-            for context in &contexts {
-                let scope = self.index.source_context(*context).lexical_scope;
-                candidates.extend(
-                    self.store
-                        .scopes
-                        .get(scope)
-                        .lookup_all(&parent_name)
-                        .iter()
-                        .copied()
-                        .filter(|candidate| {
-                            self.store.symbols.contains(*candidate)
-                                && self.store.symbols.get(*candidate).origin
-                                    == SymbolOrigin::Source(self.source)
-                                && matches!(
-                                    self.store.symbols.get(*candidate).kind,
-                                    SymbolKind::Class | SymbolKind::Trait
-                                )
-                        }),
-                );
-                if !candidates.is_empty() {
-                    break;
+                    _ => break,
                 }
             }
-            candidates.sort_by_key(|candidate| candidate.index());
-            candidates.dedup();
-            if let [parent] = candidates.as_slice()
+            let parent_type =
+                match self.type_of_tpt_inner_journaled(parent_constructor, context, info_journal) {
+                    Ok(parent_type) => parent_type,
+                    Err(_) => return Ok(None),
+                };
+            let parent_class = match self.store.types.try_get(parent_type) {
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(parent),
+                    ..
+                }) => Some(*parent),
+                Some(Type::Applied { tycon, .. }) => match self.store.types.try_get(*tycon) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(parent),
+                        ..
+                    }) => Some(*parent),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(parent) = parent_class else {
+                return Ok(None);
+            };
+            if self.store.symbols.contains(parent)
+                && self.store.symbols.get(parent).origin == SymbolOrigin::Source(self.source)
                 && matches!(
-                    self.index.definition_of(*parent),
+                    self.index.definition_of(parent),
                     Some(SourceDefinition::Canonical { source, .. }) if source == self.source
                 )
             {
-                parents.push(*parent);
+                parents.push(parent);
             }
         }
-        Ok(parents)
+        Ok(Some(parents))
     }
 
     fn is_supported_any_ref_identity_receiver(&self, receiver: TypeId) -> Result<bool, TyperError> {

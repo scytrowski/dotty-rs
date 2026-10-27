@@ -65,18 +65,14 @@ impl SourceTyper<'_> {
             }
         }
         let receiver = self.this_type_receiver_view(receiver)?;
-        let mut candidates = if self.any_ref_identity_operator_name(operator) {
-            let Some(symbol) = self.any_ref_identity_symbol_for_receiver(receiver, operator)?
-            else {
-                return Err(TyperError::MemberNotFound {
-                    source: self.source,
-                    tree_index,
-                    receiver,
-                    name: operator,
-                });
-            };
+        let identity_symbol = if self.any_ref_identity_operator_name(operator) {
+            self.any_ref_identity_symbol_for_receiver(receiver, operator)?
+        } else {
+            None
+        };
+        let mut candidates = if let Some(symbol) = identity_symbol {
             let source_shadows =
-                self.source_declares_member_in_source_hierarchy(receiver, operator)?;
+                self.source_declares_member_in_source_hierarchy(receiver, operator, info_journal)?;
             // A same-spelled source or trait declaration cannot stand in for
             // the compiler's final AnyRef identity symbol.
             if source_shadows {
@@ -102,6 +98,15 @@ impl SourceTyper<'_> {
                 member: None,
                 rejection: None,
             }]
+        } else if self.any_ref_identity_operator_name(operator)
+            && !self.is_external_class_identity_receiver(receiver)
+        {
+            return Err(TyperError::MemberNotFound {
+                source: self.source,
+                tree_index,
+                receiver,
+                name: operator,
+            });
         } else if self.any_equality_operator_name(operator)
             && self.is_canonical_any_receiver(receiver)
         {
@@ -574,20 +579,18 @@ impl SourceTyper<'_> {
                     self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
                 let receiver_view = self.this_type_receiver_view(receiver)?;
                 let java_class_qualifier = self.is_java_class_qualifier(qualifier);
-                if !java_class_qualifier && self.any_ref_identity_operator_name(selection.name) {
-                    let Some(symbol) =
-                        self.any_ref_identity_symbol_for_receiver(receiver_view, selection.name)?
-                    else {
-                        return Err(TyperError::MemberNotFound {
-                            source: self.source,
-                            tree_index: function_tree.index(),
-                            receiver: receiver_view,
-                            name: selection.name,
-                        });
-                    };
+                let identity_symbol = if !java_class_qualifier
+                    && self.any_ref_identity_operator_name(selection.name)
+                {
+                    self.any_ref_identity_symbol_for_receiver(receiver_view, selection.name)?
+                } else {
+                    None
+                };
+                if let Some(symbol) = identity_symbol {
                     let source_shadows = self.source_declares_member_in_source_hierarchy(
                         receiver_view,
                         selection.name,
+                        info_journal,
                     )?;
                     // Do not let an overload set hide a source declaration
                     // that shadows the compiler-owned AnyRef identity member.
@@ -631,6 +634,16 @@ impl SourceTyper<'_> {
                             allow_mutable_local_receiver,
                         },
                     )
+                } else if !java_class_qualifier
+                    && self.any_ref_identity_operator_name(selection.name)
+                    && !self.is_external_class_identity_receiver(receiver_view)
+                {
+                    return Err(TyperError::MemberNotFound {
+                        source: self.source,
+                        tree_index: function_tree.index(),
+                        receiver: receiver_view,
+                        name: selection.name,
+                    });
                 } else {
                     let mut members = match self.lookup_overload_members_journaled(
                         receiver_view,
