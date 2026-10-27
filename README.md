@@ -31,9 +31,12 @@ APIs and supported language subsets are still evolving.
   field state, planned-class references, construction, calls, and bounded
   same-unit inheritance. Source integration tests also cover sibling reference
   joins, nested construction, reference field initialization, and chained call
-  receivers, and the bounded same-source `Reader.read(counter) = counter.get()`
-  cross-class call, and a linked `CounterFactory.create` that constructs and
-  returns the exact `Counter` reference type. Strict pinned Scala 3.9 gates
+  receivers; the bounded same-source
+  `Reader.read(counter) = counter.get()` cross-class call; and a linked
+  `CounterFactory.create` that constructs and returns the exact `Counter`
+  reference type. The paired JVM/TASTy adapter also
+  checks the complete Rust `Counter` + `CounterOwner` batch for the plain
+  constructor-reference/private-field alias shape. Strict pinned Scala 3.9 gates
   consume the Rust TASTy for single-class, independent two-class, Reader and
   factory cross-class cases; the factory consumer runs the unchanged Rust
   classes on JDK 21 and a separate oracle rebuilds Rust TASTy with
@@ -44,8 +47,9 @@ The source-to-class-file pipeline is exercised in
 [`tests/jvm_source_compilation.rs`](tests/jvm_source_compilation.rs), with JVM
 verification and execution in CI. The opt-in root `dotty::jvm_tasty_artifacts`
 library module emits an owned, decoded-and-validated Counter `.class`/`.tasty`
-pair or a complete in-memory batch for the audited independent Counter/Gauge
-and linked Counter/Reader source shapes. Batch emission uses one frontend
+pair or a complete in-memory batch for the audited independent Counter/Gauge,
+linked Counter/Reader, and constructor-injected Counter/CounterOwner source
+shapes. Batch emission uses one frontend
 session, links each class to
 the exact UUID from its TASTy header, and returns nothing unless every artifact
 passes whole-batch validation. Test-only publication stages complete batches
@@ -58,6 +62,11 @@ paths are not a compiler driver/CLI or general Scala ABI support. See the
 [independent multi-class audit](docs/jvm-tasty-multiclass.md) and
 [cross-class acceptance record](docs/jvm-tasty-cross-class.md) for exact
 versions, hashes, controls, and reproduction commands.
+
+The constructor-injected `CounterOwner(counter)` batch is structurally checked
+for all four Rust-produced files and their source, JVM ABI, and TASTy links.
+Its original-class runtime identity proof and independent Scala consumer remain
+separate follow-up gates (#1757 and #1758).
 
 Compatibility targets Scala **3.9.0**, pinned to source revision
 `777528f19a58e794c9954a42f433373472ec57f8`. The semantic pickler emits TASTy
