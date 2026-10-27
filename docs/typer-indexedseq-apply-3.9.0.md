@@ -52,6 +52,21 @@ remains **0/1 typed**, blocked by `TermNameNotFound` for inner tree 611 at
 `sequenceOfChars(index)`. This has not been connected to the external generic
 `IndexedSeq.apply` path and is not counted as uplift.
 
+The repository's three-file focused smoke audit was also run twice, and both
+normalized reports matched the CI artifact and each other. It remains **0/31
+fully typed**. Fourteen `BCodeBodyBuilder.scala` roots now reach `MemberLookup`
+where the prior checked-in report stopped at `TypeNameNotFound`; one more
+`BCodeBodyBuilder` root moved from `TermNameNotFound` to `MemberLookup`. The
+smoke report therefore records that blocker movement, but it does not show a
+fully typed method or establish broader corpus uplift. The checked-in focused
+baseline was updated to this exact report so CI will compare against the
+reviewed post-change observations. On this same selection, package requests
+changed from 4,177 to 128, member requests from 3,341 to 102, and recorded
+class-symbol successes from 827 to 31. These are focused resolver counters,
+not full-corpus metrics. The lower counts accompany the first-blocker shift;
+they do not establish typing uplift or by themselves say whether the reduced
+resolver activity is beneficial.
+
 Focused reports and retained per-run logs are in the task-local ignored
 `target/issue-1746/reports/` and `target/issue-1746/*audit-tmp-final-expanded/`
 directories. They are evidence for these selected roots only, not corpus-wide

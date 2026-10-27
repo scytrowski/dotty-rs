@@ -6494,6 +6494,57 @@ mod tests {
     }
 
     #[test]
+    fn lowers_scala39_some_value_to_its_canonical_class_parameter() {
+        let bytes = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library/scala/Some.tasty"),
+        )
+        .expect("pinned Some.tasty fixture should exist");
+        let class_name = BinaryName::from_internal("scala/Some");
+        let decoded =
+            tasty_symbol::decode(&bytes, &class_name).expect("pinned Some class should decode");
+        let value = decoded
+            .fields
+            .iter()
+            .find(|field| field.name == "value")
+            .expect("Some.value constructor accessor should be decoded");
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let origin = SymbolOrigin::Tasty(loader.store.origins.register_tasty());
+        let (class_symbol, declarations, origin) = loader
+            .enter_class(&class_name, decoded.flags, origin)
+            .expect("Some class identity should be entered");
+        let class_type_parameters = loader.enter_tasty_class_type_parameters(
+            &class_name,
+            declarations,
+            &decoded.type_parameters,
+            origin,
+        );
+        let expected_parameter = loader
+            .store
+            .types
+            .get(class_type_parameters[0])
+            .reference_symbol()
+            .expect("Some.A should be a canonical class parameter symbol");
+        let value_type = loader.lower_tasty_member_type_with_class_parameters(
+            &class_name,
+            value.declared_type.as_ref(),
+            &class_type_parameters,
+        );
+
+        assert_eq!(
+            loader.store.types.get(value_type).reference_symbol(),
+            Some(expected_parameter),
+            "Some.value must lower to the exact class-owned parameter symbol"
+        );
+        assert_eq!(
+            loader.store.symbols.get(expected_parameter).owner,
+            Some(class_symbol)
+        );
+    }
+
+    #[test]
     fn lowers_scala39_tasty_methods_with_absent_and_empty_term_clauses_distinctly() {
         let bytes = semantic_unpickler_fixture_bytes("Methods.tasty");
         let owner = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Methods");

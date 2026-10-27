@@ -2157,8 +2157,8 @@ fn decode_constructor_accessor_fields(
                 file,
                 &body.type_tree,
                 package,
-                class_type_parameters,
                 &HashMap::new(),
+                class_type_parameters,
                 resolve_bare,
                 0,
             ),
@@ -6385,6 +6385,26 @@ mod tests {
             apply.return_type,
             Some(DecodedTastyType::ClassParamRef(1))
         ));
+    }
+
+    #[test]
+    fn decodes_scala39_some_value_constructor_accessor_as_class_parameter() {
+        let decoded = decode(
+            &fixture_bytes("scala3-library/scala/Some.tasty"),
+            &BinaryName::from_internal("scala/Some"),
+        )
+        .expect("pinned Scala 3.9 Some TASTy should decode");
+        let value = decoded
+            .fields
+            .iter()
+            .find(|field| field.name == "value")
+            .expect("Some.value constructor accessor should be decoded");
+
+        assert_eq!(
+            value.declared_type,
+            Some(DecodedTastyType::ClassParamRef(0)),
+            "Some.value refers to the enclosing class parameter A, not a method parameter"
+        );
     }
 
     #[test]
