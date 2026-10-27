@@ -1,0 +1,114 @@
+# `Either.left` / `Either.right` nested projection audit (Scala 3.9.0)
+
+**Result: BLOCKED / UNMET.** This audit did not make either method fully typed.
+It identifies a source Namer prerequisite; it does not claim that `Either.left`
+or `Either.right` has improved.
+
+## Scope and pinned inputs
+
+- Scala source revision: `777528f19a58e794c9954a42f433373472ec57f8`.
+- Scala compiler/library: pinned 3.9.0 artifacts; JDK 21.
+- dotty-rs base: `bf69a070380ff9e3a6a48dcaa1670b695c9cf159` (main after #1764).
+- Exact roots: `library/src/scala/util/Either.scala#tree=19` (`left`) and
+  `#tree=31` (`right`).
+- No hosted full standard-library corpus audit was run.
+
+## First blocker and provenance
+
+On the exact 25-method Tier A cohort, `left` and `right` remain blocked at
+source child trees 16 and 28, respectively. Both failures are term-namespace
+`MemberNotFound` results while resolving `LeftProjection` / `RightProjection`
+on the canonical `Either` receiver. The failure occurs before candidate
+selection, generated `apply` lookup, argument inference, or result conformance.
+
+The source Namer probe confirms that each nested declaration is entered as a
+real `CASE Class` owned by `Either$`'s `ModuleClass`. It does not enter a
+term-side symbol for the case class and does not link a companion. The focused
+Namer regression test records this current behavior and ensures that merely
+observing the nested class does not invent an unsupported term symbol.
+
+## Scala 3.9.0 oracle
+
+The checked-in oracle harness under
+`tools/typer-classpath-corpus-audit/either-companion-oracle/` compiles the
+minimal nested case-class shape and the focused negative controls against the
+pinned Scala artifacts. Its typed tree shows `EitherLike.LeftProjection.apply`
+and `RightProjection.apply` instantiated with both type parameters and called
+with `this`. Dotty emits each nested case class's companion `Object` and
+`ModuleClass` and a generated polymorphic `apply`.
+
+The controls establish that same-spelled nested classes retain distinct
+owners, a user companion overload can coexist with generated `apply`, and an
+ordinary nested class is constructed with `new` rather than a synthesized
+companion. Wrong arity/type, inaccessible constructor, and ambiguous overload
+examples are rejected by dotc. These results rule out treating every nested
+class as a term or fabricating an `apply` based only on its spelling.
+
+## Cohort result
+
+Two deterministic passes of the unchanged 25-method audit produced identical
+normalized reports. Current main is **12/25 fully typed**; the complete
+per-method result is checked in at
+[`typer-either-nested-projection-3.9.0.tsv`](typer-either-nested-projection-3.9.0.tsv).
+The report is byte-identical to the #1764 PR-head audit.
+
+| Root | Result on this base | First failure / note |
+| --- | --- | --- |
+| `Either.scala#tree=19` `left` | blocked | Term `MemberNotFound`, child tree 16 |
+| `Either.scala#tree=31` `right` | blocked | Term `MemberNotFound`, child tree 28 |
+| `Either.scala#tree=84` `swap` | blocked | Separate external `scala.util.Left` module identity failure; outside this issue's projection path |
+
+All 10 methods accepted before #1764 remain fully typed with the same source
+tree identities and result shapes. Two numeric typed-tree arena IDs changed in
+the frozen verifier (`Option.isDefined`: 3 to 9; `Option.knownSize`: 9 to 15)
+because newly accepted `Option.isEmpty` is allocated earlier. This is an arena
+ID shift, not a change in those methods' accepted status, source roots, or
+oracle-result shapes. The frozen cohort manifest was not edited. #1764 also
+added `Option.isEmpty` and `Option.nonEmpty`, yielding the current 12/25 total.
+
+## Disposition and next bounded dependency
+
+The requested target remains **UNMET/BLOCKED**. Supporting this call correctly
+requires Namer to represent the canonical companion `Object` / `ModuleClass`
+and synthesize the case-class `apply` signature with the source class's generic
+parameters and constructor parameter identities. That support must preserve
+ownership, explicit companion overloads, visibility, and failure rollback.
+The existing code has no general source case-class companion synthesis; adding
+one here would exceed this issue's narrow resolver scope and guessing a
+term-side member would violate canonical symbol identity.
+
+The bounded prerequisite is [#1773](https://github.com/scytrowski/dotty-rs/issues/1773), which covers canonical `apply` synthesis for a deliberately restricted nested source case-class shape. This
+issue should be revisited only after that prerequisite establishes the needed
+source symbols and focused negative tests. No constructor lowering, `unapply`,
+`copy`, JVM work, or broad overload/type-inference work is included.
+
+## Reproduction
+
+From the repository root, use the task-local pinned oracle harness:
+
+```sh
+env PATH="$JDK21_HOME/bin:$PATH" JAVA_HOME="$JDK21_HOME" \
+  SCALA39_JDK_RELEASE=21 SCALA39_ROOT="$SCALA39_ROOT" \
+  COURSIER_MAVEN_ROOT="$COURSIER_MAVEN_ROOT" \
+  DOTTY_EITHER_COMPANION_TMP_ROOT="$PWD/target/issue-1747/oracle-script" \
+  tools/typer-classpath-corpus-audit/either-companion-oracle/run
+```
+
+The script verifies the pinned Scala source revision, JDK release, and SHA-256
+manifest for all eight Scala artifacts; it retains compiler output under the
+task-specific `target/issue-1747/oracle-script` directory. The audit reports
+and run logs used for the two-pass 25-method comparison were retained under
+`target/issue-1747/` during this work.
+
+## Validation recorded for this audit PR
+
+- `cargo fmt --all -- --check` — passed.
+- `python3 tools/check-frontend-boundaries.py` — passed.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` — passed.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` — passed.
+- `cargo test --workspace --all-targets --locked` — passed.
+- The mandatory JDK 21 test gate was run with `DOTTY_CLASSFILE_REQUIRE_JDK=1` and the JDK 21 `bin` directory on `PATH`.
+- Focused Namer integration test: `cargo test -p dotty-namer --test parsed_unit --locked` — 102 passed.
+- Scala 3.9.0 case-companion oracle harness — passed; pinned artifacts and source revision verified.
+- Both repeated cohort reports were byte-identical within each run and byte-identical to the retained current-main baseline; the #1764 pre-merge report also matched.
+- `git diff --check` — passed.
