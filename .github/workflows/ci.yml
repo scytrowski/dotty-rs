@@ -30,29 +30,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.98.1 --profile minimal
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-        with:
-          shared-key: dotty-rs-ci-rust-checks
-          cache-targets: true
-          cache-workspace-crates: false
-          cache-all-crates: false
-          save-if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
-
-      - name: Run tests
-        run: cargo test --workspace --all-targets --locked
-
-  rust-quality:
-    name: Rust quality checks
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
       - name: Lint GitHub Actions workflows
         run: tools/check-workflows.sh
 
@@ -81,6 +58,9 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --no-deps --locked
+
+      - name: Run tests
+        run: cargo test --workspace --all-targets --locked
 
       - name: Check diff
         run: git diff --check
