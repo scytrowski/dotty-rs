@@ -18,7 +18,7 @@ GitHub's [cache access rules](https://docs.github.com/en/actions/reference/workf
 
 ## Main seed and first new-PR restore
 
-On 2026-10-27, the existing workflow was manually dispatched on `main` without changing workflow code. Main was at `c200939821773c542566a25896f2e2cb385008`.
+On 2026-10-27, the existing workflow was manually dispatched on `main` without changing workflow code. Main was at `c200939821773c542566a25896b1f2e2cb385008`.
 
 | Run | Cache and staging result | Strict gates | Elapsed job time |
 | --- | --- | --- | --- |
