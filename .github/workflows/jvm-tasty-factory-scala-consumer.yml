@@ -154,6 +154,7 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_OBJECT_COMPOSITION_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_CONSTRUCTOR_INJECTION_CONSUMER: '1'
           DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
         run: |
           cargo +1.98.1 test \
@@ -162,8 +163,17 @@ jobs:
             --test jvm_tasty_cross_class_scala_consumer \
             --test jvm_tasty_factory_scala_consumer \
             --test jvm_tasty_object_composition_scala_consumer \
+            --test jvm_tasty_constructor_injection_scala_consumer \
             --test jvm_tasty_cross_class_factories \
             --test tasty_source_pickling \
+            --locked -- --nocapture
+
+      - name: Verify constructor alias PARAM addresses with pinned Scala 3.9
+        env:
+          DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
+        run: |
+          cargo +1.98.1 test -p dotty --test jvm_tasty_plan \
+            same_batch_reference_field_alias_targets_template_parameter_and_preserves_read \
             --locked -- --nocapture
 
       - name: Run mandatory Java 21 verifier and publisher gate
