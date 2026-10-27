@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 22222)
+Total output lines: 2294
+
 //! Read-only consistency proofs for the audited JVM / Scala 3 TASTy overlap.
 //!
 //! This crate is the acyclic coordination layer between `dotty-jvm` and
@@ -18,7 +21,7 @@ use dotty_classfile::tasty_link::{TastyLinkError, TastyLinkId};
 use dotty_core::ast::{AstArena, TreeKind, Untyped};
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, SymbolOrigin, Visibility};
 use dotty_core::types::{MethodKind, MethodType, TermRefTarget, Type};
-use dotty_core::{Definitions, SemanticStore, SourceId, SymbolId, TreeId, Typed};
+use dotty_core::{Definitions, SemanticStore, SourceDefinition, SourceId, SymbolId, TreeId, Typed};
 use dotty_jvm::{
     JvmClassInitializationPlan, JvmClassMetadata, JvmCodegenError, JvmCompilationUnit,
     JvmFieldSourceVisibility,
@@ -926,6 +929,15 @@ fn validate_reference_field_constructor_code(
         .iter()
         .find(|metadata| metadata.identity().symbol() == reference_field.target_class())
         .ok_or_else(|| "reference initializer target is absent from the JVM batch".to_owned())?;
+    if let Some(template_parameter) = reference_field.template_parameter_alias() {
+        return validate_reference_field_alias_constructor_code(
+            class_file,
+            proof,
+            field,
+            target,
+            template_parameter,
+        );
+    }
     let target_constructor = target
         .constructor()
         .filter(|constructor| constructor.descriptor().as_str() == "(I)V")
@@ -1013,59 +1025,7 @@ fn validate_reference_field_constructor_code(
     let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Class { name_index }) =
         class_file.constant_pool.get(class_index)
     else {
-        return Err("constructor new does not reference CONSTANT_Class".into());
-    };
-    let allocated_class = class_file
-        .constant_pool
-        .utf8(*name_index)
-        .map_err(|error| format!("invalid constructed class name: {error:?}"))?;
-    if allocated_class != target.identity().internal_name() {
-        return Err(format!(
-            "constructor allocates {allocated_class}, expected {}",
-            target.identity().internal_name()
-        ));
-    }
-    method_ref(
-        cp_index(11),
-        target.identity().internal_name(),
-        ("<init>", target_constructor.descriptor().as_str()),
-    )?;
-
-    let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
-        class_index,
-        name_and_type_index,
-    }) = class_file.constant_pool.get(cp_index(14))
-    else {
-        return Err("constructor putfield does not reference CONSTANT_Fieldref".into());
-    };
-    let owner = class_file
-        .constant_pool
-        .class_name(*class_index)
-        .map_err(|error| format!("invalid initialized field owner: {error:?}"))?;
-    let initialized_field = class_file
-        .constant_pool
-        .name_and_type(*name_and_type_index)
-        .map_err(|error| format!("invalid initialized field name/descriptor: {error:?}"))?;
-    if owner != proof.internal_name() || initialized_field != (field.name(), field.descriptor()) {
-        return Err(format!(
-            "constructor initializes {owner}.{}:{}, expected {}.{}:{}",
-            initialized_field.0,
-            initialized_field.1,
-            proof.internal_name(),
-            field.name(),
-            field.descriptor()
-        ));
-    }
-    Ok(())
-}
-
-struct CrossClassMethodRef {
-    caller: SymbolId,
-    target: SymbolId,
-    owner_internal_name: String,
-    name: String,
-    descriptor: String,
-    constructor: bool,
+        return Err("con…2222 tokens truncated…onstructor: bool,
     receiver_field: Option<SymbolId>,
 }
 
