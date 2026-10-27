@@ -21,6 +21,7 @@ const CROSS_CLASS_IDENTITY_RESULT: &str =
 const CROSS_CLASS_FACTORY_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
 const SAME_BATCH_REFERENCE_FIELD: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass CounterOwner(seed: Int):\n  private val inner: Counter = new Counter(seed)\n  def constant(): Int = 0\n";
+const SAME_BATCH_REFERENCE_CONSTRUCTOR: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass CounterOwner(counter: Counter):\n  def constant(): Int = 0\n";
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 struct WithoutPlannedClasses<'a>(&'a dyn SourceTypedBindings);
@@ -728,6 +729,99 @@ fn same_batch_class_formal_emits_reader_owned_counter_type_without_cloning_count
             ));
             if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
                 run_reader_signature_oracle(output.bytes());
+            }
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn same_batch_reference_constructor_emits_distinct_counter_parameters() {
+    with_paired_jvm_tasty_batch_plan(
+        SAME_BATCH_REFERENCE_CONSTRUCTOR,
+        "CounterOwner.scala",
+        SourceId::from_index(1753),
+        |batch| {
+            let [counter, owner] = batch.classes else {
+                panic!("fixture has Counter and CounterOwner plans");
+            };
+            let output = owner
+                .tasty_plan
+                .pickle()
+                .expect("same-batch Counter constructor parameter is supported");
+            let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+            let package = file.asts().unwrap().get(0).unwrap().decode_package().unwrap();
+            assert_eq!(package.stats.len(), 1, "Owner sidecar contains only Owner");
+            let index = file.ast_address_index().unwrap();
+            let parameters = index
+                .iter()
+                .filter(|node| node.tag == PARAM_TAG)
+                .collect::<Vec<_>>();
+            assert_eq!(parameters.len(), 2, "template and constructor retain separate PARAM nodes");
+            for parameter in parameters {
+                let parameter = parameter.decode_parameter().unwrap();
+                assert_eq!(file.names().render(parameter.name()).unwrap(), "counter");
+                let body = parameter.decode_body().unwrap();
+                assert_eq!(body.type_tree.nodes()[0].tag, IDENTTPT_TAG);
+                assert!(body.type_tree.name_refs().iter().any(|name| {
+                    file.names().render(*name).unwrap() == "Counter"
+                }));
+            }
+            assert!(
+                !index.iter().any(|node| node.tag == VALDEF_TAG),
+                "plain constructor parameter must not become a field alias"
+            );
+
+            let plan = owner.tasty_plan.plan();
+            let constructor_parameter = plan.constructor.parameter_clauses[0][0];
+            let constructor = plan.constructor.symbol;
+            let TreeKind::DefDef(constructor_tree) = &plan.source_ast.get(plan.constructor.source_tree).kind else {
+                panic!("primary constructor source tree is a DefDef");
+            };
+            let parameter_tree = constructor_tree.value_param_clauses[0][0];
+            let class_parameter = plan.source_index.symbol_at(batch.source_id, parameter_tree).unwrap();
+            assert_ne!(class_parameter, constructor_parameter);
+            assert_eq!(batch.jvm_unit.store.symbols.get(class_parameter).owner, Some(owner.class));
+            assert_eq!(batch.jvm_unit.store.symbols.get(constructor_parameter).owner, Some(constructor));
+            assert_eq!(batch.jvm_unit.store.symbols.get(class_parameter).name, batch.jvm_unit.store.symbols.get(constructor_parameter).name);
+            assert!(output.declarations().iter().any(|declaration| {
+                declaration.symbol == class_parameter && declaration.owner == owner.class
+            }));
+            assert!(output.declarations().iter().any(|declaration| {
+                declaration.symbol == constructor_parameter && declaration.owner == constructor
+            }));
+            let dotty_core::SymbolInfo::Complete(parameter_type) =
+                batch.jvm_unit.store.symbols.get(constructor_parameter).info
+            else {
+                panic!("constructor parameter has a completed type");
+            };
+            assert!(matches!(
+                batch.jvm_unit.store.types.get(parameter_type),
+                Type::TypeRef { target: TypeRefTarget::Symbol(target), .. } if *target == counter.class
+            ));
+            let without_classes = WithoutPlannedClasses(plan.typed_bindings);
+            let unplanned_target = ClassStatePicklePlan {
+                store: plan.store,
+                definitions: plan.definitions,
+                source_ast: plan.source_ast,
+                typed_ast: plan.typed_ast,
+                source_index: plan.source_index,
+                typed_bindings: &without_classes,
+                source: plan.source.clone(),
+                class: plan.class,
+                class_tree: plan.class_tree,
+                constructor: plan.constructor.clone(),
+                members: plan.members,
+            };
+            assert!(matches!(
+                unplanned_target.validate(),
+                Err(PickleError::UnsupportedTypeReference { ty }) if ty == parameter_type
+            ));
+            if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+                run_constructor_parameter_oracle(
+                    counter.tasty_plan.pickle().unwrap().bytes(),
+                    output.bytes(),
+                );
             }
         },
     )
@@ -1612,6 +1706,75 @@ fn malformed_sibling_class_trees_are_rejected_before_pickling() {
         },
     )
     .unwrap();
+}
+
+fn run_constructor_parameter_oracle(counter_tasty: &[u8], owner_tasty: &[u8]) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala root for explicit oracle"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let version = Command::new(&compiler)
+        .arg("-version")
+        .output()
+        .expect("query pinned Scala compiler version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"));
+
+    let root = std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir);
+    let temporary = root.join(format!(
+        "dotty-issue-1753-constructor-oracle-{}",
+        std::process::id()
+    ));
+    fs::remove_dir_all(&temporary).ok();
+    let candidate = temporary.join("candidate/example");
+    let compiled = temporary.join("compiled");
+    fs::create_dir_all(&candidate).unwrap();
+    fs::create_dir_all(&compiled).unwrap();
+    fs::write(candidate.join("Counter.tasty"), counter_tasty).unwrap();
+    fs::write(candidate.join("CounterOwner.tasty"), owner_tasty).unwrap();
+    let from_tasty = Command::new(&compiler)
+        .arg("-from-tasty")
+        .arg("-classpath")
+        .arg(temporary.join("candidate"))
+        .arg("-d")
+        .arg(&compiled)
+        .arg(candidate.join("Counter.tasty"))
+        .arg(candidate.join("CounterOwner.tasty"))
+        .output()
+        .expect("consume Rust-produced same-batch TASTy with pinned Scala 3.9");
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected constructor parameter sidecars: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    let javap = Command::new("javap")
+        .arg("-classpath")
+        .arg(&compiled)
+        .arg("-s")
+        .arg("example.CounterOwner")
+        .output()
+        .expect("inspect Scala-rebuilt CounterOwner constructor");
+    assert!(javap.status.success());
+    assert!(
+        String::from_utf8_lossy(&javap.stdout).contains("(Lexample/Counter;)V"),
+        "Scala-rebuilt constructor has an unexpected descriptor: {}",
+        String::from_utf8_lossy(&javap.stdout)
+    );
+    fs::remove_dir_all(temporary).unwrap();
 }
 
 fn run_reader_signature_oracle(reader_tasty: &[u8]) {

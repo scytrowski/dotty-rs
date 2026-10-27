@@ -65,8 +65,11 @@ source/typed spans. No AST or semantic record is cloned into another field
 model.
 
 The constructor contract permits the ordinary default form or one plain clause
-of `Int` parameters. Parameter entries are the constructor-owned derived IDs in
-source order; each must match `derived_symbol_at`, remain distinct from the
+of `Int` parameters. One additional bounded form permits a single plain
+parameter whose type is a public ordinary class in the same source and package,
+provided that class is included in the exact planned batch. Parameter entries
+are the constructor-owned derived IDs in source order; each must match
+`derived_symbol_at`, remain distinct from the
 class-owned canonical parameter ID, and agree with the completed `Type::Method`
 signature. The source parameter metadata must identify the parser's plain
 `ParamAccessor + PrivateLocal` form; explicit `val`/`var` accessor forms remain
@@ -76,9 +79,10 @@ Field-to-field reads are rejected because successful typing alone does not
 establish safe initialization order.
 The constructor-owned scope must resolve each parameter uniquely, both
 parameter identities must retain source-local provenance, and any completed
-class-owned template parameter type must agree with the constructor's `Int`
-signature. Missing or deferred template parameter types remain valid because
-the typer does not complete every accessor identity eagerly.
+class-owned template parameter type must agree with the constructor signature.
+Same-batch class types must retain their canonical package prefix and exact
+planned class identity. Missing or deferred template parameter types remain
+valid because the typer does not complete every accessor identity eagerly.
 
 Validation borrows the compilation session and cannot publish bytes or mutate
 its semantic store. Unsupported or inconsistent inputs return typed errors,
@@ -89,8 +93,9 @@ unsupported visibility/modifiers, and bounded item/owner chain violations.
 
 `ValidatedClassStatePlan::pickle` emits a complete Scala 3.9 TASTy file for the
 validated class-state slice with either the ordinary no-argument primary
-constructor or one plain `Int` parameter clause. It emits distinct class-owned
-template `PARAM` and constructor-owned signature `PARAM` declarations, then
+constructor, one plain `Int` parameter clause, or one plain same-batch class
+parameter. It emits distinct class-owned template `PARAM` and constructor-owned
+signature `PARAM` declarations, then
 preserves `Template.body` order: each private primitive field is a class-owned
 `VALDEF` with its declared primitive type, exact typed initializer, and the
 observed `PRIVATE, LOCAL` modifier tail (`MUTABLE` for a `var`); ordinary methods
@@ -99,6 +104,14 @@ field initializer reference is emitted only for the exact constructor-owned
 parameter identity in the validated plan. The output includes the source-file
 annotation and canonical declaration addresses. The serializer applies the
 configured projection and whole-file limits.
+
+The same-batch constructor fixture emits only the two distinct
+`counter: Counter` `PARAM` declarations in `CounterOwner`; it emits no field
+alias. The paired JVM/TASTy contract checks the matching same-package
+constructor descriptor. With `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE` enabled,
+Scala 3.9 consumes both Rust-produced `Counter.tasty` and `CounterOwner.tasty`
+with `-from-tasty`. The separate alias/field representation remains outside
+this increment.
 
 The regression fixture emits `seed: Int = 42`, `enabled: Boolean = true`,
 `counter: Int = 0`, and `constant(): Int = 1`. It checks source order, declaration

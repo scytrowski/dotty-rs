@@ -290,6 +290,85 @@ impl ClassStateValidator<'_, '_> {
         )
     }
 
+    fn same_batch_constructor_class_type(
+        &self,
+        ty: TypeId,
+        owner_class: SymbolId,
+        source_name: Name,
+    ) -> Result<(SymbolId, TreeId<Untyped>), PickleError> {
+        let Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(target_class),
+        }) = self.plan.store.types.try_get(ty)
+        else {
+            return Err(PickleError::UnsupportedTypeReference { ty });
+        };
+        let target_class = *target_class;
+        let target_record = self.symbol(target_class)?;
+        let owner_package = self.symbol(owner_class)?.owner;
+        let prefix_matches_owner_package = owner_package.is_some_and(|package| {
+            matches!(
+                self.plan.store.types.try_get(*prefix),
+                Some(Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(actual_package),
+                }) if *prefix == self.plan.definitions.no_prefix && *actual_package == package
+            )
+        });
+        if !prefix_matches_owner_package
+            || target_class == owner_class
+            || !self
+                .plan
+                .typed_bindings
+                .planned_class_symbols()
+                .contains(&target_class)
+            || target_record.kind != SymbolKind::Class
+            || target_record.origin != SymbolOrigin::Source(self.plan.source.id)
+            || target_record.owner != owner_package
+            || target_record.visibility != Visibility::Public
+            || !target_record.flags.is_empty()
+            || !target_record.annotations.is_empty()
+            || target_record.name != source_name
+        {
+            return Err(PickleError::UnsupportedTypeReference { ty });
+        }
+        let Some(SourceDefinition::Canonical { source, tree }) =
+            self.plan.source_index.definition_of(target_class)
+        else {
+            return Err(PickleError::SourceDefinition {
+                symbol: target_class,
+            });
+        };
+        let TreeKind::TypeDef(definition) = &self.source_tree(tree)?.kind else {
+            return Err(PickleError::SourceShape {
+                tree,
+                expected: SourceRole::Class,
+            });
+        };
+        if source != self.plan.source.id
+            || self.plan.source_index.symbol_at(source, tree) != Some(target_class)
+            || definition.name.as_name() != &source_name
+        {
+            return Err(PickleError::SourceDefinition {
+                symbol: target_class,
+            });
+        }
+        let target_type = self.completed(target_class)?;
+        let Some(Type::ClassInfo(info)) = self.plan.store.types.try_get(target_type) else {
+            return Err(PickleError::MalformedType {
+                ty: target_type,
+                role: TypeRole::ClassInfo,
+            });
+        };
+        if info.class != target_class || info.prefix != self.plan.definitions.no_prefix {
+            return Err(PickleError::MalformedType {
+                ty: target_type,
+                role: TypeRole::ClassInfo,
+            });
+        }
+        Ok((target_class, tree))
+    }
+
     fn initializer_has_type(
         &self,
         actual: TypeId,
@@ -844,6 +923,7 @@ impl ClassStateValidator<'_, '_> {
             });
         }
         let mut signature_index = 0;
+        let mut has_reference_parameter = false;
         let int_name = self
             .plan
             .store
@@ -992,17 +1072,30 @@ impl ClassStateValidator<'_, '_> {
                     });
                 };
                 let signature_param = signature.params[signature_index];
+                let parameter_type = self.completed(symbol)?;
+                let is_int = self.same_canonical_type(parameter_type, self.plan.definitions.int);
+                let is_reference = if is_int {
+                    false
+                } else {
+                    self.same_batch_constructor_class_type(parameter_type, class, tpt.name)?;
+                    true
+                };
                 match canonical_record.info {
-                    SymbolInfo::Complete(ty) => match self.plan.store.types.try_get(ty) {
-                        Some(Type::NoType | Type::Error(_)) => {
+                    SymbolInfo::Complete(ty) => {
+                        if matches!(
+                            self.plan.store.types.try_get(ty),
+                            Some(Type::NoType | Type::Error(_))
+                        ) {
                             return Err(PickleError::IncompleteType { ty });
                         }
-                        Some(_) if !self.same_canonical_type(ty, self.plan.definitions.int) => {
+                        if is_int {
+                            if !self.same_canonical_type(ty, self.plan.definitions.int) {
+                                return Err(PickleError::UnsupportedTypeReference { ty });
+                            }
+                        } else if !self.same_exact_type_ref(ty, parameter_type) {
                             return Err(PickleError::UnsupportedTypeReference { ty });
                         }
-                        Some(_) => {}
-                        None => return Err(PickleError::InvalidType { ty }),
-                    },
+                    }
                     SymbolInfo::Missing | SymbolInfo::Deferred(_) => {}
                     info => {
                         return Err(PickleError::IncompleteSymbol {
@@ -1011,19 +1104,37 @@ impl ClassStateValidator<'_, '_> {
                         });
                     }
                 }
-                if tpt.name != int_name
+                if is_reference {
+                    if !self.same_exact_type_ref(signature_param.ty, parameter_type) {
+                        return Err(PickleError::UnsupportedTypeReference {
+                            ty: signature_param.ty,
+                        });
+                    }
+                    has_reference_parameter = true;
+                }
+                if (is_int && tpt.name != int_name)
                     || signature_param.name.as_name() != parameter.name.as_name()
                     || signature_param.erased
                     || signature_param.varargs
-                    || !self.same_canonical_type(signature_param.ty, self.plan.definitions.int)
-                    || !self.same_canonical_type(self.completed(symbol)?, self.plan.definitions.int)
+                    || (is_int
+                        && !self.same_canonical_type(signature_param.ty, self.plan.definitions.int))
                 {
-                    return Err(PickleError::UnsupportedTypeReference {
-                        ty: self.completed(symbol)?,
+                    return Err(PickleError::UnsupportedTypeReference { ty: parameter_type });
+                }
+                if is_reference && item_count != 1 {
+                    return Err(PickleError::Unsupported {
+                        feature: UnsupportedFeature::PrimaryConstructorInput,
+                        symbol: Some(symbol),
                     });
                 }
                 signature_index += 1;
             }
+        }
+        if has_reference_parameter && item_count != 1 {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::PrimaryConstructorInput,
+                symbol: Some(plan.symbol),
+            });
         }
         Ok(())
     }

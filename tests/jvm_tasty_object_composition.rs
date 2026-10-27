@@ -905,7 +905,6 @@ fn constructor_reference_alias_preserves_source_identity_and_records_first_pickl
     ] {
         typer.complete_symbol(symbol).unwrap();
     }
-    let mut owner_template_parameter_type = None;
     for parameter in [owner_template_parameter, owner_constructor_parameter] {
         let SymbolInfo::Complete(parameter_type) = typer.store().symbols.get(parameter).info else {
             panic!("both source parameter identities have completed types");
@@ -915,9 +914,6 @@ fn constructor_reference_alias_preserves_source_identity_and_records_first_pickl
             Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. })
                 if *symbol == counter_class
         ));
-        if parameter == owner_template_parameter {
-            owner_template_parameter_type = Some(parameter_type);
-        }
     }
     let inner = source_index.symbol_at(source_id, inner_tree).unwrap();
     typer.complete_symbol(inner).unwrap();
@@ -1056,8 +1052,10 @@ fn constructor_reference_alias_preserves_source_identity_and_records_first_pickl
     };
     assert!(matches!(
         direct_error,
-        dotty_tasty_pickler::PickleError::UnsupportedTypeReference { ty }
-            if Some(ty) == owner_template_parameter_type
+        dotty_tasty_pickler::PickleError::Unsupported {
+            feature: dotty_tasty_pickler::UnsupportedFeature::UnsafeFieldInitializer,
+            ..
+        }
     ));
 
     let wrong_derived_formal = match (ClassStatePicklePlan {
@@ -1106,7 +1104,7 @@ fn constructor_reference_alias_preserves_source_identity_and_records_first_pickl
             reason,
             ..
         }
-        if reason.contains("UnsupportedTypeReference")
+        if reason.contains("UnsafeFieldInitializer")
     ));
     assert_eq!(
         owner_parameter_tree,
@@ -1270,7 +1268,7 @@ class CounterOwner(counter: foreign.Counter):
                 "class CounterOwner(counter: Counter, x: Int)",
             ),
             phase: "TASTy plan validation",
-            reason_prefix: "UnsupportedTypeReference",
+            reason_prefix: "Unsupported { feature: PrimaryConstructorInput",
         },
         Case {
             name: "extra constructor clause",
@@ -1317,7 +1315,7 @@ class CounterOwner(counter: foreign.Counter):
                 )
                 .replace("private val inner: Counter = counter", "private val inner: Counter = other"),
             phase: "TASTy plan validation",
-            reason_prefix: "UnsupportedTypeReference",
+            reason_prefix: "Unsupported { feature: PrimaryConstructorInput",
         },
     ];
     for case in variants {

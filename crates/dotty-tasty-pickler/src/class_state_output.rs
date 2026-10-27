@@ -35,6 +35,69 @@ fn complete_type(
     }
 }
 
+fn constructor_parameter_type_syntax(
+    context: &mut EncodingContext<'_>,
+    plan: &crate::ClassStatePicklePlan<'_>,
+    source_parameter: dotty_core::TreeId<dotty_core::Untyped>,
+    parameter: SymbolId,
+) -> Result<AstLabel, PickleError> {
+    let parameter_type = complete_type(plan.store, parameter)?;
+    if parameter_type == plan.definitions.int {
+        return context.primitive_type_syntax(parameter_type);
+    }
+    let Some(dotty_core::Type::TypeRef {
+        target: dotty_core::TypeRefTarget::Symbol(target_class),
+        ..
+    }) = plan.store.types.try_get(parameter_type)
+    else {
+        return Err(PickleError::UnsupportedTypeReference { ty: parameter_type });
+    };
+    let target_class = *target_class;
+    let Some(dotty_core::SourceDefinition::Canonical { source, tree }) =
+        plan.source_index.definition_of(target_class)
+    else {
+        return Err(PickleError::SourceDefinition {
+            symbol: target_class,
+        });
+    };
+    let dotty_core::ast::TreeKind::ValDef(parameter_definition) =
+        &plan.source_ast.get(source_parameter).kind
+    else {
+        return Err(PickleError::SourceShape {
+            tree: source_parameter,
+            expected: crate::SourceRole::Parameter,
+        });
+    };
+    let dotty_core::ast::TreeKind::Ident(type_syntax) =
+        &plan.source_ast.get(parameter_definition.tpt).kind
+    else {
+        return Err(PickleError::SourceShape {
+            tree: parameter_definition.tpt,
+            expected: crate::SourceRole::TypeSyntax,
+        });
+    };
+    if source != plan.source.id
+        || plan.source_index.symbol_at(source, tree) != Some(target_class)
+        || plan.store.symbols.get(target_class).name != type_syntax.name
+    {
+        return Err(PickleError::SourceDefinition {
+            symbol: target_class,
+        });
+    }
+    context.register_planned_source_class(
+        target_class,
+        tree,
+        plan.typed_bindings.planned_class_symbols(),
+    )?;
+    let name = context.intern_name(type_syntax.name)?;
+    let child = context.lower_type(parameter_type)?;
+    context.wire_node(AstNode::NatAst {
+        tag: IDENTTPT_TAG,
+        value: AstOperand::Nat(name),
+        child,
+    })
+}
+
 pub(crate) fn package_path(
     store: &dotty_core::SemanticStore,
     package: SymbolId,
@@ -445,7 +508,8 @@ impl ValidatedClassStatePlan<'_, '_> {
                     .ok_or(PickleError::SourceDefinition { symbol: parameter })?;
                 let template_record = p.store.symbols.get(template_parameter);
                 let template_name = context.intern_name(template_record.name)?;
-                let template_type = context.lower_type(p.definitions.int)?;
+                let parameter_type =
+                    constructor_parameter_type_syntax(&mut context, p, tree, parameter)?;
                 let private = marker(&mut context, PRIVATE_TAG)?;
                 let local = marker(&mut context, LOCAL_TAG)?;
                 context.bind_declaration(
@@ -454,7 +518,7 @@ impl ValidatedClassStatePlan<'_, '_> {
                         tag: PARAM_TAG,
                         fields: vec![
                             AstField::Nat(template_name),
-                            AstField::Tree(template_type),
+                            AstField::Tree(parameter_type),
                             AstField::Tree(private),
                             AstField::Tree(local),
                         ],
@@ -472,7 +536,7 @@ impl ValidatedClassStatePlan<'_, '_> {
                 let parameter_record = p.store.symbols.get(parameter);
                 let parameter_name = context.intern_name(parameter_record.name)?;
                 let parameter_type =
-                    context.primitive_type_syntax(complete_type(p.store, parameter)?)?;
+                    constructor_parameter_type_syntax(&mut context, p, tree, parameter)?;
                 context.bind_declaration(
                     parameter,
                     AstNode::Length {
