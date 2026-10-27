@@ -5,7 +5,7 @@
 Keep the existing `cargo test --workspace --all-targets --locked` CI command.
 Nextest ran the current harnesses successfully and reduced warm execution time
 on this host, but the one clean-target build-and-test pair differed by only
-4.0 seconds (2.8%). That is not a repeatable net win: the host load changed
+6.6 seconds (4.5%). That is not a repeatable net win: the host load changed
 substantially between runs, and installing the runner is an additional cost.
 No CI workflow or test configuration was changed.
 
@@ -17,8 +17,12 @@ The comparison used the CI test command from `.github/workflows/ci.yml`'s
 `cargo test --workspace --all-targets --locked`. The benchmark used those same
 build settings and command. `CARGO_TERM_COLOR` was set to `never` locally to
 keep captured output stable; this does not affect compilation or test
-selection. Each runner used an isolated target directory and the same locked
-workspace at commit `ab4d52c248242290404e70a43098c12e6de2083b`.
+selection. Runs were recorded at PR head
+`9ae361c084f871121b690678427f0f0bb8fbcde4`; compared with base
+`ab4d52c248242290404e70a43098c12e6de2083b`, that head adds only this report
+and its evidence/reproduction files. Compiler sources, manifests, lockfile,
+and CI configuration are identical. Each runner used an isolated target
+directory.
 
 Cargo metadata reports 149 targets across 16 packages: 14 libraries, 127
 integration-test targets, 6 binaries, and 2 examples. One example is a
@@ -70,32 +74,32 @@ the complete Cargo command, including Cargo startup and test discovery.
 
 | Runner / concurrency | Repetitions | Times (s) | Median (s) |
 | --- | ---: | --- | ---: |
-| Cargo + libtest, default | 3 | 34.057, 34.161, 34.530 | 34.161 |
-| Nextest, 16 (`num-cpus`) | 3 | 27.969, 26.992, 27.242 | 27.242 |
-| Nextest, 4 | 1 | 37.518 | — |
-| Nextest, 2 | 1 | 63.996 | — |
+| Cargo + libtest, default | 3 | 34.963, 35.270, 35.208 | 35.208 |
+| Nextest, 16 (`num-cpus`) | 3 | 28.717, 28.586, 28.554 | 28.586 |
+| Nextest, 4 | 1 | 37.935 | — |
+| Nextest, 2 | 1 | 66.910 | — |
 
-At the default concurrency, Nextest's warm-run median was 6.9 seconds (20.3%)
+At the default concurrency, Nextest's warm-run median was 6.6 seconds (18.8%)
 lower. Lowering Nextest concurrency increased elapsed time on this suite.
 
-One clean-target build-and-test run per tool measured 145.751 seconds for
-Cargo/libtest and 141.738 seconds for Nextest, a 4.013-second (2.8%)
+One clean-target build-and-test run per tool measured 146.573 seconds for
+Cargo/libtest and 140.002 seconds for Nextest, a 6.571-second (4.5%)
 difference. These runs used separate empty target directories, the same
 checkout, profile settings, Rust toolchain, and already populated Cargo
 registry cache. The Nextest binary had already been downloaded, so its
 installation cost is not in that comparison.
 
-During the warm measurements, host 1-minute load averages ranged from 1.21 to
-20.62 and were often rising while a run was in progress. In particular, the
-clean Cargo run started at 6.92 and ended at 16.76, while the clean Nextest
-run started at 15.50 and ended at 20.37. The environment was not an idle or
+During the measurements, host 1-minute load averages ranged from 4.65 to
+25.12 and often rose while a run was in progress. In particular, the clean
+Cargo run started at 6.79 and ended at 11.36, while the clean Nextest run
+started at 11.36 and ended at 16.42. The environment was not an idle or
 hosted-CI runner, so small end-to-end differences cannot be attributed to the
 runner reliably.
 
 Peak resident memory was sampled every 100 ms from `/proc` for the command's
-visible process tree. The largest sampled tree sum was about 435 MiB for
-Cargo/libtest and 55 MiB for Nextest; the largest individual process samples
-were about 400 MiB and 36 MiB, respectively. Tree sums can double-count shared
+visible process tree. The largest sampled tree sum was about 436 MiB for
+Cargo/libtest and 65 MiB for Nextest; the largest individual process samples
+were about 402 MiB and 35 MiB, respectively. Tree sums can double-count shared
 pages, and 100 ms sampling can miss short-lived child processes; treat these
 as rough observations, not comparable peak-memory measurements.
 
@@ -120,6 +124,14 @@ The core commands used were:
 cargo test --workspace --all-targets --locked
 cargo nextest run --workspace --all-targets --locked --retries 0 --test-threads num-cpus
 ```
+
+The compressed raw listings, identity-diff outputs, environment record, and
+all measured run logs are in
+[`issue-1769-evidence.tar.gz`](issue-1769-evidence/issue-1769-evidence.tar.gz).
+Its SHA-256 is recorded in
+[`issue-1769-evidence.tar.gz.sha256`](issue-1769-evidence/issue-1769-evidence.tar.gz.sha256).
+The inventory comparator and benchmark driver are alongside this report in
+[`issue-1769-evidence/`](issue-1769-evidence/README.md).
 
 Nextest references: [prebuilt binaries](https://www.nexte.st/docs/installation/pre-built-binaries/),
 [configuration reference](https://www.nexte.st/docs/configuration/reference/),
