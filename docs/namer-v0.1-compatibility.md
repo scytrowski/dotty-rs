@@ -69,6 +69,32 @@ counted as completed-run structural failures. Synthetic enum APIs such as
 `values`, lookup methods, and `ordinal` are later synthesis work, not enum
 identity failures.
 
+## Bounded nested case-class companions
+
+The namer now creates a companion `Object`/`ModuleClass` and a derived
+`apply` identity for a nested case class that is a direct member of a source
+object, when its primary constructor has exactly one non-empty ordinary
+parameter clause. It reuses a valid explicit class/object companion pair.
+The generated method's source-semantic-index provenance points to the case
+class tree; its type-parameter and value-parameter identities point to the
+original constructor parameter trees in declaration order. This keeps the
+generic source relationships recoverable without fabricating completed
+`SymbolInfo` or performing type resolution.
+
+Abstract case classes, constructor defaults, contextual/repeated or otherwise
+modified parameters, bounds/context bounds on type parameters, non-public
+constructors, secondary constructors, and conflicting same-name declarations
+are rejected with a typed Namer error. Abstract case classes do not receive a
+generated `apply` in the pinned Scala 3.9.0 implementation.
+Erased and by-name case-class parameters are currently rejected by the parser
+and do not reach this Namer path. Ordinary nested classes do not receive
+case-class companions. The Scala 3.9.0 oracle fixture
+`tools/typer-classpath-corpus-audit/either-companion-oracle` verifies nested
+owners, explicit overloads, and negative call controls. This bounded increment
+does not synthesize `unapply` or `copy`, lower constructor calls, or claim
+Typer support. The corpus figures above are the checked-in measurement from
+revision `5edd6ee`; this focused change has not regenerated that full report.
+
 ## Export handoff
 
 The source corpus contains 10 export keyword occurrences. Seven export sites
