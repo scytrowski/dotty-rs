@@ -8,8 +8,9 @@ definitions with the expected projection result types.
 - Scala source revision: `777528f19a58e794c9954a42f433373472ec57f8`.
 - Scala compiler/library: pinned 3.9.0 artifacts; JDK 21.
 - dotty-rs base: `5b84f092d3abae3aed365ccfafa0f46b53e48a9d` (main after #1776).
-- Implementation candidate: `dc1bbeaea0ecd1ebea8be1a67573a39460ee043e` (Typer implementation; preceded by
-  Namer provenance commit `ce52437b0b`).
+- Implementation fix: `b775708843afdff3b76c72eadcfbdcb472ab7627` (preserves singleton
+  conformance; based on Typer commit `dc1bbeaea0ecd1ebea8be1a67573a39460ee043e`
+  and Namer provenance commit `ce52437b0b474d2a856f00f48fc6b418d87071ff`).
 - Exact roots: `library/src/scala/util/Either.scala#tree=19` (`left`) and
   `#tree=31` (`right`).
 - No hosted full standard-library corpus audit was run.
@@ -35,7 +36,9 @@ Regression coverage includes generated and explicit companions, canonical
 ModuleClass provenance, generated `apply` signature shape, and generic `this`
 inference. The explicit companion test confirms that an existing `object Node`
 and its members are retained while the case class's generated `apply` is
-completed separately.
+completed separately. Application conformance keeps an original `this.type`
+when it already matches the parameter, then falls back to the applied generic
+receiver view only when needed.
 
 ## Scala 3.9.0 oracle
 
@@ -111,7 +114,7 @@ To regenerate the exact two-method result, derive a selection manifest from
 the frozen cohort and retain both runs under task-local `target/` directories:
 
 ```sh
-mkdir -p target/issue-1747/reports
+mkdir -p target/issue-1747/reports target/issue-1747/test-tmp
 python3 - <<'PYGEN'
 import csv
 from pathlib import Path
@@ -135,6 +138,7 @@ env PATH="/home/vdrake6/.jdks/jdk-21/bin:$PATH" \
   SCALA39_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source \
   SCALA39_JDK_RELEASE=21 \
   COURSIER_MAVEN_ROOT=/home/vdrake6/.codex/worktrees/bdf3/dotty-rs/target/worktrees/issue-1746/target/issue-1746/coursier/https/repo1.maven.org/maven2 \
+  TMPDIR="$PWD/target/issue-1747/test-tmp" \
   DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1747/audit-pair-tmp" \
   tools/typer-classpath-corpus-audit/run \
     --method-kind ordinary \
@@ -151,6 +155,7 @@ env PATH="/home/vdrake6/.jdks/jdk-21/bin:$PATH" \
   SCALA39_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source \
   SCALA39_JDK_RELEASE=21 \
   COURSIER_MAVEN_ROOT=/home/vdrake6/.codex/worktrees/bdf3/dotty-rs/target/worktrees/issue-1746/target/issue-1746/coursier/https/repo1.maven.org/maven2 \
+  TMPDIR="$PWD/target/issue-1747/test-tmp" \
   DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1747/audit-cohort-tmp" \
   tools/typer-classpath-corpus-audit/run \
     --method-kind ordinary \
@@ -167,16 +172,16 @@ and result shape. The existing `Either.isLeft` and `Either.isRight` report IDs
 shifted from 2 and 5 to 16 and 19 as the two requested methods were added.
 Those numbers are report-local IDs, not semantic identity.
 
-## Validation recorded for this audit PR
+## Validation recorded for issue #1747
 
 - `cargo fmt --all -- --check` — passed.
 - `python3 tools/check-frontend-boundaries.py` — passed.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — passed.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` — passed.
-- `cargo test --workspace --all-targets --locked` — passed.
-- Mandatory JDK 21 gate with `DOTTY_CLASSFILE_REQUIRE_JDK=1` — passed (168 source-compilation, 17 classfile encoder, and 173 JVM library tests).
+- `cargo test --workspace --all-targets --locked` — passed with `TMPDIR` pointed at `target/issue-1747/test-tmp` because the shared `/tmp` volume was full.
+- Mandatory JDK 21 gate with `DOTTY_CLASSFILE_REQUIRE_JDK=1` — passed for all requested targets.
 - Focused Namer regression: `nested_case_class_gets_a_companion_and_source_mapped_apply_parameters` — passed.
-- Focused Typer regressions: generated companion identity/ClassInfo/apply signature, explicit companion apply signature, and generic `this` inference — passed.
+- Focused Typer regressions: generated companion identity/ClassInfo/apply signature, explicit companion apply signature, generic `this` inference, and ordinary plus explicit-polymorphic `this.type` arguments — passed.
 - Scala 3.9.0 case-companion oracle harness — passed; pinned artifacts and source revision verified.
 - The two-method report and both 25-method cohort reports were byte-identical between their repeated deterministic passes.
 - Cohort comparison: exactly `Either.left` and `Either.right` newly typed; the 12 prior typed results retain their source IDs and result shapes. `Either.swap` remains blocked by its separate external `scala.util.Left` identity failure.
