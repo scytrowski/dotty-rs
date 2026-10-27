@@ -40,10 +40,15 @@ fn constructor_parameter_type_syntax(
     plan: &crate::ClassStatePicklePlan<'_>,
     source_parameter: dotty_core::TreeId<dotty_core::Untyped>,
     parameter: SymbolId,
+    template_parameter: bool,
 ) -> Result<AstLabel, PickleError> {
     let parameter_type = complete_type(plan.store, parameter)?;
     if parameter_type == plan.definitions.int {
-        return context.primitive_type_syntax(parameter_type);
+        return if template_parameter {
+            context.lower_type(parameter_type)
+        } else {
+            context.primitive_type_syntax(parameter_type)
+        };
     }
     let Some(dotty_core::Type::TypeRef {
         target: dotty_core::TypeRefTarget::Symbol(target_class),
@@ -509,7 +514,7 @@ impl ValidatedClassStatePlan<'_, '_> {
                 let template_record = p.store.symbols.get(template_parameter);
                 let template_name = context.intern_name(template_record.name)?;
                 let parameter_type =
-                    constructor_parameter_type_syntax(&mut context, p, tree, parameter)?;
+                    constructor_parameter_type_syntax(&mut context, p, tree, parameter, true)?;
                 let private = marker(&mut context, PRIVATE_TAG)?;
                 let local = marker(&mut context, LOCAL_TAG)?;
                 context.bind_declaration(
@@ -536,7 +541,7 @@ impl ValidatedClassStatePlan<'_, '_> {
                 let parameter_record = p.store.symbols.get(parameter);
                 let parameter_name = context.intern_name(parameter_record.name)?;
                 let parameter_type =
-                    constructor_parameter_type_syntax(&mut context, p, tree, parameter)?;
+                    constructor_parameter_type_syntax(&mut context, p, tree, parameter, false)?;
                 context.bind_declaration(
                     parameter,
                     AstNode::Length {

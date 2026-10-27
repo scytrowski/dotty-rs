@@ -22,6 +22,11 @@ const CROSS_CLASS_FACTORY_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
 const SAME_BATCH_REFERENCE_FIELD: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass CounterOwner(seed: Int):\n  private val inner: Counter = new Counter(seed)\n  def constant(): Int = 0\n";
 const SAME_BATCH_REFERENCE_CONSTRUCTOR: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass CounterOwner(counter: Counter):\n  def constant(): Int = 0\n";
+// Frozen Rust output from main at fe8e21dd for SAME_BATCH_REFERENCE_FIELD.
+const COUNTER_BASE_TASTY: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_pickler_class_state/counter_base.tasty");
+const COUNTER_OWNER_BASE_TASTY: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_pickler_class_state/counter_owner_base.tasty");
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 struct WithoutPlannedClasses<'a>(&'a dyn SourceTypedBindings);
@@ -730,6 +735,26 @@ fn same_batch_class_formal_emits_reader_owned_counter_type_without_cloning_count
             if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
                 run_reader_signature_oracle(output.bytes());
             }
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn same_batch_reference_field_keeps_existing_primitive_tasty_bytes() {
+    with_paired_jvm_tasty_batch_plan(
+        SAME_BATCH_REFERENCE_FIELD,
+        "CounterOwner.scala",
+        SourceId::from_index(1753),
+        |batch| {
+            assert_eq!(
+                batch.classes[0].tasty_plan.pickle().unwrap().bytes(),
+                COUNTER_BASE_TASTY
+            );
+            assert_eq!(
+                batch.classes[1].tasty_plan.pickle().unwrap().bytes(),
+                COUNTER_OWNER_BASE_TASTY
+            );
         },
     )
     .unwrap();
