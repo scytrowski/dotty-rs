@@ -48,7 +48,7 @@ The full workspace test run covered positive and negative assertions, fixture co
 
 ## Reproduce and inspect
 
-- Exact target/testcase inventory and rename map: [`issue-1767-inventory.tar.gz.base64`](issue-1767-inventory.tar.gz.base64) (decode with `base64 -d`, then inspect with `tar -tzf`). SHA-256 of decoded archive: `d2b7c560b4b1c40a25cffe9ebbf9d271701d403df9b9d4d75334f424532f22375`.
+- Exact target/testcase inventory and rename map: [`issue-1767-inventory.tar.gz.base64`](issue-1767-inventory.tar.gz.base64) (decode with `base64 -d`, then inspect with `tar -tzf`). SHA-256 of decoded archive: `6f2d28d26e37795bc34df1816bc35c8273118b9157a57c92419185f721cb2e61`.
 - Inventory command: build each target executable from Cargo JSON artifacts, then run `<executable> --list` and `<executable> --list --ignored`; deduplicate by executable path.
 - Build command: `cargo test --workspace --all-targets --locked --no-run --timings --message-format=json` with the variables above and a fresh `CARGO_TARGET_DIR`.
 - Test command: `cargo test --workspace --all-targets --locked` with the same profile variables.
