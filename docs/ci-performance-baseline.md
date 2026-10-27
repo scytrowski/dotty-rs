@@ -30,7 +30,7 @@ Workflow-level concurrency is part of the latency context. CI cancels an older r
 | [Lexer compatibility](../.github/workflows/lexer-compatibility.yml) | Manual dispatch only, selecting fixtures, source corpus, or both. Not a PR check. | JDK 25 and sbt setup, stable Rust install, Scala lexer oracle and selected corpus comparison. The JDK setup caches sbt dependencies. No uploaded report artifact. | Two manual runs are present; both failed. No successful timing sample. |
 | [Scala parser oracle](../.github/workflows/parser-oracle.yml) | Manual dispatch only. Not a PR check. | JDK 25, sbt setup, stable Rust install, Scala 3.9 parser differential oracle. Caches Coursier/sbt state. No uploaded report artifact. | No runs found in the repository's recorded workflow history. |
 | [TASTy compatibility](../.github/workflows/tasty-compatibility.yml) | Manual dispatch only, selecting all, scala3-library, or scala3-compiler. Not a PR check. | JDK 25 and sbt setup, stable Rust install, structured TASTy round trips for the selected fixture corpus. The JDK setup caches sbt dependencies. No uploaded report artifact. | One successful run, 2026-09-17; it is a one-off observation, not a baseline distribution. |
-| [CI Cargo compile timings](../.github/workflows/ci-cargo-timings.yml) | New manual diagnostic workflow, with warm-cache or cold-cache mode. Not a PR check. | Runs the test-target compile with `--no-run --timings`; uploads Cargo HTML timing output and environment metadata for 30 days. | Available for future opt-in measurements; it was not run while establishing this baseline. |
+| [CI Cargo compile timings](../.github/workflows/ci-cargo-timings.yml) | Manual diagnostic workflow. Selects full target cache, dependency-only cache, or cold mode, plus compile-only or full Rust checks. Not a PR check. | Compile-only mode runs test-target compilation with `--no-run --timings`; full mode runs the production Rust checks workload. Uploads Cargo HTML timing output and environment metadata for 30 days. | Used for the controlled cache comparison in #1736; profile comparison for #1737 is recorded below. |
 
 The hosted full-corpus job remains opt-in and was not dispatched. The failure-only historical lexer records and the old push-event full-corpus records are not used as successful timing samples.
 
@@ -153,6 +153,50 @@ One complete PR CI run on this commit finished in **6m21s** from workflow creati
 
 The Typer cache transfers are small; Scala consumer cache changes would require a separate end-to-end comparison of its much longer staged compiler path. Preserve those configurations for now and keep their sizes and observed cache outcomes visible for the follow-up issues in the Refactor milestone.
 
+## Rust test compilation and linking profile (#1737)
+
+The pinned test profile uses `opt-level = 1`. I compared it with `opt-level = 0` on source revision [`1d4d4ce`](https://github.com/scytrowski/dotty-rs/commit/1d4d4cee70e66fdc7b673c16c7fb48126c03bd8f), using Rust/Cargo 1.98.1, `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_TEST_DEBUG=0`, and separate initially empty target directories. This was a local Linux x86_64 host with 16 logical CPUs and 29 GiB RAM; the Cargo registry was warm. The clean compile is therefore a cold target build, not a cold dependency download.
+
+| Test profile | Cold all-target build (`--no-run --timings`) | Full test execution | Combined observation | Maximum single child RSS | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `opt-level = 1` (repository default) | 97.9s | 17.3s | 115.3s | 1.33 GiB | 7,058 passed; 18 ignored |
+| `opt-level = 0` | 18.9s | Aborted after 66.5s | Incomplete | 1.18 GiB | Stack overflow in `loader::tests::inheritance_ancestry_has_a_bounded_depth` |
+
+The faster unoptimized build is not a valid CI candidate: it fails an existing all-targets test with the runner's default test-thread stack. The repository's optimized test profile remains unchanged. Under the passing profile, three warm compile-only invocations were 0.067s–0.073s (0.069s median); three subsequent full test executions passed with 17.1s median (16.965s–18.414s). The cold build plus test run and the warm compile plus test samples keep compilation and execution separate rather than attributing test runtime to compilation.
+
+The Cargo HTML report from the default-profile run was generated at `target/issue-1737/opt1/cargo-timings/cargo-timing.html`. It recorded 197 dirty units, a 97.9s build wall time, and maximum concurrency of 17 units (`jobs=16`, 16 logical CPUs). The slowest units were:
+
+| Compilation unit | Unit time |
+| --- | ---: |
+| `dotty-classloader` library test build | 86.3s |
+| `dotty-parser` library test build | 72.6s |
+| `dotty-typer` library test build | 65.2s |
+| `dotty-typer` `local_definition_audit` integration test | 62.1s |
+| `dotty-tasty-pickler` `source_pipeline` integration test | 49.8s |
+| `dotty-typer` `package_prefix_parity` integration test | 41.5s |
+| `dotty` `jvm_source_compilation` integration test | 34.6s |
+| `dotty` `classpath_source_typing` integration test | 33.8s |
+| `dotty-jvm` library test build | 25.6s |
+| `dotty` `jvm_tasty_plan` integration test | 25.0s |
+
+Unit times overlap under parallel compilation and must not be summed as wall time. Cargo's stable HTML timing report does not separate the final linker phase from each Rust compilation unit. The same clean build emitted 148 test-profile executables: 126 integration-test targets, 14 library test harnesses, six binary test harnesses, and two example harnesses. Their output files totaled 447,926,632 bytes (about 427 MiB). Each integration target therefore incurs its own Rust codegen/link step; the current timing report attributes that work to its compilation unit. The targets cover distinct fixtures and suites, so none was consolidated without evidence that its process isolation and assertions were redundant.
+
+Reproduce the profile comparison from a clean checkout with fresh target paths. The `cargo-timings/` subdirectory contains Cargo's HTML report; `--message-format=json` also records each compiler artifact and executable path.
+
+```sh
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0
+
+CARGO_TARGET_DIR=target/issue-1737/opt1 CARGO_PROFILE_TEST_OPT_LEVEL=1 \
+  cargo test --workspace --all-targets --locked --no-run --timings --message-format=json
+CARGO_TARGET_DIR=target/issue-1737/opt1 CARGO_PROFILE_TEST_OPT_LEVEL=1 \
+  cargo test --workspace --all-targets --locked
+
+CARGO_TARGET_DIR=target/issue-1737/opt0 CARGO_PROFILE_TEST_OPT_LEVEL=0 \
+  cargo test --workspace --all-targets --locked --no-run --timings --message-format=json
+CARGO_TARGET_DIR=target/issue-1737/opt0 CARGO_PROFILE_TEST_OPT_LEVEL=0 \
+  cargo test --workspace --all-targets --locked
+```
+
 ## Before/after procedure for performance issues
 
 1. Select the exact workflow, job, and command changed by the issue. Keep the same test/feature/target set, lockfile, source revision except for the intended change, JDK, Scala 3.9.0 revision, Rust version, runner image, environment variables, and concurrency settings.
@@ -165,7 +209,7 @@ The Typer cache transfers are small; Scala consumer cache changes would require 
 ## Prioritized hypotheses to test in follow-up issues
 
 1. **Large cache transfer (addressed by #1736):** the former CI Cargo cache was 5.27 GB with a 2m01s median restore. Dependency-only caching reduced the measured benchmark cache to 12.3 MB and cut median benchmark-job wall time by 1m46s. Track cache size and warm/cold behavior as toolchain and lockfile inputs change.
-2. **Compilation within the full test step:** one successful run reports 4m35s in Cargo's test profile build; the full CI test step has a 6m50s four-run median. Use the uploaded Cargo timing report to locate expensive crates before proposing build-profile or test-graph changes.
+2. **Compilation within the full test step:** one successful CI run reports 4m35s in Cargo's test profile build; the full CI test step has a 6m50s four-run median. The local profile comparison found no safe test-profile change: `opt-level = 0` overflows an existing bounded-inheritance test's stack. The report identifies the largest compilation units and 126 separate integration-test targets; stable Cargo does not isolate linker time from each unit, and no target consolidation was justified by the evidence.
 3. **Pinned Scala staging:** Scala source staging has a 5m42s median and up to 7m36s in five consumer samples. Separate sbt staging, cache restore, and Rust consumer tests before changing this flow.
 4. **Queueing and gate fan-out:** a measured Scala consumer waited 5m31s before its job began. CI runs two parallel jobs and cancels older runs on the same workflow/ref; the retried CI example took 14m20s end to end, including its failed first JVM-gate attempt and retry interval, while the JVM-gate attempts had 2s and 3s of runner queue. Track queue separately from retries and compiler cost.
 5. **Manual compatibility coverage:** lexer, parser, and TASTy workflows have inadequate successful-run samples for cost comparisons. Gather normal opt-in samples only when those workflows are intentionally run; do not turn them into extra PR compilation without an explicit design decision.
