@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 20469)
+Total output lines: 1231
+
 # JVM backend boundary
 
 `dotty-jvm` is the adapter boundary between a completed typed frontend and
@@ -580,34 +583,7 @@ conversions, and discarded Long or Double expressions remain unsupported.
 `Apply` tree plus the planned caller class and method. It resolves only a
 canonical `TermRefTarget::Symbol` carried by an `Ident` or a `Select` on that
 class's `this`. Ident references must have either `NoPrefix` or that class's
-`ThisType` as their canonical term-reference prefix; selected references must
-have that class's `ThisType`. Other prefixes return a typed unsupported-shape
-error. The resolver then requires the target to belong to the same class's
-explicit emission plan and declaration scope. The result carries the exact
-owner internal name, JVM method name and descriptor, canonical method symbol,
-`Virtual` invocation kind, and result contract. The typed call result must
-agree with the projected descriptor. Contextual `using` calls, type
-applications, other receivers, constructors, static or extension methods,
-unresolved name-designed references, and parameterless methods without an
-explicit empty clause return typed errors. This API resolves metadata only:
-it does not check argument arity or types, evaluate arguments, load `this`, or
-emit an invocation instruction.
-
-`JvmCompilationUnit::lower_same_class_call_receiver` composes that validated
-call context with receiver lowering. A `Select` receiver must be the current
-class's unqualified `this`; an `Ident` is accepted only after the resolver has
-proved it names a planned instance method. The method returns a fresh builder
-containing exactly one `aload(0)`. Callers append argument evaluation after
-that builder so the receiver precedes the arguments. Qualified `this`,
-`super`, other receiver expressions, and static caller methods return typed
-errors. This API emits neither arguments nor the invocation and does not
-introduce general JVM reference-value lowering.
-
-Planned method-body lowering in `emit_class` accepts a regular `Apply` whose
-target passes `resolve_planned_instance_call`. It evaluates the selected
-receiver once before lowering each argument once in source order, checks their
-stack values against the exact descriptor, and emits one symbolic
-`invokevirtual`. Int/Boolean results leave one int-like value; Unit leaves no
+`ThisType` as…469 tokens truncated…s no
 value. Arity, receiver-flow, argument-flow, target, and typed-result mismatches
 return structured errors, and a failed method does not produce a class
 artifact. Standalone expression/body lowering has no emission plan, so it
@@ -727,17 +703,22 @@ Counter/CounterReader, and Counter/CounterOwner shapes. The paired batch path
 uses one complete source session, serializes each complete TASTy sidecar, links
 each classfile with that sidecar's producer-owned Scala 3.9.0 UUID, and checks
 the ordered complete manifest before returning any owned bytes. For the
-CounterOwner shape, its private final planned reference field, direct
-constructor initialization, and cross-class `read()I` dispatch are checked
-against exact source symbols and the decoded `Fieldref`/`Methodref` owners and
-descriptors. A producer or validation error returns no partial batch. The
-coordinator writes no files; the staged filesystem test adapter does not claim
-crash-atomic publication.
+CounterOwner shapes, the direct `new Counter(seed)` case retains its original
+constructor validation, and the constructor-injected alias case requires an
+exact public `(Lexample/Counter;)V` constructor plus the original immutable
+private `inner` field. Its bytecode proof checks the initialized argument is
+stored once after the direct-super call, with no target allocation, and checks
+`read()I` against the planned `Fieldref`/`Methodref` owners and descriptors.
+All four linked classfile/sidecar paths are validated as one source-ordered
+batch. A producer or validation error returns no partial batch. The coordinator
+writes no files; the staged filesystem test adapter does not claim crash-atomic
+publication.
 
 This remains a narrow library API, not a production compiler driver or general
-artifact publisher. Rust-produced JVM execution is covered for this fixture by
-the Java 21 verifier test; independent Scala consumption of the linked
-CounterOwner classfile/TASTy pair remains a separate compatibility gate.
+artifact publisher. Rust-produced JVM execution of the direct-`new` fixture is
+covered by the Java 21 verifier test. Runtime identity for the
+constructor-injected alias and independent Scala consumption of that linked
+pair are separate compatibility gates (#1757 and #1758).
 
 The frontend must set `JvmClassInitializationPlan::ImplicitNoArg` only after
 proving the source class has no constructor parameters or body, superclass
