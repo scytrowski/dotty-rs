@@ -164,7 +164,7 @@ The pinned test profile uses `opt-level = 1`. I compared it with `opt-level = 0`
 
 The faster unoptimized build is not a valid CI candidate: it fails an existing all-targets test with the runner's default test-thread stack. The repository's optimized test profile remains unchanged. Under the passing profile, three warm compile-only invocations were 0.067s–0.073s (0.069s median); three subsequent full test executions passed with 17.1s median (16.965s–18.414s). The cold build plus test run and the warm compile plus test samples keep compilation and execution separate rather than attributing test runtime to compilation.
 
-The Cargo HTML report from the default-profile run was generated at `target/issue-1737/opt1/cargo-timings/cargo-timing.html`. It recorded 197 dirty units, a 97.9s build wall time, and maximum concurrency of 17 units (`jobs=16`, 16 logical CPUs). The slowest units were:
+The [preserved cold Cargo HTML report](ci-performance-baseline/issue-1737-opt1-cold-cargo-timing.html) is the timestamped report from the default-profile run (`2026-10-27T06:02:05Z`). It recorded 197 dirty units, a 97.9s build wall time, and maximum concurrency of 17 units (`jobs=16`, 16 logical CPUs). The slowest units were:
 
 | Compilation unit | Unit time |
 | --- | ---: |
@@ -181,6 +181,17 @@ The Cargo HTML report from the default-profile run was generated at `target/issu
 
 Unit times overlap under parallel compilation and must not be summed as wall time. Cargo's stable HTML timing report does not separate the final linker phase from each Rust compilation unit. The same clean build emitted 148 test-profile executables: 126 integration-test targets, 14 library test harnesses, six binary test harnesses, and two example harnesses. Their output files totaled 447,926,632 bytes (about 427 MiB). Each integration target therefore incurs its own Rust codegen/link step; the current timing report attributes that work to its compilation unit. The targets cover distinct fixtures and suites, so none was consolidated without evidence that its process isolation and assertions were redundant.
 
+I also measured the production check order on one fresh target directory to see whether Clippy and rustdoc outputs carry into test compilation. The sequence used Rust/Cargo 1.98.1, the same source revision and environment as the profile comparison, then ran Clippy, rustdoc, test compilation, and the full test suite in order:
+
+| Step | Cargo profile | Cargo timing units | Wall time | Result |
+| --- | --- | ---: | ---: | --- |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | `dev` | 0 fresh, 198 dirty | 7.7s | Passed |
+| `cargo doc --workspace --no-deps --locked` (`RUSTDOCFLAGS=-D warnings`) | `dev` | 30 fresh, 32 dirty | 4.5s | Passed; 30 units were fresh after Clippy |
+| `cargo test --workspace --all-targets --locked --no-run` | `test` | 0 fresh, 197 dirty | 91.2s | Passed; no test-profile units were reused from the preceding dev-profile checks |
+| `cargo test --workspace --all-targets --locked` | `test` | Warm | 17.1s | 7,058 passed, 0 failed, 18 ignored |
+
+This confirms that the test profile rebuilds its full set of units after the dev-profile Clippy and docs checks. Rustdoc did reuse 30 dev-profile units from Clippy. The test profile remains separately optimized because switching it to `opt-level=0` causes the existing bounded-inheritance test to overflow its stack. These timings are one local sequence, not a hosted CI benchmark.
+
 Reproduce the profile comparison from a clean checkout with fresh target paths. The `cargo-timings/` subdirectory contains Cargo's HTML report; `--message-format=json` also records each compiler artifact and executable path.
 
 ```sh
@@ -195,6 +206,13 @@ CARGO_TARGET_DIR=target/issue-1737/opt0 CARGO_PROFILE_TEST_OPT_LEVEL=0 \
   cargo test --workspace --all-targets --locked --no-run --timings --message-format=json
 CARGO_TARGET_DIR=target/issue-1737/opt0 CARGO_PROFILE_TEST_OPT_LEVEL=0 \
   cargo test --workspace --all-targets --locked
+
+# In a separate fresh target directory, measure the production check sequence:
+export RUSTDOCFLAGS="-D warnings"
+CARGO_TARGET_DIR=target/issue-1737/sequence cargo clippy --workspace --all-targets --locked --timings -- -D warnings
+CARGO_TARGET_DIR=target/issue-1737/sequence cargo doc --workspace --no-deps --locked --timings
+CARGO_TARGET_DIR=target/issue-1737/sequence cargo test --workspace --all-targets --locked --no-run --timings
+CARGO_TARGET_DIR=target/issue-1737/sequence cargo test --workspace --all-targets --locked
 ```
 
 ## Before/after procedure for performance issues
