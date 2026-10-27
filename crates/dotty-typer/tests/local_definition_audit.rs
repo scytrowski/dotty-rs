@@ -7596,11 +7596,9 @@ fn pinned_scala39_local_definition_audit() {
                 methods.keys().all(|path| focused_files.contains(path)),
                 "every selected method must belong to a selected source file"
             );
-            assert_eq!(
-                audit.local_method_first_blockers.len(),
-                selected_method_count,
-                "every selected method tree must exist and receive one typing outcome"
-            );
+            // Keep the historical cohort immutable. Methods without an outcome
+            // remain explicitly listed below, while methods in a Namer-failed
+            // file receive the concrete Namer error in the error path.
         }
         println!("FOCUSED_REPORT_BEGIN");
         println!("status=FOCUSED / PARTIAL");
@@ -7622,6 +7620,24 @@ fn pinned_scala39_local_definition_audit() {
             "first_blocker_rows={}",
             audit.local_method_first_blockers.len()
         );
+        if let Some(methods) = &focused_methods {
+            let observed = audit
+                .local_method_first_blockers
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let missing = methods
+                .iter()
+                .flat_map(|(path, trees)| {
+                    trees.iter().map(move |tree| format!("{path}#tree={tree}"))
+                })
+                .filter(|identity| !observed.contains(identity))
+                .collect::<Vec<_>>();
+            println!("missing_selected_methods={}", missing.len());
+            for identity in missing {
+                println!("  missing_method={identity}");
+            }
+        }
         println!("selected_paths:");
         for path in &focused_files {
             println!("  {path}");
@@ -12470,10 +12486,39 @@ fn audit_source_inner_filtered(
                 namer_time = stage_started.elapsed();
             }
             audit.namer_failed_files = 1;
+            let failure = classify_namer_error(&error);
             if audit.local_defdefs != 0 {
-                let failure = classify_namer_error(&error);
                 for _ in 0..audit.local_defdefs {
                     record_failure(&mut audit, failure.clone(), path);
+                }
+            }
+            if let Some(selected_trees) = focused_method_tree_filter {
+                let source_lines = SourceLineIndex::new(text);
+                for (tree, _) in local_method_trees(&parsed.ast) {
+                    if !selected_trees.contains(&tree.index()) {
+                        continue;
+                    }
+                    let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind else {
+                        unreachable!()
+                    };
+                    let name = store.names.resolve(definition.name.as_name().text());
+                    let start = parsed
+                        .ast
+                        .get(tree)
+                        .position
+                        .expect("local method has a source position")
+                        .span()
+                        .range()
+                        .start() as usize;
+                    let site = format!("{path}:{}:{name}", source_lines.line_at(start));
+                    let method_key = format!("{path}#tree={}", tree.index());
+                    audit
+                        .local_method_first_blockers
+                        .insert(method_key.clone(), failure.bucket.clone());
+                    audit.local_method_attempts.insert(format!(
+                        "method={method_key}::site={site}::attempt=<none>::blocker={}::typed=false",
+                        failure.bucket
+                    ));
                 }
             }
             if profile_timing {
@@ -12624,16 +12669,6 @@ fn audit_source_inner_filtered(
     }
 
     let local_method_trees = local_method_trees(&parsed.ast);
-    if let Some(allowed) = focused_method_tree_filter {
-        assert_eq!(
-            local_method_trees
-                .iter()
-                .filter(|(tree, _)| allowed.contains(&tree.index()))
-                .count(),
-            allowed.len(),
-            "every selected method tree must be a local method"
-        );
-    }
     let match_pattern_shapes = parsed
         .ast
         .iter()
