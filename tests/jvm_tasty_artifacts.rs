@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 20959)
-Total output lines: 2470
-
 use dotty::jvm_tasty_plan::with_paired_jvm_tasty_class_plan;
 use dotty_classfile::classfile::{ClassFile, Reader};
 use dotty_classfile::tasty_link::TastyLinkId;
@@ -1192,7 +1189,121 @@ fn reference_field_owner_batch_executes_on_verified_jdk21() {
             "example/Counter.class",
             "example/Counter.tasty",
             "example/CounterOwner.class",
-            "example/CounterOw…959 tokens truncated…e() {
+            "example/CounterOwner.tasty",
+        ]
+    );
+    let classfile_paths = batch
+        .classes()
+        .iter()
+        .map(|pair| classes.join(pair.classfile_path()))
+        .collect::<Vec<_>>();
+    let original_hashes = classfile_paths
+        .iter()
+        .map(|path| sha256sum(path))
+        .collect::<Vec<_>>();
+
+    let javap = Command::new("javap")
+        .args([
+            "-classpath",
+            classes.to_str().unwrap(),
+            "-p",
+            "-s",
+            "-c",
+            "-v",
+            "example.CounterOwner",
+        ])
+        .output()
+        .expect("start JDK 21 javap for the Rust CounterOwner class");
+    assert!(
+        javap.status.success(),
+        "javap rejected Rust CounterOwner.class:\n{}",
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap = String::from_utf8_lossy(&javap.stdout);
+    assert!(javap.contains("major version: 65"), "{javap}");
+    for expected in [
+        "private final example.Counter inner;",
+        "descriptor: Lexample/Counter;",
+        "public example.CounterOwner(int);",
+        "descriptor: (I)V",
+        "public int read();",
+        "descriptor: ()I",
+        "Method java/lang/Object.\"<init>\":()V",
+        "new           #",
+        "Method example/Counter.\"<init>\":(I)V",
+        "putfield      #",
+        "getfield      #",
+        "invokevirtual #",
+        "Method example/Counter.get:()I",
+    ] {
+        assert!(
+            javap.contains(expected),
+            "javap output omitted {expected:?}:\n{javap}"
+        );
+    }
+
+    let harness = output.path().join("CounterOwnerRuntimeHarness.java");
+    let harness_classes = output.path().join("harness-classes");
+    std::fs::create_dir(&harness_classes).unwrap();
+    std::fs::write(
+        &harness,
+        r#"public final class CounterOwnerRuntimeHarness {
+    public static void main(String[] args) {
+        int[] seeds = {7, 42, 0, -3};
+        example.CounterOwner[] owners = new example.CounterOwner[seeds.length];
+        for (int index = 0; index < seeds.length; index++) {
+            owners[index] = new example.CounterOwner(seeds[index]);
+        }
+        for (int repetition = 0; repetition < 3; repetition++) {
+            for (int index = 0; index < seeds.length; index++) {
+                expect(owners[index].read(), seeds[index]);
+            }
+        }
+        System.out.println("independent owners=7,42,0,-3; repeated=3");
+    }
+
+    private static void expect(int actual, int expected) {
+        if (actual != expected) {
+            throw new AssertionError("expected " + expected + ", got " + actual);
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let javac = Command::new("javac")
+        .arg("-classpath")
+        .arg(&classes)
+        .arg("-d")
+        .arg(&harness_classes)
+        .arg(&harness)
+        .output()
+        .expect("start JDK 21 javac for the Rust CounterOwner harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected the Rust CounterOwner batch:\n{}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+
+    let classpath = std::env::join_paths([harness_classes.as_path(), classes.as_path()]).unwrap();
+    let java = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(classpath)
+        .arg("CounterOwnerRuntimeHarness")
+        .output()
+        .expect("start JDK 21 verifier and Rust CounterOwner harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected or failed the Rust CounterOwner batch:\n{}\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "independent owners=7,42,0,-3; repeated=3"
+    );
+
+    for (index, (path, pair)) in classfile_paths.iter().zip(batch.classes()).enumerate() {
         assert_eq!(sha256sum(path), original_hashes[index]);
         assert_eq!(
             std::fs::read(path).unwrap(),
