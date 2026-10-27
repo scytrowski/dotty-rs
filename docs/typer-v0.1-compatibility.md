@@ -392,12 +392,16 @@ The session lifecycle is:
    `into_session`; use `into_packages` only when that adapter accepts
    `Packages` directly.
 
-The generic Java fixture confirms that `GenericSample<T>` and its `first`
-member load into the shared store. Typing the member through a source receiver
-of type `GenericSample[A]` is currently reported as
-`ExternalGenericInstantiationDeferred`, because external generic argument
-order is not modeled by the typer. The integration test pins this typed
-limitation rather than treating it as successful adaptation.
+The pinned Scala 3.9 collection fixture exercises external generic TASTy
+adaptation: `IndexedSeq[A]` retains its class parameter and applied parent
+views, and `seq(index)` selects the nearest `apply` declaration when the
+inherited `SeqOps` and `Function1` signatures are equivalent. The typed result
+retains the exact source `A` symbol, while a non-`Int` index is rejected.
+External generic substitution requires the resolver to provide canonical
+class-parameter symbols in declaration order and a receiver view with matching
+arity; without that metadata, the typer keeps
+`ExternalGenericInstantiationDeferred`. Unsupported parent argument shapes
+remain explicit `Type::Error` slots rather than being inferred or erased.
 
 ## Supported source contract
 
@@ -1063,18 +1067,19 @@ are small synthetic stubs, so this test requires no installed JDK.
 Package term requests remain unresolved unless an authoritative module
 identity is already present. Existing incomplete source classes are not
 replaced by classpath duplicates because there is no safe in-place completion
-contract. Applying external generic receiver arguments remains a focused
-`ExternalGenericInstantiationDeferred` boundary. Resolver failures roll back
-store and session state, and retries remain covered by the classloader and
-source-typing tests. Frozen cohort outcomes and the unchanged full pinned
-report are recorded in the #975 section of
+contract. Applying external generic receiver arguments uses ordered canonical
+class-parameter metadata; missing metadata or malformed arity remains a
+focused deferred/error boundary. Resolver failures roll back store and session
+state, and retries remain covered by the classloader and source-typing tests.
+Frozen cohort outcomes and the unchanged full pinned report are recorded in
+the #975 section of
 [`typer-classpath-corpus-audit-3.9.0.md`](typer-classpath-corpus-audit-3.9.0.md).
 
 ### #1020 deferred classloader member identities
 
 Classloader completion now keeps superclass/interface parents eager while
 using canonical identity shells for member descriptors, generic signatures,
-bounds, annotation identities, and named best-effort TASTy member types.
+bounds, annotation identities, and bounded named/applied TASTy member types.
 A completed external class may contain `TypeRef`s to classes whose info is
 still `Missing`. This issue does not add on-demand completion to Typer member
 lookup (#1021) or direct resolver access (#1022). Callers needing those members
@@ -1090,7 +1095,8 @@ source completion path. Declined/unowned identities retain
 `ClassInfoUnavailable`; recognized completion errors use
 `ExternalClassCompletion`, and reported success is checked for valid class
 identity, ClassInfo, and declarations. Applied receiver views remain attached
-to candidates, preserving the existing external generic substitution boundary.
+to candidates; the typer substitutes them only when the resolver supplies
+ordered canonical class-parameter metadata.
 A parent shell is completed only when lookup visits its inheritance branch;
 classpath loading itself still eagerly completes direct hierarchy parents.
 
