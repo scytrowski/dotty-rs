@@ -9,8 +9,8 @@ use std::fmt;
 use dotty_core::ast::{ApplyKind, AstArena, TreeKind, Typed, TypedAst, Untyped};
 use dotty_core::{
     Definitions, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SourceTypedIndex,
-    SymbolFlags, SymbolId, SymbolInfo, SymbolKind, TermRefTarget, TreeId, Type, TypeId,
-    TypeRefTarget,
+    SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TermRefTarget, TreeId, Type,
+    TypeId, TypeRefTarget,
 };
 use dotty_jvm::{JvmClassPlan, JvmCompilationUnit};
 
@@ -281,6 +281,7 @@ pub fn validate_cross_class_constructor_call_proofs<'session>(
             })
             || jvm_unit.classes[ordinal].class != caller_class
             || !store.symbols.contains(caller_class)
+            || !has_source_origin(store, caller_class, source_id)
             || store.symbols.get(caller_class).kind != SymbolKind::Class
             || store.symbols.get(caller_class).owner != Some(package_owner)
         {
@@ -381,6 +382,11 @@ fn require_source_position(
     Ok(position)
 }
 
+fn has_source_origin(store: &SemanticStore, symbol: SymbolId, source_id: SourceId) -> bool {
+    store.symbols.contains(symbol)
+        && store.symbols.get(symbol).origin == SymbolOrigin::Source(source_id)
+}
+
 fn require_matching_source_typed_positions(
     source_ast: &AstArena<Untyped>,
     typed_ast: &TypedAst,
@@ -469,6 +475,7 @@ fn validate_constructor_call_candidate<'session>(
                 tree: method_tree,
             })
         || !store.symbols.contains(method)
+        || !has_source_origin(store, method, source_id)
         || store.symbols.get(method).kind != SymbolKind::Method
         || store.symbols.get(method).owner != Some(caller_class)
         || store.symbols.get(method).visibility != dotty_core::Visibility::Public
@@ -526,6 +533,7 @@ fn validate_constructor_call_candidate<'session>(
             tree: method_formal_tree,
         })
         || !store.symbols.contains(method_formal)
+        || !has_source_origin(store, method_formal, source_id)
         || store.symbols.get(method_formal).kind != SymbolKind::Parameter
         || store.symbols.get(method_formal).owner != Some(method)
     {
@@ -727,6 +735,7 @@ fn validate_constructor_call_candidate<'session>(
     if target_class == caller_class
         || formal_class == Some(target_class)
         || !store.symbols.contains(target_class)
+        || !has_source_origin(store, target_class, source_id)
         || store.symbols.get(target_class).kind != SymbolKind::Class
     {
         return Err(identity_error(
@@ -805,6 +814,8 @@ fn validate_constructor_call_candidate<'session>(
     };
     if selected_constructor != target_constructor
         || !store.symbols.contains(target_constructor)
+        || !has_source_origin(store, target_constructor, source_id)
+        || !has_source_origin(store, selected_constructor, source_id)
         || store.symbols.get(selected_constructor).kind != SymbolKind::Constructor
         || store.symbols.get(selected_constructor).owner != Some(target_class)
     {
@@ -869,6 +880,11 @@ fn validate_constructor_call_candidate<'session>(
                 "target constructor formal is not canonically derived from its primary constructor",
             )
         })?;
+    if !has_source_origin(store, constructor_formal, source_id) {
+        return Err(identity_error(
+            "target constructor formal does not have the supplied source origin",
+        ));
+    }
     let SymbolInfo::Complete(constructor_type) = store.symbols.get(target_constructor).info else {
         return Err(semantic_error("target constructor signature is incomplete"));
     };

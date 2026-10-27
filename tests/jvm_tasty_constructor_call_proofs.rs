@@ -5,7 +5,7 @@ use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 use dotty_core::ast::{AstArena, AstPhase, TreeKind};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceDefinition, SourceId, SourceSpan, SourceText,
-    TermRefTarget, Type, TypeRefTarget,
+    SymbolOrigin, TermRefTarget, Type, TypeRefTarget,
 };
 use dotty_jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmMethodPlan,
@@ -475,6 +475,36 @@ fn assert_generic_proof(source: &str, source_number: u32, expected_descriptor: &
     assert!(matches!(
         validate_cross_class_constructor_call_proofs(stale_annotation),
         Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(_))
+    ));
+
+    let caller_method = proof.method();
+    let typed_ast_snapshot = clone_arena(typer.typed_ast());
+    let source_typed_snapshot = typer.source_typed_index().clone();
+    let class_snapshot = jvm_unit.classes.clone();
+    drop(proofs);
+    drop(jvm_unit);
+    drop(typer);
+    store.symbols.get_mut(caller_method).origin =
+        SymbolOrigin::Source(SourceId::from_index(source_number.saturating_add(102)));
+    let wrong_symbol_origin_unit = JvmCompilationUnit {
+        store: &store,
+        typed_ast: &typed_ast_snapshot,
+        classes: class_snapshot,
+    };
+    let wrong_symbol_origin = CrossClassConstructorCallProofInput {
+        source_id,
+        source_root: parsed.root,
+        store: &store,
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: &typed_ast_snapshot,
+        source_index: &source_index,
+        source_typed_index: &source_typed_snapshot,
+        jvm_unit: &wrong_symbol_origin_unit,
+    };
+    assert!(matches!(
+        validate_cross_class_constructor_call_proofs(wrong_symbol_origin),
+        Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(_))
     ));
 }
 
