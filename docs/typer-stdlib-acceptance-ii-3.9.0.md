@@ -9,7 +9,7 @@ The independent A0 holdout remained **9/25**. This provides no evidence of holdo
 ## Scope and exact inputs
 
 - Baseline source revision: `dc71c164aab415dc8a75e698e7ab64fd85891faf` (pre-#1744, with the original 10 accepted methods).
-- Final source under test: `034a5105b8ea256f604c74ac44134d55b7206d50` (includes the integrated changes through #1778, the deterministic holdout/gate changes, and the Namer-outcome reporting fix). Current GitHub `main` is `ab4d52c248242290404e70a43098c12e6de2083b` (#1779); its difference from the source checkout is docs-only and does not change the audited code.
+- Final source under test: `d4f5792db39027a96d5de4706166bee56b8d0005` (includes the integrated changes through #1778, the deterministic holdout/gate changes, and the Namer-outcome reporting fix). PR base `main` is `3b80293ccefff711c0f76ed00f9982d936067e74`; intervening #1768/#1769 changes are documentation-only and do not alter the audited code.
 - Scala 3.9.0 source: `777528f19a58e794c9954a42f433373472ec57f8`.
 - Scala compiler/library artifacts: the pinned Scala 3.9.0 Maven set in `tests/fixtures/tasty_pickler/provenance.json`.
 - JDK: Temurin `21.0.8+9`; Rust: `1.98.1` (`rustc 1.98.1 (48a229cea 2026-09-01)`).
