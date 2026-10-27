@@ -307,7 +307,7 @@ if [[ "$method_kind" == ordinary ]]; then
     exit 0
 fi
 if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
-    export CARGO_BUILD_JOBS=1
+    export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
     export RUST_TEST_THREADS=1
     manifest_argument="$focused_manifest"
     if [[ -n "$focused_manifest" && "$focused_manifest" != /* ]]; then
@@ -359,7 +359,7 @@ if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
     export DOTTY_AUDIT_FOCUSED_FILES="$tmp_dir/focused-files.txt"
     if ! (
         cd "$repo_root"
-        cargo test -p dotty-typer --test local_definition_audit --locked --no-run
+        /usr/bin/time -v cargo test -p dotty-typer --test local_definition_audit --locked --no-run
     ) >"$tmp_dir/build.log" 2>&1; then
         cat "$tmp_dir/build.log" >&2
         exit 1
