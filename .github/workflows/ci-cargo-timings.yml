@@ -12,6 +12,14 @@ on:
           - full
           - rust-cache
           - cold
+      workload:
+        description: Compile only or run the complete Rust checks workload
+        required: true
+        type: choice
+        default: compile-only
+        options:
+          - compile-only
+          - full-rust-checks
 
 permissions:
   contents: read
@@ -27,7 +35,7 @@ env:
 
 jobs:
   cargo-timings:
-    name: Cargo test compile timing
+    name: CI workload cache timing
     runs-on: ubuntu-latest
 
     steps:
@@ -56,7 +64,7 @@ jobs:
         if: inputs.cache == 'rust-cache'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
-          shared-key: dotty-rs-ci-test-no-debug-no-incremental
+          shared-key: dotty-rs-ci-rust-checks
 
       - name: Record measurement environment
         env:
@@ -70,17 +78,49 @@ jobs:
             printf 'cargo\t%s\n' "$(cargo --version)"
             printf 'runner_os\t%s\n' '${{ runner.os }}'
             printf 'cache_mode\t%s\n' '${{ inputs.cache }}'
+            printf 'workload\t%s\n' '${{ inputs.workload }}'
             printf 'cache_hit\t%s\n' "${FULL_CACHE_HIT:-${RUST_CACHE_HIT:-not-applicable}}"
           } > target/cargo-timings/environment.tsv
 
       - name: Compile the workspace test targets and write Cargo timings
+        if: inputs.workload == 'compile-only'
         run: cargo test --workspace --all-targets --locked --no-run --timings
+
+      - name: Lint GitHub Actions workflows
+        if: inputs.workload == 'full-rust-checks'
+        run: tools/check-workflows.sh
+
+      - name: Check formatting
+        if: inputs.workload == 'full-rust-checks'
+        run: cargo fmt --all -- --check
+
+      - name: Check frontend platform boundaries
+        if: inputs.workload == 'full-rust-checks'
+        run: python3 tools/check-frontend-boundaries.py
+
+      - name: Run Clippy
+        if: inputs.workload == 'full-rust-checks'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Build documentation
+        if: inputs.workload == 'full-rust-checks'
+        env:
+          RUSTDOCFLAGS: '-D warnings'
+        run: cargo doc --workspace --no-deps --locked
+
+      - name: Run tests
+        if: inputs.workload == 'full-rust-checks'
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Check diff
+        if: inputs.workload == 'full-rust-checks'
+        run: git diff --check
 
       - name: Upload Cargo timing report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cargo-timings-${{ github.sha }}-${{ inputs.cache }}
+          name: cargo-timings-${{ github.sha }}-${{ inputs.workload }}-${{ inputs.cache }}
           path: target/cargo-timings/
           if-no-files-found: warn
           retention-days: 30
