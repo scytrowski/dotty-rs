@@ -2114,6 +2114,9 @@ fn namer_error_kind(error: &dotty_namer::NamerError) -> String {
             "DuplicateFieldInitializerContext"
         }
         dotty_namer::NamerError::MalformedAstShape { .. } => "MalformedAstShape",
+        dotty_namer::NamerError::UnsupportedCaseClassCompanionShape { .. } => {
+            "UnsupportedCaseClassCompanionShape"
+        }
         dotty_namer::NamerError::InvalidVisibilityQualifier { .. } => "InvalidVisibilityQualifier",
         dotty_namer::NamerError::UnsupportedGivenNameShape { .. } => "UnsupportedGivenNameShape",
         dotty_namer::NamerError::AnonymousGivenWithoutParents { .. } => {

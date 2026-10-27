@@ -5738,7 +5738,7 @@ fn shared_package_symbols_have_no_reverse_provenance_across_source_units() {
 }
 
 #[test]
-fn parsed_nested_case_class_keeps_its_real_class_without_inventing_a_companion() {
+fn parsed_nested_case_class_keeps_its_real_class_and_gets_a_companion() {
     use dotty_core::ast::UntypedNode;
     use dotty_core::{SymbolKind, TermName};
 
@@ -5791,6 +5791,18 @@ fn parsed_nested_case_class_keeps_its_real_class_without_inventing_a_companion()
         .scopes
         .get(either_module_scope)
         .lookup(TermName::new(named.store.names.intern("LeftProjection")).as_name());
+    let projection_module_class = named
+        .store
+        .scopes
+        .get(either_module_scope)
+        .lookup(TypeName::new(named.store.names.intern("LeftProjection$")).as_name())
+        .unwrap();
+    let projection_module_scope = named.index.scope_of(projection_module_class).unwrap();
+    let generated_apply = named
+        .store
+        .scopes
+        .get(projection_module_scope)
+        .lookup(TermName::new(named.store.names.intern("apply")).as_name());
 
     assert_eq!(
         named.store.symbols.get(either_class).kind,
@@ -5822,7 +5834,437 @@ fn parsed_nested_case_class_keeps_its_real_class_without_inventing_a_companion()
     );
     assert_eq!(
         named.store.symbols.get(projection_class).links.companion,
-        None
+        projection_term
     );
-    assert_eq!(projection_term, None);
+    assert!(projection_term.is_some());
+    assert_eq!(
+        named
+            .store
+            .symbols
+            .get(projection_term.unwrap())
+            .links
+            .companion,
+        Some(projection_class)
+    );
+    assert!(generated_apply.is_some());
+}
+
+#[test]
+fn nested_case_class_gets_a_companion_and_source_mapped_apply_parameters() {
+    use dotty_core::ast::UntypedNode;
+    use dotty_core::{SymbolKind, SymbolOrigin, TermName};
+
+    let mut named = named_source(
+        "object Owners { case class Node[A, B](first: A, second: B) }",
+        1773,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("compilation unit should have a package root");
+    };
+    let owner_tree = package.stats[0];
+    let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(owner_object)) =
+        &named.parsed.ast.get(owner_tree).kind
+    else {
+        panic!("Owners should be an object");
+    };
+    let TreeKind::Template(owner_template) = &named.parsed.ast.get(owner_object.template).kind
+    else {
+        panic!("Owners should have a template");
+    };
+    let class_tree = owner_template.body[0];
+    let TreeKind::TypeDef(class_def) = &named.parsed.ast.get(class_tree).kind else {
+        panic!("Node should be a case class");
+    };
+    let TreeKind::Template(class_template) = &named.parsed.ast.get(class_def.rhs).kind else {
+        panic!("Node should have a template");
+    };
+    let TreeKind::DefDef(constructor) = &named.parsed.ast.get(class_template.constructor).kind
+    else {
+        panic!("Node should have a primary constructor");
+    };
+    let class_type_parameter_trees = constructor.type_params.clone();
+    let value_parameter_trees = constructor.value_param_clauses[0].clone();
+
+    let owner_object_symbol = named.index.symbol_at(named.source, owner_tree).unwrap();
+    let owner_semantic_parent = named.store.symbols.get(owner_object_symbol).owner.unwrap();
+    let owner_module_class = named
+        .index
+        .derived_symbol_at(owner_semantic_parent, named.source, owner_tree)
+        .unwrap();
+    let owner_scope = named.index.scope_of(owner_module_class).unwrap();
+    let class_symbol = named.index.symbol_at(named.source, class_tree).unwrap();
+    let companion_term_name = TermName::new(named.store.names.intern("Node"));
+    let companion_object = named
+        .store
+        .scopes
+        .get(owner_scope)
+        .lookup(companion_term_name.as_name())
+        .unwrap();
+    let companion_module_class = named
+        .store
+        .scopes
+        .get(owner_scope)
+        .lookup(TypeName::new(named.store.names.intern("Node$")).as_name())
+        .unwrap();
+    let companion_scope = named.index.scope_of(companion_module_class).unwrap();
+    let apply_name = TermName::new(named.store.names.intern("apply"));
+    let apply = named
+        .store
+        .scopes
+        .get(companion_scope)
+        .lookup(apply_name.as_name())
+        .unwrap();
+    let apply_type_parameters = class_type_parameter_trees
+        .iter()
+        .map(|tree| {
+            named
+                .index
+                .derived_symbol_at(apply, named.source, *tree)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let apply_value_parameters = value_parameter_trees
+        .iter()
+        .map(|tree| {
+            named
+                .index
+                .derived_symbol_at(apply, named.source, *tree)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let constructor_symbol = named
+        .index
+        .symbol_at(named.source, class_template.constructor)
+        .unwrap();
+
+    assert_eq!(
+        named.store.symbols.get(companion_object).kind,
+        SymbolKind::Object
+    );
+    assert_eq!(
+        named.store.symbols.get(companion_module_class).kind,
+        SymbolKind::ModuleClass
+    );
+    assert_eq!(
+        named.store.symbols.get(companion_object).origin,
+        SymbolOrigin::Synthetic
+    );
+    assert_eq!(
+        named.store.symbols.get(companion_module_class).origin,
+        SymbolOrigin::Synthetic
+    );
+    assert_eq!(
+        named.store.symbols.get(class_symbol).links.companion,
+        Some(companion_object)
+    );
+    assert_eq!(
+        named.store.symbols.get(companion_object).links.companion,
+        Some(class_symbol)
+    );
+    assert_eq!(named.store.symbols.get(apply).kind, SymbolKind::Method);
+    assert!(
+        named
+            .store
+            .symbols
+            .get(apply)
+            .flags
+            .contains(SymbolFlags::SYNTHETIC)
+    );
+    assert_eq!(
+        named.store.symbols.get(apply).owner,
+        Some(companion_module_class)
+    );
+    assert_eq!(apply_type_parameters.len(), 2);
+    assert_eq!(apply_value_parameters.len(), 2);
+    for (symbol, tree) in apply_type_parameters
+        .iter()
+        .zip(&class_type_parameter_trees)
+    {
+        assert_eq!(
+            named.store.symbols.get(*symbol).kind,
+            SymbolKind::TypeParameter
+        );
+        assert_eq!(named.store.symbols.get(*symbol).owner, Some(apply));
+        assert_eq!(
+            named.index.definition_of(*symbol),
+            Some(SourceDefinition::Derived {
+                source: named.source,
+                tree: *tree
+            })
+        );
+    }
+    for tree in &class_type_parameter_trees {
+        assert!(named.index.symbol_at(named.source, *tree).is_some());
+        assert!(
+            named
+                .index
+                .derived_symbol_at(constructor_symbol, named.source, *tree)
+                .is_some()
+        );
+    }
+    for (symbol, tree) in apply_value_parameters.iter().zip(&value_parameter_trees) {
+        assert_eq!(named.store.symbols.get(*symbol).kind, SymbolKind::Parameter);
+        assert_eq!(named.store.symbols.get(*symbol).owner, Some(apply));
+        assert_eq!(
+            named.index.definition_of(*symbol),
+            Some(SourceDefinition::Derived {
+                source: named.source,
+                tree: *tree
+            })
+        );
+        let class_field = named.index.symbol_at(named.source, *tree).unwrap();
+        let constructor_parameter = named
+            .index
+            .derived_symbol_at(constructor_symbol, named.source, *tree)
+            .unwrap();
+        assert_ne!(class_field, constructor_parameter);
+        assert_ne!(constructor_parameter, *symbol);
+    }
+    assert_eq!(
+        named.index.definition_of(apply),
+        Some(SourceDefinition::Derived {
+            source: named.source,
+            tree: class_tree
+        })
+    );
+}
+
+#[test]
+fn case_class_companions_keep_distinct_owners_and_reuse_explicit_companions() {
+    use dotty_core::ast::UntypedNode;
+    use dotty_core::{SymbolKind, TermName, TypeName};
+
+    let mut named = named_source(
+        "object Owners:\n  object First:\n    case class Node(value: Int)\n  object Second:\n    case class Node(value: Int)\n  object Plain:\n    class Node(value: Int)\n  object Explicit:\n    case class Node[A](value: A)\n    object Node:\n      def apply(value: String, tag: Int): Node[String] = new Node(value)",
+        1774,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("compilation unit should have a package root");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(owners)) =
+        &named.parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("Owners should be an object");
+    };
+    let TreeKind::Template(owners_template) = &named.parsed.ast.get(owners.template).kind else {
+        panic!("Owners should have a template");
+    };
+    let nested_object = |index: usize| {
+        let object_tree = owners_template.body[index];
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(object)) =
+            &named.parsed.ast.get(object_tree).kind
+        else {
+            panic!("nested declaration should be an object");
+        };
+        let TreeKind::Template(template) = &named.parsed.ast.get(object.template).kind else {
+            panic!("nested object should have a template");
+        };
+        let module_class = named
+            .index
+            .derived_symbol_at(
+                named
+                    .store
+                    .symbols
+                    .get(named.index.symbol_at(named.source, object_tree).unwrap())
+                    .owner
+                    .unwrap(),
+                named.source,
+                object_tree,
+            )
+            .unwrap();
+        let scope = named.index.scope_of(module_class).unwrap();
+        (template.body.as_slice(), scope)
+    };
+
+    let (first_body, first_scope) = nested_object(0);
+    let (second_body, second_scope) = nested_object(1);
+    let (_plain_body, plain_scope) = nested_object(2);
+    let (explicit_body, explicit_scope) = nested_object(3);
+    let first_node = named.index.symbol_at(named.source, first_body[0]).unwrap();
+    let second_node = named.index.symbol_at(named.source, second_body[0]).unwrap();
+    let first_companion = named
+        .store
+        .scopes
+        .get(first_scope)
+        .lookup(TermName::new(named.store.names.intern("Node")).as_name())
+        .unwrap();
+    let second_companion = named
+        .store
+        .scopes
+        .get(second_scope)
+        .lookup(TermName::new(named.store.names.intern("Node")).as_name())
+        .unwrap();
+    assert_ne!(first_companion, second_companion);
+    assert_eq!(
+        named.store.symbols.get(first_node).links.companion,
+        Some(first_companion)
+    );
+    assert_eq!(
+        named.store.symbols.get(second_node).links.companion,
+        Some(second_companion)
+    );
+
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(plain_scope)
+            .lookup(TermName::new(named.store.names.intern("Node")).as_name()),
+        None,
+        "an ordinary nested class must not get a term companion"
+    );
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(plain_scope)
+            .lookup(TypeName::new(named.store.names.intern("Node$")).as_name()),
+        None,
+        "an ordinary nested class must not get a module class"
+    );
+
+    let explicit_node = named
+        .index
+        .symbol_at(named.source, explicit_body[0])
+        .unwrap();
+    let explicit_object_tree = explicit_body[1];
+    let explicit_object = named
+        .index
+        .symbol_at(named.source, explicit_object_tree)
+        .unwrap();
+    assert_eq!(
+        named.store.symbols.get(explicit_node).links.companion,
+        Some(explicit_object)
+    );
+    assert_eq!(
+        named.store.symbols.get(explicit_object).kind,
+        SymbolKind::Object
+    );
+    let explicit_module_class = named
+        .index
+        .derived_symbol_at(
+            named.store.symbols.get(explicit_object).owner.unwrap(),
+            named.source,
+            explicit_object_tree,
+        )
+        .unwrap();
+    let explicit_module_scope = named.index.scope_of(explicit_module_class).unwrap();
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(explicit_module_scope)
+            .lookup_all(TermName::new(named.store.names.intern("apply")).as_name())
+            .len(),
+        2,
+        "generated apply should coexist with the explicit apply overload"
+    );
+    assert!(
+        named
+            .store
+            .scopes
+            .get(explicit_scope)
+            .lookup(TermName::new(named.store.names.intern("Node")).as_name())
+            .is_some()
+    );
+}
+
+#[test]
+fn unsupported_nested_case_class_shape_rolls_back_and_later_naming_succeeds() {
+    let (invalid, invalid_source, mut store) = parsed_source(
+        "object Owners { case class Node(value: Int)(tag: Int) }",
+        1775,
+    );
+    let mut packages = Packages::new();
+    let checkpoint = store.checkpoint();
+    let error = name_compilation_unit(
+        &invalid.ast,
+        invalid.root,
+        invalid_source,
+        "Unsupported.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect_err("multiple constructor clauses must be explicitly unsupported");
+    assert!(matches!(
+        error,
+        NamerError::UnsupportedCaseClassCompanionShape {
+            reason: "expected exactly one non-empty ordinary value parameter clause",
+            ..
+        }
+    ));
+    assert_eq!(
+        store.checkpoint(),
+        checkpoint,
+        "failed naming must roll back allocations"
+    );
+
+    let valid_source = SourceId::from_index(1776);
+    let source_text = "object Owners { case class Node(value: Int) }";
+    let scanner =
+        dotty_lexer::ContextualScanner::new(source_text).expect("valid source should lex");
+    let valid = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        valid_source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(valid.diagnostics.is_empty(), "{:?}", valid.diagnostics);
+    let index = name_compilation_unit(
+        &valid.ast,
+        valid.root,
+        valid_source,
+        "Supported.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("a new valid source should name after the failed attempt");
+    let TreeKind::PackageDef(package) = &valid.ast.get(valid.root).kind else {
+        panic!("compilation unit should have a package root");
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(owner)) =
+        &valid.ast.get(package.stats[0]).kind
+    else {
+        panic!("Owners should be an object");
+    };
+    let TreeKind::Template(template) = &valid.ast.get(owner.template).kind else {
+        panic!("Owners should have a template");
+    };
+    let class = index.symbol_at(valid_source, template.body[0]).unwrap();
+    assert!(store.symbols.get(class).links.companion.is_some());
+}
+
+#[test]
+fn nested_case_class_companion_rejects_each_unsupported_constructor_feature() {
+    let unsupported_sources = [
+        "object Owners { case class Node(value: Int = 1) }",
+        "object Owners { case class Node(using value: Int) }",
+        "object Owners { case class Node(value: Int*) }",
+        "object Owners { case class Node private (value: Int) }",
+        "object Owners { case class Node(value: Int) { def this() = this(0) } }",
+        "object Owners { case class Node[A <: AnyRef](value: A) }",
+        "object Owners { case class Node[A: Ordering](value: A) }",
+        "object Owners { case class Node(private val value: Int) }",
+        "object Owners:\n  def Node: Int = 1\n  case class Node(value: Int)",
+    ];
+
+    for (source_index, source_text) in unsupported_sources.iter().enumerate() {
+        let (parsed, source, mut store) = parsed_source(source_text, 1780 + source_index as u32);
+        let mut packages = Packages::new();
+        let result = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "UnsupportedCaseClass.scala",
+            &mut store,
+            &mut packages,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(NamerError::UnsupportedCaseClassCompanionShape { .. })
+            ),
+            "expected an explicit unsupported-shape error for {source_text:?}, got {result:?}"
+        );
+    }
 }

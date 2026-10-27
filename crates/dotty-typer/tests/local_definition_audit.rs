@@ -20318,6 +20318,12 @@ fn classify_namer_error(error: &NamerError) -> FailureClassification {
             "NamerError::DuplicateFieldInitializerContext"
         }
         NamerError::MalformedAstShape { .. } => "NamerError::MalformedAstShape",
+        NamerError::UnsupportedCaseClassCompanionShape { reason, .. } => {
+            return FailureClassification {
+                bucket: format!("NamerError::UnsupportedCaseClassCompanionShape::{reason}"),
+                family: FailureFamily::ParserNamer,
+            };
+        }
         NamerError::InvalidVisibilityQualifier { protected, .. } => {
             if *protected {
                 "NamerError::InvalidVisibilityQualifier::protected"

@@ -54,6 +54,11 @@ pub enum NamerError {
         tree_index: u32,
         expected: &'static str,
     },
+    /// A nested case class uses a constructor shape not supported by generated apply synthesis.
+    UnsupportedCaseClassCompanionShape {
+        tree_index: u32,
+        reason: &'static str,
+    },
     /// A qualified source visibility does not name an enclosing access boundary.
     InvalidVisibilityQualifier {
         tree_index: u32,
@@ -152,6 +157,10 @@ impl fmt::Display for NamerError {
                     "tree {tree_index} does not have expected shape: {expected}"
                 )
             }
+            Self::UnsupportedCaseClassCompanionShape { tree_index, reason } => write!(
+                f,
+                "nested case class tree {tree_index} cannot receive a generated companion: {reason}"
+            ),
             Self::InvalidVisibilityQualifier {
                 tree_index,
                 protected,
@@ -1544,6 +1553,12 @@ impl Namer<'_> {
         };
         if definition.metadata.modifiers.contains(&Modifier::Enum) {
             self.ensure_enum_companion(tree, symbol, declaration_context)?;
+        } else if definition.metadata.modifiers.contains(&Modifier::Case)
+            && self.is_source_object_module_class(
+                self.store.symbols.get(symbol).owner.unwrap_or(symbol),
+            )
+        {
+            self.ensure_nested_case_class_companion(tree, symbol, declaration_context)?;
         }
         self.scan_template_body(
             definition.rhs,
@@ -1580,6 +1595,370 @@ impl Namer<'_> {
         if !self.companion_links.contains(&(class, object)) {
             self.companion_links.push((class, object));
         }
+    }
+
+    fn is_source_object_module_class(&self, symbol: SymbolId) -> bool {
+        let owner = self.store.symbols.get(symbol);
+        if owner.kind != SymbolKind::ModuleClass
+            || owner.origin != SymbolOrigin::Source(self.source)
+        {
+            return false;
+        }
+        let Some(SourceDefinition::Derived { source, tree }) = self.index.definition_of(symbol)
+        else {
+            return false;
+        };
+        source == self.source
+            && matches!(
+                self.arena.get(tree).kind,
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+            )
+    }
+
+    fn ensure_nested_case_class_companion(
+        &mut self,
+        tree: TreeId<Untyped>,
+        class_symbol: SymbolId,
+        declaration_context: SourceContextId,
+    ) -> Result<(), NamerError> {
+        let TreeKind::TypeDef(definition) = &self.arena.get(tree).kind else {
+            return Err(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "case class TypeDef",
+            });
+        };
+        let TreeKind::Template(template) = &self.arena.get(definition.rhs).kind else {
+            return Err(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "case class Template",
+            });
+        };
+        let TreeKind::DefDef(constructor) = &self.arena.get(template.constructor).kind else {
+            return Err(NamerError::MalformedAstShape {
+                tree_index: template.constructor.index(),
+                expected: "case class primary constructor",
+            });
+        };
+        let unsupported = |reason| NamerError::UnsupportedCaseClassCompanionShape {
+            tree_index: tree.index(),
+            reason,
+        };
+
+        if constructor.metadata.visibility.is_some()
+            || !constructor.metadata.modifiers.is_empty()
+            || !constructor.metadata.annotations.is_empty()
+        {
+            return Err(unsupported(
+                "primary constructor has visibility or special modifiers",
+            ));
+        }
+        if constructor.value_param_clauses.len() != 1
+            || constructor.value_param_clauses[0].is_empty()
+        {
+            return Err(unsupported(
+                "expected exactly one non-empty ordinary value parameter clause",
+            ));
+        }
+        if template.body.iter().any(|member| {
+            matches!(
+                &self.arena.get(*member).kind,
+                TreeKind::DefDef(method)
+                    if self.store.names.resolve(method.name.as_name().text()) == "<init>"
+            )
+        }) {
+            return Err(unsupported("secondary constructors are not supported"));
+        }
+        for parameter_tree in &constructor.type_params {
+            let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter_tree.index(),
+                    expected: "case class type parameter TypeDef",
+                });
+            };
+            if parameter.metadata.visibility.is_some()
+                || !parameter.metadata.annotations.is_empty()
+                || parameter
+                    .metadata
+                    .modifiers
+                    .iter()
+                    .any(|modifier| !matches!(modifier, Modifier::Param | Modifier::PrivateLocal))
+            {
+                return Err(unsupported("type parameter is not plain"));
+            }
+            let TreeKind::TypeBoundsTree(bounds) = &self.arena.get(parameter.rhs).kind else {
+                return Err(unsupported(
+                    "bounded or non-plain type parameters are not supported",
+                ));
+            };
+            if bounds.low.is_some() || bounds.high.is_some() || bounds.alias.is_some() {
+                return Err(unsupported("bounded type parameters are not supported"));
+            }
+        }
+        let value_parameters = &constructor.value_param_clauses[0];
+        for parameter_tree in value_parameters {
+            let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter_tree.index(),
+                    expected: "case class constructor parameter ValDef",
+                });
+            };
+            if parameter.rhs.is_some()
+                || parameter.metadata.visibility.is_some()
+                || !parameter.metadata.annotations.is_empty()
+                || parameter.metadata.modifiers != [Modifier::ParamAccessor]
+            {
+                return Err(unsupported(
+                    "constructor parameter has a default or special modifier",
+                ));
+            }
+            if matches!(
+                self.arena.get(parameter.tpt).kind,
+                TreeKind::ByNameTypeTree(_) | TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
+            ) {
+                return Err(unsupported(
+                    "by-name and repeated parameters are not supported",
+                ));
+            }
+        }
+
+        let owner =
+            self.store
+                .symbols
+                .get(class_symbol)
+                .owner
+                .ok_or(NamerError::MalformedAstShape {
+                    tree_index: tree.index(),
+                    expected: "nested case class with an object owner",
+                })?;
+        let owner_scope = self
+            .index
+            .scope_of(owner)
+            .ok_or(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "enclosing object with a declaration scope",
+            })?;
+        let class_name = self.store.symbols.get(class_symbol).name;
+        let class_type_name = *TypeName::new(class_name.text()).as_name();
+        let same_name_classes = self
+            .store
+            .scopes
+            .get(owner_scope)
+            .lookup_all(&class_type_name);
+        if same_name_classes.len() != 1 || same_name_classes[0] != class_symbol {
+            return Err(unsupported("same-name class declaration is ambiguous"));
+        }
+        let term_name = *dotty_core::TermName::new(class_name.text()).as_name();
+        let class_text = self.store.names.resolve(class_name.text()).to_owned();
+        let module_class_text = format!("{class_text}$");
+        let module_class_name =
+            *TypeName::new(self.store.names.intern(&module_class_text)).as_name();
+        let term_candidates = self
+            .store
+            .scopes
+            .get(owner_scope)
+            .lookup_all(&term_name)
+            .to_vec();
+        let explicit_objects = term_candidates
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                let symbol = self.store.symbols.get(*candidate);
+                symbol.kind == SymbolKind::Object
+                    && symbol.origin == SymbolOrigin::Source(self.source)
+            })
+            .collect::<Vec<_>>();
+
+        let companion_module_class = match explicit_objects.as_slice() {
+            [object] if term_candidates.len() == 1 => {
+                if self.store.symbols.get(*object).owner != Some(owner) {
+                    return Err(unsupported(
+                        "explicit companion is not owned by the enclosing object",
+                    ));
+                }
+                let object_tree = match self.index.definition_of(*object) {
+                    Some(SourceDefinition::Canonical { source, tree }) if source == self.source => {
+                        tree
+                    }
+                    _ => {
+                        return Err(unsupported(
+                            "explicit companion has no canonical source declaration",
+                        ));
+                    }
+                };
+                let Some(module_class) = self
+                    .index
+                    .derived_symbol_at(owner, self.source, object_tree)
+                    .filter(|module_class| {
+                        let symbol = self.store.symbols.get(*module_class);
+                        symbol.kind == SymbolKind::ModuleClass
+                            && symbol.owner == Some(owner)
+                            && symbol.origin == SymbolOrigin::Source(self.source)
+                            && self.index.definition_of(*module_class)
+                                == Some(SourceDefinition::Derived {
+                                    source: self.source,
+                                    tree: object_tree,
+                                })
+                            && self
+                                .store
+                                .scopes
+                                .get(owner_scope)
+                                .lookup_all(&module_class_name)
+                                .contains(module_class)
+                    })
+                else {
+                    return Err(unsupported(
+                        "explicit companion has no canonical module class",
+                    ));
+                };
+                self.queue_companion_link(class_symbol, *object);
+                module_class
+            }
+            [] if term_candidates.is_empty()
+                && self
+                    .store
+                    .scopes
+                    .get(owner_scope)
+                    .lookup_all(&module_class_name)
+                    .is_empty() =>
+            {
+                let visibility = self.store.symbols.get(class_symbol).visibility;
+                let object = self.store.symbols.alloc(Symbol {
+                    name: term_name,
+                    owner: Some(owner),
+                    kind: SymbolKind::Object,
+                    flags: SymbolFlags::EMPTY,
+                    visibility,
+                    info: SymbolInfo::Missing,
+                    origin: SymbolOrigin::Synthetic,
+                    annotations: Vec::new(),
+                    position: self.arena.get(tree).position,
+                    links: SymbolLinks::default(),
+                });
+                self.store
+                    .scopes
+                    .get_mut(owner_scope)
+                    .enter(term_name, object);
+                self.scope_insertions.push((owner_scope, object));
+                let module_class = self.store.symbols.alloc(Symbol {
+                    name: module_class_name,
+                    owner: Some(owner),
+                    kind: SymbolKind::ModuleClass,
+                    flags: SymbolFlags::EMPTY,
+                    visibility,
+                    info: SymbolInfo::Missing,
+                    origin: SymbolOrigin::Synthetic,
+                    annotations: Vec::new(),
+                    position: self.arena.get(tree).position,
+                    links: SymbolLinks::default(),
+                });
+                self.store
+                    .scopes
+                    .get_mut(owner_scope)
+                    .enter(module_class_name, module_class);
+                self.scope_insertions.push((owner_scope, module_class));
+                let scope = self.store.scopes.alloc(Scope::new(Some(module_class)));
+                self.index.record_scope(module_class, scope)?;
+                self.index
+                    .record_declaration_context(object, declaration_context)?;
+                self.index
+                    .record_declaration_context(module_class, declaration_context)?;
+                self.queue_companion_link(class_symbol, object);
+                module_class
+            }
+            _ => {
+                return Err(unsupported(
+                    "same-name declaration is not a unique companion object",
+                ));
+            }
+        };
+        self.enter_case_class_apply(
+            tree,
+            class_symbol,
+            companion_module_class,
+            declaration_context,
+            &constructor.type_params,
+            value_parameters,
+        )
+    }
+
+    fn enter_case_class_apply(
+        &mut self,
+        class_tree: TreeId<Untyped>,
+        class_symbol: SymbolId,
+        companion_module_class: SymbolId,
+        declaration_context: SourceContextId,
+        type_parameters: &[TreeId<Untyped>],
+        value_parameters: &[TreeId<Untyped>],
+    ) -> Result<(), NamerError> {
+        let companion_scope =
+            self.index
+                .scope_of(companion_module_class)
+                .ok_or(NamerError::MalformedAstShape {
+                    tree_index: class_tree.index(),
+                    expected: "case class companion with a declaration scope",
+                })?;
+        let apply_name = *dotty_core::TermName::new(self.store.names.intern("apply")).as_name();
+        let apply = self.enter_derived_symbol(
+            class_tree,
+            apply_name,
+            companion_module_class,
+            companion_scope,
+            SymbolSpec {
+                kind: SymbolKind::Method,
+                flags: SymbolFlags::SYNTHETIC,
+                visibility: self.store.symbols.get(class_symbol).visibility,
+            },
+        )?;
+        let apply_scope = self.store.scopes.alloc(Scope::new(Some(apply)));
+        self.index.record_scope(apply, apply_scope)?;
+        let apply_context =
+            self.child_source_context(apply, apply_scope, Some(declaration_context));
+        self.index
+            .record_declaration_context(apply, apply_context)?;
+
+        for parameter_tree in type_parameters {
+            let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter_tree.index(),
+                    expected: "case class type parameter TypeDef",
+                });
+            };
+            let symbol = self.enter_derived_symbol(
+                *parameter_tree,
+                *parameter.name.as_name(),
+                apply,
+                apply_scope,
+                SymbolSpec {
+                    kind: SymbolKind::TypeParameter,
+                    flags: SymbolFlags::EMPTY,
+                    visibility: Visibility::Public,
+                },
+            )?;
+            self.index
+                .record_declaration_context(symbol, apply_context)?;
+        }
+        for parameter_tree in value_parameters {
+            let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter_tree.index(),
+                    expected: "case class constructor parameter ValDef",
+                });
+            };
+            let symbol = self.enter_derived_symbol(
+                *parameter_tree,
+                *parameter.name.as_name(),
+                apply,
+                apply_scope,
+                SymbolSpec {
+                    kind: SymbolKind::Parameter,
+                    flags: SymbolFlags::EMPTY,
+                    visibility: Visibility::Public,
+                },
+            )?;
+            self.index
+                .record_declaration_context(symbol, apply_context)?;
+        }
+        Ok(())
     }
 
     fn ensure_enum_companion(
