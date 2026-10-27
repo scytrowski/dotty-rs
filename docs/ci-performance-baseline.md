@@ -246,6 +246,67 @@ CARGO_TARGET_DIR=target/issue-1737/sequence cargo test --workspace --all-targets
 CARGO_TARGET_DIR=target/issue-1737/sequence cargo test --workspace --all-targets --locked
 ```
 
+## Follow-up: classloader stack overflow blocker (#1765)
+
+The #1737 profile comparison is not permission to select `opt-level = 0` for
+CI. On pinned Rust/Cargo 1.98.1, the default-stack reproduction below aborts
+with a stack overflow in
+`loader::tests::inheritance_ancestry_has_a_bounded_depth` on Debian x86_64
+(kernel `6.12.74+deb13+1-amd64`, 16 logical CPUs). The exact-depth positive
+case `inheritance_ancestry_accepts_the_maximum_depth` also overflows at
+`opt-level = 0`; both pass at `opt-level = 1`. The 256-class guard remains
+unchanged.
+
+```sh
+export CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0
+
+CARGO_TARGET_DIR=target/issue-1765/opt0 CARGO_PROFILE_TEST_OPT_LEVEL=0 \
+  cargo +1.98.1 test -p dotty-classloader --lib \
+  loader::tests::inheritance_ancestry_accepts_the_maximum_depth -- --exact
+CARGO_TARGET_DIR=target/issue-1765/opt1 CARGO_PROFILE_TEST_OPT_LEVEL=1 \
+  cargo +1.98.1 test -p dotty-classloader --lib \
+  loader::tests::inheritance_ancestry_accepts_the_maximum_depth -- --exact
+CARGO_TARGET_DIR=target/issue-1765/opt0 CARGO_PROFILE_TEST_OPT_LEVEL=0 \
+  cargo +1.98.1 test -p dotty-classloader --lib \
+  loader::tests::inheritance_ancestry_has_a_bounded_depth -- --exact
+CARGO_TARGET_DIR=target/issue-1765/opt1 CARGO_PROFILE_TEST_OPT_LEVEL=1 \
+  cargo +1.98.1 test -p dotty-classloader --lib \
+  loader::tests::inheritance_ancestry_has_a_bounded_depth -- --exact
+
+CARGO_TARGET_DIR=target/issue-1765/opt0 CARGO_PROFILE_TEST_OPT_LEVEL=0 \
+  cargo +1.98.1 test --workspace --all-targets --locked
+CARGO_TARGET_DIR=target/issue-1765/opt1 CARGO_PROFILE_TEST_OPT_LEVEL=1 \
+  cargo +1.98.1 test --workspace --all-targets --locked
+```
+
+The failure is recursive production class loading, not only error wrapping or
+the test harness: the exact-depth *successful* chain also exhausts the default
+test-thread stack. As a diagnostic, setting `RUST_MIN_STACK=8388608` makes the
+over-depth reproduction complete and return its expected typed error; that
+larger stack is not a fix and is not part of the test configuration. A pinned
+opt-level-0 test binary built with `RUSTC_BOOTSTRAP=1 RUSTFLAGS="-Z
+emit-stack-sizes"` reports a 14,216-byte frame for `load_uncached_class`, plus
+2,200 bytes for `load_uncached` and 2,168 bytes for
+`load_class_with_inheritance_ancestry` at each recursive level. The classfile
+loader frame remains active while it recursively loads each superclass or
+interface, so 256 levels exceed a normal test-thread stack before the guard
+can make the over-depth failure observable. The `DependencyFailure` cause is
+reference-counted; nested inline error wrapping is not the stack's dominant
+cost.
+
+Focused cycle detection, cycle rollback, cached failure/provenance, and
+malformed-reference tests pass at opt-level 0. The full classloader unit suite
+passes at opt-level 1 (449 passed, 4 ignored). The clean workspace all-targets
+opt-level-0 run stops at the reproduced stack overflow in the classloader unit
+target. The corresponding opt-level-1 workspace all-targets run passes. No
+profile change is recommended until a correction removes the per-level stack
+cost while preserving the 256-depth guard, cycle/root-cause diagnostics,
+provenance, identity, and rollback contracts. A bounded iterative hierarchy
+worklist is a focused follow-up candidate; extracting only member completion
+did not make the default-stack reproduction pass and was not retained. Do not
+treat this experiment as evidence that any subset or the workspace is ready
+for opt-level 0.
+
 ## Before/after procedure for performance issues
 
 1. Select the exact workflow, job, and command changed by the issue. Keep the same test/feature/target set, lockfile, source revision except for the intended change, JDK, Scala 3.9.0 revision, Rust version, runner image, environment variables, and concurrency settings.
