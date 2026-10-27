@@ -134,24 +134,22 @@ The main CI benchmark compared the same pinned Rust 1.98.1 and the same compile 
 
 Across the three warm compile-only runs, the full cache had a **7m52s median benchmark-job wall time** (6m30s–8m39s), a **2m01s median restore**, and a **5m43s median compile**. Dependency-only caching had a **6m06s median warm job wall time** (4m31s–6m13s), a **2s median restore**, and a **5m45s median compile**. The compile medians are effectively equal; avoiding the 5.27 GB transfer produced a measured 1m46s (about 22%) lower median compile-benchmark job time. After the experiment, the dependency-only cache entry on its benchmark branch was 12,347,030 bytes, about 427 times smaller than the full archive. The first dependency-only cache miss completed in 4m34s and created that entry. These are three-run samples on hosted runners, not an SLO, and this benchmark excludes test execution.
 
-### Full Rust-check workload comparison
+### Same-commit full Rust-check comparison
 
-The compile-only comparison above led to replacing the main Rust-check job's full target cache with dependency-only caching. To include Clippy, rustdoc, and test execution, the complete Rust checks job was also measured on the PR head at the same pinned Rust 1.98.1 toolchain. The first run populated the dependency cache; three subsequent runs were confirmed cache hits. The job commands and test set stayed unchanged.
+Both cache strategies were measured on commit `287880316cebe239e5ea7c754bcb77038e93d6a4`, with Rust 1.98.1, the same `ubuntu-latest` runner image, and the complete Rust checks workload: workflow lint, formatting, frontend-boundary guard, Clippy, rustdoc, workspace tests, and diff checking. The legacy strategy restores the full target cache through `actions/cache`; the dependency-only strategy uses the production `Swatinem/rust-cache` configuration. All six runs passed and reported cache hits.
 
-| Strategy and sample | Cache result | Rust checks job wall time |
-| --- | --- | ---: |
-| Former full cache: [40415404197](https://github.com/scytrowski/dotty-rs/actions/runs/40415404197) | Hit (log confirms) | 9m47s |
-| Former full cache: [40412150151](https://github.com/scytrowski/dotty-rs/actions/runs/40412150151) | Hit (log confirms) | 10m05s |
-| Former full cache: [40407343107](https://github.com/scytrowski/dotty-rs/actions/runs/40407343107) | Outcome unavailable | 7m43s |
-| Former full cache: [40407034274](https://github.com/scytrowski/dotty-rs/actions/runs/40407034274) | Outcome unavailable | 9m48s |
-| Dependency-only, initial PR run: [40430067130](https://github.com/scytrowski/dotty-rs/actions/runs/40430067130?attempt=1) | Miss; seeded cache | 6m56s |
-| Dependency-only, warm: [40430067130 attempt 2](https://github.com/scytrowski/dotty-rs/actions/runs/40430067130?attempt=2) | Hit | 8m22s |
-| Dependency-only, warm: [40430067130 attempt 3](https://github.com/scytrowski/dotty-rs/actions/runs/40430067130?attempt=3) | Hit | 8m54s |
-| Dependency-only, warm: [40430067130 attempt 4](https://github.com/scytrowski/dotty-rs/actions/runs/40430067130?attempt=4) | Hit | 8m47s |
+| Cache strategy | Run | Restored cache | Rust checks job wall time |
+| --- | --- | ---: | ---: |
+| Full target cache | [40434782259](https://github.com/scytrowski/dotty-rs/actions/runs/40434782259) | 5,269,214,731 B; 1m38s | 10m38s |
+| Full target cache | [40434792902](https://github.com/scytrowski/dotty-rs/actions/runs/40434792902) | 5,269,214,731 B; 1m32s | 10m34s |
+| Full target cache | [40436303159](https://github.com/scytrowski/dotty-rs/actions/runs/40436303159) | 5,269,214,731 B; 2m28s | 11m17s |
+| Dependency-only cache | [40434152387, attempt 1](https://github.com/scytrowski/dotty-rs/actions/runs/40434152387?attempt=1) | 27,026,064 B; 2s | 5m51s |
+| Dependency-only cache | [40434152387, attempt 2](https://github.com/scytrowski/dotty-rs/actions/runs/40434152387?attempt=2) | 27,026,064 B; 1s | 7m16s |
+| Dependency-only cache | [40434152387, attempt 3](https://github.com/scytrowski/dotty-rs/actions/runs/40434152387?attempt=3) | 27,026,064 B; 2s | 6m47s |
 
-For the former full-cache workflow, the four Rust-check job times have a **9m48s median** and a **7m43s–10m05s range**; logs confirm hits in two of the four samples, while the other two cache outcomes are unavailable. The three warm dependency-only runs have an **8m47s median** and an **8m22s–8m54s range**, 61 seconds (about 10%) below the former workflow's four-run median. The complete job includes formatting, the boundary guard, Clippy, rustdoc, tests, and diff checking. Its test step varied from 7m25s to 7m50s across the three warm runs, so these hosted-runner samples do not isolate the cache's causal contribution to job time. The restore step was under two seconds for all three warm runs, compared with a 2m01s median full-cache restore in the earlier measurements.
+The full target cache had a **10m38s median** Rust-check job wall time (10m34s–11m17s) and a **1m38s median restore** (1m32s–2m28s). The dependency-only cache had a **6m47s median** (5m51s–7m16s) and a **2s median restore** (1s–2s). That is a measured **3m51s (about 36%) lower median job time** for the dependency-only strategy on this same workload and commit. Its 27.0 MB archive is about **195 times smaller** than the 5.27 GB full target archive.
 
-The first dependency-only run also exercised both parallel CI jobs: the complete CI workflow finished in **6m58s**, with the JVM gate completing successfully in 2m24s. This is one full-workflow observation, not a repeated distribution. Earlier complete CI runs had a 9m53s elapsed median (9m12s–10m08s). The JVM gate's cache configuration remains unchanged because its measured archive is small and toolchain-specific.
+One complete PR CI run on this commit finished in **6m21s** from workflow creation to the last of its two parallel jobs; the dependency-cache Rust checks finished in 5m51s and the unchanged JDK 21 gate in 1m51s. This is one end-to-end workflow observation. The repeated comparison above covers the full Rust checks job, while the parallel JVM gate remains unchanged because its measured archive is small and toolchain-specific.
 
 The Typer cache transfers are small; Scala consumer cache changes would require a separate end-to-end comparison of its much longer staged compiler path. Preserve those configurations for now and keep their sizes and observed cache outcomes visible for the follow-up issues in the Refactor milestone.
 
