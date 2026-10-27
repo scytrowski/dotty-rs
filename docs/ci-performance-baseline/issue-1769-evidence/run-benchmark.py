@@ -16,13 +16,15 @@ if mode not in {"libtest", "nextest"}:
     raise SystemExit(f"unknown mode: {mode}")
 
 env = os.environ.copy()
+java_home = os.environ.get("BENCH_JAVA_HOME", "/home/vdrake6/.jdks/jdk-21")
+(bench / "tmp").mkdir(parents=True, exist_ok=True)
 env.update({
     "CARGO_TARGET_DIR": os.environ.get("BENCH_TARGET_DIR", str(bench / "target")),
     "CARGO_INCREMENTAL": "0",
     "CARGO_PROFILE_TEST_DEBUG": "0",
     "CARGO_TERM_COLOR": "never",
     "TMPDIR": str(bench / "tmp"),
-    "JAVA_HOME": "/home/vdrake6/.jdks/jdk-21",
+    "JAVA_HOME": java_home,
 })
 env["PATH"] = env["JAVA_HOME"] + "/bin:" + env["PATH"]
 env.pop("RUST_TEST_THREADS", None)

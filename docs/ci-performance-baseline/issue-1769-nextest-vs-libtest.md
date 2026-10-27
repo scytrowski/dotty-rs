@@ -127,9 +127,9 @@ cargo nextest run --workspace --all-targets --locked --retries 0 --test-threads 
 
 The compressed raw listings, identity-diff outputs, environment record, and
 all measured run logs are in
-[`issue-1769-evidence.tar.gz`](issue-1769-evidence/issue-1769-evidence.tar.gz).
+[`issue-1769-evidence.tar.gz`](issue-1769-evidence.tar.gz).
 Its SHA-256 is recorded in
-[`issue-1769-evidence.tar.gz.sha256`](issue-1769-evidence/issue-1769-evidence.tar.gz.sha256).
+[`issue-1769-evidence.tar.gz.sha256`](issue-1769-evidence.tar.gz.sha256).
 The inventory comparator and benchmark driver are alongside this report in
 [`issue-1769-evidence/`](issue-1769-evidence/README.md).
 
