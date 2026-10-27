@@ -4,12 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       cache:
-        description: Restore the CI Cargo cache, or skip it for a cold build
+        description: Select the full target cache, Rust dependency cache, or a cold build
         required: true
         type: choice
-        default: warm
+        default: full
         options:
-          - warm
+          - full
+          - rust-cache
           - cold
 
 permissions:
@@ -33,8 +34,12 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Restore CI Cargo cache
-        if: inputs.cache == 'warm'
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+
+      - name: Restore full CI Cargo cache
+        id: full-cache
+        if: inputs.cache == 'full'
         uses: actions/cache@v4
         with:
           path: |
@@ -46,10 +51,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-debug-
 
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+      - name: Restore Rust dependency cache
+        id: rust-cache
+        if: inputs.cache == 'rust-cache'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: dotty-rs-ci-test-no-debug-no-incremental
 
       - name: Record measurement environment
+        env:
+          FULL_CACHE_HIT: ${{ steps.full-cache.outputs.cache-hit }}
+          RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
         run: |
           mkdir -p target/cargo-timings
           {
@@ -58,6 +70,7 @@ jobs:
             printf 'cargo\t%s\n' "$(cargo --version)"
             printf 'runner_os\t%s\n' '${{ runner.os }}'
             printf 'cache_mode\t%s\n' '${{ inputs.cache }}'
+            printf 'cache_hit\t%s\n' "${FULL_CACHE_HIT:-${RUST_CACHE_HIT:-not-applicable}}"
           } > target/cargo-timings/environment.tsv
 
       - name: Compile the workspace test targets and write Cargo timings
