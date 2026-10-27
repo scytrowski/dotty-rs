@@ -244,17 +244,83 @@ impl SourceTyper<'_> {
         let receiver = match class_kind {
             SymbolKind::ModuleClass => self.this_type_receiver_view(callable)?,
             SymbolKind::Class | SymbolKind::Trait
-                if matches!(class_origin, SymbolOrigin::Source(_)) =>
+                if matches!(
+                    class_origin,
+                    SymbolOrigin::Source(_) | SymbolOrigin::Tasty(_)
+                ) =>
             {
                 receiver
             }
-            SymbolKind::Trait if canonical_function == Some(class) => receiver,
             _ => return Ok((function, callable)),
         };
         let apply_name = Name::new(self.store.names.intern("apply"), Namespace::Term);
-        let candidates = self
+        let mut candidates = self
             .lookup_members_journaled(receiver, apply_name, info_journal)
             .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+        if candidates.len() > 1 {
+            let callable_types = candidates
+                .iter()
+                .map(|candidate| self.member_type_on_journaled(candidate, info_journal))
+                .collect::<Result<Vec<_>, TyperError>>()?;
+            let methods = callable_types
+                .iter()
+                .map(|callable| match self.store.types.try_get(*callable) {
+                    Some(Type::Method(method)) => Some(method.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(methods) = methods {
+                let same_callable = methods.iter().skip(1).all(|method| {
+                    if method.kind != methods[0].kind
+                        || method.params.len() != methods[0].params.len()
+                        || method
+                            .params
+                            .iter()
+                            .zip(&methods[0].params)
+                            .any(|(left, right)| {
+                                left.erased != right.erased || left.varargs != right.varargs
+                            })
+                    {
+                        return false;
+                    }
+                    let same_parameters =
+                        method
+                            .params
+                            .iter()
+                            .zip(&methods[0].params)
+                            .all(|(left, right)| {
+                                let forward = self.is_subtype(left.ty, right.ty);
+                                let backward = self.is_subtype(right.ty, left.ty);
+                                matches!((forward, backward), (Ok(true), Ok(true)))
+                            });
+                    let same_result = matches!(
+                        (
+                            self.is_subtype(method.result, methods[0].result),
+                            self.is_subtype(methods[0].result, method.result)
+                        ),
+                        (Ok(true), Ok(true))
+                    );
+                    same_parameters && same_result
+                });
+                if same_callable {
+                    let nearest_depth = candidates
+                        .iter()
+                        .map(|candidate| candidate.inheritance_depth)
+                        .min();
+                    if let Some(nearest_depth) = nearest_depth {
+                        let mut nearest = candidates
+                            .iter()
+                            .filter(|candidate| candidate.inheritance_depth == nearest_depth);
+                        if let Some(candidate) = nearest.next()
+                            && nearest.next().is_none()
+                        {
+                            let selected = candidate.symbol;
+                            candidates.retain(|candidate| candidate.symbol == selected);
+                        }
+                    }
+                }
+            }
+        }
         let [candidate] = candidates.as_slice() else {
             return if candidates.is_empty() {
                 Ok((function, callable))
@@ -297,7 +363,13 @@ impl SourceTyper<'_> {
         }
 
         let member_type = if canonical_function == Some(class) {
-            self.canonical_function_member_type(candidate, class, applied_arity.unwrap())?
+            match self.member_type_on_journaled(candidate, info_journal) {
+                Ok(member_type) => member_type,
+                Err(TyperError::ExternalGenericInstantiationDeferred { .. }) => {
+                    self.canonical_function_member_type(candidate, class, applied_arity.unwrap())?
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             self.member_type_on_journaled(candidate, info_journal)?
         };
@@ -372,21 +444,38 @@ impl SourceTyper<'_> {
                 symbol: candidate.symbol,
             });
         }
+        let class_parameters = self
+            .external_class_type_parameters(class)
+            .unwrap_or_default();
+        let is_class_parameter = |ty: TypeId, index: usize| {
+            self.is_tasty_class_parameter_marker(ty, index)
+                || class_parameters.get(index).is_some_and(|parameter| {
+                    matches!(
+                        self.store.types.try_get(ty),
+                        Some(Type::TypeRef {
+                            target: TypeRefTarget::Symbol(symbol),
+                            ..
+                        }) if symbol == parameter
+                    )
+                })
+        };
         if method.kind != MethodKind::Plain
-            || method.params.iter().enumerate().any(|(index, parameter)| {
-                !self.is_tasty_class_parameter_marker(parameter.ty, index)
-            })
-            || !self.is_tasty_class_parameter_marker(method.result, arity)
+            || method
+                .params
+                .iter()
+                .enumerate()
+                .any(|(index, parameter)| !is_class_parameter(parameter.ty, index))
+            || !is_class_parameter(method.result, arity)
         {
             return Err(TyperError::MemberTypeUnavailable {
                 symbol: candidate.symbol,
             });
         }
 
-        // The TASTy decoder retains each exact class-parameter reference in
-        // an explicit unresolved marker. Only those markers may be
-        // instantiated here; ordinary Error types (including missing
-        // dependencies and malformed references) remain failures.
+        // Accept either the legacy marker or the exact class-parameter
+        // symbol reference emitted by the generic TASTy class loader. Ordinary
+        // Error types (including missing dependencies and malformed references)
+        // remain failures.
         for (parameter, ty) in method.params.iter_mut().zip(&type_arguments) {
             parameter.ty = *ty;
         }

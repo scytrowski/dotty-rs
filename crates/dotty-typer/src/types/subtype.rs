@@ -137,6 +137,46 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
     }
 
     fn is_subtype(&mut self, found: TypeId, expected: TypeId) -> Result<bool, TypeRelationError> {
+        let type_parameter = |ty: TypeId| match self.typer.store.types.try_get(ty) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            }) if self.typer.store.symbols.contains(*symbol)
+                && self.typer.store.symbols.get(*symbol).kind == SymbolKind::TypeParameter =>
+            {
+                Some(*symbol)
+            }
+            _ => None,
+        };
+        let found_parameter = type_parameter(found);
+        let expected_parameter = type_parameter(expected);
+        if let (Some(found_parameter), Some(expected_parameter)) =
+            (found_parameter, expected_parameter)
+        {
+            if found_parameter == expected_parameter {
+                // Type-parameter symbols are canonical declaration identities.
+                // Their prefixes are not independent nominal types and may
+                // contain the recursive generic parent view being checked.
+                return Ok(true);
+            }
+            let is_class_parameter = |symbol: SymbolId| {
+                self.typer
+                    .store
+                    .symbols
+                    .get(symbol)
+                    .owner
+                    .is_some_and(|owner| {
+                        self.typer.store.symbols.contains(owner)
+                            && matches!(
+                                self.typer.store.symbols.get(owner).kind,
+                                SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                            )
+                    })
+            };
+            if is_class_parameter(found_parameter) && is_class_parameter(expected_parameter) {
+                return Err(TypeRelationError::UnsupportedType { found, expected });
+            }
+        }
         let found = self.normalize(found)?;
         let expected = self.normalize(expected)?;
         self.validate_supported(
@@ -266,9 +306,14 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
     fn reject_unmodeled_external_generic(&self, view: &ClassView) -> Result<(), TypeRelationError> {
         if view.applied && !view.args.is_empty() && !self.typer.is_current_source_symbol(view.class)
         {
-            return Err(TypeRelationError::ExternalGenericInstantiationDeferred {
-                class: view.class,
-            });
+            let parameters = self.typer.external_class_type_parameters(view.class);
+            let has_canonical_arity =
+                parameters.is_some_and(|parameters| parameters.len() == view.args.len());
+            if !has_canonical_arity {
+                return Err(TypeRelationError::ExternalGenericInstantiationDeferred {
+                    class: view.class,
+                });
+            }
         }
         Ok(())
     }
