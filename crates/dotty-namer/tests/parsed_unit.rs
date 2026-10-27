@@ -5736,3 +5736,93 @@ fn shared_package_symbols_have_no_reverse_provenance_across_source_units() {
 
     assert_eq!(shared[0], shared[1]);
 }
+
+#[test]
+fn parsed_nested_case_class_keeps_its_real_class_without_inventing_a_companion() {
+    use dotty_core::ast::UntypedNode;
+    use dotty_core::{SymbolKind, TermName};
+
+    let source_text = "class Container { class Either[A, B]; object Either { case class LeftProjection[A, B](e: Either[A, B]) } }";
+    let mut named = named_source(source_text, 1747);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("compilation unit should have a package root");
+    };
+    let container_tree = package.stats[0];
+    let TreeKind::TypeDef(container) = &named.parsed.ast.get(container_tree).kind else {
+        panic!("Container should be a class");
+    };
+    let TreeKind::Template(container_template) = &named.parsed.ast.get(container.rhs).kind else {
+        panic!("Container should have a template");
+    };
+    let either_object_tree = container_template.body[1];
+    let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(either_object)) =
+        &named.parsed.ast.get(either_object_tree).kind
+    else {
+        panic!("Either companion should be an object");
+    };
+    let TreeKind::Template(either_template) = &named.parsed.ast.get(either_object.template).kind
+    else {
+        panic!("Either object should have a template");
+    };
+    let projection_tree = either_template.body[0];
+    let container_symbol = named.index.symbol_at(named.source, container_tree).unwrap();
+    let either_class = named
+        .index
+        .symbol_at(named.source, container_template.body[0])
+        .unwrap();
+    let either_object_symbol = named
+        .index
+        .symbol_at(named.source, either_object_tree)
+        .unwrap();
+    let projection_class = named
+        .index
+        .symbol_at(named.source, projection_tree)
+        .unwrap();
+    let container_scope = named.index.scope_of(container_symbol).unwrap();
+    let either_module_class = named
+        .store
+        .scopes
+        .get(container_scope)
+        .lookup(TypeName::new(named.store.names.intern("Either$")).as_name())
+        .unwrap();
+    let either_module_scope = named.index.scope_of(either_module_class).unwrap();
+    let projection_term = named
+        .store
+        .scopes
+        .get(either_module_scope)
+        .lookup(TermName::new(named.store.names.intern("LeftProjection")).as_name());
+
+    assert_eq!(
+        named.store.symbols.get(either_class).kind,
+        SymbolKind::Class
+    );
+    assert_eq!(
+        named.store.symbols.get(either_object_symbol).kind,
+        SymbolKind::Object
+    );
+    assert_eq!(
+        named.store.symbols.get(either_class).links.companion,
+        Some(either_object_symbol)
+    );
+    assert_eq!(
+        named.store.symbols.get(projection_class).kind,
+        SymbolKind::Class
+    );
+    assert!(
+        named
+            .store
+            .symbols
+            .get(projection_class)
+            .flags
+            .contains(SymbolFlags::CASE)
+    );
+    assert_eq!(
+        named.store.symbols.get(projection_class).owner,
+        Some(either_module_class)
+    );
+    assert_eq!(
+        named.store.symbols.get(projection_class).links.companion,
+        None
+    );
+    assert_eq!(projection_term, None);
+}
