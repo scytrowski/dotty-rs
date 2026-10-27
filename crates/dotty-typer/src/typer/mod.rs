@@ -1036,6 +1036,14 @@ mod tests {
     }
 
     impl SymbolResolver for ProfiledCompilerResolver {
+        fn class_type_parameters(
+            &self,
+            store: &SemanticStore,
+            class: SymbolId,
+        ) -> Option<Vec<SymbolId>> {
+            self.inner.class_type_parameters(store, class)
+        }
+
         fn checkpoint(&self) -> dotty_core::ResolverCheckpoint {
             self.inner.checkpoint()
         }
@@ -31346,7 +31354,7 @@ mod tests {
         };
 
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class Function1 { def apply(value: Int): Int = value }; class Use { def invoke(function: Int => Int, value: Int): Int = function(value); def invoke2(function: (Int, Int) => Int, left: Int, right: Int): Int = function(left, right); def generic[A, B](function: A => B, value: A): B = function(value); def sourceShadow(function: Function1, value: Int): Int = function(value); def wrong(function: Int => Int, value: String): Int = function(value); def wrongArity(function: (Int, Int) => Int, left: Int): Int = function(left); def nested[X, B](function: (B, X) => B, seq: IndexedSeq[X], at: Int, acc: B): B = function(acc, seq(at)) }",
+            "class Function1 { def apply(value: Int): Int = value }; class Use { def invoke(function: Int => Int, value: Int): Int = function(value); def invoke2(function: (Int, Int) => Int, left: Int, right: Int): Int = function(left, right); def generic[A, B](function: A => B, value: A): B = function(value); def sourceShadow(function: Function1, value: Int): Int = function(value); def wrong(function: Int => Int, value: String): Int = function(value); def wrongArity(function: (Int, Int) => Int, left: Int): Int = function(left); def nested[X, B](function: (B, X) => B, seq: scala.collection.IndexedSeq[X], at: Int, acc: B): B = function(acc, seq(at)); def wrongIndex[X](seq: scala.collection.IndexedSeq[X], at: String): X = seq(at); def wrongIndexArity[X](seq: scala.collection.IndexedSeq[X], at: Int): X = seq(at, at) }",
         );
         let invoke = method_definition_and_rhs(&parsed, &store, &index, source, "invoke");
         let invoke2 = method_definition_and_rhs(&parsed, &store, &index, source, "invoke2");
@@ -31356,6 +31364,9 @@ mod tests {
         let wrong = method_definition_and_rhs(&parsed, &store, &index, source, "wrong");
         let wrong_arity = method_definition_and_rhs(&parsed, &store, &index, source, "wrongArity");
         let nested = method_definition_and_rhs(&parsed, &store, &index, source, "nested");
+        let wrong_index = method_definition_and_rhs(&parsed, &store, &index, source, "wrongIndex");
+        let wrong_index_arity =
+            method_definition_and_rhs(&parsed, &store, &index, source, "wrongIndexArity");
         let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../dotty-tasty/tests/fixtures/scala3-library");
         let resolver = ClasspathSymbolResolver::new(
@@ -31400,6 +31411,15 @@ mod tests {
         let (wrong_arity_method, wrong_arity_rhs) = wrong_arity;
         let wrong_arity_context = typer.expression_context_for(wrong_arity_method).unwrap();
         let wrong_arity = typer.type_expression(wrong_arity_rhs, wrong_arity_context);
+        let (wrong_index_method, wrong_index_rhs) = wrong_index;
+        let wrong_index_context = typer.expression_context_for(wrong_index_method).unwrap();
+        let wrong_index = typer.type_expression(wrong_index_rhs, wrong_index_context);
+        let (wrong_index_arity_method, wrong_index_arity_rhs) = wrong_index_arity;
+        let wrong_index_arity_context = typer
+            .expression_context_for(wrong_index_arity_method)
+            .unwrap();
+        let wrong_index_arity =
+            typer.type_expression(wrong_index_arity_rhs, wrong_index_arity_context);
         assert!(
             results.iter().all(|(_, result)| result.is_ok()),
             "got {results:?}"
@@ -31439,6 +31459,14 @@ mod tests {
             wrong_arity.is_err(),
             "wrong Function2 arity must be rejected"
         );
+        assert!(
+            wrong_index.is_err(),
+            "IndexedSeq.apply must reject a non-Int index"
+        );
+        assert!(
+            wrong_index_arity.is_err(),
+            "IndexedSeq.apply must reject the wrong number of arguments"
+        );
         let nested_context = typer.expression_context_for(nested.0).unwrap();
         let nested_result = typer.type_expression(nested.1, nested_context);
         let TreeKind::Apply(outer_application) = &parsed.ast.get(nested.1).kind else {
@@ -31449,17 +31477,84 @@ mod tests {
             &parsed.ast.get(nested_sequence_application).kind,
             TreeKind::Apply(_)
         ));
-        assert!(
-            matches!(
-                nested_result,
-                Err(TyperError::ApplicationCalleeNotMethod { tree_index, .. })
-                    if tree_index == nested_sequence_application.index()
-            ),
-            "the remaining root blocker should be the external seq.apply call: {nested_result:?}"
+        let nested_result = nested_result
+            .unwrap_or_else(|error| panic!("generic IndexedSeq.apply call should type: {error:?}"));
+        let typed_sequence_tree = typer
+            .source_typed_index()
+            .get(source, nested_sequence_application)
+            .expect("nested sequence application should have typed source mapping");
+        let TreeKind::Apply(typed_sequence_apply) =
+            &typer.typed_ast().get(typed_sequence_tree).kind
+        else {
+            panic!("typed nested sequence call should remain an Apply")
+        };
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(apply),
+            ..
+        } = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(typed_sequence_apply.function).ty)
+        else {
+            panic!("IndexedSeq.apply should resolve to a canonical method symbol")
+        };
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(*apply).name.text()),
+            "apply"
         );
+        assert_eq!(typer.store().symbols.get(*apply).kind, SymbolKind::Method);
+        assert!(matches!(
+            typer.store().symbols.get(*apply).origin,
+            dotty_core::SymbolOrigin::Tasty(_)
+        ));
+        let expected_x = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(nested.0))
+                    .then(|| index.symbol_at(source, definition.type_params[0]))
+                    .flatten()
+            })
+            .expect("nested method X type parameter should be indexed");
+        let expected_b = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(nested.0))
+                    .then(|| index.symbol_at(source, definition.type_params[1]))
+                    .flatten()
+            })
+            .expect("nested method B type parameter should be indexed");
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(nested_result).ty),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == expected_b
+        ));
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_sequence_tree).ty),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == expected_x
+        ));
         assert_eq!(typer.source_typed_index().get(source, wrong_rhs), None);
         assert_eq!(
             typer.source_typed_index().get(source, wrong_arity_rhs),
+            None
+        );
+        assert_eq!(
+            typer.source_typed_index().get(source, wrong_index_rhs),
+            None
+        );
+        assert_eq!(
+            typer
+                .source_typed_index()
+                .get(source, wrong_index_arity_rhs),
             None
         );
         let retry_context = typer.expression_context_for(invoke.0).unwrap();

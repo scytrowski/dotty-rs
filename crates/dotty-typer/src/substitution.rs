@@ -122,9 +122,22 @@ impl SourceTyper<'_> {
                 Ok(declaration)
             }
         } else if view.applied && !view.arguments.is_empty() {
-            Err(TyperError::ExternalGenericInstantiationDeferred {
-                class: candidate.declaring_class,
-            })
+            let Some(parameters) = self.external_class_type_parameters(candidate.declaring_class)
+            else {
+                return Err(TyperError::ExternalGenericInstantiationDeferred {
+                    class: candidate.declaring_class,
+                });
+            };
+            if parameters.len() != view.arguments.len() {
+                return Err(TyperError::ReceiverGenericArityMismatch {
+                    class: candidate.declaring_class,
+                    expected: parameters.len(),
+                    actual: view.arguments.len(),
+                });
+            }
+            let substitutions: Vec<_> = parameters.into_iter().zip(view.arguments).collect();
+            substitute_type_symbols(self.store, declaration, &substitutions)
+                .map_err(TyperError::TypeSubstitution)
         } else {
             Ok(declaration)
         }
@@ -152,7 +165,19 @@ impl SourceTyper<'_> {
         }
         if !self.is_current_source_symbol(class) {
             if current.applied && !current.arguments.is_empty() {
-                return Err(TyperError::ExternalGenericInstantiationDeferred { class });
+                let Some(parameters) = self.external_class_type_parameters(class) else {
+                    return Err(TyperError::ExternalGenericInstantiationDeferred { class });
+                };
+                if parameters.len() != current.arguments.len() {
+                    return Err(TyperError::ReceiverGenericArityMismatch {
+                        class,
+                        expected: parameters.len(),
+                        actual: current.arguments.len(),
+                    });
+                }
+                let substitutions: Vec<_> = parameters.into_iter().zip(current.arguments).collect();
+                return substitute_type_symbols(self.store, parent_view, &substitutions)
+                    .map_err(TyperError::TypeSubstitution);
             }
             return Ok(parent_view);
         }
@@ -276,6 +301,46 @@ impl SourceTyper<'_> {
             parameters.push(parameter);
         }
         Ok(parameters)
+    }
+
+    pub(super) fn external_class_type_parameters(&self, class: SymbolId) -> Option<Vec<SymbolId>> {
+        if !self.store.symbols.contains(class) {
+            return None;
+        }
+        let declaration = self.store.symbols.get(class);
+        if !matches!(declaration.kind, SymbolKind::Class | SymbolKind::Trait)
+            || self.is_current_source_symbol(class)
+        {
+            return None;
+        }
+        let SymbolInfo::Complete(info) = declaration.info else {
+            return None;
+        };
+        let Type::ClassInfo(info) = self.store.types.try_get(info)? else {
+            return None;
+        };
+        if !self.store.scopes.contains(info.declarations) {
+            return None;
+        }
+        let scope = self.store.scopes.get(info.declarations);
+        if scope.owner != Some(class) {
+            return None;
+        }
+        let resolver = &self.resolver;
+        let parameters = resolver.class_type_parameters(self.store, class)?;
+        for &symbol in &parameters {
+            if !self.store.symbols.contains(symbol) {
+                return None;
+            }
+            let member = self.store.symbols.get(symbol);
+            if member.kind != SymbolKind::TypeParameter
+                || member.owner != Some(class)
+                || !matches!(member.info, SymbolInfo::Complete(_))
+            {
+                return None;
+            }
+        }
+        Some(parameters)
     }
 
     fn class_view(&mut self, ty: TypeId) -> Result<ClassView, TyperError> {

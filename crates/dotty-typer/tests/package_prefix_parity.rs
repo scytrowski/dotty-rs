@@ -683,7 +683,7 @@ fn classfile_nullary_instance_method_keeps_explicit_empty_call() {
 }
 
 #[test]
-fn classfile_nullary_generic_method_rejects_deferred_receiver_instantiation() {
+fn classfile_nullary_generic_method_substitutes_the_receiver_parameter() {
     let source_text = "package consumer\nobject Use { def implicitCall(op: scala.tools.asm.Opcodes[java.lang.Object]): java.lang.Object = op.get; def explicitCall(op: scala.tools.asm.Opcodes[java.lang.Object]): java.lang.Object = op.get() }";
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -740,21 +740,25 @@ fn classfile_nullary_generic_method_rejects_deferred_receiver_instantiation() {
     )));
     for (method, body) in methods {
         let context = typer.expression_context_for(method).unwrap();
-        let result = typer.type_expression(body, context);
-        let preserves_deferred_receiver_error = match &result {
-            Err(dotty_typer::TyperError::ExternalGenericInstantiationDeferred { .. }) => true,
-            Err(dotty_typer::TyperError::MemberLookup(error)) => matches!(
-                error.as_ref(),
-                dotty_typer::MemberLookupError::ParentTypeAdaptation {
-                    error: dotty_typer::TyperError::ExternalGenericInstantiationDeferred { .. },
-                    ..
-                }
-            ),
-            _ => false,
+        let typed = typer
+            .type_expression(body, context)
+            .expect("canonical class type-parameter metadata should instantiate get");
+        assert_eq!(typer.source_typed_index().get(source, body), Some(typed));
+        let actual = typer.typed_ast().get(typed).ty;
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } = typer.store().types.get(actual)
+        else {
+            panic!("generic get() should instantiate to the explicit Object result")
         };
-        assert!(
-            preserves_deferred_receiver_error,
-            "expected deferred generic receiver instantiation, got {result:?}"
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(*symbol).name.text()),
+            "Object",
+            "generic get() should instantiate to java.lang.Object"
         );
     }
 }

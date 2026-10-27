@@ -15,7 +15,7 @@ use dotty_namer::name_compilation_unit;
 use dotty_parser::{ParseResult, parse_compilation_unit};
 use dotty_tasty::tasty::TastyFile;
 use dotty_tasty_unpickler::tasty_unpickler::TastyUnpickler;
-use dotty_typer::{MemberLookupError, SourceTyper, TyperError};
+use dotty_typer::{SourceTyper, TyperError};
 use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -663,6 +663,17 @@ impl<E: ClassPathEntry> RecordingResolver<E> {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for RecordingResolver<E> {
+    fn class_type_parameters(
+        &self,
+        store: &SemanticStore,
+        class: SymbolId,
+    ) -> Option<Vec<SymbolId>> {
+        self.inner
+            .as_ref()
+            .unwrap()
+            .class_type_parameters(store, class)
+    }
+
     fn module_class_of_object(
         &self,
         store: &SemanticStore,
@@ -2272,7 +2283,7 @@ fn local_import_qualifiers_resolve_through_the_classpath() {
 }
 
 #[test]
-fn generic_external_receiver_reports_the_current_signature_limitation() {
+fn generic_external_receiver_substitutes_its_canonical_type_parameter() {
     let stubs = TemporaryDirectory::new("generic-jdk-stubs");
     write_required_jdk_stubs(stubs.path());
     let mut store = SemanticStore::new();
@@ -2327,20 +2338,28 @@ fn generic_external_receiver_reports_the_current_signature_limitation() {
     let (method, rhs) = method_rhs(&unit, typer.store(), "genericFirst");
     let context = typer.expression_context_for(method).unwrap();
 
-    let error = typer
+    let typed = typer
         .type_expression(rhs, context)
-        .expect_err("external generic receiver adaptation remains explicitly deferred");
+        .expect("a modeled external generic receiver should instantiate its member");
+    let expected_parameter = unit
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (unit.index.symbol_at(unit.source, tree) == Some(method))
+                .then(|| unit.index.symbol_at(unit.source, definition.type_params[0]))
+                .flatten()
+        })
+        .expect("genericFirst's A parameter should have its canonical source symbol");
     assert!(matches!(
-        error,
-        TyperError::MemberLookup(error)
-            if matches!(
-                *error,
-                MemberLookupError::ParentTypeAdaptation {
-                    error: TyperError::ExternalGenericInstantiationDeferred { .. },
-                    ..
-                }
-            )
+        typer.store().types.get(typer.typed_ast().get(typed).ty),
+        Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }
+            if *symbol == expected_parameter
     ));
+    assert!(typer.source_typed_index().get(unit.source, rhs).is_some());
 }
 
 #[test]

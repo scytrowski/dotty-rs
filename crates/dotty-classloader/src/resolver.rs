@@ -1769,6 +1769,14 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
+    fn class_type_parameters(
+        &self,
+        _store: &SemanticStore,
+        class: SymbolId,
+    ) -> Option<Vec<SymbolId>> {
+        self.session.class_type_parameters.get(&class).cloned()
+    }
+
     fn package_object_collision(
         &mut self,
         store: &mut SemanticStore,

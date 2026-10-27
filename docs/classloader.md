@@ -457,7 +457,8 @@ in [`typer-classpath-corpus-audit-3.9.0.md`](typer-classpath-corpus-audit-3.9.0.
 ### 4.4 `.tasty` convergence
 
 `tasty_symbol::decode` reconstructs a `DecodedTastyClass` (flags,
-superclass, interfaces, fields, methods) from a `.tasty` file's
+superclass, interfaces, class type parameters and bounds, applied parent
+views, fields, and methods) from a `.tasty` file's
 `TypeDef`/`Template`, without full type-checking. `ClassLoader::
 load_uncached_tasty` enters it the same enter-before-complete way as
 `.class` loading, converging on the identical `Symbol`/`Type::ClassInfo`
@@ -469,8 +470,18 @@ Case-class constructor `val`/`var` parameters are extracted from the
 primary constructor's own `term_params` (tagged `CASEACCESSOR_TAG`/
 `FIELDACCESSOR_TAG`) rather than `Template.stats`, since Scala's pickler
 never duplicates them there. See §3's "known gaps" for what's
-deliberately not reconstructed from `.tasty` yet (class type parameters,
-unsupported member type shapes, annotations).
+deliberately not reconstructed from `.tasty` yet (unsupported member type
+shapes, annotations).
+
+Class type parameters are entered in their declared order and retained by the
+loading session as canonical `SymbolId`s. The same identities are used when
+lowering class member types and applied parent views, so external receiver
+arguments can be substituted without recovering parameter identity from a
+name or scope iteration order. A parent whose generic arguments include a
+shape outside the supported TASTy subset keeps its applied constructor and
+arity; each unsupported argument lowers to an explicit `Type::Error` rather
+than erasing the whole parent view. This preserves supported sibling
+arguments while keeping the unsupported slot observable.
 
 For `DefDef` methods, TASTy clause presence is retained independently of the
 flattened JVM parameter list. A definition with no clauses of either kind
@@ -853,14 +864,14 @@ All done unless noted otherwise.
 8. Multi-release JAR version selection. **Done** (folded into
    Milestone 2).
 9. `.tasty`-backed loading, converging on the same symbol model as
-   `.class` loading. **Done** for name/flags/superclass/interfaces/
-   fields/methods (§4.4); method generics and named/applied method types
-   are supported for a bounded subset, while class type parameters,
-   unsupported member shapes, and annotations remain unbuilt (§3).
+   `.class` loading. **Done** for name/flags/superclass/interfaces/class
+   type parameters/applied parent views/fields/methods (§4.4); method and
+   class generics are supported for a bounded subset, while unsupported
+   member shapes and annotations remain unbuilt (§3).
 
 ### Open work (not milestone-numbered — tracked here instead)
-- Broader `.tasty` member type resolution beyond the named/applied method
-  subset, including class type parameters and annotations.
+- Broader `.tasty` member type resolution beyond the named/applied subset,
+  including higher-kinded/dependent shapes and annotations.
 - Explicit field/method/interface-method overload resolution (JVMS
   §5.4.3.2-5.4.3.4) as an API distinct from class loading.
 
