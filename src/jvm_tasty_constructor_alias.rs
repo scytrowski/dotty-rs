@@ -526,9 +526,11 @@ fn type_and_validate_source(
                                 .iter()
                                 .any(|clause| !clause.is_empty())
                             || method.rhs.is_none()
+                            || method.metadata.visibility.is_some()
+                            || typer.store().symbols.get(symbol).visibility != Visibility::Public
                         {
                             return Err(fail(
-                                "Counter.get must be one concrete zero-argument method",
+                                "Counter.get must be one public concrete zero-argument method",
                             ));
                         }
                         counter_get_seen = true;

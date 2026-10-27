@@ -273,3 +273,20 @@ fn rejects_nested_package_and_lazy_field_as_outside_the_proven_abi_shape() {
         Err(ConstructorReferenceAliasError::SourceShape(_))
     ));
 }
+
+#[test]
+fn rejects_private_cross_class_get_target() {
+    let private_get = SOURCE.replace(
+        "  def get(): Int = current",
+        "  private def get(): Int = current",
+    );
+    assert!(matches!(
+        with_constructor_reference_alias_proof(
+            &private_get,
+            "PrivateGet.scala",
+            SourceId::from_index(1768),
+            |_| ()
+        ),
+        Err(ConstructorReferenceAliasError::SourceShape(_))
+    ));
+}
