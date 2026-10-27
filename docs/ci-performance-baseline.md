@@ -262,3 +262,7 @@ CARGO_TARGET_DIR=target/issue-1737/sequence cargo test --workspace --all-targets
 3. **Pinned Scala staging:** Scala source staging has a 5m42s median and up to 7m36s in five consumer samples. Separate sbt staging, cache restore, and Rust consumer tests before changing this flow.
 4. **Queueing and gate fan-out:** a measured Scala consumer waited 5m31s before its job began. CI runs two parallel jobs and cancels older runs on the same workflow/ref; the retried CI example took 14m20s end to end, including its failed first JVM-gate attempt and retry interval, while the JVM-gate attempts had 2s and 3s of runner queue. Track queue separately from retries and compiler cost.
 5. **Manual compatibility coverage:** lexer, parser, and TASTy workflows have inadequate successful-run samples for cost comparisons. Gather normal opt-in samples only when those workflows are intentionally run; do not turn them into extra PR compilation without an explicit design decision.
+
+The subsequent check-DAG and PR critical-path assessment for [#1740](ci-critical-path-1740.md)
+records the measured candidate split, runner-time trade-off, required-check
+policy, and reasons the existing job layout was retained.
