@@ -242,10 +242,37 @@ characterization baselines, not added producer support. The audit also leaves
 erased/repeated parameters and arbitrary initializer expressions for later
 work, as required by the bounded scope.
 
-This issue is characterization only. No production emitter, pickler, Typer,
-compiler CLI, or dependency boundary changes are included. Successor issues
-can use these first-error baselines while enabling the constructor PARAM,
-field alias, linked ABI, and Scala consumer in order.
+## Rust one-session proof boundary (#1752)
+
+`dotty::jvm_tasty_constructor_alias::with_constructor_reference_alias_proof`
+now parses, names, and types the exact two-class source once and invokes a
+callback with an immutable `ValidatedConstructorReferenceAlias`. The receipt
+retains the original `Counter`, `CounterOwner`, constructor, distinct
+class-owned/template and constructor-derived `counter` parameter, `inner`,
+`read`, and `Counter.get` identities. It also retains the original source and
+typed initializer/read roots and exposes borrowed views of the same semantic
+store, source AST, typed AST, source index, and source-to-typed index through
+`session()`.
+
+The proof checks the full package/class source shape, class-scope membership,
+symbol ownership and provenance, the exact source-index relationship between
+the two same-spelled parameter symbols, their completed package-qualified
+`Counter` types, the immutable unqualified private field and its typed
+constructor-parameter reference, and the `read` → `inner` → `Counter.get`
+typed edge. It records the required JVM descriptors
+`(Lexample/Counter;)V`, `Lexample/Counter;`, and `()I` from those canonical
+source types and owners.
+
+Scala 3.9 TASTy has two `PARAM counter` declarations: the class template
+parameter and the primary-constructor formal. The Rust source index preserves
+that phase distinction as one canonical class-owned symbol plus a distinct
+constructor-owned derived symbol for the same original formal tree. The proof
+does not allocate a replacement symbol to make those phases appear identical.
+
+This receipt is only a source/typed identity contract for successor planning.
+It does not validate a serialized constructor `PARAM`, field alias TASTy
+encoding, linked class/TASTy artifacts, or Scala consumer behavior. No
+production TASTy bytes, JVM bytes, or CLI are produced by this proof.
 
 ## Validation
 
