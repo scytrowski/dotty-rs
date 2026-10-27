@@ -413,8 +413,86 @@ cargo test -p dotty --test jvm_tasty_contract \
 ```
 
 This proves the JVM behavior of the original Rust classfiles. It does not show
-that Scala consumed their TASTy; the independent pinned Scala consumer remains
-the separate #1758 gate.
+that Scala consumed their TASTy; the pinned Scala consumer is verified below.
+
+## Pinned Scala 3.9 consumer proof (#1758)
+
+The strict consumer test emits the complete `Counter`/`CounterOwner` linked
+batch in two fresh source sessions, then compiles only the separate
+`tests/fixtures/jvm_tasty_constructor_injection/Consumer.scala` against each
+Rust batch. It runs the Scala client with `java -Xverify:all` on the unchanged
+Rust classfiles. Reflection in the Scala client checks that each private
+`Owner.inner` field is reference-identical to the `Counter` passed to that
+Owner; mutations `7 → 42 → -9` remain visible and the independent second pair
+still reads `3`. Both original Rust batches and the isolated Scala `-from-tasty`
+Owner reconstruction return `-9`.
+
+The oracle run used Scala compiler `3.9.0` from source revision
+`777528f19a58e794c9954a42f433373472ec57f8`, and Eclipse Temurin
+`21.0.8+9` (`java 21.0.8`, `javac 21.0.8`, `javap 21.0.8`). The producer and
+consumer source SHA-256 values were:
+
+| Source | SHA-256 |
+| --- | --- |
+| `CounterOwner.scala` | `e86e00a64089e157a05adbb883b2b109d47d259176911927c9d62bff5f1d374e` |
+| `Consumer.scala` | `374f0c2aba8576b73db08f3c72c742641adb3b28fb6d6afe767e0391f86b8b8d` |
+
+Each Rust classfile has major version 65, each TASTy sidecar is version 28.9.0,
+and each classfile's `TASTY` link equals that sidecar's header UUID. The first
+batch SHA-256 values and UUIDs were:
+
+| Artifact | SHA-256 | TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `15758239b1d5a6dcb73e2ea705c0ad77494ca37813a8d8cc9aa09595f62d621e` | `00d9381a49fab3ac0000000000008193` |
+| `example/Counter.tasty` | `8a1022221260fc99d1fdd8e40b855d7931f5b958a419aac072230ddce262eaba` | `00d9381a49fab3ac0000000000008193` |
+| `example/CounterOwner.class` | `c06cb0314d7baa2ff4ad2fea0ec136b041b5d097a6e0bfef608f44e9f3982934` | `00ab49827d097def0000000000008195` |
+| `example/CounterOwner.tasty` | `05add331ff9fda55596016af151f6c79fbef5bcebb5d1aa8c369ce941487181c` | `00ab49827d097def0000000000008195` |
+
+All four artifact byte arrays and UUIDs match across the fresh sessions. Their
+hashes are checked again after Scala compilation and execution. The compiler
+classpath puts the Rust batch before the pinned Scala runtime libraries; the
+runtime classpath contains that Rust batch, only the Scala consumer and its
+small Java launcher, and the pinned Scala runtime libraries. Compiler jars are
+also checked not to contain either `example.Counter` or
+`example.CounterOwner`. The consumer bytecode references exactly
+`Counter.<init>(I)V`, `CounterOwner.<init>(Lexample/Counter;)V`,
+`CounterOwner.read()I`, and `Counter.set(I)V`.
+
+Scala's decompiler reads the original Rust `CounterOwner.tasty` as a
+`CounterOwner(counter: example.Counter)` with the private `inner` initializer
+selecting `CounterOwner.this.counter`, and `read()` selecting
+`CounterOwner.this.inner.get()`. The matching TASTy wire test checks the two
+distinct template/constructor `PARAM counter` addresses and confirms the field
+RHS targets the template parameter. An isolated `-from-tasty` reconstruction
+preserves the `(Lexample/Counter;)V` constructor and alias field and runs
+against the original Rust `Counter.class`; that reconstructed Owner is never
+used by the positive consumer runtime.
+
+The strict negative controls confirm that TASTy-only member lookup finds
+`Counter.get` and `CounterOwner.read` after each method is removed from a copy
+of its Rust classfile, while the matched classfile-only inputs fail. Additional
+controls reject wrong `CounterOwner` formal types, missing classfiles at JVM
+runtime, classfiles moved outside their package path (TASTy compile still
+succeeds, then JVM loading fails), missing or misplaced sidecars, corrupt
+sidecars, a renamed TASTY marker, and class/TASTy UUID mismatches under
+`-Werror`. Observed diagnostics
+include `value get/read is not a member`, `.tasty file is missing`, `not a
+TASTy file`, `out of sync with its TASTy file`, Scala's `Found Other / Required
+example.Counter`, and JVM `NoClassDefFoundError: example/Counter` or
+`NoClassDefFoundError: example/CounterOwner` at the respective first failing
+layer.
+
+Reproduce the strict independent Scala consumer with the pinned Scala checkout,
+JDK 21, and SHA-verified Maven cache configured:
+
+```sh
+SCALA39_ROOT=/path/to/scala3-at-777528f19a58e794c9954a42f433373472ec57f8 \
+JAVA_HOME=/path/to/temurin-21 \
+COURSIER_MAVEN_ROOT=/path/to/verified-maven-cache \
+DOTTY_REQUIRE_SCALA_TASTY_CONSTRUCTOR_INJECTION_CONSUMER=1 \
+  cargo test -p dotty --test jvm_tasty_constructor_injection_scala_consumer \
+  --locked -- --nocapture
+```
 
 ## Validation
 
@@ -425,6 +503,11 @@ focused repository checks are:
 cargo test -p dotty --test jvm_tasty_object_composition --locked
 cargo test -p dotty --test jvm_tasty_object_composition \
   constructor_injection_negative_matrix_pins_first_batch_rejection --locked
+SCALA39_ROOT=/path/to/pinned-scala JAVA_HOME=/path/to/temurin-21 \
+COURSIER_MAVEN_ROOT=/path/to/verified-maven-cache \
+DOTTY_REQUIRE_SCALA_TASTY_CONSTRUCTOR_INJECTION_CONSUMER=1 \
+  cargo test -p dotty --test jvm_tasty_constructor_injection_scala_consumer \
+  --locked -- --nocapture
 PATH=/home/vdrake6/.jdks/jdk-21/bin:$PATH DOTTY_CLASSFILE_REQUIRE_JDK=1 \
   cargo test -p dotty --test jvm_source_compilation \
   constructor_injected_reference_alias_emits_and_preserves_object_identity \
