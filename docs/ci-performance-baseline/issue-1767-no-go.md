@@ -64,5 +64,3 @@ The full workspace test run exercised positive and negative assertions, fixture 
 - Inventory command: deduplicate Cargo JSON artifacts by executable path, then run each executable with `--list` and `--list --ignored`.
 - Build command: `cargo test --workspace --all-targets --locked --no-run --timings --message-format=json` with the variables above and a fresh `CARGO_TARGET_DIR`.
 - Test command: `cargo test --workspace --all-targets --locked` with the same profile variables.
-7462 docs/ci-performance-baseline/issue-1767-no-go.md
-6f2d28d26e37795bc34df1816bc35c8273118b9157a57c92419185f721cb2e61  -
