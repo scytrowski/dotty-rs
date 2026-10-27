@@ -203,7 +203,12 @@ reports the missing sidecar for `Counter` and `CounterOwner`; the mismatched
 run reports that `CounterOwner.class` is out of sync with the loaded TASTy,
 then fails member lookup.
 
-## One-session Rust source identity and first failures
+## Initial audit boundary and first failures
+
+The first-failure matrix below records the repository state during the #1751
+audit, before later increments added class-valued constructor TASTy formals,
+the field alias wire shape, and complete linked artifact emission. The current
+bounded linked-batch contract is described in the next section.
 
 The audit regression parses, names, and types the exact fixture in one real
 Rust frontend session. It checks the relationships rather than relying on
@@ -269,6 +274,54 @@ measured by the Scala oracle controls above. These negative outcomes are
 characterization baselines, not added producer support. The audit also leaves
 erased/repeated parameters and arbitrary initializer expressions for later
 work, as required by the bounded scope.
+
+## Linked Rust JVM/TASTy batch support (#1756)
+
+The exact two-class source above now passes through one original frontend
+session and produces a complete in-memory set, in source order:
+
+```text
+example/Counter.class
+example/Counter.tasty
+example/CounterOwner.class
+example/CounterOwner.tasty
+```
+
+The batch planner retains the same `SourceId`, `SemanticStore`, source AST,
+`SourceSemanticIndex`, typed AST, and source-to-typed bindings for both
+classes. `CounterOwner` keeps distinct class-owned/template and
+constructor-owned `counter` `SymbolId`s derived from the same source parameter
+tree. Its `inner` field and `read` body remain the original source declarations;
+the typed field initializer targets the constructor formal, and its TASTy
+initializer encodes the canonical template parameter established by the
+pickler proof.
+
+Before returning plans, the cross-producer contract checks the complete
+source-ordered JVM/TASTy class set, per-class constructor and member identities,
+same-package `Counter` `TypeRef`, descriptors, visibility, and field flags. The
+Owner constructor ABI is exactly `(Lexample/Counter;)V`; `inner` is the
+`private final` field `Lexample/Counter;`. Its classfile code is checked as the
+exact superclass call followed by `aload_0; aload_1; putfield; return`.
+Consequently, this bounded constructor path stores the incoming reference once
+and contains no `new Counter` or `Counter.<init>` call. The `read()I` bytecode
+is checked for `getfield CounterOwner.inner:Lexample/Counter;`,
+`invokevirtual Counter.get:()I`, and `ireturn` against the canonical planned
+symbols.
+
+Each classfile is linked to the UUID from its own validated TASTy 28.9.0
+header. The in-memory emitter encodes both pairs, then validates all four paths
+and bytes as one owned batch. A missing or extra path, malformed second
+classfile, stale UUID, or invalid class/member link rejects the entire result;
+the emitter does not return a successful prefix. The regression compares all
+four byte arrays from two fresh frontend sessions and verifies per-class
+headers, classfile versions, paths, and UUID links. Existing direct
+`new Counter(seed)` batches retain their original validation and output.
+
+This issue proves source-to-TASTy/JVM consistency and complete in-memory batch
+validation. The separate #1757 runtime gate proves alias identity on original
+Rust-produced classfiles; #1758 owns the independent Scala 3.9 consumer of the
+Rust-produced pair. Reconstructing classes from TASTy or passing the existing
+JVM-only test is not evidence for either successor gate.
 
 ## Rust one-session proof boundary (#1752)
 
