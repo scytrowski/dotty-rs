@@ -622,7 +622,11 @@ fn validate_constructor_call_candidate<'session>(
             "constructor argument must be the exact caller formal identifier",
         ));
     };
-    let TreeKind::Ident(argument_ident) = &source_ast.get(source_argument).kind else {
+    let TreeKind::Ident(argument_ident) = &source_ast
+        .try_get(source_argument)
+        .ok_or_else(|| source_error("constructor argument source root is stale"))?
+        .kind
+    else {
         unreachable!()
     };
     if store.names.resolve(formal_def.name.as_name().text())
@@ -712,16 +716,24 @@ fn validate_constructor_call_candidate<'session>(
     else {
         return Err(typed_error("typed argument is not an identifier"));
     };
+    let typed_argument_type = typed_ast
+        .try_get(typed_argument)
+        .ok_or_else(|| typed_error("typed argument is stale"))?
+        .ty;
     if store.names.resolve(typed_argument_ident.name.text())
         != store.names.resolve(formal_def.name.as_name().text())
-        || !matches!(store.types.try_get(typed_ast.get(typed_argument).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(target), .. }) if *target == method_formal)
+        || !matches!(store.types.try_get(typed_argument_type), Some(Type::TermRef { target: TermRefTarget::Symbol(target), .. }) if *target == method_formal)
     {
         return Err(typed_error(
             "typed constructor argument does not reference the canonical caller formal",
         ));
     }
 
-    let target_class = match store.types.try_get(typed_ast.get(typed_new_tpt).ty) {
+    let typed_new_type = typed_ast
+        .try_get(typed_new_tpt)
+        .ok_or_else(|| typed_error("typed New type tree is stale"))?
+        .ty;
+    let target_class = match store.types.try_get(typed_new_type) {
         Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(target),
             ..
@@ -767,10 +779,18 @@ fn validate_constructor_call_candidate<'session>(
             "selected constructor target is absent from the same ordered JVM batch",
         ));
     }
-    let TreeKind::TypeDef(target_def) = &source_ast.get(target_source).kind else {
+    let TreeKind::TypeDef(target_def) = &source_ast
+        .try_get(target_source)
+        .ok_or_else(|| identity_error("target class source tree is stale"))?
+        .kind
+    else {
         return Err(identity_error("target class source definition is invalid"));
     };
-    let TreeKind::Template(target_template) = &source_ast.get(target_def.rhs).kind else {
+    let TreeKind::Template(target_template) = &source_ast
+        .try_get(target_def.rhs)
+        .ok_or_else(|| identity_error("target class template source tree is stale"))?
+        .kind
+    else {
         return Err(identity_error("target class template is invalid"));
     };
     let target_constructor_tree = target_template.constructor;
@@ -801,7 +821,11 @@ fn validate_constructor_call_candidate<'session>(
             "selected target constructor is not bound to its exact primary-constructor source tree",
         ));
     }
-    let selected_constructor = match store.types.try_get(typed_ast.get(typed_select).ty) {
+    let typed_select_type = typed_ast
+        .try_get(typed_select)
+        .ok_or_else(|| typed_error("typed constructor selection is stale"))?
+        .ty;
+    let selected_constructor = match store.types.try_get(typed_select_type) {
         Some(Type::TermRef {
             target: TermRefTarget::Symbol(target),
             ..
@@ -844,7 +868,10 @@ fn validate_constructor_call_candidate<'session>(
             "target must be an ordinary class without explicit parents or annotations",
         ));
     }
-    let TreeKind::DefDef(target_constructor_def) = &source_ast.get(target_constructor_tree).kind
+    let TreeKind::DefDef(target_constructor_def) = &source_ast
+        .try_get(target_constructor_tree)
+        .ok_or_else(|| identity_error("primary constructor source tree is stale"))?
+        .kind
     else {
         return Err(identity_error("primary constructor source is invalid"));
     };
@@ -864,7 +891,10 @@ fn validate_constructor_call_candidate<'session>(
         constructor_formal_tree,
         "constructor formal has a foreign source position",
     )?;
-    let TreeKind::ValDef(constructor_formal_def) = &source_ast.get(constructor_formal_tree).kind
+    let TreeKind::ValDef(constructor_formal_def) = &source_ast
+        .try_get(constructor_formal_tree)
+        .ok_or_else(|| identity_error("constructor formal source tree is stale"))?
+        .kind
     else {
         return Err(source_error("target constructor formal is invalid"));
     };
@@ -983,8 +1013,12 @@ fn validate_constructor_call_candidate<'session>(
             "method signature result must retain the exact target class TypeRef",
         ));
     }
+    let typed_rhs_type = typed_ast
+        .try_get(typed_rhs)
+        .ok_or_else(|| typed_error("typed method RHS is stale"))?
+        .ty;
     if !matches!(
-        store.types.try_get(typed_ast.get(typed_rhs).ty),
+        store.types.try_get(typed_rhs_type),
         Some(Type::TypeRef { target: TypeRefTarget::Symbol(target), .. }) if *target == target_class
     ) {
         return Err(typed_error(
@@ -993,7 +1027,7 @@ fn validate_constructor_call_candidate<'session>(
     }
     if !is_canonical_class_type_ref(
         store,
-        typed_ast.get(typed_new_tpt).ty,
+        typed_new_type,
         target_class,
         package,
         definitions.no_prefix,

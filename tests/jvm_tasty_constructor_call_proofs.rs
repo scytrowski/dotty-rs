@@ -424,6 +424,32 @@ fn assert_generic_proof(source: &str, source_number: u32, expected_descriptor: &
         Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(_))
     ));
 
+    let target_source_tree = match source_index.definition_of(proof.target_class()) {
+        Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+        _ => panic!("proof target retains its source owner"),
+    };
+    let mut stale_target_template_ast = clone_arena(&parsed.ast);
+    let mut other_arena = clone_arena(&parsed.ast);
+    let stale_tree_id = other_arena.alloc(parsed.ast.get(parsed.root).clone());
+    let TreeKind::TypeDef(target_definition) =
+        &mut stale_target_template_ast.get_mut(target_source_tree).kind
+    else {
+        panic!("proof target is a source class");
+    };
+    target_definition.rhs = stale_tree_id;
+    let stale_target_template = CrossClassConstructorCallProofInput {
+        source_id,
+        source_root: parsed.root,
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &stale_target_template_ast,
+        typed_ast: typer.typed_ast(),
+        source_index: &source_index,
+        source_typed_index: typer.source_typed_index(),
+        jvm_unit: &jvm_unit,
+    };
+    assert!(validate_cross_class_constructor_call_proofs(stale_target_template).is_err());
+
     let mut positionless_typed_ast = clone_arena(typer.typed_ast());
     positionless_typed_ast.get_mut(proof.typed_new()).position = None;
     let positionless_unit = JvmCompilationUnit {
