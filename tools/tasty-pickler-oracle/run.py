@@ -1800,10 +1800,6 @@ def consume_factory_batch(toolchain: Toolchain, batch_root: Path) -> dict:
         roots[f"uuid-mismatch-{class_name}"] = relative_paths
         roots[f"classfile-only-{class_name}"] = relative_paths - {tasty_path}
         roots[f"missing-classfile-{class_name}"] = relative_paths - {f"example/{class_name}.class"}
-        roots[f"wrong-class-path-{class_name}"] = (
-            relative_paths - {f"example/{class_name}.class"}
-            | {f"misplaced/{class_name}.class"}
-        )
         roots[f"missing-sidecar-{class_name}"] = relative_paths - {tasty_path}
         roots[f"wrong-path-{class_name}"] = (
             relative_paths - {tasty_path} | {f"misplaced/{class_name}.tasty"}
@@ -2006,30 +2002,6 @@ object FactoryTastyProbe:
                 )
             negative_diagnostics[f"{class_name}.missing_classfile_runtime"] = failure.strip()
 
-            wrong_class_path = batch_root / f"wrong-class-path-{class_name}"
-            output = work / f"wrong-class-path-{class_name}-client"
-            output.mkdir()
-            toolchain.compiler(
-                ["-d", output, client_source],
-                classpath=os.pathsep.join((str(wrong_class_path), toolchain.runtime_classpath)),
-            )
-            runtime = subprocess.run(
-                [toolchain.java, "-Xverify:all", "-XX:-UsePerfData", "-classpath",
-                 os.pathsep.join((str(wrong_class_path), str(output), str(driver),
-                                  toolchain.runtime_classpath)), "Runner"],
-                cwd=ROOT,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=180,
-            )
-            failure = runtime.stdout
-            if runtime.returncode == 0 or f"NoClassDefFoundError: example/{class_name}" not in failure:
-                raise RuntimeError(
-                    f"{class_name} misplaced classfile runtime did not fail at class loading: {failure}"
-                )
-            negative_diagnostics[f"{class_name}.wrong_classfile_path_runtime"] = failure.strip()
-
             for control, pattern in (
                 ("uuid-mismatch", r"(?i)out of sync with its TASTy file"),
                 ("missing-sidecar", r"(?i)this `?\.tasty`? file is missing"),
@@ -2124,6 +2096,11 @@ def consume_object_composition_batch(
         roots[f"renamed-link-{class_name}"] = relative_paths - {tasty_path}
         roots[f"classfile-only-{class_name}"] = relative_paths - {tasty_path}
         roots[f"missing-classfile-{class_name}"] = relative_paths - {f"example/{class_name}.class"}
+        if constructor_injection:
+            roots[f"wrong-class-path-{class_name}"] = (
+                relative_paths - {f"example/{class_name}.class"}
+                | {f"misplaced/{class_name}.class"}
+            )
         roots[f"missing-sidecar-{class_name}"] = relative_paths - {tasty_path}
         roots[f"wrong-path-{class_name}"] = (
             relative_paths - {tasty_path} | {f"misplaced/{class_name}.tasty"}
@@ -2325,6 +2302,42 @@ object CounterTastyProbe:
                 )
             negative_diagnostics[f"{class_name}.missing_classfile_runtime"] = failure.strip()
 
+            if constructor_injection:
+                wrong_class_path = batch_root / f"wrong-class-path-{class_name}"
+                wrong_client = work / f"wrong-class-path-{class_name}-client"
+                wrong_client.mkdir()
+                toolchain.compiler(
+                    ["-d", wrong_client, client_source],
+                    classpath=os.pathsep.join((str(wrong_class_path), toolchain.runtime_classpath)),
+                )
+                wrong_driver_source = work / f"wrong-class-path-{class_name}-src/Runner.java"
+                wrong_driver_source.parent.mkdir()
+                wrong_driver_source.write_text(
+                    "public final class Runner { public static void main(String[] args) { "
+                    "System.out.println(consumer.Consumer$.MODULE$.run()); } }\n"
+                )
+                wrong_driver = work / f"wrong-class-path-{class_name}-driver"
+                wrong_driver.mkdir()
+                wrong_driver_classpath = os.pathsep.join((
+                    str(wrong_class_path), str(wrong_client), toolchain.runtime_classpath,
+                ))
+                execute([
+                    toolchain.javac, "-classpath", wrong_driver_classpath,
+                    "-d", wrong_driver, wrong_driver_source,
+                ])
+                wrong_runtime = subprocess.run(
+                    [toolchain.java, "-Xverify:all", "-XX:-UsePerfData", "-classpath",
+                     os.pathsep.join((str(wrong_class_path), str(wrong_client), str(wrong_driver),
+                                      toolchain.runtime_classpath)), "Runner"],
+                    cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180,
+                )
+                failure = wrong_runtime.stdout
+                if wrong_runtime.returncode == 0 or f"NoClassDefFoundError: example/{class_name}" not in failure:
+                    raise RuntimeError(
+                        f"{class_name} misplaced classfile runtime did not fail at class loading: {failure}"
+                    )
+                negative_diagnostics[f"{class_name}.wrong_classfile_path_runtime"] = failure.strip()
+
             renamed_link = batch_root / f"renamed-link-{class_name}"
             try:
                 compile_source(f"renamed-link-{class_name}", renamed_link, probe)
@@ -2522,8 +2535,8 @@ object CounterTastyProbe:
         "owner_classfile_only_control_rejected": True,
         "counter_missing_classfile_runtime_rejected": True,
         "owner_missing_classfile_runtime_rejected": True,
-        "counter_wrong_classfile_path_runtime_rejected": True,
-        "owner_wrong_classfile_path_runtime_rejected": True,
+        "counter_wrong_classfile_path_runtime_rejected": constructor_injection,
+        "owner_wrong_classfile_path_runtime_rejected": constructor_injection,
         "counter_uuid_mismatch_control_rejected": True,
         "owner_uuid_mismatch_control_rejected": True,
         "counter_renamed_link_control_rejected": True,
