@@ -1302,6 +1302,101 @@ fn identity_operators_reject_foreign_primitive_trait_and_overridden_members() {
 }
 
 #[test]
+fn deferred_external_parent_field_precedes_outer_package_term() {
+    let source_text = "package app\nclass Base { val None: Int = 1 }\nclass Generic[A]\nobject None\nclass Child extends Generic[Int] { def value: Any = None }\n";
+    let source = SourceId::from_index(1744);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "deferred-external-parent-field.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let base = class_definition(&parsed, &store, &index, source, "Base").0;
+    let generic = class_definition(&parsed, &store, &index, source, "Generic").0;
+    let base_type = store.types.alloc(Type::TypeRef {
+        prefix: definitions.no_prefix,
+        target: TypeRefTarget::Symbol(base),
+    });
+    let generic_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+        prefix: definitions.no_prefix,
+        class: generic,
+        parents: vec![base_type],
+        declarations: index.scope_of(generic).unwrap(),
+        self_type: None,
+    }));
+    store
+        .symbols
+        .set_info(generic, SymbolInfo::Complete(generic_info));
+    let external_origin = SymbolOrigin::Classfile(store.origins.register_classfile());
+    store.symbols.get_mut(generic).origin = external_origin;
+    store.symbols.get_mut(base).origin = external_origin;
+
+    let (method, body) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "value").then(|| {
+                (
+                    index.symbol_at(source, tree).unwrap(),
+                    definition.rhs.unwrap(),
+                )
+            })
+        })
+        .unwrap();
+    let inherited_field = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::ValDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "None")
+                .then(|| index.symbol_at(source, tree).unwrap())
+        })
+        .unwrap();
+    let context = ExpressionContext {
+        lexical: index.declaration_context_of(method).unwrap(),
+        owner: method,
+        local_scopes: None,
+    };
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    let typed = typer
+        .type_expression(body, context)
+        .expect("the inherited field remains visible through deferred generic adaptation");
+
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(typed).ty),
+        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+            if *symbol == inherited_field
+    ));
+}
+
+#[test]
 fn types_a_synthetic_field_selection_through_the_public_pipeline() {
     let text = "class C { val value: Int = 1; def use: Int = this.value }";
     let source = SourceId::from_index(0);

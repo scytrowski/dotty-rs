@@ -64,7 +64,10 @@ argument conformance. Their typed source expressions retain their original
 types. When an unqualified inherited-field probe stops at an external generic
 parent, a package-level Scala object is considered only after the canonical
 `scala` package owner and module identity are validated; the resolver does not
-infer `None` from its spelling.
+infer `None` from its spelling. Before continuing to an outer lexical scope or
+import, the typer checks the raw parent hierarchy for a matching public
+inherited field, preserving field shadowing when generic parent adaptation is
+deferred.
 
 Resolving canonical builtin types now gives same-package source declarations
 their existing precedence, then uses the builtin identity before unrelated

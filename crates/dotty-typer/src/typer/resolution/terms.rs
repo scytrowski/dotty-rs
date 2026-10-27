@@ -173,7 +173,7 @@ impl SourceTyper<'_> {
                     self.index.source_context(*context_id).lexical_scope != *scope
                 })
             });
-        let mut deferred_parent_lookups = Vec::new();
+        let mut deferred_parent_error = None;
         for (context_position, context_id) in contexts.iter().enumerate() {
             let source_context = self.index.source_context(*context_id);
             let candidates = self
@@ -228,11 +228,34 @@ impl SourceTyper<'_> {
                                 }
                             ) =>
                         {
-                            // Keep checking outer lexical scopes and imports
-                            // before considering a package default. Whether an
-                            // inherited field wins is checked without generic
-                            // parent adaptation after those contexts are known.
-                            deferred_parent_lookups.push((this_type, error));
+                            // A matching inherited field still precedes outer
+                            // lexical/import scopes. Generic adaptation may
+                            // be unavailable for this external parent, so
+                            // inspect its raw hierarchy before continuing.
+                            let inherited = self
+                                .lookup_unadapted_members_journaled(this_type, name, info_journal)
+                                .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
+                                .into_iter()
+                                .filter(|candidate| candidate.inheritance_depth > 0)
+                                .filter(|candidate| {
+                                    self.store.symbols.contains(candidate.symbol)
+                                        && self.store.symbols.get(candidate.symbol).kind
+                                            == SymbolKind::Field
+                                        && self.store.symbols.get(candidate.symbol).visibility
+                                            == dotty_core::symbols::Visibility::Public
+                                        && !self
+                                            .store
+                                            .symbols
+                                            .get(candidate.symbol)
+                                            .flags
+                                            .contains(SymbolFlags::STATIC)
+                                })
+                                .map(|candidate| candidate.symbol)
+                                .collect::<Vec<_>>();
+                            if !inherited.is_empty() {
+                                return Ok(inherited);
+                            }
+                            deferred_parent_error.get_or_insert(error);
                             continue;
                         }
                         Err(error) => return Err(TyperError::MemberLookup(Box::new(error))),
@@ -257,32 +280,6 @@ impl SourceTyper<'_> {
                     return Ok(inherited);
                 }
             }
-        }
-        let mut deferred_parent_error = None;
-        for (receiver, deferred_error) in deferred_parent_lookups {
-            let inherited = self
-                .lookup_unadapted_members_journaled(receiver, name, info_journal)
-                .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
-                .into_iter()
-                .filter(|candidate| candidate.inheritance_depth > 0)
-                .filter(|candidate| {
-                    self.store.symbols.contains(candidate.symbol)
-                        && self.store.symbols.get(candidate.symbol).kind == SymbolKind::Field
-                        && self.store.symbols.get(candidate.symbol).visibility
-                            == dotty_core::symbols::Visibility::Public
-                        && !self
-                            .store
-                            .symbols
-                            .get(candidate.symbol)
-                            .flags
-                            .contains(SymbolFlags::STATIC)
-                })
-                .map(|candidate| candidate.symbol)
-                .collect::<Vec<_>>();
-            if !inherited.is_empty() {
-                return Ok(inherited);
-            }
-            deferred_parent_error.get_or_insert(deferred_error);
         }
         if let Some(deferred_error) = deferred_parent_error {
             let scala_package = self.packages.symbol(&["scala".to_owned()]);
