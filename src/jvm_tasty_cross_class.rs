@@ -361,6 +361,49 @@ fn is_direct_constructor_call_candidate(ast: &AstArena<Untyped>, rhs: TreeId<Unt
     )
 }
 
+fn require_source_position(
+    source_ast: &AstArena<Untyped>,
+    source_id: SourceId,
+    source_tree: TreeId<Untyped>,
+    description: &'static str,
+) -> Result<dotty_core::SourceSpan, CrossClassConstructorCallProofError> {
+    let position = source_ast
+        .try_get(source_tree)
+        .and_then(|tree| tree.position)
+        .ok_or(CrossClassConstructorCallProofError::SourceIdentity(
+            "a canonical source tree is missing its source position",
+        ))?;
+    if position.source() != source_id {
+        return Err(CrossClassConstructorCallProofError::SourceIdentity(
+            description,
+        ));
+    }
+    Ok(position)
+}
+
+fn require_matching_source_typed_positions(
+    source_ast: &AstArena<Untyped>,
+    typed_ast: &TypedAst,
+    source_id: SourceId,
+    source_tree: TreeId<Untyped>,
+    typed_tree: TreeId<Typed>,
+    description: &'static str,
+) -> Result<(), CrossClassConstructorCallProofError> {
+    let source_position = require_source_position(source_ast, source_id, source_tree, description)?;
+    let typed_position = typed_ast
+        .try_get(typed_tree)
+        .and_then(|tree| tree.position)
+        .ok_or(CrossClassConstructorCallProofError::TypedBinding(
+            "a canonical typed tree is missing its source position",
+        ))?;
+    if typed_position != source_position {
+        return Err(CrossClassConstructorCallProofError::TypedBinding(
+            "source and typed trees do not retain the exact same source position and owner",
+        ));
+    }
+    Ok(())
+}
+
 fn unique_constructor_call_class_plan<'a>(
     unit: &'a JvmCompilationUnit<'_>,
     class: SymbolId,
@@ -403,6 +446,22 @@ fn validate_constructor_call_candidate<'session>(
     let identity_error = |s| CrossClassConstructorCallProofError::SourceIdentity(s);
     let semantic_error = |s| CrossClassConstructorCallProofError::SemanticIdentity(s);
     let typed_error = |s| CrossClassConstructorCallProofError::TypedBinding(s);
+    let caller_source_tree = match source_index.definition_of(caller_class) {
+        Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+        _ => return Err(identity_error("caller class has a foreign source origin")),
+    };
+    require_source_position(
+        source_ast,
+        source_id,
+        caller_source_tree,
+        "caller class has a foreign source position",
+    )?;
+    require_source_position(
+        source_ast,
+        source_id,
+        method_tree,
+        "calling method has a foreign source position",
+    )?;
     if source_index.symbol_at(source_id, method_tree) != Some(method)
         || source_index.definition_of(method)
             != Some(SourceDefinition::Canonical {
@@ -438,6 +497,12 @@ fn validate_constructor_call_candidate<'session>(
         ));
     }
     let method_formal_tree = method_def.value_param_clauses[0][0];
+    require_source_position(
+        source_ast,
+        source_id,
+        method_formal_tree,
+        "caller formal has a foreign source position",
+    )?;
     let TreeKind::ValDef(formal_def) = &source_ast
         .try_get(method_formal_tree)
         .ok_or_else(|| source_error("method formal source tree is stale"))?
@@ -578,6 +643,22 @@ fn validate_constructor_call_candidate<'session>(
     let typed_root = typed_ast
         .try_get(typed_rhs)
         .ok_or_else(|| typed_error("typed method RHS is stale"))?;
+    for (source_tree, typed_tree, description) in [
+        (source_rhs, typed_rhs, "method RHS"),
+        (source_select, typed_select, "constructor Select"),
+        (source_new, typed_new, "constructor New"),
+        (source_new_tree.tpt, typed_new_tpt, "New type tree"),
+        (source_argument, typed_argument, "constructor argument"),
+    ] {
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_tree,
+            typed_tree,
+            description,
+        )?;
+    }
     let TreeKind::Apply(typed_apply) = &typed_root.kind else {
         return Err(typed_error("typed candidate RHS is not Apply"));
     };
@@ -684,6 +765,18 @@ fn validate_constructor_call_candidate<'session>(
         return Err(identity_error("target class template is invalid"));
     };
     let target_constructor_tree = target_template.constructor;
+    require_source_position(
+        source_ast,
+        source_id,
+        target_source,
+        "constructor target has a foreign source position",
+    )?;
+    require_source_position(
+        source_ast,
+        source_id,
+        target_constructor_tree,
+        "primary constructor has a foreign source position",
+    )?;
     let target_constructor = source_index
         .symbol_at(source_id, target_constructor_tree)
         .ok_or_else(|| {
@@ -754,6 +847,12 @@ fn validate_constructor_call_candidate<'session>(
         ));
     }
     let constructor_formal_tree = target_constructor_def.value_param_clauses[0][0];
+    require_source_position(
+        source_ast,
+        source_id,
+        constructor_formal_tree,
+        "constructor formal has a foreign source position",
+    )?;
     let TreeKind::ValDef(constructor_formal_def) = &source_ast.get(constructor_formal_tree).kind
     else {
         return Err(source_error("target constructor formal is invalid"));
@@ -887,33 +986,43 @@ fn validate_constructor_call_candidate<'session>(
             "New type tree must retain the exact target class TypeRef",
         ));
     }
-    if let Some(typed_result_syntax) = source_typed_index.get(source_id, method_def.tpt)
-        && !is_canonical_class_type_ref(
+    if let Some(typed_result_syntax) = source_typed_index.get(source_id, method_def.tpt) {
+        let typed_result_syntax = typed_ast
+            .try_get(typed_result_syntax)
+            .ok_or_else(|| typed_error("source result annotation binding is stale"))?;
+        if !is_canonical_class_type_ref(
             store,
-            typed_ast.get(typed_result_syntax).ty,
+            typed_result_syntax.ty,
             target_class,
             package,
             definitions.no_prefix,
-        )
-    {
-        return Err(typed_error(
-            "source result annotation does not resolve to the exact target class",
-        ));
+        ) {
+            return Err(typed_error(
+                "source result annotation does not resolve to the exact target class",
+            ));
+        }
     }
-    if let Some(typed_formal_syntax) = source_typed_index.get(source_id, formal_def.tpt)
-        && typed_ast.get(typed_formal_syntax).ty != formal_type
-    {
-        return Err(typed_error(
-            "source formal type annotation does not match the completed formal type",
-        ));
+    if let Some(typed_formal_syntax) = source_typed_index.get(source_id, formal_def.tpt) {
+        let typed_formal_syntax = typed_ast
+            .try_get(typed_formal_syntax)
+            .ok_or_else(|| typed_error("source formal annotation binding is stale"))?;
+        if typed_formal_syntax.ty != formal_type {
+            return Err(typed_error(
+                "source formal type annotation does not match the completed formal type",
+            ));
+        }
     }
     if let Some(typed_constructor_formal_syntax) =
         source_typed_index.get(source_id, constructor_formal_def.tpt)
-        && typed_ast.get(typed_constructor_formal_syntax).ty != formal_type
     {
-        return Err(typed_error(
-            "constructor formal type annotation does not match the caller formal type",
-        ));
+        let typed_constructor_formal_syntax = typed_ast
+            .try_get(typed_constructor_formal_syntax)
+            .ok_or_else(|| typed_error("constructor formal annotation binding is stale"))?;
+        if typed_constructor_formal_syntax.ty != formal_type {
+            return Err(typed_error(
+                "constructor formal type annotation does not match the caller formal type",
+            ));
+        }
     }
     let method_plan = caller_plan
         .methods

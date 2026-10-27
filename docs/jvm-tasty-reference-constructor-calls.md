@@ -138,7 +138,10 @@ The batch planner now scans concrete source method RHS roots structurally for
 `Apply(Select(New(target), <init>), argument)`. Once that shape is present, the
 proof fails closed unless the source method, formal, target class, selected
 primary constructor, argument `TermRef`, typed roots, and JVM metadata all have
-canonical same-session identities. The caller and constructed class must be
+canonical same-session identities. Every source tree in the proof must carry a
+position owned by the proof's `SourceId`, and each mapped expression tree must
+retain the exact same source position after typing. Stale typed annotation
+bindings return a typed proof error. The caller and constructed class must be
 different public ordinary classes in the same package and ordered source/JVM
 batch. A reference-valued formal must itself be another planned same-batch
 class. The exact erased method and constructor descriptors are retained in an

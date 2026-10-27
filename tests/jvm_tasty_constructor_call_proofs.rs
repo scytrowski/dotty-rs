@@ -2,9 +2,10 @@ use dotty::jvm_tasty_cross_class::{
     CrossClassConstructorCallProofInput, validate_cross_class_constructor_call_proofs,
 };
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
-use dotty_core::ast::TreeKind;
+use dotty_core::ast::{AstArena, AstPhase, TreeKind};
 use dotty_core::{
-    Definitions, Packages, SemanticStore, SourceId, SourceText, TermRefTarget, Type, TypeRefTarget,
+    Definitions, Packages, SemanticStore, SourceDefinition, SourceId, SourceSpan, SourceText,
+    TermRefTarget, Type, TypeRefTarget,
 };
 use dotty_jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmMethodPlan,
@@ -17,6 +18,14 @@ use dotty_typer::SourceTyper;
 
 const SOURCE: &str =
     include_str!("fixtures/jvm_tasty_reference_constructor_calls/CounterOwnerFactory.scala");
+
+fn clone_arena<P: AstPhase + Clone>(source: &AstArena<P>) -> AstArena<P> {
+    let mut cloned = AstArena::new();
+    for (_, tree) in source.iter() {
+        cloned.alloc(tree.clone());
+    }
+    cloned
+}
 
 fn assert_generic_proof(source: &str, source_number: u32, expected_descriptor: &str) {
     let source_id = SourceId::from_index(source_number);
@@ -352,6 +361,121 @@ fn assert_generic_proof(source: &str, source_number: u32, expected_descriptor: &
         jvm_unit: &jvm_unit,
     };
     assert!(validate_cross_class_constructor_call_proofs(mismatched_argument).is_err());
+
+    let caller_method_tree = match source_index.definition_of(proof.method()) {
+        Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+        _ => panic!("proof method retains its source owner"),
+    };
+    let mut foreign_source_positions = clone_arena(&parsed.ast);
+    let source_position = foreign_source_positions
+        .get(caller_method_tree)
+        .position
+        .unwrap();
+    foreign_source_positions
+        .get_mut(caller_method_tree)
+        .position = Some(SourceSpan::new(
+        SourceId::from_index(source_number.saturating_add(100)),
+        source_position.span(),
+    ));
+    let foreign_method_origin = CrossClassConstructorCallProofInput {
+        source_id,
+        source_root: parsed.root,
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &foreign_source_positions,
+        typed_ast: typer.typed_ast(),
+        source_index: &source_index,
+        source_typed_index: typer.source_typed_index(),
+        jvm_unit: &jvm_unit,
+    };
+    assert!(matches!(
+        validate_cross_class_constructor_call_proofs(foreign_method_origin),
+        Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(_))
+    ));
+
+    let target_constructor_tree = match source_index.definition_of(proof.constructor()) {
+        Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+        _ => panic!("proof constructor retains its source owner"),
+    };
+    let mut foreign_target_positions = clone_arena(&parsed.ast);
+    let constructor_position = foreign_target_positions
+        .get(target_constructor_tree)
+        .position
+        .unwrap();
+    foreign_target_positions
+        .get_mut(target_constructor_tree)
+        .position = Some(SourceSpan::new(
+        SourceId::from_index(source_number.saturating_add(101)),
+        constructor_position.span(),
+    ));
+    let foreign_target_origin = CrossClassConstructorCallProofInput {
+        source_id,
+        source_root: parsed.root,
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &foreign_target_positions,
+        typed_ast: typer.typed_ast(),
+        source_index: &source_index,
+        source_typed_index: typer.source_typed_index(),
+        jvm_unit: &jvm_unit,
+    };
+    assert!(matches!(
+        validate_cross_class_constructor_call_proofs(foreign_target_origin),
+        Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(_))
+    ));
+
+    let mut positionless_typed_ast = clone_arena(typer.typed_ast());
+    positionless_typed_ast.get_mut(proof.typed_new()).position = None;
+    let positionless_unit = JvmCompilationUnit {
+        store: jvm_unit.store,
+        typed_ast: &positionless_typed_ast,
+        classes: jvm_unit.classes.clone(),
+    };
+    let positionless_typed_tree = CrossClassConstructorCallProofInput {
+        source_id,
+        source_root: parsed.root,
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: &positionless_typed_ast,
+        source_index: &source_index,
+        source_typed_index: typer.source_typed_index(),
+        jvm_unit: &positionless_unit,
+    };
+    assert!(matches!(
+        validate_cross_class_constructor_call_proofs(positionless_typed_tree),
+        Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(_))
+    ));
+
+    let method_formal_tree = match source_index.definition_of(proof.method_formal()) {
+        Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+        _ => panic!("proof formal retains its source owner"),
+    };
+    let TreeKind::ValDef(formal_definition) = &parsed.ast.get(method_formal_tree).kind else {
+        panic!("method formal retains a ValDef source tree");
+    };
+    let mut extended_typed_ast = clone_arena(typer.typed_ast());
+    let stale_typed_tree =
+        extended_typed_ast.alloc(typer.typed_ast().get(proof.typed_rhs()).clone());
+    let mut stale_formal_annotation = typer.source_typed_index().clone();
+    stale_formal_annotation
+        .insert(source_id, formal_definition.tpt, stale_typed_tree)
+        .unwrap();
+    let stale_annotation = CrossClassConstructorCallProofInput {
+        source_id,
+        source_root: parsed.root,
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: typer.typed_ast(),
+        source_index: &source_index,
+        source_typed_index: &stale_formal_annotation,
+        jvm_unit: &jvm_unit,
+    };
+    assert!(matches!(
+        validate_cross_class_constructor_call_proofs(stale_annotation),
+        Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(_))
+    ));
 }
 
 #[test]
