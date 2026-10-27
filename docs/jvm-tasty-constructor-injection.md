@@ -209,22 +209,43 @@ reference field validator: in both paths the constructor-parameter validation
 is the observed first failure. A later issue in the approved sprint sequence
 owns enabling the bounded TASTy constructor formal and then the alias field.
 
-## Scope and deferred negatives
+## Bounded negative matrix
+
+The audit-only regression runs each source variant through the real paired
+batch planner and asserts its first rejection phase and error family. It stops
+at that first result; no later producer stage is inferred from a masked case.
+
+| Variant | First rejection | What it establishes |
+| --- | --- | --- |
+| Constructor formal changed from `Counter` to `Int` | `field initializer typing`: `ExpectedExpressionTypeMismatch` | The source formal completes; assigning it to the declared `Counter` field fails during expected-type checking. |
+| Same-package `OtherCounter` formal with `Counter` field | `field initializer typing`: `ExpectedExpressionTypeMismatch` | The field does not accept another planned class identity. |
+| `Counter` removed from the source batch | `constructor typing`: `TypeNameNotFound` | An unrelated class in the batch does not satisfy the exact planned-reference requirement. |
+| `java.lang.String` or unresolved `foreign.Counter` formal | `constructor typing`: `TypeNameNotFound` | These external/foreign type spellings do not resolve in this batch run; no producer plan is made. |
+| Private `Counter` | complete JVM unit validation: `UnsupportedJvmVisibility` | Frontend typing reaches unit validation; visibility rejects the target class. |
+| Abstract `Counter` | complete JVM unit validation: `UnsupportedJvmClass` | The target's abstract class kind is rejected at whole-unit validation. |
+| Trait replacing `Counter` | `source collection`: top-level declaration is not an ordinary class | The batch API rejects a trait before constructor identity planning. |
+| `private[this]` alias field | `member planning`: bounded field visibility check | The field is not accepted as the required unqualified private field. |
+| Mutable `var` alias field | `method body typing`: `UnstableSelectionPrefix` | The later `read()` body is the first rejection; mutable field selection is outside this shape. |
+| Constructor `val` or `var` accessor | complete JVM unit validation: `InvalidPrimaryConstructor(AccessorFieldSignature)` | Accessor symbols remain distinct and are rejected by constructor metadata validation. |
+| Generic constructor | `source collection`: generic primary constructors are unsupported | Generic class identity does not enter the paired plan. |
+| Defaulted formal | `constructor planning`: `InvalidPrimaryConstructor(SourceShape)` | Default arguments are rejected before TASTy planning. |
+| Extra `Int` formal, extra clause, or `using` formal | `TASTy plan validation: UnsupportedTypeReference` on the existing `Counter` formal, or `constructor planning: InvalidPrimaryConstructor(SourceShape)` for unsupported clauses | The extra `Int` formal is masked by the earlier reference-formal rejection; clause forms reach source-shape validation first. |
+| Secondary constructor | `member planning`: method is not owned by its declaring class | The bounded member collector rejects it before primary-constructor TASTy validation. |
+| Field declared as `Int` | `member planning`: private immutable fields require a canonical same-batch class `TypeRef` | Wrong field type is rejected before initializer serialization. |
+| Alias initialized from a different same-typed constructor formal | `TASTy plan validation: UnsupportedTypeReference` | The earlier constructor type blocker masks any later comparison of the actual initializer target. |
+| Class-owned template PARAM substituted for the derived constructor formal in a real `ClassStatePicklePlan` | direct class-state validation: `ScopeMembers` for the primary constructor | A real but wrong-owner symbol is rejected; no symbol or tree is fabricated. |
+| Same-spelled class nested in a foreign package block | `source collection`: top-level siblings must all be ordinary classes | The paired batch API rejects this package-block shape before the foreign class identity can be resolved; the unresolved `foreign.Counter` case above separately pins constructor typing. |
+
+The missing-sidecar, classfile-only, and stale/mismatched-link rows are
+measured by the Scala oracle controls above. These negative outcomes are
+characterization baselines, not added producer support. The audit also leaves
+erased/repeated parameters and arbitrary initializer expressions for later
+work, as required by the bounded scope.
 
 This issue is characterization only. No production emitter, pickler, Typer,
-compiler CLI, or dependency boundary changes are included. Constructor
-`val`/`var` accessors, secondary or multiple parameter clauses, `using`,
-defaulted, erased, repeated, generic, or external constructors remain outside
-this audit's supported source shape. So do mutable or `private[this]` alias
-fields, cross-package/unplanned reference classes, and arbitrary initializer
-expressions.
-
-The measured classpath negatives are the missing-sidecar, classfile-only, and
-stale/mismatched-link controls above. The exact-source regression also pins the
-first current producer rejection. Variants hidden behind that same earlier
-constructor-parameter blocker are not represented as if a later field or ABI
-validator had run; successor issues add producer-stage negative tests when
-those stages are reached.
+compiler CLI, or dependency boundary changes are included. Successor issues
+can use these first-error baselines while enabling the constructor PARAM,
+field alias, linked ABI, and Scala consumer in order.
 
 ## Validation
 
@@ -233,6 +254,8 @@ focused repository checks are:
 
 ```sh
 cargo test -p dotty --test jvm_tasty_object_composition --locked
+cargo test -p dotty --test jvm_tasty_object_composition \
+  constructor_injection_negative_matrix_pins_first_batch_rejection --locked
 PATH=/home/vdrake6/.jdks/jdk-21/bin:$PATH DOTTY_CLASSFILE_REQUIRE_JDK=1 \
   cargo test -p dotty --test jvm_source_compilation \
   constructor_injected_reference_alias_emits_and_preserves_object_identity \

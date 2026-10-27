@@ -1060,6 +1060,37 @@ fn constructor_reference_alias_preserves_source_identity_and_records_first_pickl
             if Some(ty) == owner_template_parameter_type
     ));
 
+    let wrong_derived_formal = match (ClassStatePicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: typer.typed_ast(),
+        source_index: &source_index,
+        typed_bindings: &planned,
+        source: SourceMetadata {
+            id: source_id,
+            name: "CounterOwner.scala".to_owned(),
+        },
+        class: owner_class,
+        class_tree: class_plan.class_tree,
+        constructor: PrimaryConstructorInputPlan {
+            symbol: owner_constructor,
+            source_tree: class_plan.constructor.source_tree,
+            parameter_clauses: vec![vec![owner_template_parameter]],
+        },
+        members: &owner_members,
+    })
+    .validate()
+    {
+        Ok(_) => panic!("a class-owned template PARAM cannot stand in for the ctor formal"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        wrong_derived_formal,
+        dotty_tasty_pickler::PickleError::ScopeMembers { owner }
+            if owner == owner_constructor
+    ));
+
     let paired_error = with_paired_jvm_tasty_batch_plan(
         REFERENCE_ALIAS_SOURCE,
         "CounterOwner.scala",
@@ -1088,6 +1119,236 @@ fn constructor_reference_alias_preserves_source_identity_and_records_first_pickl
             })
             .unwrap()
     );
+}
+
+#[test]
+fn constructor_injection_negative_matrix_pins_first_batch_rejection() {
+    struct Case {
+        name: &'static str,
+        source: String,
+        phase: &'static str,
+        reason_prefix: &'static str,
+    }
+    let variants = [
+        Case {
+            name: "constructor type mismatch",
+            source: REFERENCE_ALIAS_SOURCE
+                .replace("class CounterOwner(counter: Counter)", "class CounterOwner(counter: Int)"),
+            phase: "field initializer typing",
+            reason_prefix: "ExpectedExpressionTypeMismatch",
+        },
+        Case {
+            name: "wrong same-package reference class",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "class CounterOwner(counter: Counter)",
+                "class OtherCounter(start: Int)\n\nclass CounterOwner(counter: OtherCounter)",
+            ),
+            phase: "field initializer typing",
+            reason_prefix: "ExpectedExpressionTypeMismatch",
+        },
+        Case {
+            name: "unplanned reference class",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "class Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value",
+                "class Other",
+            ),
+            phase: "constructor typing",
+            reason_prefix: "TypeNameNotFound",
+        },
+        Case {
+            name: "external reference class",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "class CounterOwner(counter: Counter)",
+                "class CounterOwner(counter: java.lang.String)",
+            ),
+            phase: "constructor typing",
+            reason_prefix: "TypeNameNotFound",
+        },
+        Case {
+            name: "wrong package reference class",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "class CounterOwner(counter: Counter)",
+                "class CounterOwner(counter: foreign.Counter)",
+            ),
+            phase: "constructor typing",
+            reason_prefix: "TypeNameNotFound",
+        },
+        Case {
+            name: "same-spelled foreign package class",
+            source: r#"package example {
+class Counter(start: Int):
+  private var current: Int = start
+  def get(): Int = current
+  def set(value: Int): Unit = current = value
+package foreign { class Counter(start: Int) }
+class CounterOwner(counter: foreign.Counter):
+  private val inner: Counter = counter
+  def read(): Int = inner.get()
+}"#
+                .to_owned(),
+            phase: "source collection",
+            reason_prefix: "top-level siblings must all be ordinary classes",
+        },
+        Case {
+            name: "private reference class",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "class Counter(start: Int):",
+                "private class Counter(start: Int):",
+            ),
+            phase: "complete JVM unit validation",
+            reason_prefix: "UnsupportedJvmVisibility",
+        },
+        Case {
+            name: "abstract reference class",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "class Counter(start: Int):",
+                "abstract class Counter(start: Int):",
+            ),
+            phase: "complete JVM unit validation",
+            reason_prefix: "UnsupportedJvmClass",
+        },
+        Case {
+            name: "trait reference class",
+            source: REFERENCE_ALIAS_SOURCE.replace("class Counter(start: Int):", "trait Counter:"),
+            phase: "source collection",
+            reason_prefix: "top-level declaration is not an ordinary class",
+        },
+        Case {
+            name: "private[this] alias field",
+            source: REFERENCE_ALIAS_SOURCE
+                .replace("private val inner: Counter", "private[this] val inner: Counter"),
+            phase: "member planning",
+            reason_prefix: "only unqualified private mutable fields and initialized private immutable same-batch reference fields are supported",
+        },
+        Case {
+            name: "mutable alias field",
+            source: REFERENCE_ALIAS_SOURCE
+                .replace("private val inner: Counter", "private var inner: Counter"),
+            phase: "method body typing",
+            reason_prefix: "UnstableSelectionPrefix",
+        },
+        Case {
+            name: "constructor val accessor",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "class CounterOwner(counter: Counter)",
+                "class CounterOwner(val counter: Counter)",
+            ),
+            phase: "complete JVM unit validation",
+            reason_prefix: "InvalidPrimaryConstructor",
+        },
+        Case {
+            name: "constructor var accessor",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "class CounterOwner(counter: Counter)",
+                "class CounterOwner(var counter: Counter)",
+            ),
+            phase: "complete JVM unit validation",
+            reason_prefix: "InvalidPrimaryConstructor",
+        },
+        Case {
+            name: "generic constructor",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "class CounterOwner(counter: Counter)",
+                "class CounterOwner[A](counter: Counter)",
+            ),
+            phase: "source collection",
+            reason_prefix: "generic primary constructors are unsupported",
+        },
+        Case {
+            name: "defaulted constructor formal",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "class CounterOwner(counter: Counter)",
+                "class CounterOwner(counter: Counter = new Counter(1))",
+            ),
+            phase: "constructor planning",
+            reason_prefix: "InvalidPrimaryConstructor",
+        },
+        Case {
+            name: "extra constructor formal",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "class CounterOwner(counter: Counter)",
+                "class CounterOwner(counter: Counter, x: Int)",
+            ),
+            phase: "TASTy plan validation",
+            reason_prefix: "UnsupportedTypeReference",
+        },
+        Case {
+            name: "extra constructor clause",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "class CounterOwner(counter: Counter)",
+                "class CounterOwner(counter: Counter)(x: Int)",
+            ),
+            phase: "constructor planning",
+            reason_prefix: "InvalidPrimaryConstructor",
+        },
+        Case {
+            name: "contextual constructor formal",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "class CounterOwner(counter: Counter)",
+                "class CounterOwner(using counter: Counter)",
+            ),
+            phase: "constructor planning",
+            reason_prefix: "InvalidPrimaryConstructor",
+        },
+        Case {
+            name: "secondary constructor",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "  def read(): Int = inner.get()",
+                "  def this(x: Int) = this(new Counter(x))\n  def read(): Int = inner.get()",
+            ),
+            phase: "member planning",
+            reason_prefix: "method is not owned by its declaring class",
+        },
+        Case {
+            name: "wrong alias field type",
+            source: REFERENCE_ALIAS_SOURCE.replace(
+                "private val inner: Counter",
+                "private val inner: Int",
+            ),
+            phase: "member planning",
+            reason_prefix: "private immutable fields require a canonical same-batch class TypeRef",
+        },
+        Case {
+            name: "alias to another same-typed formal",
+            source: REFERENCE_ALIAS_SOURCE
+                .replace(
+                    "class CounterOwner(counter: Counter)",
+                    "class CounterOwner(counter: Counter, other: Counter)",
+                )
+                .replace("private val inner: Counter = counter", "private val inner: Counter = other"),
+            phase: "TASTy plan validation",
+            reason_prefix: "UnsupportedTypeReference",
+        },
+    ];
+    for case in variants {
+        let error = with_paired_jvm_tasty_batch_plan(
+            &case.source,
+            "CounterOwner.scala",
+            SourceId::from_index(1771),
+            |_| (),
+        )
+        .unwrap_err();
+        match error {
+            PairedPlanError::BatchClass { phase, reason, .. }
+            | PairedPlanError::BatchUnit { phase, reason } => {
+                assert_eq!(
+                    phase, case.phase,
+                    "{} rejected at the wrong stage",
+                    case.name
+                );
+                assert!(
+                    reason.starts_with(case.reason_prefix),
+                    "{} expected {} but got {reason}",
+                    case.name,
+                    case.reason_prefix
+                );
+            }
+            other => panic!(
+                "{} expected a measured batch rejection, got {other:?}",
+                case.name
+            ),
+        }
+    }
 }
 
 #[test]
