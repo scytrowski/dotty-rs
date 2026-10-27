@@ -1,0 +1,8877 @@
+
+<html>
+<head>
+  <title>Cargo Build Timings — dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classfile 0.1.0, dotty-classloader 0.1.0, dotty-classloader 0.1.0, dotty-classloader 0.1.0, dotty-classloader 0.1.0, dotty-classloader 0.1.0, dotty-classloader 0.1.0, dotty-classloader 0.1.0, dotty-core 0.1.0, dotty-core 0.1.0, dotty-jvm 0.1.0, dotty-jvm-tasty-contract 0.1.0, dotty-lexer 0.1.0, dotty-lexer 0.1.0, dotty-lexer 0.1.0, dotty-namer 0.1.0, dotty-namer 0.1.0, dotty-parser 0.1.0, dotty-parser-corpus-report 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-parser-smoke-dump 0.1.0, dotty-tasty 0.1.0, dotty-tasty 0.1.0, dotty-tasty 0.1.0, dotty-tasty 0.1.0, dotty-tasty 0.1.0, dotty-tasty 0.1.0, dotty-tasty 0.1.0, dotty-tasty 0.1.0, dotty-tasty 0.1.0, dotty-tasty-pickler 0.1.0, dotty-tasty-pickler 0.1.0, dotty-tasty-pickler 0.1.0, dotty-tasty-pickler 0.1.0, dotty-tasty-pickler 0.1.0, dotty-tasty-pickler 0.1.0, dotty-tasty-pickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-tasty-unpickler 0.1.0, dotty-typer 0.1.0, dotty-typer 0.1.0, dotty-typer 0.1.0, dotty-typer 0.1.0, dotty-typer 0.1.0, dotty-typer 0.1.0, dotty-typer 0.1.0, dotty-typer 0.1.0, dotty-typer 0.1.0, dotty-typer 0.1.0, dotty-typer 0.1.0, tasty-pickler-oracle 0.1.0, tasty-pickler-oracle 0.1.0, tasty-pickler-oracle 0.1.0, tasty-pickler-oracle 0.1.0</title>
+  <meta charset="utf-8">
+<style type="text/css">
+:root {
+  --error-text: #e80000;
+  --text: #000;
+  --background: #fff;
+  --h1-border-bottom: #c0c0c0;
+  --table-box-shadow: rgba(0, 0, 0, 0.1);
+  --table-th: #d5dde5;
+  --table-th-background: #1b1e24;
+  --table-th-border-bottom: #9ea7af;
+  --table-th-border-right: #343a45;
+  --table-tr-border-top: #c1c3d1;
+  --table-tr-border-bottom: #c1c3d1;
+  --table-tr-odd-background: #ebebeb;
+  --table-td-background: #ffffff;
+  --table-td-border-right: #C1C3D1;
+  --canvas-background: #f7f7f7;
+  --canvas-axes: #303030;
+  --canvas-grid: #e6e6e6;
+  --canvas-codegen: #aa95e8;
+  --canvas-link: #95e8aa;
+  --canvas-other: #e895aa;
+  --canvas-custom-build: #f0b165;
+  --canvas-not-custom-build: #95cce8;
+  --canvas-dep-line: #ddd;
+  --canvas-dep-line-highlighted: #000;
+  --canvas-cpu: rgba(250, 119, 0, 0.2);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --error-text: #e80000;
+    --text: #fff;
+    --background: #121212;
+    --h1-border-bottom: #444;
+    --table-box-shadow: rgba(255, 255, 255, 0.1);
+    --table-th: #a0a0a0;
+    --table-th-background: #2c2c2c;
+    --table-th-border-bottom: #555;
+    --table-th-border-right: #444;
+    --table-tr-border-top: #333;
+    --table-tr-border-bottom: #333;
+    --table-tr-odd-background: #1e1e1e;
+    --table-td-background: #262626;
+    --table-td-border-right: #333;
+    --canvas-background: #1a1a1a;
+    --canvas-axes: #b0b0b0;
+    --canvas-grid: #333;
+    --canvas-block: #aa95e8;
+    --canvas-custom-build: #f0b165;
+    --canvas-not-custom-build: #95cce8;
+    --canvas-dep-line: #444;
+    --canvas-dep-line-highlighted: #fff;
+    --canvas-cpu: rgba(250, 119, 0, 0.2);
+  }
+}
+
+html {
+  font-family: sans-serif;
+  color: var(--text);
+  background: var(--background);
+}
+
+.canvas-container {
+  position: relative;
+  margin-top: 5px;
+  margin-bottom: 5px;
+}
+
+.canvas-container.hidden {
+  display: none;
+}
+
+h1 {
+  border-bottom: 1px solid var(--h1-border-bottom);
+}
+
+.graph {
+  display: block;
+}
+
+.my-table {
+  margin-top: 20px;
+  margin-bottom: 20px;
+  border-collapse: collapse;
+  box-shadow: 0 5px 10px var(--table-box-shadow);
+}
+
+.my-table th {
+  color: var(--table-th);
+  background: var(--table-th-background);
+  border-bottom: 4px solid var(--table-th-border-bottom);
+  border-right: 1px solid var(--table-th-border-right);
+  font-size: 18px;
+  font-weight: 100;
+  padding: 12px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.my-table th:first-child {
+  border-top-left-radius: 3px;
+}
+
+.my-table th:last-child {
+  border-top-right-radius: 3px;
+  border-right:none;
+}
+
+.my-table tr {
+  border-top: 1px solid var(--table-tr-border-top);
+  border-bottom: 1px solid var(--table-tr-border-bottom);
+  font-size: 16px;
+  font-weight: normal;
+}
+
+.my-table tr:first-child {
+  border-top:none;
+}
+
+.my-table tr:last-child {
+  border-bottom:none;
+}
+
+.my-table tr:nth-child(odd) td {
+  background: var(--table-tr-odd-background);
+}
+
+.my-table tr:last-child td:first-child {
+  border-bottom-left-radius:3px;
+}
+
+.my-table tr:last-child td:last-child {
+  border-bottom-right-radius:3px;
+}
+
+.my-table td {
+  background: var(--table-td-background);
+  padding: 10px;
+  text-align: left;
+  vertical-align: middle;
+  font-weight: 300;
+  font-size: 14px;
+  border-right: 1px solid var(--table-td-border-right);
+}
+
+.my-table td:last-child {
+  border-right: 0px;
+}
+
+.summary-table td:first-child {
+  vertical-align: top;
+  text-align: right;
+}
+
+.input-table td {
+  text-align: center;
+}
+
+.error-text {
+  color: var(--error-text);
+}
+
+</style>
+</head>
+<body>
+
+<h1>Cargo Build Timings</h1>
+See <a href="https://doc.rust-lang.org/nightly/cargo/reference/timings.html">Documentation</a>
+
+<table class="my-table summary-table">
+<tr>
+<td>Targets:</td><td>dotty 0.1.0 (lib)<br>dotty 0.1.0 ( tasty-audit "bin")<br>dotty 0.1.0 ( tasty-roundtrip "bin")<br>dotty 0.1.0 ( tasty-wire-baseline "bin")<br>dotty 0.1.0 ( classpath_source_typing "test")<br>dotty 0.1.0 ( jvm_source_compilation "test")<br>dotty 0.1.0 ( jvm_stateful_class_contract "test")<br>dotty 0.1.0 ( jvm_tasty_artifacts "test")<br>dotty 0.1.0 ( jvm_tasty_contract "test")<br>dotty 0.1.0 ( jvm_tasty_cross_class_audit "test")<br>dotty 0.1.0 ( jvm_tasty_cross_class_factories "test")<br>dotty 0.1.0 ( jvm_tasty_cross_class_scala_consumer "test")<br>dotty 0.1.0 ( jvm_tasty_factory_scala_consumer "test")<br>dotty 0.1.0 ( jvm_tasty_linkage_audit "test")<br>dotty 0.1.0 ( jvm_tasty_multiclass_audit "test")<br>dotty 0.1.0 ( jvm_tasty_multiclass_scala_consumer "test")<br>dotty 0.1.0 ( jvm_tasty_object_composition "test")<br>dotty 0.1.0 ( jvm_tasty_object_composition_scala_consumer "test")<br>dotty 0.1.0 ( jvm_tasty_plan "test")<br>dotty 0.1.0 ( jvm_tasty_scala_consumer "test")<br>dotty 0.1.0 ( public_api "test")<br>dotty 0.1.0 ( tasty_class_state_contract "test")<br>dotty 0.1.0 ( tasty_control_flow_contract "test")<br>dotty 0.1.0 ( tasty_roundtrip "test")<br>dotty 0.1.0 ( tasty_source_contract "test")<br>dotty 0.1.0 ( tasty_source_pickling "test")<br>dotty-classfile 0.1.0 (lib)<br>dotty-classfile 0.1.0 ( bytecode_analysis "test")<br>dotty-classfile 0.1.0 ( bytecode_code_sequence "test")<br>dotty-classfile 0.1.0 ( bytecode_labeled_assembly "test")<br>dotty-classfile 0.1.0 ( bytecode_model "test")<br>dotty-classfile 0.1.0 ( cfg_analysis "test")<br>dotty-classfile 0.1.0 ( class_file_builder "test")<br>dotty-classfile 0.1.0 ( class_file_fixtures "test")<br>dotty-classfile 0.1.0 ( classfile_jvm_encoder "test")<br>dotty-classfile 0.1.0 ( jdk_corpus "test")<br>dotty-classfile 0.1.0 ( module_info_oracle "test")<br>dotty-classfile 0.1.0 ( opaque_attribute_length "test")<br>dotty-classfile 0.1.0 ( parser_robustness "test")<br>dotty-classfile 0.1.0 ( pool_sample_fixture "test")<br>dotty-classfile 0.1.0 ( stack_map "test")<br>dotty-classfile 0.1.0 ( tasty_link_attribute "test")<br>dotty-classloader 0.1.0 (lib)<br>dotty-classloader 0.1.0 ( directory_class_path "test")<br>dotty-classloader 0.1.0 ( jdk_class_path "test")<br>dotty-classloader 0.1.0 ( jvm_visibility "test")<br>dotty-classloader 0.1.0 ( real_jdk_class_path "test")<br>dotty-classloader 0.1.0 ( tasty_loading "test")<br>dotty-classloader 0.1.0 ( jdk_classpath_benchmark "example")<br>dotty-core 0.1.0 (lib)<br>dotty-core 0.1.0 ( semantic_fixtures "test")<br>dotty-jvm 0.1.0 (lib)<br>dotty-jvm-tasty-contract 0.1.0 (lib)<br>dotty-lexer 0.1.0 (lib)<br>dotty-lexer 0.1.0 ( invariants "test")<br>dotty-lexer 0.1.0 ( dump "example")<br>dotty-namer 0.1.0 (lib)<br>dotty-namer 0.1.0 ( parsed_unit "test")<br>dotty-parser 0.1.0 (lib)<br>dotty-parser-corpus-report 0.1.0 ( dotty-parser-corpus-report "bin")<br>dotty-parser-smoke-dump 0.1.0 ( dotty-parser-smoke-dump "bin")<br>dotty-parser-smoke-dump 0.1.0 ( anonymous_template_recovery "test")<br>dotty-parser-smoke-dump 0.1.0 ( case_guard "test")<br>dotty-parser-smoke-dump 0.1.0 ( case_lambda "test")<br>dotty-parser-smoke-dump 0.1.0 ( case_layout "test")<br>dotty-parser-smoke-dump 0.1.0 ( colon_lambda "test")<br>dotty-parser-smoke-dump 0.1.0 ( for_match_final_enumerator_yield "test")<br>dotty-parser-smoke-dump 0.1.0 ( given_type_recovery "test")<br>dotty-parser-smoke-dump 0.1.0 ( indented_if_else "test")<br>dotty-parser-smoke-dump 0.1.0 ( lambda_tuple_comma_layout "test")<br>dotty-parser-smoke-dump 0.1.0 ( legacy_implicit_block_lambda "test")<br>dotty-parser-smoke-dump 0.1.0 ( legacy_macro_expression "test")<br>dotty-parser-smoke-dump 0.1.0 ( nested_end_if_before_outer_else "test")<br>dotty-parser-smoke-dump 0.1.0 ( new_template_followed_by_tuple "test")<br>dotty-parser-smoke-dump 0.1.0 ( new_template_repeated_application "test")<br>dotty-parser-smoke-dump 0.1.0 ( parenthesized_infix_condition "test")<br>dotty-parser-smoke-dump 0.1.0 ( symbolic_pattern_recovery "test")<br>dotty-tasty 0.1.0 (lib)<br>dotty-tasty 0.1.0 ( construction "test")<br>dotty-tasty 0.1.0 ( fixture_ast_expectations "test")<br>dotty-tasty 0.1.0 ( fixtures "test")<br>dotty-tasty 0.1.0 ( padded_length "test")<br>dotty-tasty 0.1.0 ( parser_robustness "test")<br>dotty-tasty 0.1.0 ( scala3_compiler "test")<br>dotty-tasty 0.1.0 ( scala3_library "test")<br>dotty-tasty 0.1.0 ( tag_constants "test")<br>dotty-tasty-pickler 0.1.0 (lib)<br>dotty-tasty-pickler 0.1.0 ( bodies "test")<br>dotty-tasty-pickler 0.1.0 ( class_state_plan "test")<br>dotty-tasty-pickler 0.1.0 ( plan_validation "test")<br>dotty-tasty-pickler 0.1.0 ( projection "test")<br>dotty-tasty-pickler 0.1.0 ( skeleton "test")<br>dotty-tasty-pickler 0.1.0 ( source_pipeline "test")<br>dotty-tasty-unpickler 0.1.0 (lib)<br>dotty-tasty-unpickler 0.1.0 ( access "test")<br>dotty-tasty-unpickler 0.1.0 ( annotated "test")<br>dotty-tasty-unpickler 0.1.0 ( binders "test")<br>dotty-tasty-unpickler 0.1.0 ( bounds "test")<br>dotty-tasty-unpickler 0.1.0 ( class_parents "test")<br>dotty-tasty-unpickler 0.1.0 ( class_scopes "test")<br>dotty-tasty-unpickler 0.1.0 ( classes "test")<br>dotty-tasty-unpickler 0.1.0 ( companion_corpus "test")<br>dotty-tasty-unpickler 0.1.0 ( completion "test")<br>dotty-tasty-unpickler 0.1.0 ( compound_types "test")<br>dotty-tasty-unpickler 0.1.0 ( constants "test")<br>dotty-tasty-unpickler 0.1.0 ( constructors "test")<br>dotty-tasty-unpickler 0.1.0 ( default_package "test")<br>dotty-tasty-unpickler 0.1.0 ( definition_tail_corpus "test")<br>dotty-tasty-unpickler 0.1.0 ( discovery "test")<br>dotty-tasty-unpickler 0.1.0 ( enter_symbols "test")<br>dotty-tasty-unpickler 0.1.0 ( fixture_corpus "test")<br>dotty-tasty-unpickler 0.1.0 ( flexible "test")<br>dotty-tasty-unpickler 0.1.0 ( in_reference "test")<br>dotty-tasty-unpickler 0.1.0 ( lambda_tpt "test")<br>dotty-tasty-unpickler 0.1.0 ( match_types "test")<br>dotty-tasty-unpickler 0.1.0 ( methodic "test")<br>dotty-tasty-unpickler 0.1.0 ( methods "test")<br>dotty-tasty-unpickler 0.1.0 ( name_resolution "test")<br>dotty-tasty-unpickler 0.1.0 ( opaque_corpus "test")<br>dotty-tasty-unpickler 0.1.0 ( recursive "test")<br>dotty-tasty-unpickler 0.1.0 ( refined_tpt_enter "test")<br>dotty-tasty-unpickler 0.1.0 ( refined_tpt_project "test")<br>dotty-tasty-unpickler 0.1.0 ( refined_tpt_real "test")<br>dotty-tasty-unpickler 0.1.0 ( root_package "test")<br>dotty-tasty-unpickler 0.1.0 ( scopes_and_identity "test")<br>dotty-tasty-unpickler 0.1.0 ( semantic_fixture "test")<br>dotty-tasty-unpickler 0.1.0 ( shared_package_path "test")<br>dotty-tasty-unpickler 0.1.0 ( shared_packages "test")<br>dotty-tasty-unpickler 0.1.0 ( symbol_annotations "test")<br>dotty-tasty-unpickler 0.1.0 ( term_type "test")<br>dotty-tasty-unpickler 0.1.0 ( type_corpus "test")<br>dotty-tasty-unpickler 0.1.0 ( type_identity "test")<br>dotty-tasty-unpickler 0.1.0 ( variance "test")<br>dotty-typer 0.1.0 (lib)<br>dotty-typer 0.1.0 ( boolean_operator_audit "test")<br>dotty-typer 0.1.0 ( class_info_tasty_oracle "test")<br>dotty-typer 0.1.0 ( int_operator_audit "test")<br>dotty-typer 0.1.0 ( local_definition_audit "test")<br>dotty-typer 0.1.0 ( module_identity_oracle "test")<br>dotty-typer 0.1.0 ( package_prefix_parity "test")<br>dotty-typer 0.1.0 ( primitive_control_flow_contract_audit "test")<br>dotty-typer 0.1.0 ( refactor_contract "test")<br>dotty-typer 0.1.0 ( semantic_parity "test")<br>dotty-typer 0.1.0 ( typed_expressions "test")<br>tasty-pickler-oracle 0.1.0 (lib)<br>tasty-pickler-oracle 0.1.0 ( tasty-pickler-oracle "bin")<br>tasty-pickler-oracle 0.1.0 ( fixtures "test")<br>tasty-pickler-oracle 0.1.0 ( harness "test")</td>
+</tr>
+<tr>
+<td>Profile:</td><td>test</td>
+</tr>
+<tr>
+<td>Fresh units:</td><td>0</td>
+</tr>
+<tr>
+<td>Dirty units:</td><td>197</td>
+</tr>
+<tr>
+<td>Total units:</td><td>197</td>
+</tr>
+<tr>
+<td>Max concurrency:</td><td>17 (jobs=16 ncpu=16)</td>
+</tr>
+<tr>
+<td>Build start:</td><td>2026-10-27T10:17:49.594148071Z</td>
+</tr>
+<tr>
+<td>Total time:</td><td>102.0s (1m 42.0s)</td>
+</tr>
+<tr>
+<td>rustc:</td><td>rustc 1.98.1 (48a229cea 2026-09-01)<br>Host: x86_64-unknown-linux-gnu<br>Target: x86_64-unknown-linux-gnu</td>
+</tr>
+
+</table>
+
+<table class="input-table">
+  <tr>
+    <td><label for="min-unit-time">Min unit time:</label></td>
+    <td title="Scale corresponds to a number of pixels per second. It is automatically initialized based on your viewport width.">
+      <label for="scale">Scale:</label>
+    </td>
+  </tr>
+  <tr>
+    <td><input type="range" min="0" max="30" step="0.1" value="0" id="min-unit-time"></td>
+    <!--
+        The scale corresponds to some number of "pixels per second".
+        Its min, max, and initial values are automatically set by JavaScript on page load,
+        based on the client viewport.
+    -->
+    <td><input type="range" min="1" max="100" value="50" id="scale"></td>
+  </tr>
+  <tr>
+    <td><output for="min-unit-time" id="min-unit-time-output"></output></td>
+    <td><output for="scale" id="scale-output"></output></td>
+    <td></td>
+  </tr>
+</table>
+
+<div id="pipeline-container" class="canvas-container"></div>
+<div id="timing-container" class="canvas-container"></div>
+
+<table class="my-table">
+<thead>
+<tr>
+  <th></th>
+  <th>Unit</th>
+  <th>Total</th>
+  <th>Frontend</th>
+<th>Codegen</th>
+  <th>Features</th>
+</tr>
+</thead>
+<tbody>
+
+<tr>
+<td>1.</td>
+<td>dotty-classloader v0.1.0 dotty_classloader "lib" (test)</td>
+<td>89.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>2.</td>
+<td>dotty-parser v0.1.0 dotty_parser "lib" (test)</td>
+<td>68.7s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>3.</td>
+<td>dotty-typer v0.1.0 dotty_typer "lib" (test)</td>
+<td>62.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>4.</td>
+<td>dotty-typer v0.1.0 package_prefix_parity "test" (test)</td>
+<td>46.7s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>5.</td>
+<td>dotty-typer v0.1.0 local_definition_audit "test" (test)</td>
+<td>44.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>6.</td>
+<td>dotty-tasty-pickler v0.1.0 source_pipeline "test" (test)</td>
+<td>42.6s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>7.</td>
+<td>dotty v0.1.0 classpath_source_typing "test" (test)</td>
+<td>38.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>8.</td>
+<td>dotty v0.1.0 jvm_source_compilation "test" (test)</td>
+<td>31.6s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>9.</td>
+<td>dotty v0.1.0 jvm_tasty_plan "test" (test)</td>
+<td>23.8s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>10.</td>
+<td>dotty-jvm v0.1.0 dotty_jvm "lib" (test)</td>
+<td>23.6s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>11.</td>
+<td>dotty-classfile v0.1.0 dotty_classfile "lib" (test)</td>
+<td>20.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>12.</td>
+<td>dotty-tasty v0.1.0 dotty_tasty "lib" (test)</td>
+<td>19.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>13.</td>
+<td>dotty-typer v0.1.0</td>
+<td>19.1s</td>
+<td>3.1s (16%)</td>
+<td>16.0s (84%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>14.</td>
+<td>dotty v0.1.0 jvm_stateful_class_contract "test" (test)</td>
+<td>19.0s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>15.</td>
+<td>dotty-parser-smoke-dump v0.1.0 dotty-parser-smoke-dump "bin" (test)</td>
+<td>16.0s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>16.</td>
+<td>dotty-classloader v0.1.0 tasty_loading "test" (test)</td>
+<td>15.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>17.</td>
+<td>dotty-namer v0.1.0 parsed_unit "test" (test)</td>
+<td>14.1s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>18.</td>
+<td>dotty-parser-corpus-report v0.1.0 dotty-parser-corpus-report "bin" (test)</td>
+<td>14.0s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>19.</td>
+<td>dotty v0.1.0 jvm_tasty_contract "test" (test)</td>
+<td>12.9s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>20.</td>
+<td>dotty-tasty-unpickler v0.1.0 dotty_tasty_unpickler "lib" (test)</td>
+<td>12.7s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>21.</td>
+<td>dotty-core v0.1.0 dotty_core "lib" (test)</td>
+<td>12.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>22.</td>
+<td>dotty-lexer v0.1.0 dotty_lexer "lib" (test)</td>
+<td>11.8s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>23.</td>
+<td>dotty-jvm v0.1.0</td>
+<td>11.2s</td>
+<td>2.3s (21%)</td>
+<td>8.9s (79%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>24.</td>
+<td>dotty v0.1.0 tasty_source_pickling "test" (test)</td>
+<td>10.9s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>25.</td>
+<td>dotty-classfile v0.1.0</td>
+<td>10.2s</td>
+<td>2.0s (20%)</td>
+<td>8.2s (80%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>26.</td>
+<td>dotty-tasty-pickler v0.1.0 class_state_plan "test" (test)</td>
+<td>10.0s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>27.</td>
+<td>dotty v0.1.0</td>
+<td>9.8s</td>
+<td>0.9s (9%)</td>
+<td>8.9s (91%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>28.</td>
+<td>dotty-tasty-unpickler v0.1.0 type_corpus "test" (test)</td>
+<td>9.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>29.</td>
+<td>dotty-typer v0.1.0 refactor_contract "test" (test)</td>
+<td>9.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>30.</td>
+<td>dotty-typer v0.1.0 typed_expressions "test" (test)</td>
+<td>9.1s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>31.</td>
+<td>dotty-tasty-pickler v0.1.0 plan_validation "test" (test)</td>
+<td>8.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>32.</td>
+<td>dotty-typer v0.1.0 semantic_parity "test" (test)</td>
+<td>8.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>33.</td>
+<td>dotty-parser-smoke-dump v0.1.0 dotty-parser-smoke-dump "bin"</td>
+<td>8.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>34.</td>
+<td>dotty-tasty-pickler v0.1.0</td>
+<td>8.0s</td>
+<td>1.6s (20%)</td>
+<td>6.4s (80%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>35.</td>
+<td>dotty-classloader v0.1.0</td>
+<td>7.5s</td>
+<td>2.0s (27%)</td>
+<td>5.5s (73%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>36.</td>
+<td>dotty-classloader v0.1.0 directory_class_path "test" (test)</td>
+<td>7.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>37.</td>
+<td>dotty-typer v0.1.0 primitive_control_flow_contract_audit "test" (test)</td>
+<td>7.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>38.</td>
+<td>dotty-classloader v0.1.0 jvm_visibility "test" (test)</td>
+<td>7.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>39.</td>
+<td>dotty v0.1.0 tasty_class_state_contract "test" (test)</td>
+<td>7.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>40.</td>
+<td>dotty-typer v0.1.0 boolean_operator_audit "test" (test)</td>
+<td>7.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>41.</td>
+<td>dotty v0.1.0 tasty_source_contract "test" (test)</td>
+<td>7.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>42.</td>
+<td>dotty-tasty v0.1.0 scala3_library "test" (test)</td>
+<td>7.1s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>43.</td>
+<td>dotty-typer v0.1.0 int_operator_audit "test" (test)</td>
+<td>7.0s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>44.</td>
+<td>dotty v0.1.0 tasty_control_flow_contract "test" (test)</td>
+<td>7.0s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>45.</td>
+<td>dotty-parser-smoke-dump v0.1.0 given_type_recovery "test" (test)</td>
+<td>7.0s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>46.</td>
+<td>dotty-tasty v0.1.0</td>
+<td>6.9s</td>
+<td>1.4s (21%)</td>
+<td>5.5s (79%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>47.</td>
+<td>dotty-parser-smoke-dump v0.1.0 case_layout "test" (test)</td>
+<td>6.8s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>48.</td>
+<td>dotty-parser-smoke-dump v0.1.0 case_lambda "test" (test)</td>
+<td>6.7s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>49.</td>
+<td>dotty-parser-smoke-dump v0.1.0 anonymous_template_recovery "test" (test)</td>
+<td>6.7s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>50.</td>
+<td>dotty-tasty-unpickler v0.1.0</td>
+<td>6.6s</td>
+<td>1.2s (18%)</td>
+<td>5.5s (82%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>51.</td>
+<td>dotty-parser-smoke-dump v0.1.0 colon_lambda "test" (test)</td>
+<td>6.6s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>52.</td>
+<td>dotty-parser-smoke-dump v0.1.0 indented_if_else "test" (test)</td>
+<td>6.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>53.</td>
+<td>dotty-parser-smoke-dump v0.1.0 new_template_repeated_application "test" (test)</td>
+<td>6.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>54.</td>
+<td>dotty-parser-smoke-dump v0.1.0 parenthesized_infix_condition "test" (test)</td>
+<td>6.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>55.</td>
+<td>dotty-parser-smoke-dump v0.1.0 legacy_macro_expression "test" (test)</td>
+<td>6.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>56.</td>
+<td>dotty v0.1.0 public_api "test" (test)</td>
+<td>6.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>57.</td>
+<td>dotty-parser-smoke-dump v0.1.0 lambda_tuple_comma_layout "test" (test)</td>
+<td>6.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>58.</td>
+<td>dotty-parser-smoke-dump v0.1.0 for_match_final_enumerator_yield "test" (test)</td>
+<td>6.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>59.</td>
+<td>dotty-parser-smoke-dump v0.1.0 legacy_implicit_block_lambda "test" (test)</td>
+<td>6.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>60.</td>
+<td>dotty-parser-smoke-dump v0.1.0 nested_end_if_before_outer_else "test" (test)</td>
+<td>6.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>61.</td>
+<td>dotty-parser-smoke-dump v0.1.0 case_guard "test" (test)</td>
+<td>6.1s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>62.</td>
+<td>dotty-parser-smoke-dump v0.1.0 new_template_followed_by_tuple "test" (test)</td>
+<td>5.9s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>63.</td>
+<td>dotty v0.1.0 jvm_tasty_artifacts "test" (test)</td>
+<td>5.9s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>64.</td>
+<td>dotty-parser-smoke-dump v0.1.0 symbolic_pattern_recovery "test" (test)</td>
+<td>5.9s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>65.</td>
+<td>dotty-classfile v0.1.0 classfile_jvm_encoder "test" (test)</td>
+<td>5.8s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>66.</td>
+<td>dotty-classfile v0.1.0 class_file_builder "test" (test)</td>
+<td>5.8s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>67.</td>
+<td>zlib-rs v0.6.8</td>
+<td>5.1s</td>
+<td>3.0s (59%)</td>
+<td>2.1s (41%)</td>
+<td>rust-allocator</td>
+</tr>
+
+<tr>
+<td>68.</td>
+<td>dotty-namer v0.1.0 dotty_namer "lib" (test)</td>
+<td>5.0s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>69.</td>
+<td>dotty v0.1.0 jvm_tasty_object_composition "test" (test)</td>
+<td>4.8s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>70.</td>
+<td>dotty-tasty-unpickler v0.1.0 term_type "test" (test)</td>
+<td>4.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>71.</td>
+<td>dotty v0.1.0 jvm_tasty_cross_class_audit "test" (test)</td>
+<td>4.0s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>72.</td>
+<td>dotty-jvm-tasty-contract v0.1.0</td>
+<td>3.9s</td>
+<td>0.6s (15%)</td>
+<td>3.3s (85%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>73.</td>
+<td>dotty v0.1.0 jvm_tasty_cross_class_factories "test" (test)</td>
+<td>3.7s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>74.</td>
+<td>dotty-tasty-pickler v0.1.0 dotty_tasty_pickler "lib" (test)</td>
+<td>3.6s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>75.</td>
+<td>dotty-tasty v0.1.0 fixture_ast_expectations "test" (test)</td>
+<td>3.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>76.</td>
+<td>dotty-classfile v0.1.0 cfg_analysis "test" (test)</td>
+<td>3.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>77.</td>
+<td>dotty-tasty v0.1.0 scala3_compiler "test" (test)</td>
+<td>3.1s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>78.</td>
+<td>serde_derive v1.0.229</td>
+<td>3.1s</td>
+<td></td>
+<td></td>
+<td>default</td>
+</tr>
+
+<tr>
+<td>79.</td>
+<td>dotty-tasty-unpickler v0.1.0 completion "test" (test)</td>
+<td>3.0s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>80.</td>
+<td>dotty-tasty-pickler v0.1.0 projection "test" (test)</td>
+<td>2.9s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>81.</td>
+<td>serde_json v1.0.151</td>
+<td>2.7s</td>
+<td>1.0s (36%)</td>
+<td>1.8s (64%)</td>
+<td>default, std</td>
+</tr>
+
+<tr>
+<td>82.</td>
+<td>dotty-tasty-pickler v0.1.0 skeleton "test" (test)</td>
+<td>2.7s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>83.</td>
+<td>tasty-pickler-oracle v0.1.0</td>
+<td>2.6s</td>
+<td>0.3s (12%)</td>
+<td>2.3s (88%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>84.</td>
+<td>tasty-pickler-oracle v0.1.0 fixtures "test" (test)</td>
+<td>2.6s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>85.</td>
+<td>dotty-tasty-unpickler v0.1.0 methods "test" (test)</td>
+<td>2.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>86.</td>
+<td>dotty-tasty-unpickler v0.1.0 annotated "test" (test)</td>
+<td>2.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>87.</td>
+<td>syn v3.0.5</td>
+<td>2.4s</td>
+<td>1.5s (62%)</td>
+<td>0.9s (38%)</td>
+<td>clone-impls, derive, parsing, printing, proc-macro</td>
+</tr>
+
+<tr>
+<td>88.</td>
+<td>dotty-tasty v0.1.0 fixtures "test" (test)</td>
+<td>2.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>89.</td>
+<td>dotty-classloader v0.1.0 real_jdk_class_path "test" (test)</td>
+<td>2.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>90.</td>
+<td>dotty-classfile v0.1.0 jdk_corpus "test" (test)</td>
+<td>2.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>91.</td>
+<td>dotty-tasty-unpickler v0.1.0 recursive "test" (test)</td>
+<td>2.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>92.</td>
+<td>dotty v0.1.0 jvm_tasty_object_composition_scala_consumer "test" (test)</td>
+<td>2.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>93.</td>
+<td>dotty-tasty-pickler v0.1.0 bodies "test" (test)</td>
+<td>2.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>94.</td>
+<td>dotty-tasty-unpickler v0.1.0 lambda_tpt "test" (test)</td>
+<td>2.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>95.</td>
+<td>dotty v0.1.0 jvm_tasty_factory_scala_consumer "test" (test)</td>
+<td>2.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>96.</td>
+<td>dotty v0.1.0 jvm_tasty_multiclass_scala_consumer "test" (test)</td>
+<td>2.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>97.</td>
+<td>serde_core v1.0.229</td>
+<td>2.2s</td>
+<td>2.0s (93%)</td>
+<td>0.2s (7%)</td>
+<td>result, std</td>
+</tr>
+
+<tr>
+<td>98.</td>
+<td>dotty v0.1.0 jvm_tasty_multiclass_audit "test" (test)</td>
+<td>2.1s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>99.</td>
+<td>dotty v0.1.0 jvm_tasty_cross_class_scala_consumer "test" (test)</td>
+<td>2.1s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>100.</td>
+<td>dotty-tasty-unpickler v0.1.0 in_reference "test" (test)</td>
+<td>2.0s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>101.</td>
+<td>dotty-lexer v0.1.0</td>
+<td>2.0s</td>
+<td>0.5s (24%)</td>
+<td>1.5s (76%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>102.</td>
+<td>dotty-parser v0.1.0</td>
+<td>2.0s</td>
+<td>1.6s (79%)</td>
+<td>0.4s (21%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>103.</td>
+<td>dotty-namer v0.1.0</td>
+<td>1.9s</td>
+<td>0.4s (20%)</td>
+<td>1.5s (80%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>104.</td>
+<td>dotty v0.1.0 tasty-audit "bin"</td>
+<td>1.9s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>105.</td>
+<td>dotty-core v0.1.0</td>
+<td>1.8s</td>
+<td>0.9s (53%)</td>
+<td>0.8s (47%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>106.</td>
+<td>dotty-tasty-unpickler v0.1.0 opaque_corpus "test" (test)</td>
+<td>1.7s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>107.</td>
+<td>dotty v0.1.0 tasty-wire-baseline "bin"</td>
+<td>1.7s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>108.</td>
+<td>dotty-tasty-unpickler v0.1.0 definition_tail_corpus "test" (test)</td>
+<td>1.6s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>109.</td>
+<td>dotty-tasty-unpickler v0.1.0 methodic "test" (test)</td>
+<td>1.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>110.</td>
+<td>dotty-tasty-unpickler v0.1.0 variance "test" (test)</td>
+<td>1.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>111.</td>
+<td>dotty-tasty-unpickler v0.1.0 discovery "test" (test)</td>
+<td>1.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>112.</td>
+<td>dotty-tasty-unpickler v0.1.0 refined_tpt_enter "test" (test)</td>
+<td>1.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>113.</td>
+<td>dotty-tasty-unpickler v0.1.0 type_identity "test" (test)</td>
+<td>1.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>114.</td>
+<td>dotty-tasty-unpickler v0.1.0 refined_tpt_project "test" (test)</td>
+<td>1.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>115.</td>
+<td>dotty-tasty-unpickler v0.1.0 class_parents "test" (test)</td>
+<td>1.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>116.</td>
+<td>dotty-tasty-unpickler v0.1.0 companion_corpus "test" (test)</td>
+<td>1.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>117.</td>
+<td>dotty-classfile v0.1.0 class_file_fixtures "test" (test)</td>
+<td>1.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>118.</td>
+<td>dotty-tasty-unpickler v0.1.0 class_scopes "test" (test)</td>
+<td>1.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>119.</td>
+<td>dotty-classloader v0.1.0 jdk_classpath_benchmark "example" (test)</td>
+<td>1.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>120.</td>
+<td>dotty-tasty-unpickler v0.1.0 classes "test" (test)</td>
+<td>1.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>121.</td>
+<td>dotty-tasty-unpickler v0.1.0 binders "test" (test)</td>
+<td>1.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>122.</td>
+<td>dotty-tasty-unpickler v0.1.0 compound_types "test" (test)</td>
+<td>1.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>123.</td>
+<td>dotty-tasty-unpickler v0.1.0 match_types "test" (test)</td>
+<td>1.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>124.</td>
+<td>dotty-classfile v0.1.0 module_info_oracle "test" (test)</td>
+<td>1.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>125.</td>
+<td>dotty-classloader v0.1.0 jdk_class_path "test" (test)</td>
+<td>1.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>126.</td>
+<td>dotty-tasty-unpickler v0.1.0 name_resolution "test" (test)</td>
+<td>1.1s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>127.</td>
+<td>dotty-classfile v0.1.0 tasty_link_attribute "test" (test)</td>
+<td>1.1s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>128.</td>
+<td>dotty-tasty-unpickler v0.1.0 refined_tpt_real "test" (test)</td>
+<td>1.1s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>129.</td>
+<td>dotty-tasty-unpickler v0.1.0 constants "test" (test)</td>
+<td>1.1s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>130.</td>
+<td>dotty-tasty-unpickler v0.1.0 scopes_and_identity "test" (test)</td>
+<td>1.0s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>131.</td>
+<td>dotty-tasty-unpickler v0.1.0 constructors "test" (test)</td>
+<td>1.0s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>132.</td>
+<td>dotty-tasty-unpickler v0.1.0 symbol_annotations "test" (test)</td>
+<td>0.9s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>133.</td>
+<td>dotty-tasty-unpickler v0.1.0 flexible "test" (test)</td>
+<td>0.9s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>134.</td>
+<td>dotty-typer v0.1.0 module_identity_oracle "test" (test)</td>
+<td>0.8s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>135.</td>
+<td>dotty-tasty v0.1.0 tag_constants "test" (test)</td>
+<td>0.8s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>136.</td>
+<td>memchr v2.8.3</td>
+<td>0.8s</td>
+<td>0.5s (60%)</td>
+<td>0.3s (40%)</td>
+<td>alloc, std</td>
+</tr>
+
+<tr>
+<td>137.</td>
+<td>dotty v0.1.0 jvm_tasty_scala_consumer "test" (test)</td>
+<td>0.8s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>138.</td>
+<td>serde v1.0.229</td>
+<td>0.8s</td>
+<td>0.7s (84%)</td>
+<td>0.1s (16%)</td>
+<td>default, derive, serde_derive, std</td>
+</tr>
+
+<tr>
+<td>139.</td>
+<td>dotty-classfile v0.1.0 stack_map "test" (test)</td>
+<td>0.8s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>140.</td>
+<td>dotty-tasty-unpickler v0.1.0 bounds "test" (test)</td>
+<td>0.8s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>141.</td>
+<td>dotty-tasty-unpickler v0.1.0 semantic_fixture "test" (test)</td>
+<td>0.8s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>142.</td>
+<td>dotty-tasty-unpickler v0.1.0 enter_symbols "test" (test)</td>
+<td>0.7s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>143.</td>
+<td>dotty-classfile v0.1.0 bytecode_labeled_assembly "test" (test)</td>
+<td>0.7s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>144.</td>
+<td>dotty v0.1.0 dotty "lib" (test)</td>
+<td>0.7s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>145.</td>
+<td>dotty-tasty-unpickler v0.1.0 default_package "test" (test)</td>
+<td>0.7s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>146.</td>
+<td>dotty-tasty-unpickler v0.1.0 fixture_corpus "test" (test)</td>
+<td>0.6s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>147.</td>
+<td>dotty-tasty-unpickler v0.1.0 shared_packages "test" (test)</td>
+<td>0.6s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>148.</td>
+<td>dotty v0.1.0 tasty-roundtrip "bin"</td>
+<td>0.6s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>149.</td>
+<td>flate2 v1.1.10</td>
+<td>0.6s</td>
+<td>0.3s (60%)</td>
+<td>0.2s (40%)</td>
+<td>any_impl, any_zlib, zlib-rs</td>
+</tr>
+
+<tr>
+<td>150.</td>
+<td>dotty-typer v0.1.0 class_info_tasty_oracle "test" (test)</td>
+<td>0.6s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>151.</td>
+<td>dotty-tasty-unpickler v0.1.0 shared_package_path "test" (test)</td>
+<td>0.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>152.</td>
+<td>dotty v0.1.0 jvm_tasty_linkage_audit "test" (test)</td>
+<td>0.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>153.</td>
+<td>dotty-classfile v0.1.0 bytecode_code_sequence "test" (test)</td>
+<td>0.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>154.</td>
+<td>dotty-tasty-unpickler v0.1.0 root_package "test" (test)</td>
+<td>0.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>155.</td>
+<td>dotty-jvm-tasty-contract v0.1.0 dotty_jvm_tasty_contract "lib" (test)</td>
+<td>0.5s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>156.</td>
+<td>dotty-classfile v0.1.0 bytecode_analysis "test" (test)</td>
+<td>0.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>157.</td>
+<td>dotty-classfile v0.1.0 opaque_attribute_length "test" (test)</td>
+<td>0.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>158.</td>
+<td>dotty-tasty v0.1.0 construction "test" (test)</td>
+<td>0.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>159.</td>
+<td>dotty-lexer v0.1.0 invariants "test" (test)</td>
+<td>0.4s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>160.</td>
+<td>proc-macro2 v1.0.107</td>
+<td>0.4s</td>
+<td>0.3s (84%)</td>
+<td>0.1s (16%)</td>
+<td>proc-macro</td>
+</tr>
+
+<tr>
+<td>161.</td>
+<td>dotty-tasty-unpickler v0.1.0 access "test" (test)</td>
+<td>0.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>162.</td>
+<td>dotty-core v0.1.0 semantic_fixtures "test" (test)</td>
+<td>0.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>163.</td>
+<td>tasty-pickler-oracle v0.1.0 tasty_pickler_oracle "lib" (test)</td>
+<td>0.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>164.</td>
+<td>tasty-pickler-oracle v0.1.0 tasty-pickler-oracle "bin"</td>
+<td>0.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>165.</td>
+<td>dotty v0.1.0 tasty-roundtrip "bin" (test)</td>
+<td>0.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>166.</td>
+<td>dotty v0.1.0 tasty_roundtrip "test" (test)</td>
+<td>0.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>167.</td>
+<td>zmij v1.0.23</td>
+<td>0.3s</td>
+<td>0.2s (64%)</td>
+<td>0.1s (36%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>168.</td>
+<td>dotty-classfile v0.1.0 pool_sample_fixture "test" (test)</td>
+<td>0.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>169.</td>
+<td>crc32fast v1.5.2</td>
+<td>0.3s</td>
+<td>0.1s (42%)</td>
+<td>0.2s (58%)</td>
+<td>default, std</td>
+</tr>
+
+<tr>
+<td>170.</td>
+<td>itoa v1.0.18</td>
+<td>0.3s</td>
+<td>0.2s (62%)</td>
+<td>0.1s (38%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>171.</td>
+<td>dotty v0.1.0 tasty-wire-baseline "bin" (test)</td>
+<td>0.3s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>172.</td>
+<td>proc-macro2 v1.0.107 build-script</td>
+<td>0.2s</td>
+<td></td>
+<td></td>
+<td>proc-macro</td>
+</tr>
+
+<tr>
+<td>173.</td>
+<td>serde v1.0.229 build-script</td>
+<td>0.2s</td>
+<td></td>
+<td></td>
+<td>default, derive, serde_derive, std</td>
+</tr>
+
+<tr>
+<td>174.</td>
+<td>serde_core v1.0.229 build-script</td>
+<td>0.2s</td>
+<td></td>
+<td></td>
+<td>result, std</td>
+</tr>
+
+<tr>
+<td>175.</td>
+<td>tasty-pickler-oracle v0.1.0 harness "test" (test)</td>
+<td>0.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>176.</td>
+<td>dotty-tasty v0.1.0 padded_length "test" (test)</td>
+<td>0.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>177.</td>
+<td>dotty-tasty v0.1.0 parser_robustness "test" (test)</td>
+<td>0.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>178.</td>
+<td>dotty v0.1.0 tasty-audit "bin" (test)</td>
+<td>0.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>179.</td>
+<td>tasty-pickler-oracle v0.1.0 tasty-pickler-oracle "bin" (test)</td>
+<td>0.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>180.</td>
+<td>crc32fast v1.5.2 build-script</td>
+<td>0.2s</td>
+<td></td>
+<td></td>
+<td>default, std</td>
+</tr>
+
+<tr>
+<td>181.</td>
+<td>quote v1.0.47 build-script</td>
+<td>0.2s</td>
+<td></td>
+<td></td>
+<td>proc-macro</td>
+</tr>
+
+<tr>
+<td>182.</td>
+<td>dotty-classfile v0.1.0 parser_robustness "test" (test)</td>
+<td>0.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>183.</td>
+<td>quote v1.0.47</td>
+<td>0.2s</td>
+<td>0.1s (76%)</td>
+<td>0.0s (24%)</td>
+<td>proc-macro</td>
+</tr>
+
+<tr>
+<td>184.</td>
+<td>dotty-classfile v0.1.0 bytecode_model "test" (test)</td>
+<td>0.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>185.</td>
+<td>zmij v1.0.23 build-script</td>
+<td>0.2s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>186.</td>
+<td>serde_json v1.0.151 build-script</td>
+<td>0.1s</td>
+<td></td>
+<td></td>
+<td>default, std</td>
+</tr>
+
+<tr>
+<td>187.</td>
+<td>dotty-lexer v0.1.0 dump "example" (test)</td>
+<td>0.1s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>188.</td>
+<td>unicode-ident v1.0.24</td>
+<td>0.1s</td>
+<td>0.1s (55%)</td>
+<td>0.1s (45%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>189.</td>
+<td>proc-macro2 v1.0.107 build-script (run)</td>
+<td>0.1s</td>
+<td></td>
+<td></td>
+<td>proc-macro</td>
+</tr>
+
+<tr>
+<td>190.</td>
+<td>unicode-ident v1.0.24</td>
+<td>0.1s</td>
+<td>0.1s (78%)</td>
+<td>0.0s (22%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>191.</td>
+<td>cfg-if v1.0.5</td>
+<td>0.1s</td>
+<td>0.0s (50%)</td>
+<td>0.0s (50%)</td>
+<td></td>
+</tr>
+
+<tr>
+<td>192.</td>
+<td>crc32fast v1.5.2 build-script (run)</td>
+<td>0.0s</td>
+<td></td>
+<td></td>
+<td>default, std</td>
+</tr>
+
+<tr>
+<td>193.</td>
+<td>quote v1.0.47 build-script (run)</td>
+<td>0.0s</td>
+<td></td>
+<td></td>
+<td>proc-macro</td>
+</tr>
+
+<tr>
+<td>194.</td>
+<td>serde_core v1.0.229 build-script (run)</td>
+<td>0.0s</td>
+<td></td>
+<td></td>
+<td>result, std</td>
+</tr>
+
+<tr>
+<td>195.</td>
+<td>serde v1.0.229 build-script (run)</td>
+<td>0.0s</td>
+<td></td>
+<td></td>
+<td>default, derive, serde_derive, std</td>
+</tr>
+
+<tr>
+<td>196.</td>
+<td>zmij v1.0.23 build-script (run)</td>
+<td>0.0s</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<td>197.</td>
+<td>serde_json v1.0.151 build-script (run)</td>
+<td>0.0s</td>
+<td></td>
+<td></td>
+<td>default, std</td>
+</tr>
+</tbody>
+</table>
+<script>
+DURATION = 102;
+const UNIT_DATA = [
+  {
+    "i": 182,
+    "name": "serde_json",
+    "version": "1.0.151",
+    "mode": "todo",
+    "target": " build-script",
+    "features": [
+      "default",
+      "std"
+    ],
+    "start": 0.06,
+    "duration": 0.15,
+    "unblocked_units": [
+      183
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 60,
+    "name": "dotty-core",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 0.06,
+    "duration": 1.78,
+    "unblocked_units": [
+      61,
+      66,
+      73
+    ],
+    "unblocked_rmeta_units": [
+      154,
+      74,
+      67,
+      71
+    ],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.94
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.94,
+          "end": 1.78
+        }
+      ]
+    ]
+  },
+  {
+    "i": 2,
+    "name": "crc32fast",
+    "version": "1.5.2",
+    "mode": "todo",
+    "target": " build-script",
+    "features": [
+      "default",
+      "std"
+    ],
+    "start": 0.06,
+    "duration": 0.19,
+    "unblocked_units": [
+      3
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 95,
+    "name": "dotty-tasty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 0.06,
+    "duration": 6.92,
+    "unblocked_units": [
+      112,
+      185
+    ],
+    "unblocked_rmeta_units": [
+      113,
+      105
+    ],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 1.45
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 1.45,
+          "end": 6.92
+        }
+      ]
+    ]
+  },
+  {
+    "i": 0,
+    "name": "cfg-if",
+    "version": "1.0.5",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 0.06,
+    "duration": 0.06,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.03
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.03,
+          "end": 0.06
+        }
+      ]
+    ]
+  },
+  {
+    "i": 35,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 0.06,
+    "duration": 10.24,
+    "unblocked_units": [
+      43,
+      36,
+      42,
+      48,
+      38,
+      62,
+      44,
+      47,
+      46,
+      49,
+      45,
+      51,
+      37,
+      39,
+      40,
+      50,
+      41
+    ],
+    "unblocked_rmeta_units": [
+      63
+    ],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 2.01
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 2.01,
+          "end": 10.24
+        }
+      ]
+    ]
+  },
+  {
+    "i": 195,
+    "name": "zmij",
+    "version": "1.0.23",
+    "mode": "todo",
+    "target": " build-script",
+    "features": [],
+    "start": 0.06,
+    "duration": 0.17,
+    "unblocked_units": [
+      196
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 166,
+    "name": "itoa",
+    "version": "1.0.18",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 0.06,
+    "duration": 0.26,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.16
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.16,
+          "end": 0.26
+        }
+      ]
+    ]
+  },
+  {
+    "i": 193,
+    "name": "zlib-rs",
+    "version": "0.6.8",
+    "mode": "todo",
+    "target": "",
+    "features": [
+      "rust-allocator"
+    ],
+    "start": 0.06,
+    "duration": 5.09,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [
+      165
+    ],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 3.0
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 3.0,
+          "end": 5.09
+        }
+      ]
+    ]
+  },
+  {
+    "i": 192,
+    "name": "unicode-ident",
+    "version": "1.0.24",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 0.06,
+    "duration": 0.11,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.06
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.06,
+          "end": 0.11
+        }
+      ]
+    ]
+  },
+  {
+    "i": 191,
+    "name": "unicode-ident",
+    "version": "1.0.24",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 0.06,
+    "duration": 0.09,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.07
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.07,
+          "end": 0.09
+        }
+      ]
+    ]
+  },
+  {
+    "i": 167,
+    "name": "memchr",
+    "version": "2.8.3",
+    "mode": "todo",
+    "target": "",
+    "features": [
+      "alloc",
+      "std"
+    ],
+    "start": 0.06,
+    "duration": 0.85,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.51
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.51,
+          "end": 0.85
+        }
+      ]
+    ]
+  },
+  {
+    "i": 170,
+    "name": "proc-macro2",
+    "version": "1.0.107",
+    "mode": "todo",
+    "target": " build-script",
+    "features": [
+      "proc-macro"
+    ],
+    "start": 0.06,
+    "duration": 0.24,
+    "unblocked_units": [
+      169
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 173,
+    "name": "quote",
+    "version": "1.0.47",
+    "mode": "todo",
+    "target": " build-script",
+    "features": [
+      "proc-macro"
+    ],
+    "start": 0.06,
+    "duration": 0.19,
+    "unblocked_units": [
+      172
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 175,
+    "name": "serde",
+    "version": "1.0.229",
+    "mode": "todo",
+    "target": " build-script",
+    "features": [
+      "default",
+      "derive",
+      "serde_derive",
+      "std"
+    ],
+    "start": 0.06,
+    "duration": 0.23,
+    "unblocked_units": [
+      176
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 178,
+    "name": "serde_core",
+    "version": "1.0.229",
+    "mode": "todo",
+    "target": " build-script",
+    "features": [
+      "result",
+      "std"
+    ],
+    "start": 0.06,
+    "duration": 0.22,
+    "unblocked_units": [
+      179
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 59,
+    "name": "dotty-core",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty_core \"lib\" (test)",
+    "features": [],
+    "start": 0.12,
+    "duration": 12.2,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 34,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty_classfile \"lib\" (test)",
+    "features": [],
+    "start": 0.15,
+    "duration": 20.51,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 183,
+    "name": "serde_json",
+    "version": "1.0.151",
+    "mode": "run-custom-build",
+    "target": " build-script (run)",
+    "features": [
+      "default",
+      "std"
+    ],
+    "start": 0.21,
+    "duration": 0.0,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 196,
+    "name": "zmij",
+    "version": "1.0.23",
+    "mode": "run-custom-build",
+    "target": " build-script (run)",
+    "features": [],
+    "start": 0.23,
+    "duration": 0.01,
+    "unblocked_units": [
+      194
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 3,
+    "name": "crc32fast",
+    "version": "1.5.2",
+    "mode": "run-custom-build",
+    "target": " build-script (run)",
+    "features": [
+      "default",
+      "std"
+    ],
+    "start": 0.24,
+    "duration": 0.02,
+    "unblocked_units": [
+      1
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 172,
+    "name": "quote",
+    "version": "1.0.47",
+    "mode": "run-custom-build",
+    "target": " build-script (run)",
+    "features": [
+      "proc-macro"
+    ],
+    "start": 0.25,
+    "duration": 0.02,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 194,
+    "name": "zmij",
+    "version": "1.0.23",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 0.25,
+    "duration": 0.28,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.18
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.18,
+          "end": 0.28
+        }
+      ]
+    ]
+  },
+  {
+    "i": 1,
+    "name": "crc32fast",
+    "version": "1.5.2",
+    "mode": "todo",
+    "target": "",
+    "features": [
+      "default",
+      "std"
+    ],
+    "start": 0.26,
+    "duration": 0.26,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.11
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.11,
+          "end": 0.26
+        }
+      ]
+    ]
+  },
+  {
+    "i": 179,
+    "name": "serde_core",
+    "version": "1.0.229",
+    "mode": "run-custom-build",
+    "target": " build-script (run)",
+    "features": [
+      "result",
+      "std"
+    ],
+    "start": 0.28,
+    "duration": 0.02,
+    "unblocked_units": [
+      177
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 176,
+    "name": "serde",
+    "version": "1.0.229",
+    "mode": "run-custom-build",
+    "target": " build-script (run)",
+    "features": [
+      "default",
+      "derive",
+      "serde_derive",
+      "std"
+    ],
+    "start": 0.29,
+    "duration": 0.02,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 169,
+    "name": "proc-macro2",
+    "version": "1.0.107",
+    "mode": "run-custom-build",
+    "target": " build-script (run)",
+    "features": [
+      "proc-macro"
+    ],
+    "start": 0.3,
+    "duration": 0.1,
+    "unblocked_units": [
+      168
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 177,
+    "name": "serde_core",
+    "version": "1.0.229",
+    "mode": "todo",
+    "target": "",
+    "features": [
+      "result",
+      "std"
+    ],
+    "start": 0.3,
+    "duration": 2.18,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [
+      181
+    ],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 2.02
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 2.02,
+          "end": 2.18
+        }
+      ]
+    ]
+  },
+  {
+    "i": 168,
+    "name": "proc-macro2",
+    "version": "1.0.107",
+    "mode": "todo",
+    "target": "",
+    "features": [
+      "proc-macro"
+    ],
+    "start": 0.4,
+    "duration": 0.37,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [
+      171
+    ],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.31
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.31,
+          "end": 0.37
+        }
+      ]
+    ]
+  },
+  {
+    "i": 171,
+    "name": "quote",
+    "version": "1.0.47",
+    "mode": "todo",
+    "target": "",
+    "features": [
+      "proc-macro"
+    ],
+    "start": 0.71,
+    "duration": 0.17,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [
+      184
+    ],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.13
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.13,
+          "end": 0.17
+        }
+      ]
+    ]
+  },
+  {
+    "i": 184,
+    "name": "syn",
+    "version": "3.0.5",
+    "mode": "todo",
+    "target": "",
+    "features": [
+      "clone-impls",
+      "derive",
+      "parsing",
+      "printing",
+      "proc-macro"
+    ],
+    "start": 0.84,
+    "duration": 2.4,
+    "unblocked_units": [
+      180
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 1.5
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 1.5,
+          "end": 2.4
+        }
+      ]
+    ]
+  },
+  {
+    "i": 67,
+    "name": "dotty-lexer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 0.99,
+    "duration": 2.03,
+    "unblocked_units": [
+      91,
+      88,
+      69,
+      84,
+      72,
+      86,
+      81,
+      76,
+      78,
+      68,
+      79,
+      70,
+      82,
+      92,
+      87,
+      93,
+      90,
+      83,
+      80,
+      77,
+      89,
+      85
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.48
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.48,
+          "end": 2.03
+        }
+      ]
+    ]
+  },
+  {
+    "i": 71,
+    "name": "dotty-namer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 0.99,
+    "duration": 1.93,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.39
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.39,
+          "end": 1.93
+        }
+      ]
+    ]
+  },
+  {
+    "i": 154,
+    "name": "dotty-typer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 0.99,
+    "duration": 19.15,
+    "unblocked_units": [
+      10,
+      19,
+      25,
+      27,
+      29,
+      156,
+      28,
+      26,
+      155,
+      14,
+      32,
+      22,
+      12,
+      8,
+      9,
+      33,
+      162,
+      31,
+      11,
+      106,
+      111,
+      15,
+      161,
+      108,
+      13,
+      23,
+      109,
+      159,
+      6,
+      157,
+      16,
+      24,
+      104,
+      17,
+      7,
+      21,
+      30,
+      107,
+      110,
+      158,
+      160,
+      163,
+      164,
+      18,
+      4,
+      20
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 3.12
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 3.12,
+          "end": 19.15
+        }
+      ]
+    ]
+  },
+  {
+    "i": 74,
+    "name": "dotty-parser",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 0.99,
+    "duration": 1.97,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 1.56
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 1.56,
+          "end": 1.97
+        }
+      ]
+    ]
+  },
+  {
+    "i": 113,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 1.71,
+    "duration": 6.61,
+    "unblocked_units": [
+      145,
+      125,
+      115,
+      131,
+      117,
+      148,
+      146,
+      139,
+      150,
+      135,
+      134,
+      121,
+      140,
+      151,
+      152,
+      141,
+      137,
+      120,
+      147,
+      143,
+      142,
+      127,
+      114,
+      124,
+      122,
+      116,
+      118,
+      128,
+      129,
+      126,
+      123,
+      130,
+      136,
+      138,
+      144,
+      149,
+      119,
+      132,
+      133
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 1.16
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 1.16,
+          "end": 6.61
+        }
+      ]
+    ]
+  },
+  {
+    "i": 105,
+    "name": "dotty-tasty-pickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 1.83,
+    "duration": 8.03,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 1.64
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 1.64,
+          "end": 8.03
+        }
+      ]
+    ]
+  },
+  {
+    "i": 73,
+    "name": "dotty-parser",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty_parser \"lib\" (test)",
+    "features": [],
+    "start": 1.86,
+    "duration": 68.66,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 63,
+    "name": "dotty-jvm",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 2.44,
+    "duration": 11.2,
+    "unblocked_units": [
+      64
+    ],
+    "unblocked_rmeta_units": [
+      65
+    ],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 2.32
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 2.32,
+          "end": 11.2
+        }
+      ]
+    ]
+  },
+  {
+    "i": 181,
+    "name": "serde_json",
+    "version": "1.0.151",
+    "mode": "todo",
+    "target": "",
+    "features": [
+      "default",
+      "std"
+    ],
+    "start": 2.48,
+    "duration": 2.74,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [
+      186
+    ],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.98
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.98,
+          "end": 2.74
+        }
+      ]
+    ]
+  },
+  {
+    "i": 66,
+    "name": "dotty-lexer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty_lexer \"lib\" (test)",
+    "features": [],
+    "start": 2.92,
+    "duration": 11.8,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 61,
+    "name": "dotty-core",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " semantic_fixtures \"test\" (test)",
+    "features": [],
+    "start": 2.97,
+    "duration": 0.35,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 83,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " for_match_final_enumerator_yield \"test\" (test)",
+    "features": [],
+    "start": 3.02,
+    "duration": 6.28,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 165,
+    "name": "flate2",
+    "version": "1.1.10",
+    "mode": "todo",
+    "target": "",
+    "features": [
+      "any_impl",
+      "any_zlib",
+      "zlib-rs"
+    ],
+    "start": 3.24,
+    "duration": 0.58,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [
+      52
+    ],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.35
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.35,
+          "end": 0.58
+        }
+      ]
+    ]
+  },
+  {
+    "i": 180,
+    "name": "serde_derive",
+    "version": "1.0.229",
+    "mode": "todo",
+    "target": "",
+    "features": [
+      "default"
+    ],
+    "start": 3.31,
+    "duration": 3.07,
+    "unblocked_units": [
+      174
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 52,
+    "name": "dotty-classloader",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 3.82,
+    "duration": 7.51,
+    "unblocked_units": [
+      55,
+      58,
+      56,
+      53,
+      57,
+      153,
+      54
+    ],
+    "unblocked_rmeta_units": [
+      5
+    ],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 2.01
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 2.01,
+          "end": 7.51
+        }
+      ]
+    ]
+  },
+  {
+    "i": 186,
+    "name": "tasty-pickler-oracle",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 4.42,
+    "duration": 2.65,
+    "unblocked_units": [
+      187,
+      189,
+      188,
+      190
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.32
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.32,
+          "end": 2.65
+        }
+      ]
+    ]
+  },
+  {
+    "i": 65,
+    "name": "dotty-jvm-tasty-contract",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 5.15,
+    "duration": 3.88,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.58
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.58,
+          "end": 3.88
+        }
+      ]
+    ]
+  },
+  {
+    "i": 89,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " nested_end_if_before_outer_else \"test\" (test)",
+    "features": [],
+    "start": 5.21,
+    "duration": 6.16,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 5,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": "",
+    "features": [],
+    "start": 6.39,
+    "duration": 9.8,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.86
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.86,
+          "end": 9.8
+        }
+      ]
+    ]
+  },
+  {
+    "i": 174,
+    "name": "serde",
+    "version": "1.0.229",
+    "mode": "todo",
+    "target": "",
+    "features": [
+      "default",
+      "derive",
+      "serde_derive",
+      "std"
+    ],
+    "start": 6.98,
+    "duration": 0.79,
+    "unblocked_units": [
+      98,
+      103,
+      102,
+      100,
+      94,
+      97,
+      96,
+      101,
+      75,
+      99
+    ],
+    "unblocked_rmeta_units": [],
+    "sections": [
+      [
+        "frontend",
+        {
+          "start": 0.0,
+          "end": 0.66
+        }
+      ],
+      [
+        "codegen",
+        {
+          "start": 0.66,
+          "end": 0.79
+        }
+      ]
+    ]
+  },
+  {
+    "i": 188,
+    "name": "tasty-pickler-oracle",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty-pickler-oracle \"bin\"",
+    "features": [],
+    "start": 7.08,
+    "duration": 0.29,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 189,
+    "name": "tasty-pickler-oracle",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " fixtures \"test\" (test)",
+    "features": [],
+    "start": 7.36,
+    "duration": 2.63,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 96,
+    "name": "dotty-tasty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " construction \"test\" (test)",
+    "features": [],
+    "start": 7.76,
+    "duration": 0.4,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 101,
+    "name": "dotty-tasty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " scala3_compiler \"test\" (test)",
+    "features": [],
+    "start": 8.17,
+    "duration": 3.07,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 126,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " default_package \"test\" (test)",
+    "features": [],
+    "start": 8.32,
+    "duration": 0.65,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 117,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " bounds \"test\" (test)",
+    "features": [],
+    "start": 8.98,
+    "duration": 0.76,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 122,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " completion \"test\" (test)",
+    "features": [],
+    "start": 9.03,
+    "duration": 3.01,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 147,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " shared_packages \"test\" (test)",
+    "features": [],
+    "start": 9.3,
+    "duration": 0.62,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 148,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " symbol_annotations \"test\" (test)",
+    "features": [],
+    "start": 9.74,
+    "duration": 0.88,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 143,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " root_package \"test\" (test)",
+    "features": [],
+    "start": 9.87,
+    "duration": 0.49,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 134,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " match_types \"test\" (test)",
+    "features": [],
+    "start": 9.92,
+    "duration": 1.21,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 135,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " methodic \"test\" (test)",
+    "features": [],
+    "start": 10.0,
+    "duration": 1.54,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 44,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jdk_corpus \"test\" (test)",
+    "features": [],
+    "start": 10.3,
+    "duration": 2.24,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 48,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " pool_sample_fixture \"test\" (test)",
+    "features": [],
+    "start": 10.36,
+    "duration": 0.26,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 36,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " bytecode_analysis \"test\" (test)",
+    "features": [],
+    "start": 10.62,
+    "duration": 0.42,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 37,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " bytecode_code_sequence \"test\" (test)",
+    "features": [],
+    "start": 10.62,
+    "duration": 0.53,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 46,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " opaque_attribute_length \"test\" (test)",
+    "features": [],
+    "start": 11.04,
+    "duration": 0.42,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 49,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " stack_map \"test\" (test)",
+    "features": [],
+    "start": 11.13,
+    "duration": 0.78,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 42,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " class_file_fixtures \"test\" (test)",
+    "features": [],
+    "start": 11.16,
+    "duration": 1.34,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 50,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty_link_attribute \"test\" (test)",
+    "features": [],
+    "start": 11.24,
+    "duration": 1.11,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 53,
+    "name": "dotty-classloader",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " directory_class_path \"test\" (test)",
+    "features": [],
+    "start": 11.33,
+    "duration": 7.5,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 56,
+    "name": "dotty-classloader",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " real_jdk_class_path \"test\" (test)",
+    "features": [],
+    "start": 11.37,
+    "duration": 2.3,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 54,
+    "name": "dotty-classloader",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jdk_class_path \"test\" (test)",
+    "features": [],
+    "start": 11.46,
+    "duration": 1.19,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 55,
+    "name": "dotty-classloader",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_visibility \"test\" (test)",
+    "features": [],
+    "start": 11.54,
+    "duration": 7.46,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 153,
+    "name": "dotty-typer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty_typer \"lib\" (test)",
+    "features": [],
+    "start": 11.91,
+    "duration": 62.37,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 57,
+    "name": "dotty-classloader",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty_loading \"test\" (test)",
+    "features": [],
+    "start": 12.03,
+    "duration": 15.48,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 58,
+    "name": "dotty-classloader",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jdk_classpath_benchmark \"example\" (test)",
+    "features": [],
+    "start": 12.32,
+    "duration": 1.31,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 47,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " parser_robustness \"test\" (test)",
+    "features": [],
+    "start": 12.35,
+    "duration": 0.18,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 40,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " cfg_analysis \"test\" (test)",
+    "features": [],
+    "start": 12.49,
+    "duration": 3.43,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 39,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " bytecode_model \"test\" (test)",
+    "features": [],
+    "start": 12.53,
+    "duration": 0.17,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 51,
+    "name": "dotty-classloader",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty_classloader \"lib\" (test)",
+    "features": [],
+    "start": 12.55,
+    "duration": 89.44,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 62,
+    "name": "dotty-jvm",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty_jvm \"lib\" (test)",
+    "features": [],
+    "start": 12.65,
+    "duration": 23.58,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 38,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " bytecode_labeled_assembly \"test\" (test)",
+    "features": [],
+    "start": 12.7,
+    "duration": 0.67,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 41,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " class_file_builder \"test\" (test)",
+    "features": [],
+    "start": 13.38,
+    "duration": 5.79,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 45,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " module_info_oracle \"test\" (test)",
+    "features": [],
+    "start": 13.63,
+    "duration": 1.21,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 64,
+    "name": "dotty-jvm-tasty-contract",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty_jvm_tasty_contract \"lib\" (test)",
+    "features": [],
+    "start": 13.64,
+    "duration": 0.46,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 43,
+    "name": "dotty-classfile",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " classfile_jvm_encoder \"test\" (test)",
+    "features": [],
+    "start": 13.67,
+    "duration": 5.82,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 128,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " discovery \"test\" (test)",
+    "features": [],
+    "start": 14.1,
+    "duration": 1.47,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 139,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " recursive \"test\" (test)",
+    "features": [],
+    "start": 14.72,
+    "duration": 2.23,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 150,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " type_corpus \"test\" (test)",
+    "features": [],
+    "start": 14.84,
+    "duration": 9.49,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 121,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " companion_corpus \"test\" (test)",
+    "features": [],
+    "start": 15.58,
+    "duration": 1.34,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 119,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " class_scopes \"test\" (test)",
+    "features": [],
+    "start": 15.92,
+    "duration": 1.32,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 120,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " classes \"test\" (test)",
+    "features": [],
+    "start": 16.19,
+    "duration": 1.31,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 146,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " shared_package_path \"test\" (test)",
+    "features": [],
+    "start": 16.91,
+    "duration": 0.54,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 138,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " opaque_corpus \"test\" (test)",
+    "features": [],
+    "start": 16.95,
+    "duration": 1.71,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 129,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " enter_symbols \"test\" (test)",
+    "features": [],
+    "start": 17.25,
+    "duration": 0.73,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 142,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " refined_tpt_real \"test\" (test)",
+    "features": [],
+    "start": 17.45,
+    "duration": 1.11,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 151,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " type_identity \"test\" (test)",
+    "features": [],
+    "start": 17.5,
+    "duration": 1.39,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 144,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " scopes_and_identity \"test\" (test)",
+    "features": [],
+    "start": 17.98,
+    "duration": 1.03,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 124,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " constants \"test\" (test)",
+    "features": [],
+    "start": 18.56,
+    "duration": 1.06,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 141,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " refined_tpt_project \"test\" (test)",
+    "features": [],
+    "start": 18.66,
+    "duration": 1.37,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 115,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " annotated \"test\" (test)",
+    "features": [],
+    "start": 18.84,
+    "duration": 2.48,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 152,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " variance \"test\" (test)",
+    "features": [],
+    "start": 18.88,
+    "duration": 1.49,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 114,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " access \"test\" (test)",
+    "features": [],
+    "start": 19.0,
+    "duration": 0.35,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 116,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " binders \"test\" (test)",
+    "features": [],
+    "start": 19.01,
+    "duration": 1.27,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 132,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " in_reference \"test\" (test)",
+    "features": [],
+    "start": 19.17,
+    "duration": 2.05,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 133,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " lambda_tpt \"test\" (test)",
+    "features": [],
+    "start": 19.35,
+    "duration": 2.21,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 125,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " constructors \"test\" (test)",
+    "features": [],
+    "start": 19.48,
+    "duration": 0.99,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 130,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " fixture_corpus \"test\" (test)",
+    "features": [],
+    "start": 19.62,
+    "duration": 0.64,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 137,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " name_resolution \"test\" (test)",
+    "features": [],
+    "start": 20.03,
+    "duration": 1.15,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 109,
+    "name": "dotty-tasty-pickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " projection \"test\" (test)",
+    "features": [],
+    "start": 20.14,
+    "duration": 2.88,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 8,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty-roundtrip \"bin\" (test)",
+    "features": [],
+    "start": 20.26,
+    "duration": 0.29,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 13,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_source_compilation \"test\" (test)",
+    "features": [],
+    "start": 20.28,
+    "duration": 31.59,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 12,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " classpath_source_typing \"test\" (test)",
+    "features": [],
+    "start": 20.37,
+    "duration": 38.49,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 17,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_tasty_cross_class_audit \"test\" (test)",
+    "features": [],
+    "start": 20.48,
+    "duration": 3.96,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 9,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty-roundtrip \"bin\"",
+    "features": [],
+    "start": 20.54,
+    "duration": 0.58,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 155,
+    "name": "dotty-typer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " boolean_operator_audit \"test\" (test)",
+    "features": [],
+    "start": 20.66,
+    "duration": 7.4,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 164,
+    "name": "dotty-typer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " typed_expressions \"test\" (test)",
+    "features": [],
+    "start": 21.12,
+    "duration": 9.1,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 23,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_tasty_multiclass_scala_consumer \"test\" (test)",
+    "features": [],
+    "start": 21.18,
+    "duration": 2.18,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 159,
+    "name": "dotty-typer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " module_identity_oracle \"test\" (test)",
+    "features": [],
+    "start": 21.22,
+    "duration": 0.85,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 6,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty-audit \"bin\" (test)",
+    "features": [],
+    "start": 21.31,
+    "duration": 0.2,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 19,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_tasty_cross_class_scala_consumer \"test\" (test)",
+    "features": [],
+    "start": 21.51,
+    "duration": 2.06,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 26,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_tasty_plan \"test\" (test)",
+    "features": [],
+    "start": 21.57,
+    "duration": 23.75,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 25,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_tasty_object_composition_scala_consumer \"test\" (test)",
+    "features": [],
+    "start": 22.08,
+    "duration": 2.22,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 22,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_tasty_multiclass_audit \"test\" (test)",
+    "features": [],
+    "start": 23.02,
+    "duration": 2.09,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 7,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty-audit \"bin\"",
+    "features": [],
+    "start": 23.37,
+    "duration": 1.9,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 160,
+    "name": "dotty-typer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " package_prefix_parity \"test\" (test)",
+    "features": [],
+    "start": 23.57,
+    "duration": 46.67,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 161,
+    "name": "dotty-typer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " primitive_control_flow_contract_audit \"test\" (test)",
+    "features": [],
+    "start": 24.3,
+    "duration": 7.47,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 10,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty-wire-baseline \"bin\" (test)",
+    "features": [],
+    "start": 24.33,
+    "duration": 0.26,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 33,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty_source_pickling \"test\" (test)",
+    "features": [],
+    "start": 24.44,
+    "duration": 10.92,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 107,
+    "name": "dotty-tasty-pickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " class_state_plan \"test\" (test)",
+    "features": [],
+    "start": 24.59,
+    "duration": 9.97,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 32,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty_source_contract \"test\" (test)",
+    "features": [],
+    "start": 25.11,
+    "duration": 7.29,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 15,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_tasty_artifacts \"test\" (test)",
+    "features": [],
+    "start": 25.27,
+    "duration": 5.9,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 110,
+    "name": "dotty-tasty-pickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " skeleton \"test\" (test)",
+    "features": [],
+    "start": 27.52,
+    "duration": 2.73,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 30,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty_control_flow_contract \"test\" (test)",
+    "features": [],
+    "start": 28.06,
+    "duration": 6.99,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 28,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " public_api \"test\" (test)",
+    "features": [],
+    "start": 30.23,
+    "duration": 6.46,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 104,
+    "name": "dotty-tasty-pickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty_tasty_pickler \"lib\" (test)",
+    "features": [],
+    "start": 30.25,
+    "duration": 3.63,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 21,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_tasty_linkage_audit \"test\" (test)",
+    "features": [],
+    "start": 31.17,
+    "duration": 0.53,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 11,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty-wire-baseline \"bin\"",
+    "features": [],
+    "start": 31.7,
+    "duration": 1.68,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 16,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_tasty_contract \"test\" (test)",
+    "features": [],
+    "start": 31.77,
+    "duration": 12.95,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 157,
+    "name": "dotty-typer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " int_operator_audit \"test\" (test)",
+    "features": [],
+    "start": 32.4,
+    "duration": 7.05,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 162,
+    "name": "dotty-typer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " refactor_contract \"test\" (test)",
+    "features": [],
+    "start": 33.38,
+    "duration": 9.46,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 163,
+    "name": "dotty-typer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " semantic_parity \"test\" (test)",
+    "features": [],
+    "start": 33.88,
+    "duration": 8.52,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 108,
+    "name": "dotty-tasty-pickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " plan_validation \"test\" (test)",
+    "features": [],
+    "start": 34.56,
+    "duration": 8.54,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 31,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty_roundtrip \"test\" (test)",
+    "features": [],
+    "start": 35.05,
+    "duration": 0.28,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 4,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty \"lib\" (test)",
+    "features": [],
+    "start": 35.33,
+    "duration": 0.65,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 24,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_tasty_object_composition \"test\" (test)",
+    "features": [],
+    "start": 35.36,
+    "duration": 4.83,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 156,
+    "name": "dotty-typer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " class_info_tasty_oracle \"test\" (test)",
+    "features": [],
+    "start": 35.98,
+    "duration": 0.55,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 20,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_tasty_factory_scala_consumer \"test\" (test)",
+    "features": [],
+    "start": 36.23,
+    "duration": 2.19,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 111,
+    "name": "dotty-tasty-pickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " source_pipeline \"test\" (test)",
+    "features": [],
+    "start": 36.53,
+    "duration": 42.56,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 18,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_tasty_cross_class_factories \"test\" (test)",
+    "features": [],
+    "start": 36.69,
+    "duration": 3.71,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 27,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_tasty_scala_consumer \"test\" (test)",
+    "features": [],
+    "start": 38.42,
+    "duration": 0.82,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 106,
+    "name": "dotty-tasty-pickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " bodies \"test\" (test)",
+    "features": [],
+    "start": 39.24,
+    "duration": 2.21,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 14,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " jvm_stateful_class_contract \"test\" (test)",
+    "features": [],
+    "start": 39.45,
+    "duration": 19.02,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 29,
+    "name": "dotty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty_class_state_contract \"test\" (test)",
+    "features": [],
+    "start": 40.2,
+    "duration": 7.43,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 158,
+    "name": "dotty-typer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " local_definition_audit \"test\" (test)",
+    "features": [],
+    "start": 40.4,
+    "duration": 44.53,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 123,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " compound_types \"test\" (test)",
+    "features": [],
+    "start": 41.45,
+    "duration": 1.23,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 131,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " flexible \"test\" (test)",
+    "features": [],
+    "start": 42.4,
+    "duration": 0.86,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 136,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " methods \"test\" (test)",
+    "features": [],
+    "start": 42.68,
+    "duration": 2.52,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 118,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " class_parents \"test\" (test)",
+    "features": [],
+    "start": 42.85,
+    "duration": 1.35,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 140,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " refined_tpt_enter \"test\" (test)",
+    "features": [],
+    "start": 43.1,
+    "duration": 1.44,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 145,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " semantic_fixture \"test\" (test)",
+    "features": [],
+    "start": 43.26,
+    "duration": 0.76,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 149,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " term_type \"test\" (test)",
+    "features": [],
+    "start": 44.02,
+    "duration": 4.25,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 127,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " definition_tail_corpus \"test\" (test)",
+    "features": [],
+    "start": 44.19,
+    "duration": 1.65,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 97,
+    "name": "dotty-tasty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " fixture_ast_expectations \"test\" (test)",
+    "features": [],
+    "start": 44.54,
+    "duration": 3.43,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 99,
+    "name": "dotty-tasty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " padded_length \"test\" (test)",
+    "features": [],
+    "start": 44.72,
+    "duration": 0.21,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 103,
+    "name": "dotty-tasty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tag_constants \"test\" (test)",
+    "features": [],
+    "start": 44.93,
+    "duration": 0.85,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 100,
+    "name": "dotty-tasty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " parser_robustness \"test\" (test)",
+    "features": [],
+    "start": 45.2,
+    "duration": 0.2,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 94,
+    "name": "dotty-tasty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty_tasty \"lib\" (test)",
+    "features": [],
+    "start": 45.31,
+    "duration": 19.41,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 98,
+    "name": "dotty-tasty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " fixtures \"test\" (test)",
+    "features": [],
+    "start": 45.41,
+    "duration": 2.39,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 75,
+    "name": "dotty-parser-corpus-report",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty-parser-corpus-report \"bin\" (test)",
+    "features": [],
+    "start": 45.78,
+    "duration": 13.96,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 102,
+    "name": "dotty-tasty",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " scala3_library \"test\" (test)",
+    "features": [],
+    "start": 45.85,
+    "duration": 7.12,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 190,
+    "name": "tasty-pickler-oracle",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " harness \"test\" (test)",
+    "features": [],
+    "start": 47.63,
+    "duration": 0.22,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 187,
+    "name": "tasty-pickler-oracle",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty-pickler-oracle \"bin\" (test)",
+    "features": [],
+    "start": 47.8,
+    "duration": 0.19,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 112,
+    "name": "dotty-tasty-unpickler",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty_tasty_unpickler \"lib\" (test)",
+    "features": [],
+    "start": 47.86,
+    "duration": 12.65,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 185,
+    "name": "tasty-pickler-oracle",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " tasty_pickler_oracle \"lib\" (test)",
+    "features": [],
+    "start": 47.96,
+    "duration": 0.3,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 88,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " legacy_macro_expression \"test\" (test)",
+    "features": [],
+    "start": 47.99,
+    "duration": 6.47,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 76,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty-parser-smoke-dump \"bin\" (test)",
+    "features": [],
+    "start": 48.27,
+    "duration": 15.97,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 91,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " new_template_repeated_application \"test\" (test)",
+    "features": [],
+    "start": 48.27,
+    "duration": 6.5,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 87,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " legacy_implicit_block_lambda \"test\" (test)",
+    "features": [],
+    "start": 51.87,
+    "duration": 6.22,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 85,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " indented_if_else \"test\" (test)",
+    "features": [],
+    "start": 52.97,
+    "duration": 6.55,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 80,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " case_lambda \"test\" (test)",
+    "features": [],
+    "start": 54.46,
+    "duration": 6.73,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 78,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " anonymous_template_recovery \"test\" (test)",
+    "features": [],
+    "start": 54.77,
+    "duration": 6.7,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 86,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " lambda_tuple_comma_layout \"test\" (test)",
+    "features": [],
+    "start": 58.08,
+    "duration": 6.36,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 92,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " parenthesized_infix_condition \"test\" (test)",
+    "features": [],
+    "start": 58.47,
+    "duration": 6.48,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 77,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty-parser-smoke-dump \"bin\"",
+    "features": [],
+    "start": 58.87,
+    "duration": 8.21,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 82,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " colon_lambda \"test\" (test)",
+    "features": [],
+    "start": 59.52,
+    "duration": 6.59,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 72,
+    "name": "dotty-namer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " parsed_unit \"test\" (test)",
+    "features": [],
+    "start": 59.74,
+    "duration": 14.07,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 84,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " given_type_recovery \"test\" (test)",
+    "features": [],
+    "start": 60.51,
+    "duration": 6.99,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 81,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " case_layout \"test\" (test)",
+    "features": [],
+    "start": 61.19,
+    "duration": 6.78,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 70,
+    "name": "dotty-namer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dotty_namer \"lib\" (test)",
+    "features": [],
+    "start": 61.46,
+    "duration": 5.05,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 79,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " case_guard \"test\" (test)",
+    "features": [],
+    "start": 64.24,
+    "duration": 6.1,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 68,
+    "name": "dotty-lexer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " invariants \"test\" (test)",
+    "features": [],
+    "start": 64.44,
+    "duration": 0.39,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 93,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " symbolic_pattern_recovery \"test\" (test)",
+    "features": [],
+    "start": 64.72,
+    "duration": 5.87,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 90,
+    "name": "dotty-parser-smoke-dump",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " new_template_followed_by_tuple \"test\" (test)",
+    "features": [],
+    "start": 64.83,
+    "duration": 5.91,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  },
+  {
+    "i": 69,
+    "name": "dotty-lexer",
+    "version": "0.1.0",
+    "mode": "todo",
+    "target": " dump \"example\" (test)",
+    "features": [],
+    "start": 64.95,
+    "duration": 0.12,
+    "unblocked_units": [],
+    "unblocked_rmeta_units": [],
+    "sections": null
+  }
+];
+const CONCURRENCY_DATA = [
+  {
+    "t": 0.06,
+    "active": 16,
+    "waiting": 0,
+    "inactive": 181
+  },
+  {
+    "t": 0.12,
+    "active": 16,
+    "waiting": 0,
+    "inactive": 180
+  },
+  {
+    "t": 0.15,
+    "active": 16,
+    "waiting": 0,
+    "inactive": 179
+  },
+  {
+    "t": 0.16999999999999998,
+    "active": 15,
+    "waiting": 0,
+    "inactive": 179
+  },
+  {
+    "t": 0.21,
+    "active": 14,
+    "waiting": 0,
+    "inactive": 178
+  },
+  {
+    "t": 0.23,
+    "active": 14,
+    "waiting": 0,
+    "inactive": 177
+  },
+  {
+    "t": 0.24,
+    "active": 15,
+    "waiting": 0,
+    "inactive": 176
+  },
+  {
+    "t": 0.24000000000000002,
+    "active": 14,
+    "waiting": 1,
+    "inactive": 175
+  },
+  {
+    "t": 0.25,
+    "active": 14,
+    "waiting": 0,
+    "inactive": 174
+  },
+  {
+    "t": 0.26,
+    "active": 14,
+    "waiting": 0,
+    "inactive": 173
+  },
+  {
+    "t": 0.27,
+    "active": 13,
+    "waiting": 0,
+    "inactive": 173
+  },
+  {
+    "t": 0.28,
+    "active": 13,
+    "waiting": 0,
+    "inactive": 172
+  },
+  {
+    "t": 0.29,
+    "active": 14,
+    "waiting": 0,
+    "inactive": 171
+  },
+  {
+    "t": 0.29000000000000004,
+    "active": 13,
+    "waiting": 0,
+    "inactive": 171
+  },
+  {
+    "t": 0.3,
+    "active": 14,
+    "waiting": 0,
+    "inactive": 169
+  },
+  {
+    "t": 0.30000000000000004,
+    "active": 13,
+    "waiting": 0,
+    "inactive": 169
+  },
+  {
+    "t": 0.31,
+    "active": 12,
+    "waiting": 0,
+    "inactive": 169
+  },
+  {
+    "t": 0.32,
+    "active": 11,
+    "waiting": 0,
+    "inactive": 169
+  },
+  {
+    "t": 0.4,
+    "active": 11,
+    "waiting": 0,
+    "inactive": 168
+  },
+  {
+    "t": 0.52,
+    "active": 10,
+    "waiting": 0,
+    "inactive": 168
+  },
+  {
+    "t": 0.53,
+    "active": 9,
+    "waiting": 0,
+    "inactive": 168
+  },
+  {
+    "t": 0.71,
+    "active": 10,
+    "waiting": 0,
+    "inactive": 167
+  },
+  {
+    "t": 0.77,
+    "active": 9,
+    "waiting": 0,
+    "inactive": 167
+  },
+  {
+    "t": 0.84,
+    "active": 10,
+    "waiting": 0,
+    "inactive": 166
+  },
+  {
+    "t": 0.88,
+    "active": 9,
+    "waiting": 0,
+    "inactive": 166
+  },
+  {
+    "t": 0.9099999999999999,
+    "active": 8,
+    "waiting": 0,
+    "inactive": 166
+  },
+  {
+    "t": 0.99,
+    "active": 12,
+    "waiting": 0,
+    "inactive": 162
+  },
+  {
+    "t": 1.51,
+    "active": 12,
+    "waiting": 2,
+    "inactive": 160
+  },
+  {
+    "t": 1.71,
+    "active": 13,
+    "waiting": 1,
+    "inactive": 160
+  },
+  {
+    "t": 1.83,
+    "active": 14,
+    "waiting": 0,
+    "inactive": 160
+  },
+  {
+    "t": 1.84,
+    "active": 13,
+    "waiting": 3,
+    "inactive": 157
+  },
+  {
+    "t": 1.86,
+    "active": 14,
+    "waiting": 2,
+    "inactive": 157
+  },
+  {
+    "t": 2.07,
+    "active": 14,
+    "waiting": 3,
+    "inactive": 156
+  },
+  {
+    "t": 2.32,
+    "active": 14,
+    "waiting": 4,
+    "inactive": 155
+  },
+  {
+    "t": 2.44,
+    "active": 15,
+    "waiting": 3,
+    "inactive": 155
+  },
+  {
+    "t": 2.48,
+    "active": 15,
+    "waiting": 2,
+    "inactive": 155
+  },
+  {
+    "t": 2.92,
+    "active": 15,
+    "waiting": 1,
+    "inactive": 155
+  },
+  {
+    "t": 2.96,
+    "active": 14,
+    "waiting": 1,
+    "inactive": 155
+  },
+  {
+    "t": 2.97,
+    "active": 15,
+    "waiting": 0,
+    "inactive": 155
+  },
+  {
+    "t": 3.0199999999999996,
+    "active": 14,
+    "waiting": 22,
+    "inactive": 133
+  },
+  {
+    "t": 3.02,
+    "active": 15,
+    "waiting": 21,
+    "inactive": 133
+  },
+  {
+    "t": 3.06,
+    "active": 15,
+    "waiting": 22,
+    "inactive": 132
+  },
+  {
+    "t": 3.2399999999999998,
+    "active": 14,
+    "waiting": 23,
+    "inactive": 131
+  },
+  {
+    "t": 3.24,
+    "active": 15,
+    "waiting": 22,
+    "inactive": 131
+  },
+  {
+    "t": 3.31,
+    "active": 16,
+    "waiting": 21,
+    "inactive": 131
+  },
+  {
+    "t": 3.3200000000000003,
+    "active": 15,
+    "waiting": 21,
+    "inactive": 131
+  },
+  {
+    "t": 3.46,
+    "active": 15,
+    "waiting": 22,
+    "inactive": 130
+  },
+  {
+    "t": 3.5900000000000003,
+    "active": 15,
+    "waiting": 23,
+    "inactive": 129
+  },
+  {
+    "t": 3.82,
+    "active": 16,
+    "waiting": 22,
+    "inactive": 129
+  },
+  {
+    "t": 3.8200000000000003,
+    "active": 15,
+    "waiting": 22,
+    "inactive": 129
+  },
+  {
+    "t": 4.42,
+    "active": 16,
+    "waiting": 21,
+    "inactive": 129
+  },
+  {
+    "t": 4.76,
+    "active": 16,
+    "waiting": 22,
+    "inactive": 128
+  },
+  {
+    "t": 5.1499999999999995,
+    "active": 15,
+    "waiting": 22,
+    "inactive": 128
+  },
+  {
+    "t": 5.15,
+    "active": 16,
+    "waiting": 21,
+    "inactive": 128
+  },
+  {
+    "t": 5.21,
+    "active": 17,
+    "waiting": 20,
+    "inactive": 128
+  },
+  {
+    "t": 5.220000000000001,
+    "active": 16,
+    "waiting": 20,
+    "inactive": 128
+  },
+  {
+    "t": 5.83,
+    "active": 16,
+    "waiting": 21,
+    "inactive": 127
+  },
+  {
+    "t": 6.38,
+    "active": 15,
+    "waiting": 22,
+    "inactive": 126
+  },
+  {
+    "t": 6.39,
+    "active": 16,
+    "waiting": 21,
+    "inactive": 126
+  },
+  {
+    "t": 6.9799999999999995,
+    "active": 15,
+    "waiting": 23,
+    "inactive": 124
+  },
+  {
+    "t": 6.98,
+    "active": 16,
+    "waiting": 22,
+    "inactive": 124
+  },
+  {
+    "t": 7.07,
+    "active": 15,
+    "waiting": 26,
+    "inactive": 120
+  },
+  {
+    "t": 7.08,
+    "active": 16,
+    "waiting": 25,
+    "inactive": 120
+  },
+  {
+    "t": 7.36,
+    "active": 17,
+    "waiting": 24,
+    "inactive": 120
+  },
+  {
+    "t": 7.37,
+    "active": 16,
+    "waiting": 24,
+    "inactive": 120
+  },
+  {
+    "t": 7.76,
+    "active": 17,
+    "waiting": 24,
+    "inactive": 119
+  },
+  {
+    "t": 7.7700000000000005,
+    "active": 16,
+    "waiting": 33,
+    "inactive": 110
+  },
+  {
+    "t": 8.16,
+    "active": 15,
+    "waiting": 33,
+    "inactive": 110
+  },
+  {
+    "t": 8.17,
+    "active": 16,
+    "waiting": 32,
+    "inactive": 110
+  },
+  {
+    "t": 8.32,
+    "active": 16,
+    "waiting": 70,
+    "inactive": 71
+  },
+  {
+    "t": 8.97,
+    "active": 15,
+    "waiting": 70,
+    "inactive": 71
+  },
+  {
+    "t": 8.98,
+    "active": 16,
+    "waiting": 69,
+    "inactive": 71
+  },
+  {
+    "t": 9.03,
+    "active": 17,
+    "waiting": 68,
+    "inactive": 71
+  },
+  {
+    "t": 9.030000000000001,
+    "active": 16,
+    "waiting": 68,
+    "inactive": 71
+  },
+  {
+    "t": 9.3,
+    "active": 16,
+    "waiting": 67,
+    "inactive": 71
+  },
+  {
+    "t": 9.74,
+    "active": 16,
+    "waiting": 66,
+    "inactive": 71
+  },
+  {
+    "t": 9.86,
+    "active": 15,
+    "waiting": 66,
+    "inactive": 71
+  },
+  {
+    "t": 9.87,
+    "active": 16,
+    "waiting": 65,
+    "inactive": 71
+  },
+  {
+    "t": 9.92,
+    "active": 16,
+    "waiting": 64,
+    "inactive": 71
+  },
+  {
+    "t": 9.99,
+    "active": 15,
+    "waiting": 64,
+    "inactive": 71
+  },
+  {
+    "t": 10.0,
+    "active": 16,
+    "waiting": 63,
+    "inactive": 71
+  },
+  {
+    "t": 10.3,
+    "active": 16,
+    "waiting": 79,
+    "inactive": 54
+  },
+  {
+    "t": 10.36,
+    "active": 16,
+    "waiting": 78,
+    "inactive": 54
+  },
+  {
+    "t": 10.62,
+    "active": 17,
+    "waiting": 76,
+    "inactive": 54
+  },
+  {
+    "t": 10.620000000000001,
+    "active": 16,
+    "waiting": 76,
+    "inactive": 54
+  },
+  {
+    "t": 11.04,
+    "active": 16,
+    "waiting": 75,
+    "inactive": 54
+  },
+  {
+    "t": 11.129999999999999,
+    "active": 15,
+    "waiting": 75,
+    "inactive": 54
+  },
+  {
+    "t": 11.13,
+    "active": 16,
+    "waiting": 74,
+    "inactive": 54
+  },
+  {
+    "t": 11.149999999999999,
+    "active": 15,
+    "waiting": 74,
+    "inactive": 54
+  },
+  {
+    "t": 11.16,
+    "active": 16,
+    "waiting": 73,
+    "inactive": 54
+  },
+  {
+    "t": 11.24,
+    "active": 16,
+    "waiting": 72,
+    "inactive": 54
+  },
+  {
+    "t": 11.33,
+    "active": 16,
+    "waiting": 78,
+    "inactive": 47
+  },
+  {
+    "t": 11.37,
+    "active": 17,
+    "waiting": 77,
+    "inactive": 47
+  },
+  {
+    "t": 11.370000000000001,
+    "active": 16,
+    "waiting": 77,
+    "inactive": 47
+  },
+  {
+    "t": 11.459999999999999,
+    "active": 15,
+    "waiting": 77,
+    "inactive": 47
+  },
+  {
+    "t": 11.46,
+    "active": 16,
+    "waiting": 76,
+    "inactive": 47
+  },
+  {
+    "t": 11.54,
+    "active": 16,
+    "waiting": 75,
+    "inactive": 47
+  },
+  {
+    "t": 11.91,
+    "active": 16,
+    "waiting": 74,
+    "inactive": 47
+  },
+  {
+    "t": 12.03,
+    "active": 17,
+    "waiting": 73,
+    "inactive": 47
+  },
+  {
+    "t": 12.04,
+    "active": 16,
+    "waiting": 73,
+    "inactive": 47
+  },
+  {
+    "t": 12.319999999999999,
+    "active": 15,
+    "waiting": 73,
+    "inactive": 47
+  },
+  {
+    "t": 12.32,
+    "active": 16,
+    "waiting": 72,
+    "inactive": 47
+  },
+  {
+    "t": 12.35,
+    "active": 16,
+    "waiting": 71,
+    "inactive": 47
+  },
+  {
+    "t": 12.49,
+    "active": 17,
+    "waiting": 70,
+    "inactive": 47
+  },
+  {
+    "t": 12.5,
+    "active": 16,
+    "waiting": 70,
+    "inactive": 47
+  },
+  {
+    "t": 12.53,
+    "active": 16,
+    "waiting": 69,
+    "inactive": 47
+  },
+  {
+    "t": 12.540000000000001,
+    "active": 15,
+    "waiting": 69,
+    "inactive": 47
+  },
+  {
+    "t": 12.55,
+    "active": 16,
+    "waiting": 68,
+    "inactive": 47
+  },
+  {
+    "t": 12.65,
+    "active": 16,
+    "waiting": 67,
+    "inactive": 47
+  },
+  {
+    "t": 12.7,
+    "active": 16,
+    "waiting": 66,
+    "inactive": 47
+  },
+  {
+    "t": 13.37,
+    "active": 15,
+    "waiting": 66,
+    "inactive": 47
+  },
+  {
+    "t": 13.38,
+    "active": 16,
+    "waiting": 65,
+    "inactive": 47
+  },
+  {
+    "t": 13.63,
+    "active": 16,
+    "waiting": 64,
+    "inactive": 47
+  },
+  {
+    "t": 13.639999999999999,
+    "active": 15,
+    "waiting": 65,
+    "inactive": 46
+  },
+  {
+    "t": 13.64,
+    "active": 16,
+    "waiting": 64,
+    "inactive": 46
+  },
+  {
+    "t": 13.669999999999998,
+    "active": 15,
+    "waiting": 64,
+    "inactive": 46
+  },
+  {
+    "t": 13.67,
+    "active": 16,
+    "waiting": 63,
+    "inactive": 46
+  },
+  {
+    "t": 14.1,
+    "active": 17,
+    "waiting": 62,
+    "inactive": 46
+  },
+  {
+    "t": 14.100000000000001,
+    "active": 16,
+    "waiting": 62,
+    "inactive": 46
+  },
+  {
+    "t": 14.72,
+    "active": 16,
+    "waiting": 61,
+    "inactive": 46
+  },
+  {
+    "t": 14.84,
+    "active": 16,
+    "waiting": 60,
+    "inactive": 46
+  },
+  {
+    "t": 15.57,
+    "active": 15,
+    "waiting": 60,
+    "inactive": 46
+  },
+  {
+    "t": 15.58,
+    "active": 16,
+    "waiting": 59,
+    "inactive": 46
+  },
+  {
+    "t": 15.92,
+    "active": 16,
+    "waiting": 58,
+    "inactive": 46
+  },
+  {
+    "t": 16.19,
+    "active": 16,
+    "waiting": 57,
+    "inactive": 46
+  },
+  {
+    "t": 16.91,
+    "active": 17,
+    "waiting": 56,
+    "inactive": 46
+  },
+  {
+    "t": 16.92,
+    "active": 16,
+    "waiting": 56,
+    "inactive": 46
+  },
+  {
+    "t": 16.95,
+    "active": 16,
+    "waiting": 55,
+    "inactive": 46
+  },
+  {
+    "t": 17.24,
+    "active": 15,
+    "waiting": 55,
+    "inactive": 46
+  },
+  {
+    "t": 17.25,
+    "active": 16,
+    "waiting": 54,
+    "inactive": 46
+  },
+  {
+    "t": 17.45,
+    "active": 16,
+    "waiting": 53,
+    "inactive": 46
+  },
+  {
+    "t": 17.5,
+    "active": 16,
+    "waiting": 52,
+    "inactive": 46
+  },
+  {
+    "t": 17.98,
+    "active": 16,
+    "waiting": 51,
+    "inactive": 46
+  },
+  {
+    "t": 18.56,
+    "active": 16,
+    "waiting": 50,
+    "inactive": 46
+  },
+  {
+    "t": 18.66,
+    "active": 16,
+    "waiting": 49,
+    "inactive": 46
+  },
+  {
+    "t": 18.83,
+    "active": 15,
+    "waiting": 49,
+    "inactive": 46
+  },
+  {
+    "t": 18.84,
+    "active": 16,
+    "waiting": 48,
+    "inactive": 46
+  },
+  {
+    "t": 18.88,
+    "active": 17,
+    "waiting": 47,
+    "inactive": 46
+  },
+  {
+    "t": 18.89,
+    "active": 16,
+    "waiting": 47,
+    "inactive": 46
+  },
+  {
+    "t": 19.0,
+    "active": 16,
+    "waiting": 46,
+    "inactive": 46
+  },
+  {
+    "t": 19.01,
+    "active": 16,
+    "waiting": 45,
+    "inactive": 46
+  },
+  {
+    "t": 19.17,
+    "active": 16,
+    "waiting": 44,
+    "inactive": 46
+  },
+  {
+    "t": 19.35,
+    "active": 16,
+    "waiting": 43,
+    "inactive": 46
+  },
+  {
+    "t": 19.48,
+    "active": 17,
+    "waiting": 42,
+    "inactive": 46
+  },
+  {
+    "t": 19.490000000000002,
+    "active": 16,
+    "waiting": 42,
+    "inactive": 46
+  },
+  {
+    "t": 19.619999999999997,
+    "active": 15,
+    "waiting": 42,
+    "inactive": 46
+  },
+  {
+    "t": 19.62,
+    "active": 16,
+    "waiting": 41,
+    "inactive": 46
+  },
+  {
+    "t": 20.03,
+    "active": 16,
+    "waiting": 40,
+    "inactive": 46
+  },
+  {
+    "t": 20.139999999999997,
+    "active": 15,
+    "waiting": 86,
+    "inactive": 0
+  },
+  {
+    "t": 20.14,
+    "active": 16,
+    "waiting": 85,
+    "inactive": 0
+  },
+  {
+    "t": 20.26,
+    "active": 16,
+    "waiting": 84,
+    "inactive": 0
+  },
+  {
+    "t": 20.28,
+    "active": 16,
+    "waiting": 83,
+    "inactive": 0
+  },
+  {
+    "t": 20.369999999999997,
+    "active": 15,
+    "waiting": 83,
+    "inactive": 0
+  },
+  {
+    "t": 20.37,
+    "active": 16,
+    "waiting": 82,
+    "inactive": 0
+  },
+  {
+    "t": 20.47,
+    "active": 15,
+    "waiting": 82,
+    "inactive": 0
+  },
+  {
+    "t": 20.48,
+    "active": 16,
+    "waiting": 81,
+    "inactive": 0
+  },
+  {
+    "t": 20.54,
+    "active": 17,
+    "waiting": 80,
+    "inactive": 0
+  },
+  {
+    "t": 20.55,
+    "active": 16,
+    "waiting": 80,
+    "inactive": 0
+  },
+  {
+    "t": 20.66,
+    "active": 16,
+    "waiting": 79,
+    "inactive": 0
+  },
+  {
+    "t": 21.119999999999997,
+    "active": 15,
+    "waiting": 79,
+    "inactive": 0
+  },
+  {
+    "t": 21.12,
+    "active": 16,
+    "waiting": 78,
+    "inactive": 0
+  },
+  {
+    "t": 21.18,
+    "active": 16,
+    "waiting": 77,
+    "inactive": 0
+  },
+  {
+    "t": 21.22,
+    "active": 17,
+    "waiting": 76,
+    "inactive": 0
+  },
+  {
+    "t": 21.220000000000002,
+    "active": 16,
+    "waiting": 76,
+    "inactive": 0
+  },
+  {
+    "t": 21.31,
+    "active": 17,
+    "waiting": 75,
+    "inactive": 0
+  },
+  {
+    "t": 21.32,
+    "active": 16,
+    "waiting": 75,
+    "inactive": 0
+  },
+  {
+    "t": 21.509999999999998,
+    "active": 15,
+    "waiting": 75,
+    "inactive": 0
+  },
+  {
+    "t": 21.51,
+    "active": 16,
+    "waiting": 74,
+    "inactive": 0
+  },
+  {
+    "t": 21.560000000000002,
+    "active": 15,
+    "waiting": 74,
+    "inactive": 0
+  },
+  {
+    "t": 21.57,
+    "active": 16,
+    "waiting": 73,
+    "inactive": 0
+  },
+  {
+    "t": 22.07,
+    "active": 15,
+    "waiting": 73,
+    "inactive": 0
+  },
+  {
+    "t": 22.08,
+    "active": 16,
+    "waiting": 72,
+    "inactive": 0
+  },
+  {
+    "t": 23.02,
+    "active": 16,
+    "waiting": 71,
+    "inactive": 0
+  },
+  {
+    "t": 23.36,
+    "active": 15,
+    "waiting": 71,
+    "inactive": 0
+  },
+  {
+    "t": 23.37,
+    "active": 16,
+    "waiting": 70,
+    "inactive": 0
+  },
+  {
+    "t": 23.57,
+    "active": 16,
+    "waiting": 69,
+    "inactive": 0
+  },
+  {
+    "t": 24.299999999999997,
+    "active": 15,
+    "waiting": 69,
+    "inactive": 0
+  },
+  {
+    "t": 24.3,
+    "active": 16,
+    "waiting": 68,
+    "inactive": 0
+  },
+  {
+    "t": 24.33,
+    "active": 16,
+    "waiting": 67,
+    "inactive": 0
+  },
+  {
+    "t": 24.44,
+    "active": 16,
+    "waiting": 66,
+    "inactive": 0
+  },
+  {
+    "t": 24.59,
+    "active": 16,
+    "waiting": 65,
+    "inactive": 0
+  },
+  {
+    "t": 25.11,
+    "active": 16,
+    "waiting": 64,
+    "inactive": 0
+  },
+  {
+    "t": 25.27,
+    "active": 16,
+    "waiting": 63,
+    "inactive": 0
+  },
+  {
+    "t": 27.509999999999998,
+    "active": 15,
+    "waiting": 63,
+    "inactive": 0
+  },
+  {
+    "t": 27.52,
+    "active": 16,
+    "waiting": 62,
+    "inactive": 0
+  },
+  {
+    "t": 28.06,
+    "active": 17,
+    "waiting": 61,
+    "inactive": 0
+  },
+  {
+    "t": 28.060000000000002,
+    "active": 16,
+    "waiting": 61,
+    "inactive": 0
+  },
+  {
+    "t": 30.22,
+    "active": 15,
+    "waiting": 61,
+    "inactive": 0
+  },
+  {
+    "t": 30.23,
+    "active": 16,
+    "waiting": 60,
+    "inactive": 0
+  },
+  {
+    "t": 30.25,
+    "active": 16,
+    "waiting": 59,
+    "inactive": 0
+  },
+  {
+    "t": 31.17,
+    "active": 16,
+    "waiting": 58,
+    "inactive": 0
+  },
+  {
+    "t": 31.7,
+    "active": 17,
+    "waiting": 57,
+    "inactive": 0
+  },
+  {
+    "t": 31.700000000000003,
+    "active": 16,
+    "waiting": 57,
+    "inactive": 0
+  },
+  {
+    "t": 31.77,
+    "active": 16,
+    "waiting": 56,
+    "inactive": 0
+  },
+  {
+    "t": 32.4,
+    "active": 16,
+    "waiting": 55,
+    "inactive": 0
+  },
+  {
+    "t": 33.38,
+    "active": 16,
+    "waiting": 54,
+    "inactive": 0
+  },
+  {
+    "t": 33.88,
+    "active": 16,
+    "waiting": 53,
+    "inactive": 0
+  },
+  {
+    "t": 34.56,
+    "active": 16,
+    "waiting": 52,
+    "inactive": 0
+  },
+  {
+    "t": 35.05,
+    "active": 16,
+    "waiting": 51,
+    "inactive": 0
+  },
+  {
+    "t": 35.33,
+    "active": 16,
+    "waiting": 50,
+    "inactive": 0
+  },
+  {
+    "t": 35.36,
+    "active": 16,
+    "waiting": 49,
+    "inactive": 0
+  },
+  {
+    "t": 35.98,
+    "active": 16,
+    "waiting": 48,
+    "inactive": 0
+  },
+  {
+    "t": 36.23,
+    "active": 16,
+    "waiting": 47,
+    "inactive": 0
+  },
+  {
+    "t": 36.529999999999994,
+    "active": 15,
+    "waiting": 47,
+    "inactive": 0
+  },
+  {
+    "t": 36.53,
+    "active": 16,
+    "waiting": 46,
+    "inactive": 0
+  },
+  {
+    "t": 36.69,
+    "active": 16,
+    "waiting": 45,
+    "inactive": 0
+  },
+  {
+    "t": 38.419999999999995,
+    "active": 15,
+    "waiting": 45,
+    "inactive": 0
+  },
+  {
+    "t": 38.42,
+    "active": 16,
+    "waiting": 44,
+    "inactive": 0
+  },
+  {
+    "t": 39.24,
+    "active": 16,
+    "waiting": 43,
+    "inactive": 0
+  },
+  {
+    "t": 39.449999999999996,
+    "active": 15,
+    "waiting": 43,
+    "inactive": 0
+  },
+  {
+    "t": 39.45,
+    "active": 16,
+    "waiting": 42,
+    "inactive": 0
+  },
+  {
+    "t": 40.19,
+    "active": 15,
+    "waiting": 42,
+    "inactive": 0
+  },
+  {
+    "t": 40.2,
+    "active": 16,
+    "waiting": 41,
+    "inactive": 0
+  },
+  {
+    "t": 40.4,
+    "active": 16,
+    "waiting": 40,
+    "inactive": 0
+  },
+  {
+    "t": 41.45,
+    "active": 16,
+    "waiting": 39,
+    "inactive": 0
+  },
+  {
+    "t": 42.4,
+    "active": 17,
+    "waiting": 38,
+    "inactive": 0
+  },
+  {
+    "t": 42.400000000000006,
+    "active": 16,
+    "waiting": 38,
+    "inactive": 0
+  },
+  {
+    "t": 42.68,
+    "active": 16,
+    "waiting": 37,
+    "inactive": 0
+  },
+  {
+    "t": 42.84,
+    "active": 15,
+    "waiting": 37,
+    "inactive": 0
+  },
+  {
+    "t": 42.85,
+    "active": 16,
+    "waiting": 36,
+    "inactive": 0
+  },
+  {
+    "t": 43.1,
+    "active": 16,
+    "waiting": 35,
+    "inactive": 0
+  },
+  {
+    "t": 43.26,
+    "active": 16,
+    "waiting": 34,
+    "inactive": 0
+  },
+  {
+    "t": 44.019999999999996,
+    "active": 15,
+    "waiting": 34,
+    "inactive": 0
+  },
+  {
+    "t": 44.02,
+    "active": 16,
+    "waiting": 33,
+    "inactive": 0
+  },
+  {
+    "t": 44.19,
+    "active": 17,
+    "waiting": 32,
+    "inactive": 0
+  },
+  {
+    "t": 44.2,
+    "active": 16,
+    "waiting": 32,
+    "inactive": 0
+  },
+  {
+    "t": 44.54,
+    "active": 16,
+    "waiting": 31,
+    "inactive": 0
+  },
+  {
+    "t": 44.72,
+    "active": 16,
+    "waiting": 30,
+    "inactive": 0
+  },
+  {
+    "t": 44.93,
+    "active": 16,
+    "waiting": 29,
+    "inactive": 0
+  },
+  {
+    "t": 45.2,
+    "active": 16,
+    "waiting": 28,
+    "inactive": 0
+  },
+  {
+    "t": 45.31,
+    "active": 17,
+    "waiting": 27,
+    "inactive": 0
+  },
+  {
+    "t": 45.32,
+    "active": 16,
+    "waiting": 27,
+    "inactive": 0
+  },
+  {
+    "t": 45.400000000000006,
+    "active": 15,
+    "waiting": 27,
+    "inactive": 0
+  },
+  {
+    "t": 45.41,
+    "active": 16,
+    "waiting": 26,
+    "inactive": 0
+  },
+  {
+    "t": 45.78,
+    "active": 16,
+    "waiting": 25,
+    "inactive": 0
+  },
+  {
+    "t": 45.839999999999996,
+    "active": 15,
+    "waiting": 25,
+    "inactive": 0
+  },
+  {
+    "t": 45.85,
+    "active": 16,
+    "waiting": 24,
+    "inactive": 0
+  },
+  {
+    "t": 47.63,
+    "active": 16,
+    "waiting": 23,
+    "inactive": 0
+  },
+  {
+    "t": 47.8,
+    "active": 16,
+    "waiting": 22,
+    "inactive": 0
+  },
+  {
+    "t": 47.85,
+    "active": 15,
+    "waiting": 22,
+    "inactive": 0
+  },
+  {
+    "t": 47.86,
+    "active": 16,
+    "waiting": 21,
+    "inactive": 0
+  },
+  {
+    "t": 47.96,
+    "active": 17,
+    "waiting": 20,
+    "inactive": 0
+  },
+  {
+    "t": 47.97,
+    "active": 16,
+    "waiting": 20,
+    "inactive": 0
+  },
+  {
+    "t": 47.989999999999995,
+    "active": 15,
+    "waiting": 20,
+    "inactive": 0
+  },
+  {
+    "t": 47.99,
+    "active": 16,
+    "waiting": 19,
+    "inactive": 0
+  },
+  {
+    "t": 48.26,
+    "active": 15,
+    "waiting": 19,
+    "inactive": 0
+  },
+  {
+    "t": 48.27,
+    "active": 16,
+    "waiting": 17,
+    "inactive": 0
+  },
+  {
+    "t": 51.87,
+    "active": 17,
+    "waiting": 16,
+    "inactive": 0
+  },
+  {
+    "t": 51.870000000000005,
+    "active": 16,
+    "waiting": 16,
+    "inactive": 0
+  },
+  {
+    "t": 52.97,
+    "active": 16,
+    "waiting": 15,
+    "inactive": 0
+  },
+  {
+    "t": 54.46,
+    "active": 16,
+    "waiting": 14,
+    "inactive": 0
+  },
+  {
+    "t": 54.77,
+    "active": 16,
+    "waiting": 13,
+    "inactive": 0
+  },
+  {
+    "t": 58.08,
+    "active": 17,
+    "waiting": 12,
+    "inactive": 0
+  },
+  {
+    "t": 58.089999999999996,
+    "active": 16,
+    "waiting": 12,
+    "inactive": 0
+  },
+  {
+    "t": 58.47,
+    "active": 16,
+    "waiting": 11,
+    "inactive": 0
+  },
+  {
+    "t": 58.86,
+    "active": 15,
+    "waiting": 11,
+    "inactive": 0
+  },
+  {
+    "t": 58.87,
+    "active": 16,
+    "waiting": 10,
+    "inactive": 0
+  },
+  {
+    "t": 59.519999999999996,
+    "active": 15,
+    "waiting": 10,
+    "inactive": 0
+  },
+  {
+    "t": 59.52,
+    "active": 16,
+    "waiting": 9,
+    "inactive": 0
+  },
+  {
+    "t": 59.74,
+    "active": 16,
+    "waiting": 8,
+    "inactive": 0
+  },
+  {
+    "t": 60.51,
+    "active": 16,
+    "waiting": 7,
+    "inactive": 0
+  },
+  {
+    "t": 61.19,
+    "active": 16,
+    "waiting": 6,
+    "inactive": 0
+  },
+  {
+    "t": 61.46,
+    "active": 17,
+    "waiting": 5,
+    "inactive": 0
+  },
+  {
+    "t": 61.470000000000006,
+    "active": 16,
+    "waiting": 5,
+    "inactive": 0
+  },
+  {
+    "t": 64.24,
+    "active": 17,
+    "waiting": 4,
+    "inactive": 0
+  },
+  {
+    "t": 64.24000000000001,
+    "active": 16,
+    "waiting": 4,
+    "inactive": 0
+  },
+  {
+    "t": 64.44,
+    "active": 16,
+    "waiting": 3,
+    "inactive": 0
+  },
+  {
+    "t": 64.72,
+    "active": 16,
+    "waiting": 2,
+    "inactive": 0
+  },
+  {
+    "t": 64.83,
+    "active": 16,
+    "waiting": 1,
+    "inactive": 0
+  },
+  {
+    "t": 64.95,
+    "active": 16,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 65.07000000000001,
+    "active": 15,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 66.11,
+    "active": 14,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 66.51,
+    "active": 13,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 67.08,
+    "active": 12,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 67.5,
+    "active": 11,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 67.97,
+    "active": 10,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 70.24000000000001,
+    "active": 9,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 70.33999999999999,
+    "active": 8,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 70.52,
+    "active": 7,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 70.59,
+    "active": 6,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 70.74,
+    "active": 5,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 73.81,
+    "active": 4,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 74.28,
+    "active": 3,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 79.09,
+    "active": 2,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 84.93,
+    "active": 1,
+    "waiting": 0,
+    "inactive": 0
+  },
+  {
+    "t": 101.99,
+    "active": 0,
+    "waiting": 0,
+    "inactive": 0
+  }
+];
+const CPU_USAGE = [
+  [
+    0.147401986,
+    76.21621621621621
+  ],
+  [
+    0.250940081,
+    86.07594936708861
+  ],
+  [
+    0.372026315,
+    77.66497461928934
+  ],
+  [
+    0.51978542,
+    72.34042553191489
+  ],
+  [
+    0.711241676,
+    65.23178807947019
+  ],
+  [
+    0.83772898,
+    68.13725490196079
+  ],
+  [
+    0.992692727,
+    56.0
+  ],
+  [
+    1.3833339009999999,
+    92.17252396166134
+  ],
+  [
+    1.508804949,
+    96.46464646464646
+  ],
+  [
+    1.711465147,
+    93.86503067484662
+  ],
+  [
+    1.833304413,
+    96.33507853403141
+  ],
+  [
+    2.063236846,
+    94.23076923076923
+  ],
+  [
+    2.313588713,
+    97.2636815920398
+  ],
+  [
+    2.439532798,
+    93.62745098039215
+  ],
+  [
+    2.5529379370000003,
+    96.62921348314607
+  ],
+  [
+    2.86834533,
+    95.23809523809524
+  ],
+  [
+    3.020767731,
+    94.21487603305785
+  ],
+  [
+    3.236738541,
+    96.23188405797102
+  ],
+  [
+    3.461961111,
+    96.05633802816901
+  ],
+  [
+    3.596426596,
+    97.70642201834862
+  ],
+  [
+    3.823927129,
+    94.76584022038567
+  ],
+  [
+    4.110714979,
+    93.59823399558499
+  ],
+  [
+    4.419729712,
+    95.97585513078471
+  ],
+  [
+    4.734996762,
+    98.18913480885311
+  ],
+  [
+    5.144741072,
+    95.58599695585997
+  ],
+  [
+    5.715317698,
+    96.36963696369637
+  ],
+  [
+    5.833730057,
+    98.37837837837837
+  ],
+  [
+    6.333940177,
+    95.73934837092732
+  ],
+  [
+    6.888056221,
+    95.2542372881356
+  ],
+  [
+    7.072833512,
+    96.24573378839591
+  ],
+  [
+    7.252433762,
+    95.81881533101046
+  ],
+  [
+    7.364529436,
+    94.38202247191012
+  ],
+  [
+    7.640177443,
+    95.20547945205479
+  ],
+  [
+    7.763854967,
+    91.4572864321608
+  ],
+  [
+    8.16420462,
+    95.59055118110236
+  ],
+  [
+    8.32126507,
+    95.16129032258064
+  ],
+  [
+    8.822004042,
+    95.23212045169385
+  ],
+  [
+    8.975954049,
+    95.16129032258064
+  ],
+  [
+    9.304465647,
+    95.41108986615679
+  ],
+  [
+    9.736439778,
+    95.63318777292577
+  ],
+  [
+    9.867555572,
+    93.30143540669856
+  ],
+  [
+    9.999301757,
+    93.36492890995261
+  ],
+  [
+    10.301888927,
+    96.65271966527197
+  ],
+  [
+    10.617991704,
+    95.00998003992017
+  ],
+  [
+    11.040863875,
+    94.67455621301775
+  ],
+  [
+    11.15604737,
+    94.05405405405405
+  ],
+  [
+    11.329047373,
+    95.9409594095941
+  ],
+  [
+    11.463731719,
+    95.85253456221199
+  ],
+  [
+    11.912968174,
+    95.1048951048951
+  ],
+  [
+    12.033753373,
+    97.36842105263158
+  ],
+  [
+    12.323399373,
+    96.76724137931035
+  ],
+  [
+    12.492411277,
+    95.91078066914498
+  ],
+  [
+    12.653164552,
+    95.65217391304348
+  ],
+  [
+    13.205033544,
+    95.79545454545455
+  ],
+  [
+    13.375676347,
+    96.0
+  ],
+  [
+    13.630521351,
+    96.25935162094763
+  ],
+  [
+    14.103708844,
+    97.23320158102767
+  ],
+  [
+    14.60411386,
+    95.23212045169385
+  ],
+  [
+    14.717146501,
+    94.97206703910615
+  ],
+  [
+    14.841004773,
+    97.47474747474747
+  ],
+  [
+    15.341498536,
+    98.1203007518797
+  ],
+  [
+    15.576900136999999,
+    96.27659574468085
+  ],
+  [
+    15.923632277,
+    97.12230215827338
+  ],
+  [
+    16.18486484,
+    95.42168674698794
+  ],
+  [
+    16.68731414,
+    96.38854296388543
+  ],
+  [
+    16.912600601,
+    96.07843137254902
+  ],
+  [
+    17.248427749,
+    94.9438202247191
+  ],
+  [
+    17.448454038,
+    95.61128526645768
+  ],
+  [
+    17.980156069,
+    95.17647058823529
+  ],
+  [
+    18.480602232,
+    96.99248120300751
+  ],
+  [
+    18.655040474,
+    94.50549450549451
+  ],
+  [
+    18.833399436,
+    93.7062937062937
+  ],
+  [
+    19.000712805,
+    94.40298507462687
+  ],
+  [
+    19.163517247,
+    95.38461538461539
+  ],
+  [
+    19.352114582,
+    94.35215946843854
+  ],
+  [
+    19.484541785,
+    96.15384615384616
+  ],
+  [
+    19.61942846,
+    94.93087557603687
+  ],
+  [
+    20.028503528,
+    95.37750385208012
+  ],
+  [
+    20.142014145,
+    97.20670391061452
+  ],
+  [
+    20.255191146,
+    93.82022471910112
+  ],
+  [
+    20.372452768,
+    93.15789473684211
+  ],
+  [
+    20.47836251,
+    93.33333333333333
+  ],
+  [
+    20.659152783,
+    96.16724738675958
+  ],
+  [
+    21.122880286,
+    96.62162162162163
+  ],
+  [
+    21.312652794999998,
+    97.38562091503267
+  ],
+  [
+    21.509144434,
+    97.43589743589743
+  ],
+  [
+    22.06612374,
+    95.93679458239278
+  ],
+  [
+    22.575679778,
+    95.72649572649573
+  ],
+  [
+    23.021007564,
+    97.17912552891396
+  ],
+  [
+    23.365125692,
+    97.26775956284153
+  ],
+  [
+    23.569047315,
+    95.6923076923077
+  ],
+  [
+    24.069538224,
+    96.98870765370138
+  ],
+  [
+    24.295146629,
+    96.05633802816901
+  ],
+  [
+    24.44351606,
+    97.11934156378601
+  ],
+  [
+    24.587861275,
+    95.19650655021834
+  ],
+  [
+    25.091314788,
+    98.13664596273291
+  ],
+  [
+    25.267709538,
+    97.51773049645391
+  ],
+  [
+    25.768160413,
+    98.6198243412798
+  ],
+  [
+    26.268429625,
+    99.87484355444306
+  ],
+  [
+    26.768689189,
+    99.0
+  ],
+  [
+    27.268956879,
+    98.99874843554443
+  ],
+  [
+    27.518174932,
+    96.20253164556962
+  ],
+  [
+    28.01873013,
+    97.74436090225564
+  ],
+  [
+    28.559315183,
+    96.54775604142692
+  ],
+  [
+    29.059595976,
+    97.1141781681305
+  ],
+  [
+    29.559828211,
+    96.87108886107634
+  ],
+  [
+    30.063309808,
+    98.01242236024845
+  ],
+  [
+    30.224944016,
+    97.66536964980544
+  ],
+  [
+    30.746523815,
+    98.55072463768116
+  ],
+  [
+    31.17150875,
+    97.37226277372262
+  ],
+  [
+    31.672081483,
+    97.86700125470514
+  ],
+  [
+    32.268780329,
+    98.2124079915878
+  ],
+  [
+    32.400252603,
+    97.61904761904762
+  ],
+  [
+    32.900608678,
+    96.98870765370138
+  ],
+  [
+    33.380458347,
+    96.484375
+  ],
+  [
+    33.876577759,
+    96.5909090909091
+  ],
+  [
+    34.376875645,
+    98.1203007518797
+  ],
+  [
+    34.555523061,
+    95.1219512195122
+  ],
+  [
+    35.052910049,
+    96.08091024020227
+  ],
+  [
+    35.328898938,
+    97.05215419501134
+  ],
+  [
+    35.864158682,
+    97.89719626168224
+  ],
+  [
+    35.975767654,
+    97.17514124293785
+  ],
+  [
+    36.232173416,
+    97.30392156862744
+  ],
+  [
+    36.529722018,
+    97.66454352441613
+  ],
+  [
+    36.688947218,
+    94.921875
+  ],
+  [
+    37.191313995,
+    98.88198757763975
+  ],
+  [
+    37.691584602,
+    96.7459324155194
+  ],
+  [
+    38.191834359,
+    97.36842105263158
+  ],
+  [
+    38.419905824,
+    97.51381215469613
+  ],
+  [
+    38.920455053,
+    99.125
+  ],
+  [
+    39.24288647,
+    98.04305283757338
+  ],
+  [
+    39.449507747,
+    97.59036144578313
+  ],
+  [
+    39.949841452,
+    98.375
+  ],
+  [
+    40.196794878,
+    97.46192893401015
+  ],
+  [
+    40.395437933,
+    96.85534591194968
+  ],
+  [
+    40.895747683,
+    97.74718397997496
+  ],
+  [
+    41.39602937,
+    98.24780976220275
+  ],
+  [
+    41.952107449,
+    97.18468468468468
+  ],
+  [
+    42.397283792,
+    97.46121297602257
+  ],
+  [
+    42.68386237,
+    97.16157205240175
+  ],
+  [
+    42.844946948,
+    96.484375
+  ],
+  [
+    43.096092727,
+    97.2636815920398
+  ],
+  [
+    43.256738372,
+    97.265625
+  ],
+  [
+    43.757033484,
+    96.8671679197995
+  ],
+  [
+    44.01971693,
+    96.67458432304038
+  ],
+  [
+    44.192396934,
+    94.18181818181819
+  ],
+  [
+    44.534784898,
+    95.58011049723757
+  ],
+  [
+    44.717757105,
+    95.59322033898304
+  ],
+  [
+    44.931432873,
+    97.10144927536231
+  ],
+  [
+    45.203358241,
+    97.6798143851508
+  ],
+  [
+    45.31176188,
+    94.18604651162791
+  ],
+  [
+    45.780192145,
+    97.05882352941177
+  ],
+  [
+    46.346829897,
+    98.55715871254162
+  ],
+  [
+    46.847116323,
+    98.62671660424469
+  ],
+  [
+    47.347393402,
+    99.50248756218906
+  ],
+  [
+    47.622076172,
+    97.01149425287356
+  ],
+  [
+    47.801110894,
+    97.2027972027972
+  ],
+  [
+    47.961794821,
+    96.85039370078741
+  ],
+  [
+    48.267151056,
+    97.5103734439834
+  ],
+  [
+    48.775316038,
+    98.29476248477467
+  ],
+  [
+    49.275573891,
+    100.0
+  ],
+  [
+    49.775808722,
+    99.24906132665832
+  ],
+  [
+    50.27607996,
+    96.74185463659148
+  ],
+  [
+    50.776313197,
+    97.75
+  ],
+  [
+    51.276571603,
+    97.61606022584692
+  ],
+  [
+    51.776835587,
+    97.49687108886107
+  ],
+  [
+    52.366661046,
+    98.8272921108742
+  ],
+  [
+    52.866957032,
+    98.24561403508773
+  ],
+  [
+    53.465837453,
+    98.95833333333333
+  ],
+  [
+    53.966136103,
+    99.12280701754386
+  ],
+  [
+    54.459430568,
+    97.8562421185372
+  ],
+  [
+    54.765504479,
+    96.49484536082474
+  ],
+  [
+    55.266019976,
+    99.24906132665832
+  ],
+  [
+    55.76632073,
+    99.5
+  ],
+  [
+    56.266621695,
+    97.99749687108886
+  ],
+  [
+    56.766910056,
+    97.5
+  ],
+  [
+    57.267172179,
+    98.24780976220275
+  ],
+  [
+    57.77131595,
+    98.64197530864197
+  ],
+  [
+    58.084487182,
+    97.59036144578313
+  ],
+  [
+    58.469552234,
+    97.8827361563518
+  ],
+  [
+    58.866301599,
+    98.89415481832543
+  ],
+  [
+    59.367813786,
+    97.14285714285714
+  ],
+  [
+    59.512920348,
+    97.82608695652173
+  ],
+  [
+    59.737446355,
+    98.88268156424581
+  ],
+  [
+    60.237999192,
+    98.7468671679198
+  ],
+  [
+    60.510268867,
+    98.85321100917432
+  ],
+  [
+    61.010793973,
+    97.11779448621554
+  ],
+  [
+    61.18551753,
+    97.15302491103203
+  ],
+  [
+    61.461398287,
+    97.73242630385488
+  ],
+  [
+    61.961944021,
+    99.0
+  ],
+  [
+    62.462249114,
+    99.62406015037594
+  ],
+  [
+    62.962506307,
+    98.7468671679198
+  ],
+  [
+    63.462772919,
+    99.49937421777221
+  ],
+  [
+    63.963038248,
+    97.11779448621554
+  ],
+  [
+    64.239173983,
+    96.81818181818181
+  ],
+  [
+    64.440749118,
+    98.15950920245399
+  ],
+  [
+    64.722601695,
+    95.0561797752809
+  ],
+  [
+    64.832779793,
+    97.76536312849161
+  ],
+  [
+    64.949470906,
+    98.91304347826087
+  ],
+  [
+    65.068102168,
+    98.4375
+  ],
+  [
+    65.568454419,
+    99.7496871088861
+  ],
+  [
+    66.070511498,
+    98.625
+  ],
+  [
+    66.510450932,
+    98.0
+  ],
+  [
+    67.015377343,
+    97.9064039408867
+  ],
+  [
+    67.500539767,
+    96.64082687338501
+  ],
+  [
+    67.963804285,
+    97.16216216216216
+  ],
+  [
+    68.464138765,
+    99.125
+  ],
+  [
+    68.827208938,
+    98.95652173913044
+  ],
+  [
+    69.327458226,
+    98.38709677419355
+  ],
+  [
+    69.827689892,
+    98.37092731829574
+  ],
+  [
+    70.240776927,
+    97.87234042553192
+  ],
+  [
+    70.518273876,
+    96.14512471655328
+  ],
+  [
+    70.741374329,
+    97.48603351955308
+  ],
+  [
+    71.241605685,
+    98.24780976220275
+  ],
+  [
+    71.615365685,
+    98.00332778702163
+  ],
+  [
+    72.11557493,
+    99.125
+  ],
+  [
+    72.654686563,
+    99.41656942823803
+  ],
+  [
+    73.154936923,
+    99.875
+  ],
+  [
+    73.545251732,
+    99.36204146730462
+  ],
+  [
+    73.660448953,
+    100.0
+  ],
+  [
+    73.805150867,
+    98.26086956521739
+  ],
+  [
+    74.282557497,
+    98.15546772068511
+  ],
+  [
+    74.782927263,
+    95.875
+  ],
+  [
+    75.283195067,
+    69.28838951310861
+  ],
+  [
+    75.78343014,
+    40.09962640099627
+  ],
+  [
+    76.287305279,
+    93.1930693069307
+  ],
+  [
+    76.787523411,
+    100.0
+  ],
+  [
+    77.287735091,
+    99.625
+  ],
+  [
+    77.787958843,
+    100.0
+  ],
+  [
+    78.288194847,
+    97.74718397997496
+  ],
+  [
+    78.788411316,
+    68.78901373283395
+  ],
+  [
+    79.093564963,
+    53.51239669421488
+  ],
+  [
+    79.593788384,
+    34.711779448621556
+  ],
+  [
+    80.095305212,
+    78.73918417799753
+  ],
+  [
+    80.595551747,
+    100.0
+  ],
+  [
+    81.09578664,
+    100.0
+  ],
+  [
+    81.596017596,
+    99.62453066332917
+  ],
+  [
+    82.096257167,
+    93.875
+  ],
+  [
+    82.596468937,
+    75.3441802252816
+  ],
+  [
+    83.096696477,
+    58.75
+  ],
+  [
+    83.59689968,
+    50.875
+  ],
+  [
+    84.097103756,
+    46.99248120300752
+  ],
+  [
+    84.597299325,
+    41.125
+  ],
+  [
+    84.922705524,
+    39.92395437262357
+  ],
+  [
+    85.422912255,
+    26.375
+  ],
+  [
+    85.9231057,
+    18.85143570536829
+  ],
+  [
+    86.423285069,
+    20.123456790123456
+  ],
+  [
+    86.923480629,
+    18.648310387984978
+  ],
+  [
+    87.42366532,
+    19.302615193026156
+  ],
+  [
+    87.923856912,
+    18.77346683354193
+  ],
+  [
+    88.424040579,
+    18.875
+  ],
+  [
+    88.924180795,
+    18.85143570536829
+  ],
+  [
+    89.424370685,
+    24.81296758104739
+  ],
+  [
+    89.924559312,
+    25.0
+  ],
+  [
+    90.42474349,
+    19.023779724655824
+  ],
+  [
+    90.924983624,
+    12.98377028714107
+  ],
+  [
+    91.425220492,
+    12.625
+  ],
+  [
+    91.925455196,
+    13.0
+  ],
+  [
+    92.425630017,
+    7.625
+  ],
+  [
+    92.925809707,
+    6.25
+  ],
+  [
+    93.425997112,
+    6.25
+  ],
+  [
+    93.926227298,
+    6.36704119850188
+  ],
+  [
+    94.426406627,
+    6.375
+  ],
+  [
+    94.926615614,
+    6.25
+  ],
+  [
+    95.426803138,
+    6.2578222778473105
+  ],
+  [
+    95.927027994,
+    7.125
+  ],
+  [
+    96.427253141,
+    6.857855361596009
+  ],
+  [
+    96.927544671,
+    6.25
+  ],
+  [
+    97.427767283,
+    6.265664160401002
+  ],
+  [
+    97.927991818,
+    6.25
+  ],
+  [
+    98.428221041,
+    6.741573033707866
+  ],
+  [
+    98.928425569,
+    6.25
+  ],
+  [
+    99.428646097,
+    6.2578222778473105
+  ],
+  [
+    99.928850283,
+    6.25
+  ],
+  [
+    100.429047618,
+    6.36704119850188
+  ],
+  [
+    100.929261463,
+    8.385481852315394
+  ],
+  [
+    101.429450422,
+    8.270676691729335
+  ],
+  [
+    101.929673525,
+    7.904642409033883
+  ]
+];
+// Position of the vertical axis.
+const X_LINE = 50;
+// General-use margin size.
+const MARGIN = 5;
+// Position of the horizontal axis, relative to the bottom.
+const Y_LINE = 35;
+// Minimum distance between time tick labels.
+const MIN_TICK_DIST = 50;
+// Radius for rounded rectangle corners.
+const RADIUS = 3;
+// Height of unit boxes.
+const BOX_HEIGHT = 25;
+// Distance between Y tick marks on the unit graph.
+const Y_TICK_DIST = BOX_HEIGHT + 2;
+// Rects used for mouseover detection.
+// Objects of {x, y, x2, y2, i} where `i` is the index into UNIT_DATA.
+let HIT_BOXES = [];
+// Index into UNIT_DATA of the last unit hovered over by mouse.
+let LAST_HOVER = null;
+// Key is unit index, value is {x, y, width, sections} of the box.
+let UNIT_COORDS = {};
+// Map of unit index to the index it was unlocked by.
+let REVERSE_UNIT_DEPS = {};
+let REVERSE_UNIT_RMETA_DEPS = {};
+let UNIT_BY_INDEX = {};
+
+const MIN_GRAPH_WIDTH = 200;
+const MAX_GRAPH_WIDTH = 4096;
+
+// How many pixels per second is added by each scale value
+const SCALE_PIXELS_PER_SEC = 8;
+
+function scale_to_graph_width(scale) {
+  // The scale corresponds to `SCALE_PIXELS_PER_SEC` pixels per seconds.
+  // We thus multiply it by that, and the total duration, to get the graph width.
+  const width = scale * SCALE_PIXELS_PER_SEC * DURATION;
+
+  // We then cap the size of the graph. It is hard to view if it is too large, and
+  // browsers may not render a large graph because it takes too much memory.
+  // 4096 is still ridiculously large, and probably won't render on mobile
+  // browsers, but should be ok for many desktop environments.
+  // Also use a minimum width of 200.
+  return Math.max(MIN_GRAPH_WIDTH, Math.min(MAX_GRAPH_WIDTH, width));
+}
+
+// This function performs the reverse of `scale_to_graph_width`.
+function width_to_graph_scale(width) {
+  const maxWidth = Math.min(MAX_GRAPH_WIDTH, width);
+  const minWidth = Math.max(MIN_GRAPH_WIDTH, width);
+
+  const trimmedWidth = Math.max(minWidth, Math.min(maxWidth, width));
+
+  const scale = Math.round(trimmedWidth / (DURATION * SCALE_PIXELS_PER_SEC));
+  return Math.max(1, scale);
+}
+
+// Init scale value and limits based on the client's window width and min/max graph width.
+const scaleElement = document.getElementById('scale');
+scaleElement.min = width_to_graph_scale(MIN_GRAPH_WIDTH);
+scaleElement.max = width_to_graph_scale(MAX_GRAPH_WIDTH);
+scaleElement.value = width_to_graph_scale(window.innerWidth * 0.75);
+
+// Colors from css
+const getCssColor = name => getComputedStyle(document.body).getPropertyValue(name);
+const TEXT_COLOR = getCssColor('--text');
+const BG_COLOR = getCssColor('--background');
+const CANVAS_BG = getCssColor('--canvas-background');
+const AXES_COLOR = getCssColor('--canvas-axes');
+const GRID_COLOR = getCssColor('--canvas-grid');
+const CODEGEN_COLOR = getCssColor('--canvas-codegen');
+const LINK_COLOR = getCssColor('--canvas-link');
+// Final leftover section after link
+const OTHER_COLOR = getCssColor('--canvas-other');
+const CUSTOM_BUILD_COLOR = getCssColor('--canvas-custom-build');
+const NOT_CUSTOM_BUILD_COLOR = getCssColor('--canvas-not-custom-build');
+const DEP_LINE_COLOR = getCssColor('--canvas-dep-line');
+const DEP_LINE_HIGHLIGHTED_COLOR = getCssColor('--canvas-dep-line-highlighted');
+const CPU_COLOR = getCssColor('--canvas-cpu');
+
+for (const unit of UNIT_DATA) {
+  UNIT_BY_INDEX[unit.i] = unit;
+  for (let unblocked of unit.unblocked_units) {
+    REVERSE_UNIT_DEPS[unblocked] = unit.i;
+  }
+  for (let unblocked of unit.unblocked_rmeta_units) {
+    REVERSE_UNIT_RMETA_DEPS[unblocked] = unit.i;
+  }
+}
+
+// Compute x,y coordinate of each block.
+// We also populate a map with the count of each unit name to disambiguate if necessary
+function compute_unit_coords(units, px_per_sec) {
+  const unitCount = new Map();
+  UNIT_COORDS = {};
+  for (i = 0; i < units.length; i++) {
+    let unit = units[i];
+    let y = i * Y_TICK_DIST + 1;
+    let x = px_per_sec * unit.start;
+
+    const sections = [];
+    if (unit.sections !== null) {
+      // We have access to compilation sections
+      for (const section of unit.sections) {
+        const [name, { start, end }] = section;
+        sections.push({
+          name,
+          start: x + px_per_sec * start,
+          width: (end - start) * px_per_sec
+        });
+      }
+    }
+
+    let width = Math.max(px_per_sec * unit.duration, 1.0);
+    UNIT_COORDS[unit.i] = { x, y, width, sections };
+
+    const count = unitCount.get(unit.name) || 0;
+    unitCount.set(unit.name, count + 1);
+  }
+
+  return { UNIT_COORDS, unitCount }
+}
+
+class SvgRenderer {
+  constructor() {}
+
+  render_pipeline_graph() {
+    if (UNIT_DATA.length == 0) {
+      return;
+    }
+    HIT_BOXES.length = 0;
+    const min_time = document.getElementById('min-unit-time').valueAsNumber;
+
+    const units = UNIT_DATA.filter(unit => unit.duration >= min_time);
+
+    const graph_height = Y_TICK_DIST * units.length;
+    let { canvas_height, canvas_width, graph_width, px_per_sec } = graph_dimension(graph_height);
+    const axes = this._draw_graph_axes({ canvas_height, graph_height, graph_width, px_per_sec });
+
+    // Draw Y tick marks.
+    let y_ticks = '';
+    if (units.length != 0) {
+      const path_commands = Array(units.length - 1)
+        .fill(0)
+        .map((_, idx) => {
+          const n = idx + 1;
+          const y = MARGIN + Y_TICK_DIST * n;
+          return `M${X_LINE} ${y} h-5`;
+        });
+      y_ticks = `<path class="axis axis-y" d="${path_commands.join(" ")}"></path>`;
+    }
+
+    // Draw Y labels.
+    const y_labels = Array(units.length)
+      .fill(0)
+      .map((_, n) => {
+          let y = MARGIN + Y_TICK_DIST * n + Y_TICK_DIST / 2;
+          return `<text class="axis axis-y" x="${X_LINE - 4}" y="${y}">${n + 1}</text>`;
+      })
+      .join("");
+
+    // Draw the graph.
+    const { UNIT_COORDS, unitCount } = compute_unit_coords(units, px_per_sec);
+    const presentSections = new Set();
+
+    // Draw the blocks.
+    let blocks = Array(units.length)
+      .fill(0)
+      .map((_, i) => {
+        let unit = units[i];
+        let { x, y, width, sections } = UNIT_COORDS[unit.i];
+
+        const boxes = [this._roundedRect("", x, y, width, unit)].concat(
+          sections.map((section) => {
+            presentSections.add(section.name);
+            return this._roundedRect(
+              section.name,
+              section.start,
+              y,
+              section.width,
+              unit,
+            );
+          }),
+        );
+
+        const labelName = (unitCount.get(unit.name) || 0) > 1 ? `${unit.name} (v${unit.version})${unit.target}` : `${unit.name}${unit.target}`;
+        const label = `${labelName}: ${unit.duration}s`;
+
+        const text_info_width = measure_text_width(label);
+        const label_x = Math.min(x + 5.0, canvas_width - text_info_width - X_LINE);
+        const box_label = `<text class="box" x="${label_x}" y="${y + BOX_HEIGHT / 2}">${label}</text>`;
+
+        const dep_lines = this._draw_dep_lines(unit.i);
+        return boxes.concat(box_label).concat(dep_lines);
+      })
+      .flat()
+      .join("");
+
+    blocks = `
+<g id="boxes" transform="translate(${X_LINE} ${MARGIN})">${blocks}</g>
+<g id="hl-dep-lines" transform="translate(${X_LINE} ${MARGIN})"></g>`;
+
+    // Draw a legend.
+    const legend = `
+<g class="legend" transform="translate(${canvas_width-200},${MARGIN})">
+  ${this._draw_legend(160, get_legend_entries(presentSections))}
+</g>`;
+
+    const svg_container = document.getElementById("pipeline-container");
+    if (svg_container) {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("width", canvas_width);
+      svg.setAttribute("height", canvas_height);
+      Object.assign(svg.style, {
+        background: CANVAS_BG,
+        color: TEXT_COLOR,
+        fontFamily: 'sans-serif',
+        fontSize: '16px'
+      });
+      svg.innerHTML = `
+<style type="text/css">
+  path.axis {
+    fill: none;
+    stroke: ${AXES_COLOR};
+    stroke-width: 2;
+  }
+  text.axis {
+    fill: ${AXES_COLOR};
+    font-size: 16px;
+    stroke: none;
+    text-anchor: middle;
+  }
+  text.axis-y {
+    dominant-baseline: middle;
+    text-anchor: end;
+  }
+  .grid {
+    stroke: ${GRID_COLOR};
+    stroke-dasharray: 2 4;
+    stroke-width: 2;
+  }
+  rect.box {
+    fill: ${NOT_CUSTOM_BUILD_COLOR};
+    height: ${BOX_HEIGHT}px;
+    rx: ${RADIUS}px;
+    ry: ${RADIUS}px;
+  }
+  rect.box.run-custom-build {
+    fill: ${CUSTOM_BUILD_COLOR};
+  }
+  rect.box.codegen {
+    fill: ${CODEGEN_COLOR};
+  }
+  rect.box.link {
+    fill: ${LINK_COLOR};
+  }
+  rect.box.other {
+    fill: ${OTHER_COLOR}
+  }
+  text.box {
+    dominant-baseline: middle;
+    fill: ${TEXT_COLOR};
+    font-size: 14px;
+    text-anchor: start
+  }
+  .dep-line {
+    fill: none;
+    stroke: ${DEP_LINE_COLOR};
+    stroke-dasharray: 2;
+    stroke-width: 2;
+  }
+  #hl-dep-lines .dep-line{
+    stroke: ${DEP_LINE_HIGHLIGHTED_COLOR};
+  }
+  path.legend__cell {
+    stroke-width: 2;
+  }
+  .legend__desc {
+    fill: ${TEXT_COLOR};
+    dominant-baseline: middle;
+  }
+</style>
+${axes}
+${y_ticks}
+${y_labels}
+${blocks}
+${legend}`;
+      svg_container.innerHTML = svg.outerHTML;
+    }
+  }
+
+  // Draw a legend at the current position of the ctx.
+  // entries should be an array of objects with the following scheme:
+  // {
+  //   "name": <name of the legend entry> [string],
+  //   "color": <color of the legend entry> [string],
+  //   "line": <should the entry be a thin line or a rectangle> [bool]
+  // }
+  _draw_legend(width, entries) {
+    const entry_height = 20;
+
+    // Add a bit of margin to the bottom and top
+    const height = entries.length * entry_height + 4;
+
+    // Draw background
+    let legend = [];
+    legend.push(`<rect stroke="${TEXT_COLOR}" stroke-width="1" fill="${BG_COLOR}" width="${width}" height="${height}"></rect>`);
+
+    // Dimension of a block
+    const block_height = 15;
+    const block_width = 30;
+
+    // Margin from the left edge
+    const x_start = 5;
+    // Width of the "mark" section (line/block)
+    const mark_width = 45;
+
+    // Draw legend entries
+    let y = 12;
+    for (const entry of entries) {
+      const cell = entry.line ?
+        `<path class="legend__cell" stroke="${entry.color}" d="M${x_start} ${y} h ${mark_width}"></path>` :
+        `
+<rect class="legend__cell" fill="${entry.color}" width="${block_width}" height="${block_height}"
+  x="${x_start + (mark_width - block_width) / 2}" y="${y - (block_height / 2)}"
+></rect>`;
+      legend.push(cell);
+      legend.push(`<text class="legend__desc" x="${x_start + mark_width + 4}" y="${y + 1}">${entry.name}</text>`)
+      y += entry_height;
+    }
+    return legend.join("")
+  }
+
+  // Draws lines from the given unit to the units it unlocks.
+  _draw_dep_lines(unit_idx) {
+    const unit = UNIT_BY_INDEX[unit_idx];
+    const { x, y, sections } = UNIT_COORDS[unit_idx];
+    return unit.unblocked_units
+      .map((unblocked) => this._draw_one_dep_line(x, y, unblocked, unit_idx))
+      .concat(
+        unit.unblocked_rmeta_units.map((unblocked) => {
+          const codegen_x = get_codegen_section_x(sections);
+          return this._draw_one_dep_line(codegen_x, y, unblocked, unit_idx);
+        }),
+      )
+      .join("");
+  }
+
+  _draw_one_dep_line(from_x, from_y, to_unit, from_unit) {
+    if (to_unit in UNIT_COORDS) {
+      let { x: u_x, y: u_y } = UNIT_COORDS[to_unit];
+      // Use multiple path instead to avoid potential rendering issue while scrolling in Firefox.
+      return `
+<path class="dep-line" data-unblocked="${to_unit}" data-unblocked-by="${from_unit}" d="M ${from_x} ${from_y + BOX_HEIGHT / 2} h -5"></path>
+<path class="dep-line" data-unblocked="${to_unit}" data-unblocked-by="${from_unit}" d="M ${from_x - 5} ${from_y + BOX_HEIGHT / 2} V ${u_y + BOX_HEIGHT / 2}"></path>
+<path class="dep-line" data-unblocked="${to_unit}" data-unblocked-by="${from_unit}" d="M ${from_x - 5} ${u_y + BOX_HEIGHT / 2} H${u_x}"></path>
+`;
+    }
+  }
+
+  render_timing_graph() {
+    if (CONCURRENCY_DATA.length == 0) {
+      return;
+    }
+    const HEIGHT = 400;
+    const AXIS_HEIGHT = HEIGHT - MARGIN - Y_LINE;
+    const TOP_MARGIN = 10;
+    const GRAPH_HEIGHT = AXIS_HEIGHT - TOP_MARGIN;
+
+    let { canvas_height, canvas_width, graph_height, graph_width, px_per_sec } = graph_dimension(AXIS_HEIGHT);
+    const axis_bottom = this._draw_graph_axes({ canvas_height, graph_height, graph_width, px_per_sec });
+
+    // Draw Y tick marks and labels.
+    let max_v = 0;
+    for (let c of CONCURRENCY_DATA) {
+      max_v = Math.max(max_v, c.active, c.waiting, c.inactive);
+    }
+    const px_per_v = GRAPH_HEIGHT / max_v;
+    const { step, tick_dist, num_ticks } = split_ticks(max_v, px_per_v, GRAPH_HEIGHT);
+
+    const labels = [];
+    const ticks_path_commands = Array(num_ticks)
+      .fill(0)
+      .map((_, n) => {
+        const y = HEIGHT - Y_LINE - ((n + 1) * tick_dist);
+        labels.push( `<text class="axis axis-y" x="${X_LINE - 10}" y="${y}">${(n + 1) * step}</text>`);
+        return `M${X_LINE} ${y} h-5`;
+      })
+      .join(" ");
+    const ticks = `<path class="axis axis-y" d="${ticks_path_commands}"></path>`;
+    const ticks_labels = labels.join("");
+
+    // Label the Y axis.
+    let label_y = (HEIGHT - Y_LINE) / 2;
+
+    const y_axis_label = `<text class="axis axis-label" transform="translate(15, ${label_y}) rotate(270)"># Units</text>`
+    const axis_left = `${y_axis_label}${ticks}${ticks_labels}`;
+
+    // Draw the graph.
+
+    function coord(t, v) {
+      return {
+        x: graph_width * (t / DURATION),
+        y: TOP_MARGIN + GRAPH_HEIGHT * (1.0 - (v / max_v))
+      };
+    }
+
+    const cpuFillStyle = CPU_COLOR;
+    let cpu = "";
+    if (CPU_USAGE.length > 1) {
+      const bottomLeft = coord(CPU_USAGE[0][0], 0);
+      const bottomRight = coord(CPU_USAGE[CPU_USAGE.length - 1][0], 0);
+      const path_commands = [`M${bottomLeft.x} ${bottomLeft.y}`]
+      .concat(
+        Array(CPU_USAGE.length)
+          .fill(0)
+          .map((_, i) => {
+            let [time, usage] = CPU_USAGE[i];
+            let { x, y } = coord(time, (usage / 100.0) * max_v);
+            return `L${x} ${y}`;
+          }),
+      )
+      .concat(`L${bottomRight.x} ${bottomRight.y}`);
+      cpu = `<path stroke-width="0" fill="${cpuFillStyle}" d="${path_commands.join("")}"></path>`;
+    }
+
+    function draw_line(style, key) {
+      let first = CONCURRENCY_DATA[0];
+      let last = coord(first.t, key(first));
+      const path_commands = [];
+      path_commands.push(`M${last.x} ${last.y}`)
+      for (let i = 1; i < CONCURRENCY_DATA.length; i++) {
+        let c = CONCURRENCY_DATA[i];
+        let { x, y } = coord(c.t, key(c));
+        path_commands.push(`L${x} ${last.y} V${y}`);
+        last = { x, y };
+      }
+      return `<path class="status-line" stroke="${style}" d="${path_commands.join("")}"></path>`
+    }
+
+    const lines = [];
+    lines.push(draw_line('blue', function(c) { return c.inactive; }));
+    lines.push(draw_line('red', function(c) { return c.waiting; }));
+    lines.push(draw_line('green', function(c) { return c.active; }));
+
+    const timings = `<g class="graph-content" transform="translate(${X_LINE} ${MARGIN})">${cpu}${lines}</g>`;
+
+    // Draw a legend.
+    const legend = `
+<g class="legend" transform="translate(${canvas_width-200},${MARGIN})">
+${this._draw_legend(150, [{
+    name: "Waiting",
+    color: "red",
+    line: true
+  }, {
+    name: "Inactive",
+    color: "blue",
+    line: true
+  }, {
+    name: "Active",
+    color: "green",
+    line: true
+  }, {
+    name: "CPU Usage",
+    color: cpuFillStyle,
+    line: false
+}])}
+</g>`;
+
+    const svg_container = document.getElementById("timing-container");
+    if (svg_container) {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("width", canvas_width);
+      svg.setAttribute("height", canvas_height);
+      Object.assign(svg.style, {
+        background: CANVAS_BG,
+        color: TEXT_COLOR,
+        fontFamily: 'sans-serif',
+        fontSize: '16px'
+      });
+      svg.innerHTML = `
+<style type="text/css">
+  path.axis {
+    fill: none;
+    stroke: ${AXES_COLOR};
+    stroke-width: 2;
+  }
+  text.axis {
+    fill: ${AXES_COLOR};
+    font-size: 16px;
+    stroke: none;
+    text-anchor: middle;
+  }
+  text.axis-y {
+    dominant-baseline: middle;
+    text-anchor: end;
+  }
+  .grid {
+    stroke: ${GRID_COLOR};
+    stroke-dasharray: 2 4;
+    stroke-width: 2;
+  }
+  .status-line {
+    fill: none;
+    stroke-width: 2;
+  }
+  path.legend__cell {
+    stroke-width: 2;
+  }
+  .legend__desc {
+    fill: ${TEXT_COLOR};
+    dominant-baseline: middle;
+  }
+</style>
+${axis_bottom}
+${axis_left}
+${timings}
+${legend}
+`;
+      svg_container.innerHTML = svg.outerHTML;
+    }
+  }
+
+  _draw_graph_axes({ canvas_height, graph_height, graph_width, px_per_sec }) {
+    // Draw main axes.
+    const main_axes = `
+<path class="axis" d="
+  M${X_LINE} ${MARGIN}
+  V${graph_height + MARGIN}
+  H${X_LINE + graph_width + 20}"
+></path>`;
+
+    // Draw X tick marks.
+    const { step, tick_dist, num_ticks } = split_ticks(DURATION, px_per_sec, graph_width);
+    const TICK_LENGTH = 5;
+    const grid_height = canvas_height - Y_LINE;
+    const labels = [];
+    const ticks_path_commands = Array(num_ticks)
+        .fill(0)
+        .map((_, n) => {
+          const x = X_LINE + ((n + 1) * tick_dist);
+          const label = `
+  <text class="axis" x="${x}" y="${grid_height + 20}">
+    ${(n + 1) * step}s
+  </text>`;
+          labels.push(label);
+          return `M${x} ${grid_height} v${TICK_LENGTH}`;
+        })
+        .join(" ");
+
+    const ticks = `<path class="axis"  d="${ticks_path_commands}"></path>`;
+    const ticks_labels = labels.join("")
+
+    // Draw vertical lines.
+    const vertical_lines = Array(num_ticks)
+      .fill(0)
+      .map((_, n) => {
+        const x = X_LINE + ((n + 1) * tick_dist);
+        return `<path class="grid" d="M${x} ${grid_height - 1} V${MARGIN}"></path>`;
+      })
+      .join("");
+    return `${main_axes}${ticks}${vertical_lines}${ticks_labels}`;
+  }
+
+  _roundedRect(section_name, x, y, width, unit) {
+    return `
+<rect class="box ${unit.mode} ${section_name}" data-i="${unit.i}" x="${x}" y="${y}" width="${width}"
+  onmousemove="hl(${unit.i})"
+>
+</rect>`
+  }
+}
+
+// Determine the width of text for svg.
+function measure_text_width(text) {
+  let ctx;
+  let canvas = measure_text_width.canvas;
+  if (!canvas) {
+    canvas = (measure_text_width.canvas = document.createElement("canvas"));
+  }
+  ctx = canvas.getContext("2d");
+  ctx.font = '14px sans-serif';
+  const text_info = ctx.measureText(text);
+  return text_info.width;
+}
+
+// Gets the x-coordinate of the codegen section of a unit.
+//
+// This is for drawing rmeta dependency lines.
+function get_codegen_section_x(sections) {
+    const codegen_section = sections.find(s => s.name === "codegen")
+    if (!codegen_section) {
+        // This happens only when type-checking (e.g., `cargo check`)
+        return null;
+    }
+    return codegen_section.start;
+}
+
+function get_legend_entries(presentSections) {
+    let frontend_name = "Frontend/rest";
+    if (presentSections.has("other")) {
+      frontend_name = "Frontend";
+    }
+
+    const legend_entries = [{
+      name: frontend_name,
+      color: NOT_CUSTOM_BUILD_COLOR,
+      line: false
+    }];
+    if (presentSections.has("codegen")) {
+      legend_entries.push({
+        name: "Codegen",
+        color: CODEGEN_COLOR,
+        line: false
+      });
+    }
+    if (presentSections.has("link")) {
+      legend_entries.push({
+        name: "Linking",
+        color: LINK_COLOR,
+        line: false
+      });
+    }
+    if (presentSections.has("other")) {
+      legend_entries.push({
+        name: "Other",
+        color: OTHER_COLOR,
+        line: false
+      });
+    }
+  return legend_entries
+}
+
+function graph_dimension(graph_height) {
+  const scale = document.getElementById('scale').valueAsNumber;
+  const graph_width = scale_to_graph_width(scale);
+  const px_per_sec = graph_width / DURATION;
+  const canvas_width = Math.max(graph_width + X_LINE + 30, X_LINE + 250);
+  const canvas_height = graph_height + MARGIN + Y_LINE;
+  return { canvas_height, canvas_width, graph_height, graph_width, px_per_sec, scale }
+}
+
+// Determine the spacing and number of ticks along an axis.
+function split_ticks(max_value, px_per_v, max_px) {
+  const max_ticks = Math.floor(max_px / MIN_TICK_DIST);
+  if (max_ticks <= 1) {
+    // Graph is too small for even 1 tick.
+    return {step: max_value, tick_dist: max_px, num_ticks: 1};
+  }
+  let step;
+  if (max_value <= max_ticks) {
+    step = 1;
+  } else if (max_value <= max_ticks * 2) {
+    step = 2;
+  } else if (max_value <= max_ticks * 4) {
+    step = 4;
+  } else if (max_value <= max_ticks * 5) {
+    step = 5;
+  } else {
+    step = 10;
+    let count = 0;
+    while (true) {
+      if (count > 100) {
+        throw Error("tick loop too long");
+      }
+      count += 1;
+      if (max_value <= max_ticks * step) {
+        break;
+      }
+      step += 10;
+    }
+  }
+  const tick_dist = px_per_v * step;
+  const num_ticks = Math.floor(max_value / step);
+  return {step, tick_dist, num_ticks};
+}
+
+function hl(i) {
+  // Highlight dependency lines on mouse hover.
+  if (i === undefined || i == LAST_HOVER) {
+    return
+  }
+  LAST_HOVER = i;
+  let g = document.getElementById("hl-dep-lines");
+
+  if (g) {
+    const selector = '#boxes .dep-line[data-unblocked="'+i+'"],#boxes .dep-line[data-unblocked-by="' + i + '"]';
+    const lines = Array.from(document.querySelectorAll(selector)).map(el => el.outerHTML);
+    g.innerHTML = lines.join("");
+  }
+}
+
+let renderer = new SvgRenderer();
+try {
+  renderer.render_pipeline_graph();
+  renderer.render_timing_graph();
+} catch (err) {
+  console.error(err);
+}
+
+// Set up and handle controls.
+{
+  const range = document.getElementById('min-unit-time');
+  const time_output = document.getElementById('min-unit-time-output');
+  time_output.innerHTML = `${range.value}s`;
+  range.oninput = event => {
+    time_output.innerHTML = `${range.value}s`;
+    try {
+      renderer.render_pipeline_graph();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const scale = document.getElementById('scale');
+  const scale_output = document.getElementById('scale-output');
+  scale_output.innerHTML = `${scale.value}`;
+  scale.oninput = event => {
+    scale_output.innerHTML = `${scale.value}`;
+    try {
+      renderer.render_pipeline_graph();
+      renderer.render_timing_graph();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  Array.from(document.querySelectorAll("input[name='renderer']")).forEach(function(el) {
+    el.addEventListener("change", function(event) {
+      renderer = setupRenderer(event.target.value);
+      try {
+        renderer.render_pipeline_graph();
+        renderer.render_timing_graph();
+      } catch (err) {
+        console.error(err);
+      }
+    });
+  });
+}
+
+</script>
+</body>
+</html>
