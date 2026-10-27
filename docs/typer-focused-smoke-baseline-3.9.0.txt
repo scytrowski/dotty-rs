@@ -32,7 +32,7 @@ method_outcomes:
   method=library/src/scala/collection/StringParsers.scala#tree=1007::site=library/src/scala/collection/StringParsers.scala:243:isExp::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=1058::site=library/src/scala/collection/StringParsers.scala:245:expOK::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=1175::site=library/src/scala/collection/StringParsers.scala:240:isDecFloatLiteral::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
-  method=library/src/scala/collection/StringParsers.scala#tree=123::site=library/src/scala/collection/StringParsers.scala:41:rec::attempt=library/src/scala/collection/StringParsers.scala#tree=129::blocker=MemberLookup::typed=false
+  method=library/src/scala/collection/StringParsers.scala#tree=123::site=library/src/scala/collection/StringParsers.scala:41:rec::attempt=library/src/scala/collection/StringParsers.scala#tree=129::blocker=MemberNotFound::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=482::site=library/src/scala/collection/StringParsers.scala:109:step::attempt=library/src/scala/collection/StringParsers.scala#tree=550::blocker=TermNameNotFound::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=641::site=library/src/scala/collection/StringParsers.scala:144:step::attempt=library/src/scala/collection/StringParsers.scala#tree=710::blocker=MemberLookup::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=750::site=library/src/scala/collection/StringParsers.scala:186:rec::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
@@ -7541,6 +7541,7 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=892	prefix=java.lang::namespace=type::name=Tree::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   library/src/scala/collection/StringParsers.scala#tree=129	prefix=scala::namespace=type::name=Option::space=Prefix	external class success	-	-	kind=Class::origin=tasty::path=scala.Option
   library/src/scala/collection/StringParsers.scala#tree=129	prefix=scala::namespace=term::name=None::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=scala.None
+  library/src/scala/collection/StringParsers.scala#tree=129	prefix=scala::namespace=term::name=Some::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=scala.Some
   library/src/scala/collection/StringParsers.scala#tree=1361	prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   library/src/scala/collection/StringParsers.scala#tree=1361	prefix=scala::namespace=type::name=Function1::space=Prefix	external class success	-	-	kind=Trait::origin=tasty::path=scala.Function1
   library/src/scala/collection/StringParsers.scala#tree=1361	scala/annotation	package success	direct package evidence	package=scala/annotation::owner=scala	kind=Package::origin=synthetic::path=scala.annotation
@@ -7564,7 +7565,8 @@ resolver_observations:
   library/src/scala/collection/StringParsers.scala#tree=710	prefix=scala::namespace=type::name=Option::space=Prefix	external class success	-	-	kind=Class::origin=tasty::path=scala.Option
 blocker_counts:
   ApplicationCalleeNotMethod: count=11, files=1
-  MemberLookup: count=4, files=2
+  MemberLookup: count=3, files=2
+  MemberNotFound: count=1, files=1
   TermNameNotFound: count=2, files=2
   TypeNameNotFound: count=14, files=1
 resolver_metrics:
@@ -7572,11 +7574,11 @@ resolver_metrics:
   package_successes=883
   package_unresolved=3294
   package_errors=0
-  member_requests=3340
-  member_successes=826
+  member_requests=3341
+  member_successes=827
   member_unresolved=2514
   member_errors=0
-  class_symbol_successes=826
+  class_symbol_successes=827
 materialized_packages:
   dotty.tools.dotc
   dotty.tools.dotc.ast

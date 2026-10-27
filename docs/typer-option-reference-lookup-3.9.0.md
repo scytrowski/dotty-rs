@@ -25,10 +25,18 @@ typed.
 
 The new root allocates typed nodes before later roots in the same session, so
 the numeric `typed_tree` IDs for `isDefined` and `knownSize` move from 3 to 9
-and from 9 to 15. Their source roots, result types, and typed status remain the
-same. The deterministic audit compares normalized outcomes across two runs;
-the optional frozen-cohort gate also compares allocation IDs and therefore
-reports these expected shifts.
+and from 9 to 15. `nonEmpty` was blocked in the baseline cohort and has ID 18
+in the final cohort. These IDs are allocation-specific; the source roots,
+result types, and typed statuses are the stable outcomes. The deterministic
+audit compares normalized outcomes across two runs; the optional frozen-cohort
+gate also compares allocation IDs and therefore reports the expected shifts.
+
+The separate CI focused smoke audit covers 31 methods in three files. Its
+checked-in baseline records one related blocker progression in
+`StringParsers.rec`: the deferred generic-parent lookup now checks inherited
+field names safely and resolves `scala.None`, then reaches a later
+`MemberNotFound`. That method remains untyped; the focused baseline records the
+new diagnostic and resolver metrics explicitly.
 
 The baseline and final per-root cohort outcomes are recorded in
 [`typer-option-reference-lookup-3.9.0.tsv`](typer-option-reference-lookup-3.9.0.tsv).
@@ -44,9 +52,11 @@ The typer now accepts a canonical source class receiver when its source
 identity, package prefix, class scope, and applied type-parameter arity agree.
 It does not complete the whole class just to establish that a class is a
 reference type. Before selecting the registered `eq`/`ne` symbol, it checks
-same-named declarations in the current source class and resolvable source
-parents. This preserves direct and inherited source shadowing without
-instantiating unrelated external generic parents.
+same-named declarations in the current source class and source parents resolved
+through their full type-tree identities, including qualified and imported names.
+Shared ancestors in a diamond are visited once. This preserves direct and
+inherited source shadowing without instantiating unrelated external generic
+parents.
 
 For the identity argument, canonical source class values and module objects
 with a validated Object/ModuleClass relationship are viewed as `Object` for
