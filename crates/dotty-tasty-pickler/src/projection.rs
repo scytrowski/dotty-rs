@@ -983,6 +983,63 @@ impl<'a> EncodingContext<'a> {
         })
     }
 
+    /// Emits a checked reference to a class-owned template PARAM from a field
+    /// initializer. Scala 3.9 encodes this as TERMREFsymbol(param, THIS(class)).
+    pub(crate) fn class_template_parameter_reference(
+        &mut self,
+        class: SymbolId,
+        parameter: SymbolId,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|context| {
+            let class_label = *context
+                .declarations
+                .get(&class)
+                .ok_or(reference(class, ReferenceError::NotRegistered))?;
+            let parameter_label = *context
+                .declarations
+                .get(&parameter)
+                .ok_or(reference(parameter, ReferenceError::NotRegistered))?;
+            let class_record = context.symbol(class)?;
+            let parameter_record = context.symbol(parameter)?;
+            if class_record.kind != SymbolKind::Class
+                || class_record.origin != SymbolOrigin::Source(context.source)
+                || parameter_record.kind != SymbolKind::Parameter
+                || parameter_record.owner != Some(class)
+                || parameter_record.origin != SymbolOrigin::Source(context.source)
+                || !parameter_record.name.is_term()
+            {
+                return Err(reference(parameter, ReferenceError::Metadata));
+            }
+            let package = class_record
+                .owner
+                .ok_or(reference(class, ReferenceError::Owner))?;
+            let package_ref = context.package_reference(package)?;
+            let type_ref = context
+                .wire
+                .push(AstNode::NatAst {
+                    tag: TYPEREFSYMBOL_TAG,
+                    value: AstOperand::Reference(class_label),
+                    child: package_ref,
+                })
+                .map_err(construction)?;
+            let receiver = context
+                .wire
+                .push(AstNode::Ast {
+                    tag: THIS_TAG,
+                    child: type_ref,
+                })
+                .map_err(construction)?;
+            context
+                .wire
+                .push(AstNode::NatAst {
+                    tag: TERMREFSYMBOL_TAG,
+                    value: AstOperand::Reference(parameter_label),
+                    child: receiver,
+                })
+                .map_err(construction)
+        })
+    }
+
     /// Lowers a verified plain Int method application target as SELECTin.
     pub(crate) fn same_class_method_select_in(
         &mut self,
