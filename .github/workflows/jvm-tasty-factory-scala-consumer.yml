@@ -21,7 +21,7 @@ permissions:
 
 concurrency:
   group: jvm-tasty-factory-scala-consumer-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   consume-factory:
@@ -31,6 +31,7 @@ jobs:
     env:
       SCALA39_ROOT: ${{ github.workspace }}/scala39-source
       COURSIER_MAVEN_ROOT: ${{ github.workspace }}/.cache/coursier/v1/https/repo1.maven.org/maven2
+      SCALA39_SOURCE_SHA: 777528f19a58e794c9954a42f433373472ec57f8
 
     steps:
       - name: Check out dotty-rs
@@ -40,16 +41,25 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: scala/scala3
-          ref: 777528f19a58e794c9954a42f433373472ec57f8
+          ref: ${{ env.SCALA39_SOURCE_SHA }}
           path: scala39-source
           persist-credentials: false
 
       - name: Install pinned JDK 21.0.8
+        id: install-jdk
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21.0.8+9.0.LTS'
           check-latest: false
+          cache: sbt
+          cache-dependency-path: |
+            scala39-source/build.sbt
+            scala39-source/project/build.properties
+            scala39-source/project/*.sbt
+            scala39-source/project/*.scala
+            scala39-source/project/**/*.sbt
+            scala39-source/project/**/*.scala
 
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal
@@ -68,13 +78,22 @@ jobs:
       - name: Verify pinned source and JDK
         run: |
           set -euo pipefail
-          test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = "777528f19a58e794c9954a42f433373472ec57f8"
+          test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = "$SCALA39_SOURCE_SHA"
           grep -q '^JAVA_VERSION="21.0.8"$' "$JAVA_HOME/release"
           test -d "$JAVA_HOME/jmods"
           mkdir -p "$COURSIER_MAVEN_ROOT"
 
       - name: Install sbt runner
         uses: sbt/setup-sbt@v1
+
+      - name: Restore exact pinned Scala build outputs
+        id: scala-build-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            scala39-source/target
+            scala39-source/**/target
+          key: ${{ runner.os }}-${{ runner.arch }}-scala39-targets-${{ env.SCALA39_SOURCE_SHA }}-jdk21.0.8-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
 
       - name: Stage the pinned Scala source compiler
         run: cd "$SCALA39_ROOT" && sbt "dist/universal:stage"
@@ -103,6 +122,30 @@ jobs:
           org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar 92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3
           org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar 1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af
           ARTIFACTS
+
+      - name: Save exact pinned Scala build outputs
+        if: success() && steps.scala-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            scala39-source/target
+            scala39-source/**/target
+          key: ${{ runner.os }}-${{ runner.arch }}-scala39-targets-${{ env.SCALA39_SOURCE_SHA }}-jdk21.0.8-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
+
+      - name: Record Scala cache state and output size
+        env:
+          SCALA_BUILD_CACHE_HIT: ${{ steps.scala-build-cache.outputs.cache-hit }}
+          SCALA_DEPENDENCY_CACHE_HIT: ${{ steps.install-jdk.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          target_bytes="$(find "$SCALA39_ROOT" -type d -name target -prune -print0 | xargs -0 -r du -sb | awk '{sum += $1} END {print sum + 0}')"
+          {
+            echo '### Pinned Scala cache measurement'
+            echo "- Source SHA: $SCALA39_SOURCE_SHA"
+            echo "- Dependency cache hit: ${SCALA_DEPENDENCY_CACHE_HIT:-false}"
+            echo "- Build-output cache hit: ${SCALA_BUILD_CACHE_HIT:-false}"
+            echo "- Restored/generated Scala target bytes: $target_bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run strict linked Scala and TASTy oracle release gates
         env:
