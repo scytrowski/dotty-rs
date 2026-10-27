@@ -355,6 +355,67 @@ It does not validate a serialized constructor `PARAM`, field alias TASTy
 encoding, linked class/TASTy artifacts, or Scala consumer behavior. No
 production TASTy bytes, JVM bytes, or CLI are produced by this proof.
 
+## Original Rust JVM alias proof (#1757)
+
+The linked four-artifact batch is emitted twice from fresh Rust frontend
+sessions. Both `Counter.class` and `CounterOwner.class` bytes, TASTy sidecars,
+and class-to-sidecar UUIDs are identical across the sessions. The test stages
+all four artifacts, then places only the two original Rust-produced classfiles
+in a separate runtime classpath alongside the Java harness. `javac` and
+`java -Xverify:all` never see Scala-generated or `-from-tasty` rebuilt
+classes.
+
+The strict run used Eclipse Temurin `21.0.8+9` (`javac 21.0.8`), producing
+classfile major version 65. Before `javac`, the Rust classfile SHA-256 digests
+were:
+
+| Original Rust classfile | SHA-256 before `javac` and after `java -Xverify:all` |
+| --- | --- |
+| `Counter.class` | `a3d893c45a56e187fc1c19ce1e2160d035fd7965bff3cfaab3834d41e20a5e4f` |
+| `CounterOwner.class` | `83f9bed85e3b93d6a6c5591ee771408f4b2b350d574ebacca38d21adaae60c54` |
+
+`javap -v -p -c` and the classfile decoder show the public Owner constructor
+descriptor `(Lexample/Counter;)V`, `max_locals = 2`, and the exact instruction
+sequence `aload_0; invokespecial java/lang/Object.<init>()V; aload_0;
+aload_1; putfield CounterOwner.inner:Lexample/Counter;; return`. The referenced
+field is private final. Owner's constructor contains no `new` instruction or
+`Counter.<init>` call. `read()I` loads that field and invokes
+`example/Counter.get:()I`. `javap` confirms `Counter` has the private mutable
+`current:I` field and the public `<init>(I)V`, `get()I`, and `set(I)V` members.
+
+The harness receives `Counter(7)`, observes reads of `7`, `42`, and `-9` as
+that same object is mutated, and uses reflection to assert
+`CounterOwner.inner == counter` by reference identity. A second
+`Counter(3)`/Owner pair remains independent while both objects are mutated.
+The explicit harness checks finish with `identity=true; first=100; second=13`.
+The test verifies both original classfile hashes are unchanged after
+`javac` and after JVM execution.
+
+Negative controls cover the observed contract boundaries: the linked-batch
+validator rejects an invalid Owner constructor descriptor, field descriptor
+or final flag, wrong `Counter.get` dispatch target, forged argument local,
+an allocation opcode in place of the argument load, and a field store reordered
+before direct-super initialization. The alias contract suite also rejects a missing `CounterOwner`
+TASTy sidecar and a corrupt second classfile. With `Counter.class` omitted from
+the runtime classpath, `java -Xverify:all` reports
+`NoClassDefFoundError: example/Counter`. These are invalid artifacts or
+incomplete inputs; none is treated as a valid Rust-produced classfile.
+
+Reproduce the strict JDK runtime proof from the repository root:
+
+```sh
+PATH=/home/vdrake6/.jdks/jdk-21/bin:$PATH DOTTY_CLASSFILE_REQUIRE_JDK=1 \
+  cargo test -p dotty --test jvm_tasty_artifacts \
+  constructor_injected_reference_alias_executes_on_verified_jdk21 \
+  --locked -- --nocapture
+cargo test -p dotty --test jvm_tasty_contract \
+  constructor_reference_alias --locked
+```
+
+This proves the JVM behavior of the original Rust classfiles. It does not show
+that Scala consumed their TASTy; the independent pinned Scala consumer remains
+the separate #1758 gate.
+
 ## Validation
 
 The audit was reproduced with the pinned source compiler and JDK above. The
