@@ -97,6 +97,12 @@ opt-in Scala reader/runtime regression is `same_batch_reference_field_alias_targ
 in `tests/jvm_tasty_plan.rs`; enable it with
 `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`, `SCALA39_ROOT` set to the pinned
 Scala 3.9 checkout, and `JAVA_HOME` set to JDK 21.
+The root `dotty::jvm_tasty_artifacts` adapter can pair this TASTy plan with the
+same-session JVM plans for `Counter` and `CounterOwner`. Its contract verifies
+the `(Lexample/Counter;)V` constructor, the single incoming-reference field
+store, the `inner.get()` call targets, and each classfile's own sidecar UUID.
+The owned emitter validates the complete four-file batch before returning it;
+this orchestration remains outside the pickler crate.
 A method may have no value clause, one explicit
 empty clause, or one plain clause of ordinary Int or Boolean
 parameters. Parameter IDs, ownership, source scope, types and order must agree
