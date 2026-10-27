@@ -336,12 +336,44 @@ fn loads_scala39_source_with_its_applied_iterator_alias_parent() {
     let parent_names = parents
         .iter()
         .map(|parent| {
-            let symbol = store.types.get(*parent).reference_symbol().unwrap();
+            let tycon = match store.types.get(*parent) {
+                Type::Applied { tycon, .. } => *tycon,
+                _ => *parent,
+            };
+            let symbol = store.types.get(tycon).reference_symbol().unwrap();
             store.names.resolve(store.symbols.get(symbol).name.text())
         })
         .collect::<Vec<_>>();
     assert!(parent_names.contains(&"Closeable"));
     assert!(parent_names.contains(&"Iterator"));
+    let iterator_parent = parents
+        .iter()
+        .copied()
+        .find(|parent| {
+            let tycon = match store.types.get(*parent) {
+                Type::Applied { tycon, .. } => *tycon,
+                _ => *parent,
+            };
+            store
+                .types
+                .get(tycon)
+                .reference_symbol()
+                .is_some_and(|symbol| {
+                    store.names.resolve(store.symbols.get(symbol).name.text()) == "Iterator"
+                })
+        })
+        .expect("Source's Iterator parent should be present");
+    let Type::Applied { args, .. } = store.types.get(iterator_parent) else {
+        panic!("Source should retain the applied Iterator[Char] parent view")
+    };
+    assert_eq!(args.len(), 1);
+    let char_symbol = store.types.get(args[0]).reference_symbol().unwrap();
+    assert_eq!(
+        store
+            .names
+            .resolve(store.symbols.get(char_symbol).name.text()),
+        "Char"
+    );
 }
 
 #[test]

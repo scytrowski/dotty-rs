@@ -2464,6 +2464,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             parents.push(self.type_ref(parent));
         }
 
+        self.complete_class_with_parent_types(class_symbol, declarations, parents);
+    }
+
+    fn complete_class_with_parent_types(
+        &mut self,
+        class_symbol: SymbolId,
+        declarations: ScopeId,
+        parents: Vec<TypeId>,
+    ) {
         let class_info = self.store.types.alloc(Type::ClassInfo(ClassInfo {
             prefix: self.definitions.no_prefix,
             class: class_symbol,
@@ -2669,6 +2678,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 .get_mut(declarations)
                 .enter(symbol_name, symbol);
             entered.push((symbol, parameter));
+        }
+
+        if let Some(class_symbol) = class_symbol {
+            self.session.record_class_type_parameters(
+                class_symbol,
+                entered.iter().map(|(symbol, _)| *symbol).collect(),
+            );
         }
 
         let env = self.class_type_var_env(declarations, None);
@@ -3049,7 +3065,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
         let decoded =
             decoded.map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
-
         let origin = SymbolOrigin::Tasty(self.store.origins.register_tasty());
         let (class_symbol, declarations, origin) = self.enter_class(name, decoded.flags, origin)?;
         self.session.record_origin(class_symbol, resource_origin);
@@ -3069,10 +3084,47 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             self.store.symbols.get_mut(class_symbol).visibility = visibility;
         }
 
-        let super_class = self.load_dependency(name, decoded.super_class, inheritance_ancestry)?;
-        let mut interfaces = Vec::with_capacity(decoded.interfaces.len());
-        for dependency in decoded.interfaces {
-            interfaces.push(self.load_dependency(name, dependency, inheritance_ancestry)?);
+        let class_type_parameters = self.enter_tasty_class_type_parameters(
+            name,
+            declarations,
+            &decoded.type_parameters,
+            origin,
+        );
+
+        let super_class =
+            self.load_dependency(name, decoded.super_class.clone(), inheritance_ancestry)?;
+        let mut parents = Vec::with_capacity(decoded.interfaces.len() + 1);
+        let mut parent_symbols = Vec::with_capacity(decoded.interfaces.len() + 1);
+        parent_symbols.push(super_class);
+        for dependency in decoded.interfaces.iter().cloned() {
+            parent_symbols.push(self.load_dependency(name, dependency, inheritance_ancestry)?);
+        }
+        for (index, parent) in decoded
+            .parent_types
+            .iter()
+            .take(parent_symbols.len())
+            .enumerate()
+        {
+            let fallback = parent_symbols.get(index).copied();
+            let parent_type = parent
+                .as_ref()
+                .map(|parent| {
+                    self.lower_tasty_type(name, Some(parent), &[], &class_type_parameters)
+                })
+                .filter(|parent_type| !matches!(self.store.types.get(*parent_type), Type::Error(_)))
+                .or_else(|| fallback.map(|symbol| self.type_ref(symbol)));
+            if let Some(parent_type) = parent_type {
+                parents.push(parent_type);
+            }
+        }
+        if parents.len() != parent_symbols.len() {
+            parents.extend(
+                parent_symbols
+                    .iter()
+                    .skip(parents.len())
+                    .copied()
+                    .map(|symbol| self.type_ref(symbol)),
+            );
         }
 
         // `.tasty` annotation decoding is not built yet (unlike `.class`'s
@@ -3080,7 +3132,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // entered below simply keeps the empty `Symbol::annotations`
         // `enter_field`/`enter_method` already give it.
         for field in &decoded.fields {
-            let resolved_type = self.lower_tasty_member_type(name, field.declared_type.as_ref());
+            let resolved_type = self.lower_tasty_member_type_with_class_parameters(
+                name,
+                field.declared_type.as_ref(),
+                &class_type_parameters,
+            );
             self.enter_field(
                 class_symbol,
                 declarations,
@@ -3091,7 +3147,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             );
         }
         for method in &decoded.methods {
-            let resolved_type = self.lower_tasty_method(name, method);
+            let resolved_type =
+                self.lower_tasty_method_with_class_parameters(name, method, &class_type_parameters);
             self.enter_method(
                 class_symbol,
                 declarations,
@@ -3102,8 +3159,75 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             );
         }
 
-        self.complete_class(class_symbol, declarations, Some(super_class), interfaces);
+        self.complete_class_with_parent_types(class_symbol, declarations, parents);
         Ok(class_symbol)
+    }
+
+    fn enter_tasty_class_type_parameters(
+        &mut self,
+        owner: &BinaryName,
+        declarations: ScopeId,
+        parameters: &[tasty_symbol::DecodedTastyTypeParameter],
+        origin: SymbolOrigin,
+    ) -> Vec<TypeId> {
+        let class_symbol = self.store.scopes.get(declarations).owner;
+        let symbols = parameters
+            .iter()
+            .map(|parameter| {
+                let name = Name::new(self.store.names.intern(&parameter.name), Namespace::Type);
+                let symbol = self.store.symbols.alloc(Symbol {
+                    name,
+                    owner: class_symbol,
+                    kind: SymbolKind::TypeParameter,
+                    flags: SymbolFlags::EMPTY,
+                    visibility: Visibility::Public,
+                    info: SymbolInfo::Missing,
+                    origin,
+                    annotations: Vec::new(),
+                    position: None,
+                    links: SymbolLinks::default(),
+                });
+                self.store.scopes.get_mut(declarations).enter(name, symbol);
+                symbol
+            })
+            .collect::<Vec<_>>();
+        let references = symbols
+            .iter()
+            .copied()
+            .map(|symbol| self.type_ref(symbol))
+            .collect::<Vec<_>>();
+        if let Some(class_symbol) = class_symbol {
+            self.session
+                .record_class_type_parameters(class_symbol, symbols.clone());
+        }
+
+        for (symbol, parameter) in symbols.into_iter().zip(parameters) {
+            let (low, high) = if parameter.bounds_supported {
+                let low = match parameter.lower_bound.as_ref() {
+                    Some(bound) => self.lower_tasty_type(owner, Some(bound), &[], &references),
+                    None => {
+                        let nothing = self.definitions.nothing_class;
+                        self.type_ref(nothing)
+                    }
+                };
+                let high = parameter
+                    .upper_bound
+                    .as_ref()
+                    .map_or(self.definitions.any_type, |bound| {
+                        self.lower_tasty_type(owner, Some(bound), &[], &references)
+                    });
+                (low, high)
+            } else {
+                let unsupported =
+                    self.unresolved_tasty_type("unsupported class type parameter bounds");
+                (unsupported, unsupported)
+            };
+            let bounds = self.store.types.alloc(Type::Bounds { low, high });
+            self.store
+                .symbols
+                .set_info(symbol, SymbolInfo::Complete(bounds));
+        }
+        references
     }
 
     /// Resolves a `.tasty` member's declared type (already reduced to a
@@ -3131,26 +3255,23 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     fn lower_tasty_member_type(
         &mut self,
         owner: &BinaryName,
-        declared_type: Option<&BinaryName>,
+        declared_type: Option<&tasty_symbol::DecodedTastyType>,
     ) -> TypeId {
-        let Some(dependency) = declared_type else {
-            let message = self.store.names.intern(
-                "unresolved .tasty member type: tasty_symbol::decode could not reduce the \
-                 declared type tree to a name",
-            );
-            return self.store.types.alloc(Type::Error(ErrorType { message }));
-        };
+        self.lower_tasty_member_type_with_class_parameters(owner, declared_type, &[])
+    }
 
-        match self.ensure_dependency_identity(owner, dependency) {
-            Ok(symbol) => self.type_ref(symbol),
-            Err(error) => {
-                let text = format!(
-                    "unresolved .tasty member type: best-effort name {dependency} failed to load: {error}"
-                );
-                let message = self.store.names.intern(&text);
-                self.store.types.alloc(Type::Error(ErrorType { message }))
-            }
-        }
+    fn lower_tasty_member_type_with_class_parameters(
+        &mut self,
+        owner: &BinaryName,
+        declared_type: Option<&tasty_symbol::DecodedTastyType>,
+        class_type_parameters: &[TypeId],
+    ) -> TypeId {
+        let Some(declared_type) = declared_type else {
+            return self.unresolved_tasty_type(
+                "TASTy decoder could not reduce the declared type tree to a supported shape",
+            );
+        };
+        self.lower_tasty_type(owner, Some(declared_type), &[], class_type_parameters)
     }
 
     /// Lowers a [`tasty_symbol::DecodedTastyMethod`] into its semantic
@@ -3173,6 +3294,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         &mut self,
         owner: &BinaryName,
         method: &tasty_symbol::DecodedTastyMethod,
+    ) -> TypeId {
+        self.lower_tasty_method_with_class_parameters(owner, method, &[])
+    }
+
+    fn lower_tasty_method_with_class_parameters(
+        &mut self,
+        owner: &BinaryName,
+        method: &tasty_symbol::DecodedTastyMethod,
+        class_type_parameters: &[TypeId],
     ) -> TypeId {
         let poly_binder = (!method.type_parameters.is_empty()).then(|| self.store.types.reserve());
         let type_parameter_refs = poly_binder
@@ -3198,13 +3328,20 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         owner,
                         parameter.lower_bound.as_ref(),
                         &type_parameter_refs,
+                        class_type_parameters,
                     );
-                    let high = parameter
-                        .upper_bound
-                        .as_ref()
-                        .map_or(self.definitions.any_type, |ty| {
-                            self.lower_tasty_type(owner, Some(ty), &type_parameter_refs)
-                        });
+                    let high =
+                        parameter
+                            .upper_bound
+                            .as_ref()
+                            .map_or(self.definitions.any_type, |ty| {
+                                self.lower_tasty_type(
+                                    owner,
+                                    Some(ty),
+                                    &type_parameter_refs,
+                                    class_type_parameters,
+                                )
+                            });
                     (low, high)
                 } else {
                     let error =
@@ -3233,6 +3370,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 owner,
                 parameter.declared_type.as_ref(),
                 &type_parameter_refs,
+                class_type_parameters,
             );
             let text = self.store.names.intern(&parameter.name);
             params.push(MethodParam {
@@ -3246,7 +3384,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let result = if method.name == "<init>" {
             self.definitions.unit
         } else {
-            self.lower_tasty_type(owner, method.return_type.as_ref(), &type_parameter_refs)
+            self.lower_tasty_type(
+                owner,
+                method.return_type.as_ref(),
+                &type_parameter_refs,
+                class_type_parameters,
+            )
         };
 
         let method_type = if method.has_term_clause || method.name == "<init>" {
@@ -3278,10 +3421,20 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         owner: &BinaryName,
         declared_type: Option<&tasty_symbol::DecodedTastyType>,
         type_parameters: &[TypeId],
+        class_type_parameters: &[TypeId],
     ) -> TypeId {
         match declared_type {
             Some(tasty_symbol::DecodedTastyType::Named(name)) => {
-                self.lower_tasty_member_type(owner, Some(name))
+                match self.ensure_dependency_identity(owner, name) {
+                    Ok(symbol) => self.type_ref(symbol),
+                    Err(error) => {
+                        let text = format!(
+                            "unresolved .tasty member type: best-effort name {name} failed to load: {error}"
+                        );
+                        let message = self.store.names.intern(&text);
+                        self.store.types.alloc(Type::Error(ErrorType { message }))
+                    }
+                }
             }
             Some(tasty_symbol::DecodedTastyType::ParamRef(index)) => type_parameters
                 .get(*index as usize)
@@ -3289,21 +3442,38 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 .unwrap_or_else(|| {
                     self.unresolved_tasty_type("type parameter reference is out of range")
                 }),
-            Some(tasty_symbol::DecodedTastyType::ClassParamRef(index)) => {
-                let message = self.store.names.intern(&format!(
-                    "unresolved .tasty class type parameter reference: #{index}"
-                ));
-                self.store.types.alloc(Type::Error(ErrorType { message }))
-            }
+            Some(tasty_symbol::DecodedTastyType::ClassParamRef(index)) => class_type_parameters
+                .get(*index as usize)
+                .copied()
+                .unwrap_or_else(|| {
+                    self.unresolved_tasty_type("class type parameter reference is out of range")
+                }),
             Some(tasty_symbol::DecodedTastyType::Applied { tycon, arguments }) => {
-                let tycon = self.lower_tasty_type(owner, Some(tycon), type_parameters);
+                let tycon = self.lower_tasty_type(
+                    owner,
+                    Some(tycon),
+                    type_parameters,
+                    class_type_parameters,
+                );
                 let args = arguments
                     .iter()
-                    .map(|argument| self.lower_tasty_type(owner, Some(argument), type_parameters))
+                    .map(|argument| {
+                        self.lower_tasty_type(
+                            owner,
+                            Some(argument),
+                            type_parameters,
+                            class_type_parameters,
+                        )
+                    })
                     .collect();
                 self.store.types.alloc(Type::Applied { tycon, args })
             }
-            None => self.lower_tasty_member_type(owner, None),
+            Some(tasty_symbol::DecodedTastyType::Unsupported) => self.unresolved_tasty_type(
+                "TASTy type tree is outside the supported projection subset",
+            ),
+            None => self.unresolved_tasty_type(
+                "TASTy decoder could not reduce the declared type tree to a supported shape",
+            ),
         }
     }
 
@@ -8157,7 +8327,8 @@ mod tests {
             ])),
             &mut store,
         );
-        let fallback = loader.lower_tasty_member_type(&name, Some(&broken));
+        let broken_type = tasty_symbol::DecodedTastyType::Named(broken.clone());
+        let fallback = loader.lower_tasty_member_type(&name, Some(&broken_type));
         let Type::Error(error) = loader.store.types.get(fallback) else {
             panic!("TASTy fallback")
         };
@@ -8493,7 +8664,9 @@ mod tests {
             )])),
             &mut store,
         );
-        let ty = loader.lower_tasty_member_type(&BinaryName::from_internal("Owner"), Some(&name));
+        let declared = tasty_symbol::DecodedTastyType::Named(name.clone());
+        let ty =
+            loader.lower_tasty_member_type(&BinaryName::from_internal("Owner"), Some(&declared));
         let id = parent_symbol(loader.store, ty);
         assert_eq!(loader.store.symbols.get(id).info, SymbolInfo::Missing);
         assert_eq!(loader.ensure_class_identity(&name).unwrap(), id);
@@ -9636,9 +9809,9 @@ mod tests {
     /// above covers "a name was guessed but failed to load" end to end
     /// through a real fixture, so this covers the other path directly:
     /// `declared_type` genuinely `None` (`tasty_symbol::decode` itself
-    /// could not reduce the type tree to any name at all).
+    /// could not reduce the type tree to a supported shape at all).
     #[test]
-    fn unresolved_tasty_member_type_names_the_reason_when_no_name_was_reduced_at_all() {
+    fn unresolved_tasty_member_type_names_the_reason_when_no_shape_was_reduced_at_all() {
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
 
@@ -9650,7 +9823,7 @@ mod tests {
             panic!("expected a Type::Error");
         };
         let message = store.names.resolve(error.message);
-        assert!(message.contains("could not reduce the declared type tree to a name"));
+        assert!(message.contains("could not reduce the declared type tree to a supported shape"));
     }
 
     /// `tasty_symbol::decodes_a_private_class_with_a_generic_mixin_naming_its_own_enclosing_class`

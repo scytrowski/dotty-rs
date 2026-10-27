@@ -10,8 +10,10 @@ use std::collections::HashMap;
 /// [`SemanticStore`](dotty_core::SemanticStore) session — which class names
 /// have a canonical identity (`identified`), or have been fully loaded and
 /// completed (`resolved`), the `PackageRegistry` (which package paths have already
-/// been resolved to which package `SymbolId`), and each resolved symbol's
-/// own [`ClassfileMetadata`]/[`ClassOrigin`] sidecar data.
+/// been resolved to which package `SymbolId`), each resolved symbol's
+/// own [`ClassfileMetadata`]/[`ClassOrigin`] sidecar data, and the ordered
+/// canonical class type-parameter symbols needed to adapt applied parent/member
+/// types across classloader instances.
 ///
 /// `Definitions` (`ClassLoader::with_definitions`) already solved this for
 /// the builtin `Object`/`Any`/`Nothing`/primitive identities — bootstrap
@@ -23,7 +25,7 @@ use std::collections::HashMap;
 /// `java/util/List` and its `java/util` package the same way they already
 /// agree on `Object`'s — otherwise `TypeRef` equality and any later
 /// AST/Symbol lookup would depend on which loader happened to load a given
-/// class first. `metadata`/`origins` extend that same reasoning to
+/// class first. `metadata`/`origins`/`class_type_parameters` extend that same reasoning to
 /// provenance: a `SymbolId` a later loader picks up from `resolved` (rather
 /// than loading it itself) must still resolve to real `ClassLoader::metadata`/
 /// `ClassLoader::origin` lookups, not silently go `None` just because a
@@ -73,6 +75,8 @@ pub struct LoadingSession {
     pub(crate) packages: PackageRegistry,
     pub(crate) metadata: HashMap<SymbolId, ClassfileMetadata>,
     metadata_order: Vec<SymbolId>,
+    pub(crate) class_type_parameters: HashMap<SymbolId, Vec<SymbolId>>,
+    class_type_parameters_undo: Vec<(SymbolId, Option<Vec<SymbolId>>)>,
     pub(crate) origins: HashMap<SymbolId, ClassOrigin>,
     origin_undo: Vec<(SymbolId, Option<ClassOrigin>)>,
     symbol_undo: Vec<(SymbolId, Symbol)>,
@@ -84,6 +88,7 @@ pub(crate) struct SessionCheckpoint {
     modules: usize,
     resolved: usize,
     metadata: usize,
+    class_type_parameters: usize,
     origins: usize,
     symbols: usize,
     packages: (usize, usize),
@@ -122,6 +127,8 @@ impl LoadingSession {
             packages: PackageRegistry::new(),
             metadata: HashMap::new(),
             metadata_order: Vec::new(),
+            class_type_parameters: HashMap::new(),
+            class_type_parameters_undo: Vec::new(),
             origins: HashMap::new(),
             origin_undo: Vec::new(),
             symbol_undo: Vec::new(),
@@ -134,6 +141,7 @@ impl LoadingSession {
             modules: self.module_order.len(),
             resolved: self.resolved_order.len(),
             metadata: self.metadata_order.len(),
+            class_type_parameters: self.class_type_parameters_undo.len(),
             origins: self.origin_undo.len(),
             symbols: self.symbol_undo.len(),
             packages: self.packages.checkpoint(),
@@ -200,6 +208,18 @@ impl LoadingSession {
         self.metadata.insert(symbol, metadata);
     }
 
+    pub(crate) fn record_class_type_parameters(
+        &mut self,
+        class: SymbolId,
+        parameters: Vec<SymbolId>,
+    ) {
+        if self.class_type_parameters.get(&class) == Some(&parameters) {
+            return;
+        }
+        let previous = self.class_type_parameters.insert(class, parameters);
+        self.class_type_parameters_undo.push((class, previous));
+    }
+
     pub(crate) fn rollback_to(
         &mut self,
         store: &mut dotty_core::SemanticStore,
@@ -229,6 +249,17 @@ impl LoadingSession {
         while self.metadata_order.len() > checkpoint.metadata {
             let symbol = self.metadata_order.pop().expect("length checked");
             self.metadata.remove(&symbol);
+        }
+        while self.class_type_parameters_undo.len() > checkpoint.class_type_parameters {
+            let (class, previous) = self
+                .class_type_parameters_undo
+                .pop()
+                .expect("length checked");
+            if let Some(previous) = previous {
+                self.class_type_parameters.insert(class, previous);
+            } else {
+                self.class_type_parameters.remove(&class);
+            }
         }
         while self.origin_undo.len() > checkpoint.origins {
             let (symbol, previous) = self.origin_undo.pop().expect("length checked");
@@ -375,5 +406,27 @@ mod tests {
 
         assert!(!session.metadata.contains_key(&identity));
         assert_eq!(session.origins.get(&identity), Some(&origin));
+    }
+
+    #[test]
+    fn class_type_parameter_metadata_rolls_back_insertions_and_replacements() {
+        let mut store = SemanticStore::new();
+        let class = symbol(&mut store, "Generic");
+        let first = symbol(&mut store, "A");
+        let replacement = symbol(&mut store, "B");
+        let new_class = symbol(&mut store, "NewGeneric");
+        let mut session = LoadingSession::new();
+        session.record_class_type_parameters(class, vec![first]);
+        let existing = session.checkpoint();
+
+        session.record_class_type_parameters(class, vec![replacement]);
+        session.record_class_type_parameters(new_class, vec![replacement]);
+        session.rollback_to(&mut store, existing);
+
+        assert_eq!(
+            session.class_type_parameters.get(&class),
+            Some(&vec![first])
+        );
+        assert!(!session.class_type_parameters.contains_key(&new_class));
     }
 }

@@ -126,6 +126,18 @@ impl std::error::Error for ResolutionError {}
 /// Supplies symbols an adapter did not enter itself. See the module docs for
 /// the contract.
 pub trait SymbolResolver {
+    /// Returns the class's canonical type-parameter symbols in declaration
+    /// order when this resolver owns the class. The order is semantic data:
+    /// callers must not infer it from a name lookup scope, whose iteration
+    /// order is intentionally unspecified.
+    fn class_type_parameters(
+        &self,
+        _store: &SemanticStore,
+        _class: SymbolId,
+    ) -> Option<Vec<SymbolId>> {
+        None
+    }
+
     /// Reports whether a package child and a classpath Object provide
     /// competing evidence for the same package-qualified name.
     fn package_object_collision(
