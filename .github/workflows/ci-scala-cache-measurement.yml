@@ -2,6 +2,8 @@ name: Phase 2 Scala cache measurement (temporary)
 
 on:
   pull_request:
+    types:
+      - opened
     branches:
       - main
     paths:
@@ -202,7 +204,7 @@ jobs:
             --test jvm_tasty_cross_class_factories \
             --test tasty_source_pickling \
             --locked -- --nocapture
-          echo "scala_tasty_gate_seconds\t$(($(date -u +%s) - start))" >> target/scala-cache-measurement/provenance.tsv
+          printf "scala_tasty_gate_seconds\\t%s\\n" "$(($(date -u +%s) - start))" >> target/scala-cache-measurement/provenance.tsv
 
       - name: Run mandatory Java 21 verifier and publisher gate
         env:
@@ -216,12 +218,12 @@ jobs:
             --test jvm_tasty_artifacts \
             --test jvm_stateful_class_contract \
             --locked -- --nocapture
-          echo "java21_gate_seconds\t$(($(date -u +%s) - start))" >> target/scala-cache-measurement/provenance.tsv
+          printf "java21_gate_seconds\\t%s\\n" "$(($(date -u +%s) - start))" >> target/scala-cache-measurement/provenance.tsv
 
       - name: Record check completion and publish measurement artifact
         if: always()
         run: |
-          echo "checks_finished_utc\t$(date -u +%FT%TZ)" >> target/scala-cache-measurement/provenance.tsv
+          printf "checks_finished_utc\\t%s\\n" "$(date -u +%FT%TZ)" >> target/scala-cache-measurement/provenance.tsv
 
       - name: Upload sample metadata
         if: always()
