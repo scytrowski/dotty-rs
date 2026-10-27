@@ -164,6 +164,7 @@ impl SourceTyper<'_> {
             argument_index,
             depth,
         } = location;
+        let actual = self.this_type_receiver_view(actual)?;
         if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
             return Err(TyperError::UnsupportedInferenceShape {
                 source: self.source,

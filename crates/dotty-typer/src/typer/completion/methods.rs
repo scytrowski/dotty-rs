@@ -3,6 +3,181 @@
 use super::*;
 
 impl SourceTyper<'_> {
+    pub(super) fn generated_case_class_for_apply(
+        &self,
+        method: SymbolId,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        let method_symbol = self.store.symbols.get(method);
+        let owner = method_symbol.owner?;
+        if source != self.source
+            || method_symbol.kind != SymbolKind::Method
+            || !method_symbol.flags.contains(SymbolFlags::SYNTHETIC)
+            || self.store.names.resolve(method_symbol.name.text()) != "apply"
+            || method_symbol.name.namespace() != dotty_core::Namespace::Term
+            || method_symbol.origin != SymbolOrigin::Source(source)
+            || self.store.symbols.get(owner).kind != SymbolKind::ModuleClass
+            || self.index.definition_of(method) != Some(SourceDefinition::Derived { source, tree })
+            || self.index.derived_symbol_at(owner, source, tree) != Some(method)
+        {
+            return None;
+        }
+        let class = self.index.symbol_at(source, tree)?;
+        if self.index.definition_of(class) != Some(SourceDefinition::Canonical { source, tree }) {
+            return None;
+        }
+        let class_symbol = self.store.symbols.get(class);
+        if class_symbol.kind != SymbolKind::Class
+            || !class_symbol.flags.contains(SymbolFlags::CASE)
+            || class_symbol.origin != SymbolOrigin::Source(source)
+        {
+            return None;
+        }
+        let object = class_symbol.links.companion?;
+        if !self.store.symbols.contains(object) {
+            return None;
+        }
+        let object_symbol = self.store.symbols.get(object);
+        if object_symbol.kind != SymbolKind::Object
+            || object_symbol.owner != class_symbol.owner
+            || object_symbol.links.companion != Some(class)
+            || self.source_module_class_of_object(object).ok()? != owner
+            || !matches!(
+                self.arena.try_get(tree).map(|node| &node.kind),
+                Some(TreeKind::TypeDef(definition))
+                    if definition.metadata.modifiers.contains(&dotty_core::ast::Modifier::Case)
+            )
+        {
+            return None;
+        }
+        Some(class)
+    }
+
+    pub(super) fn complete_generated_case_class_apply_signature(
+        &mut self,
+        method: SymbolId,
+        class: SymbolId,
+        source: SourceId,
+        class_tree: TreeId<Untyped>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let Some(TreeKind::TypeDef(class_definition)) =
+            self.arena.try_get(class_tree).map(|node| &node.kind)
+        else {
+            return Err(TyperError::SymbolSourceKindMismatch {
+                source,
+                tree_index: class_tree.index(),
+                symbol: method,
+                kind: SymbolKind::Method,
+            });
+        };
+        let Some(TreeKind::Template(template)) = self
+            .arena
+            .try_get(class_definition.rhs)
+            .map(|node| &node.kind)
+        else {
+            return Err(TyperError::MalformedMethodClause {
+                method,
+                method_tree_index: class_tree.index(),
+                clause_index: 0,
+            });
+        };
+        let Some(TreeKind::DefDef(constructor)) = self
+            .arena
+            .try_get(template.constructor)
+            .map(|node| &node.kind)
+        else {
+            return Err(TyperError::MalformedMethodClause {
+                method,
+                method_tree_index: class_tree.index(),
+                clause_index: 0,
+            });
+        };
+        if constructor.value_param_clauses.len() != 1
+            || constructor.value_param_clauses[0].is_empty()
+        {
+            return Err(TyperError::MalformedMethodClause {
+                method,
+                method_tree_index: class_tree.index(),
+                clause_index: 0,
+            });
+        }
+
+        let type_parameters = self.type_parameter_specs(
+            method,
+            &constructor.type_params,
+            true,
+            info_journal,
+            class_tree.index(),
+            0,
+        )?;
+        let (value_parameters, kind) = self.method_parameter_specs(
+            method,
+            &constructor.value_param_clauses[0],
+            true,
+            class_tree.index(),
+            usize::from(!type_parameters.is_empty()),
+            info_journal,
+        )?;
+        if kind != MethodKind::Plain {
+            return Err(TyperError::MalformedMethodClause {
+                method,
+                method_tree_index: class_tree.index(),
+                clause_index: usize::from(!type_parameters.is_empty()),
+            });
+        }
+
+        let class_owner = self
+            .store
+            .symbols
+            .get(class)
+            .owner
+            .ok_or(TyperError::DeclarationContextMissing { symbol: class })?;
+        let prefix = self
+            .store
+            .types
+            .alloc(Type::ThisType { class: class_owner });
+        let tycon = self.store.types.alloc(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(class),
+        });
+        let arguments = type_parameters
+            .iter()
+            .map(|parameter| {
+                self.store.types.alloc(Type::TypeRef {
+                    prefix: self.definitions.no_prefix,
+                    target: TypeRefTarget::Symbol(parameter.symbol),
+                })
+            })
+            .collect::<Vec<_>>();
+        let result = if arguments.is_empty() {
+            tycon
+        } else {
+            self.store.types.alloc(Type::Applied {
+                tycon,
+                args: arguments,
+            })
+        };
+        let method_type = method_type_from_symbols(self.store, &value_parameters, result, kind)
+            .map_err(|error| TyperError::TypeRebinding {
+                source,
+                tree_index: class_tree.index(),
+                error,
+            })?;
+        if type_parameters.is_empty() {
+            Ok(method_type)
+        } else {
+            poly_type_from_symbols(self.store, &type_parameters, method_type).map_err(|error| {
+                TyperError::TypeRebinding {
+                    source,
+                    tree_index: class_tree.index(),
+                    error,
+                }
+            })
+        }
+    }
+
     pub(super) fn complete_method_signature(
         &mut self,
         method: SymbolId,

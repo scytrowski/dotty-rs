@@ -714,7 +714,7 @@ impl SourceTyper<'_> {
                     expected_type,
                     info_journal,
                 )?;
-                (typed_argument.typed, actual)
+                (typed_argument.typed, self.this_type_receiver_view(actual)?)
             } else {
                 let argument = self.type_value_expression_inner(
                     *argument_tree,
@@ -728,7 +728,7 @@ impl SourceTyper<'_> {
                     expected_type,
                     info_journal,
                 )?;
-                (argument, actual)
+                (argument, self.this_type_receiver_view(actual)?)
             };
             match self.conforms(actual, expected_type) {
                 Ok(true) => {}

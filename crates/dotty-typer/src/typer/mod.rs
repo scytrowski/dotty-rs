@@ -3717,6 +3717,83 @@ mod tests {
     }
 
     #[test]
+    fn generated_case_class_apply_infers_arguments_from_generic_this() {
+        let source_text = "class Box[A] { def project: Box.Projection[A] = Box.Projection(this) }; object Box { case class Projection[A](value: Box[A]) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let projection = class_symbol(&parsed, &store, &index, source, "Projection");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "project");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let Type::Applied { tycon, args } =
+            typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("expected the generated apply to return Projection[A]");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), projection);
+        assert_eq!(args.len(), 1);
+        assert!(matches!(
+            typer.store().types.get(args[0]),
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn generated_case_class_apply_signature_works_with_explicit_companion() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "object Owners { case class Node[A](value: A); object Node { val marker = 1 } }",
+        );
+        let node = class_symbol(&parsed, &store, &index, source, "Node");
+        let SourceDefinition::Canonical { tree, .. } = index.definition_of(node).unwrap() else {
+            panic!("expected the Node source class definition");
+        };
+        let companion = store.symbols.get(node).links.companion.unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let companion_module_class = typer.source_module_class_of_object(companion).unwrap();
+        let apply = typer
+            .index
+            .derived_symbol_at(companion_module_class, source, tree)
+            .expect("the source case class should contribute a generated apply");
+
+        let apply_info = typer.complete_symbol(apply).unwrap();
+        let Type::Poly(poly) = typer.store().types.get(apply_info) else {
+            panic!("expected a polymorphic generated apply signature");
+        };
+        assert_eq!(poly.params.len(), 1);
+        let Type::Method(method) = typer.store().types.get(poly.result) else {
+            panic!("expected a generated apply value clause");
+        };
+        assert_eq!(method.params.len(), 1);
+        let Type::Applied { tycon, args } = typer.store().types.get(method.result) else {
+            panic!("expected the generated apply result to be Node[A]");
+        };
+        assert_eq!(args.len(), 1);
+        assert_eq!(type_symbol(typer.store(), *tycon), node);
+    }
+
+    #[test]
     fn source_parent_adaptation_rejects_an_unrelated_receiver_owner() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class Parent[A, B]; class Child[A, B] extends Parent[A, B]; class Other[A, B]",

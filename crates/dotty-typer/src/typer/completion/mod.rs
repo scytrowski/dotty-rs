@@ -251,6 +251,20 @@ impl SourceTyper<'_> {
                 | SymbolKind::Trait,
                 TreeKind::TypeDef(_),
             ) => None,
+            (SymbolKind::ModuleClass, TreeKind::TypeDef(_))
+                if self
+                    .generated_case_class_for_companion_module_class(symbol, source, tree)
+                    .is_some() =>
+            {
+                None
+            }
+            (SymbolKind::Method, TreeKind::TypeDef(_))
+                if self
+                    .generated_case_class_for_apply(symbol, source, tree)
+                    .is_some() =>
+            {
+                None
+            }
             // Namer records both object term and derived module class against
             // the original parser-only `ModuleDef`; keep their semantic
             // dispatch distinct even though their source tree is shared.
@@ -345,21 +359,39 @@ impl SourceTyper<'_> {
                 self.complete_type_alias(symbol, rhs, tree.index(), context, info_journal)
             }
             SymbolKind::Method => {
-                let definition = method_definition.ok_or(TyperError::SymbolSourceKindMismatch {
-                    source,
-                    tree_index: tree.index(),
-                    symbol,
-                    kind,
-                })?;
-                let info = if self.local_methods.contains_symbol(symbol) {
-                    self.complete_local_method_signature(
+                let info = if let Some(class) =
+                    self.generated_case_class_for_apply(symbol, source, tree)
+                {
+                    self.complete_generated_case_class_apply_signature(
                         symbol,
-                        tree.index(),
-                        &definition,
+                        class,
+                        source,
+                        tree,
                         info_journal,
                     )?
                 } else {
-                    self.complete_method_signature(symbol, tree.index(), &definition, info_journal)?
+                    let definition =
+                        method_definition.ok_or(TyperError::SymbolSourceKindMismatch {
+                            source,
+                            tree_index: tree.index(),
+                            symbol,
+                            kind,
+                        })?;
+                    if self.local_methods.contains_symbol(symbol) {
+                        self.complete_local_method_signature(
+                            symbol,
+                            tree.index(),
+                            &definition,
+                            info_journal,
+                        )?
+                    } else {
+                        self.complete_method_signature(
+                            symbol,
+                            tree.index(),
+                            &definition,
+                            info_journal,
+                        )?
+                    }
                 };
                 let previous = *self.store.symbols.info(symbol);
                 info_journal.push((symbol, previous));
