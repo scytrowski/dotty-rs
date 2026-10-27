@@ -39,6 +39,8 @@ const IDENTITY_CROSS_CLASS_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterIdentitySource.scala");
 const TASTY_OBJECT_COMPOSITION_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_object_composition/CounterOwner.scala");
+const TASTY_CONSTRUCTOR_INJECTION_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_constructor_injection/CounterOwner.scala");
 
 type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
@@ -7088,6 +7090,122 @@ fn exact_tasty_object_composition_fixture_emits_reference_field_and_executes() {
         assert!(
             java.status.success(),
             "java -Xverify:all rejected object-composition harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
+
+#[test]
+fn constructor_injected_reference_alias_emits_and_preserves_object_identity() {
+    let output = TestOutputDirectory::new("constructor-injected-reference-alias");
+    let artifacts = compile_source_classes(
+        TASTY_CONSTRUCTOR_INJECTION_SOURCE,
+        "CounterOwner.scala",
+        output.path(),
+    )
+    .expect("the pinned constructor-alias audit source compiles through one source batch");
+    assert_eq!(artifacts.len(), 2);
+    let owner_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "example/CounterOwner")
+        .expect("CounterOwner is emitted from the same source unit");
+    let owner = decode_emitted_class(owner_artifact);
+    assert_eq!((owner.version.major, owner.version.minor), (65, 0));
+    let [inner] = owner.fields.as_slice() else {
+        panic!("CounterOwner has one physical field");
+    };
+    assert_eq!(owner.constant_pool.utf8(inner.name_index), Ok("inner"));
+    assert_eq!(
+        owner.constant_pool.utf8(inner.descriptor_index),
+        Ok("Lexample/Counter;")
+    );
+    assert!(inner.access_flags.is_private());
+    assert!(inner.access_flags.is_final());
+
+    let constructor = emitted_method_code(&owner, "<init>");
+    assert_opcode_sequence(constructor, &[0x2a, 0xb7, 0x2a, 0x2b, 0xb5, 0xb1]);
+    assert_invocation_sequence(
+        &owner,
+        constructor,
+        &[(0xb7, "java/lang/Object", "<init>", "()V")],
+    );
+    assert_field_reference(
+        &owner,
+        constructor,
+        0xb5,
+        "example/CounterOwner",
+        "inner",
+        "Lexample/Counter;",
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&owner, "read"),
+        &[0x2a, 0xb4, 0xb6, 0xac],
+    );
+    assert_field_reference(
+        &owner,
+        emitted_method_code(&owner, "read"),
+        0xb4,
+        "example/CounterOwner",
+        "inner",
+        "Lexample/Counter;",
+    );
+    assert_invocation_sequence(
+        &owner,
+        emitted_method_code(&owner, "read"),
+        &[(0xb6, "example/Counter", "get", "()I")],
+    );
+
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("ConstructorAliasHarness.java");
+        fs::write(
+            &harness,
+            r#"public final class ConstructorAliasHarness {
+  public static void main(String[] args) throws Exception {
+    example.Counter supplied = new example.Counter(7);
+    example.CounterOwner owner = new example.CounterOwner(supplied);
+    if (owner.read() != 7) throw new AssertionError("initial aliased value");
+    supplied.set(42);
+    if (owner.read() != 42) throw new AssertionError("owner observes mutation of supplied object");
+    supplied.set(-9);
+    if (owner.read() != -9) throw new AssertionError("owner retains the same supplied object");
+    example.Counter independent = new example.Counter(3);
+    example.CounterOwner independentOwner = new example.CounterOwner(independent);
+    supplied.set(10);
+    if (independentOwner.read() != 3) throw new AssertionError("separate owner stays independent");
+    var field = example.CounterOwner.class.getDeclaredField("inner");
+    field.setAccessible(true);
+    if (field.get(owner) != supplied) throw new AssertionError("field is the identical supplied object");
+  }
+}
+"#,
+        )
+        .expect("write constructor-alias runtime harness");
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac for constructor-alias harness");
+        assert!(
+            javac.status.success(),
+            "javac rejected constructor-alias harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-ea",
+                "-classpath",
+                classpath,
+                "ConstructorAliasHarness",
+            ])
+            .output()
+            .expect("start JDK verifier for constructor-alias harness");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected constructor-alias classes\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&java.stdout),
             String::from_utf8_lossy(&java.stderr)
         );
