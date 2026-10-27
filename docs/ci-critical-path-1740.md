@@ -132,10 +132,18 @@ optimized because the unoptimized profile fails the stack-depth test.
 
 The candidate changed only `.github/workflows/ci.yml`, so hosted validation
 exercised all default CI gates; path-filtered Scala and focused-Typer workflows
-did not trigger. The test command and quality commands were unchanged, both
-candidate jobs were unconditional, and no step uses `continue-on-error`. Any
-failed step therefore fails its job and the CI workflow. No intentionally
-failing source commit was pushed; failure propagation follows the unchanged
-commands and GitHub's default job aggregation. The final implementation keeps
-the workflow layout unchanged because the measured candidate did not produce a
-net benefit.
+did not trigger. For a negative control, a temporary test
+(`tests/ci_failure_probe_1740.rs`) was added in one PR update and removed before
+the final head. In [run 40472697314](https://github.com/scytrowski/dotty-rs/actions/runs/40472697314),
+that test panicked as intended, the unchanged `Run tests` step exited 101, the
+`Rust checks` job failed, and the overall CI workflow concluded `failure`; the
+separate Classfile JVM gate passed. The `tests/**` change also triggered the
+pinned Scala consumer path filter, which passed in
+[run 40472697370](https://github.com/scytrowski/dotty-rs/actions/runs/40472697370).
+This verifies that a failing test remains visible and that relevant tests-path
+edits select the Scala consumer.
+
+The final workflow has no `continue-on-error` or conditional success shortcut;
+any failed job makes CI fail. The temporary probe is absent from the final PR
+diff. The workflow layout remains unchanged because the measured split did not
+produce a net benefit.
