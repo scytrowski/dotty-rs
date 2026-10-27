@@ -266,3 +266,5 @@ CARGO_TARGET_DIR=target/issue-1737/sequence cargo test --workspace --all-targets
 The subsequent check-DAG and PR critical-path assessment for [#1740](ci-critical-path-1740.md)
 records the measured candidate split, runner-time trade-off, required-check
 policy, and reasons the existing job layout was retained.
+
+The final before/after synthesis, all-triggered PR timing snapshots, and next measured target are in the [#1741 performance results](ci-performance-results-1741.md).
