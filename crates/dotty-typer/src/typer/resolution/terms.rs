@@ -458,7 +458,9 @@ impl SourceTyper<'_> {
         };
         let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(object)
         else {
-            return Err(TyperError::ObjectModuleClassUnavailable { object });
+            return self
+                .generated_case_class_module_class_of_object(object, owner)
+                .ok_or(TyperError::ObjectModuleClassUnavailable { object });
         };
         if source != self.source {
             return Err(TyperError::ObjectModuleClassUnavailable { object });
@@ -474,6 +476,69 @@ impl SourceTyper<'_> {
             return Err(TyperError::ObjectModuleClassUnavailable { object });
         }
         Ok(module_class)
+    }
+
+    fn generated_case_class_module_class_of_object(
+        &self,
+        object: SymbolId,
+        owner: SymbolId,
+    ) -> Option<SymbolId> {
+        let object_symbol = self.store.symbols.get(object);
+        if object_symbol.origin != SymbolOrigin::Synthetic
+            || object_symbol.owner != Some(owner)
+            || self.store.symbols.get(owner).kind != SymbolKind::ModuleClass
+        {
+            return None;
+        }
+        let class = object_symbol.links.companion?;
+        if !self.store.symbols.contains(class) {
+            return None;
+        }
+        let class_symbol = self.store.symbols.get(class);
+        if class_symbol.kind != SymbolKind::Class
+            || !class_symbol.flags.contains(SymbolFlags::CASE)
+            || class_symbol.origin != SymbolOrigin::Source(self.source)
+            || class_symbol.owner != Some(owner)
+            || class_symbol.links.companion != Some(object)
+        {
+            return None;
+        }
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(class)
+        else {
+            return None;
+        };
+        if source != self.source
+            || self.index.symbol_at(source, tree) != Some(class)
+            || !matches!(
+                self.arena.try_get(tree).map(|node| &node.kind),
+                Some(TreeKind::TypeDef(definition))
+                    if definition.metadata.modifiers.contains(&dotty_core::ast::Modifier::Case)
+                        && !definition
+                            .metadata
+                            .modifiers
+                            .contains(&dotty_core::ast::Modifier::Abstract)
+            )
+        {
+            return None;
+        }
+        let module_class = self.index.derived_symbol_at(owner, source, tree)?;
+        let module_symbol = self.store.symbols.get(module_class);
+        if module_symbol.kind != SymbolKind::ModuleClass
+            || module_symbol.origin != SymbolOrigin::Synthetic
+            || module_symbol.owner != Some(owner)
+            || self.index.definition_of(module_class)
+                != Some(SourceDefinition::Derived { source, tree })
+            || self.index.scope_of(module_class).is_none()
+        {
+            return None;
+        }
+        let owner_scope = self.index.scope_of(owner)?;
+        let scope = self.store.scopes.get(owner_scope);
+        (scope.lookup_all(&object_symbol.name).contains(&object)
+            && scope
+                .lookup_all(&module_symbol.name)
+                .contains(&module_class))
+        .then_some(module_class)
     }
 
     /// Returns the source-owned or resolver-validated ModuleClass for an
@@ -521,6 +586,117 @@ mod tests {
     use dotty_lexer::ContextualScanner;
     use dotty_namer::name_compilation_unit;
     use dotty_parser::parse_compilation_unit;
+
+    #[test]
+    fn generated_nested_case_class_companion_uses_its_source_module_class_identity() {
+        let source = SourceId::from_index(1773);
+        let text = "object Owners { case class Node[A](value: A) }";
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let scanner = ContextualScanner::new(text).unwrap();
+        let parsed = parse_compilation_unit(
+            SourceText::new(text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+        let mut packages = Packages::new();
+        let index = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "GeneratedCaseCompanion.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap();
+        let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+            panic!("expected a package root");
+        };
+        let owner_tree = package.stats[0];
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(owner_definition)) =
+            &parsed.ast.get(owner_tree).kind
+        else {
+            panic!("expected the Owners object");
+        };
+        let TreeKind::Template(owner_template) = &parsed.ast.get(owner_definition.template).kind
+        else {
+            panic!("expected the Owners template");
+        };
+        let class_tree = owner_template.body[0];
+        let class = index.symbol_at(source, class_tree).unwrap();
+        let owner = store.symbols.get(class).owner.unwrap();
+        let owner_tree_symbol = index.symbol_at(source, owner_tree).unwrap();
+        assert_eq!(
+            store.symbols.get(owner_tree_symbol).kind,
+            SymbolKind::Object
+        );
+        let owner_module_class = index
+            .derived_symbol_at(
+                store.symbols.get(owner_tree_symbol).owner.unwrap(),
+                source,
+                owner_tree,
+            )
+            .unwrap();
+        assert_eq!(owner, owner_module_class);
+
+        let companion = store.symbols.get(class).links.companion.unwrap();
+        assert_eq!(store.symbols.get(companion).kind, SymbolKind::Object);
+        assert_eq!(index.definition_of(companion), None);
+        let companion_module_class = index
+            .derived_symbol_at(owner, source, class_tree)
+            .expect("the generated ModuleClass must retain its class-tree provenance");
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert_eq!(
+            typer.module_class_of_object(companion).unwrap(),
+            companion_module_class
+        );
+        let class_info_id = typer.complete_symbol(companion_module_class).unwrap();
+        let dotty_core::Type::ClassInfo(class_info) = typer.store().types.get(class_info_id) else {
+            panic!("expected a generated companion ClassInfo");
+        };
+        assert_eq!(class_info.class, companion_module_class);
+        assert_eq!(class_info.parents, [definitions.object_type]);
+        assert_eq!(
+            class_info.declarations,
+            index.scope_of(companion_module_class).unwrap()
+        );
+
+        let apply = index
+            .derived_symbol_at(companion_module_class, source, class_tree)
+            .expect("the generated apply must retain its class-tree provenance");
+        let apply_info = typer.complete_symbol(apply).unwrap();
+        let dotty_core::Type::Poly(poly) = typer.store().types.get(apply_info) else {
+            panic!("expected a polymorphic generated apply signature");
+        };
+        assert_eq!(poly.params.len(), 1);
+        let dotty_core::Type::Method(method) = typer.store().types.get(poly.result) else {
+            panic!("expected a generated apply value clause");
+        };
+        assert_eq!(method.kind, dotty_core::MethodKind::Plain);
+        assert_eq!(method.params.len(), 1);
+        let dotty_core::Type::Applied { tycon, args } = typer.store().types.get(method.result)
+        else {
+            panic!("expected the result to be the applied nested class type");
+        };
+        assert_eq!(args.len(), 1);
+        assert!(matches!(
+            typer.store().types.get(*tycon),
+            dotty_core::Type::TypeRef {
+                prefix,
+                target: dotty_core::TypeRefTarget::Symbol(symbol),
+            } if *prefix != definitions.no_prefix && *symbol == class
+        ));
+    }
 
     #[test]
     fn default_term_import_resolves_a_scala_package_term() {

@@ -3,6 +3,61 @@
 use super::*;
 
 impl SourceTyper<'_> {
+    pub(super) fn generated_case_class_for_companion_module_class(
+        &self,
+        module_class: SymbolId,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        let module_symbol = self.store.symbols.get(module_class);
+        let owner = module_symbol.owner?;
+        if module_symbol.kind != SymbolKind::ModuleClass
+            || module_symbol.origin != SymbolOrigin::Synthetic
+            || module_symbol.owner != Some(owner)
+            || self.index.definition_of(module_class)
+                != Some(SourceDefinition::Derived { source, tree })
+            || source != self.source
+            || self.index.derived_symbol_at(owner, source, tree) != Some(module_class)
+        {
+            return None;
+        }
+        let class = self.index.symbol_at(source, tree)?;
+        if self.index.definition_of(class) != Some(SourceDefinition::Canonical { source, tree }) {
+            return None;
+        }
+        let class_symbol = self.store.symbols.get(class);
+        if class_symbol.kind != SymbolKind::Class
+            || !class_symbol.flags.contains(SymbolFlags::CASE)
+            || class_symbol.origin != SymbolOrigin::Source(source)
+            || class_symbol.owner != Some(owner)
+        {
+            return None;
+        }
+        let object = class_symbol.links.companion?;
+        if !self.store.symbols.contains(object) {
+            return None;
+        }
+        let object_symbol = self.store.symbols.get(object);
+        if object_symbol.kind != SymbolKind::Object
+            || object_symbol.origin != SymbolOrigin::Synthetic
+            || object_symbol.owner != Some(owner)
+            || object_symbol.links.companion != Some(class)
+            || !matches!(
+                self.arena.try_get(tree).map(|node| &node.kind),
+                Some(TreeKind::TypeDef(definition))
+                    if definition.metadata.modifiers.contains(&dotty_core::ast::Modifier::Case)
+                        && !definition
+                            .metadata
+                            .modifiers
+                            .contains(&dotty_core::ast::Modifier::Abstract)
+            )
+        {
+            return None;
+        }
+        self.index.scope_of(module_class)?;
+        Some(class)
+    }
+
     pub(in crate::typer) fn validate_existing_class_info(
         &self,
         symbol: SymbolId,
@@ -45,6 +100,29 @@ impl SourceTyper<'_> {
                 source: self.source,
                 tree_index: source_tree.index(),
             })?;
+        if kind == SymbolKind::ModuleClass
+            && self
+                .generated_case_class_for_companion_module_class(symbol, self.source, source_tree)
+                .is_some()
+        {
+            let declarations = self
+                .index
+                .scope_of(symbol)
+                .ok_or(TyperError::MissingClassScope { symbol })?;
+            let info = self.store.types.alloc(Type::ClassInfo(ClassInfo {
+                prefix: self.definitions.no_prefix,
+                class: symbol,
+                parents: vec![self.definitions.object_type],
+                declarations,
+                self_type: None,
+            }));
+            let previous = *self.store.symbols.info(symbol);
+            info_journal.push((symbol, previous));
+            self.store
+                .symbols
+                .set_info(symbol, SymbolInfo::Complete(info));
+            return Ok(info);
+        }
         let template = match (kind, &source_node.kind) {
             (SymbolKind::Class | SymbolKind::Trait, TreeKind::TypeDef(definition)) => {
                 let Some(node) = self.arena.try_get(definition.rhs) else {

@@ -1862,6 +1862,8 @@ impl Namer<'_> {
                     .get_mut(owner_scope)
                     .enter(module_class_name, module_class);
                 self.scope_insertions.push((owner_scope, module_class));
+                self.index
+                    .record_derived_symbol(owner, self.source, tree, module_class)?;
                 let scope = self.store.scopes.alloc(Scope::new(Some(module_class)));
                 self.index.record_scope(module_class, scope)?;
                 self.index

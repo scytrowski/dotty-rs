@@ -5906,6 +5906,19 @@ fn nested_case_class_gets_a_companion_and_source_mapped_apply_parameters() {
         .get(owner_scope)
         .lookup(TypeName::new(named.store.names.intern("Node$")).as_name())
         .unwrap();
+    assert_eq!(
+        named
+            .index
+            .derived_symbol_at(owner_module_class, named.source, class_tree),
+        Some(companion_module_class)
+    );
+    assert_eq!(
+        named.index.definition_of(companion_module_class),
+        Some(SourceDefinition::Derived {
+            source: named.source,
+            tree: class_tree,
+        })
+    );
     let companion_scope = named.index.scope_of(companion_module_class).unwrap();
     let apply_name = TermName::new(named.store.names.intern("apply"));
     let apply = named
