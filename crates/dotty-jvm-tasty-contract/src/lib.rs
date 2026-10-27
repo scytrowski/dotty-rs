@@ -336,7 +336,13 @@ pub fn validate_jvm_tasty_class<'proof, 'unit, 'plan, 'session>(
         .cloned()
         .ok_or(JvmTastyContractError::JvmClassMissing { class: tasty.class })?;
 
-    validate_constructor(jvm_unit.store, tasty, class_plan, &jvm_metadata)?;
+    validate_constructor(
+        jvm_unit.store,
+        tasty,
+        class_plan,
+        &jvm_metadata,
+        all_jvm_metadata.as_slice(),
+    )?;
     validate_fields(
         jvm_unit.store,
         tasty_plan,
@@ -1653,6 +1659,7 @@ fn validate_constructor(
     tasty: &dotty_tasty_pickler::ClassStatePicklePlan<'_>,
     jvm_class: &dotty_jvm::JvmClassPlan,
     metadata: &JvmClassMetadata,
+    planned_classes: &[JvmClassMetadata],
 ) -> Result<(), JvmTastyContractError> {
     let constructor = tasty.constructor.symbol;
     let JvmClassInitializationPlan::PrimaryConstructor(jvm_constructor) = &jvm_class.initialization
@@ -1683,12 +1690,17 @@ fn validate_constructor(
         .iter()
         .map(|parameter| parameter.symbol())
         .collect::<Vec<_>>();
-    let expected_descriptor =
-        source_constructor_descriptor(store, tasty.definitions, &expected_parameters).ok_or(
-            JvmTastyContractError::UnsupportedSourceShape {
-                symbol: constructor,
-            },
-        )?;
+    let expected_descriptor = source_constructor_descriptor(
+        store,
+        tasty.definitions,
+        &expected_parameters,
+        planned_classes,
+        tasty.source.id,
+        store.symbols.get(tasty.class).owner,
+    )
+    .ok_or(JvmTastyContractError::UnsupportedSourceShape {
+        symbol: constructor,
+    })?;
     let actual_descriptor = binary_constructor.descriptor().as_str().to_owned();
     if jvm_constructor.symbol() != constructor
         || actual_parameters != expected_parameters
@@ -2060,13 +2072,39 @@ fn source_constructor_descriptor(
     store: &SemanticStore,
     definitions: &Definitions,
     parameters: &[SymbolId],
+    planned_classes: &[JvmClassMetadata],
+    source: dotty_core::SourceId,
+    owner_package: Option<SymbolId>,
 ) -> Option<String> {
     let mut descriptors = Vec::with_capacity(parameters.len());
     for parameter in parameters {
         let SymbolInfo::Complete(ty) = store.symbols.get(*parameter).info else {
             return None;
         };
-        descriptors.push(primitive_descriptor(definitions, ty)?);
+        if let Some(descriptor) = primitive_descriptor(definitions, ty) {
+            descriptors.push(descriptor.to_owned());
+            continue;
+        }
+        let descriptor = planned_class_descriptor(store, definitions, ty, planned_classes)?;
+        let Type::TypeRef {
+            target: dotty_core::TypeRefTarget::Symbol(target),
+            ..
+        } = store.types.try_get(ty)?
+        else {
+            descriptors.push(descriptor);
+            continue;
+        };
+        if !store.symbols.contains(*target) {
+            return None;
+        }
+        let target = store.symbols.get(*target);
+        if target.kind != SymbolKind::Class
+            || target.origin != SymbolOrigin::Source(source)
+            || target.owner != owner_package
+        {
+            return None;
+        }
+        descriptors.push(descriptor);
     }
     // JVM constructors always return void, even if the source constructor
     // symbol's semantic result records its owning class.
