@@ -1166,6 +1166,277 @@ fn constructor_injected_reference_emits_complete_linked_batch_deterministically(
 }
 
 #[test]
+fn constructor_injected_reference_alias_executes_on_verified_jdk21() {
+    if !require_jdk_21_or_skip() {
+        return;
+    }
+
+    let first = emit_paired_jvm_tasty_batch(
+        COUNTER_OWNER_ALIAS,
+        "tests/fixtures/jvm_tasty_constructor_injection/CounterOwner.scala",
+        SourceId::from_index(17571),
+    )
+    .unwrap();
+    let second = emit_paired_jvm_tasty_batch(
+        COUNTER_OWNER_ALIAS,
+        "tests/fixtures/jvm_tasty_constructor_injection/CounterOwner.scala",
+        SourceId::from_index(17572),
+    )
+    .unwrap();
+    assert_ne!(first.source_id(), second.source_id());
+    assert_eq!(first.classes().len(), 2);
+    for (first, second) in first.classes().iter().zip(second.classes()) {
+        assert_eq!(first.classfile_bytes(), second.classfile_bytes());
+        assert_eq!(first.tasty_bytes(), second.tasty_bytes());
+        assert_eq!(first.tasty_link_id(), second.tasty_link_id());
+    }
+
+    let stage = TestDirectory::new("constructor-reference-alias-runtime");
+    let classes = stage.path().join("rust-classes");
+    let published = publish_paired_batch(&classes, &first, None).unwrap();
+    assert_eq!(published.len(), 4);
+    let runtime_classes = stage.path().join("runtime-classes");
+    for pair in first.classes() {
+        let classfile = runtime_classes.join(pair.classfile_path());
+        std::fs::create_dir_all(classfile.parent().unwrap()).unwrap();
+        std::fs::write(classfile, pair.classfile_bytes()).unwrap();
+    }
+    assert_eq!(read_relative_files(&runtime_classes).unwrap().len(), 2);
+    let classfile_paths = first
+        .classes()
+        .iter()
+        .map(|pair| runtime_classes.join(pair.classfile_path()))
+        .collect::<Vec<_>>();
+    let original_hashes = classfile_paths
+        .iter()
+        .map(|path| sha256sum(path))
+        .collect::<Vec<_>>();
+
+    let owner_pair = &first.classes()[1];
+
+    let javap_counter = Command::new("javap")
+        .args([
+            "-classpath",
+            runtime_classes.to_str().unwrap(),
+            "-v",
+            "-p",
+            "-c",
+        ])
+        .arg("example.Counter")
+        .output()
+        .expect("start JDK 21 javap for the Rust Counter class");
+    assert!(
+        javap_counter.status.success(),
+        "javap rejected original Rust Counter.class:\n{}",
+        String::from_utf8_lossy(&javap_counter.stderr)
+    );
+    let javap_counter = String::from_utf8_lossy(&javap_counter.stdout);
+    assert!(
+        javap_counter.contains("major version: 65"),
+        "{javap_counter}"
+    );
+    for expected in [
+        "private int current;",
+        "descriptor: I",
+        "public example.Counter(int);",
+        "descriptor: (I)V",
+        "public int get();",
+        "descriptor: ()I",
+        "public void set(int);",
+    ] {
+        assert!(
+            javap_counter.contains(expected),
+            "javap Counter dump omitted {expected:?}:\n{javap_counter}"
+        );
+    }
+
+    let javap = Command::new("javap")
+        .args([
+            "-classpath",
+            runtime_classes.to_str().unwrap(),
+            "-v",
+            "-p",
+            "-c",
+        ])
+        .arg("example.CounterOwner")
+        .output()
+        .expect("start JDK 21 javap for the Rust CounterOwner alias class");
+    assert!(
+        javap.status.success(),
+        "javap rejected original Rust CounterOwner.class:\n{}",
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap = String::from_utf8_lossy(&javap.stdout);
+    assert!(javap.contains("major version: 65"), "{javap}");
+    assert!(
+        javap.contains("private final example.Counter inner;"),
+        "{javap}"
+    );
+    let constructor_dump = javap
+        .split("public example.CounterOwner(example.Counter);")
+        .nth(1)
+        .expect("javap shows the reference constructor")
+        .split("public int read();")
+        .next()
+        .unwrap();
+    for expected in [
+        "descriptor: (Lexample/Counter;)V",
+        "Method java/lang/Object.\"<init>\":()V",
+        "Field inner:Lexample/Counter;",
+        "aload_1",
+        "putfield",
+        "return",
+    ] {
+        assert!(
+            constructor_dump.contains(expected),
+            "javap constructor dump omitted {expected:?}:\n{constructor_dump}"
+        );
+    }
+    assert!(!constructor_dump.contains("new "), "{constructor_dump}");
+    assert_eq!(constructor_dump.matches("putfield").count(), 1);
+    assert!(
+        !constructor_dump.contains("Method example/Counter.\"<init>\":(I)V"),
+        "{constructor_dump}"
+    );
+    let read_dump = javap.split("public int read();").nth(1).unwrap();
+    for expected in [
+        "descriptor: ()I",
+        "Field inner:Lexample/Counter;",
+        "Method example/Counter.get:()I",
+    ] {
+        assert!(
+            read_dump.contains(expected),
+            "javap read dump omitted {expected:?}:\n{read_dump}"
+        );
+    }
+
+    let harness = stage.path().join("CounterOwnerAliasHarness.java");
+    let harness_classes = stage.path().join("harness-classes");
+    std::fs::create_dir(&harness_classes).unwrap();
+    std::fs::write(
+        &harness,
+        r#"package example;
+
+import java.lang.reflect.Field;
+
+public final class CounterOwnerAliasHarness {
+    public static void main(String[] args) throws ReflectiveOperationException {
+        Counter firstCounter = new Counter(7);
+        CounterOwner firstOwner = new CounterOwner(firstCounter);
+        assertIdentity(firstOwner, firstCounter);
+        expect(firstOwner.read(), 7);
+        firstCounter.set(42);
+        expect(firstOwner.read(), 42);
+        firstCounter.set(-9);
+        expect(firstOwner.read(), -9);
+
+        Counter secondCounter = new Counter(3);
+        CounterOwner secondOwner = new CounterOwner(secondCounter);
+        assertIdentity(secondOwner, secondCounter);
+        expect(secondOwner.read(), 3);
+        secondCounter.set(13);
+        expect(secondOwner.read(), 13);
+        expect(firstOwner.read(), -9);
+        firstCounter.set(100);
+        expect(firstOwner.read(), 100);
+        expect(secondOwner.read(), 13);
+        System.out.println("identity=true; first=100; second=13");
+    }
+
+    private static void assertIdentity(CounterOwner owner, Counter expected)
+        throws ReflectiveOperationException {
+        Field inner = CounterOwner.class.getDeclaredField("inner");
+        inner.setAccessible(true);
+        if (inner.get(owner) != expected) {
+            throw new AssertionError("Owner.inner is not the exact injected Counter");
+        }
+    }
+
+    private static void expect(int actual, int expected) {
+        if (actual != expected) {
+            throw new AssertionError("expected " + expected + ", got " + actual);
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let javac = Command::new("javac")
+        .arg("-classpath")
+        .arg(&runtime_classes)
+        .arg("-d")
+        .arg(&harness_classes)
+        .arg(&harness)
+        .output()
+        .expect("start JDK 21 javac for the original Rust class harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected the alias harness:\n{}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    for (index, path) in classfile_paths.iter().enumerate() {
+        assert_eq!(
+            sha256sum(path),
+            original_hashes[index],
+            "javac changed the Rust class"
+        );
+    }
+
+    let classpath =
+        std::env::join_paths([harness_classes.as_path(), runtime_classes.as_path()]).unwrap();
+    let java = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(&classpath)
+        .arg("example.CounterOwnerAliasHarness")
+        .output()
+        .expect("start JDK 21 verifier and original Rust class harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected or failed original Rust classes:\n{}\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "identity=true; first=100; second=13"
+    );
+    for (index, (path, pair)) in classfile_paths.iter().zip(first.classes()).enumerate() {
+        assert_eq!(
+            sha256sum(path),
+            original_hashes[index],
+            "java changed the Rust class"
+        );
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            pair.classfile_bytes(),
+            "runtime must use the original Rust-produced classfile"
+        );
+    }
+
+    let without_counter = stage.path().join("without-counter");
+    std::fs::create_dir_all(without_counter.join("example")).unwrap();
+    std::fs::write(
+        without_counter.join("example/CounterOwner.class"),
+        owner_pair.classfile_bytes(),
+    )
+    .unwrap();
+    let missing_counter_classpath =
+        std::env::join_paths([harness_classes.as_path(), without_counter.as_path()]).unwrap();
+    let missing_counter = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(missing_counter_classpath)
+        .arg("example.CounterOwnerAliasHarness")
+        .output()
+        .expect("start JDK 21 missing-Counter negative control");
+    assert!(!missing_counter.status.success());
+    let missing_counter_error = String::from_utf8_lossy(&missing_counter.stderr);
+    assert!(
+        missing_counter_error.contains("NoClassDefFoundError: example/Counter"),
+        "missing Counter class produced unexpected JVM error:\n{missing_counter_error}"
+    );
+}
+
+#[test]
 fn reference_field_owner_batch_executes_on_verified_jdk21() {
     if !require_jdk_21_or_skip() {
         return;
