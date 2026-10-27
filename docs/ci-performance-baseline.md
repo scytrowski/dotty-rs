@@ -8,12 +8,12 @@ The seven existing workflows are listed below. `CI`, `JVM TASTy factory Scala co
 
 The active GitHub ruleset for the default branch currently contains only the `non_fast_forward` rule. It does not define required status checks. Therefore, the automatically triggered pull request workflows below are observed PR checks, but GitHub does not enforce them as required checks under this ruleset. Confirm this policy before describing any status as a required merge gate.
 
-Workflow-level concurrency is part of the latency context. CI cancels an older run for the same workflow/ref; Scala consumer, Typer focused, and Cargo timings allow an existing run to finish; the manual compatibility workflows cancel an older run for the same ref. All job layouts are single-job workflows except CI, which has two independent parallel jobs. None uses a matrix or cross-job `needs` dependency. The full-corpus workflow has one `audit` job, conditionally created only when the dispatch input is `run-full-audit`.
+Workflow-level concurrency is part of the latency context. CI cancels an older run for the same workflow/ref; the Scala consumer cancels superseded pull-request runs but leaves manual runs alone; Typer focused and Cargo timings allow an existing run to finish; the manual compatibility workflows cancel an older run for the same ref. All job layouts are single-job workflows except CI, which has two independent parallel jobs. None uses a matrix or cross-job `needs` dependency. The full-corpus workflow has one `audit` job, conditionally created only when the dispatch input is `run-full-audit`.
 
 | Workflow | Concurrency group | `cancel-in-progress` | Job shape |
 | --- | --- | --- | --- |
 | CI | `ci-${{ github.workflow }}-${{ github.ref }}` | `true` | `checks` and `classfile-jvm-encoder`, independent and parallel. |
-| JVM TASTy factory Scala consumer | `jvm-tasty-factory-scala-consumer-${{ github.event.pull_request.number || github.ref }}` | `false` | One `consume-factory` job. |
+| JVM TASTy factory Scala consumer | `jvm-tasty-factory-scala-consumer-${{ github.event.pull_request.number || github.ref }}` | `true` for pull requests; `false` for manual dispatch | One `consume-factory` job. |
 | Typer focused audit | `typer-focused-audit-${{ github.event.pull_request.number || github.ref }}` | `false` | One `focused-audit` job. |
 | Typer full corpus audit | `typer-full-corpus-audit-${{ github.ref }}` | `false` | One conditional `audit` job. |
 | Lexer compatibility | `lexer-compatibility-${{ github.ref }}` | `true` | One `verify` job. |
@@ -151,7 +151,36 @@ The full target cache had a **10m38s median** Rust-check job wall time (10m34s�
 
 One complete PR CI run on this commit finished in **6m21s** from workflow creation to the last of its two parallel jobs; the dependency-cache Rust checks finished in 5m51s and the unchanged JDK 21 gate in 1m51s. This is one end-to-end workflow observation. The repeated comparison above covers the full Rust checks job, while the parallel JVM gate remains unchanged because its measured archive is small and toolchain-specific.
 
-The Typer cache transfers are small; Scala consumer cache changes would require a separate end-to-end comparison of its much longer staged compiler path. Preserve those configurations for now and keep their sizes and observed cache outcomes visible for the follow-up issues in the Refactor milestone.
+The Typer cache transfers are small; the Scala consumer staged compiler path is measured for issue #1738 below. Preserve the Typer configuration and keep its sizes and observed cache outcomes visible for the follow-up issues in the Refactor milestone.
+
+## Pinned Scala 3.9 consumer cache and queue measurements (#1738)
+
+The baseline uses the five successful consumer runs above with Scala source SHA `777528f19a58e794c9954a42f433373472ec57f8`, JDK 21.0.8, Rust 1.98.1, and `ubuntu-latest`. Durations below are from the job's step timestamps, which separate the Scala source stage, combined Rust/linked Scala-TASTy tests, and Java verifier from setup. Job elapsed excludes runner queue; the end-to-end sample with a 5m31s queue took 18m50s.
+
+| Baseline run | Scala source stage | Rust and Scala/TASTy gates | Java 21 verifier | Consumer job elapsed |
+| --- | ---: | ---: | ---: | ---: |
+| [40415404272](https://github.com/scytrowski/dotty-rs/actions/runs/40415404272) | 5m42s | 3m01s | 1m39s | 11m22s |
+| [40412150338](https://github.com/scytrowski/dotty-rs/actions/runs/40412150338) | 5m26s | 2m49s | 1m31s | 10m46s |
+| [40410952824](https://github.com/scytrowski/dotty-rs/actions/runs/40410952824) | 5m48s | 2m37s | 1m30s | 10m59s |
+| [40407343386](https://github.com/scytrowski/dotty-rs/actions/runs/40407343386) | 7m36s | 3m08s | 1m37s | 13m19s |
+| [40407034283](https://github.com/scytrowski/dotty-rs/actions/runs/40407034283) | 4m56s | 2m48s | 1m32s | 10m09s |
+
+The baseline medians are **5m42s** for source staging, **2m49s** for the combined Rust/Scala-TASTy gate, **1m32s** for Java verification, and **10m59s** for the consumer job. Pre-stage job setup, checkout, JDK/Rust setup, cache restore, and sbt runner setup took 32–47s (35s median). The separately verified pinned Maven artifact download step took 0–1s. Existing Coursier/Rust cache restore was 2–15s (3s median), and its post-job save was 8–15s (12s median). Two archived samples show a cache miss and save; the other three cache outcomes are unavailable. The `sbt/setup-sbt@v1` runner cache was already present at about 54.6 MB, with a 4–9s setup and 8–9s post step; it does not cache the Scala source project's compiled outputs.
+
+The experiment adds `setup-java@v4` sbt dependency caching and a separate cache of Scala project `target` directories. The target cache key includes runner OS/architecture, the exact pinned Scala source SHA, JDK 21.0.8, and a hash of the Scala build definitions (including `project/build.properties`, which pins sbt). The workflow checks out and verifies that same source SHA before restoring it. The cache is saved only after `dist/universal:stage` succeeds and the pinned Maven artifacts pass SHA256 verification. It does not replace or skip any strict consumer test or Java verifier.
+
+| Candidate run | Cache state | Scala source stage | Rust and Scala/TASTy gates | Java 21 verifier | Consumer job elapsed |
+| --- | --- | ---: | ---: | ---: | ---: |
+| [40461901018, attempt 1](https://github.com/scytrowski/dotty-rs/actions/runs/40461901018/attempts/1) | Cold miss; populated caches | 8m04s | 5m06s | 2m17s | 16m58s |
+| [40461901018, attempt 2](https://github.com/scytrowski/dotty-rs/actions/runs/40461901018/attempts/2) | Warm hit | 57s | 4m10s | 1m38s | 7m52s |
+| [40461901018, attempt 3](https://github.com/scytrowski/dotty-rs/actions/runs/40461901018/attempts/3) | Warm hit | 58s | 4m18s | 1m38s | 8m17s |
+| [40465699896](https://github.com/scytrowski/dotty-rs/actions/runs/40465699896) | Warm hit | 56s | 4m16s | 1m39s | 7m58s |
+
+The three warm runs had a **7m58s median** job elapsed, 3m01s (about 28%) below the five-run baseline median. Warm source staging fell from 5m42s to 57s; the 643,190,038-byte source-build cache restored in 7–11s. Pre-stage setup and restores took 46–60s (46s median), including the pinned JDK/Rust installations, the 369,769,288-byte sbt dependency cache and the existing Rust/Coursier cache. The sbt dependency cache reported a hit on all warm runs; its restore is included in the 6–8s JDK setup step. The explicit pinned Maven artifact download remained 0s on warm runs. The existing Rust/Coursier cache remained 708,392,355 bytes, and the sbt runner cache remained 54,644,841 bytes. The two new caches therefore add about 1.01 GB to the PR-scoped cache footprint. The cold first run took 16m58s and is slower than the baseline median; the measured win applies to subsequent updates to the same PR. GitHub keeps these cache entries scoped to the PR ref, so a new PR starts cold unless a default-branch cache is seeded.
+
+The warm Rust/Scala-TASTy step includes test compilation and execution. On attempt 2 Cargo reported 3.13s to build test targets; test-binary runtimes were 13.67s (`jvm_tasty_cross_class_factories`), 35.81s (`jvm_tasty_cross_class_scala_consumer`), 48.13s (`jvm_tasty_factory_scala_consumer`), 55.58s (`jvm_tasty_multiclass_scala_consumer`), 55.87s (`jvm_tasty_object_composition_scala_consumer`), 16.01s (`jvm_tasty_scala_consumer`), and 21.69s (`tasty_source_pickling`). Cargo's Java-gate targets built in 1.86s; their test times were 69.61s (`jvm_source_compilation`), 4.07s (`jvm_stateful_class_contract`), 2.89s (`jvm_tasty_artifacts`), and 12.87s (`classfile_jvm_encoder`). All reported gates passed in all three candidate attempts.
+
+The existing PR filter covers the root crate, workspace crates, integration tests and fixtures, lockfile/toolchain, consumer workflow, and TASTy oracle inputs. Narrowing `crates/**` or `tests/**` could skip changes that affect generated TASTy or its interoperability fixtures, so the filter remains broad. Concurrency history shows a concrete stale-run queue: on PR branch `codex/issue-1744-option-equality`, run [40433634380](https://github.com/scytrowski/dotty-rs/actions/runs/40433634380) was created at 01:37:06 UTC while [40432673424](https://github.com/scytrowski/dotty-rs/actions/runs/40432673424) was still running until 01:42:34; the newer run began at 01:45:25, 8m19s after creation. The workflow now cancels older pull-request runs in that PR-specific group, while manual benchmark runs remain non-cancelling. This keeps the latest commit's full Scala/TASTy and Java checks intact and avoids spending runner time on an obsolete head.
 
 ## Rust test compilation and linking profile (#1737)
 
