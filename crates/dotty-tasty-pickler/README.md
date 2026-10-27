@@ -78,6 +78,25 @@ methods, other constructor arities/types, secondary/default/using/varargs or
 generic constructors, nested allocations, and multiple class formals remain
 unsupported. Constructors outside this exact source-defined shape fail with
 typed validation errors before bytes are returned.
+
+A bounded class-state plan may also emit the exact same-batch alias
+`class CounterOwner(counter: Counter): private val inner: Counter = counter`.
+Validation requires the original source `Ident(counter)` and its exact typed
+binding to the constructor-owned derived formal, then verifies that formal's
+source parameter tree maps through `SourceSemanticIndex` to the distinct
+class-owned template parameter. The TASTy field RHS targets that canonical
+template `PARAM` with a `THIS(CounterOwner)` prefix, as required by the pinned
+Scala 3.9 oracle; it never serializes the derived constructor `SymbolId` as a
+TASTy address. The field must be private, immutable, and typed as the exact
+same-batch Counter class. It retains its original declaration order and the
+planned method body, including `read(): Int = inner.get()`. The separate
+direct-`new` initializer path is unchanged. Mutable/qualified-private aliases,
+constructor accessors, shadowed or foreign references, unsupported constructor
+forms, and mismatched class types fail before complete output. The strict
+opt-in Scala reader/runtime regression is `same_batch_reference_field_alias_targets_template_parameter_and_preserves_read`
+in `tests/jvm_tasty_plan.rs`; enable it with
+`DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`, `SCALA39_ROOT` set to the pinned
+Scala 3.9 checkout, and `JAVA_HOME` set to JDK 21.
 A method may have no value clause, one explicit
 empty clause, or one plain clause of ordinary Int or Boolean
 parameters. Parameter IDs, ownership, source scope, types and order must agree

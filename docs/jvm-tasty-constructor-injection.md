@@ -1,9 +1,10 @@
 # Scala 3.9 constructor-injection and reference-alias audit
 
-This document records the audit-only contract for a plain primary-constructor
-reference parameter copied into a private immutable field. It characterizes
-Scala 3.9 TASTy/JVM output and the current Rust frontend/planner boundary; it
-does not add producer support.
+This document records the contract for a plain primary-constructor reference
+parameter copied into a private immutable field. It characterizes Scala 3.9
+TASTy/JVM output and the bounded Rust pickler support for the exact
+`CounterOwner(counter: Counter)` alias shape. It does not add general reference
+fields, constructor accessors, or new JVM code generation.
 
 ## Pinned inputs and reproduction
 
@@ -138,8 +139,35 @@ Classpath controls distinguish TASTy discovery from JVM execution:
 | Only the two `.class` files | Fails with “This `.tasty` file is missing.” for each Scala 3 class. | Not run after compile failure. |
 | `CounterOwner.class` paired with `Counter.tasty` in its place | Fails with “CounterOwner.class is out of sync with its TASTy file”; the compiler then cannot resolve `CounterOwner`. | Not run after compile failure. |
 
-These are Scala-generated oracle controls. They do not claim that the current
-Rust TASTy producer can emit this shape.
+These controls were originally captured from Scala-generated oracle artifacts.
+The Rust producer regression now independently emits both sidecars, invokes
+the pinned compiler's `-decompile` and `-from-tasty` paths, compiles an
+independent client, and runs the reconstructed classes with Temurin 21
+`-Xverify:all`. The client mutates the exact Counter supplied to the Owner and
+checks that the observed sequence is `7 → 42 → -9`, then checks a second pair
+remains independent. The test requires the checkout revision above and the
+Temurin `21.0.8+9` toolchain; it is enabled by
+`DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1` with `SCALA39_ROOT` and `JAVA_HOME`
+set. It writes candidate sidecars and rebuilt classes only into an isolated
+temporary directory.
+
+The accepted Rust source/typed mapping is deliberately two-stage:
+
+| Semantic identity | TASTy address/use |
+| --- | --- |
+| Canonical source parameter tree in `SourceSemanticIndex` | Class/template-owned `PARAM counter: Counter` declaration. |
+| Derived typed constructor formal from `derived_symbol_at(<init>, source, parameter-tree)` | Separate constructor-owned `PARAM counter: Counter` signature declaration and the typed initializer's `TermRef` target. |
+| Exact source `Ident(counter)` initializer bound to its typed `Ident` | Field `VALDEF inner` RHS encodes `TERMREFsymbol` to the canonical template `PARAM`, qualified by `THIS(TYPEREFsymbol(CounterOwner))`, matching Scala 3.9. |
+
+The validator proves the source-to-typed root binding and span, constructor
+scope and signature, the canonical/derived parameter relationship, same-batch
+Counter class identity and type, and the immutable private field identity
+before serialization. The alias branch does not pass a constructor-owned
+symbol to the TASTy address encoder. Direct `new Counter(seed)` initializers
+retain their separate existing validation and wire lowering. Mutable or
+`private[this]` fields, constructor accessors, multiple/default/using
+parameters, mismatched types, and non-alias reference expressions remain
+rejected before complete sidecar bytes are returned.
 
 Reproduce the classpath controls after the first compile above:
 
