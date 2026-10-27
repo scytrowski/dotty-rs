@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use dotty::jvm_tasty_cross_class::{
-    CrossClassFactoryProofInput, CrossClassFactoryProofKind, validate_cross_class_factory_proof,
+    CrossClassConstructorCallProofInput, validate_cross_class_constructor_call_proofs,
 };
 use dotty_classfile::access_flags::{ACC_PRIVATE, ACC_PUBLIC};
 use dotty_classfile::attribute::Attribute;
@@ -13619,183 +13619,9 @@ fn factory_return_and_identity_control_reach_the_real_jvm_source_pipeline() {
                 .symbol_at(source_id, parameter_tree)
                 .expect("method parameter has its canonical source symbol");
             assert_eq!(unit.store.symbols.get(parameter).owner, Some(method));
-            let proof = validate_cross_class_factory_proof(
-                CrossClassFactoryProofInput {
-                    source_id,
-                    source_root,
-                    store: unit.store,
-                    definitions,
-                    source_ast: ast,
-                    typed_ast: unit.typed_ast,
-                    source_index: index,
-                    source_typed_index,
-                    jvm_unit: unit,
-                },
-                if method_name == "create" {
-                    CrossClassFactoryProofKind::Factory
-                } else {
-                    CrossClassFactoryProofKind::Identity
-                },
-            )
-            .expect("read-only canonical factory/identity proof validates");
-            assert_eq!(proof.source_id(), source_id);
-            assert_eq!(proof.owner_class(), owner);
-            assert_eq!(proof.method(), method);
-            assert_eq!(proof.method_formal(), parameter);
-            assert_eq!(proof.typed_rhs(), typed_root);
-            assert_eq!(
-                proof.descriptor(),
-                if method_name == "create" {
-                    "(I)Lexample/Counter;"
-                } else {
-                    "(Lexample/Counter;)Lexample/Counter;"
-                }
-            );
             if method_name == "create" {
-                let empty_typed_index = SourceTypedIndex::new();
-                let wrong_mapping = validate_cross_class_factory_proof(
-                    CrossClassFactoryProofInput {
-                        source_id,
-                        source_root,
-                        store: unit.store,
-                        definitions,
-                        source_ast: ast,
-                        typed_ast: unit.typed_ast,
-                        source_index: index,
-                        source_typed_index: &empty_typed_index,
-                        jvm_unit: unit,
-                    },
-                    CrossClassFactoryProofKind::Factory,
-                )
-                .err()
-                .expect("missing source-to-typed mapping is rejected");
-                assert!(matches!(
-                    wrong_mapping,
-                    dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::TypedBinding(_)
-                ));
-
-                let TreeKind::PackageDef(package) = &ast.get(source_root).kind else {
-                    panic!("factory source root remains a package");
-                };
-                let mut missing_scopes = SourceSemanticIndex::new();
-                for class_tree in &package.stats {
-                    let class = index
-                        .symbol_at(source_id, *class_tree)
-                        .expect("top-level source class has its canonical symbol");
-                    missing_scopes
-                        .record_symbol(source_id, *class_tree, class)
-                        .expect("canonical class identity can be replayed");
-                }
-                let missing_scope = validate_cross_class_factory_proof(
-                    CrossClassFactoryProofInput {
-                        source_id,
-                        source_root,
-                        store: unit.store,
-                        definitions,
-                        source_ast: ast,
-                        typed_ast: unit.typed_ast,
-                        source_index: &missing_scopes,
-                        source_typed_index,
-                        jvm_unit: unit,
-                    },
-                    CrossClassFactoryProofKind::Factory,
-                )
-                .err()
-                .expect("canonical class mappings without declaration scopes are rejected");
-                assert!(matches!(
-                    missing_scope,
-                    dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::SourceIdentity(_)
-                ));
-
-                let stale_source = validate_cross_class_factory_proof(
-                    CrossClassFactoryProofInput {
-                        source_id: SourceId::from_index(source_id.index() + 1),
-                        source_root,
-                        store: unit.store,
-                        definitions,
-                        source_ast: ast,
-                        typed_ast: unit.typed_ast,
-                        source_index: index,
-                        source_typed_index,
-                        jvm_unit: unit,
-                    },
-                    CrossClassFactoryProofKind::Factory,
-                )
-                .err()
-                .expect("a mismatched source identity is rejected");
-                assert!(matches!(
-                    stale_source,
-                    dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::SourceIdentity(_)
-                ));
-
-                let missing_counter = JvmCompilationUnit {
-                    store: unit.store,
-                    typed_ast: unit.typed_ast,
-                    classes: unit
-                        .classes
-                        .iter()
-                        .filter(|plan| plan.class != counter)
-                        .cloned()
-                        .collect(),
-                };
-                let unplanned_target = validate_cross_class_factory_proof(
-                    CrossClassFactoryProofInput {
-                        source_id,
-                        source_root,
-                        store: unit.store,
-                        definitions,
-                        source_ast: ast,
-                        typed_ast: unit.typed_ast,
-                        source_index: index,
-                        source_typed_index,
-                        jvm_unit: &missing_counter,
-                    },
-                    CrossClassFactoryProofKind::Factory,
-                )
-                .err()
-                .expect("an unplanned Counter target is rejected");
-                assert!(matches!(
-                    unplanned_target,
-                    dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::JvmPlan(_)
-                ));
-
-                let mut missing_method_plans = unit.classes.clone();
-                let owner_plan = missing_method_plans
-                    .iter_mut()
-                    .find(|plan| plan.class == owner)
-                    .expect("factory owner plan exists");
-                owner_plan
-                    .methods
-                    .retain(|candidate| candidate.method != method);
-                let missing_method_unit = JvmCompilationUnit {
-                    store: unit.store,
-                    typed_ast: unit.typed_ast,
-                    classes: missing_method_plans,
-                };
-                let unplanned_method = validate_cross_class_factory_proof(
-                    CrossClassFactoryProofInput {
-                        source_id,
-                        source_root,
-                        store: unit.store,
-                        definitions,
-                        source_ast: ast,
-                        typed_ast: unit.typed_ast,
-                        source_index: index,
-                        source_typed_index,
-                        jvm_unit: &missing_method_unit,
-                    },
-                    CrossClassFactoryProofKind::Factory,
-                )
-                .err()
-                .expect("a source method absent from the JVM plan is rejected");
-                assert!(matches!(
-                    unplanned_method,
-                    dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::JvmPlan(_)
-                ));
-            }
-            if class_name == "CounterIdentity" {
-                let wrong_source_kind = validate_cross_class_factory_proof(
-                    CrossClassFactoryProofInput {
+                let proofs = validate_cross_class_constructor_call_proofs(
+                    CrossClassConstructorCallProofInput {
                         source_id,
                         source_root,
                         store: unit.store,
@@ -13806,16 +13632,18 @@ fn factory_return_and_identity_control_reach_the_real_jvm_source_pipeline() {
                         source_typed_index,
                         jvm_unit: unit,
                     },
-                    CrossClassFactoryProofKind::Factory,
                 )
-                .err()
-                .expect("a factory proof rejects the standalone identity-control owner");
-                assert!(matches!(
-                    wrong_source_kind,
-                    dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::SourceShape(_)
-                ));
-            }
-            if method_name == "create" {
+                .expect("generic read-only constructor-call proof validates");
+                let proof = proofs
+                    .iter()
+                    .find(|proof| proof.method() == method)
+                    .expect("factory method receives a generic constructor-call receipt");
+                assert_eq!(proof.source_id(), source_id);
+                assert_eq!(proof.caller_class(), owner);
+                assert_eq!(proof.method_formal(), parameter);
+                assert_eq!(proof.typed_rhs(), typed_root);
+                assert_eq!(proof.method_descriptor(), "(I)Lexample/Counter;");
+                assert_eq!(proof.constructor_descriptor(), "(I)V");
                 let counter_tree = ast
                     .iter()
                     .find_map(|(tree, node)| match &node.kind {
@@ -13923,8 +13751,8 @@ fn private_factory_constructor_is_rejected_by_jvm_call_site_visibility() {
                        source_typed_index: &SourceTypedIndex,
                        unit: &mut JvmCompilationUnit<'_>,
                        definitions: &Definitions| {
-        proof_error = validate_cross_class_factory_proof(
-            CrossClassFactoryProofInput {
+        proof_error =
+            validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
                 source_id,
                 source_root,
                 store: unit.store,
@@ -13934,10 +13762,8 @@ fn private_factory_constructor_is_rejected_by_jvm_call_site_visibility() {
                 source_index,
                 source_typed_index,
                 jvm_unit: unit,
-            },
-            CrossClassFactoryProofKind::Factory,
-        )
-        .err();
+            })
+            .err();
     };
     let error = compile_source_batch_with_source_observer(
         source,
@@ -13950,7 +13776,7 @@ fn private_factory_constructor_is_rejected_by_jvm_call_site_visibility() {
     .unwrap_err();
     assert!(matches!(
         proof_error,
-        Some(dotty::jvm_tasty_cross_class::CrossClassFactoryProofError::SemanticIdentity(_))
+        Some(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(_))
     ));
     assert!(matches!(
         error,

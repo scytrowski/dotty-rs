@@ -1430,7 +1430,7 @@ fn factory_batch_contract_rejects_wrong_result_abi_target_and_partial_pairs() {
                 .map(|class| class.tasty_plan)
                 .collect::<Vec<_>>();
             let validated = validate_jvm_tasty_batch(source_batch.jvm_unit, &plans).unwrap();
-            assert!(source_batch.factory_proof.is_some());
+            assert_eq!(source_batch.constructor_call_proofs.len(), 1);
             let valid = encode_batch_for_contract_test(&source_batch);
             validate_jvm_tasty_batch_artifacts(&validated, valid.clone()).unwrap();
 

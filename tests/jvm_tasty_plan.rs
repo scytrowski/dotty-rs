@@ -356,6 +356,7 @@ fn counter_and_gauge_have_one_ordered_shared_batch_session() {
             assert_eq!(batch.source_id, SourceId::from_index(205));
             assert_eq!(batch.jvm_unit.classes.len(), 2);
             assert_eq!(batch.classes.len(), 2);
+            assert!(batch.constructor_call_proofs.is_empty());
             assert!(std::ptr::eq(
                 batch.jvm_unit.store,
                 batch.classes[0].tasty_plan.plan().store
@@ -547,28 +548,24 @@ fn counter_and_gauge_have_one_ordered_shared_batch_session() {
 }
 
 #[test]
-fn counter_factory_batch_binds_the_canonical_identity_proof_to_both_plans() {
+fn counter_factory_batch_binds_the_generic_constructor_proof_to_both_plans() {
     with_paired_jvm_tasty_batch_plan(
         CROSS_CLASS_FACTORY_SOURCE,
         "tests/fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala",
         SourceId::from_index(1694),
         |batch| {
-            let proof = batch
-                .factory_proof
-                .as_ref()
-                .expect("the Counter/CounterFactory batch retains its constructor proof");
-            assert_eq!(
-                proof.kind(),
-                dotty::jvm_tasty_cross_class::CrossClassFactoryProofKind::Factory
-            );
-            assert_eq!(proof.descriptor(), "(I)Lexample/Counter;");
-            assert_eq!(proof.counter_class(), batch.classes[0].class);
-            assert_eq!(proof.owner_class(), batch.classes[1].class);
+            let [proof] = batch.constructor_call_proofs else {
+                panic!("the structural scan returns one constructor-call proof");
+            };
+            assert_eq!(proof.method_descriptor(), "(I)Lexample/Counter;");
+            assert_eq!(proof.target_class(), batch.classes[0].class);
+            assert_eq!(proof.caller_class(), batch.classes[1].class);
+            assert_eq!(proof.constructor_descriptor(), "(I)V");
 
             let factory_plan = batch
                 .classes
                 .iter()
-                .find(|class| class.class == proof.owner_class())
+                .find(|class| class.class == proof.caller_class())
                 .unwrap()
                 .tasty_plan
                 .plan();
@@ -594,12 +591,18 @@ fn counter_factory_batch_binds_the_canonical_identity_proof_to_both_plans() {
                     .typed_at(batch.source_id, source_rhs),
                 Some(proof.typed_rhs())
             );
+            assert_eq!(
+                factory_plan
+                    .typed_bindings
+                    .typed_at(batch.source_id, proof.source_argument()),
+                Some(proof.typed_argument())
+            );
             assert!(
                 batch
                     .jvm_unit
                     .classes
                     .iter()
-                    .find(|class| class.class == proof.owner_class())
+                    .find(|class| class.class == proof.caller_class())
                     .unwrap()
                     .methods
                     .iter()
@@ -1291,13 +1294,16 @@ fn same_batch_class_result_emits_identity_tasty_and_rejects_nonformal_constructo
         SourceId::from_index(1693),
         |_| panic!("constructor literals are outside the validated source slice"),
     );
-    let Err(PairedPlanError::BatchClass { phase, reason, .. }) = construction else {
+    let Err(PairedPlanError::BatchUnit { phase, reason }) = construction else {
         panic!(
             "an unsupported constructor argument must fail before a completed batch: {construction:?}"
         );
     };
-    assert_eq!(phase, "JVM/TASTy cross-contract validation");
-    assert!(reason.contains("TastyPlan(Unsupported"), "{reason}");
+    assert_eq!(phase, "cross-class constructor-call identity proof");
+    assert!(
+        reason.contains("constructor argument must be the exact caller formal"),
+        "{reason}"
+    );
 }
 
 #[test]
