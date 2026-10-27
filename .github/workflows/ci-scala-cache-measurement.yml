@@ -1,0 +1,233 @@
+name: Phase 2 Scala cache measurement (temporary)
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/ci-scala-cache-measurement.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-scala-cache-measurement-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    name: Scala ${{ matrix.cache_mode }} sample ${{ matrix.sample }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        cache_mode: [seeded, cold]
+        sample: [1, 2, 3]
+    env:
+      SCALA39_ROOT: ${{ github.workspace }}/scala39-source
+      COURSIER_MAVEN_ROOT: ${{ github.workspace }}/.cache/coursier/v1/https/repo1.maven.org/maven2
+      SCALA39_SOURCE_SHA: 777528f19a58e794c9954a42f433373472ec57f8
+      CACHE_MODE: ${{ matrix.cache_mode }}
+      SAMPLE: ${{ matrix.sample }}
+
+    steps:
+      - name: Check out dotty-rs
+        uses: actions/checkout@v4
+
+      - name: Check out pinned Scala 3.9.0 sources
+        uses: actions/checkout@v4
+        with:
+          repository: scala/scala3
+          ref: ${{ env.SCALA39_SOURCE_SHA }}
+          path: scala39-source
+          persist-credentials: false
+
+      - name: Install pinned JDK 21.0.8
+        id: install-jdk
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21.0.8+9.0.LTS'
+          check-latest: false
+          cache: sbt
+          cache-dependency-path: |
+            scala39-source/build.sbt
+            scala39-source/project/build.properties
+            scala39-source/project/*.sbt
+            scala39-source/project/*.scala
+            scala39-source/project/**/*.sbt
+            scala39-source/project/**/*.scala
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+
+      - name: Cache pinned Scala dependencies and Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/coursier
+            target/debug
+            target/.rustc_info.json
+          key: ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-scala-3.9.0
+          restore-keys: |
+            ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-
+
+      - name: Verify pinned source and JDK
+        run: |
+          set -euo pipefail
+          test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = "$SCALA39_SOURCE_SHA"
+          grep -q '^JAVA_VERSION="21.0.8"' "$JAVA_HOME/release"
+          test -d "$JAVA_HOME/jmods"
+          mkdir -p "$COURSIER_MAVEN_ROOT" target/scala-cache-measurement
+
+      - name: Install sbt runner
+        uses: sbt/setup-sbt@v1
+
+      - name: Restore exact pinned Scala build outputs
+        id: scala-build-cache
+        if: matrix.cache_mode == 'seeded'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            scala39-source/target
+            scala39-source/**/target
+          key: ${{ runner.os }}-${{ runner.arch }}-scala39-targets-${{ env.SCALA39_SOURCE_SHA }}-jdk21.0.8-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
+
+      - name: Record measurement provenance
+        env:
+          SCALA_BUILD_CACHE_HIT: ${{ steps.scala-build-cache.outputs.cache-hit }}
+          SCALA_DEPENDENCY_CACHE_HIT: ${{ steps.install-jdk.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          {
+            printf 'sample\t%s\n' "$SAMPLE"
+            printf 'cache_mode\t%s\n' "$CACHE_MODE"
+            printf 'dotty_merge_sha\t%s\n' "$(git rev-parse HEAD)"
+            printf 'dotty_head_sha\t%s\n' '${{ github.event.pull_request.head.sha }}'
+            printf 'scala_source_sha\t%s\n' "$SCALA39_SOURCE_SHA"
+            printf 'run_id\t%s\n' '${{ github.run_id }}'
+            printf 'run_attempt\t%s\n' '${{ github.run_attempt }}'
+            printf 'runner_os\t%s\n' '${{ runner.os }}'
+            printf 'runner_image\t%s\n' "$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2-)"
+            printf 'rustc\t%s\n' "$(rustc +1.98.1 --version)"
+            printf 'java\t%s\n' "$(java -version 2>&1 | head -n 1)"
+            printf 'scala_target_cache\t%s\n' "${SCALA_BUILD_CACHE_HIT:-bypassed}"
+            printf 'scala_dependency_cache\t%s\n' "${SCALA_DEPENDENCY_CACHE_HIT:-false}"
+            printf 'runner_started_utc\t%s\n' "$(date -u +%FT%TZ)"
+          } > target/scala-cache-measurement/provenance.tsv
+
+      - name: Stage pinned Scala compiler and record duration
+        run: |
+          set -euo pipefail
+          start="$(date -u +%s)"
+          start_iso="$(date -u +%FT%TZ)"
+          (cd "$SCALA39_ROOT" && sbt "dist/universal:stage")
+          end="$(date -u +%s)"
+          end_iso="$(date -u +%FT%TZ)"
+          {
+            printf 'stage_started_utc\t%s\n' "$start_iso"
+            printf 'stage_finished_utc\t%s\n' "$end_iso"
+            printf 'stage_seconds\t%s\n' "$((end - start))"
+          } >> target/scala-cache-measurement/provenance.tsv
+
+      - name: Download and verify pinned Scala compiler artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS=' ' read -r relative_path sha256; do
+            [[ -z "$relative_path" ]] && continue
+            destination="$COURSIER_MAVEN_ROOT/$relative_path"
+            mkdir -p "$(dirname "$destination")"
+            if [[ ! -f "$destination" ]] || ! printf '%s  %s\n' "$sha256" "$destination" | sha256sum --check --status; then
+              curl --fail --location --retry 3 \
+                "https://repo1.maven.org/maven2/$relative_path" \
+                --output "$destination"
+            fi
+            printf '%s  %s\n' "$sha256" "$destination" | sha256sum --check --status
+          done <<'ARTIFACTS'
+          org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar 9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba
+          org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd
+          org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar 3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a
+          org/scala-lang/tasty-core_3/3.9.0/tasty-core_3-3.9.0.jar 66e12dda98bb23e864f3a31f8527c8338bf47bce9b85cc380b368c69c1ba8d0f
+          org/scala-lang/scala3-interfaces/3.9.0/scala3-interfaces-3.9.0.jar 64dfde1d2c6309d65a01c5f3ea836137eb84338dcadeb16f85764561ef4e10db
+          org/scala-lang/modules/scala-asm/9.9.0-scala-1/scala-asm-9.9.0-scala-1.jar 75ac366e8ecb691e06a7e85041eed0f67919a646e5262fa0901225698c104375
+          org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar 92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3
+          org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar 1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af
+          ARTIFACTS
+
+      - name: Save exact pinned Scala build outputs
+        if: success() && matrix.cache_mode == 'seeded' && steps.scala-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            scala39-source/target
+            scala39-source/**/target
+          key: ${{ runner.os }}-${{ runner.arch }}-scala39-targets-${{ env.SCALA39_SOURCE_SHA }}-jdk21.0.8-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
+
+      - name: Record Scala output size and check cache state
+        env:
+          SCALA_BUILD_CACHE_HIT: ${{ steps.scala-build-cache.outputs.cache-hit }}
+          SCALA_DEPENDENCY_CACHE_HIT: ${{ steps.install-jdk.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          target_bytes="$(find "$SCALA39_ROOT" -type d -name target -prune -print0 | xargs -0 -r du -sb | awk '{sum += $1} END {print sum + 0}')"
+          printf 'scala_target_bytes\t%s\n' "$target_bytes" >> target/scala-cache-measurement/provenance.tsv
+          {
+            echo '### Scala cache measurement'
+            echo "- Sample: $SAMPLE"
+            echo "- Mode: $CACHE_MODE"
+            echo "- Build-output cache: ${SCALA_BUILD_CACHE_HIT:-bypassed}"
+            echo "- Dependency cache hit: ${SCALA_DEPENDENCY_CACHE_HIT:-false}"
+            echo "- Scala target bytes: $target_bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run strict linked Scala and TASTy release gates
+        env:
+          DOTTY_REQUIRE_SCALA_TASTY_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_OBJECT_COMPOSITION_CONSUMER: '1'
+          DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
+        run: |
+          start="$(date -u +%s)"
+          cargo +1.98.1 test \
+            --test jvm_tasty_scala_consumer \
+            --test jvm_tasty_multiclass_scala_consumer \
+            --test jvm_tasty_cross_class_scala_consumer \
+            --test jvm_tasty_factory_scala_consumer \
+            --test jvm_tasty_object_composition_scala_consumer \
+            --test jvm_tasty_cross_class_factories \
+            --test tasty_source_pickling \
+            --locked -- --nocapture
+          echo "scala_tasty_gate_seconds\t$(($(date -u +%s) - start))" >> target/scala-cache-measurement/provenance.tsv
+
+      - name: Run mandatory Java 21 verifier and publisher gate
+        env:
+          DOTTY_CLASSFILE_REQUIRE_JDK: '1'
+        run: |
+          start="$(date -u +%s)"
+          cargo +1.98.1 test \
+            -p dotty-classfile --test classfile_jvm_encoder \
+            -p dotty-jvm --lib \
+            -p dotty --test jvm_source_compilation \
+            --test jvm_tasty_artifacts \
+            --test jvm_stateful_class_contract \
+            --locked -- --nocapture
+          echo "java21_gate_seconds\t$(($(date -u +%s) - start))" >> target/scala-cache-measurement/provenance.tsv
+
+      - name: Record check completion and publish measurement artifact
+        if: always()
+        run: |
+          echo "checks_finished_utc\t$(date -u +%FT%TZ)" >> target/scala-cache-measurement/provenance.tsv
+
+      - name: Upload sample metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scala-cache-${{ matrix.cache_mode }}-sample-${{ matrix.sample }}-${{ github.event.pull_request.head.sha }}
+          path: target/scala-cache-measurement/
+          if-no-files-found: error
+          retention-days: 30
