@@ -71,6 +71,21 @@ pub(in crate::typer) enum ZeroArgumentSelectionError {
 }
 
 impl SourceTyper<'_> {
+    fn this_type_application_argument_view(
+        &mut self,
+        actual: TypeId,
+        expected: TypeId,
+    ) -> Result<TypeId, TyperError> {
+        let receiver_view = self.this_type_receiver_view(actual)?;
+        if receiver_view == actual {
+            return Ok(actual);
+        }
+        match self.conforms(actual, expected) {
+            Ok(true) => Ok(actual),
+            Ok(false) | Err(_) => Ok(receiver_view),
+        }
+    }
+
     /// Selects a member used without an argument list. Parameterless methods
     /// and values retain their exact selected reference; methods with a clause
     /// and polymorphic results need syntax/inference this call does not supply.
@@ -714,7 +729,10 @@ impl SourceTyper<'_> {
                     expected_type,
                     info_journal,
                 )?;
-                (typed_argument.typed, self.this_type_receiver_view(actual)?)
+                (
+                    typed_argument.typed,
+                    self.this_type_application_argument_view(actual, expected_type)?,
+                )
             } else {
                 let argument = self.type_value_expression_inner(
                     *argument_tree,
@@ -728,7 +746,10 @@ impl SourceTyper<'_> {
                     expected_type,
                     info_journal,
                 )?;
-                (argument, self.this_type_receiver_view(actual)?)
+                (
+                    argument,
+                    self.this_type_application_argument_view(actual, expected_type)?,
+                )
             };
             match self.conforms(actual, expected_type) {
                 Ok(true) => {}
