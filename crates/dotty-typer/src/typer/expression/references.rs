@@ -1089,36 +1089,32 @@ impl SourceTyper<'_> {
         let java_class_qualifier = self.is_java_class_qualifier(qualifier);
 
         // `AnyRef.eq/ne` are compiler semantic members, not methods loaded
-        // from the JVM Object class. Keep their selection narrower than
-        // ordinary member lookup until the source model distinguishes those
-        // owners and supports a complete reference hierarchy.
+        // from the JVM Object class. Validate the canonical source receiver
+        // and check source-owned declarations before selecting these symbols.
         if !java_class_qualifier && self.any_ref_identity_operator_name(name) {
             if self
-                .any_ref_identity_symbol_for_receiver(receiver, name)
+                .any_ref_identity_symbol_for_receiver(receiver, name)?
                 .is_some()
+                && !self.source_declares_member_in_source_hierarchy(receiver, name, info_journal)?
+                && let Some(symbol) = self.any_ref_identity_symbol_for_receiver(receiver, name)?
             {
-                let candidates = self
-                    .lookup_members_journaled(receiver, name, info_journal)
-                    .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
-                if candidates.is_empty()
-                    && let Some(symbol) = self.any_ref_identity_symbol_for_receiver(receiver, name)
-                {
-                    let ty = self.store.types.alloc(Type::TermRef {
-                        prefix: receiver_type,
-                        target: TermRefTarget::Symbol(symbol),
-                    });
-                    return Ok(
-                        TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
-                            .select(qualifier, name, backquoted, ty, position),
-                    );
-                }
+                let ty = self.store.types.alloc(Type::TermRef {
+                    prefix: receiver_type,
+                    target: TermRefTarget::Symbol(symbol),
+                });
+                return Ok(
+                    TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                        .select(qualifier, name, backquoted, ty, position),
+                );
             }
-            return Err(TyperError::MemberNotFound {
-                source: self.source,
-                tree_index,
-                receiver,
-                name,
-            });
+            if !self.is_external_class_identity_receiver(receiver) {
+                return Err(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index,
+                    receiver,
+                    name,
+                });
+            }
         }
 
         let mut candidates = self
@@ -1306,55 +1302,284 @@ impl SourceTyper<'_> {
         ))
     }
 
-    /// Produces the nominal view used only for checking a `this` value against
-    /// the canonical AnyRef identity parameter. The typed tree keeps its
-    /// original ThisType and source identity.
+    /// Produces a reference view for the canonical AnyRef identity parameter.
+    /// The typed argument keeps its original source expression and type.
     pub(in crate::typer) fn any_ref_identity_argument_view(
         &mut self,
         ty: TypeId,
-    ) -> Option<TypeId> {
-        let Some(Type::ThisType { class }) = self.store.types.try_get(ty).cloned() else {
-            return None;
+    ) -> Result<Option<TypeId>, TyperError> {
+        let view = if matches!(self.store.types.try_get(ty), Some(Type::ThisType { .. })) {
+            self.this_type_receiver_view(ty)?
+        } else {
+            ty
         };
-        if !self.is_supported_any_ref_identity_receiver(ty) {
-            return None;
+        if self.is_supported_any_ref_identity_receiver(view)? {
+            return Ok(Some(self.definitions.object_type));
         }
-        let prefix = self.type_symbol_prefix(class);
-        Some(self.store.types.alloc(Type::TypeRef {
-            prefix,
-            target: TypeRefTarget::Symbol(class),
-        }))
+        if let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(object),
+            ..
+        }) = self.store.types.try_get(view)
+            && self.store.symbols.contains(*object)
+            && self.store.symbols.get(*object).kind == SymbolKind::Object
+        {
+            self.module_class_of_object(*object)?;
+            return Ok(Some(self.definitions.object_type));
+        }
+        let module_class = match self.store.types.try_get(view) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            }) => Some(*class),
+            Some(Type::Applied { tycon, args }) if args.is_empty() => {
+                match self.store.types.try_get(*tycon) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(class),
+                        ..
+                    }) => Some(*class),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let Some(module_class) = module_class.filter(|class| {
+            self.store.symbols.contains(*class)
+                && self.store.symbols.get(*class).kind == SymbolKind::ModuleClass
+        }) else {
+            return Ok(None);
+        };
+        let Some(object) = self.store.symbols.get(module_class).links.companion else {
+            return Ok(None);
+        };
+        if self.module_class_of_object(object)? == module_class {
+            Ok(Some(self.definitions.object_type))
+        } else {
+            Ok(None)
+        }
     }
 
     pub(in crate::typer) fn any_ref_identity_symbol_for_receiver(
         &self,
         receiver: TypeId,
         name: Name,
-    ) -> Option<SymbolId> {
-        if !self.is_supported_any_ref_identity_receiver(receiver) {
-            return None;
+    ) -> Result<Option<SymbolId>, TyperError> {
+        if !self.is_supported_any_ref_identity_receiver(receiver)? {
+            return Ok(None);
         }
-        let operators = self
+        let Some(operators) = self
             .definitions
-            .any_ref_identity_operator_symbols(self.store)?;
-        match self.store.names.resolve(name.text()) {
+            .any_ref_identity_operator_symbols(self.store)
+        else {
+            return Ok(None);
+        };
+        Ok(match self.store.names.resolve(name.text()) {
             "eq" => Some(operators.eq),
             "ne" => Some(operators.ne),
             _ => None,
-        }
+        })
     }
 
-    fn is_supported_any_ref_identity_receiver(&self, receiver: TypeId) -> bool {
+    /// Identifies an external class receiver for which canonical AnyRef
+    /// identity lookup is not yet modeled. Preserve ordinary member lookup's
+    /// explicit unsupported/error result for these classpath types instead of
+    /// changing it to an earlier `MemberNotFound` diagnostic.
+    pub(in crate::typer) fn is_external_class_identity_receiver(&self, receiver: TypeId) -> bool {
         let class = match self.store.types.try_get(receiver) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            }) => Some(*class),
+            Some(Type::Applied { tycon, .. }) => match self.store.types.try_get(*tycon) {
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(class),
+                    ..
+                }) => Some(*class),
+                _ => None,
+            },
+            _ => None,
+        };
+        class.is_some_and(|class| {
+            self.store.symbols.contains(class)
+                && self.store.symbols.get(class).kind == SymbolKind::Class
+                && matches!(
+                    self.store.symbols.get(class).origin,
+                    SymbolOrigin::Classfile(_) | SymbolOrigin::Tasty(_)
+                )
+        })
+    }
+
+    /// Checks only declarations owned by the current source hierarchy. The
+    /// canonical `AnyRef.eq/ne` symbols are compiler members, so probing the
+    /// full external hierarchy here can force unrelated generic classpath
+    /// instantiation (for example `Option[A]`'s collection parents).
+    pub(in crate::typer) fn source_declares_member_in_source_hierarchy(
+        &mut self,
+        receiver: TypeId,
+        name: Name,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<bool, TyperError> {
+        let class = match self.store.types.try_get(receiver) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            })
+            | Some(Type::ThisType { class }) => *class,
+            Some(Type::Applied { tycon, .. }) => match self.store.types.try_get(*tycon) {
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(class),
+                    ..
+                }) => *class,
+                _ => return Ok(false),
+            },
+            _ => return Ok(false),
+        };
+        let mut pending = vec![(class, Vec::new())];
+        let mut visited = std::collections::HashSet::new();
+        while let Some((class, ancestors)) = pending.pop() {
+            if ancestors.contains(&class) {
+                // A real cycle makes shadowing uncertain. A repeated node on
+                // a different path is a valid diamond and is handled below.
+                return Ok(true);
+            }
+            if !visited.insert(class) {
+                continue;
+            }
+            if !matches!(
+                self.index.definition_of(class),
+                Some(SourceDefinition::Canonical { source, .. }) if source == self.source
+            ) || !self.store.symbols.contains(class)
+                || self.store.symbols.get(class).origin != SymbolOrigin::Source(self.source)
+            {
+                continue;
+            }
+            let Some(scope) = self.index.scope_of(class) else {
+                return Ok(true);
+            };
+            if !self.store.scopes.contains(scope)
+                || self.store.scopes.get(scope).owner != Some(class)
+            {
+                return Ok(true);
+            }
+            let declarations = self.store.scopes.get(scope);
+            if declarations.lookup_all(&name).iter().any(|symbol| {
+                self.store.symbols.contains(*symbol)
+                    && self.store.symbols.get(*symbol).origin == SymbolOrigin::Source(self.source)
+            }) {
+                return Ok(true);
+            }
+            let Some(parents) = self.source_parent_classes(class, info_journal)? else {
+                // Do not select a compiler member when a source parent could
+                // not be resolved to its canonical source identity.
+                return Ok(true);
+            };
+            let mut next_ancestors = ancestors;
+            next_ancestors.push(class);
+            pending.extend(
+                parents
+                    .into_iter()
+                    .map(|parent| (parent, next_ancestors.clone())),
+            );
+        }
+        Ok(false)
+    }
+
+    fn source_parent_classes(
+        &mut self,
+        class: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<Vec<SymbolId>>, TyperError> {
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(class)
+        else {
+            return Ok(Some(Vec::new()));
+        };
+        if source != self.source {
+            return Ok(Some(Vec::new()));
+        }
+        let Some(Tree {
+            kind: TreeKind::TypeDef(definition),
+            ..
+        }) = self.arena.try_get(tree)
+        else {
+            return Ok(None);
+        };
+        let Some(Tree {
+            kind: TreeKind::Template(template),
+            ..
+        }) = self.arena.try_get(definition.rhs)
+        else {
+            return Ok(None);
+        };
+        let context = self
+            .index
+            .declaration_context_of(class)
+            .ok_or(TyperError::SourceClassTypeParametersProvenanceMissing { symbol: class })?;
+        let mut parents = Vec::new();
+        for parent in &template.parents {
+            // Parent arguments do not affect which class owns declarations.
+            // Resolve only the parent constructor so an unsupported or
+            // deferred external generic application does not obscure a
+            // qualified/import-aliased source parent identity.
+            let mut parent_constructor = *parent;
+            loop {
+                let Some(node) = self.arena.try_get(parent_constructor) else {
+                    return Ok(None);
+                };
+                match &node.kind {
+                    TreeKind::AppliedTypeTree(applied) => parent_constructor = applied.tpt,
+                    TreeKind::TypeApply(application) => parent_constructor = application.function,
+                    TreeKind::Apply(application) => parent_constructor = application.function,
+                    TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                        parent_constructor = parens.inner;
+                    }
+                    _ => break,
+                }
+            }
+            let parent_type =
+                match self.type_of_tpt_inner_journaled(parent_constructor, context, info_journal) {
+                    Ok(parent_type) => parent_type,
+                    Err(_) => return Ok(None),
+                };
+            let parent_class = match self.store.types.try_get(parent_type) {
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(parent),
+                    ..
+                }) => Some(*parent),
+                Some(Type::Applied { tycon, .. }) => match self.store.types.try_get(*tycon) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(parent),
+                        ..
+                    }) => Some(*parent),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(parent) = parent_class else {
+                return Ok(None);
+            };
+            if self.store.symbols.contains(parent)
+                && self.store.symbols.get(parent).origin == SymbolOrigin::Source(self.source)
+                && matches!(
+                    self.index.definition_of(parent),
+                    Some(SourceDefinition::Canonical { source, .. }) if source == self.source
+                )
+            {
+                parents.push(parent);
+            }
+        }
+        Ok(Some(parents))
+    }
+
+    fn is_supported_any_ref_identity_receiver(&self, receiver: TypeId) -> Result<bool, TyperError> {
+        let (class, applied, argument_count) = match self.store.types.try_get(receiver) {
             Some(Type::TypeRef {
                 prefix,
                 target: TypeRefTarget::Symbol(class),
             }) => {
                 if !self.store.symbols.contains(*class) {
-                    return false;
+                    return Ok(false);
                 }
                 let Some(owner) = self.store.symbols.get(*class).owner else {
-                    return false;
+                    return Ok(false);
                 };
                 if *prefix != self.definitions.no_prefix
                     && !matches!(
@@ -1365,15 +1590,42 @@ impl SourceTyper<'_> {
                         }) if *package_prefix == self.definitions.no_prefix && *package == owner
                     )
                 {
-                    return false;
+                    return Ok(false);
                 }
-                *class
+                (*class, false, 0)
             }
-            Some(Type::ThisType { class }) => *class,
-            _ => return false,
+            Some(Type::ThisType { class }) => (*class, false, 0),
+            Some(Type::Applied { tycon, args }) => {
+                let Some(Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(class),
+                }) = self.store.types.try_get(*tycon)
+                else {
+                    return Ok(false);
+                };
+                if !self.store.symbols.contains(*class) {
+                    return Ok(false);
+                }
+                let Some(owner) = self.store.symbols.get(*class).owner else {
+                    return Ok(false);
+                };
+                if *prefix != self.definitions.no_prefix
+                    && !matches!(
+                        self.store.types.try_get(*prefix),
+                        Some(Type::TypeRef {
+                            prefix: package_prefix,
+                            target: TypeRefTarget::Symbol(package),
+                        }) if *package_prefix == self.definitions.no_prefix && *package == owner
+                    )
+                {
+                    return Ok(false);
+                }
+                (*class, true, args.len())
+            }
+            _ => return Ok(false),
         };
         if !self.store.symbols.contains(class) {
-            return false;
+            return Ok(false);
         }
         let declaration = self.store.symbols.get(class);
         if declaration.kind != SymbolKind::Class
@@ -1387,30 +1639,35 @@ impl SourceTyper<'_> {
                 Some(SourceDefinition::Canonical { source, .. }) if source == self.source
             )
         {
-            return false;
+            return Ok(false);
         }
-        let SymbolInfo::Complete(info_id) = declaration.info else {
-            return false;
+        let Ok(parameters) = self.source_class_type_parameters(class) else {
+            return Ok(false);
         };
-        let Some(Type::ClassInfo(info)) = self.store.types.try_get(info_id) else {
-            return false;
+        if (applied && argument_count != parameters.len()) || (!applied && !parameters.is_empty()) {
+            return Ok(false);
+        }
+        let Some(scope) = self.index.scope_of(class) else {
+            return Ok(false);
         };
-        if info.class != class || !self.store.scopes.contains(info.declarations) {
-            return false;
+        if !self.store.scopes.contains(scope) {
+            return Ok(false);
         }
-        if self.index.scope_of(class) != Some(info.declarations) {
-            return false;
-        }
-        let declarations = self.store.scopes.get(info.declarations);
+        let declarations = self.store.scopes.get(scope);
         if declarations.owner != Some(class)
             || declarations.entered_symbols().any(|symbol| {
                 !self.store.symbols.contains(symbol)
-                    || self.store.symbols.get(symbol).kind == SymbolKind::TypeParameter
+                    || (self.store.symbols.get(symbol).kind == SymbolKind::TypeParameter
+                        && !parameters.contains(&symbol))
             })
         {
-            return false;
+            return Ok(false);
         }
-        info.parents.as_slice() == [self.definitions.object_type]
+        // A canonical source class is a reference type even when its direct
+        // parents are traits or generic collection classes rather than Object.
+        // Member lookup still decides whether a source declaration shadows
+        // this compiler-provided member.
+        Ok(true)
     }
 
     /// Type a selection qualifier without treating a package path as a value.

@@ -173,6 +173,7 @@ impl SourceTyper<'_> {
                     self.index.source_context(*context_id).lexical_scope != *scope
                 })
             });
+        let mut deferred_parent_error = None;
         for (context_position, context_id) in contexts.iter().enumerate() {
             let source_context = self.index.source_context(*context_id);
             let candidates = self
@@ -215,9 +216,50 @@ impl SourceTyper<'_> {
                 let this_type = self.store.types.alloc(Type::ThisType {
                     class: source_context.owner,
                 });
-                let inherited = self
-                    .lookup_members_journaled(this_type, name, info_journal)
-                    .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
+                let inherited =
+                    match self.lookup_members_journaled(this_type, name, info_journal) {
+                        Ok(inherited) => inherited,
+                        Err(error)
+                            if matches!(
+                                &error,
+                                MemberLookupError::ParentTypeAdaptation {
+                                    error: TyperError::ExternalGenericInstantiationDeferred { .. },
+                                    ..
+                                }
+                            ) =>
+                        {
+                            // A matching inherited field still precedes outer
+                            // lexical/import scopes. Generic adaptation may
+                            // be unavailable for this external parent, so
+                            // inspect its raw hierarchy before continuing.
+                            let inherited = self
+                                .lookup_unadapted_members_journaled(this_type, name, info_journal)
+                                .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
+                                .into_iter()
+                                .filter(|candidate| candidate.inheritance_depth > 0)
+                                .filter(|candidate| {
+                                    self.store.symbols.contains(candidate.symbol)
+                                        && self.store.symbols.get(candidate.symbol).kind
+                                            == SymbolKind::Field
+                                        && self.store.symbols.get(candidate.symbol).visibility
+                                            == dotty_core::symbols::Visibility::Public
+                                        && !self
+                                            .store
+                                            .symbols
+                                            .get(candidate.symbol)
+                                            .flags
+                                            .contains(SymbolFlags::STATIC)
+                                })
+                                .map(|candidate| candidate.symbol)
+                                .collect::<Vec<_>>();
+                            if !inherited.is_empty() {
+                                return Ok(inherited);
+                            }
+                            deferred_parent_error.get_or_insert(error);
+                            continue;
+                        }
+                        Err(error) => return Err(TyperError::MemberLookup(Box::new(error))),
+                    }
                     .into_iter()
                     .filter(|candidate| candidate.inheritance_depth > 0)
                     .filter(|candidate| {
@@ -238,6 +280,19 @@ impl SourceTyper<'_> {
                     return Ok(inherited);
                 }
             }
+        }
+        if let Some(deferred_error) = deferred_parent_error {
+            let scala_package = self.packages.symbol(&["scala".to_owned()]);
+            if let Some(symbol) = self.lookup_default_term_import(name, tree_index, position)?
+                && self.store.symbols.contains(symbol)
+                && self.store.symbols.get(symbol).kind == SymbolKind::Object
+                && self.store.symbols.get(symbol).owner == scala_package
+                && scala_package.is_some()
+            {
+                self.module_class_of_object(symbol)?;
+                return Ok(vec![symbol]);
+            }
+            return Err(TyperError::MemberLookup(Box::new(deferred_error)));
         }
         if let Some(symbol) = self.lookup_default_term_import(name, tree_index, position)? {
             return Ok(vec![symbol]);

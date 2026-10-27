@@ -135,6 +135,78 @@ impl SourceTyper<'_> {
         self.lookup_members_inner(receiver, name, journal, false)
     }
 
+    /// Checks inherited declarations by name without adapting generic parent
+    /// types. This is safe for precedence checks: parent type arguments affect
+    /// a member's type, but not whether a declaration with this name exists.
+    pub(in crate::typer) fn lookup_unadapted_members_journaled(
+        &mut self,
+        receiver: TypeId,
+        name: Name,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<MemberCandidate>, MemberLookupError> {
+        let receiver_view = self.normalize_member_receiver(receiver, journal)?;
+        let class = class_symbol_for_type(self.store, receiver_view, false)?;
+        let mut queue = VecDeque::from([PendingClass {
+            symbol: class,
+            receiver_view,
+            depth: 0,
+        }]);
+        let mut visited = HashSet::from([class]);
+        let mut processed = Vec::new();
+        let mut edges = HashMap::<SymbolId, Vec<SymbolId>>::new();
+        let mut candidates = Vec::new();
+
+        while let Some(pending) = queue.pop_front() {
+            let info = match self.class_info(pending.symbol, journal) {
+                Ok(info) => info,
+                Err(MemberLookupError::ClassInfoUnavailable { .. })
+                    if pending.symbol == self.definitions.object_class =>
+                {
+                    processed.push(pending.symbol);
+                    edges.insert(pending.symbol, Vec::new());
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let direct = self.direct_candidates(
+                pending.symbol,
+                pending.receiver_view,
+                pending.depth,
+                name,
+                &info,
+            )?;
+            if !direct.is_empty() {
+                candidates.extend(direct);
+                processed.push(pending.symbol);
+                edges.insert(pending.symbol, Vec::new());
+                continue;
+            }
+            processed.push(pending.symbol);
+            let mut parents = Vec::with_capacity(info.parents.len());
+            for parent_view in info.parents {
+                let parent = class_symbol_for_type(self.store, parent_view, true)?;
+                parents.push(parent);
+                if visited.insert(parent) {
+                    if pending.depth == MAX_MEMBER_LOOKUP_DEPTH {
+                        return Err(MemberLookupError::TooDeep);
+                    }
+                    queue.push_back(PendingClass {
+                        symbol: parent,
+                        receiver_view: parent_view,
+                        depth: pending.depth + 1,
+                    });
+                }
+            }
+            edges.insert(pending.symbol, parents);
+        }
+        if let Some(cycle) = find_inheritance_cycle(class, &processed, &edges) {
+            return Err(MemberLookupError::InheritanceCycle { symbol: cycle });
+        }
+        let mut seen = HashSet::new();
+        candidates.retain(|candidate| seen.insert(candidate.symbol));
+        Ok(candidates)
+    }
+
     /// Finds matching declarations on a receiver and its nominal parents,
     /// including inherited buckets hidden by direct declarations on the path.
     /// Overload application uses this view before applicability filtering and
