@@ -6237,6 +6237,7 @@ fn unsupported_nested_case_class_shape_rolls_back_and_later_naming_succeeds() {
 #[test]
 fn nested_case_class_companion_rejects_each_unsupported_constructor_feature() {
     let unsupported_sources = [
+        "object Owners { abstract case class Node(value: Int) }",
         "object Owners { case class Node(value: Int = 1) }",
         "object Owners { case class Node(using value: Int) }",
         "object Owners { case class Node(value: Int*) }",

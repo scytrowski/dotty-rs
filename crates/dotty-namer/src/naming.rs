@@ -1644,6 +1644,12 @@ impl Namer<'_> {
             reason,
         };
 
+        if definition.metadata.modifiers.contains(&Modifier::Abstract) {
+            return Err(unsupported(
+                "abstract case classes do not receive a generated apply",
+            ));
+        }
+
         if constructor.metadata.visibility.is_some()
             || !constructor.metadata.modifiers.is_empty()
             || !constructor.metadata.annotations.is_empty()

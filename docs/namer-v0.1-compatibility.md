@@ -81,9 +81,11 @@ original constructor parameter trees in declaration order. This keeps the
 generic source relationships recoverable without fabricating completed
 `SymbolInfo` or performing type resolution.
 
-Constructor defaults, contextual/repeated or otherwise modified parameters,
-bounds/context bounds on type parameters, non-public constructors, secondary constructors,
-and conflicting same-name declarations are rejected with a typed Namer error.
+Abstract case classes, constructor defaults, contextual/repeated or otherwise
+modified parameters, bounds/context bounds on type parameters, non-public
+constructors, secondary constructors, and conflicting same-name declarations
+are rejected with a typed Namer error. Abstract case classes do not receive a
+generated `apply` in the pinned Scala 3.9.0 implementation.
 Erased and by-name case-class parameters are currently rejected by the parser
 and do not reach this Namer path. Ordinary nested classes do not receive
 case-class companions. The Scala 3.9.0 oracle fixture
