@@ -9,7 +9,7 @@ The independent A0 holdout remained **9/25**. This provides no evidence of holdo
 ## Scope and exact inputs
 
 - Baseline source revision: `dc71c164aab415dc8a75e698e7ab64fd85891faf` (pre-#1744, with the original 10 accepted methods).
-- Final source under test: `d4f5792db39027a96d5de4706166bee56b8d0005` (includes the integrated changes through #1778, the deterministic holdout/gate changes, and the Namer-outcome reporting fix). PR base `main` is `3b80293ccefff711c0f76ed00f9982d936067e74`; intervening #1768/#1769 changes are documentation-only and do not alter the audited code.
+- Final source under test: local commit `d4f5792db39027a96d5de4706166bee56b8d0005` (includes the integrated changes through #1778, the deterministic holdout/gate changes, and the Namer-outcome reporting fix). This local commit was not published as a GitHub commit. The equivalent retrievable source and harness state is PR head `f1c487b3af79f5e67ebe7a17240c873d7f98d3c9`: the tracked diff from the tested commit to the published PR tree contains only the closeout report, TSV evidence, and reconciler files; no source, audit harness, or test file changed. PR base `main` is `3b80293ccefff711c0f76ed00f9982d936067e74`; intervening #1768/#1769 changes are documentation-only and do not alter the audited code. The PR head makes the tested code and harness retrievable, but the audit itself ran at the local commit stated above.
 - Scala 3.9.0 source: `777528f19a58e794c9954a42f433373472ec57f8`.
 - Scala compiler/library artifacts: the pinned Scala 3.9.0 Maven set in `tests/fixtures/tasty_pickler/provenance.json`.
 - JDK: Temurin `21.0.8+9`; Rust: `1.98.1` (`rustc 1.98.1 (48a229cea 2026-09-01)`).
@@ -72,7 +72,7 @@ The baseline and final ordinary-main audits were each run with `--verify-determi
 
 The corrected focused audit reports are local evidence: package-term SHA-256 `271dad8115101bd36980b02f4a42012dad225cea41ecd001d8426de6bab9d22e`, object-module SHA-256 `631acd4997931103a45d788c5cdbaa070fc81221fb5dd8ec23e5ad184e64f128`. Each reconciler retained all frozen rows and reported 0 missing methods.
 
-Validation on the final source revision: all 122 typer audit Python tests passed; `cargo fmt --all -- --check`, `python3 tools/check-frontend-boundaries.py`, workspace Clippy with `-D warnings`, and workspace rustdoc with `-D warnings` passed. The complete `cargo test --workspace --all-targets --locked` passed after setting `TMPDIR` to a task-local directory under `target/`; its first attempt hit the already-full shared `/tmp` and was rerun successfully without deleting unrelated temporary data. The required JDK 21 gate passed with `DOTTY_CLASSFILE_REQUIRE_JDK=1` and the pinned Temurin 21 toolchain. `git diff --check` passed.
+Validation on the tested source revision: all 122 typer audit Python tests passed; `cargo fmt --all -- --check`, `python3 tools/check-frontend-boundaries.py`, workspace Clippy with `-D warnings`, and workspace rustdoc with `-D warnings` passed. The complete `cargo test --workspace --all-targets --locked` passed after setting `TMPDIR` to a task-local directory under `target/`; its first attempt hit the already-full shared `/tmp` and was rerun successfully without deleting unrelated temporary data. The required JDK 21 gate passed with `DOTTY_CLASSFILE_REQUIRE_JDK=1` and the pinned Temurin 21 toolchain. `git diff --check` passed. GitHub Actions reruns these gates against the retrievable PR head above.
 
 Representative commands (environment paths omitted):
 
