@@ -10386,6 +10386,31 @@ mod tests {
     }
 
     #[test]
+    fn inheritance_ancestry_accepts_the_maximum_depth() {
+        let mut classes = HashMap::new();
+        for index in 0..MAX_INHERITANCE_DEPTH {
+            let this_name = format!("Allowed{index}");
+            let super_name =
+                (index + 1 < MAX_INHERITANCE_DEPTH).then(|| format!("Allowed{}", index + 1));
+            classes.insert(
+                BinaryName::from_internal(&this_name),
+                synthetic_class(&this_name, super_name.as_deref()),
+            );
+        }
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        let symbol = loader
+            .load_class(&BinaryName::from_internal("Allowed0"))
+            .expect("a hierarchy at the configured depth limit is accepted");
+
+        assert!(matches!(
+            store.symbols.get(symbol).info,
+            SymbolInfo::Complete(_)
+        ));
+    }
+
+    #[test]
     fn inheritance_ancestry_has_a_bounded_depth() {
         let mut classes = HashMap::new();
         for index in 0..=MAX_INHERITANCE_DEPTH {
