@@ -1,31 +1,41 @@
 # `Either.left` / `Either.right` nested projection audit (Scala 3.9.0)
 
-**Result: BLOCKED / UNMET.** This audit did not make either method fully typed.
-It identifies a source Namer prerequisite; it does not claim that `Either.left`
-or `Either.right` has improved.
+**Result: ACCEPTED.** Both targeted methods now produce fully typed method
+definitions with the expected projection result types.
 
 ## Scope and pinned inputs
 
 - Scala source revision: `777528f19a58e794c9954a42f433373472ec57f8`.
 - Scala compiler/library: pinned 3.9.0 artifacts; JDK 21.
-- dotty-rs base: `bf69a070380ff9e3a6a48dcaa1670b695c9cf159` (main after #1764).
+- dotty-rs base: `5b84f092d3abae3aed365ccfafa0f46b53e48a9d` (main after #1776).
+- Implementation candidate: `dc1bbeaea0ecd1ebea8be1a67573a39460ee043e` (Typer implementation; preceded by
+  Namer provenance commit `ce52437b0b`).
 - Exact roots: `library/src/scala/util/Either.scala#tree=19` (`left`) and
   `#tree=31` (`right`).
 - No hosted full standard-library corpus audit was run.
 
 ## First blocker and provenance
 
-On the exact 25-method Tier A cohort, `left` and `right` remain blocked at
-source child trees 16 and 28, respectively. Both failures are term-namespace
-`MemberNotFound` results while resolving `LeftProjection` / `RightProjection`
-on the canonical `Either` receiver. The failure occurs before candidate
-selection, generated `apply` lookup, argument inference, or result conformance.
+On the exact two-method audit at the base SHA, the first blocker was
+`ObjectModuleClassUnavailable` for each generated nested projection companion.
+After adding canonical provenance for the generated companion `ModuleClass`,
+the first failure moved to source-kind validation, then generated `apply`
+completion, generic inference from `this`, and finally argument conformance.
+The final implementation resolves the `Either` qualifier to its canonical
+`ModuleClass`; obtains the nested `CASE Class`, companion `Object` and companion
+`ModuleClass` through reciprocal symbol links and `SourceSemanticIndex`
+provenance; completes a bounded companion `ClassInfo`; and completes the
+generated polymorphic `apply` from the source constructor's parameter symbols.
+It uses the existing `ThisType` receiver view for both constraint inference and
+argument conformance.
 
-The source Namer probe confirms that each nested declaration is entered as a
-real `CASE Class` owned by `Either$`'s `ModuleClass`. It does not enter a
-term-side symbol for the case class and does not link a companion. The focused
-Namer regression test records this current behavior and ensures that merely
-observing the nested class does not invent an unsupported term symbol.
+The implementation does not infer identity from names, synthesize companions
+for ordinary nested classes, lower constructors, or add `unapply`/`copy`.
+Regression coverage includes generated and explicit companions, canonical
+ModuleClass provenance, generated `apply` signature shape, and generic `this`
+inference. The explicit companion test confirms that an existing `object Node`
+and its members are retained while the case class's generated `apply` is
+completed separately.
 
 ## Scala 3.9.0 oracle
 
@@ -46,41 +56,38 @@ class as a term or fabricating an `apply` based only on its spelling.
 
 ## Cohort result
 
-Two deterministic passes of the unchanged 25-method audit produced identical
-normalized reports. Current main is **12/25 fully typed**; the complete
-per-method result is checked in at
+Two deterministic passes of the exact two-method audit and two passes of the
+unchanged 25-method audit produced identical normalized reports. The exact
+targets are **2/2 fully typed**. The unchanged cohort moved from **12/25 to
+14/25 fully typed**; the complete per-method result is checked in at
 [`typer-either-nested-projection-3.9.0.tsv`](typer-either-nested-projection-3.9.0.tsv).
-The checked-in TSV uses `-` in the final `typed_tree` field when a method has no typed tree, avoiding ambiguous trailing empty fields. The audit output itself is byte-identical to the #1764 PR-head report.
+The checked-in TSV uses `-` in the final `typed_tree` field when a method has
+no typed tree, avoiding ambiguous trailing empty fields. All 12 methods typed
+at the base remain typed with the same source-tree IDs and result shapes. The
+new roots have report-local typed-tree IDs 6 and 13; the existing `Either.isLeft`
+and `Either.isRight` report IDs shifted from 2 and 5 to 16 and 19. These IDs are
+not semantic identities.
 
-| Root | Result on this base | First failure / note |
+| Root | Result | First failure / note |
 | --- | --- | --- |
-| `Either.scala#tree=19` `left` | blocked | Term `MemberNotFound`, child tree 16 |
-| `Either.scala#tree=31` `right` | blocked | Term `MemberNotFound`, child tree 28 |
+| `Either.scala#tree=19` `left` | typed | `Either$.LeftProjection[Either.A, Either.B]`, typed tree 6 |
+| `Either.scala#tree=31` `right` | typed | `Either$.RightProjection[Either.A, Either.B]`, typed tree 13 |
 | `Either.scala#tree=84` `swap` | blocked | Separate external `scala.util.Left` module identity failure; outside this issue's projection path |
 
-All 10 methods accepted before #1764 remain fully typed with the same source
-tree identities and result shapes. Two numeric typed-tree arena IDs changed in
-the frozen verifier (`Option.isDefined`: 3 to 9; `Option.knownSize`: 9 to 15)
-because newly accepted `Option.isEmpty` is allocated earlier. This is an arena
-ID shift, not a change in those methods' accepted status, source roots, or
-oracle-result shapes. The frozen cohort manifest was not edited. #1764 also
-added `Option.isEmpty` and `Option.nonEmpty`, yielding the current 12/25 total.
+The pinned Scala 3.9.0 oracle expects exactly the observed result shapes. The
+frozen 25-method manifest was not changed. No hosted full standard-library
+corpus audit was run.
 
-## Disposition and next bounded dependency
+## Disposition
 
-The requested target remains **UNMET/BLOCKED**. Supporting this call correctly
-requires Namer to represent the canonical companion `Object` / `ModuleClass`
-and synthesize the case-class `apply` signature with the source class's generic
-parameters and constructor parameter identities. That support must preserve
-ownership, explicit companion overloads, visibility, and failure rollback.
-The existing code has no general source case-class companion synthesis; adding
-one here would exceed this issue's narrow resolver scope and guessing a
-term-side member would violate canonical symbol identity.
-
-The bounded prerequisite is [#1773](https://github.com/scytrowski/dotty-rs/issues/1773), which covers canonical `apply` synthesis for a deliberately restricted nested source case-class shape. This
-issue should be revisited only after that prerequisite establishes the needed
-source symbols and focused negative tests. No constructor lowering, `unapply`,
-`copy`, JVM work, or broad overload/type-inference work is included.
+The stretch target in #1747 is met. Existing pinned Scala oracle controls cover
+ordinary nested classes, same-named classes with distinct owners, explicit
+companion overloads, wrong arity/type, inaccessible constructors, and
+ambiguous overloads. Rust regression tests cover the generated and explicit
+companion paths used here. #1773 supplies the bounded canonical case-class
+companion representation used by this implementation. No constructor lowering,
+`unapply`, `copy`, JVM work, broad overload inference, or hosted full-corpus
+audit was added.
 
 ## Reproduction
 
@@ -100,17 +107,51 @@ task-specific `target/issue-1747/oracle-script` directory. The audit reports
 and run logs used for the two-pass 25-method comparison were retained under
 `target/issue-1747/` during this work.
 
-To regenerate the exact 25-method ordinary-member TSV and retain both runs,
-from the dotty-rs repository root:
+To regenerate the exact two-method result, derive a selection manifest from
+the frozen cohort and retain both runs under task-local `target/` directories:
 
 ```sh
 mkdir -p target/issue-1747/reports
+python3 - <<'PYGEN'
+import csv
+from pathlib import Path
+source = Path("docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv")
+selected = {
+    "library/src/scala/util/Either.scala#tree=19",
+    "library/src/scala/util/Either.scala#tree=31",
+}
+rows = [row for row in csv.DictReader(source.open(encoding="utf-8"), delimiter="\t")
+        if row["identity"] in selected]
+assert {row["identity"] for row in rows} == selected
+with Path("target/issue-1747/reports/either-pair-manifest.tsv").open(
+    "w", encoding="utf-8", newline=""
+) as output:
+    writer = csv.DictWriter(output, fieldnames=rows[0].keys(), delimiter="\t")
+    writer.writeheader()
+    writer.writerows(rows)
+PYGEN
 env PATH="/home/vdrake6/.jdks/jdk-21/bin:$PATH" \
   JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
   SCALA39_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source \
   SCALA39_JDK_RELEASE=21 \
   COURSIER_MAVEN_ROOT=/home/vdrake6/.codex/worktrees/bdf3/dotty-rs/target/worktrees/issue-1746/target/issue-1746/coursier/https/repo1.maven.org/maven2 \
-  DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1747/audit-tmp-repro" \
+  DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1747/audit-pair-tmp" \
+  tools/typer-classpath-corpus-audit/run \
+    --method-kind ordinary \
+    --method-manifest target/issue-1747/reports/either-pair-manifest.tsv \
+    --verify-determinism \
+    target/issue-1747/reports/either-pair-reproduced.tsv
+```
+
+To regenerate the unchanged 25-method cohort, use the frozen manifest:
+
+```sh
+env PATH="/home/vdrake6/.jdks/jdk-21/bin:$PATH" \
+  JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
+  SCALA39_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source \
+  SCALA39_JDK_RELEASE=21 \
+  COURSIER_MAVEN_ROOT=/home/vdrake6/.codex/worktrees/bdf3/dotty-rs/target/worktrees/issue-1746/target/issue-1746/coursier/https/repo1.maven.org/maven2 \
+  DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1747/audit-cohort-tmp" \
   tools/typer-classpath-corpus-audit/run \
     --method-kind ordinary \
     --method-manifest docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv \
@@ -118,55 +159,13 @@ env PATH="/home/vdrake6/.jdks/jdk-21/bin:$PATH" \
     target/issue-1747/reports/ordinary-reproduced.tsv
 ```
 
-The manifest contains exactly 25 pinned `path#tree` identities. The audit
-forces one Cargo build/test thread, runs the ordinary-method request twice,
-compares the normalized reports internally, and writes retained logs and
-intermediate TSVs below the task-specific audit directory. To compare the
-outputs explicitly and validate the ten previously accepted roots:
-
-```sh
-run_dir="$(cat target/issue-1747/audit-tmp-repro/run-dir.txt)"
-cmp "$run_dir/first.ordinary-report.tsv" "$run_dir/second.ordinary-report.tsv"
-cmp target/issue-1747/reports/ordinary-reproduced.tsv \
-  "$run_dir/first.ordinary-report.tsv"
-python3 - <<'PY'
-import csv
-from pathlib import Path
-
-cohort = list(csv.DictReader(
-    Path("docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv").open(), delimiter="\t"
-))
-lines = Path("target/issue-1747/reports/ordinary-reproduced.tsv").read_text().splitlines()
-header = next(i for i, line in enumerate(lines) if line.startswith(
-    "method\towner_path\tmethod_name\tline\trange\tmodifiers\texpected_result\t"
-    "actual_result\tcomplexity\tstatus\tsource_tree\ttyped_tree"
-))
-report = {row["method"]: row for row in csv.DictReader(lines[header:], delimiter="\t")}
-typed_tree_shifts = []
-for row in cohort:
-    if row["gate"] != "required_typed":
-        continue
-    actual = report[row["identity"]]
-    assert actual["status"] == "typed"
-    assert actual["source_tree"] == row["source_tree"]
-    assert actual["actual_result"] == row["oracle_result"]
-    if actual["typed_tree"] != row["typed_tree"]:
-        typed_tree_shifts.append((row["identity"], row["typed_tree"], actual["typed_tree"]))
-expected_shifts = [
-    ("library/src/scala/Option.scala#tree=122", "3", "9"),
-    ("library/src/scala/Option.scala#tree=129", "9", "15"),
-]
-assert typed_tree_shifts == expected_shifts, typed_tree_shifts
-print("10 previously accepted roots remain typed with stable source IDs and result shapes.")
-print("Expected typed-tree arena ID shifts:", typed_tree_shifts)
-PY
-```
-
-Do not add `--require-typed-cohort` to this reproduction: its frozen verifier
-also compares arena-local `typed_tree` numbers and therefore exits nonzero for
-the two expected shifts above, despite those roots retaining typed status,
-source-tree identity, and result shape. The explicit semantic-preservation
-check above reports those shifts without changing the frozen manifest.
+The runner validates exact `path#tree` identities, forces one Cargo build/test
+thread, compares both normalized reports, and retains logs and intermediates
+under the task-local directory. Comparison against the base report showed all
+12 previously typed roots retained their typed status, source-tree identity,
+and result shape. The existing `Either.isLeft` and `Either.isRight` report IDs
+shifted from 2 and 5 to 16 and 19 as the two requested methods were added.
+Those numbers are report-local IDs, not semantic identity.
 
 ## Validation recorded for this audit PR
 
@@ -175,8 +174,10 @@ check above reports those shifts without changing the frozen manifest.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` — passed.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` — passed.
 - `cargo test --workspace --all-targets --locked` — passed.
-- The mandatory JDK 21 test gate was run with `DOTTY_CLASSFILE_REQUIRE_JDK=1` and the JDK 21 `bin` directory on `PATH`.
-- Focused Namer integration test: `cargo test -p dotty-namer --test parsed_unit --locked` — 102 passed.
+- Mandatory JDK 21 gate with `DOTTY_CLASSFILE_REQUIRE_JDK=1` — passed (168 source-compilation, 17 classfile encoder, and 173 JVM library tests).
+- Focused Namer regression: `nested_case_class_gets_a_companion_and_source_mapped_apply_parameters` — passed.
+- Focused Typer regressions: generated companion identity/ClassInfo/apply signature, explicit companion apply signature, and generic `this` inference — passed.
 - Scala 3.9.0 case-companion oracle harness — passed; pinned artifacts and source revision verified.
-- Both repeated cohort reports were byte-identical within each run and byte-identical to the retained current-main baseline; the #1764 pre-merge report also matched.
+- The two-method report and both 25-method cohort reports were byte-identical between their repeated deterministic passes.
+- Cohort comparison: exactly `Either.left` and `Either.right` newly typed; the 12 prior typed results retain their source IDs and result shapes. `Either.swap` remains blocked by its separate external `scala.util.Left` identity failure.
 - `git diff --check` — passed.
