@@ -429,11 +429,15 @@ fn type_and_validate_source(
                     let rhs = value.rhs.ok_or(fail("inner field initializer required"))?;
                     if value.metadata.visibility
                         != Some(VisibilitySyntax::Private { qualifier: None })
-                        || value.metadata.modifiers.contains(&Modifier::Var)
+                        || value
+                            .metadata
+                            .modifiers
+                            .iter()
+                            .any(|modifier| matches!(modifier, Modifier::Var | Modifier::Lazy))
                         || !value.metadata.annotations.is_empty()
                     {
                         return Err(fail(
-                            "inner must be an unqualified private immutable field without annotations",
+                            "inner must be an unqualified private eager immutable field without annotations",
                         ));
                     }
                     typer.complete_symbol(symbol).map_err(|_| {
@@ -672,7 +676,7 @@ fn finish_proof<'session>(
             .symbols
             .get(field)
             .flags
-            .contains(SymbolFlags::MUTABLE)
+            .contains(SymbolFlags::MUTABLE | SymbolFlags::LAZY)
     {
         return Err(fail("parameter/field visibility or mutability"));
     }
@@ -936,10 +940,24 @@ fn finish_proof<'session>(
             "read must select Counter.get through original inner field",
         ));
     }
+    // This proof is deliberately pinned to the top-level `example` package.
+    // Checking only the immediate owner name would incorrectly accept
+    // `package outer.example` and emit descriptors for `example.Counter`.
     let package_name = store.names.resolve(store.symbols.get(package).name.text());
+    let package_parent = store.symbols.get(package).owner;
+    let is_top_level_package = package_parent.is_some_and(|parent| {
+        let root = store.symbols.get(parent);
+        root.kind == SymbolKind::Package
+            && root.owner.is_none()
+            && store.names.resolve(root.name.text()).is_empty()
+    });
     let counter_name = store.names.resolve(store.symbols.get(counter).name.text());
     let owner_name = store.names.resolve(store.symbols.get(owner).name.text());
-    if package_name != "example" || counter_name != "Counter" || owner_name != "CounterOwner" {
+    if package_name != "example"
+        || !is_top_level_package
+        || counter_name != "Counter"
+        || owner_name != "CounterOwner"
+    {
         return Err(ConstructorReferenceAliasError::AbiShape(
             "canonical package/class names",
         ));

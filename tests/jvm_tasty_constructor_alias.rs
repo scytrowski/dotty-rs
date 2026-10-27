@@ -243,3 +243,33 @@ fn rejects_wrong_declaration_order_foreign_counter_and_non_alias_rhs() {
         .is_err()
     );
 }
+
+#[test]
+fn rejects_nested_package_and_lazy_field_as_outside_the_proven_abi_shape() {
+    let nested_package = SOURCE.replace("package example", "package outer.example");
+    assert!(matches!(
+        with_constructor_reference_alias_proof(
+            &nested_package,
+            "NestedPackage.scala",
+            SourceId::from_index(1766),
+            |_| ()
+        ),
+        Err(ConstructorReferenceAliasError::AbiShape(
+            "canonical package/class names"
+        ))
+    ));
+
+    let lazy_field = SOURCE.replace(
+        "private val inner: Counter",
+        "private lazy val inner: Counter",
+    );
+    assert!(matches!(
+        with_constructor_reference_alias_proof(
+            &lazy_field,
+            "Lazy.scala",
+            SourceId::from_index(1767),
+            |_| ()
+        ),
+        Err(ConstructorReferenceAliasError::SourceShape(_))
+    ));
+}
