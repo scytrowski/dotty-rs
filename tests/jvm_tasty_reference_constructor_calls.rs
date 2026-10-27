@@ -141,6 +141,38 @@ fn type_ref_symbol(store: &SemanticStore, ty: dotty_core::TypeId) -> SymbolId {
     *symbol
 }
 
+fn paired_failure(source: &str, source_id: u32) -> PairedPlanError {
+    with_paired_jvm_tasty_batch_plan(
+        source,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(source_id),
+        |_| (),
+    )
+    .expect_err("the changed control must fail through the real paired source pipeline")
+}
+
+fn assert_batch_failure(
+    error: PairedPlanError,
+    expected_class_index: usize,
+    expected_phase: &str,
+    expected_reason: &str,
+) {
+    assert!(
+        matches!(
+            error,
+            PairedPlanError::BatchClass {
+                class_index,
+                phase,
+                ref reason,
+                ..
+            } if class_index == expected_class_index
+                && phase == expected_phase
+                && reason.contains(expected_reason)
+        ),
+        "unexpected measured rejection: {error:?}"
+    );
+}
+
 struct AuditBindings<'a> {
     index: &'a SourceTypedIndex,
     classes: &'a [SymbolId],
@@ -666,4 +698,187 @@ fn renamed_and_reordered_three_class_sources_do_not_depend_on_fixture_names_or_o
             "variant fails in the same measured stage: {error:?}"
         );
     }
+}
+
+#[test]
+fn zero_argument_constructor_call_is_rejected_by_method_body_typing() {
+    let source = SOURCE.replace("new CounterOwner(counter)", "new CounterOwner()");
+    assert_batch_failure(
+        paired_failure(&source, 17935),
+        2,
+        "method body typing",
+        "ApplicationArityMismatch",
+    );
+}
+
+#[test]
+fn wrong_constructor_argument_type_is_rejected_by_method_body_typing() {
+    let source = SOURCE.replace("new CounterOwner(counter)", "new CounterOwner(1)");
+    assert_batch_failure(
+        paired_failure(&source, 17936),
+        2,
+        "method body typing",
+        "ApplicationArgumentTypeMismatch",
+    );
+}
+
+#[test]
+fn mismatched_factory_result_is_rejected_by_jvm_tasty_cross_contract_validation() {
+    let source = SOURCE.replace(
+        "def wrap(counter: Counter): CounterOwner =",
+        "def wrap(counter: Counter): Counter =",
+    );
+    assert_batch_failure(
+        paired_failure(&source, 17937),
+        2,
+        "JVM/TASTy cross-contract validation",
+        "BodyType",
+    );
+}
+
+#[test]
+fn private_owner_constructor_is_rejected_by_tasty_plan_validation() {
+    let source = SOURCE.replace(
+        "class CounterOwner(counter: Counter):",
+        "class CounterOwner private (counter: Counter):",
+    );
+    assert_batch_failure(
+        paired_failure(&source, 17938),
+        1,
+        "TASTy plan validation",
+        "PrimaryConstructorInput",
+    );
+}
+
+#[test]
+fn abstract_owner_instantiation_is_rejected_by_method_body_typing() {
+    let source = SOURCE.replace(
+        "class CounterOwner(counter",
+        "abstract class CounterOwner(counter",
+    );
+    assert_batch_failure(
+        paired_failure(&source, 17939),
+        2,
+        "method body typing",
+        "AbstractClassInstantiation",
+    );
+}
+
+#[test]
+fn generic_owner_primary_constructor_is_rejected_during_source_collection() {
+    let source = SOURCE.replace(
+        "class CounterOwner(counter",
+        "class CounterOwner[A](counter",
+    );
+    assert_batch_failure(
+        paired_failure(&source, 17940),
+        1,
+        "source collection",
+        "generic primary constructors are unsupported",
+    );
+}
+
+#[test]
+fn constructor_val_accessor_is_rejected_by_jvm_unit_validation() {
+    let source = SOURCE.replace(
+        "class CounterOwner(counter",
+        "class CounterOwner(val counter",
+    );
+    assert!(matches!(
+        paired_failure(&source, 17941),
+        PairedPlanError::BatchUnit {
+            phase: "complete JVM unit validation",
+            reason,
+        } if reason.contains("AccessorFieldSignature")
+    ));
+}
+
+#[test]
+fn nested_constructor_application_reaches_the_existing_int_only_tasty_gate() {
+    let source = SOURCE.replace(
+        "new CounterOwner(counter)",
+        "new CounterOwner(new Counter(1))",
+    );
+    assert_batch_failure(
+        paired_failure(&source, 17942),
+        2,
+        "JVM/TASTy cross-contract validation",
+        "UnsupportedTypeReference",
+    );
+}
+
+#[test]
+fn constructor_default_argument_is_rejected_during_constructor_planning() {
+    let source = SOURCE.replace(
+        "class CounterOwner(counter: Counter):",
+        "class CounterOwner(counter: Counter = new Counter(0)):",
+    );
+    assert_batch_failure(
+        paired_failure(&source, 17943),
+        1,
+        "constructor planning",
+        "SourceShape",
+    );
+}
+
+#[test]
+fn constructor_var_accessor_is_rejected_by_jvm_unit_validation() {
+    let source = SOURCE.replace(
+        "class CounterOwner(counter",
+        "class CounterOwner(var counter",
+    );
+    assert!(matches!(
+        paired_failure(&source, 17944),
+        PairedPlanError::BatchUnit {
+            phase: "complete JVM unit validation",
+            reason,
+        } if reason.contains("AccessorFieldSignature")
+    ));
+}
+
+#[test]
+fn secondary_constructor_is_rejected_during_member_planning() {
+    let source = SOURCE.replace(
+        "class CounterOwner(counter: Counter):",
+        "class CounterOwner(counter: Counter):\n  def this() = this(new Counter(0))",
+    );
+    assert_batch_failure(
+        paired_failure(&source, 17945),
+        1,
+        "member planning",
+        "method is not owned by its declaring class",
+    );
+}
+
+#[test]
+fn overloaded_secondary_constructor_is_rejected_during_member_planning() {
+    let source = SOURCE.replace(
+        "class CounterOwner(counter: Counter):",
+        "class CounterOwner(counter: Counter):\n  def this(counter: Counter, flag: Boolean) = this(counter)",
+    );
+    assert_batch_failure(
+        paired_failure(&source, 17946),
+        1,
+        "member planning",
+        "method is not owned by its declaring class",
+    );
+}
+
+#[test]
+fn contextual_primary_constructor_is_rejected_during_constructor_planning() {
+    let source = SOURCE
+        .replace(
+            "class CounterOwner(counter: Counter):",
+            "class CounterOwner(using counter: Counter):",
+        )
+        .replace(
+            "new CounterOwner(counter)",
+            "new CounterOwner(using counter)",
+        );
+    assert_batch_failure(
+        paired_failure(&source, 17947),
+        1,
+        "constructor planning",
+        "SourceShape",
+    );
 }

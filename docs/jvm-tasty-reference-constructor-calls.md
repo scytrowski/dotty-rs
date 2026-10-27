@@ -132,7 +132,7 @@ Rust producer failure. The paired plan does not produce a JVM-only artifact
 before the TASTy cross-contract failure, so this audit does not claim the
 three-class JVM artifact batch succeeds.
 
-## Variants and deferred controls
+## Variants and negative controls
 
 The focused Rust regression renames the package and all three class names, and
 separately reverses the `Counter`/`CounterOwner` source declaration order. Both
@@ -140,16 +140,41 @@ still reach the same measured TASTy cross-contract `UnsupportedTypeReference`
 failure. The test deliberately records the limitation, not a proposed
 implementation based on those names or positions.
 
-The following are negative or adjacent controls for successor implementation
-issues, not accepted behavior in this audit: foreign same-name symbols;
-private, abstract, generic, or external constructors; wrong arity or argument
-type; return mismatch; a selected constructor owned by another class; stale
-source IDs; `val`/`var` constructor accessors; overloaded/default/using/secondary
-constructors; nested `new`; missing sidecars; changed TASTY UUID links; and
-classfile-only Java fallback. They remain deferred because current paired
-production is blocked at the earlier result-signature gate. No diagnostic or
-rejection stage is invented for them. The pinned Scala positive fixture is the
-authoritative control for the supported source shape.
+The focused rejection tests exercise these source-valid or source-typed
+controls through the real paired API. The stage and error below are the first
+observed rejection; these are current bounded behavior, not general Scala
+semantics:
+
+| Variation | First measured rejection |
+| --- | --- |
+| `new CounterOwner()` | `class_index=2`, `method body typing` / `ApplicationArityMismatch` |
+| `new CounterOwner(1)` | `class_index=2`, `method body typing` / `ApplicationArgumentTypeMismatch` |
+| Declare `wrap` as returning `Counter` while its body returns `CounterOwner` | `class_index=2`, `JVM/TASTy cross-contract validation` / `BodyType` |
+| Make `CounterOwner`'s primary constructor private | `class_index=1`, `TASTy plan validation` / `PrimaryConstructorInput` |
+| Make `CounterOwner` abstract | `class_index=2`, `method body typing` / `AbstractClassInstantiation` |
+| Add a type parameter to `CounterOwner` | `class_index=1`, `source collection` / generic primary constructors unsupported |
+| Change constructor input to `val counter` | `complete JVM unit validation` / `InvalidPrimaryConstructor(AccessorFieldSignature)` |
+| Change constructor input to `var counter` | `complete JVM unit validation` / `InvalidPrimaryConstructor(AccessorFieldSignature)` |
+| Nest `new Counter(1)` as the Owner argument | `class_index=2`, `JVM/TASTy cross-contract validation` / same Int-only constructor gate |
+| Add a default to `CounterOwner`'s constructor parameter | `class_index=1`, `constructor planning` / `InvalidPrimaryConstructor(SourceShape)` |
+| Add a secondary constructor (including an overload) | `class_index=1`, `member planning` / method not owned by declaring class |
+| Make the primary constructor contextual (`using`) | `class_index=1`, `constructor planning` / `InvalidPrimaryConstructor(SourceShape)` |
+| Rename package and all three classes; reverse Counter/Owner declaration order | `class_index=2`, `JVM/TASTy cross-contract validation` / same Int-only constructor gate |
+
+Some requested controls cannot be authoritatively constructed through this
+source-level paired API without violating the one-session identity invariant:
+
+| Control | Why it remains unmeasured here |
+| --- | --- |
+| Foreign same-name class or a selected constructor owned by another class | The typer resolves the source selection to its canonical constructor. Producing a foreign same-slot `SymbolId` would require fabricating typed identities, explicitly excluded by the issue. |
+| Stale/foreign source IDs | The paired API creates and consumes one source ID internally. A stale binding requires substituting caller-forged source/typed indexes, which this audit does not do. |
+| External constructor | This fixture uses only source-local classes; an external definition needs a separate classpath/TASTy resolver setup and is not reached by the current constructor-call gate. |
+| Missing sidecar, altered TASTY link UUID, or Java classfile-only fallback | The paired producer returns no artifact batch after its measured TASTy failure, so there is no Rust-produced classfile set to exercise those artifact-integration controls against. |
+
+No rejection stage is claimed for the unmeasured cases. In particular, the
+positive Scala oracle is not evidence that a Rust artifact batch passes those
+controls. The negative tests preserve the current boundaries so successor
+issues can move only the intended gate.
 
 ## Reproduction
 
