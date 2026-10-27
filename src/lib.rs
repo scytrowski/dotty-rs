@@ -33,5 +33,8 @@ pub mod jvm_tasty_plan;
 /// Read-only cross-class source/typed identity proofs for JVM/TASTy planning.
 pub mod jvm_tasty_cross_class;
 
+/// Callback-scoped proof for canonical constructor-reference field aliases.
+pub mod jvm_tasty_constructor_alias;
+
 /// Opt-in emission of a linked `.class` and complete `.tasty` pair.
 pub mod jvm_tasty_artifacts;
