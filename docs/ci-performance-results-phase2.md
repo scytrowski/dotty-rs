@@ -1,8 +1,10 @@
 # CI performance integration results: phase 2 (#1771)
 
-Recorded 2026-10-27. **Decision: retain the current CI configuration.** Across issues #1765–#1770, only the manually seeded, exact-key Scala build cache showed a successful first-new-PR reuse; it is opt-in and preserves all verification. The proposed Rust test-profile, integration-target, and Nextest changes did not establish a safe, repeatable net win. A larger runner is unavailable to this personal-account repository and was not benchmarked. No normal workflow, test profile, test target, or runner label changed in this phase.
+Recorded 2026-10-27. **Partial integration: retain the current CI configuration; the final controlled measurement gate remains open.** Across issues #1765–#1770, only the manually seeded, exact-key Scala build cache showed a successful first-new-PR reuse; it is opt-in and preserves all verification. The proposed Rust test-profile, integration-target, and Nextest changes did not establish a safe, repeatable net win. A larger runner is unavailable to this personal-account repository and was not benchmarked. No normal workflow, test profile, test target, or runner label changed in this phase.
 
 This is an integration of independent experiments, not a new paired benchmark of one combined candidate. Their source SHAs, hosts, target-cache states, and triggered workflows differ. The report keeps those measurements separate and does not treat their deltas as additive.
+
+This report does not complete issue #1771. The recent seeded fresh-PR path below is one accepted-configuration observation; a recent controlled fixed-SHA baseline and comparable PR-to-green measurement are still outstanding. Keep #1771 open until that measurement is available. Do not remove the existing valid Scala cache entry to manufacture an unseeded control.
 
 ## Decisions across the six experiment issues
 
