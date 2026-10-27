@@ -65,8 +65,9 @@ versions, hashes, controls, and reproduction commands.
 
 The constructor-injected `CounterOwner(counter)` batch is structurally checked
 for all four Rust-produced files and their source, JVM ABI, and TASTy links.
-Its original-class runtime identity proof and independent Scala consumer remain
-separate follow-up gates (#1757 and #1758).
+Its strict JDK 21 runtime gate proves the original Rust `CounterOwner` stores
+and reads the exact injected `Counter` instance; independent Scala consumption
+of the Rust-produced pair remains the separate #1758 gate.
 
 Compatibility targets Scala **3.9.0**, pinned to source revision
 `777528f19a58e794c9954a42f433373472ec57f8`. The semantic pickler emits TASTy
