@@ -1,9 +1,15 @@
-schema=1
-baseline_dotty_sha=2738ddf91cfba88a92649aec0f36a27988c7f4f8
-pinned_scala_revision=777528f19a58e794c9954a42f433373472ec57f8
-oracle_status=not_run_missing_SCALA39_ROOT
-cohort_status=not_run_missing_SCALA39_ROOT
-root	issue_reported_before	current_before	current_after	whole_method
-library/src/scala/Tuple.scala#tree=23	ErrorType/source-classpath-identity	not_run	not_run	not_run
-library/src/scala/Option.scala#tree=214	SymbolResolution/scala.Some-identity	not_run	not_run	not_run
-library/src/scala/util/Either.scala#tree=84	SymbolResolution/scala.util.Left-identity	not_run	not_run	not_run
+schema	1
+baseline_dotty_sha	2738ddf91cfba88a92649aec0f36a27988c7f4f8
+comparison_dotty_sha	21ca7e0d6921166fda810897efa9658956042735
+implementation_commit	d42b52eb936bddcd4f9920e7c0d315a08457ad06
+pinned_scala_revision	777528f19a58e794c9954a42f433373472ec57f8
+scala_compiler	3.9.0
+jdk_feature	25
+oracle_status	passed_import_controls_only
+cohort_status	passed_deterministic_14_of_25_typed
+root_audit_status	passed_deterministic_0_of_3_typed
+root	issue_reported_before	comparison_before	implementation_after	whole_method
+library/src/scala/Tuple.scala#tree=23	ErrorType before argument conformance	ApplicationArgumentConformanceUnsupported tree=22	ApplicationArgumentConformanceUnsupported tree=22	blocked
+library/src/scala/Option.scala#tree=214	SymbolResolution scala/Some identity	SymbolResolution tree=207 external module identity collision scala/Some	SymbolResolution tree=207 external module identity collision scala/Some	blocked
+library/src/scala/util/Either.scala#tree=84	SymbolResolution scala/util/Left identity	SymbolResolution tree=67 external module identity collision scala/util/Left	SymbolResolution tree=67 external module identity collision scala/util/Left	blocked
+cohort	selected=25	attempted=25	typed=14	blocked=11	excluded=0	not_attempted=0	determinism=byte-identical
