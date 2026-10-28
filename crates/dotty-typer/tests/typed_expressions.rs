@@ -442,6 +442,86 @@ fn types_a_small_source_program_with_no_resolver_or_jdk_fixture() {
 }
 
 #[test]
+fn deferred_case_class_apply_keeps_sibling_typing_and_fails_at_use() {
+    let text = "object Owners { case class Node(value: Int = 1); def unrelated: Int = 42; def construct: Node = Node(1) }";
+    let source = SourceId::from_index(1809);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "deferred-case-class-apply.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("unsupported generated apply metadata must not reject the source unit");
+    let method_and_body = |wanted: &str| {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == wanted).then(|| {
+                    (
+                        index.symbol_at(source, tree).unwrap(),
+                        definition.rhs.unwrap(),
+                    )
+                })
+            })
+            .unwrap_or_else(|| panic!("source should contain method {wanted}"))
+    };
+    let (unrelated, unrelated_body) = method_and_body("unrelated");
+    let (construct, construct_body) = method_and_body("construct");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(NoResolver));
+
+    let unrelated_context = typer.expression_context_for(unrelated).unwrap();
+    let typed_unrelated = typer
+        .type_expression(unrelated_body, unrelated_context)
+        .expect("a valid sibling method should type after deferred companion naming");
+    assert_eq!(
+        typer
+            .widen_expression_type(typer.typed_ast().get(typed_unrelated).ty)
+            .unwrap(),
+        definitions.int
+    );
+    assert_eq!(
+        typer.source_typed_index().get(source, unrelated_body),
+        Some(typed_unrelated),
+        "the unrelated source method keeps its exact source-to-typed binding"
+    );
+
+    let construct_context = typer.expression_context_for(construct).unwrap();
+    let constructed = typer.type_expression(construct_body, construct_context);
+    assert!(
+        matches!(
+            constructed,
+            Err(TyperError::ApplicationCalleeNotMethod { .. })
+        ),
+        "unsupported generated apply should fail explicitly at use, got {constructed:?}"
+    );
+}
+
+#[test]
 fn source_type_lookup_accepts_default_scala_alias_with_a_canonical_target_name() {
     let text = "object C { def value: Traversable }";
     let source = SourceId::from_index(0);

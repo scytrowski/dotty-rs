@@ -6183,11 +6183,9 @@ fn case_class_companions_keep_distinct_owners_and_reuse_explicit_companions() {
 }
 
 #[test]
-fn unsupported_nested_case_class_shape_rolls_back_and_later_naming_succeeds() {
-    let (invalid, invalid_source, mut store) = parsed_source(
-        "object Owners { case class Node(value: Int)(tag: Int) }",
-        1775,
-    );
+fn invalid_contextual_only_case_class_rolls_back_and_later_naming_succeeds() {
+    let (invalid, invalid_source, mut store) =
+        parsed_source("object Owners { case class Node(using value: Int) }", 1775);
     let mut packages = Packages::new();
     let checkpoint = store.checkpoint();
     let error = name_compilation_unit(
@@ -6198,11 +6196,11 @@ fn unsupported_nested_case_class_shape_rolls_back_and_later_naming_succeeds() {
         &mut store,
         &mut packages,
     )
-    .expect_err("multiple constructor clauses must be explicitly unsupported");
+    .expect_err("a contextual-only case class is invalid and must be rejected");
     assert!(matches!(
         error,
         NamerError::UnsupportedCaseClassCompanionShape {
-            reason: "expected exactly one ordinary value parameter clause",
+            reason: "a contextual-only primary constructor is invalid for a case class",
             ..
         }
     ));
@@ -6300,28 +6298,134 @@ fn nested_empty_case_class_clause_gets_zero_argument_apply_and_preserves_sibling
 }
 
 #[test]
-fn nested_case_class_companion_rejects_each_unsupported_constructor_feature() {
-    let unsupported_sources = [
-        "object Owners { abstract case class Node(value: Int) }",
-        "object Owners { case class Node(value: Int = 1) }",
-        "object Owners { case class Node(using value: Int) }",
-        "object Owners { case class Node(value: Int*) }",
-        "object Owners { case class Node private (value: Int) }",
-        "object Owners { case class Node(value: Int) { def this() = this(0) } }",
-        "object Owners { case class Node[A <: AnyRef](value: A) }",
-        "object Owners { case class Node[A: Ordering](value: A) }",
-        "object Owners { case class Node(private val value: Int) }",
-        "object Owners:\n  def Node: Int = 1\n  case class Node(value: Int)",
+fn valid_nested_case_class_shapes_defer_apply_without_losing_the_companion_or_siblings() {
+    let deferred_sources = [
+        "object Owners { case class Node(value: Int = 1); def unrelated: Int = 1 }",
+        "object Owners { case class Node(value: Int)(tag: Int); def unrelated: Int = 1 }",
+        "object Owners { case class Node(values: Int*); def unrelated: Int = 1 }",
+        "object Owners { case class Node private (value: Int); def unrelated: Int = 1 }",
+        "object Owners { case class Node(value: Int) { def this() = this(0) }; def unrelated: Int = 1 }",
+        "object Owners { case class Node[A <: AnyRef](value: A); def unrelated: Int = 1 }",
+        "object Owners { case class Node[A: Ordering](value: A); def unrelated: Int = 1 }",
+        "object Owners { case class Node(private val value: Int); def unrelated: Int = 1 }",
+        "object Owners { abstract case class Node(value: Int); def unrelated: Int = 1 }",
     ];
 
-    for (source_index, source_text) in unsupported_sources.iter().enumerate() {
+    for (source_index, source_text) in deferred_sources.iter().enumerate() {
         let (parsed, source, mut store) = parsed_source(source_text, 1780 + source_index as u32);
+        let mut packages = Packages::new();
+        let index = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "DeferredCaseClassApply.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap_or_else(|error| panic!("valid source should be named: {source_text:?}: {error}"));
+        let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+            panic!("compilation unit should have a package root");
+        };
+        let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(owner)) =
+            &parsed.ast.get(package.stats[0]).kind
+        else {
+            panic!("Owners should be an object");
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(owner.template).kind else {
+            panic!("Owners should have a template");
+        };
+        let class = index.symbol_at(source, template.body[0]).unwrap();
+        let method = index
+            .symbol_at(source, *template.body.last().unwrap())
+            .unwrap();
+        let companion = store.symbols.get(class).links.companion.unwrap();
+        let module_class = index
+            .derived_symbol_at(
+                store.symbols.get(class).owner.unwrap(),
+                source,
+                template.body[0],
+            )
+            .unwrap();
+        let companion_scope = index.scope_of(module_class).unwrap();
+        let apply_name = TermName::new(store.names.intern("apply"));
+        assert_eq!(store.symbols.get(companion).kind, SymbolKind::Object);
+        assert_eq!(store.symbols.get(method).kind, SymbolKind::Method);
+        assert!(
+            store
+                .scopes
+                .get(companion_scope)
+                .lookup_all(apply_name.as_name())
+                .is_empty(),
+            "unsupported apply metadata must be deferred for {source_text:?}"
+        );
+    }
+}
+
+#[test]
+fn unsupported_case_class_shapes_keep_explicit_companion_members_and_reject_invalid_syntax() {
+    let source_text = "object Owners { case class Node(value: Int = 1); object Node { def apply(value: String): Node = new Node(1) }; def unrelated: Int = 1 }";
+    let (parsed, source, mut store) = parsed_source(source_text, 1795);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "ExplicitDeferredCompanion.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("an explicit companion should survive deferred synthetic apply creation");
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("compilation unit should have a package root");
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(owner)) =
+        &parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("Owners should be an object");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(owner.template).kind else {
+        panic!("Owners should have a template");
+    };
+    let class = index.symbol_at(source, template.body[0]).unwrap();
+    let explicit_object = index.symbol_at(source, template.body[1]).unwrap();
+    assert_eq!(
+        store.symbols.get(class).links.companion,
+        Some(explicit_object)
+    );
+    let module_class = index
+        .derived_symbol_at(
+            store.symbols.get(explicit_object).owner.unwrap(),
+            source,
+            template.body[1],
+        )
+        .unwrap();
+    let companion_scope = index.scope_of(module_class).unwrap();
+    let apply_name = TermName::new(store.names.intern("apply"));
+    assert_eq!(
+        store
+            .scopes
+            .get(companion_scope)
+            .lookup_all(apply_name.as_name())
+            .len(),
+        1,
+        "the explicit apply must remain without an unsafe generated overload"
+    );
+
+    for (source_index, source_text) in [
+        "object Owners { case class Node }",
+        "object Owners { case class Node(using value: Int) }",
+        "object Owners { def Node: Int = 1; case class Node(value: Int) }",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (parsed, source, mut store) = parsed_source(source_text, 1796 + source_index as u32);
         let mut packages = Packages::new();
         let result = name_compilation_unit(
             &parsed.ast,
             parsed.root,
             source,
-            "UnsupportedCaseClass.scala",
+            "InvalidCaseClass.scala",
             &mut store,
             &mut packages,
         );
@@ -6330,7 +6434,42 @@ fn nested_case_class_companion_rejects_each_unsupported_constructor_feature() {
                 result,
                 Err(NamerError::UnsupportedCaseClassCompanionShape { .. })
             ),
-            "expected an explicit unsupported-shape error for {source_text:?}, got {result:?}"
+            "invalid Scala shapes must remain rejected for {source_text:?}, got {result:?}"
         );
     }
+
+    let source_text = "object Owners { case class Node(value: => Int) }";
+    let source = SourceId::from_index(1800);
+    let mut store = SemanticStore::new();
+    let scanner = dotty_lexer::ContextualScanner::new(source_text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| matches!(diagnostic.issue(), ParseIssue::Parameter(_))),
+        "Scala's by-name case-class parameter restriction must be observable as a parser diagnostic"
+    );
+    let mut packages = Packages::new();
+    let checkpoint = store.checkpoint();
+    let error = name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "InvalidByNameCaseClass.scala",
+        SourceParseStatus::Recovered,
+        &mut store,
+        &mut packages,
+    )
+    .expect_err("invalid by-name case-class parameters must remain rejected");
+    assert!(
+        matches!(error, NamerError::UnsupportedCaseClassCompanionShape { .. }),
+        "by-name case-class parameters must not receive a generated companion apply"
+    );
+    assert_eq!(store.checkpoint(), checkpoint);
 }
