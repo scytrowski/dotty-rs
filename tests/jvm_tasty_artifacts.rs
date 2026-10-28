@@ -1374,6 +1374,151 @@ fn renamed_and_reordered_reference_constructor_batches_emit_complete_links() {
 }
 
 #[test]
+fn renamed_reordered_reference_constructor_graph_executes_on_verified_jvm() {
+    if !require_jdk_21_or_skip() {
+        return;
+    }
+
+    let renamed = REFERENCE_CONSTRUCTOR_BATCH
+        .replace("package example", "package renamed")
+        .replace("CounterOwnerFactory", "WidgetBuilder")
+        .replace("CounterOwner", "WidgetHolder")
+        .replace("Counter", "Widget")
+        .replace("wrap(", "build(");
+    let renamed_reordered = renamed
+        .replace(
+            "class Widget(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass WidgetHolder(counter: Widget):",
+            "class WidgetHolder(counter: Widget):",
+        )
+        .replace(
+            "\nclass WidgetBuilder:",
+            "\nclass Widget(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass WidgetBuilder:",
+        );
+    let batch = emit_paired_jvm_tasty_batch(
+        &renamed_reordered,
+        "renamed-reference-constructor.scala",
+        SourceId::from_index(17975),
+    )
+    .expect("renamed reference-constructor source emits a batch");
+    assert_eq!(batch.classes().len(), 3);
+    assert_eq!(batch.source_id(), SourceId::from_index(17975));
+
+    let stage = TestDirectory::new("renamed-reference-constructor-runtime");
+    let classes = stage.path().join("classes");
+    let expected = [
+        ("renamed/WidgetHolder.class", "renamed.WidgetHolder"),
+        ("renamed/Widget.class", "renamed.Widget"),
+        ("renamed/WidgetBuilder.class", "renamed.WidgetBuilder"),
+    ];
+    for (artifact, (expected_path, class_name)) in batch.classes().iter().zip(expected) {
+        assert_eq!(artifact.classfile_path(), expected_path);
+        let path = classes.join(artifact.classfile_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, artifact.classfile_bytes()).unwrap();
+        let decoded = ClassFile::decode(&mut Reader::new(artifact.classfile_bytes())).unwrap();
+        assert_eq!(
+            decoded
+                .constant_pool
+                .class_name(decoded.this_class)
+                .unwrap(),
+            expected_path.strip_suffix(".class").unwrap()
+        );
+        assert_eq!(decoded.version.major, 65);
+        let javap = Command::new("javap")
+            .args(["-classpath", classes.to_str().unwrap(), "-p", "-v"])
+            .arg(class_name)
+            .output()
+            .expect("start javap for renamed Rust classfile");
+        assert!(
+            javap.status.success(),
+            "javap rejected {class_name}: {}",
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&javap.stdout).contains("major version: 65"),
+            "javap did not report Java 21 class version for {class_name}"
+        );
+    }
+
+    let harness = stage.path().join("RenamedFactoryHarness.java");
+    let harness_classes = stage.path().join("harness-classes");
+    std::fs::create_dir(&harness_classes).unwrap();
+    std::fs::write(
+        &harness,
+        r#"import java.lang.reflect.Field;
+
+public final class RenamedFactoryHarness {
+    public static void main(String[] args) throws ReflectiveOperationException {
+        renamed.Widget widget = new renamed.Widget(7);
+        renamed.WidgetBuilder builder = new renamed.WidgetBuilder();
+        renamed.WidgetHolder first = builder.build(widget);
+        renamed.WidgetHolder second = builder.build(widget);
+        if (first == second) throw new AssertionError("build must allocate distinct holders");
+        assertIdentity(first, widget);
+        assertIdentity(second, widget);
+        expect(first.read(), 7);
+        widget.set(42);
+        expect(first.read(), 42);
+        expect(second.read(), 42);
+
+        renamed.Widget otherWidget = new renamed.Widget(3);
+        renamed.WidgetHolder other = builder.build(otherWidget);
+        assertIdentity(other, otherWidget);
+        otherWidget.set(13);
+        expect(other.read(), 13);
+        expect(first.read(), 42);
+        System.out.println("renamed-identity=true; same-widget-builds=distinct; values=42,13");
+    }
+
+    private static void assertIdentity(renamed.WidgetHolder holder, renamed.Widget expected)
+        throws ReflectiveOperationException {
+        Field inner = renamed.WidgetHolder.class.getDeclaredField("inner");
+        inner.setAccessible(true);
+        if (inner.get(holder) != expected) throw new AssertionError("Holder.inner lost Widget identity");
+    }
+
+    private static void expect(int actual, int expected) {
+        if (actual != expected) throw new AssertionError("expected " + expected + ", got " + actual);
+    }
+}
+"#,
+    )
+    .unwrap();
+    let javac = Command::new("javac")
+        .args([
+            "-classpath",
+            classes.to_str().unwrap(),
+            "-d",
+            harness_classes.to_str().unwrap(),
+        ])
+        .arg(&harness)
+        .output()
+        .expect("start javac against renamed Rust classes");
+    assert!(
+        javac.status.success(),
+        "javac rejected renamed graph harness: {}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let classpath = std::env::join_paths([harness_classes.as_path(), classes.as_path()]).unwrap();
+    let java = Command::new("java")
+        .args(["-Xverify:all", "-classpath"])
+        .arg(classpath)
+        .arg("RenamedFactoryHarness")
+        .output()
+        .expect("start strict JVM verification for renamed Rust classes");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected renamed graph:\n{}\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "renamed-identity=true; same-widget-builds=distinct; values=42,13"
+    );
+}
+
+#[test]
 fn reference_constructor_factory_executes_original_rust_object_graph_on_verified_jvm() {
     if !require_jdk_21_or_skip() {
         return;
@@ -1993,7 +2138,13 @@ public final class ReferenceFactoryHarness {
         .windows(wrap.code.len())
         .position(|bytes| bytes == wrap.code)
         .expect("Factory classfile contains the decoded wrap Code bytes");
-    uninitialized_owner[factory_code_offset + 5] = 0x00;
+    uninitialized_owner[factory_code_offset + 5..factory_code_offset + 8]
+        .copy_from_slice(&[0x57, 0x57, 0x00]);
+    assert_eq!(
+        &uninitialized_owner[factory_code_offset + 5..factory_code_offset + 9],
+        &[0x57, 0x57, 0x00, 0xb0],
+        "negative control removes the constructor call with stack-balanced pops and reaches areturn"
+    );
     let corrupted = stage.path().join("uninitialized-owner");
     std::fs::create_dir_all(corrupted.join("example")).unwrap();
     std::fs::write(
@@ -2028,6 +2179,10 @@ public final class ReferenceFactoryHarness {
     assert!(
         verifier_error.contains("VerifyError"),
         "mutated Factory must fail verification, got:\n{verifier_error}"
+    );
+    assert!(
+        verifier_error.contains("uninitialized") || verifier_error.contains("uninitializedThis"),
+        "failure must be caused by the uninitialized Owner reaching areturn:\n{verifier_error}"
     );
 
     for (label, code_offset, replacement) in [

@@ -339,6 +339,15 @@ emission with distinct `SourceId`s still compares byte-for-byte. The test is in
 the required JDK job and fails when JDK 21+ tools are absent under
 `DOTTY_CLASSFILE_REQUIRE_JDK=1`.
 
+A second required JDK test renames the package, classes, and factory method to
+`renamed.Widget`, `WidgetHolder`, and `WidgetBuilder.build`, then moves
+`WidgetHolder` before `Widget` in source order. It resolves and stages each
+class by the emitted artifact path and checks source identity, reflected alias
+identity, distinct holders from repeated calls, and independent mutation under
+`java -Xverify:all`. The uninitialized-return negative control replaces the
+whole constructor invocation with stack-balanced `pop; pop; nop` instructions,
+leaving one uninitialized Owner for `areturn`; the JVM rejects that return.
+
 Negative runtime controls remove either linked class and require the JVM to
 report the missing class. Mutated bytecode that skips the constructor call,
 omits `dup`, loads an integer instead of the reference parameter, returns an
