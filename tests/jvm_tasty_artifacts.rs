@@ -1304,6 +1304,152 @@ fn reference_constructor_graph_emits_six_complete_deterministic_linked_artifacts
 }
 
 #[test]
+fn reference_constructor_batch_publisher_contains_all_six_artifact_failures() {
+    let batch = emit_paired_jvm_tasty_batch(
+        REFERENCE_CONSTRUCTOR_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(18001),
+    )
+    .expect("emit the complete Counter/Owner/Factory batch");
+    let pairs = batch_publish_pairs(&batch);
+    let base = TestDirectory::new("reference-constructor-publish-faults");
+
+    assert_eq!(pairs.len(), 3);
+    let mut missing_factory_sidecar = pairs.clone();
+    missing_factory_sidecar[2].tasty_path = "";
+    let missing_factory_pair = base.path().join("missing-factory-tasty");
+    assert!(matches!(
+        publish_batch_pairs(&missing_factory_pair, &missing_factory_sidecar, None),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 2,
+            phase: "TASTy path",
+            ..
+        })
+    ));
+    assert!(!missing_factory_pair.exists());
+
+    let mut missing_factory_class = pairs.clone();
+    missing_factory_class[2].classfile_path = "";
+    let missing_factory_class_destination = base.path().join("missing-factory-class");
+    assert!(matches!(
+        publish_batch_pairs(
+            &missing_factory_class_destination,
+            &missing_factory_class,
+            None
+        ),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 2,
+            phase: "class-file path",
+            ..
+        })
+    ));
+    assert!(!missing_factory_class_destination.exists());
+
+    let mut corrupt_factory_class = pairs.clone();
+    corrupt_factory_class[2].classfile_bytes = &[];
+    let corrupt_factory_class_destination = base.path().join("corrupt-factory-class");
+    assert!(matches!(
+        publish_batch_pairs(
+            &corrupt_factory_class_destination,
+            &corrupt_factory_class,
+            None
+        ),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 2,
+            phase: "class-file decode",
+            ..
+        })
+    ));
+    assert!(!corrupt_factory_class_destination.exists());
+
+    let mut forged_source = pairs.clone();
+    forged_source[2].source_id = SourceId::from_index(18002);
+    let forged_source_destination = base.path().join("forged-source-provenance");
+    assert!(matches!(
+        publish_batch_pairs(&forged_source_destination, &forged_source, None),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 2,
+            phase: "source identity",
+            ..
+        })
+    ));
+    assert!(!forged_source_destination.exists());
+
+    for (label, class_index) in [("owner", 1), ("factory", 2)] {
+        let mut corrupt_sidecar = pairs.clone();
+        corrupt_sidecar[class_index].tasty_bytes = &[];
+        let destination = base.path().join(format!("corrupt-{label}-sidecar"));
+        assert!(matches!(
+            publish_batch_pairs(&destination, &corrupt_sidecar, None),
+            Err(BatchPublishError::InvalidManifest {
+                class_index: actual,
+                phase: "TASTy decode",
+                ..
+            }) if actual == class_index
+        ));
+        assert!(!destination.exists());
+    }
+
+    let factory_link = batch.classes()[2].tasty_link_id();
+    let mut stale_factory_class = pairs[2].classfile_bytes.to_vec();
+    let link_offset = stale_factory_class
+        .windows(factory_link.as_bytes().len())
+        .position(|window| window == factory_link.as_bytes())
+        .expect("Factory classfile contains its TASTy UUID");
+    stale_factory_class[link_offset] ^= 0x80;
+    let mut stale_link = pairs.clone();
+    stale_link[2].classfile_bytes = &stale_factory_class;
+    let stale_link_destination = base.path().join("stale-factory-link");
+    assert!(matches!(
+        publish_batch_pairs(&stale_link_destination, &stale_link, None),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 2,
+            phase: "classfile/TASTy link",
+            ..
+        })
+    ));
+    assert!(!stale_link_destination.exists());
+
+    for (index, fault) in (1..=6)
+        .map(BatchPublishFault::AfterStagedFiles)
+        .chain([
+            BatchPublishFault::BeforePromotion,
+            BatchPublishFault::AfterPromotion,
+        ])
+        .enumerate()
+    {
+        let destination = base.path().join(format!("injected-failure-{index}"));
+        assert!(matches!(
+            publish_paired_batch(&destination, &batch, Some(fault)),
+            Err(BatchPublishError::Io { .. })
+        ));
+        assert!(
+            !destination.exists(),
+            "fault case {index} must leave no accepted partial final tree"
+        );
+        assert_eq!(
+            std::fs::read_dir(base.path()).unwrap().count(),
+            0,
+            "fault case {index} must clean its private staging tree"
+        );
+    }
+
+    let existing = base.path().join("existing-output");
+    std::fs::create_dir(&existing).unwrap();
+    let sentinel = existing.join("sentinel");
+    std::fs::write(&sentinel, b"preserve unrelated destination").unwrap();
+    assert!(matches!(
+        publish_paired_batch(&existing, &batch, None),
+        Err(BatchPublishError::DestinationExists { .. })
+    ));
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap(),
+        b"preserve unrelated destination"
+    );
+    assert_eq!(read_relative_files(&existing).unwrap(), ["sentinel"]);
+}
+
+#[test]
 fn renamed_and_reordered_reference_constructor_batches_emit_complete_links() {
     let renamed = REFERENCE_CONSTRUCTOR_BATCH
         .replace("package example", "package renamed")

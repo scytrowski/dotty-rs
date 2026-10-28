@@ -442,3 +442,89 @@ paths. Both batches' dependency hashes matched before and after Scala
 compilation and JVM execution. If `DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSUMER`
 is set, missing or mismatched Scala 3.9.0 revision/dependencies or JDK 21+
 tools fail the test rather than skip it.
+
+## Final three-class release gate (#1800)
+
+The final strict runs used Rust `1.98.1`, Scala compiler 3.9.0 from source
+revision `777528f19a58e794c9954a42f433373472ec57f8`, and Eclipse Temurin
+`21.0.8+9` (`java`, `javac`, and `javap` all report 21.0.8). The pinned Maven
+artifacts are read from
+`target-fs2/coursier/https/repo1.maven.org/maven2`; the oracle checks their
+SHA-256 values against `tests/fixtures/tasty_pickler/provenance.json`. The
+standalone Scala client source SHA-256 is
+`86f6f693cbe3fd2e7cf7f3a51f7cf36ce7eb310981fc0b435e2082514ea349c9`.
+
+`DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER=1 cargo test -p
+dotty --test jvm_tasty_reference_constructor_scala_consumer --locked --
+--nocapture` passed. Its compile classpath puts the six-file Rust output first,
+followed only by `scala3-library_3-3.9.0.jar` and
+`scala-library-3.9.0.jar`. The Scala compiler launcher uses the eight
+SHA-pinned jars listed in `tests/fixtures/tasty_pickler/provenance.json`:
+those two runtime libraries, `scala3-compiler_3-3.9.0.jar`,
+`tasty-core_3-3.9.0.jar`, `scala3-interfaces-3.9.0.jar`,
+`scala-asm-9.9.0-scala-1.jar`, `compiler-interface-1.12.0.jar`, and
+`util-interface-1.11.5.jar`. Runtime classpath order is the unchanged Rust
+six-file root, the separate consumer output, then the two Scala runtime jars.
+Three separate probes resolved `Counter.get`, `CounterOwner.read`, and
+`CounterOwnerFactory.wrap` with each member removed from its classfile but
+present in TASTy; their classfile-only controls failed. Missing, misplaced,
+corrupt, and UUID-mismatched sidecars failed with pinned Scala diagnostics.
+The client compiled against Rust-only output, and both fresh producer sessions
+ran with `java -Xverify:all`, returning `-9`. Runtime used the unchanged
+original Rust classes. The separate `-from-tasty` output was used only for
+semantic reconstruction and never replaced runtime dependencies.
+
+The strict run recorded these six Rust artifact digests and linked TASTy UUIDs
+for the first fresh frontend session:
+
+| Class | Classfile SHA-256 | TASTy SHA-256 | TASTy UUID |
+| --- | --- | --- | --- |
+| `example.Counter` | `b38143cee8571a6602865ff6062eca92dd771582f539b156100ffc9647af94ae` | `a0e78329d60aba318de825eaddb7668d34838197158653c1b7384188143099c7` | `00da82c5ca4ebdac0000000000008193` |
+| `example.CounterOwner` | `d914c2dfc5b8d22079be304fc7c463be171394a528b71603de43342a79db91b2` | `9bcfbbb9d12f71a50122c6b2af960fe76ffd7f629a57738f61f4d384821f7f13` | `004ebc559d6864ef0000000000008195` |
+| `example.CounterOwnerFactory` | `2891207c0907224a87da6ea95d0610b022572e5bb055faefa5349fbdfd0d13e7` | `fa91a9f9410e5fc876fd27d3f4e324371b9237b36df21f8297bb785fb5a792d2` | `006568821180adc10000000000008194` |
+
+The second independent session emitted byte-identical files at the same six
+paths. The strict Rust JDK command passed with
+`DOTTY_CLASSFILE_REQUIRE_JDK=1` for the classfile encoder, JVM backend, source
+compilation, stateful class contract, and paired artifact tests. The direct
+Factory harness used `java -Xverify:all` on the original Rust classes,
+verified that `Owner.inner` is the same input object, checked distinct Owners
+for repeated calls, observed `7 → 42 → -9` after mutating the original
+Counter, and kept a second `Counter(3)` graph independent. The harness and
+Scala consumer both verify that Rust classfile hashes remain unchanged.
+
+The command used was:
+
+```sh
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  --test jvm_tasty_artifacts \
+  --test jvm_stateful_class_contract \
+  --locked -- --nocapture
+```
+
+The other strict Scala 3.9 consumers passed with their required flags:
+`DOTTY_REQUIRE_SCALA_TASTY_CONSTRUCTOR_INJECTION_CONSUMER`,
+`DOTTY_REQUIRE_SCALA_TASTY_OBJECT_COMPOSITION_CONSUMER`,
+`DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER`,
+`DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER`,
+`DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER`, and
+`DOTTY_REQUIRE_SCALA_TASTY_CONSUMER`. The pinned source pickler oracle passed
+with `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`. Rust checks passed for workspace
+formatting, the frontend dependency-boundary guard, Clippy with warnings
+denied, rustdoc with warnings denied, and all workspace target tests. Scratch
+compiler files used the worktree's `target/tmp` because the shared `/tmp`
+filesystem was full; no unrelated cache files were removed.
+
+The six-file publisher regression rejects a missing Factory sidecar or
+classfile, forged per-class source provenance, corrupt Owner or Factory TASTy,
+and a mismatched Factory link UUID before publication. Injected handled errors
+after each of the six staged files, before promotion, and after promotion
+leave no final output tree and clean staging. A pre-existing destination and
+sentinel remain intact. This covers handled failures and does not claim
+crash-atomic filesystem durability. The supported producer shape remains
+bounded: nested constructor expressions, fields, null, factory-result
+arguments, secondary or generic constructors, multiple reference formals,
+and other unproven constructor forms fail before a complete batch is returned.
