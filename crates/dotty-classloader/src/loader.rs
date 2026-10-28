@@ -9266,7 +9266,11 @@ mod tests {
             (name.clone(), synthetic_class("sample/Shadowed", None)),
             (
                 BinaryName::from_internal("sample/ExternalChild"),
-                synthetic_class("sample/ExternalChild", Some("sample/Shadowed")),
+                synthetic_class_with_object_fields(
+                    "sample/ExternalChild",
+                    Some("sample/Shadowed"),
+                    &[("inherited", "sample/Shadowed")],
+                ),
             ),
         ]);
         let mut loader = ClassLoader::with_definitions(
@@ -9291,6 +9295,8 @@ mod tests {
             ),
             source_class
         );
+        let inherited_type = member_type_id(loader.store, external_child, "inherited");
+        assert_eq!(parent_symbol(loader.store, inherited_type), source_class);
         assert_eq!(loader.store.symbols.get(source_class).origin, source_origin);
         assert_eq!(
             loader.store.symbols.get(source_class).info,
@@ -9317,6 +9323,162 @@ mod tests {
                 .get(declarations)
                 .lookup_all(&source_only_name),
             [source_only]
+        );
+    }
+
+    #[test]
+    fn module_identity_fails_closed_on_an_incomplete_source_case_class_and_can_retry() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let bytes = semantic_unpickler_fixture_bytes("Both.tasty");
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let source_origin = SymbolOrigin::Source(dotty_core::SourceId::from_index(17));
+        let mut packages = dotty_core::Packages::new();
+        let package = packages
+            .enter(
+                &mut store,
+                source_origin,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .last()
+            .expect("source package")
+            .symbol;
+        let source_name = Name::new(store.names.intern("Both"), Namespace::Type);
+        let source_class = store.symbols.alloc(Symbol {
+            name: source_name,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::CASE,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: source_origin,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let package_scope = packages.scope_of(package).expect("source package scope");
+        store
+            .scopes
+            .get_mut(package_scope)
+            .enter(source_name, source_class);
+        let original_source_class = store.symbols.get(source_class).clone();
+        let mut loader = ClassLoader::with_definitions(
+            InMemoryTastyClassPath(HashMap::from([(name.clone(), bytes.clone())])),
+            &mut store,
+            definitions,
+            LoadingSession::with_packages(packages),
+        );
+
+        let error = loader.ensure_module_identity(&name).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClassLoadError::IdentityConflict { ref reason, .. }
+                if reason == "the canonical package name is occupied by an incompatible symbol"
+        ));
+        assert_eq!(
+            loader.store.symbols.get(source_class),
+            &original_source_class
+        );
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&source_name),
+            [source_class]
+        );
+        assert!(!loader.session.modules.contains_key(&name));
+        assert!(loader.session.origins.is_empty());
+        assert!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&Name::new(
+                    loader.store.names.intern("Both"),
+                    Namespace::Term
+                ))
+                .is_empty()
+        );
+        assert!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&Name::new(
+                    loader.store.names.intern("Both$"),
+                    Namespace::Type
+                ))
+                .is_empty()
+        );
+
+        let session = loader.into_session();
+        store.scopes.get_mut(package_scope).remove(source_class);
+        let mut retry = ClassLoader::with_definitions(
+            InMemoryTastyClassPath(HashMap::from([(name.clone(), bytes)])),
+            &mut store,
+            definitions,
+            session,
+        );
+        let identity = retry
+            .ensure_module_identity(&name)
+            .expect("a fresh retry succeeds after the conflicting source declaration is gone");
+        assert_eq!(
+            identity
+                .companion_class
+                .map(|id| retry.store.symbols.get(id).kind),
+            Some(SymbolKind::Class)
+        );
+        assert_eq!(retry.session.modules.get(&name), Some(&identity));
+    }
+
+    #[test]
+    fn module_identity_keeps_classpath_snapshot_origins_in_independent_stores() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let bytes = semantic_unpickler_fixture_bytes("Both.tasty");
+        let first_origin = ClassOrigin::Jar(PathBuf::from("/snapshot/first.jar"));
+        let second_origin = ClassOrigin::Jar(PathBuf::from("/snapshot/second.jar"));
+
+        let mut first_store = SemanticStore::new();
+        let first_definitions = Definitions::bootstrap(&mut first_store);
+        let mut first = ClassLoader::with_definitions(
+            ResourceClassPath(HashMap::from([(
+                name.clone(),
+                (bytes.clone(), ClassFormat::Tasty, first_origin.clone()),
+            )])),
+            &mut first_store,
+            first_definitions,
+            LoadingSession::new(),
+        );
+        let first_identity = first.ensure_module_identity(&name).unwrap();
+        assert_eq!(first.origin(first_identity.object), Some(&first_origin));
+        assert_eq!(
+            first.store.symbols.get(first_identity.object).kind,
+            SymbolKind::Object
+        );
+
+        let mut second_store = SemanticStore::new();
+        let second_definitions = Definitions::bootstrap(&mut second_store);
+        let mut second = ClassLoader::with_definitions(
+            ResourceClassPath(HashMap::from([(
+                name.clone(),
+                (bytes, ClassFormat::Tasty, second_origin.clone()),
+            )])),
+            &mut second_store,
+            second_definitions,
+            LoadingSession::new(),
+        );
+        let second_identity = second.ensure_module_identity(&name).unwrap();
+
+        assert_eq!(second.origin(second_identity.object), Some(&second_origin));
+        assert_eq!(
+            second.store.symbols.get(second_identity.object).kind,
+            SymbolKind::Object
+        );
+        assert_ne!(
+            first.origin(first_identity.object),
+            second.origin(second_identity.object)
         );
     }
 
