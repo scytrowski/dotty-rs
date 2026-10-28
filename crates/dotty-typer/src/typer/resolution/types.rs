@@ -143,7 +143,7 @@ impl SourceTyper<'_> {
         // ask the resolver for the same exact package member when it lives in
         // the classpath. Keep the search nearest-package-first and type-only.
         let mut seen_packages = Vec::new();
-        let builtin_type = self
+        let builtin_spelling = self
             .definitions
             .source_builtin_type(self.store, name)
             .is_some();
@@ -156,11 +156,10 @@ impl SourceTyper<'_> {
                 continue;
             }
             seen_packages.push(package);
-            if builtin_type {
-                // Keep primitive and top/bottom source spellings bound to
-                // this session's canonical Definitions entry; package
-                // resolver aliases for these names are not substitutes for
-                // that identity, regardless of the current package.
+            if builtin_spelling && self.package_path(package).as_slice() == ["scala"] {
+                // Scala's package-level builtin spellings stay bound to this
+                // session's Definitions entry. A declaration in another
+                // current or enclosing package can still shadow that fallback.
                 continue;
             }
             let request = MemberRequest {

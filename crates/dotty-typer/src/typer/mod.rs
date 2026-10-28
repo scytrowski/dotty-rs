@@ -10001,6 +10001,83 @@ mod tests {
     }
 
     #[test]
+    fn unqualified_current_package_type_can_shadow_a_builtin_spelling() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package sample { class Use { val value: Matchable = null } }");
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let package = packages.symbol(&["sample"]).unwrap();
+        let external_type = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        let matchable_name = store.names.intern("Matchable");
+        store.symbols.get_mut(external_type).name = Name::new(matchable_name, Namespace::Type);
+        store.symbols.get_mut(external_type).owner = Some(package);
+        let classfile_origin = store.origins.register_classfile();
+        store.symbols.get_mut(external_type).origin = SymbolOrigin::Classfile(classfile_origin);
+        let builtin_matchable = definitions.matchable_class;
+        let resolver = ScriptedResolver {
+            member: Some(external_type),
+            member_error: None,
+            package: None,
+            member_requests: Rc::new(RefCell::new(Vec::new())),
+            package_requests: Rc::new(RefCell::new(Vec::new())),
+        };
+        let context = index.declaration_context_of(value).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let projected = typer.type_of_tpt(type_tree, context).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), external_type);
+        assert_ne!(type_symbol(typer.store(), projected), builtin_matchable);
+        assert_eq!(
+            typer.store().symbols.get(external_type).owner,
+            Some(package)
+        );
+    }
+
+    #[test]
+    fn scala_package_builtin_spelling_keeps_its_canonical_definition() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package scala { class Use { val value: Boolean = true } }");
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let package = packages.symbol(&["scala"]).unwrap();
+        let external_type = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        let boolean_name = store.names.intern("Boolean");
+        store.symbols.get_mut(external_type).name = Name::new(boolean_name, Namespace::Type);
+        store.symbols.get_mut(external_type).owner = Some(package);
+        let canonical_boolean = definitions.boolean;
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let resolver = ScriptedResolver {
+            member: Some(external_type),
+            member_error: None,
+            package: None,
+            member_requests: Rc::clone(&requests),
+            package_requests: Rc::new(RefCell::new(Vec::new())),
+        };
+        let context = index.declaration_context_of(value).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let projected = typer.type_of_tpt(type_tree, context).unwrap();
+
+        assert_eq!(projected, canonical_boolean);
+        assert!(requests.borrow().is_empty());
+    }
+
+    #[test]
     fn unqualified_external_type_uses_an_enclosing_package_identity() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("package sample.nested { class Use { val value: Parent = null } }");

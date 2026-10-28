@@ -19,7 +19,7 @@ conformance, owned typed tree, and exact source-to-typed mapping are present.
 - Two-pass normalized audit SHA-256: main
   `2be03443d031397c61fa32049fa7b3c47ed635656aef98379b0834957538a847`;
   analysis
-  `3730ce339eafabcb4d71c0a0913fc90f2998bd61b22fc8408a49e3fcdfcac701`.
+  `93952a0614a125eba72543a12c2fd121ddfeaaab89d0f77c2d231ae7c2acf36a`.
   Both used `--verify-determinism`; the separate 50-method union audit also
   passed its two-pass comparison.
 
@@ -36,8 +36,10 @@ The eight nested `MemberLookup` errors resolve into four causes:
    and `Prop`. Type resolution now asks the configured resolver for the exact
    type member in the current or enclosing package after lexical source lookup
    and imports. It accepts only symbols owned by that package chain, ignores
-   wider resolver results, preserves canonical builtin identity, and retains
-   resolver ambiguity/errors. `ArrayBuilder.knownSize` and
+   wider resolver results, and retains resolver ambiguity/errors. A legitimate
+   current/enclosing package declaration may shadow a builtin spelling;
+   canonical builtin fallback remains after package lookup, and resolver alias
+   handling remains specific to the `scala` package. `ArrayBuilder.knownSize` and
    `HashMap.unimproveHash` now type completely. `PropImpl.clear` advances past
    parent completion but remains blocked by a separate `Unit` RHS conformance
    error; it is not counted as a gain.
@@ -71,6 +73,9 @@ With pinned compiler/library jars and JDK 21, Scala 3.9.0 compiled:
 - `Double` unary minus: `(D)D`, bytecode `dneg`;
 - `Numeric.DoubleIsFractional.negate`: call descriptor `(D)D`;
 - source-owned `unary_-`: call to that source declaration.
+- a separately compiled `sample.Matchable` in the current package: Scala picks
+  that class for `Matchable` and emits identity descriptor
+  `(Lsample/Matchable;)Lsample/Matchable;`.
 
 The negative fixtures separately fail with `toFloat is not a member of
 Array[Int]` and `Short.toFloat does not take parameters`, checking wrong
@@ -87,9 +92,23 @@ java -cp "$ORACLE_CP" dotty.tools.dotc.Main \
 javap -classpath target/member-lookup-oracle/classes -p -s -c 'MemberLookupOracle$'
 ```
 
-Compile each `Negative*.scala` separately and expect a nonzero exit. The
-project prefix-operator regression asserts the selected identity for a
-source-owned unary operator.
+Compile `ClasspathMatchable.scala` first, then compile
+`ClasspathMatchableUse.scala` with its output on the classpath to reproduce the
+current-package/builtin spelling control. Compile each `Negative*.scala`
+separately and expect a nonzero exit. The project prefix-operator regression
+asserts the selected identity for a source-owned unary operator.
+
+```sh
+mkdir -p target/classpath-matchable/classes
+java -cp "$ORACLE_CP" dotty.tools.dotc.Main \
+  -classpath "$ORACLE_CP" -d target/classpath-matchable/classes \
+  crates/dotty-typer/tests/fixtures/member-lookup-oracle-3.9.0/ClasspathMatchable.scala
+java -cp "$ORACLE_CP" dotty.tools.dotc.Main \
+  -classpath "target/classpath-matchable/classes:$ORACLE_CP" \
+  -d target/classpath-matchable/classes \
+  crates/dotty-typer/tests/fixtures/member-lookup-oracle-3.9.0/ClasspathMatchableUse.scala
+javap -classpath target/classpath-matchable/classes -p -s sample.MatchableUse
+```
 
 ## Reproduction and validation
 
@@ -101,6 +120,8 @@ cargo test -p dotty-core --lib matchable_is_a_canonical_compiler_defined_trait_w
 cargo test -p dotty-classloader compiler_builtin_class_names_reuse_definitions_and_ignore_int_classpath_entry --locked
 cargo test -p dotty-classloader compiler_builtin_aliases_are_scala_type_members_without_classpath_probes --locked
 cargo test -p dotty-typer --lib unqualified_external_type --locked
+cargo test -p dotty-typer --lib unqualified_current_package_type_can_shadow_a_builtin_spelling --locked
+cargo test -p dotty-typer --lib scala_package_builtin_spelling_keeps_its_canonical_definition --locked
 
 tools/typer-classpath-corpus-audit/run --method-kind ordinary \
   --method-manifest docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv \
@@ -110,9 +131,10 @@ tools/typer-classpath-corpus-audit/run --method-kind ordinary \
   --verify-determinism target/member-lookup-analysis-25.tsv
 ```
 
-Lookup regressions cover current and enclosing package identity, reject a
-sibling-package and a term-namespace result, preserve resolver ambiguity, and
-assert checkpoint/source-index rollback on failures and retry. Matchable tests
-assert canonical trait identity, parent, package membership, and behavior when
-a same-named classpath entry is present. Historical local-method denominators
-and the 1,236-file corpus are not part of these results.
+Lookup regressions cover current and enclosing package identity, classfile
+provenance for a builtin-name collision, reject a sibling-package and a
+term-namespace result, preserve resolver ambiguity, and assert
+checkpoint/source-index rollback on failures and retry. Matchable tests assert
+canonical trait identity, parent, package membership, and behavior when a
+same-named classpath entry is present. Historical local-method denominators and
+the 1,236-file corpus are not part of these results.
