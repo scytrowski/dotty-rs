@@ -2467,6 +2467,14 @@ impl Validator<'_, '_> {
         };
         let constructor = *constructor;
         self.validate_planned_primary_constructor(class, constructor)?;
+        let constructor_signature_type = self.complete(constructor)?;
+        let Type::Method(constructor_signature) = self.ty(constructor_signature_type)? else {
+            return Err(PickleError::MalformedType {
+                ty: constructor_signature_type,
+                role: TypeRole::ConstructorSignature,
+            });
+        };
+        let constructor_argument_type = constructor_signature.params[0].ty;
         if source_select.name.text() != self.symbol(constructor)?.name.text()
             || p.store.names.resolve(source_select.name.text()) != "<init>"
             || typed_select.name != source_select.name
@@ -2513,11 +2521,16 @@ impl Validator<'_, '_> {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         };
         let formal_record = self.symbol(formal)?;
+        let argument_type_matches = matches!(formal_record.info,
+            SymbolInfo::Complete(argument_type)
+                if (constructor_argument_type == p.definitions.int
+                    && argument_type == p.definitions.int)
+                    || self.same_planned_sibling_class_type(argument_type, constructor_argument_type));
         if formal_record.kind != SymbolKind::Parameter
             || formal_record.owner != Some(method.symbol)
             || formal_record.name.text() != source_argument.name.text()
             || typed_argument.name != source_argument.name
-            || formal_record.info != SymbolInfo::Complete(p.definitions.int)
+            || !argument_type_matches
             || !matches!(self.ty(typed_argument_type)?, Type::TermRef {
                 prefix,
                 target: TermRefTarget::Symbol(target),
@@ -2663,9 +2676,27 @@ impl Validator<'_, '_> {
                 expected: SourceRole::TypeSyntax,
             });
         };
-        if p.store.names.resolve(source_type.name.text()) != "Int" {
+        let constructor_formal_symbol = p
+            .source_index
+            .derived_symbol_at(constructor, p.source.id, constructor_formal_tree)
+            .ok_or(PickleError::SourceDefinition {
+                symbol: constructor,
+            })?;
+        let SymbolInfo::Complete(constructor_formal_type) =
+            self.symbol(constructor_formal_symbol)?.info
+        else {
+            return Err(PickleError::IncompleteSymbol {
+                symbol: constructor_formal_symbol,
+                info: self.symbol(constructor_formal_symbol)?.info,
+            });
+        };
+        let is_int_formal = constructor_formal_type == p.definitions.int
+            && p.store.names.resolve(source_type.name.text()) == "Int";
+        let is_reference_formal =
+            self.is_planned_sibling_class_type(constructor_formal_type, Some(source_type.name));
+        if !is_int_formal && !is_reference_formal {
             return Err(PickleError::UnsupportedTypeReference {
-                ty: p.definitions.int,
+                ty: constructor_formal_type,
             });
         }
         self.validate_constructor_signature_and_formal(class, constructor, constructor_formal_tree)
@@ -2697,7 +2728,28 @@ impl Validator<'_, '_> {
                 symbol: constructor,
             })?;
         let formal_record = self.symbol(formal_symbol)?;
-        if p.store.names.resolve(source_type.name.text()) != "Int"
+        let SymbolInfo::Complete(formal_type) = formal_record.info else {
+            return Err(PickleError::IncompleteSymbol {
+                symbol: formal_symbol,
+                info: formal_record.info,
+            });
+        };
+        let is_int_formal = formal_type == p.definitions.int
+            && p.store.names.resolve(source_type.name.text()) == "Int";
+        let reference_formal = matches!(
+            self.ty(formal_type)?,
+            Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(formal_class),
+            } if *formal_class != class
+                && self.is_planned_sibling_class_type(formal_type, Some(source_type.name))
+                && matches!(self.ty(*prefix)?, Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(package),
+                } if *prefix == p.definitions.no_prefix
+                    && Some(*package) == self.symbol(class)?.owner)
+        );
+        if (!is_int_formal && !reference_formal)
             || formal.rhs.is_some()
             || formal_record.kind != SymbolKind::Parameter
             || formal_record.owner != Some(constructor)
@@ -2706,18 +2758,9 @@ impl Validator<'_, '_> {
             || !formal_record.flags.is_empty()
             || !formal_record.annotations.is_empty()
             || formal_record.name.text() != formal.name.as_name().text()
-            || formal_record.info != SymbolInfo::Complete(p.definitions.int)
+            || formal_record.info != SymbolInfo::Complete(formal_type)
         {
-            let ty = match formal_record.info {
-                SymbolInfo::Complete(ty) => ty,
-                info => {
-                    return Err(PickleError::IncompleteSymbol {
-                        symbol: formal_symbol,
-                        info,
-                    });
-                }
-            };
-            return Err(PickleError::UnsupportedTypeReference { ty });
+            return Err(PickleError::UnsupportedTypeReference { ty: formal_type });
         }
         let signature_type = self.complete(constructor)?;
         let Type::Method(signature) = self.ty(signature_type)? else {
@@ -2729,7 +2772,7 @@ impl Validator<'_, '_> {
         if signature.kind != MethodKind::Plain
             || signature.params.len() != 1
             || signature.params[0].name.as_name().text() != formal.name.as_name().text()
-            || signature.params[0].ty != p.definitions.int
+            || signature.params[0].ty != formal_type
             || signature.params[0].erased
             || signature.params[0].varargs
             || !matches!(self.ty(signature.result)?, Type::TypeRef {

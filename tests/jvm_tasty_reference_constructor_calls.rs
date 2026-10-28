@@ -1,3 +1,7 @@
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::ConstantPoolEntry;
@@ -662,7 +666,7 @@ fn scala39_three_class_oracle_pins_constructor_argument_tasty_and_jvm_abi() {
 }
 
 #[test]
-fn rust_three_class_frontend_preserves_canonical_wrap_identities_before_cross_contract_rejection() {
+fn rust_three_class_frontend_pickles_the_original_reference_constructor_call() {
     let source_id = SourceId::from_index(17931);
     let source = SourceText::new(SOURCE).unwrap();
     let scanner = ContextualScanner::new(SOURCE).unwrap();
@@ -965,30 +969,209 @@ fn rust_three_class_frontend_preserves_canonical_wrap_identities_before_cross_co
             ..
         }
     ));
-    let direct_pickle_error = validated.pickle().unwrap_err();
+    let output = validated
+        .pickle()
+        .expect("the authentic Counter formal argument is serializable");
+    let tasty = TastyFile::parse_and_validate_scala_3_9(output.bytes())
+        .expect("the completed Factory TASTy is structurally valid");
+    assert_eq!(tasty.encode_validated().unwrap(), output.bytes());
+    let (method_address, wrap_body) = method_body(&tasty, "wrap");
+    let parameter_address = parameter_address(&tasty.ast_address_index().unwrap(), method_address);
+    let RawTree::LengthNode(application_node) = wrap_body.rhs.expect("wrap has its source RHS")
+    else {
+        panic!("wrap RHS is an APPLY node");
+    };
+    assert_eq!(application_node.tag, APPLY_TAG);
+    let application = application_node.decode_apply().unwrap();
+    assert_eq!(application.arguments.len(), 1);
+    let RawTree::LengthNode(select_node) = application.function else {
+        panic!("constructor function is SELECTin");
+    };
+    assert_eq!(select_node.tag, SELECTIN_TAG);
+    let select = select_node.decode_select_in().unwrap();
+    let signed = tasty
+        .names()
+        .render_signed_name(select.name)
+        .unwrap()
+        .unwrap();
+    let dotty_tasty::tasty::RenderedSignedName::Signed {
+        original,
+        signature,
+    } = signed
+    else {
+        panic!("constructor reference is a signed name");
+    };
+    assert_eq!(original, "<init>");
+    assert_eq!(signature.result, "example.CounterOwner");
+    assert_eq!(
+        signature.parameters,
+        [RenderedParamSig::TermParameter(
+            "example.Counter".to_owned()
+        )]
+    );
+    let RawTree::Ast {
+        tag: NEW_TAG,
+        child: new_type,
+        ..
+    } = &select.qualifier
+    else {
+        panic!("constructor receiver is NEW");
+    };
     assert!(matches!(
-        direct_pickle_error,
-        dotty_tasty_pickler::PickleError::UnsupportedTypeReference { ty }
-            if matches!(typer.store().types.get(ty), Type::TypeRef {
-                target: TypeRefTarget::Symbol(found), ..
-            } if typer.store().names.resolve(typer.store().symbols.get(*found).name.text()) == "Int")
+        new_type.as_ref(),
+        RawTree::NatAst {
+            tag: IDENTTPT_TAG,
+            ..
+        }
     ));
-    let plan_error = with_paired_jvm_tasty_batch_plan(
+    assert_eq!(
+        new_type
+            .name_refs()
+            .into_iter()
+            .map(|name| tasty.names().render(name).unwrap())
+            .collect::<Vec<_>>(),
+        ["CounterOwner"]
+    );
+    assert!(!select.underlying_type.ast_refs().is_empty());
+    let [argument] = application.arguments.as_slice() else {
+        panic!("one original argument is encoded");
+    };
+    let argument_refs = argument.ast_refs();
+    let [argument_reference] = argument_refs.as_slice() else {
+        panic!("the original formal is one direct term reference");
+    };
+    assert_eq!(
+        argument_reference.kind,
+        dotty_tasty::term::AstRefKind::TermRefDirect
+    );
+    assert_eq!(argument_reference.address, parameter_address);
+
+    let batch_bytes = with_paired_jvm_tasty_batch_plan(
         SOURCE,
         "CounterOwnerFactory.scala",
         SourceId::from_index(17932),
-        |_| (),
+        |batch| {
+            assert_eq!(batch.classes.len(), 3);
+            assert_eq!(batch.constructor_call_proofs.len(), 1);
+            batch.classes[2]
+                .tasty_plan
+                .pickle()
+                .expect("paired Factory plan emits the same body")
+                .bytes()
+                .to_vec()
+        },
     )
-    .unwrap_err();
-    assert!(matches!(
-        plan_error,
-        PairedPlanError::BatchClass {
-            class_index: 2,
-            phase: "JVM/TASTy cross-contract validation",
-            reason,
-            ..
-        } if reason.contains("UnsupportedTypeReference")
+    .expect("all three source classes pass paired JVM/TASTy validation");
+    assert_eq!(batch_bytes, output.bytes());
+}
+
+#[test]
+fn pinned_scala_reads_all_three_rust_reference_constructor_sidecars() {
+    if std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
+        != Some(std::ffi::OsStr::new("1"))
+    {
+        return;
+    }
+    let files = with_paired_jvm_tasty_batch_plan(
+        SOURCE,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(17960),
+        |batch| {
+            batch
+                .classes
+                .iter()
+                .map(|class| {
+                    (
+                        class.tasty_path.clone(),
+                        class
+                            .tasty_plan
+                            .pickle()
+                            .expect("each genuine source sidecar is complete")
+                            .bytes()
+                            .to_vec(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        },
+    )
+    .expect("the original one-source batch validates");
+    run_reference_constructor_scala_oracle(&files);
+}
+
+fn run_reference_constructor_scala_oracle(files: &[(String, Vec<u8>)]) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala root for explicit oracle"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let version = Command::new(&compiler)
+        .arg("-version")
+        .output()
+        .expect("query pinned Scala 3.9 compiler version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"));
+
+    let root = std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir);
+    let temporary = root.join(format!(
+        "dotty-issue-1796-scala-oracle-{}",
+        std::process::id()
     ));
+    fs::remove_dir_all(&temporary).ok();
+    let candidate = temporary.join("candidate");
+    let compiled = temporary.join("compiled");
+    fs::create_dir_all(&candidate).unwrap();
+    fs::create_dir_all(&compiled).unwrap();
+    for (path, bytes) in files {
+        let path = candidate.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+    let factory_tasty = candidate.join("example/CounterOwnerFactory.tasty");
+    let decompile = Command::new(&compiler)
+        .arg("-decompile")
+        .arg(&factory_tasty)
+        .output()
+        .expect("decompile Rust Factory TASTy with pinned Scala 3.9");
+    assert!(
+        decompile.status.success(),
+        "Scala -decompile rejected Rust Factory TASTy: {}",
+        String::from_utf8_lossy(&decompile.stderr)
+    );
+    let decompiled = String::from_utf8_lossy(&decompile.stdout);
+    assert!(decompiled.contains("wrap"), "{decompiled}");
+    assert!(decompiled.contains("CounterOwner"), "{decompiled}");
+    let from_tasty = Command::new(&compiler)
+        .arg("-from-tasty")
+        .arg("-classpath")
+        .arg(&candidate)
+        .arg("-d")
+        .arg(&compiled)
+        .args([
+            candidate.join("example/Counter.tasty"),
+            candidate.join("example/CounterOwner.tasty"),
+            factory_tasty,
+        ])
+        .output()
+        .expect("consume all Rust sidecars with pinned Scala 3.9");
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected the three Rust sidecars: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    fs::remove_dir_all(temporary).unwrap();
 }
 
 #[test]
@@ -1020,6 +1203,33 @@ fn renamed_and_reordered_three_class_sources_do_not_depend_on_fixture_names_or_o
         "CounterOwnerFactory",
         RhsProvenanceMutation::None,
     );
+    for (source, source_id) in [(&renamed, 17961), (&reordered, 17962)] {
+        let sidecars = with_paired_jvm_tasty_batch_plan(
+            source,
+            "renamed-reference-constructor.scala",
+            SourceId::from_index(source_id),
+            |batch| {
+                assert_eq!(batch.constructor_call_proofs.len(), 1);
+                batch
+                    .classes
+                    .iter()
+                    .map(|class| {
+                        class
+                            .tasty_plan
+                            .pickle()
+                            .expect("renamed and reordered source plan emits TASTy")
+                            .bytes()
+                            .to_vec()
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .expect("renamed and reordered source uses the same semantic proof");
+        assert_eq!(sidecars.len(), 3);
+        for sidecar in sidecars {
+            assert!(TastyFile::parse_and_validate_scala_3_9(&sidecar).is_ok());
+        }
+    }
 }
 
 #[test]
@@ -1148,7 +1358,7 @@ fn constructor_val_accessor_is_rejected_by_jvm_unit_validation() {
 }
 
 #[test]
-fn nested_constructor_application_reaches_the_existing_int_only_tasty_gate() {
+fn nested_constructor_application_is_rejected_by_the_bounded_identity_proof() {
     let source = SOURCE.replace(
         "new CounterOwner(counter)",
         "new CounterOwner(new Counter(1))",

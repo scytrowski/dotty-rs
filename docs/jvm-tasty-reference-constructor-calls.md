@@ -112,26 +112,51 @@ and typing without reconstructing them from spelling.
 | Lexer / parser / namer / typer | Succeeds on the original one-session, three-class unit. |
 | Factory `ClassStatePicklePlan::validate` | Succeeds with actual source and typed bindings plus all three planned class symbols. |
 | Distinct-class method signature proof/projection | Succeeds independently: `PARAM counter` refers to canonical `Counter`; result `IDENTtpt` refers to canonical `CounterOwner`; the two class SymbolIds differ. The proof retains the actual source RHS and typed RHS IDs. |
-| Factory class-state TASTy `pickle()` | Fails with `UnsupportedTypeReference` for the built-in `Int` type at the selected primary-constructor-call validation. |
-| Paired JVM/TASTy batch cross-contract validation | First batch failure is class index 2, phase `JVM/TASTy cross-contract validation`, caused by the same existing Int-only constructor formal/argument gate. |
-| Artifact publication | Not reached: paired producer validation fails before an artifact batch is returned. No emitted artifact is claimed. |
+| Factory class-state TASTy `pickle()` | Succeeds and emits the original `wrap` signature plus `APPLY(SELECTin(NEW(CounterOwner)), TERMREFdirect(wrap.counter))`. |
+| Paired JVM/TASTy batch validation | Succeeds for all three source classes, including the generic constructor-call receipt and exact descriptor checks. |
+| Artifact integration | Batched classfile plus TASTy publication and runtime execution remain in #1797/#1798. |
 
 The direct class-state `validate()` call accepts the actual signature and
 source/typed plan, including the distinct `Counter` parameter and `CounterOwner`
-result. The first lowering failure arises while serializing the real method
-body: `validate_cross_class_constructor_application` delegates to
-`validate_planned_primary_constructor`, whose formal/argument path still
-requires the constructor formal to be `Int`. The paired batch wraps that same
-failure in its `JVM/TASTy cross-contract validation` stage. This pins the
-specific constructor-call blocker, rather than treating the already accepted
-method signature as the failure. The projection API returns only the two
-signature roots; it does not emit a method body or complete Factory sidecar.
-The constructor-call blocker remains for #1796. No Typer changes were needed.
+result. Body validation checks the source and typed Apply, selected constructor,
+New type, and argument bindings against their original spans. The target
+constructor's source-derived formal and method signature must both be exactly
+one plain class-reference parameter whose class is planned in the same package;
+the caller formal must have that same canonical class TypeRef and be owned by
+the calling method. The target constructor result remains the separate
+`CounterOwner` class. No reference-category widening, name search, or class
+copying is used. No Typer changes were needed.
 
-The JVM-only backend's existing `new Holder(counter)` support is outside this
-Rust producer failure. The paired plan does not produce a JVM-only artifact
-before the TASTy cross-contract failure, so this audit does not claim the
-three-class JVM artifact batch succeeds.
+## TASTy encoding of the reference argument (#1796)
+
+For `wrap(counter: Counter): CounterOwner = new CounterOwner(counter)`, the
+Factory method signature keeps its original `PARAM counter` with
+`TYPEREF(TERMREFpkg(example), Counter)` and its distinct result
+`IDENTtpt(TYPEREF(TERMREFpkg(example), CounterOwner))`. The body is the bounded
+wire tree `APPLY(SELECTin(NEW(IDENTtpt(CounterOwner))),
+TERMREFdirect(wrap.counter))`. The `SELECTin` signed name is `<init>` with
+result signature type `example.CounterOwner` and one term parameter signature
+type `example.Counter`. Its qualifier and underlying type reference
+CounterOwner's own source declaration; the constructor declaration remains in
+the Owner sidecar, and the argument reference targets the Factory method's
+original `PARAM` address. The decoder regression verifies both that signed name
+and the direct-reference address.
+
+The source validator requires one public, concrete, ordinary, non-generic
+planned target class and its accessible public primary constructor with exactly
+one plain formal. That formal must be a canonical planned sibling class type;
+the caller method must have one ordinary parameter of that exact class type,
+and its argument expression must be the corresponding original parameter
+identifier. The input class and result class must differ. `Int` constructor
+calls retain the previous primitive signature `(scala.Int)C` encoding. Nested
+allocation, extra arguments, fields, factory values, null, foreign or
+unplanned classes, generic or secondary constructors, and other argument
+expressions remain rejected before complete TASTy bytes are returned.
+
+The JVM-only backend's existing `new Holder(counter)` lowering remains a
+separate output path. This increment validates the paired plans and serializes
+the TASTy sidecars, while six-file publication and runtime identity checks
+remain in #1797/#1798.
 
 ## Generic source/typed constructor-call proof (#1794)
 
@@ -156,12 +181,12 @@ unrelated same-named method as a decoy; the receipt still points to the
 original canonical Builder method and Owner constructor. A source unit with
 no direct matching constructor application receives an empty receipt list.
 
-For the three-class fixture, this proof succeeds before the existing TASTy
-body validator rejects the Int-only constructor argument path described above.
-The complete paired TASTy plan therefore remains unavailable in this
-increment; the standalone proof API and receipt preserve exact source/typed
-roots and session references for later signature/body and cross-ABI work. No
-TASTy or JVM bytes are emitted or changed by this proof.
+For the three-class fixture, the same receipt now feeds the bounded TASTy
+body validator and emitter. The Factory sidecar serializes its original
+method-owned parameter reference and keeps the constructor declaration in the
+Owner sidecar. The paired planner validates all three plans, but full
+classfile-plus-TASTy artifact publication remains a separate integration
+increment.
 
 Negative regressions verify rejection for a mismatched `SourceId`, an omitted
 target sibling, a stale typed RHS binding, and an argument mapped to the wrong
@@ -172,12 +197,11 @@ real typer.
 
 ## Variants and negative controls
 
-The focused Rust regression renames the package and all three class names, and
-separately reverses the `Counter`/`CounterOwner` source declaration order. Both
-variants pass the same signature proof and isolated wire projection as the
-original source: the canonical parameter and result class IDs remain distinct,
-and the projected roots are a `PARAM` and `IDENTtpt`. Full paired TASTy
-validation still reaches the separate unsupported constructor-body path.
+The focused Rust regressions rename the package and all three class names, and
+separately reverse the `Counter`/`CounterOwner` source declaration order. Both
+variants pass the same generic source proof and TASTy validation. The original
+source has a positive decoded Factory body assertion; the legacy primitive
+constructor test also remains covered by its byte-stability regression.
 
 The focused rejection tests exercise these source-valid or source-typed
 controls through the real paired API. The stage and error below are the first
@@ -194,11 +218,11 @@ semantics:
 | Add a type parameter to `CounterOwner` | `class_index=1`, `source collection` / generic primary constructors unsupported |
 | Change constructor input to `val counter` | `complete JVM unit validation` / `InvalidPrimaryConstructor(AccessorFieldSignature)` |
 | Change constructor input to `var counter` | `complete JVM unit validation` / `InvalidPrimaryConstructor(AccessorFieldSignature)` |
-| Nest `new Counter(1)` as the Owner argument | `class_index=2`, `JVM/TASTy cross-contract validation` / same Int-only constructor gate |
+| Nest `new Counter(1)` as the Owner argument | cross-class constructor-call identity proof / argument must be the exact caller formal identifier |
 | Add a default to `CounterOwner`'s constructor parameter | `class_index=1`, `constructor planning` / `InvalidPrimaryConstructor(SourceShape)` |
 | Add a secondary constructor (including an overload) | `class_index=1`, `member planning` / method not owned by declaring class |
 | Make the primary constructor contextual (`using`) | `class_index=1`, `constructor planning` / `InvalidPrimaryConstructor(SourceShape)` |
-| Rename package and all three classes; reverse Counter/Owner declaration order | Signature proof and isolated projection succeed; full paired TASTy validation still stops at the constructor body gate |
+| Rename package and all three classes; reverse Counter/Owner declaration order | Generic constructor-call proof and TASTy body validation succeed through semantic identities |
 
 Some requested controls cannot be authoritatively constructed through this
 source-level paired API without violating the one-session identity invariant:
@@ -208,12 +232,12 @@ source-level paired API without violating the one-session identity invariant:
 | Foreign same-name class or a selected constructor owned by another class | The typer resolves the source selection to its canonical constructor. Producing a foreign same-slot `SymbolId` would require fabricating typed identities, explicitly excluded by the issue. |
 | Stale/foreign source IDs | The paired API creates and consumes one source ID internally. A stale binding requires substituting caller-forged source/typed indexes, which this audit does not do. |
 | External constructor | This fixture uses only source-local classes; an external definition needs a separate classpath/TASTy resolver setup and is not reached by the current constructor-call gate. |
-| Missing sidecar, altered TASTY link UUID, or Java classfile-only fallback | The paired producer returns no artifact batch after its measured TASTy failure, so there is no Rust-produced classfile set to exercise those artifact-integration controls against. |
+| Missing sidecar, altered TASTY link UUID, or Java classfile-only fallback | Full multi-artifact publication and link validation belong to #1797; this increment exercises per-sidecar TASTy output. |
 
 No rejection stage is claimed for the unmeasured cases. In particular, the
-positive Scala oracle is not evidence that a Rust artifact batch passes those
-controls. The negative tests preserve the current boundaries so successor
-issues can move only the intended gate.
+Scala TASTy consumption is required before claiming interoperability. The
+negative tests preserve the current boundaries so successor issues can move
+only the intended gate.
 
 ## Reproduction
 
@@ -227,15 +251,26 @@ export JAVA_HOME=/path/to/jdk-21
 export PATH="$JAVA_HOME/bin:$PATH"
 export SCALA39_ROOT=/path/to/scala39-source
 SCALAC="$SCALA39_ROOT/dist/target/universal/stage/bin/scalac"
-rm -rf target/issue1793-oracle
-mkdir -p target/issue1793-oracle/classes target/issue1793-oracle/client
+rm -rf target/issue1796-oracle
+mkdir -p target/issue1796-oracle/classes target/issue1796-oracle/client
 "$SCALAC" -release 21 \
   -sourceroot tests/fixtures/jvm_tasty_reference_constructor_calls \
-  -d target/issue1793-oracle/classes \
+  -d target/issue1796-oracle/classes \
   tests/fixtures/jvm_tasty_reference_constructor_calls/CounterOwnerFactory.scala
-find target/issue1793-oracle/classes -type f | sort
-"$JAVA_HOME/bin/javap" -v -p -c -classpath target/issue1793-oracle/classes \
+find target/issue1796-oracle/classes -type f | sort
+"$JAVA_HOME/bin/javap" -v -p -c -classpath target/issue1796-oracle/classes \
   example.Counter example.CounterOwner example.CounterOwnerFactory
+```
+
+The strict Rust-produced sidecar reader gate regenerates all three source
+sidecars in one frontend session, invokes pinned Scala `-decompile` on the
+Factory sidecar, then compiles all three with `-from-tasty`:
+
+```sh
+DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 \
+SCALA39_ROOT="$SCALA39_ROOT" JAVA_HOME="$JAVA_HOME" \
+cargo test -p dotty --test jvm_tasty_reference_constructor_calls --locked \
+  pinned_scala_reads_all_three_rust_reference_constructor_sidecars -- --exact
 ```
 
 Compile `Consumer.scala` separately with the classes and staged
