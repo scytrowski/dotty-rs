@@ -6414,6 +6414,8 @@ fn unsupported_case_class_shapes_keep_explicit_companion_members_and_reject_inva
     for (source_index, source_text) in [
         "object Owners { case class Node }",
         "object Owners { case class Node(using value: Int) }",
+        "object Owners { case class Node(using value: Int)(tag: Int); def sibling: Int = 1 }",
+        "object Owners { case class Node(using value: Int)(using tag: Int); def sibling: Int = 1 }",
         "object Owners { def Node: Int = 1; case class Node(value: Int) }",
     ]
     .into_iter()
@@ -6421,6 +6423,7 @@ fn unsupported_case_class_shapes_keep_explicit_companion_members_and_reject_inva
     {
         let (parsed, source, mut store) = parsed_source(source_text, 1796 + source_index as u32);
         let mut packages = Packages::new();
+        let checkpoint = store.checkpoint();
         let result = name_compilation_unit(
             &parsed.ast,
             parsed.root,
@@ -6435,6 +6438,11 @@ fn unsupported_case_class_shapes_keep_explicit_companion_members_and_reject_inva
                 Err(NamerError::UnsupportedCaseClassCompanionShape { .. })
             ),
             "invalid Scala shapes must remain rejected for {source_text:?}, got {result:?}"
+        );
+        assert_eq!(
+            store.checkpoint(),
+            checkpoint,
+            "invalid source must roll back naming mutations for {source_text:?}"
         );
     }
 

@@ -55,6 +55,8 @@ check_rejection() {
 
 check_rejection invalid-by-name.scala E055
 check_rejection invalid-contextual-only.scala E144
+check_rejection invalid-contextual-leading-multiple.scala E144
+check_rejection invalid-contextual-multiple.scala E144
 check_rejection invalid-no-clause.scala E004
 check_rejection invalid-name-collision.scala E083
 

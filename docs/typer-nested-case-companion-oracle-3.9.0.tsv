@@ -2,5 +2,7 @@ fixture	shape	Scala 3.9.0 result	expected diagnostic	classification
 valid-shapes.scala	empty clause; ordinary and defaulted parameter; multiple ordinary/contextual clauses; repeated parameter; private constructor; secondary constructor; bounded/context-bounded type parameter; abstract case class; explicit companion	accepted		valid
 invalid-by-name.scala	by-name constructor parameter	rejected	E055	invalid
 invalid-contextual-only.scala	contextual-only constructor clause	rejected	E144	invalid
+invalid-contextual-leading-multiple.scala	contextual first clause followed by an ordinary clause	rejected	E144	invalid
+invalid-contextual-multiple.scala	multiple contextual-only clauses	rejected	E144	invalid
 invalid-no-clause.scala	no constructor parameter clause	rejected	E004	invalid
 invalid-name-collision.scala	same-name term and case class	rejected	E083	invalid

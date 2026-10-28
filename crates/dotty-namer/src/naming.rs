@@ -1655,19 +1655,12 @@ impl Namer<'_> {
         {
             synthesize_apply = false;
         }
-        let value_parameters = match constructor.value_param_clauses.as_slice() {
-            [] => {
-                return Err(unsupported(
-                    "a case class must have a primary constructor parameter clause",
-                ));
-            }
-            [parameters] => parameters.as_slice(),
-            _ => {
-                synthesize_apply = false;
-                &[]
-            }
+        let Some(leading_clause) = constructor.value_param_clauses.first() else {
+            return Err(unsupported(
+                "a case class must have a primary constructor parameter clause",
+            ));
         };
-        if value_parameters.iter().any(|parameter_tree| {
+        if leading_clause.iter().any(|parameter_tree| {
             matches!(
                 &self.arena.get(*parameter_tree).kind,
                 TreeKind::ValDef(parameter)
@@ -1679,6 +1672,12 @@ impl Namer<'_> {
                 "a contextual-only primary constructor is invalid for a case class",
             ));
         }
+        let value_parameters = if constructor.value_param_clauses.len() == 1 {
+            leading_clause.as_slice()
+        } else {
+            synthesize_apply = false;
+            &[]
+        };
         if template.body.iter().any(|member| {
             matches!(
                 &self.arena.get(*member).kind,
@@ -1713,7 +1712,11 @@ impl Namer<'_> {
                 synthesize_apply = false;
             }
         }
-        for parameter_tree in value_parameters {
+        for parameter_tree in constructor
+            .value_param_clauses
+            .iter()
+            .flat_map(|clause| clause.iter())
+        {
             let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
                 return Err(NamerError::MalformedAstShape {
                     tree_index: parameter_tree.index(),
