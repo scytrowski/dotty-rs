@@ -6404,6 +6404,14 @@ fn top_level_case_class_reuses_matching_explicit_apply_without_synthesizing_an_o
         named.store.symbols.get(apply_candidates[0]).origin,
         SymbolOrigin::Source(named.source)
     );
+    assert!(
+        named
+            .store
+            .symbols
+            .get(class)
+            .flags
+            .contains(SymbolFlags::CASE_CLASS_APPLY_DEFERRED)
+    );
 
     let other_module_name = *TypeName::new(named.store.names.intern("Other$")).as_name();
     let other_module = named
@@ -6414,18 +6422,23 @@ fn top_level_case_class_reuses_matching_explicit_apply_without_synthesizing_an_o
         .unwrap();
     let other_scope = named.index.scope_of(other_module).unwrap();
     let other_apply_candidates = named.store.scopes.get(other_scope).lookup_all(&apply_name);
-    assert_eq!(other_apply_candidates.len(), 2);
-    assert!(other_apply_candidates.iter().any(|candidate| {
-        named.store.symbols.get(*candidate).origin == SymbolOrigin::Source(named.source)
-    }));
-    assert!(other_apply_candidates.iter().any(|candidate| {
+    assert_eq!(other_apply_candidates.len(), 1);
+    assert_eq!(
+        named.store.symbols.get(other_apply_candidates[0]).origin,
+        SymbolOrigin::Source(named.source)
+    );
+    let other_class = named
+        .index
+        .symbol_at(named.source, package.stats[2])
+        .unwrap();
+    assert!(
         named
             .store
             .symbols
-            .get(*candidate)
+            .get(other_class)
             .flags
-            .contains(SymbolFlags::SYNTHETIC)
-    }));
+            .contains(SymbolFlags::CASE_CLASS_APPLY_DEFERRED)
+    );
 
     let box_module_name = *TypeName::new(named.store.names.intern("Box$")).as_name();
     let box_module = named
@@ -6441,6 +6454,62 @@ fn top_level_case_class_reuses_matching_explicit_apply_without_synthesizing_an_o
         named.store.symbols.get(box_apply_candidates[0]).origin,
         SymbolOrigin::Source(named.source)
     );
+}
+
+#[test]
+fn top_level_case_class_apply_comparison_defers_unresolved_aliases_and_shadowed_names() {
+    use dotty_core::{SymbolOrigin, TermName, TypeName};
+
+    let cases = [
+        (
+            "AliasNode",
+            "case class AliasNode(value: Int)\nobject AliasNode { type Value = Int; def apply(value: Value): AliasNode = new AliasNode(value) }",
+        ),
+        (
+            "ShadowNode",
+            "case class ShadowNode(value: Int)\nobject ShadowNode { type Int = String; def apply(value: Int): ShadowNode = new ShadowNode(1) }",
+        ),
+    ];
+
+    for (name, source_text) in cases {
+        let mut named = named_source(source_text, 1826);
+        let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+            panic!("compilation unit should have a package root");
+        };
+        let class = named
+            .index
+            .symbol_at(named.source, package.stats[0])
+            .unwrap();
+        assert!(
+            named
+                .store
+                .symbols
+                .get(class)
+                .flags
+                .contains(SymbolFlags::CASE_CLASS_APPLY_DEFERRED)
+        );
+        let owner = named.store.symbols.get(class).owner.unwrap();
+        let package_scope = named.index.scope_of(owner).unwrap();
+        let module_name = *TypeName::new(named.store.names.intern(&format!("{name}$"))).as_name();
+        let module = named
+            .store
+            .scopes
+            .get(package_scope)
+            .lookup(&module_name)
+            .unwrap();
+        let module_scope = named.index.scope_of(module).unwrap();
+        let apply_name = *TermName::new(named.store.names.intern("apply")).as_name();
+        let candidates = named.store.scopes.get(module_scope).lookup_all(&apply_name);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "{name} should retain only its source apply"
+        );
+        assert_eq!(
+            named.store.symbols.get(candidates[0]).origin,
+            SymbolOrigin::Source(named.source)
+        );
+    }
 }
 
 #[test]

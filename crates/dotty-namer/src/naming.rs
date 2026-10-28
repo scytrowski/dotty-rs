@@ -2044,7 +2044,11 @@ impl Namer<'_> {
                                 (Some(method_index), Some(class_index)) => {
                                     Some(method_index == class_index)
                                 }
-                                (None, None) => Some(method_type.name == class_type.name),
+                                // Non-parameter identifiers can be aliases or can be
+                                // shadowed differently in the two declaration contexts.
+                                // Without completing those types here, spelling alone
+                                // cannot prove either equivalence or distinction.
+                                (None, None) => None,
                                 (Some(_), None) | (None, Some(_)) => Some(false),
                             }
                         }
