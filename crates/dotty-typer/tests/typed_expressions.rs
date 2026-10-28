@@ -442,6 +442,333 @@ fn types_a_small_source_program_with_no_resolver_or_jdk_fixture() {
 }
 
 #[test]
+fn deferred_case_class_apply_keeps_sibling_typing_and_fails_at_use() {
+    let text = "object Owners { case class Node(value: Int = 1); def unrelated: Int = 42; def construct: Node = Node(1) }";
+    let source = SourceId::from_index(1809);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "deferred-case-class-apply.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("unsupported generated apply metadata must not reject the source unit");
+    let method_and_body = |wanted: &str| {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == wanted).then(|| {
+                    (
+                        index.symbol_at(source, tree).unwrap(),
+                        definition.rhs.unwrap(),
+                    )
+                })
+            })
+            .unwrap_or_else(|| panic!("source should contain method {wanted}"))
+    };
+    let (unrelated, unrelated_body) = method_and_body("unrelated");
+    let (construct, construct_body) = method_and_body("construct");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(NoResolver));
+
+    let unrelated_context = typer.expression_context_for(unrelated).unwrap();
+    let typed_unrelated = typer
+        .type_expression(unrelated_body, unrelated_context)
+        .expect("a valid sibling method should type after deferred companion naming");
+    assert_eq!(
+        typer
+            .widen_expression_type(typer.typed_ast().get(typed_unrelated).ty)
+            .unwrap(),
+        definitions.int
+    );
+    assert_eq!(
+        typer.source_typed_index().get(source, unrelated_body),
+        Some(typed_unrelated),
+        "the unrelated source method keeps its exact source-to-typed binding"
+    );
+
+    let construct_context = typer.expression_context_for(construct).unwrap();
+    let constructed = typer.type_expression(construct_body, construct_context);
+    assert!(
+        matches!(
+            constructed,
+            Err(TyperError::OverloadedSelectionDeferred { .. })
+        ),
+        "a missing generated apply must remain an explicit competing-overload error, got {constructed:?}"
+    );
+}
+
+#[test]
+fn deferred_case_class_apply_rejects_an_explicit_companion_overload_in_whole_method_typing() {
+    let text = "object O { case class N(x: Int = 1); object N { def apply(x: Any): Int = 2; def unqualified = apply(1); def locallyShadowed = { def apply(x: Any): Int = 3; apply(1) } }; def test = N(1); def explicit = N.apply(1) }";
+    let source = SourceId::from_index(1810);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "deferred-companion-overload.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("a valid explicit companion and sibling method should be named");
+    let test_methods = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            matches!(
+                store.names.resolve(definition.name.as_name().text()),
+                "test" | "explicit" | "unqualified" | "locallyShadowed"
+            )
+            .then_some((
+                store
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    .to_owned(),
+                tree,
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(test_methods.len(), 4);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(NoResolver));
+    for (name, tree) in test_methods {
+        let result = typer.type_method_definition(tree);
+        if name == "locallyShadowed" {
+            assert!(
+                result.is_ok(),
+                "a local apply should shadow the companion apply: {result:?}"
+            );
+            continue;
+        }
+        assert!(
+            matches!(
+                result,
+                Err(TyperError::OverloadedSelectionDeferred { name, .. })
+                    if typer.store().names.resolve(name.text()) == "apply"
+            ),
+            "{name} must not silently choose the explicit overload without the generated one: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn deferred_polymorphic_case_class_apply_rejects_explicit_type_arguments() {
+    let text = "object O { case class N[A](x: Int = 1); object N { def apply[A](x: Any): Int = 2 }; def test = N.apply[Int](1) }";
+    let source = SourceId::from_index(1812);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "deferred-polymorphic-companion-overload.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("a valid polymorphic explicit companion should be named");
+    let (test_tree, test_symbol) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "test")
+                .then_some((tree, index.symbol_at(source, tree).unwrap()))
+        })
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(NoResolver));
+    let result = typer.type_method_definition(test_tree);
+    assert!(
+        matches!(
+            result,
+            Err(TyperError::OverloadedTypeApplicationDeferred { .. })
+        ),
+        "explicit type arguments must not hide the missing generated apply overload: {result:?}"
+    );
+    assert!(!matches!(
+        typer.store().symbols.info(test_symbol),
+        SymbolInfo::Complete(_)
+    ));
+}
+
+#[test]
+fn deferred_polymorphic_case_class_apply_rejects_unqualified_type_application() {
+    let text = "object O { case class N[A](x: Int = 1); object N { def apply[A](x: Any): Int = 2; def test = apply[Int](1) } }";
+    let source = SourceId::from_index(1813);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "deferred-polymorphic-unqualified-apply.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("a valid polymorphic explicit companion should be named");
+    let (test_tree, test_symbol) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "test")
+                .then_some((tree, index.symbol_at(source, tree).unwrap()))
+        })
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(NoResolver));
+    let result = typer.type_method_definition(test_tree);
+    assert!(
+        matches!(
+            result,
+            Err(TyperError::OverloadedTypeApplicationDeferred { .. })
+        ),
+        "unqualified explicit type arguments must not hide the missing generated apply overload: {result:?}"
+    );
+    assert!(!matches!(
+        typer.store().symbols.info(test_symbol),
+        SymbolInfo::Complete(_)
+    ));
+}
+
+#[test]
+fn empty_nested_case_class_apply_types_through_its_whole_method() {
+    let text = "object O { case class N(); def test: N = N() }";
+    let source = SourceId::from_index(1811);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "empty-case-class-apply.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("an empty ordinary parameter clause is valid");
+    let (test_tree, test_symbol) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "test")
+                .then_some((tree, index.symbol_at(source, tree).unwrap()))
+        })
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(NoResolver));
+    let typed = typer
+        .type_method_definition(test_tree)
+        .expect("the generated zero-argument apply signature should complete");
+    assert_eq!(
+        typer.source_typed_index().get(source, test_tree),
+        Some(typed)
+    );
+    assert!(matches!(
+        typer.store().symbols.info(test_symbol),
+        SymbolInfo::Complete(_)
+    ));
+}
+
+#[test]
 fn source_type_lookup_accepts_default_scala_alias_with_a_canonical_target_name() {
     let text = "object C { def value: Traversable }";
     let source = SourceId::from_index(0);

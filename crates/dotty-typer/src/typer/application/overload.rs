@@ -524,6 +524,16 @@ impl SourceTyper<'_> {
                     function_tree.index(),
                     function_node.position,
                 )?;
+                if candidates
+                    .iter()
+                    .any(|symbol| self.is_deferred_case_class_companion_apply(ident.name, *symbol))
+                {
+                    return Err(TyperError::OverloadedSelectionDeferred {
+                        source: self.source,
+                        tree_index: application_tree_index,
+                        name: ident.name,
+                    });
+                }
                 if candidates.len() <= 1 {
                     return Ok(None);
                 }
@@ -578,6 +588,21 @@ impl SourceTyper<'_> {
                 let receiver =
                     self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
                 let receiver_view = self.this_type_receiver_view(receiver)?;
+                if self.store.names.resolve(selection.name.text()) == "apply"
+                    && let Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(module_class),
+                        ..
+                    }) = self.store.types.try_get(receiver_view)
+                    && self
+                        .deferred_case_class_for_module_class(*module_class)
+                        .is_some()
+                {
+                    return Err(TyperError::OverloadedSelectionDeferred {
+                        source: self.source,
+                        tree_index: application_tree_index,
+                        name: selection.name,
+                    });
+                }
                 let java_class_qualifier = self.is_java_class_qualifier(qualifier);
                 let identity_symbol = if !java_class_qualifier
                     && self.any_ref_identity_operator_name(selection.name)

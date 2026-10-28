@@ -1643,28 +1643,41 @@ impl Namer<'_> {
             tree_index: tree.index(),
             reason,
         };
+        let mut synthesize_apply = true;
 
         if definition.metadata.modifiers.contains(&Modifier::Abstract) {
-            return Err(unsupported(
-                "abstract case classes do not receive a generated apply",
-            ));
+            synthesize_apply = false;
         }
 
         if constructor.metadata.visibility.is_some()
             || !constructor.metadata.modifiers.is_empty()
             || !constructor.metadata.annotations.is_empty()
         {
+            synthesize_apply = false;
+        }
+        let Some(leading_clause) = constructor.value_param_clauses.first() else {
             return Err(unsupported(
-                "primary constructor has visibility or special modifiers",
+                "a case class must have a primary constructor parameter clause",
+            ));
+        };
+        if leading_clause.iter().any(|parameter_tree| {
+            matches!(
+                &self.arena.get(*parameter_tree).kind,
+                TreeKind::ValDef(parameter)
+                    if parameter.metadata.modifiers.contains(&Modifier::Implicit)
+                        || parameter.metadata.modifiers.contains(&Modifier::Given)
+            )
+        }) {
+            return Err(unsupported(
+                "a contextual-only primary constructor is invalid for a case class",
             ));
         }
-        if constructor.value_param_clauses.len() != 1
-            || constructor.value_param_clauses[0].is_empty()
-        {
-            return Err(unsupported(
-                "expected exactly one non-empty ordinary value parameter clause",
-            ));
-        }
+        let value_parameters = if constructor.value_param_clauses.len() == 1 {
+            leading_clause.as_slice()
+        } else {
+            synthesize_apply = false;
+            &[]
+        };
         if template.body.iter().any(|member| {
             matches!(
                 &self.arena.get(*member).kind,
@@ -1672,7 +1685,7 @@ impl Namer<'_> {
                     if self.store.names.resolve(method.name.as_name().text()) == "<init>"
             )
         }) {
-            return Err(unsupported("secondary constructors are not supported"));
+            synthesize_apply = false;
         }
         for parameter_tree in &constructor.type_params {
             let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
@@ -1689,19 +1702,21 @@ impl Namer<'_> {
                     .iter()
                     .any(|modifier| !matches!(modifier, Modifier::Param | Modifier::PrivateLocal))
             {
-                return Err(unsupported("type parameter is not plain"));
+                synthesize_apply = false;
             }
             let TreeKind::TypeBoundsTree(bounds) = &self.arena.get(parameter.rhs).kind else {
-                return Err(unsupported(
-                    "bounded or non-plain type parameters are not supported",
-                ));
+                synthesize_apply = false;
+                continue;
             };
             if bounds.low.is_some() || bounds.high.is_some() || bounds.alias.is_some() {
-                return Err(unsupported("bounded type parameters are not supported"));
+                synthesize_apply = false;
             }
         }
-        let value_parameters = &constructor.value_param_clauses[0];
-        for parameter_tree in value_parameters {
+        for parameter_tree in constructor
+            .value_param_clauses
+            .iter()
+            .flat_map(|clause| clause.iter())
+        {
             let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
                 return Err(NamerError::MalformedAstShape {
                     tree_index: parameter_tree.index(),
@@ -1713,17 +1728,21 @@ impl Namer<'_> {
                 || !parameter.metadata.annotations.is_empty()
                 || parameter.metadata.modifiers != [Modifier::ParamAccessor]
             {
+                synthesize_apply = false;
+            }
+            if matches!(
+                self.arena.get(parameter.tpt).kind,
+                TreeKind::ByNameTypeTree(_)
+            ) {
                 return Err(unsupported(
-                    "constructor parameter has a default or special modifier",
+                    "by-name constructor parameters are invalid for case classes",
                 ));
             }
             if matches!(
                 self.arena.get(parameter.tpt).kind,
-                TreeKind::ByNameTypeTree(_) | TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
+                TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
             ) {
-                return Err(unsupported(
-                    "by-name and repeated parameters are not supported",
-                ));
+                synthesize_apply = false;
             }
         }
 
@@ -1879,14 +1898,24 @@ impl Namer<'_> {
                 ));
             }
         };
-        self.enter_case_class_apply(
-            tree,
-            class_symbol,
-            companion_module_class,
-            declaration_context,
-            &constructor.type_params,
-            value_parameters,
-        )
+        if !synthesize_apply {
+            let class = self.store.symbols.get_mut(class_symbol);
+            class.flags = class.flags | SymbolFlags::CASE_CLASS_APPLY_DEFERRED;
+        }
+        if synthesize_apply {
+            self.enter_case_class_apply(
+                tree,
+                class_symbol,
+                companion_module_class,
+                declaration_context,
+                &constructor.type_params,
+                value_parameters,
+            )?;
+        }
+        // Keep canonical companion identities for valid but unsupported shapes while
+        // omitting a generated apply whose parameter metadata is incomplete. A source
+        // application through that absent apply remains an explicit typer error.
+        Ok(())
     }
 
     fn enter_case_class_apply(
