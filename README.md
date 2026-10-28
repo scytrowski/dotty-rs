@@ -34,25 +34,27 @@ APIs and supported language subsets are still evolving.
   receivers; the bounded same-source
   `Reader.read(counter) = counter.get()` cross-class call; and a linked
   `CounterFactory.create` that constructs and returns the exact `Counter`
-  reference type. The paired JVM/TASTy adapter also
-  checks the complete Rust `Counter` + `CounterOwner` batch for the plain
-  constructor-reference/private-field alias shape. Strict pinned Scala 3.9 gates
-  consume the Rust TASTy for single-class, independent two-class, Reader and
-  factory cross-class cases; the factory consumer runs the unchanged Rust
-  classes on JDK 21 and a separate oracle rebuilds Rust TASTy with
-  `-from-tasty`. These are bounded features, not arbitrary Scala/JVM code
-  generation.
+  reference type. The paired JVM/TASTy adapter also checks complete Rust linked
+  batches for plain constructor-reference/private-field aliasing and for a
+  three-class `Counter` → `CounterOwner` graph built through
+  `CounterOwnerFactory.wrap`. Strict pinned Scala 3.9 gates consume Rust TASTy
+  for single-class, independent two-class, Reader, factory,
+  constructor-injection, and three-class reference-constructor cases. The
+  reference-constructor client uses the Rust-only six-artifact batch, proves
+  all three sidecars supply member lookup, and runs unchanged Rust classes on
+  JDK 21; a separate oracle rebuilds Rust TASTy with `-from-tasty`. These are
+  bounded features, not arbitrary Scala/JVM code generation.
 
 The source-to-class-file pipeline is exercised in
 [`tests/jvm_source_compilation.rs`](tests/jvm_source_compilation.rs), with JVM
 verification and execution in CI. The opt-in root `dotty::jvm_tasty_artifacts`
 library module emits an owned, decoded-and-validated Counter `.class`/`.tasty`
 pair or a complete in-memory batch for the audited independent Counter/Gauge,
-linked Counter/Reader, and constructor-injected Counter/CounterOwner source
-shapes. Batch emission uses one frontend
-session, links each class to
-the exact UUID from its TASTy header, and returns nothing unless every artifact
-passes whole-batch validation. Test-only publication stages complete batches
+linked Counter/Reader, constructor-injected Counter/CounterOwner, and
+Counter/CounterOwner/CounterOwnerFactory source shapes. Batch emission uses one
+frontend session, links each class to the exact UUID from its TASTy header, and
+returns nothing unless every artifact passes whole-batch validation. Test-only
+publication stages complete batches
 with handled-error cleanup. Strict pinned Scala 3.9.0 gates verify both
 single-class, independent two-class, and cross-class TASTy-dependent lookup;
 the gates compare artifact bytes across fresh sessions and execute unchanged
@@ -74,6 +76,13 @@ checks constructor-parameter TASTy addresses, and verifies alias-batch
 publication failures before promoting the four linked artifacts. See the
 [constructor-injection release record](docs/jvm-tasty-constructor-injection.md)
 for the pinned toolchain, outputs, and reproduction commands.
+
+The separate `CounterOwnerFactory.wrap(counter)` fixture constructs an Owner
+that retains the exact input Counter. Its final strict gate checks six linked
+Rust artifacts, fresh-session byte equality, handled publication failures, a
+JDK 21 identity runtime, and the independent pinned Scala 3.9 consumer. See the
+[reference-constructor release record](docs/jvm-tasty-reference-constructor-calls.md)
+for the ABI, hashes, diagnostics, unsupported forms, and reproduction commands.
 
 Compatibility targets Scala **3.9.0**, pinned to source revision
 `777528f19a58e794c9954a42f433373472ec57f8`. The semantic pickler emits TASTy
@@ -153,7 +162,8 @@ regenerating fixtures or reports.
   [class-state pickler contract](docs/tasty-pickler-class-state-contract.md).
 - [Classloader](docs/classloader.md),
   [class-file encoder](docs/classfile-encoder.md), and
-  [JVM backend](docs/jvm-backend.md).
+  [JVM backend](docs/jvm-backend.md),
+  [reference-constructor release record](docs/jvm-tasty-reference-constructor-calls.md).
 - [Lexer oracle](tools/scala-lexer-oracle/README.md),
   [parser oracle](tools/scala-parser-oracle/README.md),
   [parser/namer corpus tooling](tools/parser-corpus-report/README.md),

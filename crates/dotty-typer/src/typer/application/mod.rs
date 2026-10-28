@@ -256,6 +256,16 @@ impl SourceTyper<'_> {
         } else {
             None
         };
+        let apply_name = Name::new(self.store.names.intern("apply"), Namespace::Term);
+        if class_kind == SymbolKind::ModuleClass
+            && self.deferred_case_class_for_module_class(class).is_some()
+        {
+            return Err(TyperError::OverloadedSelectionDeferred {
+                source: self.source,
+                tree_index: request.tree_index,
+                name: apply_name,
+            });
+        }
         let receiver = match class_kind {
             SymbolKind::ModuleClass => self.this_type_receiver_view(callable)?,
             SymbolKind::Class | SymbolKind::Trait
@@ -268,7 +278,6 @@ impl SourceTyper<'_> {
             }
             _ => return Ok((function, callable)),
         };
-        let apply_name = Name::new(self.store.names.intern("apply"), Namespace::Term);
         let mut candidates = self
             .lookup_members_journaled(receiver, apply_name, info_journal)
             .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;

@@ -151,7 +151,11 @@ identifier. The input class and result class must differ. `Int` constructor
 calls retain the previous primitive signature `(scala.Int)C` encoding. Nested
 allocation, extra arguments, fields, factory values, null, foreign or
 unplanned classes, generic or secondary constructors, and other argument
-expressions remain rejected before complete TASTy bytes are returned.
+expressions were rejected before complete TASTy bytes were returned in the
+original #1796 implementation. Issue #1817 adds only the source-proven
+two-level `Factory(Int) = new Owner(new Counter(seed))` form documented in
+[`jvm-tasty-nested-constructor-calls.md`](jvm-tasty-nested-constructor-calls.md);
+the other nested and computed forms remain rejected.
 
 The JVM-only backend's existing `new Holder(counter)` lowering remains a
 separate output path. This increment validates the paired plans and serializes
@@ -310,5 +314,221 @@ package/classes/method and after reversing the class declaration order. The
 contract regression rejects a missing third classfile, a damaged Factory
 sidecar, and a Factory allocation/constructor edge changed to `Object`.
 These checks establish deterministic Rust output and complete in-memory
-validation; they do not claim runtime execution or Scala consumer
-interoperability, which remain separate gates.
+validation. The strict runtime proof is described below; Scala consumer
+interoperability remains a separate gate.
+
+## Strict Rust classfile runtime proof (#1798)
+
+`tests/jvm_tasty_artifacts.rs::reference_constructor_factory_executes_original_rust_object_graph_on_verified_jvm`
+publishes the complete six-artifact batch into a fresh directory, then stages
+only the three original Rust-produced `.class` files into the runtime
+classpath. It decodes all three classfiles (major version 65), checks the
+source ABI, and inspects the Factory allocation and constructor call through
+their actual constant-pool references. The verified Factory sequence is
+`new CounterOwner; dup; aload_1; invokespecial CounterOwner.<init>(Counter);
+areturn`, with `max_stack = 3` and `max_locals = 2`. The Owner constructor
+calls `Object.<init>` before storing its exact parameter in the sole
+`private final inner: Counter` field; `read` loads that field and calls
+`Counter.get()I`. `javap -p -v -c` checks these generated methods and their
+descriptors.
+
+The test compiles a separate Java harness against those original Rust classes
+and runs it with `java -Xverify:all`. Reflection proves `Owner.inner == counter`
+by reference identity. Two calls to `wrap` with the same Counter produce
+distinct Owner objects retaining that same Counter. Mutations 7 → 42 → −9 are
+observed through both owners; a separate Counter/Owner pair remains
+independent. SHA-256 and byte comparisons before and after `javac` and Java
+execution ensure the toolchain did not replace Rust output. Repeated source
+emission with distinct `SourceId`s still compares byte-for-byte. The test is in
+the required JDK job and fails when JDK 21+ tools are absent under
+`DOTTY_CLASSFILE_REQUIRE_JDK=1`.
+
+A second required JDK test renames the package, classes, and factory method to
+`renamed.Widget`, `WidgetHolder`, and `WidgetBuilder.build`, then moves
+`WidgetHolder` before `Widget` in source order. It resolves and stages each
+class by the emitted artifact path and checks source identity, reflected alias
+identity, distinct holders from repeated calls, and independent mutation under
+`java -Xverify:all`. The uninitialized-return negative control replaces the
+whole constructor invocation with stack-balanced `pop; pop; nop` instructions,
+leaving one uninitialized Owner for `areturn`; the JVM rejects that return.
+
+Negative runtime controls remove either linked class and require the JVM to
+report the missing class. Mutated bytecode that skips the constructor call,
+omits `dup`, loads an integer instead of the reference parameter, returns an
+integer in place of the Owner, or uses the Counter as the Owner receiver must
+fail `-Xverify:all` with `VerifyError`. The publisher separately rejects a
+corrupted third class's TASTy link before promotion. Source-level negative
+tests reject a wrong Factory result type, wrong constructor argument type,
+inaccessible or generic constructors, nested allocation, and invalid identity
+provenance before a complete batch is returned.
+
+This lane proves execution of the bounded Rust classfile producer. It does not
+consume the Rust TASTy sidecars with Scala, and it adds no production API or
+public alias accessor. Other constructor shapes, reference widening, arbitrary
+constructor expressions, extra arguments, generic/secondary constructors,
+and broader object-graph lowering remain unsupported. Scala TASTy
+interoperability remains the separate #1799 lane.
+
+## Strict Scala reference-constructor consumer proof (#1799)
+
+`tests/jvm_tasty_reference_constructor_scala_consumer.rs` adds an opt-in gate
+under `DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER=1`. The test
+emits two independent Rust frontend sessions (`SourceId` 17991 and 17992),
+checks their three ordered class artifacts retain the same canonical class
+symbols and source-member order, and confirms each artifact belongs to its
+session. The class symbols are distinct across Counter, CounterOwner, and
+CounterOwnerFactory. The independent Scala 3.9 client is compiled only from
+`tests/fixtures/jvm_tasty_reference_constructor_calls/ScalaConsumer.scala` against
+the six files in a fresh Rust batch and the pinned Scala runtime libraries.
+Compiler jars are used only to launch scalac and are checked for shadow copies
+of the three example classes. The Scala output directory is separate and
+contains only `consumer/Consumer.class` and `consumer/Consumer$.class`.
+
+The consumer calls `CounterOwnerFactory.wrap(counter)` and has no
+`CounterOwner.<init>` Methodref. Its compiled references include
+`Counter.<init>(I)V`, `CounterOwnerFactory.<init>()V`,
+`CounterOwnerFactory.wrap(Lexample/Counter;)Lexample/CounterOwner;`,
+`CounterOwner.read()I`, and `Counter.set(I)V`. Both fresh Rust batches execute
+unchanged with `java -Xverify:all`; `Consumer.run()` returns `-9` after its
+internal checks observe 7, then 42 through the original Counter alias, keep a
+second graph at 3, and finally observe -9 without mutating that second graph.
+The gate hashes all six artifacts before and after scalac and runtime.
+
+The test also repeats the Scala consumer using independently emitted
+`renamed.Widget`, `WidgetHolder`, and `WidgetBuilder.build` artifacts, with
+`WidgetHolder` declared before `Widget` in the Rust source. Scala sees the
+`WidgetBuilder.build(Lrenamed/Widget;)Lrenamed/WidgetHolder;` signature, does
+not construct a holder directly, and returns `-9` on both independent batches.
+This verifies the producer behavior follows source identities and package
+paths instead of relying on the example class spellings.
+
+The independent lookup controls operate on each class separately. The test
+removes `get()I`, `read()I`, or `wrap(Counter):CounterOwner` from that classfile
+while retaining its matching TASTy link and sidecar; a Scala probe still
+typechecks each member from TASTy. Removing the corresponding sidecar makes
+that probe fail because the method is no longer in the classfile. Moving or
+corrupting each sidecar and flipping each classfile link UUID are also tested
+under `-Werror`. The observed first failures are Scala's missing `.tasty`
+diagnostic for absent/moved sidecars, “not a TASTy file” while reading a
+corrupt sidecar, and “out of sync with its TASTy file” for a mismatched UUID.
+Renaming each `TASTY` attribute and removing its sidecar falls back to the
+classfile and fails at the missing method lookup. The suite also confirms a
+wrong Owner constructor formal and wrong Factory result are rejected by Scala
+typechecking, and a wrong-package Owner reference does not resolve; deleting the Owner classfile fails at JVM linkage with
+`NoClassDefFoundError`, and deleting its `(Counter)V` constructor fails with
+`NoSuchMethodError` at `Factory.wrap`.
+
+Pinned Scala 3.9.0 decompilation of the Rust-produced sidecars confirms the
+Factory method has the distinct CounterOwner result and source body
+`new example.CounterOwner(counter)`, the Owner has its original
+`counter: Counter` constructor parameter and `private val inner: Counter =
+counter`, and Counter retains `get` and `set`. An isolated `-from-tasty` run
+reconstructs all three semantic declarations into a separate output directory;
+those Scala classfiles are not used by the positive runtime checks.
+
+The observed strict run used Scala source revision
+`777528f19a58e794c9954a42f433373472ec57f8`, the SHA-pinned 3.9.0 compiler
+dependencies in `tests/fixtures/tasty_pickler/provenance.json`, and Amazon
+Corretto JDK 25.0.4 (release 21 or newer). For the `SourceId(17991)` producer
+batch, the six files staged at `example/{Counter,CounterOwner,
+CounterOwnerFactory}.{class,tasty}` had these SHA-256 hashes and linked TASTy
+UUIDs:
+
+| Class | Classfile SHA-256 | TASTy SHA-256 | TASTy UUID |
+| --- | --- | --- | --- |
+| `example.Counter` | `b38143cee8571a6602865ff6062eca92dd771582f539b156100ffc9647af94ae` | `a0e78329d60aba318de825eaddb7668d34838197158653c1b7384188143099c7` | `00da82c5ca4ebdac0000000000008193` |
+| `example.CounterOwner` | `d914c2dfc5b8d22079be304fc7c463be171394a528b71603de43342a79db91b2` | `9bcfbbb9d12f71a50122c6b2af960fe76ffd7f629a57738f61f4d384821f7f13` | `004ebc559d6864ef0000000000008195` |
+| `example.CounterOwnerFactory` | `2891207c0907224a87da6ea95d0610b022572e5bb055faefa5349fbdfd0d13e7` | `fa91a9f9410e5fc876fd27d3f4e324371b9237b36df21f8297bb785fb5a792d2` | `006568821180adc10000000000008194` |
+
+Each classfile is major version 65 and each TASTy header is 28.9.0. The second
+session produced byte-identical classfile and TASTy bytes at the same ordered
+paths. Both batches' dependency hashes matched before and after Scala
+compilation and JVM execution. If `DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSUMER`
+is set, missing or mismatched Scala 3.9.0 revision/dependencies or JDK 21+
+tools fail the test rather than skip it.
+
+## Final three-class release gate (#1800)
+
+The final strict runs used Rust `1.98.1`, Scala compiler 3.9.0 from source
+revision `777528f19a58e794c9954a42f433373472ec57f8`, and Eclipse Temurin
+`21.0.8+9` (`java`, `javac`, and `javap` all report 21.0.8). The pinned Maven
+artifacts are read from
+`target-fs2/coursier/https/repo1.maven.org/maven2`; the oracle checks their
+SHA-256 values against `tests/fixtures/tasty_pickler/provenance.json`. The
+standalone Scala client source SHA-256 is
+`86f6f693cbe3fd2e7cf7f3a51f7cf36ce7eb310981fc0b435e2082514ea349c9`.
+
+`DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER=1 cargo test -p
+dotty --test jvm_tasty_reference_constructor_scala_consumer --locked --
+--nocapture` passed. Its compile classpath puts the six-file Rust output first,
+followed only by `scala3-library_3-3.9.0.jar` and
+`scala-library-3.9.0.jar`. The Scala compiler launcher uses the eight
+SHA-pinned jars listed in `tests/fixtures/tasty_pickler/provenance.json`:
+those two runtime libraries, `scala3-compiler_3-3.9.0.jar`,
+`tasty-core_3-3.9.0.jar`, `scala3-interfaces-3.9.0.jar`,
+`scala-asm-9.9.0-scala-1.jar`, `compiler-interface-1.12.0.jar`, and
+`util-interface-1.11.5.jar`. Runtime classpath order is the unchanged Rust
+six-file root, the separate consumer output, then the two Scala runtime jars.
+Three separate probes resolved `Counter.get`, `CounterOwner.read`, and
+`CounterOwnerFactory.wrap` with each member removed from its classfile but
+present in TASTy; their classfile-only controls failed. Missing, misplaced,
+corrupt, and UUID-mismatched sidecars failed with pinned Scala diagnostics.
+The client compiled against Rust-only output, and both fresh producer sessions
+ran with `java -Xverify:all`, returning `-9`. Runtime used the unchanged
+original Rust classes. The separate `-from-tasty` output was used only for
+semantic reconstruction and never replaced runtime dependencies.
+
+The strict run recorded these six Rust artifact digests and linked TASTy UUIDs
+for the first fresh frontend session:
+
+| Class | Classfile SHA-256 | TASTy SHA-256 | TASTy UUID |
+| --- | --- | --- | --- |
+| `example.Counter` | `b38143cee8571a6602865ff6062eca92dd771582f539b156100ffc9647af94ae` | `a0e78329d60aba318de825eaddb7668d34838197158653c1b7384188143099c7` | `00da82c5ca4ebdac0000000000008193` |
+| `example.CounterOwner` | `d914c2dfc5b8d22079be304fc7c463be171394a528b71603de43342a79db91b2` | `9bcfbbb9d12f71a50122c6b2af960fe76ffd7f629a57738f61f4d384821f7f13` | `004ebc559d6864ef0000000000008195` |
+| `example.CounterOwnerFactory` | `2891207c0907224a87da6ea95d0610b022572e5bb055faefa5349fbdfd0d13e7` | `fa91a9f9410e5fc876fd27d3f4e324371b9237b36df21f8297bb785fb5a792d2` | `006568821180adc10000000000008194` |
+
+The second independent session emitted byte-identical files at the same six
+paths. The strict Rust JDK command passed with
+`DOTTY_CLASSFILE_REQUIRE_JDK=1` for the classfile encoder, JVM backend, source
+compilation, stateful class contract, and paired artifact tests. The direct
+Factory harness used `java -Xverify:all` on the original Rust classes,
+verified that `Owner.inner` is the same input object, checked distinct Owners
+for repeated calls, observed `7 → 42 → -9` after mutating the original
+Counter, and kept a second `Counter(3)` graph independent. The harness and
+Scala consumer both verify that Rust classfile hashes remain unchanged.
+
+The command used was:
+
+```sh
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  --test jvm_tasty_artifacts \
+  --test jvm_stateful_class_contract \
+  --locked -- --nocapture
+```
+
+The other strict Scala 3.9 consumers passed with their required flags:
+`DOTTY_REQUIRE_SCALA_TASTY_CONSTRUCTOR_INJECTION_CONSUMER`,
+`DOTTY_REQUIRE_SCALA_TASTY_OBJECT_COMPOSITION_CONSUMER`,
+`DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER`,
+`DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER`,
+`DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER`, and
+`DOTTY_REQUIRE_SCALA_TASTY_CONSUMER`. The pinned source pickler oracle passed
+with `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`. Rust checks passed for workspace
+formatting, the frontend dependency-boundary guard, Clippy with warnings
+denied, rustdoc with warnings denied, and all workspace target tests. Scratch
+compiler files used the worktree's `target/tmp` because the shared `/tmp`
+filesystem was full; no unrelated cache files were removed.
+
+The six-file publisher regression rejects a missing Factory sidecar or
+classfile, forged per-class source provenance, corrupt Owner or Factory TASTy,
+and a mismatched Factory link UUID before publication. Injected handled errors
+after each of the six staged files, before promotion, and after promotion
+leave no final output tree and clean staging. A pre-existing destination and
+sentinel remain intact. This covers handled failures and does not claim
+crash-atomic filesystem durability. The supported producer shape remains
+bounded: nested constructor expressions, fields, null, factory-result
+arguments, secondary or generic constructors, multiple reference formals,
+and other unproven constructor forms fail before a complete batch is returned.

@@ -50,6 +50,24 @@ const FACTORY_CLASS: &[u8] = include_bytes!(
 const FACTORY_TASTY: &[u8] = include_bytes!(
     "fixtures/jvm_tasty_reference_constructor_calls/scala39/example/CounterOwnerFactory.tasty"
 );
+const NESTED_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala");
+const NESTED_COUNTER_CLASS: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_nested_constructor_calls/scala39/example/Counter.class");
+const NESTED_COUNTER_TASTY: &[u8] =
+    include_bytes!("fixtures/jvm_tasty_nested_constructor_calls/scala39/example/Counter.tasty");
+const NESTED_OWNER_CLASS: &[u8] = include_bytes!(
+    "fixtures/jvm_tasty_nested_constructor_calls/scala39/example/CounterOwner.class"
+);
+const NESTED_OWNER_TASTY: &[u8] = include_bytes!(
+    "fixtures/jvm_tasty_nested_constructor_calls/scala39/example/CounterOwner.tasty"
+);
+const NESTED_FACTORY_CLASS: &[u8] = include_bytes!(
+    "fixtures/jvm_tasty_nested_constructor_calls/scala39/example/CounterOwnerFactory.class"
+);
+const NESTED_FACTORY_TASTY: &[u8] = include_bytes!(
+    "fixtures/jvm_tasty_nested_constructor_calls/scala39/example/CounterOwnerFactory.tasty"
+);
 
 fn decode_class(bytes: &[u8]) -> ClassFile<'_> {
     let mut reader = ClassReader::new(bytes);
@@ -131,6 +149,509 @@ fn assert_classfile_link(class: &ClassFile<'_>, tasty: &TastyFile<'_>) {
         .unwrap()
         .expect("Scala class has a TASTY attribute");
     assert_eq!(link.as_bytes(), &tasty.header().uuid);
+}
+
+#[test]
+fn scala39_nested_constructor_oracle_pins_abi_bytecode_and_tasty_shape() {
+    let counter = decode_class(NESTED_COUNTER_CLASS);
+    let owner = decode_class(NESTED_OWNER_CLASS);
+    let factory = decode_class(NESTED_FACTORY_CLASS);
+    assert_eq!(
+        [
+            class_name(&counter),
+            class_name(&owner),
+            class_name(&factory)
+        ],
+        [
+            "example/Counter",
+            "example/CounterOwner",
+            "example/CounterOwnerFactory"
+        ]
+    );
+    assert_eq!(
+        [
+            counter.version.major,
+            owner.version.major,
+            factory.version.major
+        ],
+        [65, 65, 65]
+    );
+    let counter_tasty = tasty(NESTED_COUNTER_TASTY);
+    let owner_tasty = tasty(NESTED_OWNER_TASTY);
+    let factory_tasty = tasty(NESTED_FACTORY_TASTY);
+    assert_classfile_link(&counter, &counter_tasty);
+    assert_classfile_link(&owner, &owner_tasty);
+    assert_classfile_link(&factory, &factory_tasty);
+
+    assert_eq!(
+        counter
+            .constant_pool
+            .utf8(method(&counter, "<init>").descriptor_index),
+        Ok("(I)V")
+    );
+    assert_eq!(
+        owner
+            .constant_pool
+            .utf8(method(&owner, "<init>").descriptor_index),
+        Ok("(Lexample/Counter;)V")
+    );
+    let create = method(&factory, "create");
+    assert_eq!(
+        factory.constant_pool.utf8(create.descriptor_index),
+        Ok("(I)Lexample/CounterOwner;")
+    );
+    assert_eq!(
+        method_code(create),
+        [
+            0xbb, 0x00, 0x11, 0x59, 0xbb, 0x00, 0x13, 0x59, 0x1b, 0xb7, 0x00, 0x16, 0xb7, 0x00,
+            0x19, 0xb0
+        ]
+    );
+
+    let (create_address, body) = method_body(&factory_tasty, "create");
+    assert_eq!(body.parameters.len(), 1);
+    let seed_parameter = &body.parameters[0];
+    assert_eq!(seed_parameter.tag(), PARAM_TAG);
+    assert_eq!(
+        factory_tasty.names().render(seed_parameter.name()).unwrap(),
+        "seed"
+    );
+    let seed_type = seed_parameter.decode_body().unwrap().type_tree;
+    assert_eq!(seed_type.nodes()[0].tag, IDENTTPT_TAG);
+    assert_eq!(
+        seed_type
+            .name_refs()
+            .into_iter()
+            .map(|name| factory_tasty.names().render(name).unwrap())
+            .collect::<Vec<_>>(),
+        ["Int", "scala"]
+    );
+    assert_eq!(body.return_type.nodes()[0].tag, IDENTTPT_TAG);
+    assert_eq!(
+        body.return_type
+            .name_refs()
+            .into_iter()
+            .map(|name| factory_tasty.names().render(name).unwrap())
+            .collect::<Vec<_>>(),
+        ["CounterOwner", "example"]
+    );
+    let RawTree::LengthNode(outer_node) = body.rhs.expect("create has an RHS") else {
+        panic!("create outer expression is APPLY");
+    };
+    assert_eq!(outer_node.tag, APPLY_TAG);
+    let outer = outer_node.decode_apply().unwrap();
+    let [inner_argument] = outer.arguments.as_slice() else {
+        panic!("Owner constructor has one argument");
+    };
+    let RawTree::LengthNode(outer_select_node) = outer.function else {
+        panic!("outer constructor selection is a node");
+    };
+    assert_eq!(outer_select_node.tag, SELECTIN_TAG);
+    let outer_select = outer_select_node.decode_select_in().unwrap();
+    assert_eq!(
+        factory_tasty
+            .names()
+            .render_signed_name(outer_select.name)
+            .unwrap()
+            .unwrap(),
+        dotty_tasty::tasty::RenderedSignedName::Signed {
+            original: "<init>".to_owned(),
+            signature: dotty_tasty::tasty::RenderedNameSignature {
+                parameters: [RenderedParamSig::TermParameter(
+                    "example.Counter".to_owned()
+                )]
+                .into(),
+                result: "example.CounterOwner".to_owned(),
+            },
+        }
+    );
+    assert!(matches!(
+        outer_select.qualifier,
+        RawTree::Ast { tag: NEW_TAG, .. }
+    ));
+
+    let RawTree::LengthNode(inner_node) = inner_argument else {
+        panic!("the Owner argument is another APPLY");
+    };
+    assert_eq!(inner_node.tag, APPLY_TAG);
+    let inner = inner_node.decode_apply().unwrap();
+    let [seed_reference] = inner.arguments.as_slice() else {
+        panic!("Counter constructor receives the original seed");
+    };
+    let RawTree::LengthNode(inner_select_node) = inner.function else {
+        panic!("inner constructor selection is a node");
+    };
+    assert_eq!(inner_select_node.tag, SELECTIN_TAG);
+    let inner_select = inner_select_node.decode_select_in().unwrap();
+    assert_eq!(
+        factory_tasty
+            .names()
+            .render_signed_name(inner_select.name)
+            .unwrap()
+            .unwrap(),
+        dotty_tasty::tasty::RenderedSignedName::Signed {
+            original: "<init>".to_owned(),
+            signature: dotty_tasty::tasty::RenderedNameSignature {
+                parameters: [RenderedParamSig::TermParameter("scala.Int".to_owned())].into(),
+                result: "example.Counter".to_owned(),
+            },
+        }
+    );
+    assert!(matches!(
+        inner_select.qualifier,
+        RawTree::Ast { tag: NEW_TAG, .. }
+    ));
+    assert_eq!(seed_reference.ast_refs()[0].kind, AstRefKind::TermRefDirect);
+    let tasty_index = factory_tasty.ast_address_index().unwrap();
+    let seed_address = parameter_address(&tasty_index, create_address);
+    assert_eq!(seed_reference.ast_refs()[0].address, seed_address);
+    let nested_nodes = [APPLY_TAG, SELECTIN_TAG, NEW_TAG, PARAM_TAG]
+        .into_iter()
+        .flat_map(|tag| tasty_index.iter_nodes_with_tag(tag))
+        .filter(|candidate| {
+            let mut parent = Some(*candidate);
+            while let Some(node) = parent {
+                if node.offset as u32 == create_address {
+                    return true;
+                }
+                parent = tasty_index.parent_of(node.offset as u32);
+            }
+            false
+        })
+        .map(|node| (node.offset, node.tag))
+        .collect::<Vec<_>>();
+    println!(
+        "Scala nested TASTy addresses: create DEFDEF={create_address}, seed PARAM={seed_address}, descendant (address,tag)={nested_nodes:?}, tags APPLY={APPLY_TAG}, SELECTin={SELECTIN_TAG}, NEW={NEW_TAG}, PARAM={PARAM_TAG}, TERMREFdirect={}",
+        dotty_tasty::ast::TERMREFDIRECT_TAG
+    );
+}
+
+#[test]
+fn nested_constructor_rust_preserves_the_one_session_trees_and_requires_the_batch_proof() {
+    let source_id = SourceId::from_index(181501);
+    let source_text = SourceText::new(NESTED_SOURCE).unwrap();
+    let scanner = ContextualScanner::new(NESTED_SOURCE).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(source_text, source_id, scanner, &mut store.names);
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+    let source_index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "NestedConstructorCalls.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        outcome => panic!("the exact nested source names cleanly: {outcome:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("the source has one package root");
+    };
+    assert_eq!(package.stats.len(), 3);
+
+    let mut declarations = Vec::new();
+    let mut create_tree = None;
+    for &class_tree in &package.stats {
+        let class = source_index.symbol_at(source_id, class_tree).unwrap();
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
+            panic!("package member is a class");
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            panic!("class body is a template");
+        };
+        let constructor = source_index
+            .symbol_at(source_id, template.constructor)
+            .unwrap();
+        let TreeKind::DefDef(constructor_definition) = &parsed.ast.get(template.constructor).kind
+        else {
+            panic!("primary constructor is a definition");
+        };
+        let constructor_parameters = constructor_definition
+            .value_param_clauses
+            .iter()
+            .flatten()
+            .map(|&tree| {
+                source_index
+                    .derived_symbol_at(constructor, source_id, tree)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        if store.names.resolve(definition.name.as_name().text()) == "CounterOwnerFactory" {
+            create_tree = template.body.iter().copied().find(|&tree| {
+                matches!(&parsed.ast.get(tree).kind, TreeKind::DefDef(method)
+                    if store.names.resolve(method.name.as_name().text()) == "create")
+            });
+        }
+        declarations.push((class, class_tree, constructor, constructor_parameters));
+    }
+    let create_tree = create_tree.expect("the source Factory.create declaration");
+    let create = source_index.symbol_at(source_id, create_tree).unwrap();
+    let TreeKind::DefDef(create_definition) = &parsed.ast.get(create_tree).kind else {
+        panic!("create is a method definition");
+    };
+    let [seed_tree] = create_definition.value_param_clauses[0].as_slice() else {
+        panic!("create has its original seed formal");
+    };
+    let seed = source_index.symbol_at(source_id, *seed_tree).unwrap();
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &source_index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for (class, _, constructor, parameters) in &declarations {
+        typer.complete_symbol(*class).unwrap();
+        typer.complete_symbol(*constructor).unwrap();
+        for &parameter in parameters {
+            typer.complete_symbol(parameter).unwrap();
+        }
+    }
+    typer.complete_symbol(create).unwrap();
+    typer.complete_symbol(seed).unwrap();
+    let source_rhs = create_definition.rhs.unwrap();
+    let create_context = typer.expression_context_for(create).unwrap();
+    let typed_rhs = typer.type_expression(source_rhs, create_context).unwrap();
+    assert_eq!(
+        typer.source_typed_index().get(source_id, source_rhs),
+        Some(typed_rhs)
+    );
+    let TreeKind::Apply(outer) = &typer.typed_ast().get(typed_rhs).kind else {
+        panic!("the original factory RHS types as the outer Owner APPLY");
+    };
+    let [typed_inner_tree] = outer.args.as_slice() else {
+        panic!("the Owner primary constructor has one argument");
+    };
+    let TreeKind::Apply(inner) = &typer.typed_ast().get(*typed_inner_tree).kind else {
+        panic!("the Owner argument remains the nested Counter APPLY");
+    };
+    let [typed_seed_tree] = inner.args.as_slice() else {
+        panic!("the Counter primary constructor has one seed argument");
+    };
+    let Type::TermRef {
+        target: outer_constructor_target,
+        ..
+    } = typer
+        .store()
+        .types
+        .get(typer.typed_ast().get(outer.function).ty)
+    else {
+        panic!("the outer selected constructor has a canonical TermRef");
+    };
+    let Type::TermRef {
+        target: inner_constructor_target,
+        ..
+    } = typer
+        .store()
+        .types
+        .get(typer.typed_ast().get(inner.function).ty)
+    else {
+        panic!("the inner selected constructor has a canonical TermRef");
+    };
+    let outer_constructor = match *outer_constructor_target {
+        TermRefTarget::Symbol(symbol) => symbol,
+        _ => panic!("outer constructor resolves to a canonical symbol"),
+    };
+    let inner_constructor = match *inner_constructor_target {
+        TermRefTarget::Symbol(symbol) => symbol,
+        _ => panic!("inner constructor resolves to a canonical symbol"),
+    };
+    assert_eq!(outer_constructor, declarations[1].2);
+    assert_eq!(inner_constructor, declarations[0].2);
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(seed_target),
+        ..
+    } = typer
+        .store()
+        .types
+        .get(typer.typed_ast().get(*typed_seed_tree).ty)
+    else {
+        panic!("the innermost argument is a canonical parameter TermRef");
+    };
+    assert_eq!(*seed_target, seed);
+
+    let TreeKind::Apply(source_outer) = &parsed.ast.get(source_rhs).kind else {
+        panic!("the original source Factory RHS is the outer Apply");
+    };
+    let TreeKind::Select(source_outer_selection) = &parsed.ast.get(source_outer.function).kind
+    else {
+        panic!("the outer source function is the Owner constructor selection");
+    };
+    let TreeKind::New(source_owner_new) = &parsed.ast.get(source_outer_selection.qualifier).kind
+    else {
+        panic!("the source Owner constructor selection has its original New");
+    };
+    let [source_inner_tree] = source_outer.args.as_slice() else {
+        panic!("the outer source Apply has the nested source argument");
+    };
+    let TreeKind::Apply(source_inner) = &parsed.ast.get(*source_inner_tree).kind else {
+        panic!("the nested source argument is Counter Apply");
+    };
+    let TreeKind::Select(source_inner_selection) = &parsed.ast.get(source_inner.function).kind
+    else {
+        panic!("the inner source function is the Counter constructor selection");
+    };
+    let TreeKind::New(source_counter_new) = &parsed.ast.get(source_inner_selection.qualifier).kind
+    else {
+        panic!("the source Counter constructor selection has its original New");
+    };
+    let [source_seed_tree] = source_inner.args.as_slice() else {
+        panic!("the innermost source argument is seed");
+    };
+    let source_typed_index = typer.source_typed_index();
+    for source_tree in [
+        source_rhs,
+        source_outer.function,
+        source_outer_selection.qualifier,
+        *source_inner_tree,
+        source_inner.function,
+        source_inner_selection.qualifier,
+        *source_seed_tree,
+        source_owner_new.tpt,
+        source_counter_new.tpt,
+    ] {
+        assert!(
+            source_typed_index.get(source_id, source_tree).is_some(),
+            "original source tree {source_tree:?} has a same-session typed binding"
+        );
+    }
+    println!(
+        "nested source identities: classes={:?}, constructors={:?}, create={create:?}, seed={seed:?}, source_root={:?}, source_rhs={source_rhs:?}, source_owner_new={:?}, source_counter_new={:?}",
+        declarations.iter().map(|item| item.0).collect::<Vec<_>>(),
+        declarations.iter().map(|item| item.2).collect::<Vec<_>>(),
+        parsed.root,
+        source_outer_selection.qualifier,
+        source_inner_selection.qualifier,
+    );
+    println!(
+        "nested source→typed bindings: {:?}",
+        [
+            source_rhs,
+            source_outer.function,
+            source_outer_selection.qualifier,
+            *source_inner_tree,
+            source_inner.function,
+            source_inner_selection.qualifier,
+            *source_seed_tree,
+            source_owner_new.tpt,
+            source_counter_new.tpt,
+        ]
+        .map(|source_tree| (source_tree, source_typed_index.get(source_id, source_tree)))
+    );
+    println!(
+        "nested typed identities: rhs={typed_rhs:?}, owner_constructor={outer_constructor:?}, counter_constructor={inner_constructor:?}, counter_argument={typed_seed_tree:?}"
+    );
+
+    let factory_class = declarations[2].0;
+    let factory_tree = declarations[2].1;
+    let factory_constructor = declarations[2].2;
+    let TreeKind::TypeDef(factory_definition) = &parsed.ast.get(factory_tree).kind else {
+        unreachable!();
+    };
+    let TreeKind::Template(factory_template) = &parsed.ast.get(factory_definition.rhs).kind else {
+        unreachable!();
+    };
+    let TreeKind::DefDef(factory_constructor_definition) =
+        &parsed.ast.get(factory_template.constructor).kind
+    else {
+        unreachable!();
+    };
+    let constructor_clauses = factory_constructor_definition
+        .value_param_clauses
+        .iter()
+        .map(|clause| {
+            clause
+                .iter()
+                .map(|&tree| {
+                    source_index
+                        .derived_symbol_at(factory_constructor, source_id, tree)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let planned_classes = declarations.iter().map(|item| item.0).collect::<Vec<_>>();
+    let planned_methods = [create];
+    let bindings = AuditBindings {
+        index: typer.source_typed_index(),
+        classes: &planned_classes,
+        methods: &planned_methods,
+    };
+    let members = [ClassMemberPicklePlan::Method {
+        symbol: create,
+        source_tree: create_tree,
+    }];
+    let plan = ClassStatePicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: typer.typed_ast(),
+        source_index: &source_index,
+        typed_bindings: &bindings,
+        source: SourceMetadata {
+            id: source_id,
+            name: "NestedConstructorCalls.scala".to_owned(),
+        },
+        class: factory_class,
+        class_tree: factory_tree,
+        constructor: PrimaryConstructorInputPlan {
+            symbol: factory_constructor,
+            source_tree: factory_template.constructor,
+            parameter_clauses: constructor_clauses,
+        },
+        members: &members,
+    };
+    let validated = plan
+        .validate()
+        .expect("the read-only class-state plan validates the one-session identities");
+    let pickler_error = validated.pickle().expect_err(
+        "a standalone class plan without the canonical batch receipt cannot emit nesting",
+    );
+    assert!(matches!(
+        pickler_error,
+        dotty_tasty_pickler::PickleError::Unsupported {
+            feature: dotty_tasty_pickler::UnsupportedFeature::BodyExpression,
+            symbol: Some(symbol),
+        } if symbol == create
+    ));
+}
+
+#[test]
+fn nested_constructor_arity_and_type_controls_fail_during_source_typing() {
+    let owner_arity =
+        NESTED_SOURCE.replace("new CounterOwner(new Counter(seed))", "new CounterOwner()");
+    assert_batch_failure(
+        paired_failure(&owner_arity, 181504),
+        2,
+        "method body typing",
+        "ApplicationArityMismatch",
+    );
+    let counter_argument_type = NESTED_SOURCE.replace("new Counter(seed)", "new Counter(true)");
+    assert_batch_failure(
+        paired_failure(&counter_argument_type, 181505),
+        2,
+        "method body typing",
+        "ApplicationArgumentTypeMismatch",
+    );
+    let owner_argument_type = NESTED_SOURCE.replace(
+        "new CounterOwner(new Counter(seed))",
+        "new CounterOwner(seed)",
+    );
+    assert_batch_failure(
+        paired_failure(&owner_argument_type, 181506),
+        2,
+        "method body typing",
+        "ApplicationArgumentTypeMismatch",
+    );
 }
 
 fn type_ref_symbol(store: &SemanticStore, ty: dotty_core::TypeId) -> SymbolId {
@@ -1358,16 +1879,227 @@ fn constructor_val_accessor_is_rejected_by_jvm_unit_validation() {
 }
 
 #[test]
-fn nested_constructor_application_is_rejected_by_the_bounded_identity_proof() {
-    let source = SOURCE.replace(
-        "new CounterOwner(counter)",
-        "new CounterOwner(new Counter(1))",
+fn nested_constructor_proof_serializes_the_original_nested_tasty_expression() {
+    let output = with_paired_jvm_tasty_batch_plan(
+        NESTED_SOURCE,
+        "NestedConstructorCalls.scala",
+        SourceId::from_index(181604),
+        |batch| {
+            assert_eq!(batch.constructor_call_proofs.len(), 1);
+            batch.classes[2]
+                .tasty_plan
+                .pickle()
+                .expect("the proof-backed nested factory body is serialized")
+                .bytes()
+                .to_vec()
+        },
+    )
+    .expect("the source-proven two-level constructor body passes paired validation");
+    let factory = tasty(&output);
+    let (create_address, body) = method_body(&factory, "create");
+    assert_eq!(body.parameters.len(), 1);
+    assert_eq!(body.return_type.nodes()[0].tag, IDENTTPT_TAG);
+    let RawTree::LengthNode(outer_node) = body.rhs.expect("create has an RHS") else {
+        panic!("Factory.create body is the original outer constructor Apply");
+    };
+    assert_eq!(outer_node.tag, APPLY_TAG);
+    let outer = outer_node.decode_apply().unwrap();
+    let [inner_argument] = outer.arguments.as_slice() else {
+        panic!("Owner constructor has one nested constructor argument");
+    };
+    let RawTree::LengthNode(inner_node) = inner_argument else {
+        panic!("the original Counter constructor Apply remains the Owner argument");
+    };
+    assert_eq!(inner_node.tag, APPLY_TAG);
+    let inner = inner_node.decode_apply().unwrap();
+    let [seed_reference] = inner.arguments.as_slice() else {
+        panic!("Counter constructor receives the original seed formal");
+    };
+    assert_eq!(seed_reference.ast_refs()[0].kind, AstRefKind::TermRefDirect);
+    let index = factory.ast_address_index().unwrap();
+    assert_eq!(
+        seed_reference.ast_refs()[0].address,
+        parameter_address(&index, create_address)
+    );
+}
+
+#[test]
+fn pinned_scala_reads_and_from_tasty_compiles_the_rust_nested_factory_sidecar() {
+    if std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
+        != Some(std::ffi::OsStr::new("1"))
+    {
+        return;
+    }
+    let files = with_paired_jvm_tasty_batch_plan(
+        NESTED_SOURCE,
+        "NestedConstructorCalls.scala",
+        SourceId::from_index(181606),
+        |batch| {
+            batch
+                .classes
+                .iter()
+                .map(|class| {
+                    (
+                        class.tasty_path.clone(),
+                        class
+                            .tasty_plan
+                            .pickle()
+                            .expect("the nested source session emits all complete sidecars")
+                            .bytes()
+                            .to_vec(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        },
+    )
+    .expect("nested source batch passes paired validation");
+    run_nested_constructor_scala_oracle(&files);
+}
+
+fn run_nested_constructor_scala_oracle(files: &[(String, Vec<u8>)]) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala root for explicit oracle"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let version = Command::new(&compiler)
+        .arg("-version")
+        .output()
+        .expect("query pinned Scala 3.9 compiler version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"));
+
+    let root = std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .expect("oracle scratch directory must be explicitly set outside /tmp");
+    assert!(
+        !root.starts_with("/tmp"),
+        "Scala oracle scratch directory must remain outside /tmp"
+    );
+    let temporary = root.join(format!(
+        "dotty-issue-1817-scala-oracle-{}",
+        std::process::id()
+    ));
+    fs::remove_dir_all(&temporary).ok();
+    let candidate = temporary.join("candidate");
+    let compiled = temporary.join("compiled");
+    fs::create_dir_all(&candidate).unwrap();
+    fs::create_dir_all(&compiled).unwrap();
+    for (path, bytes) in files {
+        let path = candidate.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+    let factory_tasty = candidate.join("example/CounterOwnerFactory.tasty");
+    let decompile = Command::new(&compiler)
+        .arg("-decompile")
+        .arg(&factory_tasty)
+        .output()
+        .expect("decompile nested Factory TASTy with pinned Scala 3.9");
+    assert!(
+        decompile.status.success(),
+        "Scala -decompile rejected nested Factory TASTy: {}",
+        String::from_utf8_lossy(&decompile.stderr)
+    );
+    let decompiled = String::from_utf8_lossy(&decompile.stdout);
+    assert!(decompiled.contains("create"), "{decompiled}");
+    assert!(decompiled.contains("CounterOwner"), "{decompiled}");
+    assert!(decompiled.contains("Counter"), "{decompiled}");
+    let from_tasty = Command::new(&compiler)
+        .arg("-from-tasty")
+        .arg("-classpath")
+        .arg(&candidate)
+        .arg("-d")
+        .arg(&compiled)
+        .args([
+            candidate.join("example/Counter.tasty"),
+            candidate.join("example/CounterOwner.tasty"),
+            factory_tasty,
+        ])
+        .output()
+        .expect("consume nested Rust sidecars with pinned Scala 3.9");
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected nested Rust sidecars: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    fs::remove_dir_all(temporary).unwrap();
+}
+
+#[test]
+fn nested_constructor_application_with_a_literal_argument_is_rejected_at_source_shape() {
+    let source = NESTED_SOURCE.replace("new Counter(seed)", "new Counter(1)");
+    assert_unit_failure(
+        paired_failure(&source, 181605),
+        "cross-class constructor-call identity proof",
+        "constructor argument must resolve directly to the caller formal",
+    );
+}
+
+#[test]
+fn nested_constructor_proof_rejects_computed_field_factory_null_and_third_level_arguments() {
+    let branch = NESTED_SOURCE.replace(
+        "new CounterOwner(new Counter(seed))",
+        "new CounterOwner(if seed > 0 then new Counter(seed) else new Counter(0))",
+    );
+    let factory = NESTED_SOURCE
+        .replace(
+            "class CounterOwnerFactory:\n  def create",
+            "class CounterOwnerFactory:\n  def build(seed: Int): Counter = new Counter(seed)\n  def create",
+        )
+        .replace("new CounterOwner(new Counter(seed))", "new CounterOwner(build(seed))");
+    let field = NESTED_SOURCE
+        .replace(
+            "class CounterOwnerFactory:\n  def create",
+            "class CounterOwnerFactory:\n  private var stored: Int = 1\n  def create",
+        )
+        .replace(
+            "new CounterOwner(new Counter(seed))",
+            "new CounterOwner(new Counter(stored))",
+        );
+    let null = NESTED_SOURCE.replace(
+        "new CounterOwner(new Counter(seed))",
+        "new CounterOwner(null)",
+    );
+    let third_level = NESTED_SOURCE
+        .replace(
+            "class CounterOwner(counter: Counter):\n  private val inner: Counter = counter\n  def read(): Int = inner.get()",
+            "class CounterNest(counter: Counter)\nclass CounterOwner(counter: CounterNest):\n  def read(): Int = 0",
+        )
+        .replace(
+            "new CounterOwner(new Counter(seed))",
+            "new CounterOwner(new CounterNest(new Counter(seed)))",
+        );
+
+    assert_unit_failure(
+        paired_failure(&branch, 181607),
+        "cross-class constructor-call identity proof",
+        "constructor argument",
     );
     assert_unit_failure(
-        paired_failure(&source, 17942),
+        paired_failure(&factory, 181608),
         "cross-class constructor-call identity proof",
-        "constructor argument must be the exact caller formal identifier",
+        "nested constructor function must be Select",
     );
+
+    for (offset, source) in [field, null, third_level].iter().enumerate() {
+        assert_unit_failure(
+            paired_failure(source, 181609 + offset as u32),
+            "cross-class constructor-call identity proof",
+            "constructor argument",
+        );
+    }
 }
 
 #[test]

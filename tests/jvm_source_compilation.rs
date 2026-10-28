@@ -14,7 +14,7 @@ use dotty_core::ast::{AstArena, DefDef, Template, TreeKind, Typed, Untyped};
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SourceTypedIndex, SymbolFlags,
-    SymbolId, SymbolKind, TreeId, Visibility,
+    SymbolId, SymbolInfo, SymbolKind, TreeId, Visibility,
 };
 use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
@@ -41,6 +41,8 @@ const TASTY_OBJECT_COMPOSITION_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_object_composition/CounterOwner.scala");
 const TASTY_CONSTRUCTOR_INJECTION_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_constructor_injection/CounterOwner.scala");
+const TASTY_NESTED_CONSTRUCTOR_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala");
 
 type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
@@ -15374,6 +15376,314 @@ fn nested_new_constructor_arguments_lower_lifo_and_verify_initialized_values() {
         assert!(javap_output.contains("Pair.\"<init>\":(LCounter;LCounter;)V"));
         assert!(javap_output.contains("Node.\"<init>\":(LNode;)V"));
     }
+}
+
+#[test]
+fn exact_tasty_audit_source_emits_nested_owner_factory_on_the_jvm_only_path() {
+    let output = TestOutputDirectory::new("tasty-audit-nested-jvm-only");
+    let source_id = SourceId::from_index(181601);
+    let mut observed = false;
+    let mut observe = |ast: &AstArena<Untyped>,
+                       source_root: TreeId<Untyped>,
+                       source_index: &SourceSemanticIndex,
+                       source_typed_index: &SourceTypedIndex,
+                       unit: &mut JvmCompilationUnit<'_>,
+                       definitions: &Definitions| {
+        observed = true;
+        let proofs =
+            validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                source_id,
+                source_root,
+                store: unit.store,
+                definitions,
+                source_ast: ast,
+                typed_ast: unit.typed_ast,
+                source_index,
+                source_typed_index,
+                jvm_unit: unit,
+            })
+            .expect("the original three-class single-session nested call is proved");
+        let [proof] = proofs.as_slice() else {
+            panic!("exact factory receives one nested constructor proof");
+        };
+        let nested = proof
+            .nested_argument()
+            .expect("the outer argument receipt retains the exact nested call");
+        assert_eq!(proof.source_id(), source_id);
+        assert_eq!(proof.formal_class(), None);
+        assert_ne!(nested.class(), proof.target_class());
+        assert_ne!(nested.constructor(), proof.constructor());
+        assert_ne!(nested.formal(), proof.method_formal());
+        assert_eq!(
+            source_typed_index.get(source_id, nested.source_select()),
+            Some(nested.typed_select())
+        );
+        assert_eq!(
+            source_typed_index.get(source_id, nested.source_new()),
+            Some(nested.typed_new())
+        );
+        assert_eq!(
+            source_typed_index.get(source_id, nested.source_argument()),
+            Some(nested.typed_argument())
+        );
+        let mut mismatched_bindings = source_typed_index.clone();
+        mismatched_bindings.remove(source_id, nested.source_select());
+        mismatched_bindings
+            .insert(source_id, nested.source_select(), nested.typed_new())
+            .unwrap();
+        assert!(matches!(
+            validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                source_id,
+                source_root,
+                store: unit.store,
+                definitions,
+                source_ast: ast,
+                typed_ast: unit.typed_ast,
+                source_index,
+                source_typed_index: &mismatched_bindings,
+                jvm_unit: unit,
+            }),
+            Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(_))
+        ));
+        assert_eq!(
+            unit.store.symbols.get(nested.constructor()).owner,
+            Some(nested.class())
+        );
+        assert_eq!(nested.formal_type(), definitions.int);
+        assert!(matches!(
+            unit.store.types.get(nested.result_type()),
+            Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == nested.class()
+        ));
+        assert_eq!(
+            unit.store.symbols.get(proof.constructor()).owner,
+            Some(proof.target_class())
+        );
+        let inner_formal_type = match unit.store.symbols.get(nested.constructor()).info {
+            SymbolInfo::Complete(ty) => match unit.store.types.get(ty) {
+                Type::Method(signature) => signature.params[0].ty,
+                _ => panic!("inner constructor signature is a method"),
+            },
+            _ => panic!("inner constructor signature is complete"),
+        };
+        assert_eq!(inner_formal_type, definitions.int);
+        let outer_formal_type = match unit.store.symbols.get(proof.constructor()).info {
+            SymbolInfo::Complete(ty) => match unit.store.types.get(ty) {
+                Type::Method(signature) => signature.params[0].ty,
+                _ => panic!("outer constructor signature is a method"),
+            },
+            _ => panic!("outer constructor signature is complete"),
+        };
+        assert!(matches!(
+            unit.store.types.get(outer_formal_type),
+            Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == nested.class()
+        ));
+        assert_eq!(proof.constructor_formal_type(), outer_formal_type);
+        assert!(matches!(
+            unit.store.types.get(proof.result_type()),
+            Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == proof.target_class()
+        ));
+        let leaf_type = unit.typed_ast.get(nested.typed_argument()).ty;
+        assert!(matches!(
+            unit.store.types.get(leaf_type),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == proof.method_formal()
+        ));
+        assert_eq!(proof.method_descriptor(), "(I)Lexample/CounterOwner;");
+        assert_eq!(proof.constructor_descriptor(), "(Lexample/Counter;)V");
+    };
+    let artifacts = compile_source_batch_with_source_observer(
+        TASTY_NESTED_CONSTRUCTOR_SOURCE,
+        "NestedConstructorCalls.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe,
+    )
+    .expect("the original three-class source remains supported by JVM-only emission");
+    assert!(observed, "the proof used the real frontend and JVM session");
+    let factory_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "example/CounterOwnerFactory")
+        .expect("Factory class is emitted");
+    let factory = decode_emitted_class(factory_artifact);
+    let create = emitted_method_code(&factory, "create");
+    assert_opcode_sequence(create, &[0xbb, 0x59, 0xbb, 0x59, 0x1b, 0xb7, 0xb7, 0xb0]);
+    let constructor_references = decode_subset_instructions(create)
+        .into_iter()
+        .filter_map(|(offset, opcode)| {
+            if opcode != 0xb7 {
+                return None;
+            }
+            let index = u16::from_be_bytes([create[offset + 1], create[offset + 2]]);
+            let ConstantPoolEntry::Methodref {
+                class_index,
+                name_and_type_index,
+            } = factory.constant_pool.get(ConstantPoolIndex(index))?
+            else {
+                panic!("invokespecial references Methodref");
+            };
+            Some((
+                factory.constant_pool.class_name(*class_index).unwrap(),
+                factory
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .unwrap(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        constructor_references,
+        vec![
+            ("example/Counter", ("<init>", "(I)V")),
+            ("example/CounterOwner", ("<init>", "(Lexample/Counter;)V")),
+        ]
+    );
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("NestedTastyAuditHarness.java");
+        fs::write(
+            &harness,
+            "public final class NestedTastyAuditHarness { public static void main(String[] args) { example.CounterOwnerFactory factory = new example.CounterOwnerFactory(); if (factory.create(7).read() != 7) throw new AssertionError(\"nested factory result\"); if (factory.create(3).read() != 3) throw new AssertionError(\"second nested factory result\"); } }\n",
+        )
+        .unwrap();
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .unwrap();
+        assert!(
+            javac.status.success(),
+            "javac rejected nested audit harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "NestedTastyAuditHarness",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected JVM-only nested audit output\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
+
+#[test]
+fn nested_constructor_identity_proof_ignores_class_package_and_declaration_order() {
+    let renamed = TASTY_NESTED_CONSTRUCTOR_SOURCE
+        .replace("package example", "package renamed")
+        .replace("CounterOwnerFactory", "WidgetBuilder")
+        .replace("CounterOwner", "WidgetHolder")
+        .replace("Counter", "Widget")
+        .replace("create", "build");
+    let package_end = renamed.find("\n\n").unwrap() + 2;
+    let package = &renamed[..package_end];
+    let classes = &renamed[package_end..];
+    let owner_start = classes.find("class WidgetHolder(").unwrap();
+    let factory_start = classes.find("class WidgetBuilder:").unwrap();
+    let counter = &classes[..owner_start];
+    let owner = &classes[owner_start..factory_start];
+    let factory = &classes[factory_start..];
+    let reordered = format!("{package}{owner}{counter}{factory}");
+
+    for (source, source_id) in [(&renamed, 181602), (&reordered, 181603)] {
+        let output = TestOutputDirectory::new("nested-constructor-renamed-proof");
+        let mut observed = false;
+        let mut observe = |ast: &AstArena<Untyped>,
+                           source_root: TreeId<Untyped>,
+                           source_index: &SourceSemanticIndex,
+                           source_typed_index: &SourceTypedIndex,
+                           unit: &mut JvmCompilationUnit<'_>,
+                           definitions: &Definitions| {
+            observed = true;
+            let proofs =
+                validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                    source_id: SourceId::from_index(source_id),
+                    source_root,
+                    store: unit.store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: unit.typed_ast,
+                    source_index,
+                    source_typed_index,
+                    jvm_unit: unit,
+                })
+                .expect("renamed/reordered source remains structurally provable");
+            assert_eq!(proofs.len(), 1);
+            assert!(proofs[0].nested_argument().is_some());
+            assert_eq!(proofs[0].method_descriptor(), "(I)Lrenamed/WidgetHolder;");
+        };
+        compile_source_batch_with_source_observer(
+            source,
+            "RenamedNestedConstructorCalls.scala",
+            output.path(),
+            SourceId::from_index(source_id),
+            SourceUnitCardinality::AtLeastTwo,
+            &mut observe,
+        )
+        .expect("renamed/reordered source remains valid on JVM-only path");
+        assert!(observed);
+    }
+}
+
+#[test]
+fn nested_constructor_identity_proof_rejects_a_boolean_factory_leaf() {
+    let source = "package example\nclass Counter(seed: Boolean)\nclass CounterOwner(counter: Counter)\nclass CounterOwnerFactory:\n  def create(seed: Boolean): CounterOwner =\n    new CounterOwner(new Counter(seed))\n";
+    let source_id = SourceId::from_index(181606);
+    let output = TestOutputDirectory::new("nested-constructor-boolean-leaf");
+    let mut observed = false;
+    let mut proof_error = None;
+    let mut observe = |ast: &AstArena<Untyped>,
+                       source_root: TreeId<Untyped>,
+                       source_index: &SourceSemanticIndex,
+                       source_typed_index: &SourceTypedIndex,
+                       unit: &mut JvmCompilationUnit<'_>,
+                       definitions: &Definitions| {
+        observed = true;
+        proof_error = Some(
+            match validate_cross_class_constructor_call_proofs(
+                CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root,
+                    store: unit.store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: unit.typed_ast,
+                    source_index,
+                    source_typed_index,
+                    jvm_unit: unit,
+                },
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("nested constructor proofs require the canonical Int type"),
+            },
+        );
+    };
+    compile_source_batch_with_source_observer(
+        source,
+        "BooleanNestedConstructorCalls.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe,
+    )
+    .expect("the Boolean source is valid for the real frontend and JVM-only path");
+    assert!(observed, "the proof ran in the real frontend session");
+    assert!(matches!(
+        proof_error,
+        Some(
+            dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SemanticIdentity(
+                "nested constructor and factory formal must both have the canonical Int type"
+            )
+        )
+    ));
 }
 
 #[test]

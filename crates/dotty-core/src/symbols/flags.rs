@@ -52,6 +52,9 @@ flag_bits! {
     OVERRIDE = 16;
     ENUM = 17;
     EXPORTED = 18;
+    /// The case-class companion's generated `apply` was deliberately omitted
+    /// because this source subset cannot represent its constructor shape.
+    CASE_CLASS_APPLY_DEFERRED = 19;
 }
 
 impl SymbolFlags {

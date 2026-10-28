@@ -812,6 +812,13 @@ impl SourceTyper<'_> {
             position,
             info_journal,
         )?;
+        if self.is_deferred_case_class_companion_apply(ident.name, symbol) {
+            return Err(TyperError::OverloadedSelectionDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                name: ident.name,
+            });
+        }
         let declaration = self.store.symbols.get(symbol);
         if let Some(receiver) = self.uninitialized_parent_receiver
             && self.is_instance_class_member(symbol)
@@ -1087,6 +1094,28 @@ impl SourceTyper<'_> {
         let receiver = self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
         let receiver = self.this_type_receiver_view(receiver)?;
         let java_class_qualifier = self.is_java_class_qualifier(qualifier);
+
+        // A type application (for example `N.apply[Int]`) selects the member
+        // before the enclosing application is resolved. Keep the deferred
+        // generated case-class overload visible at this shared selection
+        // boundary so explicit type arguments cannot bypass the fail-closed
+        // handling used by ordinary `apply` calls.
+        if !java_class_qualifier
+            && self.store.names.resolve(name.text()) == "apply"
+            && let Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(module_class),
+                ..
+            }) = self.store.types.try_get(receiver)
+            && self
+                .deferred_case_class_for_module_class(*module_class)
+                .is_some()
+        {
+            return Err(TyperError::OverloadedSelectionDeferred {
+                source: self.source,
+                tree_index,
+                name,
+            });
+        }
 
         // `AnyRef.eq/ne` are compiler semantic members, not methods loaded
         // from the JVM Object class. Validate the canonical source receiver
