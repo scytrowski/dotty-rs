@@ -4,7 +4,12 @@ use std::process::Command;
 use dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_batch;
 use dotty_classfile::classfile::{ClassFile, Reader};
 use dotty_core::SourceId;
-use dotty_tasty::tasty::TastyFile;
+use dotty_tasty::ast::{
+    APPLY_TAG, ASSIGN_TAG, DEFDEF_TAG, IDENTTPT_TAG, NEW_TAG, PARAM_TAG, QUALTHIS_TAG, SELECT_TAG,
+    SELECTIN_TAG,
+};
+use dotty_tasty::tasty::{RenderedParamSig, RenderedSignedName, TastyFile};
+use dotty_tasty::term::{AstRefKind, RawTree};
 
 #[path = "support/jvm_tasty_batch_publisher.rs"]
 #[allow(dead_code)]
@@ -16,6 +21,236 @@ const SOURCE: &str =
 const CONSUMER_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_reference_constructor_calls/ScalaConsumer.scala");
 const REQUIRE_CONSUMER: &str = "DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER";
+
+fn method_body<'a>(
+    tasty: &'a TastyFile<'a>,
+    name: &str,
+) -> (u32, dotty_tasty::ast::DefDefBody<'a>) {
+    let index = tasty
+        .ast_address_index()
+        .expect("valid TASTy AST address index");
+    index
+        .iter_nodes_with_tag(DEFDEF_TAG)
+        .find_map(|node| {
+            let address = node.offset as u32;
+            let body = index.get(address)?.decode_defdef_body().ok()?;
+            (tasty.names().render(body.name).ok()? == name).then_some((address, body))
+        })
+        .unwrap_or_else(|| panic!("TASTy contains method {name}"))
+}
+
+fn parameter_address(index: &dotty_tasty::ast::AstAddressIndex<'_>, owner: u32) -> u32 {
+    index
+        .iter_nodes_with_tag(PARAM_TAG)
+        .find_map(|candidate| {
+            let mut parent = Some(candidate);
+            while let Some(node) = parent {
+                if node.offset as u32 == owner {
+                    return Some(candidate.offset as u32);
+                }
+                parent = index.parent_of(node.offset as u32);
+            }
+            None
+        })
+        .expect("method owns a formal PARAM")
+}
+
+fn is_counter_current_selection(tasty: &TastyFile<'_>, tree: &RawTree<'_>) -> bool {
+    let RawTree::NatAst {
+        tag: SELECT_TAG,
+        value: name,
+        child: qualifier,
+        ..
+    } = tree
+    else {
+        return false;
+    };
+    if tasty.names().render(*name).ok().as_deref() != Some("current") {
+        return false;
+    }
+    let RawTree::Ast {
+        tag: QUALTHIS_TAG,
+        child: class_type,
+        ..
+    } = qualifier.as_ref()
+    else {
+        return false;
+    };
+    matches!(
+        class_type.as_ref(),
+        RawTree::NatAst {
+            tag: IDENTTPT_TAG,
+            value,
+            ..
+        } if tasty.names().render(*value).ok().as_deref() == Some("Counter")
+    )
+}
+
+fn counter_source_body_failure(tasty: &TastyFile<'_>) -> Option<&'static str> {
+    let (_, get) = method_body(tasty, "get");
+    if !get
+        .rhs
+        .as_ref()
+        .is_some_and(|rhs| is_counter_current_selection(tasty, rhs))
+    {
+        return Some("get does not select Counter.current through Counter.this");
+    }
+
+    let (set_address, set) = method_body(tasty, "set");
+    let index = tasty.ast_address_index().ok()?;
+    let [formal] = set.parameters.as_slice() else {
+        return Some("set does not have exactly one formal parameter");
+    };
+    if tasty.names().render(formal.name()).ok().as_deref() != Some("value") {
+        return Some("set formal is not the source value parameter");
+    }
+    let formal_address = parameter_address(&index, set_address);
+    let Some(RawTree::LengthNode(assignment_node)) = set.rhs.as_ref() else {
+        return Some("set body is not an assignment");
+    };
+    if assignment_node.tag != ASSIGN_TAG {
+        return Some("set body is not an assignment");
+    }
+    let Ok(assignment) = assignment_node.decode_assign() else {
+        return Some("set assignment does not decode");
+    };
+    if !is_counter_current_selection(tasty, &assignment.left) {
+        return Some("set assignment does not target Counter.current through Counter.this");
+    }
+    let references = assignment.right.ast_refs();
+    if !matches!(
+        references.as_slice(),
+        [reference]
+            if reference.kind == AstRefKind::TermRefDirect
+                && reference.address == formal_address
+    ) {
+        return Some("set assignment RHS does not reference its original value PARAM");
+    }
+    None
+}
+
+fn assert_factory_constructor_argument_provenance(tasty: &TastyFile<'_>) {
+    let (wrap_address, wrap) = method_body(tasty, "wrap");
+    let index = tasty
+        .ast_address_index()
+        .expect("valid Factory address index");
+    let [formal] = wrap.parameters.as_slice() else {
+        panic!("Factory.wrap has exactly one formal");
+    };
+    assert_eq!(tasty.names().render(formal.name()).unwrap(), "counter");
+    let formal_address = parameter_address(&index, wrap_address);
+    let Some(RawTree::LengthNode(application_node)) = wrap.rhs.as_ref() else {
+        panic!("Factory.wrap body is an APPLY");
+    };
+    assert_eq!(application_node.tag, APPLY_TAG);
+    let application = application_node
+        .decode_apply()
+        .expect("decode Factory APPLY");
+    let [argument] = application.arguments.as_slice() else {
+        panic!("Factory constructor APPLY has one argument");
+    };
+    let RawTree::LengthNode(select_node) = &application.function else {
+        panic!("Factory constructor function is a SELECTin");
+    };
+    assert_eq!(select_node.tag, SELECTIN_TAG);
+    let select = select_node
+        .decode_select_in()
+        .expect("decode Factory SELECTin");
+    let RenderedSignedName::Signed {
+        original,
+        signature,
+    } = tasty
+        .names()
+        .render_signed_name(select.name)
+        .unwrap()
+        .expect("constructor name is signed")
+    else {
+        panic!("Factory constructor reference has a signed name");
+    };
+    assert_eq!(original, "<init>");
+    assert_eq!(signature.result, "example.CounterOwner");
+    assert_eq!(
+        signature.parameters,
+        [RenderedParamSig::TermParameter(
+            "example.Counter".to_owned()
+        )]
+    );
+    assert!(matches!(
+        &select.qualifier,
+        RawTree::Ast { tag: NEW_TAG, .. }
+    ));
+    assert!(matches!(
+        argument.ast_refs().as_slice(),
+        [reference]
+            if reference.kind == AstRefKind::TermRefDirect
+                && reference.address == formal_address
+    ));
+}
+
+fn assert_counter_source_body_contract(tasty_bytes: &[u8]) {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes)
+        .expect("Rust-produced Counter sidecar is valid Scala 3.9 TASTy");
+    assert_eq!(
+        counter_source_body_failure(&tasty),
+        None,
+        "Counter.get and Counter.set retain their source body references"
+    );
+}
+
+#[test]
+fn emitted_reference_constructor_tasty_preserves_counter_bodies_and_formal_identity() {
+    let batch = emit_paired_jvm_tasty_batch(
+        SOURCE,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(17995),
+    )
+    .expect("emit Counter/Owner/Factory source batch");
+    assert_counter_source_body_contract(batch.classes()[0].tasty_bytes());
+    let factory_tasty = TastyFile::parse_and_validate_scala_3_9(batch.classes()[2].tasty_bytes())
+        .expect("Rust-produced Factory sidecar is valid Scala 3.9 TASTy");
+    assert_factory_constructor_argument_provenance(&factory_tasty);
+
+    let constant_getter = SOURCE.replace("def get(): Int = current", "def get(): Int = 0");
+    assert_ne!(
+        constant_getter, SOURCE,
+        "constant-getter control mutates the fixture"
+    );
+    let constant_getter_batch = emit_paired_jvm_tasty_batch(
+        &constant_getter,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(17996),
+    )
+    .expect("emit constant-getter negative control");
+    let constant_getter_tasty =
+        TastyFile::parse_and_validate_scala_3_9(constant_getter_batch.classes()[0].tasty_bytes())
+            .expect("constant-getter control still has valid TASTy");
+    assert_eq!(
+        counter_source_body_failure(&constant_getter_tasty),
+        Some("get does not select Counter.current through Counter.this")
+    );
+
+    let no_op_setter = SOURCE.replace(
+        "def set(value: Int): Unit = current = value",
+        "def set(value: Int): Unit = ()",
+    );
+    assert_ne!(
+        no_op_setter, SOURCE,
+        "no-op-setter control mutates the fixture"
+    );
+    let no_op_setter_batch = emit_paired_jvm_tasty_batch(
+        &no_op_setter,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(17997),
+    )
+    .expect("emit no-op-setter negative control");
+    let no_op_setter_tasty =
+        TastyFile::parse_and_validate_scala_3_9(no_op_setter_batch.classes()[0].tasty_bytes())
+            .expect("no-op-setter control still has valid TASTy");
+    assert_eq!(
+        counter_source_body_failure(&no_op_setter_tasty),
+        Some("set body is not an assignment")
+    );
+}
 
 #[test]
 fn pinned_scala_consumes_three_rust_reference_constructor_tasty_sidecars() {
@@ -174,6 +409,7 @@ fn pinned_scala_consumes_three_rust_reference_constructor_tasty_sidecars() {
         "\"runtime_outputs\": [\n    \"-9\",\n    \"-9\"\n  ]",
         "\"rust_artifacts_unchanged_after_compile_and_run\": true",
         "\"factory_tasty_constructor_call_decompiled\": true",
+        "\"counter_tasty_source_bodies_verified\": true",
         "\"owner_tasty_parameter_alias_decompiled\": true",
         "\"counter_tasty_get_set_decompiled\": true",
         "\"isolated_from_tasty_semantics_verified\": true",
@@ -191,9 +427,13 @@ impl TestDirectory {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
-            "dotty-scala-reference-constructor-consumer-{}-{}",
+            "dotty-scala-reference-constructor-consumer-{}-{}-{}",
             std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time follows Unix epoch")
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
         ));
         std::fs::create_dir(&path).expect("create empty Scala consumer fixture root");
         Self(path)

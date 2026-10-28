@@ -3065,9 +3065,31 @@ def consume_reference_constructor_batch(toolchain: Toolchain, batch_root: Path) 
             if expected not in owner_text:
                 raise RuntimeError(f"Owner TASTy decompile lacks {expected!r}: {owner_text}")
         counter_text = decompiled["Counter"]
-        for expected in ("def get(): scala.Int", "def set(value: scala.Int): scala.Unit"):
+        counter_body_evidence = (
+            "private[this] var current: scala.Int = start",
+            "def get(): scala.Int = Counter.this.current",
+            "def set(value: scala.Int): scala.Unit = Counter.this.current = value",
+        )
+        for expected in counter_body_evidence:
             if expected not in counter_text:
-                raise RuntimeError(f"Counter TASTy decompile lacks {expected!r}: {counter_text}")
+                raise RuntimeError(
+                    f"Counter TASTy decompile lacks source-body evidence {expected!r}: {counter_text}"
+                )
+        counter_bad_body_controls = (
+            counter_text.replace(
+                "def get(): scala.Int = Counter.this.current",
+                "def get(): scala.Int = 0",
+                1,
+            ),
+            counter_text.replace(
+                "def set(value: scala.Int): scala.Unit = Counter.this.current = value",
+                "def set(value: scala.Int): scala.Unit = ()",
+                1,
+            ),
+        )
+        if any(all(evidence in mutant for evidence in counter_body_evidence)
+               for mutant in counter_bad_body_controls):
+            raise RuntimeError("Counter body evidence accepted a constant getter or no-op setter")
 
         rebuilt = work / "from-tasty-output"
         rebuilt.mkdir()
@@ -3113,6 +3135,7 @@ def consume_reference_constructor_batch(toolchain: Toolchain, batch_root: Path) 
         "owner_classfile_only_control_rejected": True,
         "factory_classfile_only_control_rejected": True,
         "counter_tasty_get_set_decompiled": True,
+        "counter_tasty_source_bodies_verified": True,
         "owner_tasty_parameter_alias_decompiled": True,
         "factory_tasty_constructor_call_decompiled": True,
         "isolated_from_tasty_semantics_verified": True,
