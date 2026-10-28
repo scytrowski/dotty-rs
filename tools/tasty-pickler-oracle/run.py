@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 40821)
-Total output lines: 3222
-
 #!/usr/bin/env python3
 """Opt-in, offline Scala 3.9 fixture generation and independent verification."""
 
@@ -852,7 +849,1617 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Flags class has unexpected signatures: {javap}")
- …20821 tokens truncated…mber}")
+            if relative.as_posix() == "example/Box.tasty":
+                signatures = (r"public example\.Box\(int\)", r"public int answer\(\)")
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Box class has unexpected signatures: {javap}")
+                if re.search(r"public (?:final )?int start\(\)", javap):
+                    raise RuntimeError(f"plain constructor input became a public accessor: {javap}")
+            if relative.as_posix() == "example/Conditionals.tasty":
+                signatures = (
+                    r"public int choose\(boolean, int, int\)",
+                    r"public int nested\(boolean, boolean\)",
+                    r"public int constant\(\)",
+                    r"public int mixed\(boolean, int\)",
+                    r"public int callBranch\(boolean, int\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Conditionals class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Blocks.tasty":
+                signatures = (
+                    r"public int ordered\(boolean, int\)",
+                    r"public int single\(\)",
+                    r"public int calls\(\)",
+                    r"public int identity\(int\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Blocks class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Mutable.tasty":
+                signatures = (
+                    r"public int overwrite\(\)", r"public int increment\(int\)",
+                    r"public int sequential\(\)", r"public int signed\(int\)",
+                    r"public int immutableTarget\(\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Mutable class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Locals.tasty":
+                signatures = (
+                    r"public int copy\(int\)", r"public int literal\(\)",
+                    r"public int call\(int\)", r"public int multiple\(int\)",
+                    r"public int identity\(int\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Locals class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Decisions.tasty":
+                signatures = (
+                    r"public void unit\(\)", r"public boolean enabled\(\)",
+                    r"public boolean disabled\(\)",
+                    r"public int choose\(boolean, int, int\)",
+                    r"public int nested\(boolean, boolean\)",
+                    r"public int stored\(boolean, int\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Decisions class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Algorithms.tasty":
+                signatures = (
+                    r"public int add\(int, int\)", r"public boolean positive\(int\)",
+                    r"public boolean both\(boolean, boolean\)",
+                    r"public boolean safeAnd\(\)",
+                    r"public boolean safeOr\(\)",
+                    r"public boolean divisionByZero\(\)",
+                    r"public int sumTo\(int\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Algorithms class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Counter.tasty":
+                signatures = (
+                    r"public example\.Counter\(int\)",
+                    r"public int get\(\)", r"public void set\(int\)",
+                    r"public int increment\(\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Counter class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Arithmetic.tasty":
+                signatures = (
+                    r"public int add\(int, int\)", r"public int subtract\(int, int\)",
+                    r"public int multiply\(int, int\)", r"public int divide\(int, int\)",
+                    r"public int remainder\(int, int\)",
+                    r"public int nested\(int, int, int\)", r"public int throughCall\(int, int\)",
+                    r"public int local\(int, int\)", r"public int compute\(int, int\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Arithmetic class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Comparisons.tasty":
+                signatures = (
+                    r"public boolean positive\(int\)", r"public boolean before\(int, int\)",
+                    r"public boolean atMost\(int, int\)", r"public boolean atLeast\(int, int\)",
+                    r"public boolean nested\(int, int\)", r"public int choose\(int\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Comparisons class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Logic.tasty":
+                signatures = (
+                    r"public boolean negate\(boolean\)",
+                    r"public boolean both\(boolean, boolean\)",
+                    r"public boolean either\(boolean, boolean\)",
+                    r"public boolean safeAnd\(\)",
+                    r"public boolean safeOr\(\)",
+                    r"public boolean evaluatedAnd\(boolean\)",
+                    r"public boolean evaluatedOr\(boolean\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Logic class has unexpected signatures: {javap}")
+            scenario = "standard"
+
+        if scenario == "calls":
+            harness_name = "OperationsCallsRuntime.java"
+            harness_source = """public final class OperationsCallsRuntime {
+  public static void main(String[] args) {
+    example.Operations operations = new example.Operations();
+    int use = operations.use();
+    int propagated = operations.propagate(17);
+    int picked = operations.picks();
+    int nested = operations.nested();
+    if (use != 42) throw new AssertionError("Operations.use() = " + use);
+    if (propagated != 17) throw new AssertionError("Operations.propagate(17) = " + propagated);
+    if (picked != 42) throw new AssertionError("Operations.picks() = " + picked);
+    if (nested != 42) throw new AssertionError("Operations.nested() = " + nested);
+    System.out.println("Operations = " + use + ", " + propagated + ", " + picked + ", " + nested);
+  }
+}
+"""
+            expected_output = "Operations = 42, 17, 42, 42"
+            expected_value = 42
+        else:
+            _, _, harness_name, harness_source, expected_output, expected_value = case
+        harness = directory / harness_name
+        harness.write_text(harness_source)
+        execute([toolchain.javac, "-classpath", compiled, "-d", compiled, harness])
+        runtime_class = harness.stem
+        run = execute([toolchain.java, "-XX:-UsePerfData", "-classpath", compiled, runtime_class])
+        if expected_output not in run:
+            raise RuntimeError(f"runtime harness did not confirm {expected_output}: {run}")
+        bad = directory / "corrupt.tasty"
+        corrupt = bytearray(candidate.read_bytes())
+        corrupt[0] ^= 1
+        bad.write_bytes(corrupt)
+        expect_failure(lambda: snapshot(binary, bad), "Rust rejects corrupted producer output")
+        rejected = directory / "corrupt-output"
+        rejected.mkdir()
+        expect_failure(lambda: toolchain.compiler(["-from-tasty", "-d", rejected, bad]),
+                       "Scala rejects corrupted producer output")
+        truncated = directory / "truncated.tasty"
+        truncated.write_bytes(candidate.read_bytes()[:-1])
+        expect_failure(lambda: snapshot(binary, truncated), "Rust rejects truncated producer output")
+        truncated_output = directory / "truncated-output"
+        truncated_output.mkdir()
+        expect_failure(lambda: toolchain.compiler(["-from-tasty", "-d", truncated_output, truncated]),
+                       "Scala rejects truncated producer output")
+        result.update({"javap": True, "runtime_value": expected_value,
+                       "runtime_profile": scenario,
+                       "rust_corrupt_rejection": True, "scala_corrupt_rejection": True,
+                       "rust_truncated_rejection": True, "scala_truncated_rejection": True})
+    return result
+
+
+def expect_failure(action, label: str) -> None:
+    try:
+        action()
+    except CommandFailure:
+        return
+    raise RuntimeError(f"negative control unexpectedly succeeded: {label}")
+
+
+def reject_source(toolchain: Toolchain, directory: Path, name: str,
+                  source: str, diagnostic: str) -> None:
+    case = directory / "source-negative" / name
+    case.mkdir(parents=True)
+    source_file = case / f"{name}.scala"
+    source_file.write_text(source)
+    output = case / "classes"
+    output.mkdir()
+    try:
+        toolchain.compiler(["-d", output, source_file])
+    except CommandFailure as error:
+        if not re.search(diagnostic, str(error), re.IGNORECASE):
+            raise RuntimeError(f"{name} failed for an unexpected reason: {error}") from error
+        return
+    raise RuntimeError(f"negative source unexpectedly compiled: {name}")
+
+
+def check_oracle(toolchain: Toolchain, binary: Path, directory: Path) -> list[dict]:
+    verify_provenance()
+    generated = directory / "regenerated"
+    generated.mkdir()
+    generate(toolchain, binary, generated, check=True)
+    results = []
+    for name, source, diagnostic in [
+        ("DuplicateField", "class DuplicateField { private val item: Int = 1; private val item: Int = 2 }", "already defined|duplicate"),
+        ("MissingInitializer", "class MissingInitializer { private val item: Int }", "not defined|abstract"),
+        ("WrongInitializer", "class WrongInitializer { private val item: Int = true }", "Found:|Required:|type mismatch"),
+    ]:
+        reject_source(toolchain, directory, name, source, diagnostic)
+        results.append({"negative_source": name, "scala_compile_rejected": True})
+    algorithm_classes = directory / "algorithm-source-reference"
+    algorithm_classes.mkdir()
+    toolchain.compiler(["-d", algorithm_classes, FIXTURES / "AlgorithmsReference.scala"])
+    algorithm_harness = directory / "AlgorithmsSourceRuntime.java"
+    algorithm_harness.write_text("""public final class AlgorithmsSourceRuntime {
+  public static void main(String[] args) {
+    example.AlgorithmsReference a = new example.AlgorithmsReference();
+    if (a.shortCircuitAnd() || !a.shortCircuitOr() || a.sumTo(5) != 10)
+      throw new AssertionError("Scala source reference failed");
+    try { a.eagerAndEffect(); throw new AssertionError("& skipped its RHS"); }
+    catch (ArithmeticException expected) { }
+    try { a.eagerOrEffect(); throw new AssertionError("| skipped its RHS"); }
+    catch (ArithmeticException expected) { }
+    System.out.println("Algorithms reference = short-circuit, eager, sumTo(5)=10");
+  }
+}
+""")
+    execute([toolchain.javac, "-classpath", algorithm_classes, "-d", algorithm_classes,
+             algorithm_harness])
+    algorithm_source_run = execute([toolchain.java, "-XX:-UsePerfData", "-classpath",
+                                    algorithm_classes, "AlgorithmsSourceRuntime"])
+    expected_algorithm_source = "Algorithms reference = short-circuit, eager, sumTo(5)=10"
+    if expected_algorithm_source not in algorithm_source_run:
+        raise RuntimeError(f"pinned Scala Algorithms source returned unexpected values: {algorithm_source_run}")
+    results.append({"source_reference": "example.AlgorithmsReference", "scala_source_compile": True,
+                    "source_runtime_output": expected_algorithm_source})
+    # Independently compile and execute the original Scala source. This is a
+    # source-level reference: it does not consume the checked-in TASTy fixture.
+    source_classes = directory / "source-reference"
+    source_classes.mkdir()
+    toolchain.compiler(["-d", source_classes, FIXTURES / "Decisions.scala"])
+    source_harness = directory / "DecisionsSourceRuntime.java"
+    source_harness.write_text("""public final class DecisionsSourceRuntime {
+  public static void main(String[] args) {
+    example.Decisions decisions = new example.Decisions();
+    decisions.unit();
+    boolean enabled = decisions.enabled();
+    boolean disabled = decisions.disabled();
+    int chooseTrue = decisions.choose(true, 11, 22);
+    int chooseFalse = decisions.choose(false, 11, 22);
+    int nestedTrueTrue = decisions.nested(true, true);
+    int nestedTrueFalse = decisions.nested(true, false);
+    int nestedFalse = decisions.nested(false, true);
+    int storedTrue = decisions.stored(true, 17);
+    int storedFalse = decisions.stored(false, 17);
+    if (!enabled || disabled || chooseTrue != 11 || chooseFalse != 22 ||
+        nestedTrueTrue != 1 || nestedTrueFalse != 2 || nestedFalse != 3 ||
+        storedTrue != 17 || storedFalse != 0) {
+      throw new AssertionError("unexpected Scala source results");
+    }
+    System.out.println("Decisions source = " + enabled + ", " + disabled + ", " +
+        chooseTrue + ", " + chooseFalse + ", " + nestedTrueTrue + ", " +
+        nestedTrueFalse + ", " + nestedFalse + ", " + storedTrue + ", " + storedFalse);
+  }
+}
+""")
+    execute([toolchain.javac, "-classpath", source_classes, "-d", source_classes, source_harness])
+    source_run = execute([toolchain.java, "-XX:-UsePerfData", "-classpath", source_classes,
+                          "DecisionsSourceRuntime"])
+    expected_source_output = "Decisions source = true, false, 11, 22, 1, 2, 3, 17, 0"
+    if expected_source_output not in source_run:
+        raise RuntimeError(f"pinned Scala source reference returned unexpected values: {source_run}")
+    results.append({"source_reference": "example.Decisions", "scala_source_compile": True,
+                    "source_runtime_output": expected_source_output})
+    for candidate in sorted((FIXTURES / "tasty").rglob("*.tasty")):
+        results.append(verify_candidate(toolchain, binary, candidate,
+                                        directory / f"verify-{candidate.stem}",
+                                        runtime=candidate.name in {"Algorithms.tasty", "Counter.tasty"}))
+    answer = FIXTURES / "tasty/example/Answer.tasty"
+    reduced = directory / "Reduced.tasty"
+    execute([binary, "reduce-answer", answer, reduced])
+    result = verify_candidate(toolchain, binary, reduced, directory / "reduced")
+    result["omits_positions_comments_and_sourcefile_annotation"] = True
+    results.append(result)
+    corrupt = directory / "corrupt.tasty"
+    data = bytearray(answer.read_bytes())
+    data[0] ^= 1
+    corrupt.write_bytes(data)
+    expect_failure(lambda: snapshot(binary, corrupt), "Rust rejects invalid magic")
+    # Also exercise the independent compiler rejection itself, not just Rust's
+    # validator. This is deliberately outside the normal validate-first pipeline.
+    bad_wire_output = directory / "invalid-wire-output"
+    bad_wire_output.mkdir()
+    expect_failure(lambda: toolchain.compiler(["-from-tasty", "-d", bad_wire_output, corrupt]),
+                   "Scala rejects invalid magic")
+    misplaced = directory / "wrong-layout/Answer.tasty"
+    misplaced.parent.mkdir()
+    shutil.copyfile(answer, misplaced)
+    bad_output = directory / "wrong-layout-output"
+    bad_output.mkdir()
+    expect_failure(lambda: toolchain.compiler(["-from-tasty", "-d", bad_output, misplaced]),
+                   "Scala rejects missing example/ package layout")
+    print("Negative controls passed: Rust/Scala invalid wire; Scala wrong package layout")
+    return results
+
+
+def consume_rust_pair(toolchain: Toolchain, pair_root: Path, tasty_link_uuid: str) -> dict:
+    """Compile a Scala client against a Rust linked pair and prove TASTy lookup."""
+    expected = {
+        "fresh-a": ("example/Counter.class", "example/Counter.tasty"),
+        "fresh-b": ("example/Counter.class", "example/Counter.tasty"),
+        "with-tasty-no-get": ("example/Counter.class", "example/Counter.tasty"),
+        "classfile-only-no-get": ("example/Counter.class",),
+        "uuid-mismatch": ("example/Counter.class", "example/Counter.tasty"),
+        "unrecognized-link": ("example/Counter.class", "example/Counter.tasty"),
+    }
+    for name, files in expected.items():
+        root = pair_root / name
+        actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+        if actual != set(files):
+            raise RuntimeError(f"{name} artifact inventory differs: {sorted(actual)}")
+
+    first = pair_root / "fresh-a"
+    second = pair_root / "fresh-b"
+    try:
+        link_bytes = bytes.fromhex(tasty_link_uuid)
+    except ValueError as error:
+        raise RuntimeError("TASTy link UUID must be 32 hexadecimal characters") from error
+    if len(link_bytes) != 16:
+        raise RuntimeError("TASTy link UUID must be 32 hexadecimal characters")
+    for relative in expected["fresh-a"]:
+        if digest(first / relative) != digest(second / relative):
+            raise RuntimeError(f"fresh Rust pair bytes differ: {relative}")
+    for pair in (first, second):
+        class_bytes = (pair / "example/Counter.class").read_bytes()
+        tasty_bytes = (pair / "example/Counter.tasty").read_bytes()
+        class_link = _class_tasty_link(class_bytes)
+        if class_link != link_bytes or _tasty_header_uuid(tasty_bytes) != class_link:
+            raise RuntimeError("Rust classfile TASTY link does not match its TASTy header UUID")
+
+    semantic_pair = pair_root / "with-tasty-no-get"
+    semantic_link = _class_tasty_link((semantic_pair / "example/Counter.class").read_bytes())
+    if semantic_link is None or _tasty_header_uuid(
+            (semantic_pair / "example/Counter.tasty").read_bytes()) != semantic_link:
+        raise RuntimeError("TASTy semantic control is missing a valid matching class-level link")
+
+    unrecognized = pair_root / "unrecognized-link"
+    try:
+        unrecognized_link = _class_tasty_link((unrecognized / "example/Counter.class").read_bytes())
+        if unrecognized_link is None or _tasty_header_uuid(
+                (unrecognized / "example/Counter.tasty").read_bytes()) != unrecognized_link:
+            raise RuntimeError("classfile is missing a matching recognized TASTY attribute")
+    except RuntimeError as error:
+        if "TASTY" not in str(error):
+            raise
+    else:
+        raise RuntimeError("unrecognized TASTY link negative control unexpectedly passed")
+
+    consumer = """package consumer
+import example.Counter
+
+object Consumer:
+  def main(args: Array[String]): Unit = run()
+  def run(): Unit =
+    val first = new Counter(start = 7)
+    val second = new Counter(start = 2)
+    println(first.get())
+    println(second.get())
+    first.set(value = 13)
+    second.set(value = -42)
+    println(first.get())
+    println(second.get())
+    first.set(value = -42)
+    println(first.get())
+    println(second.get())
+"""
+    probe = """package consumer
+import example.Counter
+
+object TastyProbe:
+  def read(counter: Counter): Int = counter.get()
+"""
+    with tempfile.TemporaryDirectory(prefix="dotty-scala-consumer-") as temporary:
+        work = Path(temporary)
+        source = work / "src/Consumer.scala"
+        source.parent.mkdir()
+        source.write_text(consumer)
+        probe_source = work / "src/TastyProbe.scala"
+        probe_source.write_text(probe)
+
+        for jar in (Path(path) for path in toolchain.classpath.split(os.pathsep)):
+            with zipfile.ZipFile(jar) as archive:
+                if "example/Counter.class" in archive.namelist():
+                    raise RuntimeError(f"Scala compiler/runtime dependency contains Counter.class: {jar}")
+
+        fresh_runtime_outputs = []
+        artifact_hashes = {}
+        for index, pair in enumerate((first, second)):
+            client = work / f"client-{index}"
+            client.mkdir()
+            class_before = digest(pair / "example/Counter.class")
+            artifact_hashes[pair.name] = {
+                "class_sha256": class_before,
+                "tasty_sha256": digest(pair / "example/Counter.tasty"),
+            }
+            toolchain.compiler(["-d", client, "-classpath", os.pathsep.join(
+                (str(pair), toolchain.classpath)), source])
+            consumer_class = client / "consumer/Consumer.class"
+            consumer_module = client / "consumer/Consumer$.class"
+            if not consumer_class.is_file() or not consumer_module.is_file():
+                raise RuntimeError("Scala consumer compilation produced no expected client classes")
+            if list(client.rglob("Counter.class")):
+                raise RuntimeError("Scala compiler emitted or copied Counter.class into client output")
+            if digest(pair / "example/Counter.class") != class_before:
+                raise RuntimeError("Scala consumer compilation changed the staged Rust Counter.class")
+
+            javap = execute([toolchain.javap, "-classpath",
+                             os.pathsep.join((str(client), str(pair))), "-verbose",
+                             "consumer.Consumer$"])
+            for reference in ('example/Counter."<init>":(I)V', "example/Counter.set:(I)V",
+                              "example/Counter.get:()I"):
+                if reference not in javap:
+                    raise RuntimeError(f"consumer bytecode lacks Methodref {reference}: {javap}")
+
+            runtime = execute([toolchain.java, "-Xverify:all", "-XX:-UsePerfData", "-classpath",
+                               os.pathsep.join((str(pair), str(client), toolchain.classpath)),
+                               "consumer.Consumer"])
+            result = [line for line in runtime.strip().splitlines()
+                      if not line.startswith("Picked up JAVA_TOOL_OPTIONS:")]
+            if result != ["7", "2", "13", "-42", "-42", "-42"]:
+                raise RuntimeError(f"Scala consumer returned an unexpected runtime result: {runtime}")
+            if digest(pair / "example/Counter.class") != class_before:
+                raise RuntimeError("runtime did not use the unchanged Rust Counter.class")
+            fresh_runtime_outputs.extend(result)
+
+        semantic_output = work / "tasty-probe-output"
+        semantic_output.mkdir()
+        semantic = pair_root / "with-tasty-no-get"
+        toolchain.compiler(["-d", semantic_output, "-classpath", os.pathsep.join(
+            (str(semantic), toolchain.classpath)), probe_source])
+        if not (semantic_output / "consumer/TastyProbe$.class").is_file():
+            raise RuntimeError("TASTy semantic control produced no probe class")
+
+        classfile_only_output = work / "classfile-only-output"
+        classfile_only_output.mkdir()
+        try:
+            toolchain.compiler(["-d", classfile_only_output, "-classpath", os.pathsep.join(
+                (str(pair_root / "classfile-only-no-get"), toolchain.classpath)), probe_source])
+        except CommandFailure as error:
+            classfile_only_failure = error.output
+        else:
+            raise RuntimeError("classfile-only control unexpectedly resolved the TASTy-only get method")
+        if not re.search(r"(?i)(get.*(not found|not a member)|no member.*get)",
+                         classfile_only_failure):
+            raise RuntimeError(f"classfile-only control failed for an unrelated reason: {classfile_only_failure}")
+
+        mismatch_output = work / "uuid-mismatch-output"
+        mismatch_output.mkdir()
+        try:
+            toolchain.compiler(["-Werror", "-d", mismatch_output, "-classpath", os.pathsep.join(
+                (str(pair_root / "uuid-mismatch"), toolchain.classpath)), probe_source])
+        except CommandFailure as error:
+            mismatch_failure = error.output
+        else:
+            raise RuntimeError("Scala compiler accepted the mismatched TASTy UUID with -Werror")
+        if not re.search(r"(?i)(tasty.*(uuid|identifier)|(uuid|identifier).*tasty)", mismatch_failure):
+            raise RuntimeError(f"UUID control failed for an unrelated reason: {mismatch_failure}")
+
+        classfile_diagnostic = next(
+            line.strip() for line in classfile_only_failure.splitlines()
+            if re.search(r"(?i)(get.*(not found|not a member)|no member.*get)", line)
+        )
+        uuid_diagnostic = next(
+            line.strip() for line in mismatch_failure.splitlines()
+            if re.search(r"(?i)(tasty.*(uuid|identifier)|(uuid|identifier).*tasty)", line)
+        )
+
+        return {
+            "scala_consumer": True,
+            "fresh_runtime_outputs": fresh_runtime_outputs,
+            "fresh_pair_hashes": artifact_hashes,
+            "counter_source_sha256": digest(ROOT / "tests/fixtures/jvm_tasty_interop/Counter.scala"),
+            "rust_class_sha256": class_before,
+            "fresh_pair_byte_identical": True,
+            "tasty_link_uuid": tasty_link_uuid,
+            "consumer_methodrefs": ["<init>(I)V", "set(I)V", "get()I"],
+            "tasty_only_method_resolved": True,
+            "classfile_only_control_rejected": True,
+            "unrecognized_link_control_rejected": True,
+            "uuid_mismatch_control_rejected": True,
+            "classfile_only_diagnostic": classfile_diagnostic,
+            "uuid_mismatch_diagnostic": uuid_diagnostic,
+            "java_version": toolchain.jdk_release["JAVA_VERSION"],
+            "compiler_artifacts_sha256": toolchain.artifacts,
+        }
+
+
+def consume_rust_batch(toolchain: Toolchain, batch_root: Path) -> dict:
+    """Consume a complete Rust Counter/Gauge batch and prove each TASTy sidecar is used."""
+    relative_paths = {
+        "example/Counter.class",
+        "example/Counter.tasty",
+        "example/Gauge.class",
+        "example/Gauge.tasty",
+    }
+    roots = {"fresh-a": relative_paths, "fresh-b": relative_paths}
+    for class_name in ("Counter", "Gauge"):
+        class_file = f"example/{class_name}.class"
+        tasty_file = f"example/{class_name}.tasty"
+        roots[f"tasty-only-{class_name}"] = relative_paths
+        roots[f"uuid-mismatch-{class_name}"] = relative_paths
+        roots[f"classfile-only-{class_name}"] = relative_paths - {tasty_file}
+        roots[f"missing-sidecar-{class_name}"] = relative_paths - {tasty_file}
+        roots[f"xasty-{class_name}"] = relative_paths - {tasty_file}
+        roots[f"missing-marker-{class_name}"] = relative_paths - {tasty_file}
+        roots[f"missing-classfile-{class_name}"] = relative_paths - {class_file}
+        roots[f"wrong-path-{class_name}"] = (
+            relative_paths - {tasty_file} | {f"misplaced/{class_name}.tasty"}
+        )
+        roots[f"corrupt-sidecar-{class_name}"] = relative_paths
+
+    for name, expected in roots.items():
+        root = batch_root / name
+        actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+        if actual != expected:
+            raise RuntimeError(f"{name} artifact inventory differs: {sorted(actual)}")
+
+    first = batch_root / "fresh-a"
+    second = batch_root / "fresh-b"
+    hashes: dict[str, dict[str, str]] = {}
+    links: dict[str, str] = {}
+    for class_name in ("Counter", "Gauge"):
+        class_path = f"example/{class_name}.class"
+        tasty_path = f"example/{class_name}.tasty"
+        first_class = first / class_path
+        first_tasty = first / tasty_path
+        if first_class.read_bytes()[6:8] != (65).to_bytes(2, "big"):
+            raise RuntimeError(f"Rust {class_name}.class is not classfile major 65")
+        class_link = _class_tasty_link(first_class.read_bytes())
+        tasty_link = _tasty_header_uuid(first_tasty.read_bytes())
+        if class_link is None or class_link != tasty_link:
+            raise RuntimeError(f"Rust {class_name} classfile and TASTy UUIDs do not match")
+        if digest(first_class) != digest(second / class_path):
+            raise RuntimeError(f"fresh Rust classfile bytes differ: {class_path}")
+        if digest(first_tasty) != digest(second / tasty_path):
+            raise RuntimeError(f"fresh Rust TASTy bytes differ: {tasty_path}")
+        hashes[class_name] = {
+            "class_sha256": digest(first_class),
+            "tasty_sha256": digest(first_tasty),
+        }
+        links[class_name] = class_link.hex()
+    if links["Counter"] == links["Gauge"]:
+        raise RuntimeError("Counter and Gauge unexpectedly share one TASTy UUID")
+
+    consumer_source = ROOT / "tests/fixtures/jvm_tasty_multiclass/Consumer.scala"
+    probes = {
+        "Counter": """package consumer
+object CounterTastyProbe:
+  def read(counter: example.Counter): Int = counter.get()
+""",
+        "Gauge": """package consumer
+object GaugeTastyProbe:
+  def read(gauge: example.Gauge): Int = gauge.get()
+""",
+    }
+    compiler_jars = [Path(path) for path in toolchain.classpath.split(os.pathsep)]
+    for jar in compiler_jars:
+        with zipfile.ZipFile(jar) as archive:
+            names = set(archive.namelist())
+        for class_name in ("Counter", "Gauge"):
+            if f"example/{class_name}.class" in names:
+                raise RuntimeError(f"Scala compiler/runtime dependency contains {class_name}.class: {jar}")
+
+    runtime_outputs: list[str] = []
+    negative_control_diagnostics: dict[str, str] = {}
+    rust_hashes_before = {
+        f"{root.name}/{relative}": digest(root / relative)
+        for root in (first, second)
+        for relative in sorted(relative_paths)
+    }
+    with tempfile.TemporaryDirectory(prefix="dotty-scala-multiclass-consumer-") as temporary:
+        work = Path(temporary)
+        client_source = work / "src/Consumer.scala"
+        client_source.parent.mkdir()
+        shutil.copyfile(consumer_source, client_source)
+        for index, pair_root in enumerate((first, second)):
+            client = work / f"client-{index}"
+            client.mkdir()
+            toolchain.compiler(["-d", client, client_source],
+                               classpath=os.pathsep.join((str(pair_root), toolchain.classpath)))
+            classfiles = sorted(
+                path.relative_to(client).as_posix()
+                for path in client.rglob("*.class")
+            )
+            expected_client_classes = ["consumer/Consumer$.class", "consumer/Consumer.class"]
+            if classfiles != expected_client_classes:
+                raise RuntimeError(f"Scala consumer emitted unexpected classes: {classfiles}")
+            for path in client.rglob("*"):
+                if path.is_file() and not path.relative_to(client).as_posix().startswith("consumer/"):
+                    raise RuntimeError(f"Scala consumer output escaped its package: {path}")
+            for class_name in ("Counter", "Gauge"):
+                if list(client.rglob(f"{class_name}.class")):
+                    raise RuntimeError(f"Scala compiler emitted or copied {class_name}.class")
+
+            javap = execute([
+                toolchain.javap,
+                "-classpath",
+                os.pathsep.join((str(client), str(pair_root))),
+                "-verbose",
+                "consumer.Consumer$",
+            ])
+            for owner in ("Counter", "Gauge"):
+                for reference in (
+                    f'example/{owner}."<init>":(I)V',
+                    f"example/{owner}.set:(I)V",
+                    f"example/{owner}.get:()I",
+                ):
+                    if reference not in javap:
+                        raise RuntimeError(f"consumer bytecode lacks Methodref {reference}: {javap}")
+
+            runtime = execute([toolchain.java, "-Xverify:all", "-XX:-UsePerfData", "-classpath",
+                               os.pathsep.join((str(pair_root), str(client), toolchain.classpath)),
+                               "consumer.Consumer"])
+            output = [line for line in runtime.strip().splitlines()
+                      if not line.startswith("Picked up JAVA_TOOL_OPTIONS:")]
+            if output != ["1329"]:
+                raise RuntimeError(f"Scala consumer returned unexpected output: {runtime}")
+            runtime_outputs.extend(output)
+
+        for class_name in ("Counter", "Gauge"):
+            probe = work / f"{class_name}TastyProbe.scala"
+            probe.write_text(probes[class_name])
+            output = work / f"probe-{class_name}"
+            output.mkdir()
+            tasty_only = batch_root / f"tasty-only-{class_name}"
+            toolchain.compiler(["-d", output, probe],
+                               classpath=os.pathsep.join((str(tasty_only), toolchain.classpath)))
+            generated = output / f"consumer/{class_name}TastyProbe$.class"
+            if not generated.is_file():
+                raise RuntimeError(f"{class_name} TASTy-only semantic probe emitted no class")
+
+            classfile_output = work / f"classfile-only-{class_name}-output"
+            classfile_output.mkdir()
+            try:
+                toolchain.compiler(["-d", classfile_output, probe],
+                                   classpath=os.pathsep.join((
+                                       str(batch_root / f"classfile-only-{class_name}"),
+                                       toolchain.classpath,
+                                   )))
+            except CommandFailure as error:
+                classfile_failure = error.output
+            else:
+                raise RuntimeError(f"{class_name} classfile-only control resolved get()")
+            if not re.search(r"(?i)(get.*(not found|not a member)|no member.*get)", classfile_failure):
+                raise RuntimeError(f"{class_name} classfile-only control failed for another reason: {classfile_failure}")
+            negative_control_diagnostics[f"{class_name}.classfile_only"] = classfile_failure.strip()
+
+            missing_output = work / f"missing-sidecar-{class_name}-output"
+            missing_output.mkdir()
+            try:
+                toolchain.compiler(["-Werror", "-d", missing_output, probe],
+                                   classpath=os.pathsep.join((
+                                       str(batch_root / f"missing-sidecar-{class_name}"),
+                                       toolchain.classpath,
+                                   )))
+            except CommandFailure as error:
+                missing_failure = error.output
+            else:
+                raise RuntimeError(f"{class_name} missing-sidecar control unexpectedly compiled")
+            if not re.search(r"(?i)(tasty.*missing|missing.*tasty|tasty.*not found)", missing_failure):
+                raise RuntimeError(f"{class_name} missing-sidecar control failed for another reason: {missing_failure}")
+            negative_control_diagnostics[f"{class_name}.missing_sidecar"] = missing_failure.strip()
+
+            mismatch_output = work / f"uuid-mismatch-{class_name}-output"
+            mismatch_output.mkdir()
+            try:
+                toolchain.compiler(["-Werror", "-d", mismatch_output, probe],
+                                   classpath=os.pathsep.join((
+                                       str(batch_root / f"uuid-mismatch-{class_name}"),
+                                       toolchain.classpath,
+                                   )))
+            except CommandFailure as error:
+                mismatch_failure = error.output
+            else:
+                raise RuntimeError(f"{class_name} stale UUID control unexpectedly compiled")
+            if not re.search(
+                r"(?i)(tasty.*(uuid|identifier|sync)|(uuid|identifier|sync).*tasty|out of sync.*tasty)",
+                mismatch_failure,
+            ):
+                raise RuntimeError(f"{class_name} UUID control failed for another reason: {mismatch_failure}")
+            negative_control_diagnostics[f"{class_name}.uuid_mismatch"] = mismatch_failure.strip()
+
+            for marker_kind in ("xasty", "missing-marker"):
+                marker_output = work / f"{marker_kind}-{class_name}-output"
+                marker_output.mkdir()
+                marker_root = batch_root / f"{marker_kind}-{class_name}"
+                try:
+                    toolchain.compiler(["-Werror", "-d", marker_output, probe],
+                                       classpath=os.pathsep.join((str(marker_root), toolchain.classpath)))
+                except CommandFailure as error:
+                    marker_failure = error.output
+                else:
+                    raise RuntimeError(f"{class_name} {marker_kind} control unexpectedly resolved get()")
+                if not re.search(r"(?i)(get.*(not found|not a member)|no member.*get)", marker_failure):
+                    raise RuntimeError(f"{class_name} {marker_kind} control failed for another reason: {marker_failure}")
+                negative_control_diagnostics[f"{class_name}.{marker_kind}"] = marker_failure.strip()
+
+            wrong_path_output = work / f"wrong-path-{class_name}-output"
+            wrong_path_output.mkdir()
+            wrong_path_root = batch_root / f"wrong-path-{class_name}"
+            try:
+                toolchain.compiler(["-Werror", "-d", wrong_path_output, probe],
+                                   classpath=os.pathsep.join((str(wrong_path_root), toolchain.classpath)))
+            except CommandFailure as error:
+                wrong_path_failure = error.output
+            else:
+                raise RuntimeError(f"{class_name} wrong-path sidecar control unexpectedly compiled")
+            if not re.search(r"(?i)(tasty.*missing|missing.*tasty|tasty.*not found)", wrong_path_failure):
+                raise RuntimeError(f"{class_name} wrong-path control failed for another reason: {wrong_path_failure}")
+            negative_control_diagnostics[f"{class_name}.wrong_path"] = wrong_path_failure.strip()
+
+            corrupt_output = work / f"corrupt-sidecar-{class_name}-output"
+            corrupt_output.mkdir()
+            corrupt_root = batch_root / f"corrupt-sidecar-{class_name}"
+            try:
+                toolchain.compiler(["-Werror", "-d", corrupt_output, probe],
+                                   classpath=os.pathsep.join((str(corrupt_root), toolchain.classpath)))
+            except CommandFailure as error:
+                corrupt_failure = error.output
+            else:
+                raise RuntimeError(f"{class_name} corrupt-sidecar control unexpectedly compiled")
+            if not re.search(r"(?i)(tasty|malformed|magic|invalid)", corrupt_failure):
+                raise RuntimeError(f"{class_name} corrupt sidecar failed for another reason: {corrupt_failure}")
+            negative_control_diagnostics[f"{class_name}.corrupt_sidecar"] = corrupt_failure.strip()
+
+            missing_class_root = batch_root / f"missing-classfile-{class_name}"
+            missing_class_client = work / f"missing-classfile-{class_name}-client"
+            missing_class_client.mkdir()
+            toolchain.compiler(["-d", missing_class_client, client_source],
+                               classpath=os.pathsep.join((str(missing_class_root), toolchain.classpath)))
+            missing_class_runtime = [toolchain.java, "-Xverify:all", "-XX:-UsePerfData", "-classpath",
+                                     os.pathsep.join((str(missing_class_root), str(missing_class_client),
+                                                      toolchain.classpath)), "consumer.Consumer"]
+            try:
+                execute(missing_class_runtime)
+            except CommandFailure as error:
+                missing_class_failure = error.output
+            else:
+                raise RuntimeError(f"{class_name} missing-classfile control unexpectedly executed")
+            if not re.search(
+                rf"(?i)(NoClassDefFoundError|ClassNotFoundException).*example[/.]{class_name}",
+                missing_class_failure,
+            ):
+                raise RuntimeError(
+                    f"{class_name} missing-classfile control failed for another reason: {missing_class_failure}"
+                )
+            negative_control_diagnostics[f"{class_name}.missing_classfile"] = missing_class_failure.strip()
+
+    rust_hashes_after = {
+        f"{root.name}/{relative}": digest(root / relative)
+        for root in (first, second)
+        for relative in sorted(relative_paths)
+    }
+    if rust_hashes_after != rust_hashes_before:
+        raise RuntimeError("Scala compile/runtime changed a staged Rust artifact")
+
+    return {
+        "scala_consumer": True,
+        "scala_source_sha256": digest(consumer_source),
+        "fresh_batches_byte_identical": True,
+        "fresh_batch_hashes": hashes,
+        "tasty_link_uuids": links,
+        "runtime_outputs": runtime_outputs,
+        "counter_tasty_only_method_resolved": True,
+        "gauge_tasty_only_method_resolved": True,
+        "counter_classfile_only_control_rejected": True,
+        "gauge_classfile_only_control_rejected": True,
+        "counter_missing_sidecar_control_rejected": True,
+        "gauge_missing_sidecar_control_rejected": True,
+        "counter_uuid_mismatch_control_rejected": True,
+        "gauge_uuid_mismatch_control_rejected": True,
+        "counter_xasty_marker_control_rejected": True,
+        "gauge_xasty_marker_control_rejected": True,
+        "counter_missing_marker_control_rejected": True,
+        "gauge_missing_marker_control_rejected": True,
+        "counter_missing_classfile_control_rejected": True,
+        "gauge_missing_classfile_control_rejected": True,
+        "counter_wrong_path_control_rejected": True,
+        "gauge_wrong_path_control_rejected": True,
+        "counter_corrupt_sidecar_control_rejected": True,
+        "gauge_corrupt_sidecar_control_rejected": True,
+        "negative_control_diagnostics": negative_control_diagnostics,
+        "rust_classfiles_unchanged_after_compile_and_run": True,
+        "consumer_classes": ["consumer/Consumer$.class", "consumer/Consumer.class"],
+        "consumer_methodrefs": [
+            'example/Counter."<init>":(I)V',
+            "example/Counter.set:(I)V",
+            "example/Counter.get:()I",
+            'example/Gauge."<init>":(I)V',
+            "example/Gauge.set:(I)V",
+            "example/Gauge.get:()I",
+        ],
+        "java_version": toolchain.jdk_release["JAVA_VERSION"],
+        "compiler_artifacts_sha256": toolchain.artifacts,
+    }
+
+
+def consume_cross_class_batch(toolchain: Toolchain, batch_root: Path) -> dict:
+    """Consume the Rust Counter/Reader pair and prove both TASTy sidecars are used."""
+    relative_paths = {
+        "example/Counter.class",
+        "example/Counter.tasty",
+        "example/Reader.class",
+        "example/Reader.tasty",
+    }
+    roots: dict[str, set[str]] = {"fresh-a": relative_paths, "fresh-b": relative_paths}
+    for class_name in ("Counter", "Reader"):
+        tasty_path = f"example/{class_name}.tasty"
+        roots[f"tasty-only-{class_name}"] = relative_paths
+        roots[f"uuid-mismatch-{class_name}"] = relative_paths
+        roots[f"classfile-only-{class_name}"] = relative_paths - {tasty_path}
+        roots[f"missing-sidecar-{class_name}"] = relative_paths - {tasty_path}
+        roots[f"wrong-path-{class_name}"] = (
+            relative_paths - {tasty_path} | {f"misplaced/{class_name}.tasty"}
+        )
+        roots[f"corrupt-sidecar-{class_name}"] = relative_paths
+
+    for name, expected in roots.items():
+        root = batch_root / name
+        actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
+        if actual != expected:
+            raise RuntimeError(f"{name} artifact inventory differs: {sorted(actual)}")
+
+    first = batch_root / "fresh-a"
+    second = batch_root / "fresh-b"
+    hashes: dict[str, dict[str, str]] = {}
+    links: dict[str, str] = {}
+    for class_name in ("Counter", "Reader"):
+        class_path = first / f"example/{class_name}.class"
+        tasty_path = first / f"example/{class_name}.tasty"
+        class_bytes = class_path.read_bytes()
+        tasty_bytes = tasty_path.read_bytes()
+        if class_bytes[6:8] != (65).to_bytes(2, "big"):
+            raise RuntimeError(f"Rust {class_name}.class is not classfile major 65")
+        class_link = _class_tasty_link(class_bytes)
+        tasty_link = _tasty_header_uuid(tasty_bytes)
+        if class_link is None or class_link != tasty_link:
+            raise RuntimeError(f"Rust {class_name} classfile and TASTy UUIDs do not match")
+        for path in (class_path, tasty_path):
+            other = second / path.relative_to(first)
+            if digest(path) != digest(other):
+                raise RuntimeError(f"fresh Rust artifact bytes differ: {path.relative_to(first)}")
+        hashes[class_name] = {
+            "class_sha256": digest(class_path),
+            "tasty_sha256": digest(tasty_path),
+        }
+        links[class_name] = class_link.hex()
+    if links["Counter"] == links["Reader"]:
+        raise RuntimeError("Counter and Reader unexpectedly share one TASTy UUID")
+
+    compiler_jars = [Path(path) for path in toolchain.classpath.split(os.pathsep)]
+    for jar in compiler_jars:
+        with zipfile.ZipFile(jar) as archive:
+            names = set(archive.namelist())
+        for class_name in ("Counter", "Reader"):
+            if f"example/{class_name}.class" in names:
+                raise RuntimeError(f"Scala compiler/runtime dependency contains {class_name}.class: {jar}")
+
+    consumer_source = ROOT / "tests/fixtures/jvm_tasty_cross_class/Consumer.scala"
+    probes = {
+        "Counter": (
+            """package consumer
+object CounterTastyProbe:
+  def read(counter: example.Counter): Int = counter.get()
+""",
+            "get",
+        ),
+        "Reader": (
+            """package consumer
+object ReaderTastyProbe:
+  def read(reader: example.Reader, counter: example.Counter): Int = reader.read(counter)
+""",
+            "read",
+        ),
+    }
+    runtime_outputs: list[str] = []
+    negative_diagnostics: dict[str, str] = {}
+    artifact_hashes_before = {
+        f"{root.name}/{relative}": digest(root / relative)
+        for root in (first, second)
+        for relative in sorted(relative_paths)
+    }
+
+    def compile_probe(work: Path, class_name: str, label: str, classpath_root: Path,
+                      source: Path, *, werror: bool = False) -> None:
+        output = work / f"{label}-{class_name}-output"
+        output.mkdir()
+        args: list[str | Path] = []
+        if werror:
+            args.append("-Werror")
+        args.extend(("-d", output, source))
+        toolchain.compiler(
+            args,
+            classpath=os.pathsep.join((str(classpath_root), toolchain.classpath)),
+        )
+
+    with tempfile.TemporaryDirectory(prefix="dotty-scala-cross-class-consumer-") as temporary:
+        work = Path(temporary)
+        client_source = work / "src/Consumer.scala"
+        client_source.parent.mkdir()
+        shutil.copyfile(consumer_source, client_source)
+        for index, pair_root in enumerate((first, second)):
+            client = work / f"client-{index}"
+            client.mkdir()
+            toolchain.compiler(
+                ["-d", client, client_source],
+                classpath=os.pathsep.join((str(pair_root), toolchain.classpath)),
+            )
+            classfiles = sorted(path.relative_to(client).as_posix() for path in client.rglob("*.class"))
+            expected_client = ["consumer/Consumer$.class", "consumer/Consumer.class"]
+            if classfiles != expected_client:
+                raise RuntimeError(f"Scala consumer emitted unexpected classfiles: {classfiles}")
+            if list(client.rglob("Counter.class")) or list(client.rglob("Reader.class")):
+                raise RuntimeError("Scala compiler emitted or copied a Rust dependency class")
+
+            javap = execute([
+                toolchain.javap,
+                "-classpath",
+                os.pathsep.join((str(client), str(pair_root))),
+                "-verbose",
+                "consumer.Consumer$",
+            ])
+            methodrefs = (
+                'example/Counter."<init>":(I)V',
+                'example/Reader."<init>":()V',
+                "example/Reader.read:(Lexample/Counter;)I",
+                "example/Counter.set:(I)V",
+            )
+            for reference in methodrefs:
+                if reference not in javap:
+                    raise RuntimeError(f"Scala consumer bytecode lacks Methodref {reference}: {javap}")
+
+            runtime = execute([
+                toolchain.java,
+                "-Xverify:all",
+                "-XX:-UsePerfData",
+                "-classpath",
+                os.pathsep.join((str(pair_root), str(client), toolchain.classpath)),
+                "consumer.Consumer",
+            ])
+            output = [line for line in runtime.strip().splitlines()
+                      if not line.startswith("Picked up JAVA_TOOL_OPTIONS:")]
+            if output != ["713"]:
+                raise RuntimeError(f"Scala consumer returned unexpected output: {runtime}")
+            runtime_outputs.extend(output)
+
+        for class_name, (probe_text, member) in probes.items():
+            probe = work / f"{class_name}TastyProbe.scala"
+            probe.write_text(probe_text)
+            tasty_only = batch_root / f"tasty-only-{class_name}"
+            try:
+                compile_probe(work, class_name, "tasty-only", tasty_only, probe)
+            except CommandFailure as error:
+                raise RuntimeError(f"{class_name} TASTy-only lookup failed: {error.output}") from error
+            generated = work / f"tasty-only-{class_name}-output/consumer/{class_name}TastyProbe$.class"
+            if not generated.is_file():
+                raise RuntimeError(f"{class_name} TASTy-only probe emitted no client class")
+
+            classfile_only = batch_root / f"classfile-only-{class_name}"
+            try:
+                compile_probe(work, class_name, "classfile-only", classfile_only, probe)
+            except CommandFailure as error:
+                failure = error.output
+            else:
+                raise RuntimeError(f"{class_name} classfile-only control resolved {member}")
+            if not re.search(rf"(?i){member}.*(not found|not a member)|no member.*{member}", failure):
+                raise RuntimeError(f"{class_name} classfile-only failed for another reason: {failure}")
+            negative_diagnostics[f"{class_name}.classfile_only"] = failure.strip()
+
+            for control, pattern in (
+                ("uuid-mismatch", r"(?i)out of sync with its TASTy file"),
+                ("missing-sidecar", r"(?i)this `?\.tasty`? file is missing"),
+                ("wrong-path", r"(?i)this `?\.tasty`? file is missing"),
+                ("corrupt-sidecar", r"(?is)could not be read.*not a TASTy file"),
+            ):
+                try:
+                    compile_probe(
+                        work,
+                        class_name,
+                        control,
+                        batch_root / f"{control}-{class_name}",
+                        probe,
+                        werror=True,
+                    )
+                except CommandFailure as error:
+                    failure = error.output
+                else:
+                    raise RuntimeError(f"{class_name} {control} control unexpectedly resolved {member}")
+                if not re.search(pattern, failure):
+                    raise RuntimeError(
+                        f"{class_name} {control} did not report its expected first-stage diagnostic: {failure}"
+                    )
+                negative_diagnostics[f"{class_name}.{control}"] = failure.strip()
+
+    artifact_hashes_after = {
+        f"{root.name}/{relative}": digest(root / relative)
+        for root in (first, second)
+        for relative in sorted(relative_paths)
+    }
+    if artifact_hashes_after != artifact_hashes_before:
+        raise RuntimeError("Scala compile/runtime changed a staged Rust artifact")
+
+    return {
+        "scala_consumer": True,
+        "scala_source_sha256": digest(consumer_source),
+        "fresh_batches_byte_identical": True,
+        "fresh_batch_hashes": hashes,
+        "tasty_link_uuids": links,
+        "runtime_outputs": runtime_outputs,
+        "counter_tasty_only_get_resolved": True,
+        "reader_tasty_only_read_resolved": True,
+        "counter_classfile_only_control_rejected": True,
+        "reader_classfile_only_control_rejected": True,
+        "counter_uuid_mismatch_control_rejected": True,
+        "reader_uuid_mismatch_control_rejected": True,
+        "counter_missing_sidecar_control_rejected": True,
+        "reader_missing_sidecar_control_rejected": True,
+        "counter_wrong_path_control_rejected": True,
+        "reader_wrong_path_control_rejected": True,
+        "counter_corrupt_sidecar_control_rejected": True,
+        "reader_corrupt_sidecar_control_rejected": True,
+        "negative_control_diagnostics": negative_diagnostics,
+        "rust_artifacts_unchanged_after_compile_and_run": True,
+        "consumer_classes": ["consumer/Consumer$.class", "consumer/Consumer.class"],
+        "consumer_methodrefs": [
+            'example/Counter."<init>":(I)V',
+            'example/Reader."<init>":()V',
+            "example/Reader.read:(Lexample/Counter;)I",
+            "example/Counter.set:(I)V",
+        ],
+        "java_version": toolchain.jdk_release["JAVA_VERSION"],
+        "compiler_artifacts_sha256": toolchain.artifacts,
+    }
+
+
+def consume_factory_batch(toolchain: Toolchain, batch_root: Path) -> dict:
+    """Consume Rust Counter/CounterFactory TASTy with pinned Scala 3.9."""
+    relative_paths = {
+        "example/Counter.class",
+        "example/Counter.tasty",
+        "example/CounterFactory.class",
+        "example/CounterFactory.tasty",
+    }
+    roots: dict[str, set[str]] = {"fresh-a": relative_paths, "fresh-b": relative_paths}
+    for class_name in ("Counter", "CounterFactory"):
+        tasty_path = f"example/{class_name}.tasty"
+        roots[f"tasty-only-{class_name}"] = relative_paths
+        roots[f"uuid-mismatch-{class_name}"] = relative_paths
+        roots[f"classfile-only-{class_name}"] = relative_paths - {tasty_path}
+        roots[f"missing-classfile-{class_name}"] = relative_paths - {f"example/{class_name}.class"}
+        roots[f"missing-sidecar-{class_name}"] = relative_paths - {tasty_path}
+        roots[f"wrong-path-{class_name}"] = (
+            relative_paths - {tasty_path} | {f"misplaced/{class_name}.tasty"}
+        )
+        roots[f"corrupt-sidecar-{class_name}"] = relative_paths
+
+    for name, expected in roots.items():
+        root = batch_root / name
+        actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
+        if actual != expected:
+            raise RuntimeError(f"{name} artifact inventory differs: {sorted(actual)}")
+
+    first = batch_root / "fresh-a"
+    second = batch_root / "fresh-b"
+    classes = ("Counter", "CounterFactory")
+    hashes: dict[str, dict[str, str]] = {}
+    links: dict[str, str] = {}
+    for class_name in classes:
+        class_path = first / f"example/{class_name}.class"
+        tasty_path = first / f"example/{class_name}.tasty"
+        class_bytes = class_path.read_bytes()
+        tasty_bytes = tasty_path.read_bytes()
+        if class_bytes[6:8] != (65).to_bytes(2, "big"):
+            raise RuntimeError(f"Rust {class_name}.class is not classfile major 65")
+        class_link = _class_tasty_link(class_bytes)
+        tasty_link = _tasty_header_uuid(tasty_bytes)
+        if class_link is None or class_link != tasty_link:
+            raise RuntimeError(f"Rust {class_name} classfile and TASTy UUIDs do not match")
+        for path in (class_path, tasty_path):
+            other = second / path.relative_to(first)
+            if digest(path) != digest(other):
+                raise RuntimeError(f"fresh Rust artifact bytes differ: {path.relative_to(first)}")
+        hashes[class_name] = {
+            "class_sha256": digest(class_path),
+            "tasty_sha256": digest(tasty_path),
+        }
+        links[class_name] = class_link.hex()
+    if links["Counter"] == links["CounterFactory"]:
+        raise RuntimeError("Counter and CounterFactory unexpectedly share one TASTy UUID")
+
+    compiler_jars = [Path(path) for path in toolchain.classpath.split(os.pathsep)]
+    for jar in compiler_jars:
+        with zipfile.ZipFile(jar) as archive:
+            names = set(archive.namelist())
+        for class_name in classes:
+            if f"example/{class_name}.class" in names:
+                raise RuntimeError(f"Scala compiler/runtime dependency contains {class_name}.class: {jar}")
+
+    consumer_source = ROOT / "tests/fixtures/jvm_tasty_cross_class_factories/FactoryConsumer.scala"
+    probes = {
+        "Counter": (
+            """package consumer
+object CounterFactoryTastyProbe:
+  def read(counter: example.Counter): Int = counter.get()
+""",
+            "get",
+        ),
+        "CounterFactory": (
+            """package consumer
+object FactoryTastyProbe:
+  def read(factory: example.CounterFactory): Int = factory.create(seed = 7).get()
+""",
+            "create",
+        ),
+    }
+    runtime_outputs: list[str] = []
+    compile_commands: list[list[str]] = []
+    runtime_commands: list[list[str]] = []
+    negative_diagnostics: dict[str, str] = {}
+    artifact_hashes_before = {
+        f"{root.name}/{relative}": digest(root / relative)
+        for root in (first, second)
+        for relative in sorted(relative_paths)
+    }
+
+    with tempfile.TemporaryDirectory(prefix="dotty-scala-factory-consumer-") as temporary:
+        work = Path(temporary)
+        client_source = work / "src/FactoryConsumer.scala"
+        client_source.parent.mkdir()
+        shutil.copyfile(consumer_source, client_source)
+        for index, pair_root in enumerate((first, second)):
+            client = work / f"client-{index}"
+            client.mkdir()
+            toolchain.compiler(
+                ["-d", client, client_source],
+                classpath=os.pathsep.join((str(pair_root), toolchain.runtime_classpath)),
+            )
+            compile_commands.append([
+                str(toolchain.java), "-XX:-UsePerfData", "-cp", toolchain.classpath,
+                "dotty.tools.dotc.Main", "-classpath",
+                os.pathsep.join((str(pair_root), toolchain.runtime_classpath)), "-color:never",
+                "-d", str(client), str(client_source),
+            ])
+            classfiles = sorted(path.relative_to(client).as_posix() for path in client.rglob("*.class"))
+            expected_client = ["consumer/Consumer$.class", "consumer/Consumer.class"]
+            if classfiles != expected_client:
+                raise RuntimeError(f"Scala consumer emitted unexpected classfiles: {classfiles}")
+            if any(client.rglob("Counter.class")) or any(client.rglob("CounterFactory.class")):
+                raise RuntimeError("Scala compiler emitted or copied a Rust dependency class")
+
+            javap = execute([
+                toolchain.javap,
+                "-classpath",
+                os.pathsep.join((str(client), str(pair_root))),
+                "-verbose",
+                "consumer.Consumer$",
+            ])
+            methodrefs = (
+                'example/CounterFactory."<init>":()V',
+                "example/CounterFactory.create:(I)Lexample/Counter;",
+                "example/Counter.get:()I",
+                "example/Counter.set:(I)V",
+            )
+            for reference in methodrefs:
+                if reference not in javap:
+                    raise RuntimeError(f"Scala consumer bytecode lacks Methodref {reference}: {javap}")
+            if "example/CounterFactory.create:(I)Ljava/lang/Object;" in javap:
+                raise RuntimeError("Scala compiler widened CounterFactory.create result to Object")
+
+            runtime = execute([
+                toolchain.java,
+                "-Xverify:all",
+                "-XX:-UsePerfData",
+                "-classpath",
+                os.pathsep.join((str(pair_root), str(client), toolchain.runtime_classpath)),
+                "consumer.Consumer",
+            ])
+            runtime_commands.append([
+                str(toolchain.java), "-Xverify:all", "-XX:-UsePerfData", "-classpath",
+                os.pathsep.join((str(pair_root), str(client), toolchain.runtime_classpath)),
+                "consumer.Consumer",
+            ])
+            output = [line for line in runtime.strip().splitlines()
+                      if not line.startswith("Picked up JAVA_TOOL_OPTIONS:")]
+            if output != ["42"]:
+                raise RuntimeError(f"Scala consumer returned unexpected output: {runtime}")
+            runtime_outputs.extend(output)
+
+        def compile_probe(class_name: str, label: str, classpath_root: Path,
+                          source: Path, *, werror: bool = False) -> None:
+            output = work / f"{label}-{class_name}-output"
+            output.mkdir()
+            args: list[str | Path] = []
+            if werror:
+                args.append("-Werror")
+            args.extend(("-d", output, source))
+            toolchain.compiler(
+                args,
+                classpath=os.pathsep.join((str(classpath_root), toolchain.runtime_classpath)),
+            )
+
+        for class_name, (probe_text, member) in probes.items():
+            probe = work / f"{class_name}TastyProbe.scala"
+            probe.write_text(probe_text)
+            tasty_only = batch_root / f"tasty-only-{class_name}"
+            try:
+                compile_probe(class_name, "tasty-only", tasty_only, probe)
+            except CommandFailure as error:
+                raise RuntimeError(f"{class_name} TASTy-only lookup failed: {error.output}") from error
+
+            classfile_only = batch_root / f"classfile-only-{class_name}"
+            try:
+                compile_probe(class_name, "classfile-only", classfile_only, probe)
+            except CommandFailure as error:
+                failure = error.output
+            else:
+                raise RuntimeError(f"{class_name} classfile-only control resolved {member}")
+            if not re.search(rf"(?i){member}.*(not found|not a member)|no member.*{member}", failure):
+                raise RuntimeError(f"{class_name} classfile-only failed for another reason: {failure}")
+            negative_diagnostics[f"{class_name}.classfile_only"] = failure.strip()
+
+            missing_classfile = batch_root / f"missing-classfile-{class_name}"
+            try:
+                compile_probe(class_name, "missing-classfile-tasty-only", missing_classfile, probe)
+            except CommandFailure as error:
+                raise RuntimeError(
+                    f"{class_name} missing-classfile TASTy lookup failed: {error.output}"
+                ) from error
+            missing_client = work / f"missing-classfile-{class_name}-consumer-output"
+            missing_client.mkdir()
+            toolchain.compiler(
+                ["-d", missing_client, client_source],
+                classpath=os.pathsep.join((str(missing_classfile), toolchain.runtime_classpath)),
+            )
+            runtime = subprocess.run(
+                [toolchain.java, "-Xverify:all", "-XX:-UsePerfData", "-classpath",
+                 os.pathsep.join((str(missing_classfile), str(missing_client),
+                                  toolchain.runtime_classpath)), "consumer.Consumer"],
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=180,
+            )
+            missing_binary = f"example/{class_name}"
+            failure = runtime.stdout
+            if runtime.returncode == 0 or f"NoClassDefFoundError: {missing_binary}" not in failure:
+                raise RuntimeError(
+                    f"{class_name} missing-classfile runtime did not fail at class loading: {failure}"
+                )
+            negative_diagnostics[f"{class_name}.missing_classfile_runtime"] = failure.strip()
+
+            for control, pattern in (
+                ("uuid-mismatch", r"(?i)out of sync with its TASTy file"),
+                ("missing-sidecar", r"(?i)this `?\.tasty`? file is missing"),
+                ("wrong-path", r"(?i)this `?\.tasty`? file is missing"),
+                ("corrupt-sidecar", r"(?is)could not be read.*not a TASTy file"),
+            ):
+                try:
+                    compile_probe(
+                        class_name,
+                        control,
+                        batch_root / f"{control}-{class_name}",
+                        probe,
+                        werror=True,
+                    )
+                except CommandFailure as error:
+                    failure = error.output
+                else:
+                    raise RuntimeError(f"{class_name} {control} control unexpectedly resolved {member}")
+                if not re.search(pattern, failure):
+                    raise RuntimeError(
+                        f"{class_name} {control} did not report its expected first-stage diagnostic: {failure}"
+                    )
+                negative_diagnostics[f"{class_name}.{control}"] = failure.strip()
+
+    artifact_hashes_after = {
+        f"{root.name}/{relative}": digest(root / relative)
+        for root in (first, second)
+        for relative in sorted(relative_paths)
+    }
+    if artifact_hashes_after != artifact_hashes_before:
+        raise RuntimeError("Scala compile/runtime changed a staged Rust artifact")
+
+    return {
+        "scala_consumer": True,
+        "scala_revision": REVISION,
+        "scala_source_sha256": digest(consumer_source),
+        "fresh_batches_byte_identical": True,
+        "fresh_batch_hashes": hashes,
+        "tasty_link_uuids": links,
+        "runtime_outputs": runtime_outputs,
+        "counter_tasty_only_get_resolved": True,
+        "factory_tasty_only_create_resolved": True,
+        "counter_classfile_only_control_rejected": True,
+        "factory_classfile_only_control_rejected": True,
+        "counter_missing_classfile_tasty_compile_succeeded": True,
+        "factory_missing_classfile_tasty_compile_succeeded": True,
+        "counter_missing_classfile_runtime_rejected": True,
+        "factory_missing_classfile_runtime_rejected": True,
+        "counter_uuid_mismatch_control_rejected": True,
+        "factory_uuid_mismatch_control_rejected": True,
+        "counter_missing_sidecar_control_rejected": True,
+        "factory_missing_sidecar_control_rejected": True,
+        "counter_wrong_path_control_rejected": True,
+        "factory_wrong_path_control_rejected": True,
+        "counter_corrupt_sidecar_control_rejected": True,
+        "factory_corrupt_sidecar_control_rejected": True,
+        "negative_control_diagnostics": negative_diagnostics,
+        "rust_artifacts_unchanged_after_compile_and_run": True,
+        "consumer_classes": ["consumer/Consumer$.class", "consumer/Consumer.class"],
+        "consumer_methodrefs": [
+            'example/CounterFactory."<init>":()V',
+            "example/CounterFactory.create:(I)Lexample/Counter;",
+            "example/Counter.get:()I",
+            "example/Counter.set:(I)V",
+        ],
+        "compile_classpath_order": ["rust-batch-root", *[str(path) for path in toolchain.runtime_jars]],
+        "compiler_process_classpath_order": [str(path) for path in compiler_jars],
+        "runtime_classpath_order": ["rust-batch-root", "consumer-output", *[str(path) for path in toolchain.runtime_jars]],
+        "compile_commands": compile_commands,
+        "runtime_commands": runtime_commands,
+        "compiler_process_classpath_order": [str(path) for path in compiler_jars],
+        "java_version": toolchain.jdk_release["JAVA_VERSION"],
+        "compiler_artifacts_sha256": toolchain.artifacts,
+    }
+
+
+def consume_object_composition_batch(
+    toolchain: Toolchain, batch_root: Path, *, constructor_injection: bool = False
+) -> dict:
+    """Prove pinned Scala consumes Rust Counter/CounterOwner TASTy and JVM output."""
+    relative_paths = {
+        "example/Counter.class",
+        "example/Counter.tasty",
+        "example/CounterOwner.class",
+        "example/CounterOwner.tasty",
+    }
+
+
+    roots: dict[str, set[str]] = {"fresh-a": relative_paths, "fresh-b": relative_paths}
+    for class_name in ("Counter", "CounterOwner"):
+        tasty_path = f"example/{class_name}.tasty"
+        roots[f"tasty-only-{class_name}"] = relative_paths
+        roots[f"uuid-mismatch-{class_name}"] = relative_paths
+        roots[f"renamed-link-{class_name}"] = relative_paths - {tasty_path}
+        roots[f"classfile-only-{class_name}"] = relative_paths - {tasty_path}
+        roots[f"missing-classfile-{class_name}"] = relative_paths - {f"example/{class_name}.class"}
+        if constructor_injection:
+            roots[f"wrong-class-path-{class_name}"] = (
+                relative_paths - {f"example/{class_name}.class"}
+                | {f"misplaced/{class_name}.class"}
+            )
+        roots[f"missing-sidecar-{class_name}"] = relative_paths - {tasty_path}
+        roots[f"wrong-path-{class_name}"] = (
+            relative_paths - {tasty_path} | {f"misplaced/{class_name}.tasty"}
+        )
+        roots[f"corrupt-sidecar-{class_name}"] = relative_paths
+
+    for name, expected in roots.items():
+        root = batch_root / name
+        actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
+        if actual != expected:
+            raise RuntimeError(f"{name} artifact inventory differs: {sorted(actual)}")
+
+    first = batch_root / "fresh-a"
+    second = batch_root / "fresh-b"
+    classes = ("Counter", "CounterOwner")
+    hashes: dict[str, dict[str, str]] = {}
+    links: dict[str, str] = {}
+    for class_name in classes:
+        class_path = first / f"example/{class_name}.class"
+        tasty_path = first / f"example/{class_name}.tasty"
+        class_bytes = class_path.read_bytes()
+        tasty_bytes = tasty_path.read_bytes()
+        if class_bytes[6:8] != (65).to_bytes(2, "big"):
+            raise RuntimeError(f"Rust {class_name}.class is not classfile major 65")
+        class_link = _class_tasty_link(class_bytes)
+        tasty_link = _tasty_header_uuid(tasty_bytes)
+        if class_link is None or class_link != tasty_link:
+            raise RuntimeError(f"Rust {class_name} classfile and TASTy UUIDs do not match")
+        for path in (class_path, tasty_path):
+            other = second / path.relative_to(first)
+            if digest(path) != digest(other):
+                raise RuntimeError(f"fresh Rust artifact bytes differ: {path.relative_to(first)}")
+        hashes[class_name] = {
+            "class_sha256": digest(class_path),
+            "tasty_sha256": digest(tasty_path),
+        }
+        links[class_name] = class_link.hex()
+    if links["Counter"] == links["CounterOwner"]:
+        raise RuntimeError("Counter and CounterOwner unexpectedly share one TASTy UUID")
+
+    compiler_jars = [Path(path) for path in toolchain.classpath.split(os.pathsep)]
+    for jar in compiler_jars:
+        with zipfile.ZipFile(jar) as archive:
+            names = set(archive.namelist())
+        for class_name in classes:
+            if f"example/{class_name}.class" in names:
+                raise RuntimeError(f"Scala compiler/runtime dependency contains {class_name}.class: {jar}")
+
+    consumer_source = ROOT / (
+        "tests/fixtures/jvm_tasty_constructor_injection/Consumer.scala"
+        if constructor_injection
+        else "tests/fixtures/jvm_tasty_object_composition/Consumer.scala"
+    )
+    source_hash = digest(consumer_source)
+    owner_probe_text = """package consumer
+object OwnerTastyProbe:
+  def read(owner: example.CounterOwner): Int = owner.read()
+"""
+    counter_probe_text = """package consumer
+object CounterTastyProbe:
+  def get(counter: example.Counter): Int = counter.get()
+"""
+    runtime_outputs: list[str] = []
+    compile_commands: list[list[str]] = []
+    runtime_commands: list[list[str]] = []
+    negative_diagnostics: dict[str, str] = {}
+    artifact_hashes_before = {
+        f"{root.name}/{relative}": digest(root / relative)
+        for root in (first, second)
+        for relative in sorted(relative_paths)
+    }
+
+    temporary_prefix = (
+        "dotty-scala-constructor-injection-consumer-"
+        if constructor_injection
+        else "dotty-scala-object-composition-consumer-"
+    )
+    with tempfile.TemporaryDirectory(prefix=temporary_prefix) as temporary:
+        work = Path(temporary)
+        client_source = work / "src/Consumer.scala"
+        client_source.parent.mkdir()
+        shutil.copyfile(consumer_source, client_source)
+        for index, pair_root in enumerate((first, second)):
+            client = work / f"client-{index}"
+            client.mkdir()
+            client_classpath = os.pathsep.join((str(pair_root), toolchain.runtime_classpath))
+            toolchain.compiler(["-d", client, client_source], classpath=client_classpath)
+            compile_commands.append([
+                str(toolchain.java), "-XX:-UsePerfData", "-cp", toolchain.classpath,
+                "dotty.tools.dotc.Main", "-classpath", client_classpath, "-color:never",
+                "-d", str(client), str(client_source),
+            ])
+            classfiles = sorted(path.relative_to(client).as_posix() for path in client.rglob("*.class"))
+            expected_client = ["consumer/Consumer$.class", "consumer/Consumer.class"]
+            if classfiles != expected_client:
+                raise RuntimeError(f"Scala consumer emitted unexpected classfiles: {classfiles}")
+            if any(client.rglob("Counter.class")) or any(client.rglob("CounterOwner.class")):
+                raise RuntimeError("Scala compiler emitted or copied a Rust dependency class")
+
+            javap = execute([
+                toolchain.javap, "-classpath", os.pathsep.join((str(client), str(pair_root))),
+                "-verbose", "consumer.Consumer$",
+            ])
+            consumer_methodrefs = [
+                'example/CounterOwner."<init>":(Lexample/Counter;)V'
+                if constructor_injection
+                else 'example/CounterOwner."<init>":(I)V',
+                "example/CounterOwner.read:()I",
+            ]
+            if constructor_injection:
+                consumer_methodrefs.extend((
+                    'example/Counter."<init>":(I)V',
+                    "example/Counter.set:(I)V",
+                ))
+            for reference in consumer_methodrefs:
+                if reference not in javap:
+                    raise RuntimeError(f"Scala consumer bytecode lacks Methodref {reference}: {javap}")
+
+            driver_source = work / "Runner.java"
+            driver_source.write_text(
+                "public final class Runner { public static void main(String[] args) { "
+                "System.out.println(consumer.Consumer$.MODULE$.run()); } }\n"
+            )
+            driver = work / f"driver-{index}"
+            driver.mkdir()
+            driver_classpath = os.pathsep.join((str(pair_root), str(client), toolchain.runtime_classpath))
+            execute([toolchain.javac, "-classpath", driver_classpath, "-d", driver, driver_source])
+            if sorted(path.relative_to(driver).as_posix() for path in driver.rglob("*.class")) != ["Runner.class"]:
+                raise RuntimeError("Java runtime driver output contains unexpected classes")
+
+            runtime_classpath = os.pathsep.join((str(pair_root), str(client), str(driver), toolchain.runtime_classpath))
+            runtime = execute([
+                toolchain.java, "-Xverify:all", "-XX:-UsePerfData", "-classpath",
+                runtime_classpath, "Runner",
+            ])
+            runtime_commands.append([
+                str(toolchain.java), "-Xverify:all", "-XX:-UsePerfData", "-classpath",
+                runtime_classpath, "Runner",
+            ])
+            output = [line for line in runtime.strip().splitlines()
+                      if not line.startswith("Picked up JAVA_TOOL_OPTIONS:")]
+            expected_output = "-9" if constructor_injection else "742"
+            if output != [expected_output]:
+                raise RuntimeError(f"Scala consumer returned unexpected output: {runtime}")
+            runtime_outputs.extend(output)
+
+        def compile_source(label: str, classpath_root: Path, source: Path, *, werror: bool = False) -> str:
+            output = work / f"{label}-output"
+            output.mkdir()
+            args: list[str | Path] = []
+            if werror:
+                args.append("-Werror")
+            args.extend(("-d", output, source))
+            return str(toolchain.compiler(
+                args,
+                classpath=os.pathsep.join((str(classpath_root), toolchain.runtime_classpath)),
+            ))
+
+        for class_name, source_text, member in (
+            ("CounterOwner", owner_probe_text, "read"),
+            ("Counter", counter_probe_text, "get"),
+        ):
+            probe = work / f"{class_name}TastyProbe.scala"
+            probe.write_text(source_text)
+            try:
+                compile_source(f"tasty-only-{class_name}", batch_root / f"tasty-only-{class_name}", probe)
+            except CommandFailure as error:
+                raise RuntimeError(f"{class_name} TASTy-only lookup failed: {error.output}") from error
+
+            classfile_only = batch_root / f"classfile-only-{class_name}"
+            try:
+                compile_source(f"classfile-only-{class_name}", classfile_only, probe)
+            except CommandFailure as error:
+                failure = error.output
+            else:
+                raise RuntimeError(f"{class_name} classfile-only control resolved {member}")
+            if not re.search(rf"(?i){member}.*(not found|not a member)|no member.*{member}", failure):
+                raise RuntimeError(f"{class_name} classfile-only failed for another reason: {failure}")
+            negative_diagnostics[f"{class_name}.classfile_only"] = failure.strip()
+
+            missing_classfile = batch_root / f"missing-classfile-{class_name}"
+            output = work / f"missing-classfile-{class_name}-client"
+            output.mkdir()
+            toolchain.compiler(
+                ["-d", output, client_source],
+                classpath=os.pathsep.join((str(missing_classfile), toolchain.runtime_classpath)),
+            )
+            driver = work / "driver-0"
+            runtime = subprocess.run(
+                [toolchain.java, "-Xverify:all", "-XX:-UsePerfData", "-classpath",
+                 os.pathsep.join((str(missing_classfile), str(output), str(driver),
+                                  toolchain.runtime_classpath)), "Runner"],
+                cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180,
+            )
+            failure = runtime.stdout
+            if runtime.returncode == 0 or f"NoClassDefFoundError: example/{class_name}" not in failure:
+                raise RuntimeError(
+                    f"{class_name} missing-classfile runtime did not fail at class loading: {failure}"
+                )
+            negative_diagnostics[f"{class_name}.missing_classfile_runtime"] = failure.strip()
+
+            if constructor_injection:
+                wrong_class_path = batch_root / f"wrong-class-path-{class_name}"
+                wrong_client = work / f"wrong-class-path-{class_name}-client"
+                wrong_client.mkdir()
+                toolchain.compiler(
+                    ["-d", wrong_client, client_source],
+                    classpath=os.pathsep.join((str(wrong_class_path), toolchain.runtime_classpath)),
+                )
+                wrong_driver_source = work / f"wrong-class-path-{class_name}-src/Runner.java"
+                wrong_driver_source.parent.mkdir()
+                wrong_driver_source.write_text(
+                    "public final class Runner { public static void main(String[] args) { "
+                    "System.out.println(consumer.Consumer$.MODULE$.run()); } }\n"
+                )
+                wrong_driver = work / f"wrong-class-path-{class_name}-driver"
+                wrong_driver.mkdir()
+                wrong_driver_classpath = os.pathsep.join((
+                    str(wrong_class_path), str(wrong_client), toolchain.runtime_classpath,
+                ))
+                execute([
+                    toolchain.javac, "-classpath", wrong_driver_classpath,
+                    "-d", wrong_driver, wrong_driver_source,
+                ])
+                wrong_runtime = subprocess.run(
+                    [toolchain.java, "-Xverify:all", "-XX:-UsePerfData", "-classpath",
+                     os.pathsep.join((str(wrong_class_path), str(wrong_client), str(wrong_driver),
+                                      toolchain.runtime_classpath)), "Runner"],
+                    cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180,
+                )
+                failure = wrong_runtime.stdout
+                if wrong_runtime.returncode == 0 or f"NoClassDefFoundError: example/{class_name}" not in failure:
+                    raise RuntimeError(
+                        f"{class_name} misplaced classfile runtime did not fail at class loading: {failure}"
+                    )
+                negative_diagnostics[f"{class_name}.wrong_classfile_path_runtime"] = failure.strip()
+
+            renamed_link = batch_root / f"renamed-link-{class_name}"
+            try:
+                compile_source(f"renamed-link-{class_name}", renamed_link, probe)
+            except CommandFailure as error:
+                failure = error.output
+            else:
+                raise RuntimeError(
+                    f"{class_name} non-TASTY classfile marker still exposed TASTy-only {member}"
+                )
+            if not re.search(rf"(?i){member}.*(not found|not a member)|no member.*{member}", failure):
+                raise RuntimeError(
+                    f"{class_name} non-TASTY marker failed for another reason: {failure}"
+                )
+            negative_diagnostics[f"{class_name}.renamed_link"] = failure.strip()
+
+            for control, pattern in (
+                ("uuid-mismatch", r"(?i)out of sync with its TASTy file"),
+                ("missing-sidecar", r"(?i)this `?\.tasty`? file is missing"),
+                ("wrong-path", r"(?i)this `?\.tasty`? file is missing"),
+                ("corrupt-sidecar", r"(?is)could not be read.*not a TASTy file"),
+            ):
+                try:
+                    compile_source(
+                        f"{control}-{class_name}", batch_root / f"{control}-{class_name}",
+                        probe, werror=True,
+                    )
+                except CommandFailure as error:
+                    failure = error.output
+                else:
+                    raise RuntimeError(f"{class_name} {control} control unexpectedly resolved {member}")
                 if not re.search(pattern, failure):
                     raise RuntimeError(
                         f"{class_name} {control} did not report its expected first-stage diagnostic: {failure}"
