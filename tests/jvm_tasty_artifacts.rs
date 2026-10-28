@@ -1374,6 +1374,803 @@ fn renamed_and_reordered_reference_constructor_batches_emit_complete_links() {
 }
 
 #[test]
+fn reference_constructor_factory_executes_original_rust_object_graph_on_verified_jvm() {
+    if !require_jdk_21_or_skip() {
+        return;
+    }
+
+    let first = emit_paired_jvm_tasty_batch(
+        REFERENCE_CONSTRUCTOR_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(17981),
+    )
+    .unwrap();
+    let repeated = emit_paired_jvm_tasty_batch(
+        REFERENCE_CONSTRUCTOR_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(17982),
+    )
+    .unwrap();
+    assert_ne!(first.source_id(), repeated.source_id());
+    assert_eq!(first.classes().len(), 3);
+    for (artifact, repeated) in first.classes().iter().zip(repeated.classes()) {
+        assert_eq!(artifact.classfile_bytes(), repeated.classfile_bytes());
+        assert_eq!(artifact.tasty_bytes(), repeated.tasty_bytes());
+        assert_eq!(artifact.tasty_link_id(), repeated.tasty_link_id());
+    }
+
+    let stage = TestDirectory::new("reference-constructor-factory-runtime");
+    let malformed_third_sidecar: [u8; 0] = [];
+    let mut malformed_third = batch_publish_pairs(&first);
+    malformed_third[2].tasty_bytes = &malformed_third_sidecar;
+    let malformed_destination = stage.path().join("malformed-third-artifact");
+    assert!(matches!(
+        publish_batch_pairs(&malformed_destination, &malformed_third, None),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 2,
+            phase: "TASTy decode",
+            ..
+        })
+    ));
+    assert!(!malformed_destination.exists());
+
+    let published = stage.path().join("published");
+    let published_paths = publish_paired_batch(&published, &first, None).unwrap();
+    assert_eq!(published_paths.len(), 6);
+    let classes = stage.path().join("classes");
+    for artifact in first.classes() {
+        let path = classes.join(artifact.classfile_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, artifact.classfile_bytes()).unwrap();
+    }
+    let classfile_paths = first
+        .classes()
+        .iter()
+        .map(|artifact| classes.join(artifact.classfile_path()))
+        .collect::<Vec<_>>();
+    let hashes = classfile_paths
+        .iter()
+        .map(|path| sha256sum(path))
+        .collect::<Vec<_>>();
+
+    let decoded = first
+        .classes()
+        .iter()
+        .map(|artifact| ClassFile::decode(&mut Reader::new(artifact.classfile_bytes())).unwrap())
+        .collect::<Vec<_>>();
+    let counter = &decoded[0];
+    let owner = &decoded[1];
+    let factory = &decoded[2];
+    for (class, expected_name) in decoded.iter().zip([
+        "example/Counter",
+        "example/CounterOwner",
+        "example/CounterOwnerFactory",
+    ]) {
+        assert_eq!(
+            class.constant_pool.class_name(class.this_class).unwrap(),
+            expected_name
+        );
+        assert_eq!((class.version.major, class.version.minor), (65, 0));
+        assert_eq!(
+            class
+                .constant_pool
+                .class_name(class.super_class.unwrap())
+                .unwrap(),
+            "java/lang/Object"
+        );
+        assert!(
+            class
+                .access_flags
+                .contains(dotty_classfile::access_flags::ACC_PUBLIC)
+        );
+    }
+    let member_pairs = |class: &ClassFile<'_>| {
+        class
+            .methods
+            .iter()
+            .map(|method| {
+                (
+                    class
+                        .constant_pool
+                        .utf8(method.name_index)
+                        .unwrap()
+                        .to_owned(),
+                    class
+                        .constant_pool
+                        .utf8(method.descriptor_index)
+                        .unwrap()
+                        .to_owned(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut counter_methods = member_pairs(counter);
+    counter_methods.sort();
+    assert_eq!(
+        counter_methods,
+        [
+            ("<init>".to_owned(), "(I)V".to_owned()),
+            ("get".to_owned(), "()I".to_owned()),
+            ("set".to_owned(), "(I)V".to_owned())
+        ]
+    );
+    assert_eq!(counter.fields.len(), 1);
+    assert_eq!(
+        counter
+            .constant_pool
+            .utf8(counter.fields[0].name_index)
+            .unwrap(),
+        "current"
+    );
+    assert_eq!(
+        counter
+            .constant_pool
+            .utf8(counter.fields[0].descriptor_index)
+            .unwrap(),
+        "I"
+    );
+    assert!(
+        counter.fields[0]
+            .access_flags
+            .contains(dotty_classfile::access_flags::ACC_PRIVATE)
+    );
+    assert!(
+        !counter.fields[0]
+            .access_flags
+            .contains(dotty_classfile::access_flags::ACC_FINAL)
+    );
+    let mut owner_methods = member_pairs(owner);
+    owner_methods.sort();
+    assert_eq!(
+        owner_methods,
+        [
+            ("<init>".to_owned(), "(Lexample/Counter;)V".to_owned()),
+            ("read".to_owned(), "()I".to_owned())
+        ]
+    );
+    let mut factory_methods = member_pairs(factory);
+    factory_methods.sort();
+    assert_eq!(
+        factory_methods,
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            (
+                "wrap".to_owned(),
+                "(Lexample/Counter;)Lexample/CounterOwner;".to_owned()
+            )
+        ]
+    );
+    assert!(
+        factory.fields.is_empty(),
+        "Factory has no synthetic storage"
+    );
+
+    assert_eq!(
+        owner.fields.len(),
+        1,
+        "Owner stores exactly the source alias field"
+    );
+    let inner = &owner.fields[0];
+    assert_eq!(owner.constant_pool.utf8(inner.name_index).unwrap(), "inner");
+    assert_eq!(
+        owner.constant_pool.utf8(inner.descriptor_index).unwrap(),
+        "Lexample/Counter;"
+    );
+    assert!(
+        inner
+            .access_flags
+            .contains(dotty_classfile::access_flags::ACC_PRIVATE)
+    );
+    assert!(
+        inner
+            .access_flags
+            .contains(dotty_classfile::access_flags::ACC_FINAL)
+    );
+
+    fn method<'a>(
+        class: &'a ClassFile<'_>,
+        name: &str,
+        descriptor: &str,
+    ) -> &'a dotty_classfile::method::MethodInfo<'a> {
+        class
+            .methods
+            .iter()
+            .find(|method| {
+                class.constant_pool.utf8(method.name_index).unwrap() == name
+                    && class.constant_pool.utf8(method.descriptor_index).unwrap() == descriptor
+            })
+            .unwrap()
+    }
+    for constructor in [
+        method(counter, "<init>", "(I)V"),
+        method(owner, "<init>", "(Lexample/Counter;)V"),
+        method(factory, "<init>", "()V"),
+    ] {
+        assert!(
+            constructor
+                .access_flags
+                .contains(dotty_classfile::access_flags::ACC_PUBLIC)
+        );
+    }
+    let [Attribute::Code(owner_ctor)] = method(owner, "<init>", "(Lexample/Counter;)V")
+        .attributes
+        .as_slice()
+    else {
+        panic!("Owner constructor has one Code attribute");
+    };
+    assert_eq!(&owner_ctor.code[..2], &[0x2a, 0xb7]);
+    let object_ctor_index =
+        ConstantPoolIndex(u16::from_be_bytes([owner_ctor.code[2], owner_ctor.code[3]]));
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = owner.constant_pool.get(object_ctor_index).unwrap()
+    else {
+        panic!("Owner constructor calls Object.<init> through a Methodref");
+    };
+    assert_eq!(
+        owner.constant_pool.class_name(*class_index).unwrap(),
+        "java/lang/Object"
+    );
+    assert_eq!(
+        owner
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("<init>", "()V")
+    );
+    assert_eq!(
+        [
+            owner_ctor.code[0],
+            owner_ctor.code[1],
+            owner_ctor.code[4],
+            owner_ctor.code[5],
+            owner_ctor.code[6],
+            owner_ctor.code[9]
+        ],
+        [0x2a, 0xb7, 0x2a, 0x2b, 0xb5, 0xb1],
+        "the incoming reference is stored only after Object initialization"
+    );
+    let inner_field_index =
+        ConstantPoolIndex(u16::from_be_bytes([owner_ctor.code[7], owner_ctor.code[8]]));
+    let ConstantPoolEntry::Fieldref {
+        class_index,
+        name_and_type_index,
+    } = owner.constant_pool.get(inner_field_index).unwrap()
+    else {
+        panic!("Owner constructor stores through a Fieldref");
+    };
+    assert_eq!(
+        owner.constant_pool.class_name(*class_index).unwrap(),
+        "example/CounterOwner"
+    );
+    assert_eq!(
+        owner
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("inner", "Lexample/Counter;")
+    );
+    assert!(
+        owner_ctor.code.contains(&0x2b),
+        "Owner constructor loads the incoming Counter"
+    );
+    assert!(
+        owner_ctor.code.contains(&0xb5),
+        "Owner constructor stores the incoming Counter"
+    );
+    assert_eq!(
+        owner_ctor
+            .code
+            .iter()
+            .filter(|opcode| **opcode == 0xb5)
+            .count(),
+        1
+    );
+    let [Attribute::Code(owner_read)] = method(owner, "read", "()I").attributes.as_slice() else {
+        panic!("Owner.read has one Code attribute");
+    };
+    assert_eq!(
+        [
+            owner_read.code[0],
+            owner_read.code[1],
+            owner_read.code[4],
+            owner_read.code[7]
+        ],
+        [0x2a, 0xb4, 0xb6, 0xac],
+        "read executes getfield; Counter.get; ireturn"
+    );
+    assert!(
+        owner_read.code.contains(&0xb4),
+        "Owner.read reads its alias field"
+    );
+    assert!(
+        owner_read.code.contains(&0xb6),
+        "Owner.read invokes Counter.get"
+    );
+    assert_eq!(owner_read.code.last(), Some(&0xac));
+    assert_eq!(owner_read.code[0], 0x2a);
+    let read_field_index =
+        ConstantPoolIndex(u16::from_be_bytes([owner_read.code[2], owner_read.code[3]]));
+    let ConstantPoolEntry::Fieldref {
+        class_index,
+        name_and_type_index,
+    } = owner.constant_pool.get(read_field_index).unwrap()
+    else {
+        panic!("Owner.read loads through a Fieldref");
+    };
+    assert_eq!(
+        owner.constant_pool.class_name(*class_index).unwrap(),
+        "example/CounterOwner"
+    );
+    assert_eq!(
+        owner
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("inner", "Lexample/Counter;")
+    );
+    let getter_index =
+        ConstantPoolIndex(u16::from_be_bytes([owner_read.code[5], owner_read.code[6]]));
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = owner.constant_pool.get(getter_index).unwrap()
+    else {
+        panic!("Owner.read invokes Counter.get through a Methodref");
+    };
+    assert_eq!(
+        owner.constant_pool.class_name(*class_index).unwrap(),
+        "example/Counter"
+    );
+    assert_eq!(
+        owner
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("get", "()I")
+    );
+
+    let [Attribute::Code(wrap)] =
+        method(factory, "wrap", "(Lexample/Counter;)Lexample/CounterOwner;")
+            .attributes
+            .as_slice()
+    else {
+        panic!("Factory.wrap has one Code attribute");
+    };
+    assert_eq!(wrap.max_stack, 3);
+    assert_eq!(wrap.max_locals, 2);
+    assert_eq!(
+        [
+            wrap.code[0],
+            wrap.code[3],
+            wrap.code[4],
+            wrap.code[5],
+            wrap.code[8]
+        ],
+        [0xbb, 0x59, 0x2b, 0xb7, 0xb0]
+    );
+    assert_eq!(
+        wrap.code.iter().filter(|opcode| **opcode == 0xbb).count(),
+        1
+    );
+    let allocation_index = ConstantPoolIndex(u16::from_be_bytes([wrap.code[1], wrap.code[2]]));
+    let ConstantPoolEntry::Class { name_index } =
+        factory.constant_pool.get(allocation_index).unwrap()
+    else {
+        panic!("Factory allocation targets a class constant");
+    };
+    assert_eq!(
+        factory.constant_pool.utf8(*name_index).unwrap(),
+        "example/CounterOwner"
+    );
+    let constructor_index = ConstantPoolIndex(u16::from_be_bytes([wrap.code[6], wrap.code[7]]));
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = factory.constant_pool.get(constructor_index).unwrap()
+    else {
+        panic!("Factory constructor invocation targets a Methodref");
+    };
+    assert_eq!(
+        factory.constant_pool.class_name(*class_index).unwrap(),
+        "example/CounterOwner"
+    );
+    assert_eq!(
+        factory
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("<init>", "(Lexample/Counter;)V")
+    );
+
+    for class_name in [
+        "example.Counter",
+        "example.CounterOwner",
+        "example.CounterOwnerFactory",
+    ] {
+        let javap = Command::new("javap")
+            .args(["-classpath", classes.to_str().unwrap(), "-p", "-v", "-c"])
+            .arg(class_name)
+            .output()
+            .expect("start javap for original Rust classfile");
+        assert!(
+            javap.status.success(),
+            "javap rejected {class_name}: {}",
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let dump = String::from_utf8_lossy(&javap.stdout);
+        assert!(dump.contains("major version: 65"), "{class_name}: {dump}");
+        match class_name {
+            "example.Counter" => {
+                for expected in [
+                    "public example.Counter(int);",
+                    "public int get();",
+                    "public void set(int);",
+                ] {
+                    assert!(
+                        dump.contains(expected),
+                        "{class_name} omitted {expected}: {dump}"
+                    );
+                }
+            }
+            "example.CounterOwner" => {
+                for expected in [
+                    "private final example.Counter inner;",
+                    "public example.CounterOwner(example.Counter);",
+                    "Field inner:Lexample/Counter;",
+                    "Method example/Counter.get:()I",
+                ] {
+                    assert!(
+                        dump.contains(expected),
+                        "{class_name} omitted {expected}: {dump}"
+                    );
+                }
+            }
+            _ => {
+                for expected in [
+                    "public example.CounterOwner wrap(example.Counter);",
+                    "new           #",
+                    "aload_1",
+                    "CounterOwner.\"<init>\":(Lexample/Counter;)V",
+                    "areturn",
+                ] {
+                    assert!(
+                        dump.contains(expected),
+                        "{class_name} omitted {expected}: {dump}"
+                    );
+                }
+            }
+        }
+    }
+
+    let harness = stage.path().join("ReferenceFactoryHarness.java");
+    let harness_classes = stage.path().join("harness-classes");
+    std::fs::create_dir(&harness_classes).unwrap();
+    std::fs::write(&harness, r#"import java.lang.reflect.Field;
+
+public final class ReferenceFactoryHarness {
+    public static void main(String[] args) throws ReflectiveOperationException {
+        example.Counter counter = new example.Counter(7);
+        example.CounterOwnerFactory factory = new example.CounterOwnerFactory();
+        example.CounterOwner first = factory.wrap(counter);
+        example.CounterOwner second = factory.wrap(counter);
+        if (first == second) throw new AssertionError("wrap must allocate a distinct Owner each time");
+        assertIdentity(first, counter);
+        assertIdentity(second, counter);
+        expect(first.read(), 7);
+        expect(second.read(), 7);
+        counter.set(42);
+        expect(first.read(), 42);
+        expect(second.read(), 42);
+        counter.set(-9);
+        expect(first.read(), -9);
+        expect(second.read(), -9);
+
+        example.Counter otherCounter = new example.Counter(3);
+        example.CounterOwner other = factory.wrap(otherCounter);
+        assertIdentity(other, otherCounter);
+        otherCounter.set(13);
+        expect(other.read(), 13);
+        expect(first.read(), -9);
+        counter.set(100);
+        expect(first.read(), 100);
+        expect(second.read(), 100);
+        expect(other.read(), 13);
+        System.out.println("factory-identity=true; same-counter-wraps=distinct; first=100; other=13");
+    }
+
+    private static void assertIdentity(example.CounterOwner owner, example.Counter expected)
+        throws ReflectiveOperationException {
+        Field inner = example.CounterOwner.class.getDeclaredField("inner");
+        inner.setAccessible(true);
+        if (inner.get(owner) != expected) throw new AssertionError("Owner.inner lost Counter identity");
+    }
+
+    private static void expect(int actual, int expected) {
+        if (actual != expected) throw new AssertionError("expected " + expected + ", got " + actual);
+    }
+}
+"#).unwrap();
+    let javac = Command::new("javac")
+        .args([
+            "-classpath",
+            classes.to_str().unwrap(),
+            "-d",
+            harness_classes.to_str().unwrap(),
+        ])
+        .arg(&harness)
+        .output()
+        .expect("start javac against the original Rust classes");
+    assert!(
+        javac.status.success(),
+        "javac rejected harness: {}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let classpath = std::env::join_paths([harness_classes.as_path(), classes.as_path()]).unwrap();
+    let java = Command::new("java")
+        .args(["-Xverify:all", "-classpath"])
+        .arg(&classpath)
+        .arg("ReferenceFactoryHarness")
+        .output()
+        .expect("start strict JVM verification and Rust class harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all failed:\n{}\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "factory-identity=true; same-counter-wraps=distinct; first=100; other=13"
+    );
+    for (index, path) in classfile_paths.iter().enumerate() {
+        assert_eq!(
+            sha256sum(path),
+            hashes[index],
+            "JDK tools changed original Rust classfile bytes"
+        );
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            first.classes()[index].classfile_bytes()
+        );
+    }
+
+    let [Attribute::Code(factory_ctor)] = method(factory, "<init>", "()V").attributes.as_slice()
+    else {
+        panic!("Factory constructor has one Code attribute");
+    };
+    let object_constructor_index = ConstantPoolIndex(u16::from_be_bytes([
+        factory_ctor.code[2],
+        factory_ctor.code[3],
+    ]));
+    let mut wrong_constructor_target = first.classes()[2].classfile_bytes().to_vec();
+    let factory_code_start = wrong_constructor_target
+        .windows(wrap.code.len())
+        .position(|bytes| bytes == wrap.code)
+        .expect("Factory classfile contains the decoded wrap Code bytes");
+    wrong_constructor_target[factory_code_start + 6..factory_code_start + 8]
+        .copy_from_slice(&object_constructor_index.0.to_be_bytes());
+    let wrong_constructor_root = stage.path().join("wrong-constructor-target");
+    std::fs::create_dir_all(wrong_constructor_root.join("example")).unwrap();
+    std::fs::write(
+        wrong_constructor_root.join("example/Counter.class"),
+        first.classes()[0].classfile_bytes(),
+    )
+    .unwrap();
+    std::fs::write(
+        wrong_constructor_root.join("example/CounterOwner.class"),
+        first.classes()[1].classfile_bytes(),
+    )
+    .unwrap();
+    std::fs::write(
+        wrong_constructor_root.join("example/CounterOwnerFactory.class"),
+        wrong_constructor_target,
+    )
+    .unwrap();
+    let wrong_constructor_classpath =
+        std::env::join_paths([harness_classes.as_path(), wrong_constructor_root.as_path()])
+            .unwrap();
+    let rejected_wrong_constructor = Command::new("java")
+        .args(["-Xverify:all", "-classpath"])
+        .arg(wrong_constructor_classpath)
+        .arg("ReferenceFactoryHarness")
+        .output()
+        .expect("start wrong constructor target verifier negative control");
+    assert!(!rejected_wrong_constructor.status.success());
+    let wrong_constructor_error = format!(
+        "{}{}",
+        String::from_utf8_lossy(&rejected_wrong_constructor.stdout),
+        String::from_utf8_lossy(&rejected_wrong_constructor.stderr)
+    );
+    assert!(
+        wrong_constructor_error.contains("VerifyError"),
+        "wrong constructor target must fail verification:\n{wrong_constructor_error}"
+    );
+
+    let mut uninitialized_owner = first.classes()[2].classfile_bytes().to_vec();
+    let factory_code_offset = uninitialized_owner
+        .windows(wrap.code.len())
+        .position(|bytes| bytes == wrap.code)
+        .expect("Factory classfile contains the decoded wrap Code bytes");
+    uninitialized_owner[factory_code_offset + 5] = 0x00;
+    let corrupted = stage.path().join("uninitialized-owner");
+    std::fs::create_dir_all(corrupted.join("example")).unwrap();
+    std::fs::write(
+        corrupted.join("example/Counter.class"),
+        first.classes()[0].classfile_bytes(),
+    )
+    .unwrap();
+    std::fs::write(
+        corrupted.join("example/CounterOwner.class"),
+        first.classes()[1].classfile_bytes(),
+    )
+    .unwrap();
+    std::fs::write(
+        corrupted.join("example/CounterOwnerFactory.class"),
+        uninitialized_owner,
+    )
+    .unwrap();
+    let corrupted_classpath =
+        std::env::join_paths([harness_classes.as_path(), corrupted.as_path()]).unwrap();
+    let rejected_uninitialized = Command::new("java")
+        .args(["-Xverify:all", "-classpath"])
+        .arg(corrupted_classpath)
+        .arg("ReferenceFactoryHarness")
+        .output()
+        .expect("start uninitialized-Owner verifier negative control");
+    assert!(!rejected_uninitialized.status.success());
+    let verifier_error = format!(
+        "{}{}",
+        String::from_utf8_lossy(&rejected_uninitialized.stdout),
+        String::from_utf8_lossy(&rejected_uninitialized.stderr)
+    );
+    assert!(
+        verifier_error.contains("VerifyError"),
+        "mutated Factory must fail verification, got:\n{verifier_error}"
+    );
+
+    for (label, code_offset, replacement) in [
+        ("missing-dup", 3usize, 0x00u8),
+        ("integer-load-for-reference", 4, 0x1b),
+        ("factory-receiver-for-counter-argument", 4, 0x2a),
+        ("integer-return-for-owner", 8, 0xac),
+    ] {
+        let mut malformed_factory = first.classes()[2].classfile_bytes().to_vec();
+        let code_start = malformed_factory
+            .windows(wrap.code.len())
+            .position(|bytes| bytes == wrap.code)
+            .unwrap();
+        malformed_factory[code_start + code_offset] = replacement;
+        let malformed_root = stage.path().join(label);
+        std::fs::create_dir_all(malformed_root.join("example")).unwrap();
+        std::fs::write(
+            malformed_root.join("example/Counter.class"),
+            first.classes()[0].classfile_bytes(),
+        )
+        .unwrap();
+        std::fs::write(
+            malformed_root.join("example/CounterOwner.class"),
+            first.classes()[1].classfile_bytes(),
+        )
+        .unwrap();
+        std::fs::write(
+            malformed_root.join("example/CounterOwnerFactory.class"),
+            malformed_factory,
+        )
+        .unwrap();
+        let malformed_classpath =
+            std::env::join_paths([harness_classes.as_path(), malformed_root.as_path()]).unwrap();
+        let rejected = Command::new("java")
+            .args(["-Xverify:all", "-classpath"])
+            .arg(malformed_classpath)
+            .arg("ReferenceFactoryHarness")
+            .output()
+            .expect("start malformed Factory verifier negative control");
+        assert!(!rejected.status.success(), "JVM accepted {label}");
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&rejected.stdout),
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(
+            output.contains("VerifyError"),
+            "{label} failed outside verifier:\n{output}"
+        );
+    }
+
+    let mut wrong_owner_receiver = first.classes()[1].classfile_bytes().to_vec();
+    let owner_ctor_offset = wrong_owner_receiver
+        .windows(owner_ctor.code.len())
+        .position(|bytes| bytes == owner_ctor.code)
+        .expect("Owner classfile contains its decoded constructor Code bytes");
+    wrong_owner_receiver[owner_ctor_offset + 4] = 0x2b;
+    let wrong_receiver_root = stage.path().join("wrong-owner-receiver");
+    std::fs::create_dir_all(wrong_receiver_root.join("example")).unwrap();
+    std::fs::write(
+        wrong_receiver_root.join("example/Counter.class"),
+        first.classes()[0].classfile_bytes(),
+    )
+    .unwrap();
+    std::fs::write(
+        wrong_receiver_root.join("example/CounterOwner.class"),
+        wrong_owner_receiver,
+    )
+    .unwrap();
+    std::fs::write(
+        wrong_receiver_root.join("example/CounterOwnerFactory.class"),
+        first.classes()[2].classfile_bytes(),
+    )
+    .unwrap();
+    let wrong_receiver_classpath =
+        std::env::join_paths([harness_classes.as_path(), wrong_receiver_root.as_path()]).unwrap();
+    let wrong_receiver = Command::new("java")
+        .args(["-Xverify:all", "-classpath"])
+        .arg(wrong_receiver_classpath)
+        .arg("ReferenceFactoryHarness")
+        .output()
+        .expect("start wrong Owner receiver verifier negative control");
+    assert!(!wrong_receiver.status.success());
+    assert!(
+        String::from_utf8_lossy(&wrong_receiver.stderr).contains("VerifyError"),
+        "wrong Owner receiver must fail verification: {}",
+        String::from_utf8_lossy(&wrong_receiver.stderr)
+    );
+
+    let without_owner = stage.path().join("without-owner");
+    std::fs::create_dir_all(without_owner.join("example")).unwrap();
+    std::fs::write(
+        without_owner.join("example/Counter.class"),
+        first.classes()[0].classfile_bytes(),
+    )
+    .unwrap();
+    std::fs::write(
+        without_owner.join("example/CounterOwnerFactory.class"),
+        first.classes()[2].classfile_bytes(),
+    )
+    .unwrap();
+    let missing_owner_classpath =
+        std::env::join_paths([harness_classes.as_path(), without_owner.as_path()]).unwrap();
+    let missing_owner = Command::new("java")
+        .args(["-Xverify:all", "-classpath"])
+        .arg(missing_owner_classpath)
+        .arg("ReferenceFactoryHarness")
+        .output()
+        .expect("start missing Owner linkage negative control");
+    assert!(!missing_owner.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_owner.stderr)
+            .contains("NoClassDefFoundError: example/CounterOwner")
+    );
+
+    let without_counter = stage.path().join("without-counter");
+    std::fs::create_dir_all(without_counter.join("example")).unwrap();
+    std::fs::write(
+        without_counter.join("example/CounterOwner.class"),
+        first.classes()[1].classfile_bytes(),
+    )
+    .unwrap();
+    std::fs::write(
+        without_counter.join("example/CounterOwnerFactory.class"),
+        first.classes()[2].classfile_bytes(),
+    )
+    .unwrap();
+    let missing_counter_classpath =
+        std::env::join_paths([harness_classes.as_path(), without_counter.as_path()]).unwrap();
+    let missing_counter = Command::new("java")
+        .args(["-Xverify:all", "-classpath"])
+        .arg(missing_counter_classpath)
+        .arg("ReferenceFactoryHarness")
+        .output()
+        .expect("start missing Counter linkage negative control");
+    assert!(!missing_counter.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_counter.stderr)
+            .contains("NoClassDefFoundError: example/Counter")
+    );
+}
+
+#[test]
 fn constructor_injected_reference_alias_executes_on_verified_jdk21() {
     if !require_jdk_21_or_skip() {
         return;
