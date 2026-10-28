@@ -958,6 +958,12 @@ fn rust_original_source_preserves_factory_call_identities_and_exposes_first_reje
         helper_proof.argument_proof().kind(),
         dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::Formal
     );
+    let helper_formal = helper_proof
+        .argument_proof()
+        .formal()
+        .expect("makeCounter's constructor argument is its direct formal");
+    assert_eq!(helper_formal.formal_type(), definitions.int);
+    assert_eq!(helper_formal.result_type(), definitions.int);
     assert_eq!(helper_proof.target_class(), counter_class);
     assert!(matches!(
         typer.store().types.get(factory_proof.constructor_formal_type()),

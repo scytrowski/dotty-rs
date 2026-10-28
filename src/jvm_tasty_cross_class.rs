@@ -163,7 +163,7 @@ impl ConstructorArgumentProof {
     }
 }
 
-/// Read-only identities retained by a direct formal argument proof.
+/// Read-only identities and value type retained by a direct formal argument proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FormalConstructorArgumentProofView {
     source_argument: TreeId<Untyped>,
@@ -186,6 +186,8 @@ impl FormalConstructorArgumentProofView {
     pub const fn formal_type(self) -> TypeId {
         self.formal_type
     }
+    /// Type produced by the original argument expression, independent of the
+    /// enclosing method's result type.
     pub const fn result_type(self) -> TypeId {
         self.result_type
     }
@@ -1253,6 +1255,29 @@ fn validate_constructor_call_candidate<'session>(
         let typed_function_node = typed_ast
             .try_get(typed_function)
             .ok_or_else(|| typed_error("planned helper typed function is stale"))?;
+        let function_shape_matches = match (
+            source_ast.try_get(source_function).map(|tree| &tree.kind),
+            &typed_function_node.kind,
+        ) {
+            (Some(TreeKind::Ident(source_ident)), TreeKind::Ident(typed_ident)) => {
+                source_receiver.is_none()
+                    && typed_receiver.is_none()
+                    && store.names.resolve(source_ident.name.text())
+                        == store.names.resolve(typed_ident.name.text())
+            }
+            (Some(TreeKind::Select(source_select)), TreeKind::Select(typed_select)) => {
+                source_receiver == Some(source_select.qualifier)
+                    && typed_receiver.is_some_and(|receiver| typed_select.qualifier == receiver)
+                    && store.names.resolve(source_select.name.text())
+                        == store.names.resolve(typed_select.name.text())
+            }
+            _ => false,
+        };
+        if !function_shape_matches {
+            return Err(typed_error(
+                "planned helper typed function must preserve the original Ident or mapped Select receiver edge",
+            ));
+        }
         let helper = match store.types.try_get(typed_function_node.ty) {
             Some(Type::TermRef {
                 target: TermRefTarget::Symbol(helper),
@@ -2578,7 +2603,7 @@ fn validate_constructor_call_candidate<'session>(
                 typed_argument,
                 formal: method_formal,
                 formal_type,
-                result_type,
+                result_type: argument_type,
             }),
         },
     };

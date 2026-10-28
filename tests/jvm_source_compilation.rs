@@ -15918,6 +15918,169 @@ fn planned_call_proof_rejects_a_same_named_foreign_owner_receipt() {
 }
 
 #[test]
+fn planned_call_proof_rejects_a_disconnected_typed_select_receiver() {
+    let source = FACTORY_RESULT_ARGUMENT_SOURCE.replace(
+        "new CounterOwner(makeCounter(seed))",
+        "new CounterOwner(this.makeCounter(seed))",
+    );
+    let source_id = SourceId::from_index(183307);
+    let output = TestOutputDirectory::new("planned-call-disconnected-receiver");
+    let mut observed = false;
+    let mut observe = |ast: &AstArena<Untyped>,
+                       source_root: TreeId<Untyped>,
+                       source_index: &SourceSemanticIndex,
+                       source_typed_index: &SourceTypedIndex,
+                       unit: &mut JvmCompilationUnit<'_>,
+                       definitions: &Definitions| {
+        observed = true;
+        let proofs =
+            validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                source_id,
+                source_root,
+                store: unit.store,
+                definitions,
+                source_ast: ast,
+                typed_ast: unit.typed_ast,
+                source_index,
+                source_typed_index,
+                jvm_unit: unit,
+            })
+            .expect("the unmodified explicit-this source has a valid proof");
+        let call = proofs
+            .iter()
+            .find_map(|proof| proof.argument_proof().planned_call())
+            .expect("the constructor argument has a planned-call receipt");
+        assert!(call.source_receiver().is_some());
+        assert!(call.typed_receiver().is_some());
+
+        let mut corrupted_typed_ast = AstArena::new();
+        for (_, tree) in unit.typed_ast.iter() {
+            corrupted_typed_ast.alloc(tree.clone());
+        }
+        let function = corrupted_typed_ast.get_mut(call.typed_function());
+        let TreeKind::Select(selection) = &mut function.kind else {
+            panic!("explicit source this selection retains a typed Select");
+        };
+        assert_ne!(selection.qualifier, call.typed_argument());
+        selection.qualifier = call.typed_argument();
+        let corrupted_unit = JvmCompilationUnit {
+            store: unit.store,
+            typed_ast: &corrupted_typed_ast,
+            classes: unit.classes.clone(),
+        };
+        assert!(matches!(
+            validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                source_id,
+                source_root,
+                store: unit.store,
+                definitions,
+                source_ast: ast,
+                typed_ast: &corrupted_typed_ast,
+                source_index,
+                source_typed_index,
+                jvm_unit: &corrupted_unit,
+            }),
+            Err(
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "planned helper typed function must preserve the original Ident or mapped Select receiver edge"
+                )
+            )
+        ));
+    };
+    compile_source_batch_with_source_observer(
+        &source,
+        "DisconnectedPlannedCallReceiver.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe,
+    )
+    .expect("the real explicit-this source emits before test-only corruption");
+    assert!(observed);
+}
+
+#[test]
+fn planned_call_proof_rejects_a_select_for_an_unqualified_source_function() {
+    let source_id = SourceId::from_index(183308);
+    let output = TestOutputDirectory::new("planned-call-unqualified-shape");
+    let mut observed = false;
+    let mut observe = |ast: &AstArena<Untyped>,
+                       source_root: TreeId<Untyped>,
+                       source_index: &SourceSemanticIndex,
+                       source_typed_index: &SourceTypedIndex,
+                       unit: &mut JvmCompilationUnit<'_>,
+                       definitions: &Definitions| {
+        observed = true;
+        let proofs =
+            validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                source_id,
+                source_root,
+                store: unit.store,
+                definitions,
+                source_ast: ast,
+                typed_ast: unit.typed_ast,
+                source_index,
+                source_typed_index,
+                jvm_unit: unit,
+            })
+            .expect("the unmodified unqualified source has a valid proof");
+        let call = proofs
+            .iter()
+            .find_map(|proof| proof.argument_proof().planned_call())
+            .expect("the constructor argument has a planned-call receipt");
+        assert_eq!(call.source_receiver(), None);
+        assert_eq!(call.typed_receiver(), None);
+
+        let mut corrupted_typed_ast = AstArena::new();
+        for (_, tree) in unit.typed_ast.iter() {
+            corrupted_typed_ast.alloc(tree.clone());
+        }
+        let function = corrupted_typed_ast.get_mut(call.typed_function());
+        let TreeKind::Ident(identifier) = &function.kind else {
+            panic!("an unqualified source helper remains an Ident");
+        };
+        function.kind = TreeKind::Select(dotty_core::ast::Select {
+            qualifier: call.typed_argument(),
+            name: identifier.name,
+            backquoted: false,
+        });
+        let corrupted_unit = JvmCompilationUnit {
+            store: unit.store,
+            typed_ast: &corrupted_typed_ast,
+            classes: unit.classes.clone(),
+        };
+        assert!(matches!(
+            validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                source_id,
+                source_root,
+                store: unit.store,
+                definitions,
+                source_ast: ast,
+                typed_ast: &corrupted_typed_ast,
+                source_index,
+                source_typed_index,
+                jvm_unit: &corrupted_unit,
+            }),
+            Err(
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "planned helper typed function must preserve the original Ident or mapped Select receiver edge"
+                )
+            )
+        ));
+    };
+    compile_source_batch_with_source_observer(
+        FACTORY_RESULT_ARGUMENT_SOURCE,
+        "UnqualifiedPlannedCall.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe,
+    )
+    .expect("the real source emits before test-only corruption");
+    assert!(observed);
+}
+
+#[test]
 fn original_factory_result_source_emits_with_complete_state_plans_and_runs_on_jdk() {
     let output = TestOutputDirectory::new("factory-result-arguments-jvm-only");
     let source_id = SourceId::from_index(18320);

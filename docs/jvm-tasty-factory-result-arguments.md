@@ -186,6 +186,7 @@ not inferred from the first rejection.
 | Conditional argument | Source proof rejects at the bounded argument-shape check. |
 | Overloaded same-class helper | A real source with a Boolean overload rejects at `SourceShape("overloaded planned helper methods are unsupported")`. |
 | Foreign same-named helper owner | Test-only corruption replaces the selected method `TermRef` with a real same-session method from another planned class; the proof rejects with `SourceIdentity` before returning receipts. |
+| Disconnected explicit receiver | Test-only same-session corruption changes only the typed helper `Select.qualifier`; the proof rejects with `TypedBinding` even though the separately mapped `this`, method `TermRef`, spans, and source mappings remain intact. |
 | Missing planned-call function binding | Test-only removal of the original source-to-typed edge rejects with `TypedBinding("planned helper function has no source-to-typed binding")`. |
 | Local/block argument | Not measured in this increment. The issue allows deferred cases; the matrix uses the direct call path only and does not make a claim about block-root scanning. |
 | Private/static/super/implicit/using/generic/external factory method | Not accepted by the proof contract: the helper must be a public, monomorphic, plain instance method with one ordinary formal, a canonical source definition, and an exact same-class `this` receiver. Source typing or earlier planning can reject some of these before the proof stage. |
@@ -205,13 +206,18 @@ Unmeasured controls have no attributed rejection stage.
 
 Each receipt keeps canonical source and typed tree IDs, the original caller
 formal, expected and result `TypeId`s, and selected owner/member identities.
+For `Formal`, the variant's `result_type` is the value type of the original
+argument expression; the enclosing constructor proof separately retains the
+method's result type. This keeps primitive and reference formals distinct from
+the class constructed by the method.
 `PlannedCall` additionally keeps the original helper `Apply` and function,
 optional explicit receiver, helper method definition and body roots, selected
 helper symbol, and helper formal. Validation checks exact `SourceId`-scoped
 source/typed mappings and matching spans; canonical source definitions and
 owners; the caller's original formal; one plain `(A)R` helper method; the
 same-class `this` prefix (including unqualified selections); its exact class
-result; and its source/JVM method body. A post-scan link requires that helper's
+result; exact `Ident`/`Select` shape parity and the mapped typed `Select`
+qualifier; and its source/JVM method body. A post-scan link requires that helper's
 own direct-formal constructor body have passed the established proof in the
 same `JvmCompilationUnit`, independent of class declaration order.
 

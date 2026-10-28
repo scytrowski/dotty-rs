@@ -219,6 +219,7 @@ fn assert_generic_proof(source: &str, source_number: u32, expected_descriptor: &
     assert_eq!(formal.source_argument(), proof.source_argument());
     assert_eq!(formal.typed_argument(), proof.typed_argument());
     assert_eq!(formal.formal_type(), proof.formal_type());
+    assert_eq!(formal.result_type(), formal.formal_type());
     assert_ne!(proof.caller_class(), target_class);
     assert_eq!(proof.caller_class(), caller_plan.1);
     let formal_class = proof
@@ -244,6 +245,10 @@ fn assert_generic_proof(source: &str, source_number: u32, expected_descriptor: &
             .get(source_id, proof.source_argument()),
         Some(proof.typed_argument())
     );
+    assert!(matches!(
+        typer.store().types.get(formal.result_type()),
+        Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == formal_class
+    ));
     assert!(matches!(
         typer.store().types.get(proof.result_type()),
         Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == target_class
