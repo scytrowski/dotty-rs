@@ -38,6 +38,54 @@ pub struct ClassFieldPicklePlan {
     pub declared_type: TypeId,
 }
 
+/// Validated signature roots for a one-formal method whose parameter and
+/// result are different public classes in the same source batch. The method
+/// body is intentionally not part of this proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DistinctReferenceMethodSignature {
+    pub(crate) method: SymbolId,
+    pub(crate) source_tree: TreeId<Untyped>,
+    pub(crate) parameter: SymbolId,
+    pub(crate) parameter_tree: TreeId<Untyped>,
+    pub(crate) parameter_type: TypeId,
+    pub(crate) parameter_class: SymbolId,
+    pub(crate) parameter_class_tree: TreeId<Untyped>,
+    pub(crate) parameter_type_syntax: TreeId<Untyped>,
+    pub(crate) result_type: TypeId,
+    pub(crate) result_class: SymbolId,
+    pub(crate) result_class_tree: TreeId<Untyped>,
+    pub(crate) result_type_syntax: TreeId<Untyped>,
+    pub(crate) source_rhs: TreeId<Untyped>,
+    pub(crate) typed_rhs: TreeId<Typed>,
+}
+
+impl DistinctReferenceMethodSignature {
+    pub fn method(&self) -> SymbolId {
+        self.method
+    }
+    pub fn parameter(&self) -> SymbolId {
+        self.parameter
+    }
+    pub fn parameter_class(&self) -> SymbolId {
+        self.parameter_class
+    }
+    pub fn result_class(&self) -> SymbolId {
+        self.result_class
+    }
+    pub fn parameter_type(&self) -> TypeId {
+        self.parameter_type
+    }
+    pub fn result_type(&self) -> TypeId {
+        self.result_type
+    }
+    pub fn source_rhs(&self) -> TreeId<Untyped> {
+        self.source_rhs
+    }
+    pub fn typed_rhs(&self) -> TreeId<Typed> {
+        self.typed_rhs
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SameBatchReferenceFieldData {
     field: ClassFieldPicklePlan,
@@ -1757,6 +1805,370 @@ pub struct ValidatedClassStatePlan<'p, 'a> {
 impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
     pub fn plan(&self) -> &'p ClassStatePicklePlan<'a> {
         self.plan
+    }
+
+    /// Validate and retain the source and semantic roots for a distinct
+    /// same-batch class reference signature. This deliberately does not
+    /// inspect or authorize serialization of the method body.
+    pub fn distinct_reference_method_signature(
+        &self,
+        method: SymbolId,
+    ) -> Result<DistinctReferenceMethodSignature, PickleError> {
+        let p = self.plan;
+        let source_tree = p
+            .members
+            .iter()
+            .find_map(|member| match member {
+                ClassMemberPicklePlan::Method {
+                    symbol,
+                    source_tree,
+                } if *symbol == method => Some(*source_tree),
+                _ => None,
+            })
+            .ok_or(PickleError::SourceDefinition { symbol: method })?;
+        let tree = p
+            .source_ast
+            .try_get(source_tree)
+            .ok_or(PickleError::InvalidSourceTree { tree: source_tree })?;
+        let TreeKind::DefDef(definition) = &tree.kind else {
+            return Err(PickleError::SourceShape {
+                tree: source_tree,
+                expected: SourceRole::Method,
+            });
+        };
+        if !p.store.symbols.contains(method) {
+            return Err(PickleError::InvalidSymbol { symbol: method });
+        }
+        let method_record = p.store.symbols.get(method);
+        if method_record.kind != SymbolKind::Method
+            || method_record.owner != Some(p.class)
+            || method_record.origin != SymbolOrigin::Source(p.source.id)
+            || method_record.visibility != Visibility::Public
+            || !method_record.flags.is_empty()
+            || !method_record.annotations.is_empty()
+            || p.source_index.symbol_at(p.source.id, source_tree) != Some(method)
+            || p.source_index.definition_of(method)
+                != Some(SourceDefinition::Canonical {
+                    source: p.source.id,
+                    tree: source_tree,
+                })
+            || !definition.type_params.is_empty()
+            || definition.value_param_clauses.len() != 1
+            || definition.value_param_clauses[0].len() != 1
+            || definition.source_param_clause_order.is_some()
+            || definition.metadata.visibility.is_some()
+            || !definition.metadata.modifiers.is_empty()
+            || !definition.metadata.annotations.is_empty()
+        {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::ClassMembers,
+                symbol: Some(method),
+            });
+        }
+        let parameter_tree = definition.value_param_clauses[0][0];
+        let parameter_node =
+            p.source_ast
+                .try_get(parameter_tree)
+                .ok_or(PickleError::InvalidSourceTree {
+                    tree: parameter_tree,
+                })?;
+        let TreeKind::ValDef(parameter_definition) = &parameter_node.kind else {
+            return Err(PickleError::SourceShape {
+                tree: parameter_tree,
+                expected: SourceRole::Parameter,
+            });
+        };
+        let parameter = p
+            .source_index
+            .symbol_at(p.source.id, parameter_tree)
+            .ok_or(PickleError::SourceDefinition { symbol: method })?;
+        if !p.store.symbols.contains(parameter) {
+            return Err(PickleError::InvalidSymbol { symbol: parameter });
+        }
+        let parameter_record = p.store.symbols.get(parameter);
+        let signature_type = match method_record.info {
+            SymbolInfo::Complete(ty) => ty,
+            info => {
+                return Err(PickleError::IncompleteSymbol {
+                    symbol: method,
+                    info,
+                });
+            }
+        };
+        let Type::Method(signature) = p
+            .store
+            .types
+            .try_get(signature_type)
+            .ok_or(PickleError::InvalidType { ty: signature_type })?
+        else {
+            return Err(PickleError::MalformedType {
+                ty: signature_type,
+                role: TypeRole::Parameter,
+            });
+        };
+        if signature.kind != MethodKind::Plain
+            || signature.params.len() != 1
+            || signature.params[0].erased
+            || signature.params[0].varargs
+            || signature.params[0].name.as_name() != parameter_definition.name.as_name()
+            || parameter_record.kind != SymbolKind::Parameter
+            || parameter_record.owner != Some(method)
+            || parameter_record.origin != SymbolOrigin::Source(p.source.id)
+            || parameter_record.name != *parameter_definition.name.as_name()
+            || parameter_record.visibility != Visibility::Public
+            || !parameter_record.flags.is_empty()
+            || !parameter_record.annotations.is_empty()
+            || p.source_index.definition_of(parameter)
+                != Some(SourceDefinition::Canonical {
+                    source: p.source.id,
+                    tree: parameter_tree,
+                })
+        {
+            return Err(PickleError::MalformedType {
+                ty: signature_type,
+                role: TypeRole::Parameter,
+            });
+        }
+        if parameter_definition.rhs.is_some()
+            || parameter_definition.metadata.visibility.is_some()
+            || !(parameter_definition.metadata.modifiers.is_empty()
+                || parameter_definition.metadata.modifiers.as_slice() == [Modifier::Param])
+            || !parameter_definition.metadata.annotations.is_empty()
+        {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::ParameterClauses,
+                symbol: Some(parameter),
+            });
+        }
+        let parameter_type = signature.params[0].ty;
+        let result_type = signature.result;
+        let parameter_signature = match parameter_record.info {
+            SymbolInfo::Complete(ty) => ty,
+            info => {
+                return Err(PickleError::IncompleteSymbol {
+                    symbol: parameter,
+                    info,
+                });
+            }
+        };
+        if parameter_signature != parameter_type {
+            return Err(PickleError::MalformedType {
+                ty: signature_type,
+                role: TypeRole::Parameter,
+            });
+        }
+        let class_target = |ty: TypeId| match p.store.types.try_get(ty) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            }) => Some(*class),
+            _ => None,
+        };
+        let parameter_class = class_target(parameter_type).ok_or(PickleError::MalformedType {
+            ty: parameter_type,
+            role: TypeRole::Parameter,
+        })?;
+        let result_class = class_target(result_type).ok_or(PickleError::MalformedType {
+            ty: result_type,
+            role: TypeRole::MethodResult,
+        })?;
+        if parameter_class == result_class {
+            return Err(PickleError::MalformedType {
+                ty: result_type,
+                role: TypeRole::MethodResult,
+            });
+        }
+        let planned = p.typed_bindings.planned_class_symbols();
+        let class_tree = |class: SymbolId| -> Result<TreeId<Untyped>, PickleError> {
+            if !planned.contains(&class) {
+                return Err(PickleError::SourceDefinition { symbol: class });
+            }
+            match p.source_index.definition_of(class) {
+                Some(SourceDefinition::Canonical { source, tree }) if source == p.source.id => {
+                    Ok(tree)
+                }
+                _ => Err(PickleError::SourceDefinition { symbol: class }),
+            }
+        };
+        let parameter_class_tree = class_tree(parameter_class)?;
+        let result_class_tree = class_tree(result_class)?;
+        let package = p.store.symbols.get(p.class).owner;
+        for class in [parameter_class, result_class] {
+            if !p.store.symbols.contains(class) {
+                return Err(PickleError::InvalidSymbol { symbol: class });
+            }
+            let record = p.store.symbols.get(class);
+            if record.kind != SymbolKind::Class
+                || record.owner != package
+                || record.origin != SymbolOrigin::Source(p.source.id)
+                || record.visibility != Visibility::Public
+                || !record.flags.is_empty()
+                || !record.annotations.is_empty()
+            {
+                return Err(PickleError::SourceDefinition { symbol: class });
+            }
+        }
+        for (ty, class) in [
+            (parameter_type, parameter_class),
+            (result_type, result_class),
+        ] {
+            let Some(Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(target),
+            }) = p.store.types.try_get(ty)
+            else {
+                return Err(PickleError::UnsupportedTypeReference { ty });
+            };
+            let owner = p.store.symbols.get(class).owner.ok_or(PickleError::Owner {
+                symbol: class,
+                expected: None,
+                actual: None,
+            })?;
+            if *target != class
+                || !matches!(p.store.types.try_get(*prefix), Some(Type::TypeRef {
+                    prefix: package_prefix, target: TypeRefTarget::Symbol(package)
+                }) if *package_prefix == p.definitions.no_prefix && *package == owner)
+            {
+                return Err(PickleError::UnsupportedTypeReference { ty });
+            }
+            let class_type = match p.store.symbols.get(class).info {
+                SymbolInfo::Complete(class_type) => class_type,
+                info => {
+                    return Err(PickleError::IncompleteSymbol {
+                        symbol: class,
+                        info,
+                    });
+                }
+            };
+            let Some(Type::ClassInfo(info)) = p.store.types.try_get(class_type) else {
+                return Err(PickleError::MalformedType {
+                    ty: class_type,
+                    role: TypeRole::ClassInfo,
+                });
+            };
+            if info.class != class
+                || info.prefix != p.definitions.no_prefix
+                || info.parents.as_slice() != [p.definitions.object_type]
+                || info.self_type.is_some()
+                || p.source_index.scope_of(class) != Some(info.declarations)
+                || !p.store.scopes.contains(info.declarations)
+                || p.store
+                    .scopes
+                    .get(info.declarations)
+                    .entered_symbols()
+                    .any(|member| {
+                        p.store.symbols.contains(member)
+                            && p.store.symbols.get(member).kind == SymbolKind::TypeParameter
+                    })
+            {
+                return Err(PickleError::MalformedType {
+                    ty: class_type,
+                    role: TypeRole::ClassInfo,
+                });
+            }
+        }
+        let TreeKind::Ident(parameter_syntax) = &p
+            .source_ast
+            .try_get(parameter_definition.tpt)
+            .ok_or(PickleError::InvalidSourceTree {
+                tree: parameter_definition.tpt,
+            })?
+            .kind
+        else {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::ParameterClauses,
+                symbol: Some(parameter),
+            });
+        };
+        let TreeKind::Ident(result_syntax) = &p
+            .source_ast
+            .try_get(definition.tpt)
+            .ok_or(PickleError::InvalidSourceTree {
+                tree: definition.tpt,
+            })?
+            .kind
+        else {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::ResultTypeSyntax,
+                symbol: Some(method),
+            });
+        };
+        if parameter_syntax.name != p.store.symbols.get(parameter_class).name
+            || result_syntax.name != p.store.symbols.get(result_class).name
+        {
+            return Err(PickleError::MalformedType {
+                ty: result_type,
+                role: TypeRole::MethodResult,
+            });
+        }
+        let source_rhs = definition.rhs.ok_or(PickleError::MissingBody { method })?;
+        let source_rhs_node = p
+            .source_ast
+            .try_get(source_rhs)
+            .ok_or(PickleError::InvalidSourceTree { tree: source_rhs })?;
+        let typed_rhs = p
+            .typed_bindings
+            .typed_at(p.source.id, source_rhs)
+            .ok_or(PickleError::MissingBody { method })?;
+        let typed_rhs_node = p
+            .typed_ast
+            .try_get(typed_rhs)
+            .ok_or(PickleError::InvalidTypedTree { tree: typed_rhs })?;
+        let source_position = source_rhs_node.position;
+        let typed_position = typed_rhs_node.position;
+        if source_position.is_none()
+            || typed_position.is_none()
+            || source_position != typed_position
+            || source_position.is_some_and(|position| position.source() != p.source.id)
+        {
+            return Err(PickleError::MethodBodySpan {
+                source_tree: source_rhs,
+                typed_tree: typed_rhs,
+            });
+        }
+        if !matches!(
+            p.store.types.try_get(typed_rhs_node.ty),
+            Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == result_class
+        ) {
+            return Err(PickleError::MalformedType {
+                ty: typed_rhs_node.ty,
+                role: TypeRole::Body,
+            });
+        }
+        Ok(DistinctReferenceMethodSignature {
+            method,
+            source_tree,
+            parameter,
+            parameter_tree,
+            parameter_type,
+            parameter_class,
+            parameter_class_tree,
+            parameter_type_syntax: parameter_definition.tpt,
+            result_type,
+            result_class,
+            result_class_tree,
+            result_type_syntax: definition.tpt,
+            source_rhs,
+            typed_rhs,
+        })
+    }
+
+    /// Validate and project only the `PARAM` and result type roots for one
+    /// distinct same-batch reference signature. No method body is encoded.
+    pub fn project_distinct_reference_method_signature(
+        &self,
+        method: SymbolId,
+    ) -> Result<crate::ProjectedMethodSignature, PickleError> {
+        let signature = self.distinct_reference_method_signature(method)?;
+        let p = self.plan;
+        let mut context = crate::EncodingContext::new(
+            p.store,
+            p.definitions,
+            p.source_index,
+            p.source.id,
+            crate::ProjectionLimits::default(),
+        )?;
+        context.distinct_reference_method_signature(self, &signature)
     }
 
     /// Read-only proofs for immutable reference fields whose target class is

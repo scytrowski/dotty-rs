@@ -79,6 +79,17 @@ generic constructors, nested allocations, and multiple class formals remain
 unsupported. Constructors outside this exact source-defined shape fail with
 typed validation errors before bytes are returned.
 
+For a distinct-class signature such as `wrap(counter: Counter): CounterOwner`,
+`ValidatedClassStatePlan::distinct_reference_method_signature` proves the
+canonical method/formal IDs, the separate planned class IDs and source trees,
+the exact completed formal/result `TypeRef`s, and the original source/typed
+body roots. `project_distinct_reference_method_signature` emits only the
+`PARAM` and result `IDENTtpt` wire roots using those two distinct class
+references. This is a type-fragment proof, not a complete method or TASTy
+file. In particular it does not authorize serializing
+`new CounterOwner(counter)`; that body remains unsupported until its own
+constructor-call validation increment.
+
 A bounded class-state plan may also emit the exact same-batch alias
 `class CounterOwner(counter: Counter): private val inner: Counter = counter`.
 Validation requires the original source `Ident(counter)` and its exact typed
