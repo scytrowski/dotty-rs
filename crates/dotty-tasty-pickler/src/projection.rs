@@ -6,8 +6,8 @@ use dotty_core::*;
 use dotty_tasty::tasty::*;
 
 use crate::{
-    Builtin, LimitKind, PickleError, ReferenceError, ValidatedPicklePlan,
-    ValidatedSameBatchReferenceField,
+    Builtin, DistinctReferenceMethodSignature, LimitKind, PickleError, ReferenceError,
+    ValidatedClassStatePlan, ValidatedPicklePlan, ValidatedSameBatchReferenceField,
 };
 
 mod primitive_operator;
@@ -52,6 +52,14 @@ enum NameKey {
 pub struct ProjectedFragment {
     pub names: NameTable,
     pub ast: BuiltAst,
+}
+
+/// Projection of only a method's formal and result signature roots.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectedMethodSignature {
+    pub fragment: ProjectedFragment,
+    pub parameter_address: u32,
+    pub result_address: u32,
 }
 
 /// One compilation session's canonical identity maps and deterministic wire builder.
@@ -1471,6 +1479,30 @@ impl<'a> EncodingContext<'a> {
         source_tree: dotty_core::TreeId<dotty_core::Untyped>,
         planned_classes: &[SymbolId],
     ) -> Result<(), PickleError> {
+        let current_class = self
+            .declarations
+            .keys()
+            .copied()
+            .find(|&candidate| {
+                self.store.symbols.contains(candidate)
+                    && self.store.symbols.get(candidate).kind == SymbolKind::Class
+            })
+            .ok_or(reference(symbol, ReferenceError::NotRegistered))?;
+        self.register_planned_source_class_for_owner(
+            symbol,
+            source_tree,
+            current_class,
+            planned_classes,
+        )
+    }
+
+    pub(crate) fn register_planned_source_class_for_owner(
+        &mut self,
+        symbol: SymbolId,
+        source_tree: TreeId<dotty_core::Untyped>,
+        owner_class: SymbolId,
+        planned_classes: &[SymbolId],
+    ) -> Result<(), PickleError> {
         self.run(|c| {
             c.charge(1)?;
             if !planned_classes.contains(&symbol)
@@ -1497,17 +1529,10 @@ impl<'a> EncodingContext<'a> {
             let owner = sibling
                 .owner
                 .ok_or(reference(symbol, ReferenceError::Owner))?;
-            let sibling_name = sibling.name;
-            let current_class = c
-                .declarations
-                .keys()
-                .copied()
-                .find(|&candidate| {
-                    c.store.symbols.contains(candidate)
-                        && c.store.symbols.get(candidate).kind == SymbolKind::Class
-                })
-                .ok_or(reference(symbol, ReferenceError::NotRegistered))?;
-            if c.symbol(current_class)?.owner != Some(owner) {
+            if c.symbol(owner_class)?.kind != SymbolKind::Class
+                || c.symbol(owner_class)?.origin != SymbolOrigin::Source(c.source)
+                || c.symbol(owner_class)?.owner != Some(owner)
+            {
                 return Err(reference(symbol, ReferenceError::Owner));
             }
             let class_type = c.complete(symbol)?;
@@ -1538,7 +1563,7 @@ impl<'a> EncodingContext<'a> {
                 });
             }
             let package = c.package_name(owner)?;
-            let name = c.utf8(c.text(sibling_name.text())?)?;
+            let name = c.utf8(c.text(sibling.name.text())?)?;
             c.external.insert(symbol, (package, name));
             c.same_source_external.insert(symbol);
             Ok(())
@@ -1846,6 +1871,114 @@ impl<'a> EncodingContext<'a> {
                     child,
                 })
                 .map_err(construction)
+        })
+    }
+
+    /// Projects the two independent type roots of a validated distinct-class
+    /// method signature. The fragment roots are a `PARAM` and its result
+    /// `IDENTtpt`; it intentionally omits the `DEFDEF` body and does not form
+    /// a complete TASTy file.
+    pub fn distinct_reference_method_signature(
+        &mut self,
+        validated: &ValidatedClassStatePlan<'_, 'a>,
+        signature: &DistinctReferenceMethodSignature,
+    ) -> Result<ProjectedMethodSignature, PickleError> {
+        self.run(|context| {
+            let plan = validated.plan();
+            if !std::ptr::eq(context.store, plan.store)
+                || !std::ptr::eq(context.definitions, plan.definitions)
+                || !std::ptr::eq(context.source_index, plan.source_index)
+                || context.source != plan.source.id
+                || !plan.members.iter().any(|member| {
+                    matches!(member,
+                    crate::ClassMemberPicklePlan::Method { symbol, source_tree }
+                    if *symbol == signature.method && *source_tree == signature.source_tree)
+                })
+            {
+                return Err(reference(signature.method, ReferenceError::NotRegistered));
+            }
+            let mut parameter_name = None;
+            for (class, class_tree, ty, syntax) in [
+                (
+                    signature.parameter_class,
+                    signature.parameter_class_tree,
+                    signature.parameter_type,
+                    signature.parameter_type_syntax,
+                ),
+                (
+                    signature.result_class,
+                    signature.result_class_tree,
+                    signature.result_type,
+                    signature.result_type_syntax,
+                ),
+            ] {
+                context.register_planned_source_class_for_owner(
+                    class,
+                    class_tree,
+                    plan.class,
+                    plan.typed_bindings.planned_class_symbols(),
+                )?;
+                let TreeKind::Ident(ident) = &plan
+                    .source_ast
+                    .try_get(syntax)
+                    .ok_or(PickleError::InvalidSourceTree { tree: syntax })?
+                    .kind
+                else {
+                    return Err(PickleError::SourceShape {
+                        tree: syntax,
+                        expected: crate::SourceRole::TypeSyntax,
+                    });
+                };
+                let child = context.lower(ty, 0)?;
+                let name = context.utf8(context.text(ident.name.text())?)?;
+                let type_root = context
+                    .wire
+                    .push(AstNode::NatAst {
+                        tag: IDENTTPT_TAG,
+                        value: AstOperand::Nat(name),
+                        child,
+                    })
+                    .map_err(construction)?;
+                if class == signature.parameter_class {
+                    let formal = context.symbol(signature.parameter)?.name;
+                    let formal = context.utf8(context.text(formal.text())?)?;
+                    parameter_name = Some((formal, type_root));
+                } else {
+                    let result_root = type_root;
+                    let (formal, parameter_root) =
+                        parameter_name.ok_or(PickleError::ProjectionAborted)?;
+                    let parameter_root = context
+                        .wire
+                        .push(AstNode::Length {
+                            tag: PARAM_TAG,
+                            fields: vec![AstField::Nat(formal), AstField::Tree(parameter_root)],
+                        })
+                        .map_err(construction)?;
+                    let fragment = context.finish(&[parameter_root, result_root])?;
+                    let parameter_address =
+                        fragment
+                            .ast
+                            .address(parameter_root)
+                            .ok_or(PickleError::Reference {
+                                symbol: signature.parameter,
+                                reason: ReferenceError::NotRegistered,
+                            })?;
+                    let result_address =
+                        fragment
+                            .ast
+                            .address(result_root)
+                            .ok_or(PickleError::Reference {
+                                symbol: signature.method,
+                                reason: ReferenceError::NotRegistered,
+                            })?;
+                    return Ok(ProjectedMethodSignature {
+                        fragment,
+                        parameter_address,
+                        result_address,
+                    });
+                }
+            }
+            Err(PickleError::ProjectionAborted)
         })
     }
     /// The oracle's wire Unit return type for a default constructor. It never

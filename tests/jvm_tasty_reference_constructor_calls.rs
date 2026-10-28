@@ -10,6 +10,7 @@ use dotty_core::{
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
+use dotty_tasty::Reader;
 use dotty_tasty::ast::{
     APPLY_TAG, DEFDEF_TAG, IDENTTPT_TAG, NEW_TAG, PARAM_TAG, SELECTIN_TAG, SHAREDTYPE_TAG,
     TYPEREF_TAG,
@@ -202,6 +203,206 @@ impl SourceTypedBindings for AuditBindings<'_> {
     fn planned_method_symbols(&self) -> &[SymbolId] {
         self.methods
     }
+}
+
+fn assert_distinct_signature_projection(
+    source_text: &str,
+    source_id: SourceId,
+    parameter_class: &str,
+    result_class: &str,
+    factory_class: &str,
+) {
+    let source = SourceText::new(source_text).unwrap();
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(source, source_id, scanner, &mut store.names);
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+    let source_index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "signature.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        outcome => panic!("source is named cleanly: {outcome:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("package root")
+    };
+    let mut classes = Vec::new();
+    let mut factory = None;
+    let mut factory_constructor = None;
+    let mut wrap_tree = None;
+    for &class_tree in &package.stats {
+        let class = source_index.symbol_at(source_id, class_tree).unwrap();
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
+            panic!("class source")
+        };
+        let class_name = store
+            .names
+            .resolve(definition.name.as_name().text())
+            .to_owned();
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            panic!("class template")
+        };
+        let constructor = source_index
+            .symbol_at(source_id, template.constructor)
+            .unwrap();
+        let TreeKind::DefDef(constructor_definition) = &parsed.ast.get(template.constructor).kind
+        else {
+            panic!("constructor")
+        };
+        let constructor_parameter_clauses = constructor_definition
+            .value_param_clauses
+            .iter()
+            .map(|clause| {
+                clause
+                    .iter()
+                    .map(|&tree| {
+                        source_index
+                            .derived_symbol_at(constructor, source_id, tree)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let constructor_parameters = constructor_parameter_clauses
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        if class_name == factory_class {
+            factory = Some((class, class_tree));
+            factory_constructor = Some((
+                constructor,
+                template.constructor,
+                constructor_parameter_clauses.clone(),
+            ));
+        }
+        classes.push((class, constructor, constructor_parameters));
+        if class_name == factory_class {
+            for &member in &template.body {
+                if matches!(&parsed.ast.get(member).kind, TreeKind::DefDef(definition) if store.names.resolve(definition.name.as_name().text()) == "wrap")
+                {
+                    wrap_tree = Some(member);
+                }
+            }
+        }
+    }
+    let (factory_symbol, factory_tree) = factory.expect("factory class exists");
+    let (constructor, constructor_tree, constructor_parameter_clauses) =
+        factory_constructor.unwrap();
+    let wrap_tree = wrap_tree.expect("wrap method exists");
+    let wrap = source_index.symbol_at(source_id, wrap_tree).unwrap();
+    let TreeKind::DefDef(wrap_definition) = &parsed.ast.get(wrap_tree).kind else {
+        panic!("wrap is a method")
+    };
+    let [parameter_tree] = wrap_definition.value_param_clauses[0].as_slice() else {
+        panic!("one formal")
+    };
+    let parameter = source_index.symbol_at(source_id, *parameter_tree).unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &source_index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for (class, class_constructor, parameters) in &classes {
+        typer.complete_symbol(*class).unwrap();
+        typer.complete_symbol(*class_constructor).unwrap();
+        for &parameter in parameters {
+            typer.complete_symbol(parameter).unwrap();
+        }
+    }
+    typer.complete_symbol(wrap).unwrap();
+    typer.complete_symbol(parameter).unwrap();
+    let context = typer.expression_context_for(wrap).unwrap();
+    let typed_rhs = typer
+        .type_expression(wrap_definition.rhs.unwrap(), context)
+        .unwrap();
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .get(source_id, wrap_definition.rhs.unwrap()),
+        Some(typed_rhs)
+    );
+    let source_typed_index = typer.source_typed_index();
+    let planned_classes = classes
+        .iter()
+        .map(|(class, _, _)| *class)
+        .collect::<Vec<_>>();
+    let planned_methods = [wrap];
+    let bindings = AuditBindings {
+        index: source_typed_index,
+        classes: &planned_classes,
+        methods: &planned_methods,
+    };
+    let members = [ClassMemberPicklePlan::Method {
+        symbol: wrap,
+        source_tree: wrap_tree,
+    }];
+    let plan = ClassStatePicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: typer.typed_ast(),
+        source_index: &source_index,
+        typed_bindings: &bindings,
+        source: SourceMetadata {
+            id: source_id,
+            name: "signature.scala".to_owned(),
+        },
+        class: factory_symbol,
+        class_tree: factory_tree,
+        constructor: PrimaryConstructorInputPlan {
+            symbol: constructor,
+            source_tree: constructor_tree,
+            parameter_clauses: constructor_parameter_clauses,
+        },
+        members: &members,
+    };
+    let validated = plan.validate().unwrap();
+    let signature = validated.distinct_reference_method_signature(wrap).unwrap();
+    let name = |symbol| {
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(symbol).name.text())
+            .to_owned()
+    };
+    assert_eq!(name(signature.parameter_class()), parameter_class);
+    assert_eq!(name(signature.result_class()), result_class);
+    assert_ne!(signature.parameter_class(), signature.result_class());
+    assert_eq!(signature.typed_rhs(), typed_rhs);
+    let projected = validated
+        .project_distinct_reference_method_signature(wrap)
+        .unwrap();
+    let parameter_root = RawTree::decode(&mut Reader::new(
+        &projected.fragment.ast.bytes()[projected.parameter_address as usize..],
+    ))
+    .unwrap();
+    let result_root = RawTree::decode(&mut Reader::new(
+        &projected.fragment.ast.bytes()[projected.result_address as usize..],
+    ))
+    .unwrap();
+    assert!(matches!(parameter_root, RawTree::LengthNode(node) if node.tag == PARAM_TAG));
+    assert!(matches!(
+        result_root,
+        RawTree::NatAst {
+            tag: IDENTTPT_TAG,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -650,6 +851,38 @@ fn rust_three_class_frontend_preserves_canonical_wrap_identities_before_cross_co
     let validated = class_state
         .validate()
         .expect("the exact source/typed ClassState plan validates");
+    let signature = validated
+        .distinct_reference_method_signature(wrap)
+        .expect("the original method has a distinct same-batch reference signature");
+    assert_eq!(signature.parameter(), wrap_parameter);
+    assert_eq!(signature.parameter_class(), counter);
+    assert_eq!(signature.result_class(), owner);
+    assert_ne!(signature.parameter_class(), signature.result_class());
+    assert_eq!(signature.source_rhs(), rhs);
+    assert_eq!(signature.typed_rhs(), typed_rhs);
+    assert_eq!(
+        source_index.symbol_at(source_id, wrap_tree),
+        Some(signature.method())
+    );
+    let projected = validated
+        .project_distinct_reference_method_signature(wrap)
+        .expect("the formal and result type roots project without a method body");
+    let parameter_root = RawTree::decode(&mut Reader::new(
+        &projected.fragment.ast.bytes()[projected.parameter_address as usize..],
+    ))
+    .unwrap();
+    let result_root = RawTree::decode(&mut Reader::new(
+        &projected.fragment.ast.bytes()[projected.result_address as usize..],
+    ))
+    .unwrap();
+    assert!(matches!(parameter_root, RawTree::LengthNode(node) if node.tag == PARAM_TAG));
+    assert!(matches!(
+        result_root,
+        RawTree::NatAst {
+            tag: IDENTTPT_TAG,
+            ..
+        }
+    ));
     let direct_pickle_error = validated.pickle().unwrap_err();
     assert!(matches!(
         direct_pickle_error,
@@ -689,26 +922,20 @@ fn renamed_and_reordered_three_class_sources_do_not_depend_on_fixture_names_or_o
             "class CounterOwner(counter: Counter):\n  private val inner: Counter = counter\n  def read(): Int = inner.get()\n\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass CounterOwnerFactory:",
         );
 
-    for (source, source_id) in [(renamed.as_str(), 17933), (reordered.as_str(), 17934)] {
-        let error = with_paired_jvm_tasty_batch_plan(
-            source,
-            "RenamedOrReordered.scala",
-            SourceId::from_index(source_id),
-            |_| (),
-        )
-        .expect_err("the audit currently reaches a measured unsupported TASTy type reference");
-        assert!(
-            matches!(
-                error,
-                PairedPlanError::BatchClass {
-                    phase: "JVM/TASTy cross-contract validation",
-                    ref reason,
-                    ..
-                } if reason.contains("UnsupportedTypeReference")
-            ),
-            "variant fails in the same measured stage: {error:?}"
-        );
-    }
+    assert_distinct_signature_projection(
+        &renamed,
+        SourceId::from_index(17933),
+        "Tally",
+        "WrappedTally",
+        "WrapperMaker",
+    );
+    assert_distinct_signature_projection(
+        &reordered,
+        SourceId::from_index(17934),
+        "Counter",
+        "CounterOwner",
+        "CounterOwnerFactory",
+    );
 }
 
 #[test]

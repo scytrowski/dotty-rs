@@ -53,11 +53,13 @@ pub use error::{
 };
 pub use plan::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, DefaultConstructorPlan,
-    LocalValueBinding, MethodPicklePlan, PicklePlan, PrimaryConstructorInputPlan, SourceMetadata,
-    SourceTypedBindings, ValidatedClassStatePlan, ValidatedPicklePlan,
-    ValidatedSameBatchReferenceField, ValidationLimits,
+    DistinctReferenceMethodSignature, LocalValueBinding, MethodPicklePlan, PicklePlan,
+    PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
+    ValidatedPicklePlan, ValidatedSameBatchReferenceField, ValidationLimits,
 };
-pub use projection::{EncodingContext, ProjectedFragment, ProjectionLimits};
+pub use projection::{
+    EncodingContext, ProjectedFragment, ProjectedMethodSignature, ProjectionLimits,
+};
 pub use skeleton::{DeclarationSkeleton, OmittedMethodBody, SkeletonDeclaration};
 
 pub use output::{PickleLimits, PickledTasty};

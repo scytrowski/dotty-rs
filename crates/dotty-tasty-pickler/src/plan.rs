@@ -5,8 +5,9 @@ mod expression_validation;
 mod source_binding;
 
 pub use class_state::{
-    ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, PrimaryConstructorInputPlan,
-    ValidatedClassStatePlan, ValidatedSameBatchReferenceField,
+    ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
+    DistinctReferenceMethodSignature, PrimaryConstructorInputPlan, ValidatedClassStatePlan,
+    ValidatedSameBatchReferenceField,
 };
 
 use dotty_core::ast::{
