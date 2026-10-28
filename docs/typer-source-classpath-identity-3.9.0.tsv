@@ -1,0 +1,18 @@
+schema	1
+baseline_dotty_sha	2738ddf91cfba88a92649aec0f36a27988c7f4f8
+comparison_dotty_sha	8b14506e83019474317e5223c724f667b2de19e5
+implementation_commit	84829ea8d8aafed9ada90cb09e84725cb3f4556e
+pinned_scala_revision	777528f19a58e794c9954a42f433373472ec57f8
+scala_compiler	3.9.0
+jdk_feature	21
+classpath_origin	/home/vdrake6/dotty-rs/target-fs2/coursier/https/repo1.maven.org/maven2/org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar
+oracle_status	passed_import_source_classpath_and_top_level_companion_controls_jdk21
+cohort_status	passed_deterministic_14_of_25_typed_post_1826_jdk21
+root_audit_status	passed_deterministic_0_of_3_typed_post_1826_jdk21
+synthetic_rollback_retry	passed_incomplete_source_case_class_rejected_then_retry_after_removal_succeeded
+independent_snapshot_stores	passed_distinct_jar_origins_remain_store_local
+root	issue_reported_before	comparison_before	implementation_after	source_identity	classpath_resource	cause_chain	whole_method
+library/src/scala/Tuple.scala#tree=23	ErrorType before argument conformance	ApplicationArgumentConformanceUnsupported tree=22	ApplicationArgumentConformanceUnsupported tree=22	SourceId(0),Type/Trait,scala package owner,ClassInfo=Missing,source companion link present	scala-library-3.9.0.jar:scala/Tuple.tasty (TASTy preferred)	source identity lookup accepted; ThisType argument conformance remains unsupported (unchanged)	blocked
+library/src/scala/Option.scala#tree=214	SymbolResolution scala/Some identity	IfBranchJoinUnsupported tree=213 (package-symbol branch join)	IfBranchJoinUnsupported tree=213 (package-symbol branch join)	SourceId(0),Type/Class,scala package owner,ClassInfo=Missing,CASE; synthetic companion Object and ModuleClass, linked, source-derived apply	scala-library-3.9.0.jar:scala/Some.tasty (TASTy preferred)	canonical source companion identity accepted; later typer branch join fails (same outcome on main and PR head)	blocked
+library/src/scala/util/Either.scala#tree=84	SymbolResolution scala/util/Left identity	ExtractorUnapplyNotFound tree=69	ExtractorUnapplyNotFound tree=69	SourceId(0),Type/Class,scala.util package owner,ClassInfo=Missing,CASE; synthetic companion Object and ModuleClass, linked, source-derived apply	scala-library-3.9.0.jar:scala/util/Left.tasty (TASTy preferred)	canonical source companion identity accepted; later typer extractor lookup fails (same outcome on main and PR head)	blocked
+cohort	selected=25	attempted=25	typed=14	blocked=11	excluded=0	not_attempted=0	determinism=byte-identical	jdk=21
