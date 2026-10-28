@@ -1,6 +1,5 @@
 use dotty::jvm_tasty_cross_class::{
-    CrossClassConstructorCallProofError, CrossClassConstructorCallProofInput,
-    validate_cross_class_constructor_call_proofs,
+    CrossClassConstructorCallProofInput, validate_cross_class_constructor_call_proofs,
 };
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 use dotty_classfile::attribute::Attribute;
@@ -920,29 +919,74 @@ fn rust_original_source_preserves_factory_call_identities_and_exposes_first_reje
             source_typed_index: typer.source_typed_index(),
             jvm_unit: &jvm_unit,
         });
-    let direct_proof = match direct_proof_result {
-        Err(error) => error,
-        Ok(_) => panic!("current proof unexpectedly accepts a factory result constructor argument"),
-    };
+    let proofs = direct_proof_result.expect("the proof scan accepts all canonical argument shapes");
+    assert_eq!(proofs.len(), 2);
+    let factory_proof = proofs
+        .iter()
+        .find(|proof| proof.method() == create)
+        .expect("create has the planned-call proof");
+    assert_eq!(
+        factory_proof.argument_proof().kind(),
+        dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::PlannedCall
+    );
+    let planned_call = factory_proof
+        .argument_proof()
+        .planned_call()
+        .expect("create's argument is an opaque planned-call receipt");
+    assert_eq!(planned_call.owner(), factory_class);
+    assert_eq!(planned_call.method(), make_counter);
+    assert_eq!(planned_call.formal(), create_parameter);
+    assert_eq!(planned_call.helper_formal(), make_counter_parameter);
+    assert_eq!(planned_call.source_argument(), source_factory_apply.args[0]);
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .get(source_id, planned_call.source_apply()),
+        Some(planned_call.typed_apply())
+    );
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .get(source_id, planned_call.helper_source_rhs()),
+        Some(planned_call.helper_typed_rhs())
+    );
+    let helper_proof = proofs
+        .iter()
+        .find(|proof| proof.method() == make_counter)
+        .expect("the helper body has its established direct-formal proof");
+    assert_eq!(
+        helper_proof.argument_proof().kind(),
+        dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::Formal
+    );
+    assert_eq!(helper_proof.target_class(), counter_class);
     assert!(matches!(
-        direct_proof,
-        CrossClassConstructorCallProofError::SourceShape(message)
-            if message == "nested constructor function must be Select"
+        typer.store().types.get(factory_proof.constructor_formal_type()),
+        Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == counter_class
+    ));
+    assert!(matches!(
+        typer.store().types.get(planned_call.result_type()),
+        Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == counter_class
     ));
     let paired_error =
         with_paired_jvm_tasty_batch_plan(SOURCE, "CounterOwnerFactory.scala", source_id, |_| ())
             .expect_err("paired planning stops before TASTy encoding");
-    assert!(matches!(
-        &paired_error,
-        PairedPlanError::BatchUnit { phase: "cross-class constructor-call identity proof", reason }
-            if reason.contains("nested constructor function must be Select")
-    ));
+    assert!(
+        matches!(
+            &paired_error,
+            PairedPlanError::BatchClass {
+                phase: "JVM/TASTy cross-contract validation",
+                reason,
+                ..
+            } if reason.contains("BodyExpression")
+        ),
+        "paired planning still rejects before returning a partial batch: {paired_error:?}"
+    );
     assert_eq!(
         typed_methods.len(),
         source_methods.iter().filter(|(_, tree)| matches!(&parsed.ast.get(*tree).kind, TreeKind::DefDef(definition) if definition.rhs.is_some())).count()
     );
     println!(
-        "Rust layer observations: class-state TASTy source plan validation succeeds; source body proof={direct_proof:?}; paired planner={paired_error:?}; expression-body TASTy encoding and artifact contract/publisher unreachable after paired preflight; JVM-only path is covered by the strict object-graph acceptance regression."
+        "Rust layer observations: class-state TASTy source plan and direct/nested/planned-call source proofs succeed; paired planner still rejects at the unsupported expression encoding boundary: {paired_error:?}; no paired artifacts are published; JVM-only path is covered by the strict object-graph acceptance regression."
     );
     let _ = (make_counter_tree, create_tree);
 }
@@ -964,10 +1008,11 @@ fn factory_argument_variants_retain_semantic_identity_independently_of_names_and
     .expect_err("renaming does not avoid the bounded proof gate");
     assert!(matches!(
         renamed_error,
-        PairedPlanError::BatchUnit {
-            phase: "cross-class constructor-call identity proof",
+        PairedPlanError::BatchClass {
+            phase: "JVM/TASTy cross-contract validation",
             reason,
-        } if reason.contains("nested constructor function must be Select")
+            ..
+        } if reason.contains("BodyExpression")
     ));
 
     let owner_start = SOURCE.find("class CounterOwner(").unwrap();
@@ -987,10 +1032,11 @@ fn factory_argument_variants_retain_semantic_identity_independently_of_names_and
     .expect_err("declaration order does not avoid the bounded proof gate");
     assert!(matches!(
         reordered_error,
-        PairedPlanError::BatchUnit {
-            phase: "cross-class constructor-call identity proof",
+        PairedPlanError::BatchClass {
+            phase: "JVM/TASTy cross-contract validation",
             reason,
-        } if reason.contains("nested constructor function must be Select")
+            ..
+        } if reason.contains("BodyExpression")
     ));
 }
 
@@ -1054,7 +1100,7 @@ fn factory_argument_negative_controls_report_their_first_existing_gate() {
         PairedPlanError::BatchUnit {
             phase: "cross-class constructor-call identity proof",
             reason,
-        } if reason.contains("constructor argument spelling must resolve to the caller formal")
+        } if reason.contains("constructor argument must resolve to the exact caller formal")
     ));
 
     let null_argument = SOURCE.replace(
@@ -1073,7 +1119,7 @@ fn factory_argument_negative_controls_report_their_first_existing_gate() {
         PairedPlanError::BatchUnit {
             phase: "cross-class constructor-call identity proof",
             reason,
-        } if reason.contains("constructor argument must be the exact caller formal identifier")
+        } if reason.contains("constructor argument must be the exact caller formal")
     ));
 
     let branch_argument = SOURCE.replace(
@@ -1092,6 +1138,6 @@ fn factory_argument_negative_controls_report_their_first_existing_gate() {
         PairedPlanError::BatchUnit {
             phase: "cross-class constructor-call identity proof",
             reason,
-        } if reason.contains("constructor argument must be the exact caller formal identifier")
+        } if reason.contains("constructor argument must be the exact caller formal")
     ));
 }

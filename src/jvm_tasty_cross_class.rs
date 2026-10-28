@@ -269,6 +269,25 @@ pub struct PlannedCallProof {
     result_type: TypeId,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum SourceArgumentShape {
+    Formal {
+        formal_tree: TreeId<Untyped>,
+    },
+    NestedNew {
+        formal_tree: TreeId<Untyped>,
+        select: TreeId<Untyped>,
+        new: TreeId<Untyped>,
+        type_tree: TreeId<Untyped>,
+    },
+    PlannedCall {
+        formal_tree: TreeId<Untyped>,
+        apply: TreeId<Untyped>,
+        function: TreeId<Untyped>,
+        receiver: Option<TreeId<Untyped>>,
+    },
+}
+
 impl PlannedCallProof {
     pub const fn source_apply(self) -> TreeId<Untyped> {
         self.source_apply
@@ -442,12 +461,11 @@ impl ValidatedCrossClassConstructorCallProof<'_> {
     }
 }
 
-/// Scan the complete source-ordered JVM batch for direct, one-formal
-/// `Apply(Select(New(target), <init>), formal)` method bodies and validate each
-/// against canonical source, typed, semantic, and JVM identities. A body with
-/// no such root is ignored; once the structural candidate is present, every
-/// failed provenance or shape check is returned as an error rather than
-/// silently falling back to unproved planning.
+/// Scan the complete source-ordered JVM batch for the supported constructor
+/// argument shapes and validate each against canonical source, typed,
+/// semantic, and JVM identities. A body with no candidate root is ignored;
+/// once a structural candidate is present, every failed provenance or shape
+/// check is returned rather than silently falling back to unproved planning.
 pub fn validate_cross_class_constructor_call_proofs<'session>(
     input: CrossClassConstructorCallProofInput<'session>,
 ) -> Result<
@@ -591,6 +609,41 @@ pub fn validate_cross_class_constructor_call_proofs<'session>(
                 &metadata,
             )?;
             proofs.push(proof);
+        }
+    }
+    for proof in &proofs {
+        let Some(planned_call) = proof.argument_proof().planned_call() else {
+            continue;
+        };
+        let helper_proof = proofs
+            .iter()
+            .find(|candidate| candidate.method() == planned_call.method())
+            .ok_or(CrossClassConstructorCallProofError::JvmPlan(
+                "planned helper body has no established same-batch constructor proof",
+            ))?;
+        if planned_call.owner() != proof.caller_class()
+            || helper_proof.caller_class() != planned_call.owner()
+            || helper_proof.source_id() != proof.source_id()
+            || helper_proof.source_rhs() != planned_call.helper_source_rhs()
+            || helper_proof.typed_rhs() != planned_call.helper_typed_rhs()
+            || helper_proof.method_formal() != planned_call.helper_formal()
+            || helper_proof.target_class()
+                != match store.types.try_get(planned_call.result_type()) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(class),
+                        ..
+                    }) => *class,
+                    _ => {
+                        return Err(CrossClassConstructorCallProofError::TypedBinding(
+                            "planned helper result has no canonical class TypeRef",
+                        ));
+                    }
+                }
+            || helper_proof.argument_proof().kind() != ConstructorArgumentProofKind::Formal
+        {
+            return Err(CrossClassConstructorCallProofError::JvmPlan(
+                "planned helper must retain its own direct-formal constructor proof in this source batch",
+            ));
         }
     }
     Ok(proofs)
@@ -862,51 +915,75 @@ fn validate_constructor_call_candidate<'session>(
         unreachable!()
     };
     let source_argument = source_apply.args[0];
-    let (argument_formal_tree, nested_source) = match &source_ast
+    let argument_shape = match &source_ast
         .try_get(source_argument)
         .ok_or_else(|| source_error("constructor argument source root is stale"))?
         .kind
     {
-        TreeKind::Ident(_) => (source_argument, None),
-        TreeKind::Apply(nested_apply)
-            if nested_apply.kind == ApplyKind::Regular && nested_apply.args.len() == 1 =>
-        {
-            let nested_select = nested_apply.function;
-            let TreeKind::Select(nested_selection) = &source_ast
-                .try_get(nested_select)
-                .ok_or_else(|| source_error("nested constructor selection source root is stale"))?
-                .kind
-            else {
-                return Err(source_error("nested constructor function must be Select"));
-            };
-            if store.names.resolve(nested_selection.name.text()) != "<init>" {
+        TreeKind::Ident(_) => SourceArgumentShape::Formal {
+            formal_tree: source_argument,
+        },
+        TreeKind::Apply(nested_apply) if nested_apply.kind == ApplyKind::Regular => {
+            if nested_apply.args.len() != 1 {
                 return Err(source_error(
-                    "nested constructor call must select the primary constructor",
+                    "nested constructor or helper call must have one regular argument",
                 ));
             }
-            let nested_new = nested_selection.qualifier;
-            let TreeKind::New(nested_new_tree) = &source_ast
-                .try_get(nested_new)
-                .ok_or_else(|| source_error("nested New source root is stale"))?
-                .kind
-            else {
-                return Err(source_error("nested constructor receiver must be New"));
-            };
-            (
-                nested_apply.args[0],
-                Some((nested_select, nested_new, nested_new_tree.tpt)),
-            )
+            let nested_select = nested_apply.function;
+            let function_kind = &source_ast
+                .try_get(nested_select)
+                .ok_or_else(|| source_error("nested application function source tree is stale"))?
+                .kind;
+            if let TreeKind::Select(nested_selection) = function_kind
+                && store.names.resolve(nested_selection.name.text()) == "<init>"
+            {
+                let nested_new = nested_selection.qualifier;
+                let TreeKind::New(nested_new_tree) = &source_ast
+                    .try_get(nested_new)
+                    .ok_or_else(|| source_error("nested New source root is stale"))?
+                    .kind
+                else {
+                    return Err(source_error("nested constructor receiver must be New"));
+                };
+                SourceArgumentShape::NestedNew {
+                    formal_tree: nested_apply.args[0],
+                    select: nested_select,
+                    new: nested_new,
+                    type_tree: nested_new_tree.tpt,
+                }
+            } else if matches!(function_kind, TreeKind::Ident(_) | TreeKind::Select(_)) {
+                let receiver = match function_kind {
+                    TreeKind::Select(selection) => Some(selection.qualifier),
+                    TreeKind::Ident(_) => None,
+                    _ => unreachable!(),
+                };
+                SourceArgumentShape::PlannedCall {
+                    formal_tree: nested_apply.args[0],
+                    apply: source_argument,
+                    function: nested_select,
+                    receiver,
+                }
+            } else {
+                return Err(source_error(
+                    "planned helper must be one selected ordinary method application",
+                ));
+            }
         }
         TreeKind::Apply(_) => {
             return Err(source_error(
-                "nested constructor application must have one regular argument",
+                "nested constructor or helper application must be regular",
             ));
         }
         _ => {
             return Err(source_error(
-                "constructor argument must be the exact caller formal identifier or one nested constructor application",
+                "constructor argument must be the exact caller formal, one nested New, or one planned call",
             ));
         }
+    };
+    let argument_formal_tree = match argument_shape {
+        SourceArgumentShape::Formal { formal_tree }
+        | SourceArgumentShape::NestedNew { formal_tree, .. }
+        | SourceArgumentShape::PlannedCall { formal_tree, .. } => formal_tree,
     };
     let TreeKind::Ident(argument_ident) = &source_ast
         .try_get(argument_formal_tree)
@@ -921,7 +998,7 @@ fn validate_constructor_call_candidate<'session>(
         != store.names.resolve(argument_ident.name.text())
     {
         return Err(source_error(
-            "constructor argument spelling must resolve to the caller formal",
+            "constructor argument must resolve to the exact caller formal",
         ));
     }
 
@@ -943,7 +1020,13 @@ fn validate_constructor_call_candidate<'session>(
     let typed_formal_argument = source_typed_index
         .get(source_id, argument_formal_tree)
         .ok_or_else(|| typed_error("formal argument has no source-to-typed binding"))?;
-    let nested_typed = if let Some((nested_select, nested_new, nested_new_tpt)) = nested_source {
+    let nested_typed = if let SourceArgumentShape::NestedNew {
+        select: nested_select,
+        new: nested_new,
+        type_tree: nested_new_tpt,
+        ..
+    } = argument_shape
+    {
         Some((
             nested_select,
             nested_new,
@@ -963,6 +1046,34 @@ fn validate_constructor_call_candidate<'session>(
                 .ok_or_else(|| {
                     typed_error("nested New type tree has no source-to-typed binding")
                 })?,
+        ))
+    } else {
+        None
+    };
+    let planned_typed = if let SourceArgumentShape::PlannedCall {
+        apply,
+        function,
+        receiver,
+        ..
+    } = argument_shape
+    {
+        Some((
+            apply,
+            function,
+            receiver,
+            source_typed_index.get(source_id, apply).ok_or_else(|| {
+                typed_error("planned helper Apply has no source-to-typed binding")
+            })?,
+            source_typed_index.get(source_id, function).ok_or_else(|| {
+                typed_error("planned helper function has no source-to-typed binding")
+            })?,
+            receiver
+                .map(|tree| {
+                    source_typed_index.get(source_id, tree).ok_or_else(|| {
+                        typed_error("planned helper receiver has no source-to-typed binding")
+                    })
+                })
+                .transpose()?,
         ))
     } else {
         None
@@ -1016,6 +1127,47 @@ fn validate_constructor_call_candidate<'session>(
                 source_tree,
                 typed_tree,
                 description,
+            )?;
+        }
+    }
+    require_matching_source_typed_positions(
+        source_ast,
+        typed_ast,
+        source_id,
+        argument_formal_tree,
+        typed_formal_argument,
+        "original constructor or helper formal argument",
+    )?;
+    if let Some((
+        source_call,
+        source_function,
+        source_receiver,
+        typed_call,
+        typed_function,
+        typed_receiver,
+    )) = planned_typed
+    {
+        for (source_tree, typed_tree, description) in [
+            (source_call, typed_call, "planned helper Apply"),
+            (source_function, typed_function, "planned helper function"),
+        ] {
+            require_matching_source_typed_positions(
+                source_ast,
+                typed_ast,
+                source_id,
+                source_tree,
+                typed_tree,
+                description,
+            )?;
+        }
+        if let (Some(source_receiver), Some(typed_receiver)) = (source_receiver, typed_receiver) {
+            require_matching_source_typed_positions(
+                source_ast,
+                typed_ast,
+                source_id,
+                source_receiver,
+                typed_receiver,
+                "planned helper receiver",
             )?;
         }
     }
@@ -1073,6 +1225,399 @@ fn validate_constructor_call_candidate<'session>(
             "typed constructor argument does not reference the canonical caller formal",
         ));
     }
+
+    let planned_call_proof = if let (
+        SourceArgumentShape::PlannedCall {
+            formal_tree: _,
+            apply: source_call,
+            function: source_function,
+            receiver: source_receiver,
+        },
+        Some((_, _, _, typed_call, typed_function, typed_receiver)),
+    ) = (argument_shape, planned_typed)
+    {
+        let TreeKind::Apply(source_call_apply) = &source_ast
+            .try_get(source_call)
+            .ok_or_else(|| source_error("planned helper application source is stale"))?
+            .kind
+        else {
+            return Err(source_error("planned helper source root must be Apply"));
+        };
+        if source_call_apply.kind != ApplyKind::Regular
+            || source_call_apply.args != [argument_formal_tree]
+        {
+            return Err(source_error(
+                "planned helper must have one ordinary argument clause",
+            ));
+        }
+        let typed_function_node = typed_ast
+            .try_get(typed_function)
+            .ok_or_else(|| typed_error("planned helper typed function is stale"))?;
+        let helper = match store.types.try_get(typed_function_node.ty) {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(helper),
+                ..
+            }) => *helper,
+            _ => {
+                return Err(typed_error(
+                    "planned helper function must retain a canonical method TermRef",
+                ));
+            }
+        };
+        if !store.symbols.contains(helper) {
+            return Err(identity_error("planned helper method symbol is stale"));
+        }
+        let source_function_name = match source_ast.try_get(source_function).map(|tree| &tree.kind)
+        {
+            Some(TreeKind::Ident(identifier)) => identifier.name,
+            Some(TreeKind::Select(selection)) => selection.name,
+            _ => {
+                return Err(source_error(
+                    "planned helper function must be the original Ident or Select",
+                ));
+            }
+        };
+        if store.names.resolve(source_function_name.text())
+            != store.names.resolve(store.symbols.get(helper).name.text())
+        {
+            return Err(identity_error(
+                "planned helper source name does not match the selected canonical method",
+            ));
+        }
+        let helper_source_tree = match source_index.definition_of(helper) {
+            Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+            _ => {
+                return Err(identity_error(
+                    "planned helper has a foreign source definition",
+                ));
+            }
+        };
+        if !store.symbols.contains(helper)
+            || !has_source_origin(store, helper, source_id)
+            || store.symbols.get(helper).kind != SymbolKind::Method
+            || store.symbols.get(helper).owner != Some(caller_class)
+            || source_index.symbol_at(source_id, helper_source_tree) != Some(helper)
+            || store.symbols.get(helper).visibility != dotty_core::Visibility::Public
+            || has_any_flag(
+                store.symbols.get(helper).flags,
+                SymbolFlags::ABSTRACT
+                    | SymbolFlags::SYNTHETIC
+                    | SymbolFlags::STATIC
+                    | SymbolFlags::GIVEN
+                    | SymbolFlags::IMPLICIT
+                    | SymbolFlags::ERASED
+                    | SymbolFlags::EXTENSION,
+            )
+        {
+            return Err(identity_error(
+                "planned helper must be a public canonical instance method owned by the caller class",
+            ));
+        }
+        let caller_source = source_index
+            .definition_of(caller_class)
+            .and_then(|definition| match definition {
+                SourceDefinition::Canonical { source, tree } if source == source_id => Some(tree),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                identity_error("planned helper caller class has a foreign definition")
+            })?;
+        let TreeKind::TypeDef(caller_def) = &source_ast
+            .try_get(caller_source)
+            .ok_or_else(|| identity_error("planned helper owner source is stale"))?
+            .kind
+        else {
+            return Err(identity_error("planned helper owner source is not a class"));
+        };
+        let TreeKind::Template(caller_template) = &source_ast
+            .try_get(caller_def.rhs)
+            .ok_or_else(|| identity_error("planned helper owner template is stale"))?
+            .kind
+        else {
+            return Err(identity_error("planned helper owner has no class template"));
+        };
+        if !caller_template.body.contains(&helper_source_tree) {
+            return Err(identity_error(
+                "planned helper is outside the caller class's exact source body",
+            ));
+        }
+        let TreeKind::DefDef(helper_def) = &source_ast
+            .try_get(helper_source_tree)
+            .ok_or_else(|| identity_error("planned helper source tree is stale"))?
+            .kind
+        else {
+            return Err(identity_error(
+                "planned helper source definition is not a method",
+            ));
+        };
+        let Some(helper_source_rhs) = helper_def.rhs else {
+            return Err(source_error(
+                "planned helper must have an original source body",
+            ));
+        };
+        if !helper_def.type_params.is_empty()
+            || helper_def.value_param_clauses.len() != 1
+            || helper_def.value_param_clauses[0].len() != 1
+            || helper_def.metadata.visibility.is_some()
+        {
+            return Err(source_error(
+                "planned helper must be a monomorphic method with one plain formal clause",
+            ));
+        }
+        if caller_template.body.iter().any(|tree| {
+            *tree != helper_source_tree
+                && source_index
+                    .symbol_at(source_id, *tree)
+                    .is_some_and(|candidate| {
+                        store.symbols.contains(candidate)
+                            && store.symbols.get(candidate).kind == SymbolKind::Method
+                            && store.symbols.get(candidate).name == store.symbols.get(helper).name
+                    })
+        }) {
+            return Err(source_error(
+                "overloaded planned helper methods are unsupported",
+            ));
+        }
+        let source_receiver_is_this = match source_receiver {
+            None => true,
+            Some(receiver) => matches!(
+                source_ast.try_get(receiver).map(|tree| &tree.kind),
+                Some(TreeKind::This(dotty_core::ast::This { qual: None }))
+            ),
+        };
+        if !source_receiver_is_this {
+            return Err(source_error(
+                "planned helper receiver must be the caller's same-instance this",
+            ));
+        }
+        let helper_formal_tree = helper_def.value_param_clauses[0][0];
+        let TreeKind::ValDef(helper_formal_def) = &source_ast
+            .try_get(helper_formal_tree)
+            .ok_or_else(|| source_error("planned helper formal source tree is stale"))?
+            .kind
+        else {
+            return Err(source_error(
+                "planned helper formal must be a value parameter",
+            ));
+        };
+        if helper_formal_def.rhs.is_some() {
+            return Err(source_error(
+                "planned helper default arguments are unsupported",
+            ));
+        }
+        let helper_formal = source_index
+            .symbol_at(source_id, helper_formal_tree)
+            .ok_or_else(|| identity_error("planned helper formal has no canonical symbol"))?;
+        if source_index.definition_of(helper_formal)
+            != Some(SourceDefinition::Canonical {
+                source: source_id,
+                tree: helper_formal_tree,
+            })
+            || !store.symbols.contains(helper_formal)
+            || !has_source_origin(store, helper_formal, source_id)
+            || store.symbols.get(helper_formal).kind != SymbolKind::Parameter
+            || store.symbols.get(helper_formal).owner != Some(helper)
+        {
+            return Err(identity_error(
+                "planned helper formal must be the canonical parameter owned by its method",
+            ));
+        }
+        let SymbolInfo::Complete(helper_type) = store.symbols.get(helper).info else {
+            return Err(semantic_error("planned helper signature is incomplete"));
+        };
+        let Some(Type::Method(helper_signature)) = store.types.try_get(helper_type) else {
+            return Err(semantic_error(
+                "planned helper signature is not a method type",
+            ));
+        };
+        let SymbolInfo::Complete(helper_formal_type) = store.symbols.get(helper_formal).info else {
+            return Err(semantic_error("planned helper formal type is incomplete"));
+        };
+        let helper_formal_type_matches = helper_formal_type == formal_type
+            || canonical_class_type_symbol(
+                store,
+                helper_formal_type,
+                package,
+                definitions.no_prefix,
+            )
+            .is_some_and(|helper_class| {
+                canonical_class_type_symbol(store, formal_type, package, definitions.no_prefix)
+                    == Some(helper_class)
+            });
+        if helper_signature.kind != dotty_core::MethodKind::Plain
+            || helper_signature.params.len() != 1
+            || helper_signature.params[0].ty != helper_formal_type
+            || !helper_formal_type_matches
+        {
+            return Err(semantic_error(
+                "planned helper must accept the exact caller formal type in one ordinary parameter",
+            ));
+        }
+        let helper_result_class = canonical_class_type_symbol(
+            store,
+            helper_signature.result,
+            package,
+            definitions.no_prefix,
+        )
+        .ok_or_else(|| {
+            semantic_error("planned helper must return one canonical same-batch class type")
+        })?;
+        if helper_result_class == caller_class
+            || !store.symbols.contains(helper_result_class)
+            || store.symbols.get(helper_result_class).kind != SymbolKind::Class
+            || store.symbols.get(helper_result_class).owner != Some(package)
+            || !has_source_origin(store, helper_result_class, source_id)
+            || source_index
+                .definition_of(helper_result_class)
+                .is_none_or(|definition| {
+                    !matches!(definition, SourceDefinition::Canonical { source, .. } if source == source_id)
+                })
+            || unique_constructor_call_class_plan(jvm_unit, helper_result_class).is_err()
+        {
+            return Err(identity_error(
+                "planned helper result must be a distinct canonical class in the same JVM unit",
+            ));
+        }
+        let TreeKind::Apply(typed_call_apply) = &typed_ast
+            .try_get(typed_call)
+            .ok_or_else(|| typed_error("planned helper typed Apply is stale"))?
+            .kind
+        else {
+            return Err(typed_error("planned helper typed call is not Apply"));
+        };
+        if typed_call != typed_argument
+            || typed_call_apply.kind != ApplyKind::Regular
+            || typed_call_apply.function != typed_function
+            || typed_call_apply.args != [typed_formal_argument]
+            || source_typed_index.get(source_id, source_call) != Some(typed_call)
+            || source_typed_index.get(source_id, source_function) != Some(typed_function)
+            || source_typed_index.get(source_id, source_call_apply.args[0])
+                != Some(typed_formal_argument)
+        {
+            return Err(typed_error(
+                "planned helper Apply must retain the exact mapped function and original formal argument",
+            ));
+        }
+        let (TreeKind::Ident(_) | TreeKind::Select(_)) = &typed_function_node.kind else {
+            return Err(typed_error(
+                "planned helper typed function must retain its original Ident or Select",
+            ));
+        };
+        let selected_helper = match store.types.try_get(typed_function_node.ty) {
+            Some(Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(symbol),
+            }) if *symbol == helper => match store.types.try_get(*prefix) {
+                Some(Type::ThisType { class }) if *class == caller_class => helper,
+                _ => {
+                    return Err(typed_error(
+                        "planned helper selection must retain the caller's exact this receiver",
+                    ));
+                }
+            },
+            _ => {
+                return Err(typed_error(
+                    "planned helper selection must retain its canonical method TermRef",
+                ));
+            }
+        };
+        if let (Some(source_receiver), Some(typed_receiver)) = (source_receiver, typed_receiver) {
+            if source_typed_index.get(source_id, source_receiver) != Some(typed_receiver)
+                || !matches!(
+                    source_ast.try_get(source_receiver).map(|tree| &tree.kind),
+                    Some(TreeKind::This(dotty_core::ast::This { qual: None }))
+                )
+                || !matches!(
+                    typed_ast.try_get(typed_receiver).map(|tree| &tree.kind),
+                    Some(TreeKind::This(dotty_core::ast::This { qual: None }))
+                )
+                || !matches!(
+                    typed_ast.try_get(typed_receiver).and_then(|tree| store.types.try_get(tree.ty)),
+                    Some(Type::ThisType { class }) if *class == caller_class
+                )
+            {
+                return Err(typed_error(
+                    "planned helper explicit receiver must be the exact mapped caller this tree",
+                ));
+            }
+        } else if typed_receiver.is_some() {
+            return Err(typed_error(
+                "unqualified planned helper must not acquire a synthetic receiver tree",
+            ));
+        }
+        let typed_result_type = typed_ast
+            .try_get(typed_call)
+            .ok_or_else(|| typed_error("planned helper result tree is stale"))?
+            .ty;
+        if !is_canonical_class_type_ref(
+            store,
+            helper_signature.result,
+            helper_result_class,
+            package,
+            definitions.no_prefix,
+        ) || !is_canonical_class_type_ref(
+            store,
+            typed_result_type,
+            helper_result_class,
+            package,
+            definitions.no_prefix,
+        ) {
+            return Err(typed_error(
+                "planned helper call result must retain the exact canonical class TypeRef",
+            ));
+        }
+        let typed_helper_rhs = source_typed_index
+            .get(source_id, helper_source_rhs)
+            .ok_or_else(|| typed_error("planned helper body has no source-to-typed binding"))?;
+        require_source_position(
+            source_ast,
+            source_id,
+            helper_source_tree,
+            "planned helper method declaration has a foreign source position",
+        )?;
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            helper_source_rhs,
+            typed_helper_rhs,
+            "planned helper body",
+        )?;
+        let helper_plan = caller_plan
+            .methods
+            .iter()
+            .filter(|plan| plan.method == selected_helper)
+            .collect::<Vec<_>>();
+        if helper_plan.len() != 1
+            || helper_plan[0].parameters != [helper_formal]
+            || helper_plan[0].body != Some(typed_helper_rhs)
+        {
+            return Err(CrossClassConstructorCallProofError::JvmPlan(
+                "planned helper JVM method plan must retain the exact body and formal",
+            ));
+        }
+        Some(PlannedCallProof {
+            source_apply: source_call,
+            source_function,
+            source_argument: argument_formal_tree,
+            source_receiver,
+            helper_source_tree,
+            helper_source_rhs,
+            typed_apply: typed_call,
+            typed_function,
+            typed_argument: typed_formal_argument,
+            typed_receiver,
+            helper_typed_rhs: typed_helper_rhs,
+            owner: caller_class,
+            method: helper,
+            formal: method_formal,
+            helper_formal,
+            formal_type,
+            result_type: typed_result_type,
+        })
+    } else {
+        None
+    };
 
     let typed_new_type = typed_ast
         .try_get(typed_new_tpt)
@@ -1440,6 +1985,8 @@ fn validate_constructor_call_candidate<'session>(
             }),
             inner_type,
         )
+    } else if let Some(planned_call) = planned_call_proof {
+        (None, planned_call.result_type())
     } else {
         if argument_formal_tree != source_argument || typed_formal_argument != typed_argument {
             return Err(typed_error(
@@ -1646,6 +2193,23 @@ fn validate_constructor_call_candidate<'session>(
             package,
             definitions.no_prefix,
         )
+    } else if let Some(planned_call) = planned_call_proof {
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        }) = store.types.try_get(planned_call.result_type())
+        else {
+            return Err(typed_error(
+                "planned helper result must be a canonical class TypeRef",
+            ));
+        };
+        is_canonical_class_type_ref(
+            store,
+            constructor_formal_type,
+            *class,
+            package,
+            definitions.no_prefix,
+        )
     } else {
         constructor_formal_type == formal_type
             || same_reference_type(constructor_formal_type, formal_type)
@@ -1654,7 +2218,7 @@ fn validate_constructor_call_candidate<'session>(
         || constructor_signature.params.len() != 1
         || constructor_signature.params[0].ty != constructor_formal_type
         || !constructor_argument_type_matches
-        || (nested_argument_proof.is_some()
+        || ((nested_argument_proof.is_some() || planned_call_proof.is_some())
             && !same_reference_type(constructor_formal_type, argument_type))
     {
         return Err(semantic_error(
@@ -1931,6 +2495,66 @@ fn validate_constructor_call_candidate<'session>(
             ));
         }
         nested_params
+    } else if let Some(planned_call) = planned_call_proof {
+        let helper_result_class = match store.types.try_get(planned_call.result_type()) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            }) => *class,
+            _ => {
+                return Err(typed_error(
+                    "planned helper result must retain a canonical class TypeRef",
+                ));
+            }
+        };
+        let helper_metadata = caller_metadata
+            .methods()
+            .iter()
+            .find(|entry| entry.symbol() == planned_call.method())
+            .ok_or(CrossClassConstructorCallProofError::JvmPlan(
+                "planned helper JVM method metadata is missing",
+            ))?;
+        let helper_result_metadata = metadata
+            .iter()
+            .find(|entry| entry.identity().symbol() == helper_result_class)
+            .ok_or(CrossClassConstructorCallProofError::JvmPlan(
+                "planned helper result class metadata is missing",
+            ))?;
+        if helper_metadata
+            .parameters()
+            .iter()
+            .map(|parameter| parameter.symbol())
+            .collect::<Vec<_>>()
+            != [planned_call.helper_formal()]
+            || !helper_metadata
+                .access_flags()
+                .contains(dotty_classfile::access_flags::ACC_PUBLIC)
+        {
+            return Err(CrossClassConstructorCallProofError::JvmPlan(
+                "planned helper JVM metadata must retain its public canonical formal",
+            ));
+        }
+        let caller_parameters = method_descriptor
+            .strip_prefix('(')
+            .and_then(|descriptor| descriptor.split_once(')'))
+            .map(|(parameters, _)| parameters)
+            .ok_or(CrossClassConstructorCallProofError::JvmPlan(
+                "calling method descriptor has no parameter clause",
+            ))?;
+        let expected_helper_descriptor = format!(
+            "({caller_parameters})L{};",
+            helper_result_metadata.identity().internal_name()
+        );
+        let expected_outer_parameter =
+            format!("L{};", helper_result_metadata.identity().internal_name());
+        if helper_metadata.descriptor().as_str() != expected_helper_descriptor
+            || constructor_params != expected_outer_parameter
+        {
+            return Err(CrossClassConstructorCallProofError::JvmPlan(
+                "planned helper and outer constructor descriptors must preserve the exact result and caller formal",
+            ));
+        }
+        caller_parameters
     } else {
         constructor_params
     };
@@ -1946,6 +2570,9 @@ fn validate_constructor_call_candidate<'session>(
     let argument_proof = ConstructorArgumentProof {
         shape: match nested_argument_proof {
             Some(nested) => ConstructorArgumentProofShape::NestedNew(nested),
+            None if let Some(planned_call) = planned_call_proof => {
+                ConstructorArgumentProofShape::PlannedCall(planned_call)
+            }
             None => ConstructorArgumentProofShape::Formal(FormalConstructorArgumentProof {
                 source_argument,
                 typed_argument,

@@ -665,9 +665,12 @@ fn constructor_call_candidates_with_unsupported_argument_shapes_fail_closed() {
         |_| (),
     )
     .expect_err("a method-result constructor argument cannot be treated as a formal");
-    assert!(matches!(
-        method_result_error,
-        PairedPlanError::BatchUnit { phase: "cross-class constructor-call identity proof", ref reason }
-            if reason.contains("nested constructor function must be Select")
-    ));
+    assert!(
+        matches!(
+            method_result_error,
+            PairedPlanError::BatchUnit { phase: "cross-class constructor-call identity proof", ref reason }
+                if reason.contains("planned helper body has no established same-batch constructor proof")
+        ),
+        "unexpected method-result rejection: {method_result_error:?}"
+    );
 }

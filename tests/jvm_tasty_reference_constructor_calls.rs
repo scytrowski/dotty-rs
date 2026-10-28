@@ -2087,10 +2087,11 @@ fn nested_constructor_proof_rejects_computed_field_factory_null_and_third_level_
         "cross-class constructor-call identity proof",
         "constructor argument",
     );
-    assert_unit_failure(
+    assert_batch_failure(
         paired_failure(&factory, 181608),
-        "cross-class constructor-call identity proof",
-        "nested constructor function must be Select",
+        2,
+        "JVM/TASTy cross-contract validation",
+        "BodyExpression",
     );
 
     for (offset, source) in [field, null, third_level].iter().enumerate() {
