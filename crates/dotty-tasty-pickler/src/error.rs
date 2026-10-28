@@ -262,6 +262,10 @@ pub enum PickleError {
         source_tree: TreeId<Untyped>,
         typed_tree: TreeId<Typed>,
     },
+    MethodBodySpan {
+        source_tree: TreeId<Untyped>,
+        typed_tree: TreeId<Typed>,
+    },
     LimitExceeded {
         kind: LimitKind,
         limit: usize,

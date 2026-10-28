@@ -2102,7 +2102,8 @@ impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
             });
         }
         let source_rhs = definition.rhs.ok_or(PickleError::MissingBody { method })?;
-        p.source_ast
+        let source_rhs_node = p
+            .source_ast
             .try_get(source_rhs)
             .ok_or(PickleError::InvalidSourceTree { tree: source_rhs })?;
         let typed_rhs = p
@@ -2113,6 +2114,18 @@ impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
             .typed_ast
             .try_get(typed_rhs)
             .ok_or(PickleError::InvalidTypedTree { tree: typed_rhs })?;
+        let source_position = source_rhs_node.position;
+        let typed_position = typed_rhs_node.position;
+        if source_position.is_none()
+            || typed_position.is_none()
+            || source_position != typed_position
+            || source_position.is_some_and(|position| position.source() != p.source.id)
+        {
+            return Err(PickleError::MethodBodySpan {
+                source_tree: source_rhs,
+                typed_tree: typed_rhs,
+            });
+        }
         if !matches!(
             p.store.types.try_get(typed_rhs_node.ty),
             Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == result_class

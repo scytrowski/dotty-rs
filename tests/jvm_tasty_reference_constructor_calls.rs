@@ -4,8 +4,9 @@ use dotty_classfile::constant_pool::ConstantPoolEntry;
 use dotty_classfile::reader::Reader as ClassReader;
 use dotty_core::ast::TreeKind;
 use dotty_core::{
-    AstArena, Definitions, Packages, SemanticStore, SourceId, SourceText, SourceTypedIndex,
-    SymbolId, SymbolInfo, TermRefTarget, TreeId, Type, TypeRefTarget, Typed, Untyped,
+    AstArena, Definitions, Packages, SemanticStore, SourceId, SourceSpan, SourceText,
+    SourceTypedIndex, Span, SymbolId, SymbolInfo, TermRefTarget, TextRange, TreeId, Type,
+    TypeRefTarget, Typed, Untyped,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
@@ -191,6 +192,16 @@ struct AuditBindings<'a> {
     methods: &'a [SymbolId],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RhsProvenanceMutation {
+    None,
+    RolledBackSourceId,
+    MissingSourcePosition,
+    MissingTypedPosition,
+    ForeignSourcePosition,
+    MismatchedPositions,
+}
+
 impl SourceTypedBindings for AuditBindings<'_> {
     fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
         self.index.get(source, tree)
@@ -211,7 +222,7 @@ fn assert_distinct_signature_projection(
     parameter_class: &str,
     result_class: &str,
     factory_class: &str,
-    stale_rhs: bool,
+    rhs_mutation: RhsProvenanceMutation,
 ) {
     let source = SourceText::new(source_text).unwrap();
     let scanner = ContextualScanner::new(source_text).unwrap();
@@ -342,7 +353,7 @@ fn assert_distinct_signature_projection(
     for (_, tree) in parsed.ast.iter() {
         source_ast.alloc(tree.clone());
     }
-    if stale_rhs {
+    if rhs_mutation == RhsProvenanceMutation::RolledBackSourceId {
         let checkpoint = source_ast.checkpoint();
         let stale_rhs = source_ast.alloc(source_ast.get(wrap_tree).clone());
         source_ast.rollback_to(checkpoint);
@@ -350,6 +361,42 @@ fn assert_distinct_signature_projection(
             panic!("wrap method is a definition")
         };
         definition.rhs = Some(stale_rhs);
+    }
+    let source_rhs = wrap_definition.rhs.unwrap();
+    match rhs_mutation {
+        RhsProvenanceMutation::MissingSourcePosition => {
+            source_ast.get_mut(source_rhs).position = None;
+        }
+        RhsProvenanceMutation::ForeignSourcePosition => {
+            let position = source_ast.get(source_rhs).position.unwrap();
+            source_ast.get_mut(source_rhs).position = Some(SourceSpan::new(
+                SourceId::from_index(source_id.index() + 1),
+                position.span(),
+            ));
+        }
+        RhsProvenanceMutation::None
+        | RhsProvenanceMutation::RolledBackSourceId
+        | RhsProvenanceMutation::MissingTypedPosition
+        | RhsProvenanceMutation::MismatchedPositions => {}
+    }
+    let mut typed_ast = AstArena::new();
+    for (_, tree) in typer.typed_ast().iter() {
+        typed_ast.alloc(tree.clone());
+    }
+    match rhs_mutation {
+        RhsProvenanceMutation::MissingTypedPosition => {
+            typed_ast.get_mut(typed_rhs).position = None;
+        }
+        RhsProvenanceMutation::MismatchedPositions => {
+            typed_ast.get_mut(typed_rhs).position = Some(SourceSpan::new(
+                source_id,
+                Span::without_point(TextRange::new(0, 0).unwrap()),
+            ));
+        }
+        RhsProvenanceMutation::None
+        | RhsProvenanceMutation::RolledBackSourceId
+        | RhsProvenanceMutation::MissingSourcePosition
+        | RhsProvenanceMutation::ForeignSourcePosition => {}
     }
     let planned_classes = classes
         .iter()
@@ -369,7 +416,7 @@ fn assert_distinct_signature_projection(
         store: typer.store(),
         definitions: &definitions,
         source_ast: &source_ast,
-        typed_ast: typer.typed_ast(),
+        typed_ast: &typed_ast,
         source_index: &source_index,
         typed_bindings: &bindings,
         source: SourceMetadata {
@@ -386,13 +433,26 @@ fn assert_distinct_signature_projection(
         members: &members,
     };
     let validated = plan.validate().unwrap();
-    if stale_rhs {
-        assert!(matches!(
-            validated.distinct_reference_method_signature(wrap),
-            Err(dotty_tasty_pickler::PickleError::InvalidSourceTree { tree })
-                if source_ast.try_get(tree).is_none()
-        ));
-        return;
+    match rhs_mutation {
+        RhsProvenanceMutation::RolledBackSourceId => {
+            assert!(matches!(
+                validated.distinct_reference_method_signature(wrap),
+                Err(dotty_tasty_pickler::PickleError::InvalidSourceTree { tree })
+                    if source_ast.try_get(tree).is_none()
+            ));
+            return;
+        }
+        RhsProvenanceMutation::MissingSourcePosition
+        | RhsProvenanceMutation::MissingTypedPosition
+        | RhsProvenanceMutation::ForeignSourcePosition
+        | RhsProvenanceMutation::MismatchedPositions => {
+            assert!(matches!(
+                validated.distinct_reference_method_signature(wrap),
+                Err(dotty_tasty_pickler::PickleError::MethodBodySpan { .. })
+            ));
+            return;
+        }
+        RhsProvenanceMutation::None => {}
     }
     let signature = validated.distinct_reference_method_signature(wrap).unwrap();
     let name = |symbol| {
@@ -950,7 +1010,7 @@ fn renamed_and_reordered_three_class_sources_do_not_depend_on_fixture_names_or_o
         "Tally",
         "WrappedTally",
         "WrapperMaker",
-        false,
+        RhsProvenanceMutation::None,
     );
     assert_distinct_signature_projection(
         &reordered,
@@ -958,7 +1018,7 @@ fn renamed_and_reordered_three_class_sources_do_not_depend_on_fixture_names_or_o
         "Counter",
         "CounterOwner",
         "CounterOwnerFactory",
-        false,
+        RhsProvenanceMutation::None,
     );
 }
 
@@ -970,8 +1030,30 @@ fn distinct_signature_rejects_a_rolled_back_source_rhs_id() {
         "Counter",
         "CounterOwner",
         "CounterOwnerFactory",
-        true,
+        RhsProvenanceMutation::RolledBackSourceId,
     );
+}
+
+#[test]
+fn distinct_signature_rejects_missing_foreign_and_mismatched_rhs_positions() {
+    for (offset, mutation) in [
+        RhsProvenanceMutation::MissingSourcePosition,
+        RhsProvenanceMutation::MissingTypedPosition,
+        RhsProvenanceMutation::ForeignSourcePosition,
+        RhsProvenanceMutation::MismatchedPositions,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_distinct_signature_projection(
+            SOURCE,
+            SourceId::from_index(17937 + offset as u32),
+            "Counter",
+            "CounterOwner",
+            "CounterOwnerFactory",
+            mutation,
+        );
+    }
 }
 
 #[test]
