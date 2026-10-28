@@ -1244,6 +1244,7 @@ struct CrossClassMethodRef {
     name: String,
     descriptor: String,
     constructor: bool,
+    argument_load_opcode: Option<u8>,
     receiver_field: Option<SymbolId>,
 }
 
@@ -1406,11 +1407,50 @@ fn validate_cross_class_call_code(
                         format!("cross-class constructor {target:?} is absent from its JVM plan")
                     })?;
                 let descriptor = constructor.descriptor().as_str();
-                if descriptor != "(I)V" || !constructor.access_flags().is_public() {
+                let caller_descriptor =
+                    source_method_descriptor(tasty.store, tasty.definitions, caller, &all_metadata)
+                        .ok_or_else(|| {
+                            format!(
+                                "cross-class caller {caller:?} has an unsupported source signature"
+                            )
+                        })?;
+                let (constructor_parameters, constructor_result) = descriptor
+                    .strip_prefix('(')
+                    .and_then(|descriptor| descriptor.split_once(")"))
+                    .ok_or_else(|| {
+                        format!("cross-class constructor {target:?} has an invalid descriptor")
+                    })?;
+                let (caller_parameters, caller_result) = caller_descriptor
+                    .strip_prefix('(')
+                    .and_then(|descriptor| descriptor.split_once(")"))
+                    .ok_or_else(|| {
+                        format!("cross-class caller {caller:?} has an invalid descriptor")
+                    })?;
+                let expected_result =
+                    format!("L{};", target_class_metadata.identity().internal_name());
+                let supported_argument = constructor_parameters == "I"
+                    || (constructor_parameters.starts_with('L')
+                        && constructor_parameters.ends_with(';')
+                        && constructor_parameters.matches(';').count() == 1);
+                if !constructor.access_flags().is_public()
+                    || !supported_argument
+                    || constructor_result != "V"
+                    || caller_parameters != constructor_parameters
+                    || caller_result != expected_result
+                {
                     return Err(format!(
-                        "cross-class constructor {target:?} is not an accessible (I)V primary constructor"
+                        "cross-class constructor {target:?} does not match the accessible source formal and result signature"
                     ));
                 }
+                let argument_load_opcode = match constructor_parameters {
+                    "I" => 0x1b,
+                    descriptor if descriptor.starts_with('L') => 0x2b,
+                    _ => {
+                        return Err(
+                            "cross-class constructor argument category is unsupported".into()
+                        );
+                    }
+                };
                 calls.push(CrossClassMethodRef {
                     caller,
                     target: *target,
@@ -1421,6 +1461,7 @@ fn validate_cross_class_call_code(
                     name: "<init>".to_owned(),
                     descriptor: descriptor.to_owned(),
                     constructor: true,
+                    argument_load_opcode: Some(argument_load_opcode),
                     receiver_field: None,
                 });
                 continue;
@@ -1461,6 +1502,7 @@ fn validate_cross_class_call_code(
             name: target_metadata.1.name().to_owned(),
             descriptor: expected_descriptor,
             constructor: false,
+            argument_load_opcode: None,
             receiver_field: match &function_tree.kind {
                 TreeKind::Select(selection) => tasty
                     .typed_ast
@@ -1516,10 +1558,13 @@ fn validate_cross_class_call_code(
             ));
         };
         let reference = if call.constructor {
+            let load_argument = call.argument_load_opcode.ok_or_else(|| {
+                "cross-class constructor has no validated argument load".to_owned()
+            })?;
             if code.code.len() != 9
                 || code.code[0] != 0xbb
                 || code.code[3] != 0x59
-                || code.code[4] != 0x1b
+                || code.code[4] != load_argument
                 || code.code[5] != 0xb7
                 || code.code[8] != 0xb0
             {

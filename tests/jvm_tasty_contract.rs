@@ -38,6 +38,8 @@ const THREE_CLASSES: &str = "package example\n\nclass Counter(start: Int):\n  pr
 const SAME_BATCH_REFERENCE_FIELD: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\nclass CounterOwner(seed: Int):\n  private val inner: Counter = new Counter(seed)\n  def constant(): Int = 0\n";
 const SAME_BATCH_REFERENCE_ALIAS: &str =
     include_str!("fixtures/jvm_tasty_constructor_injection/CounterOwner.scala");
+const REFERENCE_CONSTRUCTOR_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_reference_constructor_calls/CounterOwnerFactory.scala");
 
 #[test]
 fn whole_batch_proves_distinct_class_abi_and_rejects_partial_or_swapped_artifacts() {
@@ -433,6 +435,112 @@ fn constructor_reference_alias_proves_exact_parameter_abi_and_rejects_forged_loa
                     reason,
                     ..
                 }) if reason.contains("bounded super/aload_0/aload_1/putfield/return alias shape")
+            ));
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn three_class_reference_constructor_artifacts_are_validated_as_one_linked_graph() {
+    with_paired_jvm_tasty_batch_plan(
+        REFERENCE_CONSTRUCTOR_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(17975),
+        |source_batch| {
+            assert_eq!(source_batch.classes.len(), 3);
+            assert_eq!(source_batch.constructor_call_proofs.len(), 1);
+            let plans = source_batch
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(source_batch.jvm_unit, &plans).unwrap();
+            let artifacts = encode_batch_for_contract_test(&source_batch);
+            validate_jvm_tasty_batch_artifacts(&validated, artifacts.clone()).unwrap();
+
+            let mut missing_factory = artifacts.clone();
+            missing_factory
+                .classfiles
+                .retain(|artifact| artifact.classfile_path != "example/CounterOwnerFactory.class");
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, missing_factory),
+                Err(JvmTastyContractError::BatchArtifactPaths {
+                    reason: "missing expected class-file path",
+                    path,
+                }) if path == "example/CounterOwnerFactory.class"
+            ));
+
+            let mut corrupted_factory_sidecar = artifacts.clone();
+            let factory = corrupted_factory_sidecar
+                .sidecars
+                .iter_mut()
+                .find(|artifact| artifact.tasty_path == "example/CounterOwnerFactory.tasty")
+                .unwrap();
+            factory.tasty_bytes[0] ^= 0xff;
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, corrupted_factory_sidecar),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 2,
+                    phase: "class-file/TASTy link",
+                    ..
+                }) | Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 2,
+                    phase: "TASTy decode",
+                    ..
+                })
+            ));
+
+            let mut wrong_constructor = artifacts;
+            let factory = wrong_constructor
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/CounterOwnerFactory.class")
+                .unwrap();
+            let mut reader = Reader::new(&factory.classfile_bytes);
+            let class = ClassFile::decode(&mut reader).unwrap();
+            assert!(reader.is_at_end());
+            let object_class = (1..256)
+                .find_map(|index| {
+                    let index = ConstantPoolIndex(index);
+                    matches!(
+                        class.constant_pool.get(index),
+                        Some(ConstantPoolEntry::Class { .. })
+                    )
+                    .then(|| {
+                        (class.constant_pool.class_name(index).ok() == Some("java/lang/Object"))
+                            .then_some(index)
+                    })
+                    .flatten()
+                })
+                .expect("Factory class pool contains Object");
+            let wrap = class
+                .methods
+                .iter()
+                .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "wrap")
+                .unwrap();
+            let [Attribute::Code(code)] = wrap.attributes.as_slice() else {
+                panic!("Factory.wrap has one Code attribute");
+            };
+            let code_bytes = code.code.to_vec();
+            let [code_offset] = factory
+                .classfile_bytes
+                .windows(code_bytes.len())
+                .enumerate()
+                .filter_map(|(index, bytes)| (bytes == code_bytes).then_some(index))
+                .collect::<Vec<_>>()[..]
+            else {
+                panic!("Factory.wrap Code occurs exactly once in class bytes");
+            };
+            factory.classfile_bytes[code_offset + 1..code_offset + 3]
+                .copy_from_slice(&object_class.0.to_be_bytes());
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_constructor),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 2,
+                    phase: "cross-class invocation",
+                    ..
+                })
             ));
         },
     )

@@ -232,7 +232,7 @@ source-level paired API without violating the one-session identity invariant:
 | Foreign same-name class or a selected constructor owned by another class | The typer resolves the source selection to its canonical constructor. Producing a foreign same-slot `SymbolId` would require fabricating typed identities, explicitly excluded by the issue. |
 | Stale/foreign source IDs | The paired API creates and consumes one source ID internally. A stale binding requires substituting caller-forged source/typed indexes, which this audit does not do. |
 | External constructor | This fixture uses only source-local classes; an external definition needs a separate classpath/TASTy resolver setup and is not reached by the current constructor-call gate. |
-| Missing sidecar, altered TASTY link UUID, or Java classfile-only fallback | Full multi-artifact publication and link validation belong to #1797; this increment exercises per-sidecar TASTy output. |
+| Missing sidecar, altered TASTY link UUID, or Java classfile-only fallback | The three-class linked artifact batch and its missing/corrupt Factory controls are covered by #1797; Java classfile-only fallback remains outside this source-batch contract. |
 
 No rejection stage is claimed for the unmeasured cases. In particular, the
 Scala TASTy consumption is required before claiming interoperability. The
@@ -282,3 +282,33 @@ assertions are also available as the focused Rust test:
 ```sh
 cargo test -p dotty --test jvm_tasty_reference_constructor_calls --locked
 ```
+
+## Complete linked batch (#1797)
+
+The paired artifact emitter now completes this same source as one ordered batch
+of six owned Rust outputs: `Counter.class` / `.tasty`, `CounterOwner.class` /
+`.tasty`, and `CounterOwnerFactory.class` / `.tasty`. Each classfile targets
+major version 65 and links to the UUID in its own Scala 3.9 TASTy 28.9.0
+sidecar. The batch validator checks the exact source-ordered classes, all six
+package-relative paths, every class ABI, and each classfile-to-sidecar pair
+before returning the batch.
+
+For the cross-class edge, the source proof retains the canonical
+`CounterOwnerFactory.wrap` method and its actual typed RHS, the canonical
+`CounterOwner` class and primary constructor, and the exact method-owned
+`counter` formal. The contract derives the caller and constructor descriptors
+from their source signatures and requires the same single planned-class
+parameter and a result descriptor for the allocated Owner. Its bytecode check
+requires `new`, `dup`, the correct reference load, the exact Owner constructor
+`Methodref`, and `areturn`. The class-specific TASTy plan is emitted from the
+same source and typed roots. No Counter allocation occurs in `wrap`.
+
+The focused artifact regression emits the original source in two fresh
+semantic sessions and compares every classfile, sidecar, path, and UUID. It
+also repeats the structural proof and byte comparison after renaming the
+package/classes/method and after reversing the class declaration order. The
+contract regression rejects a missing third classfile, a damaged Factory
+sidecar, and a Factory allocation/constructor edge changed to `Object`.
+These checks establish deterministic Rust output and complete in-memory
+validation; they do not claim runtime execution or Scala consumer
+interoperability, which remain separate gates.
