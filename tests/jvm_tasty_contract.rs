@@ -40,6 +40,8 @@ const SAME_BATCH_REFERENCE_ALIAS: &str =
     include_str!("fixtures/jvm_tasty_constructor_injection/CounterOwner.scala");
 const REFERENCE_CONSTRUCTOR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_reference_constructor_calls/CounterOwnerFactory.scala");
+const NESTED_CONSTRUCTOR_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala");
 
 #[test]
 fn whole_batch_proves_distinct_class_abi_and_rejects_partial_or_swapped_artifacts() {
@@ -1696,8 +1698,109 @@ fn factory_batch_contract_rejects_missing_dup_wrong_seed_slot_and_constructor_re
     .unwrap();
 }
 
+#[test]
+fn nested_constructor_batch_contract_rejects_wrong_constructor_reference_and_stack_bound() {
+    with_paired_jvm_tasty_batch_plan(
+        NESTED_CONSTRUCTOR_BATCH,
+        "NestedConstructorCalls.scala",
+        SourceId::from_index(18191),
+        |source_batch| {
+            let plans = source_batch
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(source_batch.jvm_unit, &plans).unwrap();
+            let valid = encode_batch_for_contract_test(&source_batch);
+            validate_jvm_tasty_batch_artifacts(&validated, valid.clone()).unwrap();
+
+            let factory = valid
+                .classfiles
+                .iter()
+                .find(|artifact| artifact.classfile_path == "example/CounterOwnerFactory.class")
+                .unwrap();
+            let mut reader = Reader::new(&factory.classfile_bytes);
+            let class = ClassFile::decode(&mut reader).unwrap();
+            let create = class
+                .methods
+                .iter()
+                .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "create")
+                .unwrap();
+            let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                panic!("Factory.create has one Code attribute");
+            };
+            assert_eq!(code.max_stack, 5);
+            let nested_constructor_ref = [code.code[10], code.code[11]];
+            let outer_constructor_ref = [code.code[13], code.code[14]];
+            assert_ne!(nested_constructor_ref, outer_constructor_ref);
+
+            let mut wrong_constructor = valid.clone();
+            replace_class_method_code_bytes(
+                &mut wrong_constructor,
+                "example/CounterOwnerFactory.class",
+                "create",
+                10,
+                &outer_constructor_ref,
+            );
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, wrong_constructor),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 2,
+                    phase: "cross-class invocation",
+                    ..
+                })
+            ));
+
+            let mut underreported_stack = valid;
+            let factory = underreported_stack
+                .classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/CounterOwnerFactory.class")
+                .unwrap();
+            let mut reader = Reader::new(&factory.classfile_bytes);
+            let mut class = ClassFile::decode(&mut reader).unwrap();
+            let create_index = class
+                .methods
+                .iter()
+                .position(|method| class.constant_pool.utf8(method.name_index).unwrap() == "create")
+                .unwrap();
+            let [Attribute::Code(code)] = class.methods[create_index].attributes.as_mut_slice()
+            else {
+                panic!("Factory.create has one Code attribute");
+            };
+            code.max_stack = 0;
+            factory.classfile_bytes = class.encode().unwrap();
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, underreported_stack),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 2,
+                    phase: "cross-class invocation",
+                    ..
+                })
+            ));
+        },
+    )
+    .unwrap();
+}
+
 fn replace_factory_code_bytes(
     artifacts: &mut JvmTastyBatchArtifacts,
+    method_name: &str,
+    code_offset: usize,
+    replacement: &[u8],
+) {
+    replace_class_method_code_bytes(
+        artifacts,
+        "example/CounterFactory.class",
+        method_name,
+        code_offset,
+        replacement,
+    );
+}
+
+fn replace_class_method_code_bytes(
+    artifacts: &mut JvmTastyBatchArtifacts,
+    classfile_path: &str,
     method_name: &str,
     code_offset: usize,
     replacement: &[u8],
@@ -1705,7 +1808,7 @@ fn replace_factory_code_bytes(
     let artifact = artifacts
         .classfiles
         .iter_mut()
-        .find(|artifact| artifact.classfile_path == "example/CounterFactory.class")
+        .find(|artifact| artifact.classfile_path == classfile_path)
         .unwrap();
     let mut reader = Reader::new(&artifact.classfile_bytes);
     let class = ClassFile::decode(&mut reader).unwrap();
