@@ -15634,6 +15634,59 @@ fn nested_constructor_identity_proof_ignores_class_package_and_declaration_order
 }
 
 #[test]
+fn nested_constructor_identity_proof_rejects_a_boolean_factory_leaf() {
+    let source = "package example\nclass Counter(seed: Boolean)\nclass CounterOwner(counter: Counter)\nclass CounterOwnerFactory:\n  def create(seed: Boolean): CounterOwner =\n    new CounterOwner(new Counter(seed))\n";
+    let source_id = SourceId::from_index(181606);
+    let output = TestOutputDirectory::new("nested-constructor-boolean-leaf");
+    let mut observed = false;
+    let mut proof_error = None;
+    let mut observe = |ast: &AstArena<Untyped>,
+                       source_root: TreeId<Untyped>,
+                       source_index: &SourceSemanticIndex,
+                       source_typed_index: &SourceTypedIndex,
+                       unit: &mut JvmCompilationUnit<'_>,
+                       definitions: &Definitions| {
+        observed = true;
+        proof_error = Some(
+            match validate_cross_class_constructor_call_proofs(
+                CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root,
+                    store: unit.store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: unit.typed_ast,
+                    source_index,
+                    source_typed_index,
+                    jvm_unit: unit,
+                },
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("nested constructor proofs require the canonical Int type"),
+            },
+        );
+    };
+    compile_source_batch_with_source_observer(
+        source,
+        "BooleanNestedConstructorCalls.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe,
+    )
+    .expect("the Boolean source is valid for the real frontend and JVM-only path");
+    assert!(observed, "the proof ran in the real frontend session");
+    assert!(matches!(
+        proof_error,
+        Some(
+            dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SemanticIdentity(
+                "nested constructor and factory formal must both have the canonical Int type"
+            )
+        )
+    ));
+}
+
+#[test]
 fn allocated_immutable_reference_local_can_be_a_constructor_argument() {
     let output = TestOutputDirectory::new("allocated-reference-constructor-argument");
     let artifacts = compile_planned_constructor_source(

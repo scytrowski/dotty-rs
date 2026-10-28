@@ -1220,10 +1220,12 @@ fn validate_constructor_call_candidate<'session>(
         if inner_signature.kind != dotty_core::MethodKind::Plain
             || inner_signature.params.len() != 1
             || inner_signature.params[0].ty != inner_formal_type
+            || inner_formal_type != definitions.int
+            || formal_type != definitions.int
             || inner_formal_type != formal_type
         {
             return Err(semantic_error(
-                "nested constructor's single formal must preserve the factory's exact Int type",
+                "nested constructor and factory formal must both have the canonical Int type",
             ));
         }
         if !matches!(store.types.try_get(typed_formal_node.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == method_formal)
