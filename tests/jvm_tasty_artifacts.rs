@@ -26,6 +26,8 @@ const COUNTER_OWNER: &str =
     include_str!("fixtures/jvm_tasty_object_composition/CounterOwner.scala");
 const COUNTER_OWNER_ALIAS: &str =
     include_str!("fixtures/jvm_tasty_constructor_injection/CounterOwner.scala");
+const REFERENCE_CONSTRUCTOR_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_reference_constructor_calls/CounterOwnerFactory.scala");
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
 const COUNTER_FACTORY_REFERENCE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def create(counter: Counter): Counter = counter\n";
@@ -1163,6 +1165,212 @@ fn constructor_injected_reference_emits_complete_linked_batch_deterministically(
             .unwrap(),
         ("get", "()I")
     );
+}
+
+#[test]
+fn reference_constructor_graph_emits_six_complete_deterministic_linked_artifacts() {
+    let first = emit_paired_jvm_tasty_batch(
+        REFERENCE_CONSTRUCTOR_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(17971),
+    )
+    .unwrap();
+    let second = emit_paired_jvm_tasty_batch(
+        REFERENCE_CONSTRUCTOR_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(17972),
+    )
+    .unwrap();
+    assert_ne!(first.source_id(), second.source_id());
+    assert_eq!(first.classes().len(), 3);
+    assert_eq!(second.classes().len(), 3);
+
+    let expected = [
+        (
+            "example/Counter.class",
+            "example/Counter.tasty",
+            "example/Counter",
+        ),
+        (
+            "example/CounterOwner.class",
+            "example/CounterOwner.tasty",
+            "example/CounterOwner",
+        ),
+        (
+            "example/CounterOwnerFactory.class",
+            "example/CounterOwnerFactory.tasty",
+            "example/CounterOwnerFactory",
+        ),
+    ];
+    let mut decoded = Vec::new();
+    for ((artifact, repeat), (classfile_path, tasty_path, internal_name)) in
+        first.classes().iter().zip(second.classes()).zip(expected)
+    {
+        assert_eq!(
+            (artifact.classfile_path(), artifact.tasty_path()),
+            (classfile_path, tasty_path)
+        );
+        assert_eq!(artifact.source_id(), first.source_id());
+        assert_eq!(artifact.classfile_path(), repeat.classfile_path());
+        assert_eq!(artifact.tasty_path(), repeat.tasty_path());
+        assert_eq!(artifact.classfile_bytes(), repeat.classfile_bytes());
+        assert_eq!(artifact.tasty_bytes(), repeat.tasty_bytes());
+        assert_eq!(artifact.tasty_link_id(), repeat.tasty_link_id());
+
+        let tasty = TastyFile::parse_and_validate_scala_3_9(artifact.tasty_bytes()).unwrap();
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version,
+            ),
+            (28, 9, 0)
+        );
+        assert_eq!(
+            artifact.tasty_link_id(),
+            TastyLinkId::from_bytes(tasty.header().uuid)
+        );
+
+        let mut reader = Reader::new(artifact.classfile_bytes());
+        let class = ClassFile::decode(&mut reader).unwrap();
+        assert!(reader.is_at_end());
+        assert_eq!((class.version.major, class.version.minor), (65, 0));
+        assert_eq!(
+            class.constant_pool.class_name(class.this_class).unwrap(),
+            internal_name
+        );
+        assert_eq!(
+            class.tasty_link_id().unwrap(),
+            Some(artifact.tasty_link_id())
+        );
+        validate_classfile_tasty_link(&class, artifact.tasty_bytes()).unwrap();
+        decoded.push(class);
+    }
+
+    assert_eq!(
+        first
+            .classes()
+            .iter()
+            .flat_map(|artifact| [artifact.classfile_path(), artifact.tasty_path()])
+            .collect::<Vec<_>>(),
+        [
+            "example/Counter.class",
+            "example/Counter.tasty",
+            "example/CounterOwner.class",
+            "example/CounterOwner.tasty",
+            "example/CounterOwnerFactory.class",
+            "example/CounterOwnerFactory.tasty",
+        ]
+    );
+
+    let factory = &decoded[2];
+    let wrap = factory
+        .methods
+        .iter()
+        .find(|method| {
+            factory.constant_pool.utf8(method.name_index).unwrap() == "wrap"
+                && factory.constant_pool.utf8(method.descriptor_index).unwrap()
+                    == "(Lexample/Counter;)Lexample/CounterOwner;"
+        })
+        .expect("Factory.wrap has the distinct Counter-to-CounterOwner ABI");
+    let [Attribute::Code(code)] = wrap.attributes.as_slice() else {
+        panic!("Factory.wrap has one Code attribute");
+    };
+    assert_eq!(code.code.len(), 9);
+    assert_eq!(code.code[0], 0xbb, "new CounterOwner");
+    assert_eq!(code.code[3], 0x59, "dup");
+    assert_eq!(code.code[4], 0x2b, "aload_1 passes the existing Counter");
+    assert_eq!(code.code[5], 0xb7, "invokespecial CounterOwner.<init>");
+    assert_eq!(code.code[8], 0xb0, "areturn the initialized Owner");
+    let constructor_ref = ConstantPoolIndex(u16::from_be_bytes([code.code[6], code.code[7]]));
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = factory.constant_pool.get(constructor_ref).unwrap()
+    else {
+        panic!("Factory.wrap invokes a constructor Methodref");
+    };
+    assert_eq!(
+        factory.constant_pool.class_name(*class_index).unwrap(),
+        "example/CounterOwner"
+    );
+    assert_eq!(
+        factory
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("<init>", "(Lexample/Counter;)V")
+    );
+}
+
+#[test]
+fn renamed_and_reordered_reference_constructor_batches_emit_complete_links() {
+    let renamed = REFERENCE_CONSTRUCTOR_BATCH
+        .replace("package example", "package renamed")
+        .replace("CounterOwnerFactory", "WidgetBuilder")
+        .replace("CounterOwner", "WidgetHolder")
+        .replace("Counter", "Widget")
+        .replace("wrap(", "build(");
+    let reordered = REFERENCE_CONSTRUCTOR_BATCH
+        .replace(
+            "class Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass CounterOwner(counter: Counter):",
+            "class CounterOwner(counter: Counter):",
+        )
+        .replace(
+            "\nclass CounterOwnerFactory:",
+            "\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass CounterOwnerFactory:",
+        );
+
+    for (source, source_name, source_id, paths) in [
+        (
+            renamed.as_str(),
+            "renamed-reference-constructor.scala",
+            17973,
+            [
+                ("renamed/Widget.class", "renamed/Widget.tasty"),
+                ("renamed/WidgetHolder.class", "renamed/WidgetHolder.tasty"),
+                ("renamed/WidgetBuilder.class", "renamed/WidgetBuilder.tasty"),
+            ],
+        ),
+        (
+            reordered.as_str(),
+            "reordered-reference-constructor.scala",
+            17974,
+            [
+                ("example/CounterOwner.class", "example/CounterOwner.tasty"),
+                ("example/Counter.class", "example/Counter.tasty"),
+                (
+                    "example/CounterOwnerFactory.class",
+                    "example/CounterOwnerFactory.tasty",
+                ),
+            ],
+        ),
+    ] {
+        let first =
+            emit_paired_jvm_tasty_batch(source, source_name, SourceId::from_index(source_id))
+                .expect("renamed/reordered source follows the same structural proof path");
+        let second =
+            emit_paired_jvm_tasty_batch(source, source_name, SourceId::from_index(source_id + 1))
+                .expect("each source is repeatable in a fresh semantic session");
+        assert_eq!(first.classes().len(), 3);
+        assert_eq!(second.classes().len(), 3);
+        for ((artifact, repeat), expected_paths) in
+            first.classes().iter().zip(second.classes()).zip(paths)
+        {
+            assert_eq!(
+                (artifact.classfile_path(), artifact.tasty_path()),
+                expected_paths
+            );
+            assert_eq!(artifact.classfile_bytes(), repeat.classfile_bytes());
+            assert_eq!(artifact.tasty_bytes(), repeat.tasty_bytes());
+            assert_eq!(artifact.tasty_link_id(), repeat.tasty_link_id());
+            validate_classfile_tasty_link(
+                &ClassFile::decode(&mut Reader::new(artifact.classfile_bytes())).unwrap(),
+                artifact.tasty_bytes(),
+            )
+            .unwrap();
+        }
+    }
 }
 
 #[test]

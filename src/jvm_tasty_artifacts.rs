@@ -195,18 +195,41 @@ pub fn emit_paired_jvm_tasty_batch(
         let validated_batch = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans)
             .map_err(PairedBatchArtifactError::Contract)?;
 
-        let mut classes = Vec::with_capacity(plan.classes.len());
-        for (class_index, class) in plan.classes.iter().enumerate() {
-            let artifacts = emit_validated_pair(ValidatedPairInput {
-                jvm_unit: plan.jvm_unit,
-                class: class.class,
-                source_id: plan.source_id,
-                source_member_order: class.source_member_order.clone(),
-                classfile_path: class.classfile_path.clone(),
-                tasty_path: class.tasty_path.clone(),
-                tasty_plan: class.tasty_plan,
-                compatibility: class.compatibility,
+        // Pickle and validate every sidecar first so no classfile is emitted
+        // until the complete TASTy half of the batch exists with its producer
+        // UUIDs available for the corresponding links.
+        let tasty_outputs = plan
+            .classes
+            .iter()
+            .enumerate()
+            .map(|(class_index, class)| {
+                emit_tasty_output(class.tasty_plan, &class.tasty_path).map_err(|error| {
+                    PairedBatchArtifactError::ClassArtifact {
+                        class_index,
+                        class: class.class,
+                        error: Box::new(error),
+                    }
+                })
             })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut classes = Vec::with_capacity(plan.classes.len());
+        for (class_index, (class, tasty_output)) in
+            plan.classes.iter().zip(tasty_outputs).enumerate()
+        {
+            let artifacts = emit_classfile_for_pair(
+                ValidatedPairInput {
+                    jvm_unit: plan.jvm_unit,
+                    class: class.class,
+                    source_id: plan.source_id,
+                    source_member_order: class.source_member_order.clone(),
+                    classfile_path: class.classfile_path.clone(),
+                    tasty_path: class.tasty_path.clone(),
+                    tasty_plan: class.tasty_plan,
+                    compatibility: class.compatibility,
+                },
+                tasty_output,
+            )
             .map_err(|error| PairedBatchArtifactError::ClassArtifact {
                 class_index,
                 class: class.class,
@@ -250,6 +273,11 @@ struct ValidatedPairInput<'session> {
     compatibility: &'session ValidatedJvmTastyClass<'session, 'session, 'session, 'session>,
 }
 
+struct ValidatedTastyOutput {
+    bytes: Vec<u8>,
+    link_id: TastyLinkId,
+}
+
 fn emit_validated_pair<'session>(
     input: ValidatedPairInput<'session>,
 ) -> Result<PairedJvmTastyArtifacts, PairedArtifactError> {
@@ -263,6 +291,26 @@ fn emit_validated_pair<'session>(
         tasty_plan,
         compatibility,
     } = input;
+    let tasty_output = emit_tasty_output(tasty_plan, &tasty_path)?;
+    emit_classfile_for_pair(
+        ValidatedPairInput {
+            jvm_unit,
+            class,
+            source_id,
+            source_member_order,
+            classfile_path,
+            tasty_path,
+            tasty_plan,
+            compatibility,
+        },
+        tasty_output,
+    )
+}
+
+fn emit_tasty_output(
+    tasty_plan: &ValidatedClassStatePlan<'_, '_>,
+    tasty_path: &str,
+) -> Result<ValidatedTastyOutput, PairedArtifactError> {
     let tasty = tasty_plan
         .pickle()
         .map_err(PairedArtifactError::TastyPickle)?;
@@ -285,6 +333,30 @@ fn emit_validated_pair<'session>(
         ));
     }
     let tasty_link_id = TastyLinkId::from_bytes(tasty_file.header().uuid);
+    Ok(ValidatedTastyOutput {
+        bytes: tasty.bytes().to_vec(),
+        link_id: tasty_link_id,
+    })
+}
+
+fn emit_classfile_for_pair<'session>(
+    input: ValidatedPairInput<'session>,
+    tasty_output: ValidatedTastyOutput,
+) -> Result<PairedJvmTastyArtifacts, PairedArtifactError> {
+    let ValidatedPairInput {
+        jvm_unit,
+        class,
+        source_id,
+        source_member_order,
+        classfile_path,
+        tasty_path,
+        tasty_plan,
+        compatibility,
+    } = input;
+    let ValidatedTastyOutput {
+        bytes: tasty_bytes,
+        link_id: tasty_link_id,
+    } = tasty_output;
 
     let generated: GeneratedClass = emit_class_with_tasty_link(
         jvm_unit,
@@ -352,7 +424,7 @@ fn emit_validated_pair<'session>(
             "decoded JVM superclass differs from the checked source ABI",
         ));
     }
-    validate_classfile_tasty_link(&class_file, tasty.bytes())
+    validate_classfile_tasty_link(&class_file, &tasty_bytes)
         .map_err(PairedArtifactError::Contract)?;
     validate_decoded_members(&class_file, compatibility)
         .map_err(PairedArtifactError::ArtifactMismatch)?;
@@ -364,7 +436,7 @@ fn emit_validated_pair<'session>(
         classfile_path,
         classfile_bytes: generated.into_bytes(),
         tasty_path,
-        tasty_bytes: tasty.bytes().to_vec(),
+        tasty_bytes,
         tasty_link_id,
     })
 }
