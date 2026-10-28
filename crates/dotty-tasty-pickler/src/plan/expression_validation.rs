@@ -2515,6 +2515,30 @@ impl Validator<'_, '_> {
             typed_argument_id,
         )?;
         let typed_argument_type = typed_argument.ty;
+        if let Some(binding) = p
+            .typed_bindings
+            .nested_constructor_call(p.source.id, method.symbol)
+        {
+            if binding.source_apply != source_argument_id
+                || binding.typed_apply != typed_argument_id
+                || !matches!(self.ty(constructor_argument_type)?, Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == binding.class)
+                || !matches!(self.ty(binding.result_type)?, Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == binding.class)
+                || !matches!(self.ty(typed_argument_type)?, Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == binding.class)
+                || !self.is_planned_sibling_class_type(constructor_argument_type, None)
+            {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+            return self.validate_nested_constructor_argument(
+                binding,
+                formal,
+                constructor_argument_type,
+                method,
+                depth + 1,
+                visited,
+            );
+        }
         let (TreeKind::Ident(source_argument), TreeKind::Ident(typed_argument)) =
             (&source_argument.kind, &typed_argument.kind)
         else {
@@ -2543,6 +2567,215 @@ impl Validator<'_, '_> {
                 symbol: formal,
                 reason: crate::ReferenceError::Owner,
             });
+        }
+        Ok(())
+    }
+
+    fn validate_nested_constructor_argument(
+        &mut self,
+        binding: crate::NestedConstructorCallBinding,
+        caller_formal: SymbolId,
+        expected_type: TypeId,
+        method: &MethodPicklePlan,
+        depth: usize,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<(), PickleError> {
+        let p = self.plan;
+        if depth > self.limits.expression_depth_limit() {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: self.limits.expression_depth_limit(),
+            });
+        }
+        let source_apply = self.source_tree(binding.source_apply)?;
+        let typed_apply =
+            p.typed_ast
+                .try_get(binding.typed_apply)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.typed_apply,
+                })?;
+        let (TreeKind::Apply(source_apply_node), TreeKind::Apply(typed_apply_node)) =
+            (&source_apply.kind, &typed_apply.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        if source_apply_node.kind != ApplyKind::Regular
+            || typed_apply_node.kind != ApplyKind::Regular
+            || source_apply_node.function != binding.source_select
+            || typed_apply_node.function != binding.typed_select
+            || source_apply_node.args.as_slice() != [binding.source_argument]
+            || typed_apply_node.args.as_slice() != [binding.typed_argument]
+            || typed_apply.ty != binding.result_type
+            || !matches!(self.ty(typed_apply.ty)?, Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == binding.class)
+            || !matches!(self.ty(expected_type)?, Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == binding.class)
+        {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        }
+        let source_select = self.source_tree(binding.source_select)?;
+        let typed_select =
+            p.typed_ast
+                .try_get(binding.typed_select)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.typed_select,
+                })?;
+        let (TreeKind::Select(source_select_node), TreeKind::Select(typed_select_node)) =
+            (&source_select.kind, &typed_select.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        if source_select_node.qualifier != binding.source_new
+            || typed_select_node.qualifier != binding.typed_new
+            || p.store.names.resolve(source_select_node.name.text()) != "<init>"
+            || typed_select_node.name != source_select_node.name
+        {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        }
+        let source_new = self.source_tree(binding.source_new)?;
+        let typed_new =
+            p.typed_ast
+                .try_get(binding.typed_new)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.typed_new,
+                })?;
+        let (TreeKind::New(source_new_node), TreeKind::New(typed_new_node)) =
+            (&source_new.kind, &typed_new.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        let source_type = self.source_tree(source_new_node.tpt)?;
+        let typed_type =
+            p.typed_ast
+                .try_get(typed_new_node.tpt)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: typed_new_node.tpt,
+                })?;
+        let TreeKind::Ident(source_class_name) = &source_type.kind else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        let class_type = typed_type.ty;
+        if !matches!(typed_type.kind, TreeKind::TypeTree(_))
+            || !self.is_planned_sibling_class_type(class_type, Some(source_class_name.name))
+            || !matches!(self.ty(class_type)?, Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == binding.class)
+            || self.symbol(binding.class)?.name != source_class_name.name
+            || !matches!(self.ty(typed_new.ty)?, Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == binding.class)
+            || !matches!(self.ty(binding.result_type)?, Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == binding.class)
+        {
+            return Err(PickleError::BodyType {
+                tree: binding.typed_new,
+                ty: typed_new.ty,
+            });
+        }
+        let Type::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(constructor),
+        } = self.ty(typed_select.ty)?
+        else {
+            return Err(PickleError::BodyType {
+                tree: binding.typed_select,
+                ty: typed_select.ty,
+            });
+        };
+        if *constructor != binding.constructor
+            || !matches!(self.ty(*prefix)?, Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == binding.class)
+        {
+            return Err(PickleError::Reference {
+                symbol: binding.constructor,
+                reason: crate::ReferenceError::Owner,
+            });
+        }
+        self.validate_planned_primary_constructor(binding.class, binding.constructor)?;
+        let constructor_type = self.complete(binding.constructor)?;
+        let Type::Method(signature) = self.ty(constructor_type)? else {
+            return Err(PickleError::MalformedType {
+                ty: constructor_type,
+                role: TypeRole::ConstructorSignature,
+            });
+        };
+        let constructor_source = self
+            .plan
+            .source_index
+            .definition_of(binding.constructor)
+            .and_then(|definition| match definition {
+                SourceDefinition::Canonical { source, tree } if source == p.source.id => Some(tree),
+                _ => None,
+            })
+            .ok_or(PickleError::SourceDefinition {
+                symbol: binding.constructor,
+            })?;
+        let TreeKind::DefDef(constructor_definition) = &self.source_tree(constructor_source)?.kind
+        else {
+            return Err(PickleError::SourceShape {
+                tree: constructor_source,
+                expected: SourceRole::Constructor,
+            });
+        };
+        let Some(&constructor_formal_tree) = constructor_definition
+            .value_param_clauses
+            .first()
+            .and_then(|clause| clause.first())
+        else {
+            return Err(self.unsupported(
+                UnsupportedFeature::PrimaryConstructorInput,
+                Some(binding.constructor),
+            ));
+        };
+        let canonical_formal = p
+            .source_index
+            .derived_symbol_at(binding.constructor, p.source.id, constructor_formal_tree)
+            .ok_or(PickleError::SourceDefinition {
+                symbol: binding.constructor,
+            })?;
+        if canonical_formal != binding.formal
+            || signature.kind != MethodKind::Plain
+            || signature.params.len() != 1
+            || signature.params[0].ty != binding.formal_type
+            || binding.formal_type != p.definitions.int
+            || !matches!(self.ty(signature.result)?, Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == binding.class)
+            || self.complete(caller_formal)? != binding.formal_type
+        {
+            return Err(PickleError::MalformedType {
+                ty: constructor_type,
+                role: TypeRole::ConstructorSignature,
+            });
+        }
+        let source_argument = self.source_tree(binding.source_argument)?;
+        let typed_argument =
+            p.typed_ast
+                .try_get(binding.typed_argument)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.typed_argument,
+                })?;
+        let (TreeKind::Ident(source_ident), TreeKind::Ident(typed_ident)) =
+            (&source_argument.kind, &typed_argument.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        };
+        if !matches!(self.ty(typed_argument.ty)?, Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) } if *prefix == p.definitions.no_prefix && *symbol == caller_formal)
+            || typed_ident.name != source_ident.name
+            || self.symbol(caller_formal)?.name != source_ident.name
+        {
+            return Err(PickleError::Reference {
+                symbol: caller_formal,
+                reason: crate::ReferenceError::Owner,
+            });
+        }
+        for (source, typed) in [
+            (binding.source_select, binding.typed_select),
+            (binding.source_new, binding.typed_new),
+            (source_new_node.tpt, typed_new_node.tpt),
+            (binding.source_argument, binding.typed_argument),
+        ] {
+            self.source_typed_binding(source, typed)?;
+            let source_node = self.source_tree(source)?;
+            let typed_node = p
+                .typed_ast
+                .try_get(typed)
+                .ok_or(PickleError::InvalidTypedTree { tree: typed })?;
+            self.paired_source_typed_span(source_node.position, typed_node.position, typed)?;
+            if !visited.insert(typed) {
+                return Err(PickleError::RepeatedExpression { tree: typed });
+            }
+            self.charge(1)?;
         }
         Ok(())
     }

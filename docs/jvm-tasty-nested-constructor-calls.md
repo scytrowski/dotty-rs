@@ -2,8 +2,9 @@
 
 Issue [#1815](https://github.com/scytrowski/dotty-rs/issues/1815) freezes the
 pinned Scala output for a factory that nests `new Counter(seed)` inside
-`new CounterOwner(...)`, then measures the current Rust boundaries. This is an
-audit only. It does not enable paired JVM/TASTy emission for this body.
+`new CounterOwner(...)`. Issue #1817 adds bounded TASTy serialization for that
+source-proven shape; this document records both the oracle baseline and the
+Rust producer contract. The separate JVM output path is unchanged.
 
 The exact one-file source is
 [`NestedConstructorCalls.scala`](../tests/fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala)
@@ -130,8 +131,8 @@ The layers reject at different points:
 | --- | --- |
 | Lexer, parser, namer, typer | Succeeds; the nested body and canonical constructor/parameter identities are preserved. |
 | `ClassStatePicklePlan::validate` | Succeeds; the supplied source, typed trees, and source-to-typed bindings validate. |
-| `ValidatedClassStatePicklePlan::pickle` | Fails with `Unsupported { feature: BodyExpression, symbol: Some(SymbolId(55)) }`; no complete Factory TASTy is returned. |
-| Paired JVM/TASTy batch | The bounded source/typed constructor proof succeeds. The batch then fails at `JVM/TASTy cross-contract validation` with `TastyPlan(Unsupported { feature: BodyExpression, symbol: Some(SymbolId(55)) })`; no paired batch or bytes are returned. |
+| `ValidatedClassStatePicklePlan::pickle` before #1817 | Failed with `Unsupported { feature: BodyExpression, symbol: Some(SymbolId(55)) }`; no complete Factory TASTy was returned. |
+| Paired JVM/TASTy batch before #1817 | The bounded source/typed constructor proof succeeded, then the batch failed at `JVM/TASTy cross-contract validation` with `TastyPlan(Unsupported { feature: BodyExpression, symbol: Some(SymbolId(55)) })`. |
 | JVM-only source emission | The established separate source/JVM path succeeds for a two-site nested constructor argument; it does not create TASTy or relax the paired proof. |
 
 For the final row, the test
@@ -214,7 +215,32 @@ Existing stale/mismatched direct-root mapping regressions continue to exercise
 the fail-closed source/typed binding checks. Unsupported expression shapes do
 not produce a proof receipt.
 
-This increment changes the structural proof only. It does not serialize the
-nested body into TASTy, emit JVM bytes, change Typer behavior, or claim
-Rust-produced artifact interoperability. The pinned Scala fixtures and their
-hashes above remain the Scala 3.9.0 oracle and are byte-identical.
+## Bounded TASTy serialization added by #1817
+
+The paired batch passes the immutable nested receipt into the pickler's
+source/typed binding contract. Before serialization, the pickler rechecks the
+original outer Apply, inner Apply/Select/New nodes, the inner constructor
+owner and one-`Int` formal, the nested result class, the outer constructor's
+matching class formal, the caller method's exact `seed` TermRef, and each
+source-to-typed mapping and span. The writer then recursively emits those
+original nodes as `APPLY(SELECTin(NEW(Owner)),
+APPLY(SELECTin(NEW(Counter)), TERMREFdirect(create.seed)))`. It registers the
+inner class as a same-source sibling for the signed constructor selection; the
+constructor declaration remains in its own sidecar.
+
+`nested_constructor_proof_serializes_the_original_nested_tasty_expression`
+asserts both applications and the direct reference to the actual `PARAM` node.
+The renamed/reordered source regression and existing direct-reference and
+primitive constructor cases remain covered. With
+`DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`,
+`pinned_scala_reads_and_from_tasty_compiles_the_rust_nested_factory_sidecar`
+runs the pinned Scala 3.9 `-decompile` and `-from-tasty` checks against all
+three Rust-produced sidecars.
+
+The accepted expression is exactly one nested primary constructor whose
+single argument is the original factory's `Int` formal. A third constructor
+level, branch or other computed argument, field/local/factory/null input,
+generic/default/using/secondary constructors, and forged or stale identities
+remain rejected before complete sidecar output. The change does not alter
+Typer or JVM emission and does not claim client runtime interoperability for
+Rust-produced artifacts. Scala oracle fixture hashes above remain unchanged.

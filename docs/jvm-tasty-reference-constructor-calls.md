@@ -151,7 +151,11 @@ identifier. The input class and result class must differ. `Int` constructor
 calls retain the previous primitive signature `(scala.Int)C` encoding. Nested
 allocation, extra arguments, fields, factory values, null, foreign or
 unplanned classes, generic or secondary constructors, and other argument
-expressions remain rejected before complete TASTy bytes are returned.
+expressions were rejected before complete TASTy bytes were returned in the
+original #1796 implementation. Issue #1817 adds only the source-proven
+two-level `Factory(Int) = new Owner(new Counter(seed))` form documented in
+[`jvm-tasty-nested-constructor-calls.md`](jvm-tasty-nested-constructor-calls.md);
+the other nested and computed forms remain rejected.
 
 The JVM-only backend's existing `new Holder(counter)` lowering remains a
 separate output path. This increment validates the paired plans and serializes
