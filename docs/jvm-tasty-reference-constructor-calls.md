@@ -111,6 +111,7 @@ and typing without reconstructing them from spelling.
 | --- | --- |
 | Lexer / parser / namer / typer | Succeeds on the original one-session, three-class unit. |
 | Factory `ClassStatePicklePlan::validate` | Succeeds with actual source and typed bindings plus all three planned class symbols. |
+| Distinct-class method signature proof/projection | Succeeds independently: `PARAM counter` refers to canonical `Counter`; result `IDENTtpt` refers to canonical `CounterOwner`; the two class SymbolIds differ. The proof retains the actual source RHS and typed RHS IDs. |
 | Factory class-state TASTy `pickle()` | Fails with `UnsupportedTypeReference` for the built-in `Int` type at the selected primary-constructor-call validation. |
 | Paired JVM/TASTy batch cross-contract validation | First batch failure is class index 2, phase `JVM/TASTy cross-contract validation`, caused by the same existing Int-only constructor formal/argument gate. |
 | Artifact publication | Not reached: paired producer validation fails before an artifact batch is returned. No emitted artifact is claimed. |
@@ -123,9 +124,9 @@ body: `validate_cross_class_constructor_application` delegates to
 requires the constructor formal to be `Int`. The paired batch wraps that same
 failure in its `JVM/TASTy cross-contract validation` stage. This pins the
 specific constructor-call blocker, rather than treating the already accepted
-method signature as the failure. The issue's implementation steps must
-replace the Int-only check with source-identity-based reference validation. No
-Typer or production code was changed for this audit.
+method signature as the failure. The projection API returns only the two
+signature roots; it does not emit a method body or complete Factory sidecar.
+The constructor-call blocker remains for #1796. No Typer changes were needed.
 
 The JVM-only backend's existing `new Holder(counter)` support is outside this
 Rust producer failure. The paired plan does not produce a JVM-only artifact
@@ -173,9 +174,10 @@ real typer.
 
 The focused Rust regression renames the package and all three class names, and
 separately reverses the `Counter`/`CounterOwner` source declaration order. Both
-still reach the same measured TASTy cross-contract `UnsupportedTypeReference`
-failure. The test deliberately records the limitation, not a proposed
-implementation based on those names or positions.
+variants pass the same signature proof and isolated wire projection as the
+original source: the canonical parameter and result class IDs remain distinct,
+and the projected roots are a `PARAM` and `IDENTtpt`. Full paired TASTy
+validation still reaches the separate unsupported constructor-body path.
 
 The focused rejection tests exercise these source-valid or source-typed
 controls through the real paired API. The stage and error below are the first
@@ -196,7 +198,7 @@ semantics:
 | Add a default to `CounterOwner`'s constructor parameter | `class_index=1`, `constructor planning` / `InvalidPrimaryConstructor(SourceShape)` |
 | Add a secondary constructor (including an overload) | `class_index=1`, `member planning` / method not owned by declaring class |
 | Make the primary constructor contextual (`using`) | `class_index=1`, `constructor planning` / `InvalidPrimaryConstructor(SourceShape)` |
-| Rename package and all three classes; reverse Counter/Owner declaration order | `class_index=2`, `JVM/TASTy cross-contract validation` / same Int-only constructor gate |
+| Rename package and all three classes; reverse Counter/Owner declaration order | Signature proof and isolated projection succeed; full paired TASTy validation still stops at the constructor body gate |
 
 Some requested controls cannot be authoritatively constructed through this
 source-level paired API without violating the one-session identity invariant:
