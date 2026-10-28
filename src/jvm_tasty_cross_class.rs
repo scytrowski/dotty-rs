@@ -1,5 +1,5 @@
-//! Read-only proofs for the bounded same-source cross-class reference used by
-//! the JVM/TASTy producer sequence.
+//! Read-only source/typed proofs for bounded same-batch cross-class calls used
+//! by the JVM/TASTy producer sequence.
 //!
 //! This validates source and typed provenance only. It does not lower or
 //! serialize a cross-class TASTy signature or method body.
@@ -9,13 +9,14 @@ use std::fmt;
 use dotty_core::ast::{ApplyKind, AstArena, TreeKind, Typed, TypedAst, Untyped};
 use dotty_core::{
     Definitions, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SourceTypedIndex,
-    SymbolFlags, SymbolId, SymbolInfo, SymbolKind, TermRefTarget, TreeId, Type, TypeRefTarget,
+    SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TermRefTarget, TreeId, Type,
+    TypeId, TypeRefTarget,
 };
 use dotty_jvm::{JvmClassPlan, JvmCompilationUnit};
 
-/// A typed failure while validating the canonical factory/identity proofs.
+/// A typed failure while validating canonical constructor-call proofs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CrossClassFactoryProofError {
+pub enum CrossClassConstructorCallProofError {
     /// The source does not have the required complete class/method shape.
     SourceShape(&'static str),
     /// A source declaration is not bound to the canonical identity in this session.
@@ -28,19 +29,19 @@ pub enum CrossClassFactoryProofError {
     JvmPlan(&'static str),
 }
 
-impl fmt::Display for CrossClassFactoryProofError {
+impl fmt::Display for CrossClassConstructorCallProofError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "cross-class factory proof failed: {self:?}")
+        write!(f, "cross-class constructor-call proof failed: {self:?}")
     }
 }
 
-impl std::error::Error for CrossClassFactoryProofError {}
+impl std::error::Error for CrossClassConstructorCallProofError {}
 
-/// Borrowed inputs for the canonical factory or identity proof.
-pub struct CrossClassFactoryProofInput<'session> {
+/// Borrowed inputs for a structural source/typed constructor-call proof scan.
+pub struct CrossClassConstructorCallProofInput<'session> {
     /// Source identity used by the parser and namer.
     pub source_id: SourceId,
-    /// Exact package root containing the complete two-class source unit.
+    /// Exact package root containing the complete source batch.
     pub source_root: TreeId<Untyped>,
     /// Canonical semantic symbols and types for this session.
     pub store: &'session SemanticStore,
@@ -58,18 +59,12 @@ pub struct CrossClassFactoryProofInput<'session> {
     pub jvm_unit: &'session JvmCompilationUnit<'session>,
 }
 
-/// The independently validated shape of the source method.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CrossClassFactoryProofKind {
-    /// `CounterFactory.create(seed: Int): Counter = new Counter(seed)`.
-    Factory,
-    /// `identity(counter: Counter): Counter = counter` in CounterFactory or CounterIdentity.
-    Identity,
-}
-
-/// Read-only canonical identity proof for a factory constructor call or the
-/// independent reference-identity control method.
-pub struct ValidatedCrossClassFactoryProof<'session> {
+/// Immutable proof for one source method that passes its exact formal to the
+/// selected primary constructor of another planned class and returns that
+/// constructed class. The receipt borrows the original one-session stores via
+/// its lifetime and preserves source and typed roots for downstream TASTy
+/// signature/body validation.
+pub struct ValidatedCrossClassConstructorCallProof<'session> {
     _store: &'session SemanticStore,
     _source_ast: &'session AstArena<Untyped>,
     _typed_ast: &'session TypedAst,
@@ -77,80 +72,140 @@ pub struct ValidatedCrossClassFactoryProof<'session> {
     _source_typed_index: &'session SourceTypedIndex,
     _jvm_unit: &'session JvmCompilationUnit<'session>,
     source_id: SourceId,
-    kind: CrossClassFactoryProofKind,
-    counter_class: SymbolId,
-    owner_class: SymbolId,
-    constructor: SymbolId,
+    caller_class: SymbolId,
     method: SymbolId,
     method_formal: SymbolId,
+    formal_class: Option<SymbolId>,
+    target_class: SymbolId,
+    constructor: SymbolId,
     source_rhs: TreeId<Untyped>,
+    source_select: TreeId<Untyped>,
+    source_new: TreeId<Untyped>,
+    source_argument: TreeId<Untyped>,
     typed_rhs: TreeId<Typed>,
-    typed_constructor_select: Option<TreeId<Typed>>,
-    typed_new: Option<TreeId<Typed>>,
-    descriptor: String,
+    typed_select: TreeId<Typed>,
+    typed_new: TreeId<Typed>,
+    typed_argument: TreeId<Typed>,
+    formal_type: TypeId,
+    result_type: TypeId,
+    method_descriptor: String,
+    constructor_descriptor: String,
 }
 
-impl ValidatedCrossClassFactoryProof<'_> {
-    /// Frontend source identity shared by declarations and typed roots.
-    pub fn source_id(&self) -> SourceId {
+impl ValidatedCrossClassConstructorCallProof<'_> {
+    /// Frontend source identity shared by all declarations and tree roots.
+    pub const fn source_id(&self) -> SourceId {
         self.source_id
     }
-    /// Canonical `Counter` class identity in this frontend session.
-    pub fn counter_class(&self) -> SymbolId {
-        self.counter_class
+    /// Source class that owns the calling method.
+    pub const fn caller_class(&self) -> SymbolId {
+        self.caller_class
     }
-    /// Canonical factory or identity-owner class identity.
-    pub fn owner_class(&self) -> SymbolId {
-        self.owner_class
-    }
-    /// Canonical `Counter.<init>(Int)` identity.
-    pub fn constructor(&self) -> SymbolId {
-        self.constructor
-    }
-    /// Canonical `create` or `identity` method identity.
-    pub fn method(&self) -> SymbolId {
+    /// Canonical source method that owns the formal and RHS.
+    pub const fn method(&self) -> SymbolId {
         self.method
     }
-    /// Canonical source formal owned by the proved method.
-    pub fn method_formal(&self) -> SymbolId {
+    /// Exact source formal referenced by the constructor argument.
+    pub const fn method_formal(&self) -> SymbolId {
         self.method_formal
     }
-    /// Exact source RHS root.
-    pub fn source_rhs(&self) -> TreeId<Untyped> {
+    /// Planned class of the original argument type when the formal is a
+    /// canonical class `TypeRef` (primitive legacy controls return `None`).
+    pub const fn formal_class(&self) -> Option<SymbolId> {
+        self.formal_class
+    }
+    /// Canonical planned class constructed by the method body.
+    pub const fn target_class(&self) -> SymbolId {
+        self.target_class
+    }
+    /// Canonical primary constructor selected by the typed `Select`.
+    pub const fn constructor(&self) -> SymbolId {
+        self.constructor
+    }
+    /// Original untyped method RHS root.
+    pub const fn source_rhs(&self) -> TreeId<Untyped> {
         self.source_rhs
     }
-    /// Exact source-bound typed RHS root retained by the JVM method plan.
-    pub fn typed_rhs(&self) -> TreeId<Typed> {
+    /// Original untyped constructor `Select` root.
+    pub const fn source_select(&self) -> TreeId<Untyped> {
+        self.source_select
+    }
+    /// Original untyped `New` root.
+    pub const fn source_new(&self) -> TreeId<Untyped> {
+        self.source_new
+    }
+    /// Original untyped argument root.
+    pub const fn source_argument(&self) -> TreeId<Untyped> {
+        self.source_argument
+    }
+    /// Exact typed method RHS retained by the JVM method plan.
+    pub const fn typed_rhs(&self) -> TreeId<Typed> {
         self.typed_rhs
     }
-    /// Exact typed constructor selection for the factory proof.
-    pub fn typed_constructor_select(&self) -> Option<TreeId<Typed>> {
-        self.typed_constructor_select
+    /// Exact typed constructor `Select` root.
+    pub const fn typed_select(&self) -> TreeId<Typed> {
+        self.typed_select
     }
-    /// Exact typed `New` node for the factory proof.
-    pub fn typed_new(&self) -> Option<TreeId<Typed>> {
+    /// Exact typed `New` root.
+    pub const fn typed_new(&self) -> TreeId<Typed> {
         self.typed_new
     }
-    /// JVM method descriptor established from the canonical method plan.
-    pub fn descriptor(&self) -> &str {
-        &self.descriptor
+    /// Exact typed argument root whose `TermRef` names `method_formal`.
+    pub const fn typed_argument(&self) -> TreeId<Typed> {
+        self.typed_argument
     }
-    /// Whether this is the constructor factory or the separate identity control.
-    pub fn kind(&self) -> CrossClassFactoryProofKind {
-        self.kind
+    /// Canonical semantic type of the method formal and constructor argument.
+    pub const fn formal_type(&self) -> TypeId {
+        self.formal_type
+    }
+    /// Canonical semantic result type, equal to the constructed target class.
+    pub const fn result_type(&self) -> TypeId {
+        self.result_type
+    }
+    /// Exact erased JVM descriptor of the calling method.
+    pub fn method_descriptor(&self) -> &str {
+        &self.method_descriptor
+    }
+    /// Exact erased JVM descriptor of the selected primary constructor.
+    pub fn constructor_descriptor(&self) -> &str {
+        &self.constructor_descriptor
+    }
+    /// Semantic store, source/typed arenas, and JVM unit borrowed by this
+    /// proof. The references are the exact same-session inputs validated here.
+    pub fn session_inputs(
+        &self,
+    ) -> (
+        &SemanticStore,
+        &AstArena<Untyped>,
+        &TypedAst,
+        &SourceSemanticIndex,
+        &SourceTypedIndex,
+        &JvmCompilationUnit<'_>,
+    ) {
+        (
+            self._store,
+            self._source_ast,
+            self._typed_ast,
+            self._source_index,
+            self._source_typed_index,
+            self._jvm_unit,
+        )
     }
 }
 
-/// Prove canonical source, typed-tree, constructor, method, and JVM-plan
-/// identities for the issue #1691 factory and identity-control fixtures.
-///
-/// The function only inspects borrowed session state. It does not type source,
-/// mutate semantic stores, emit class files, or produce TASTy bytes.
-pub fn validate_cross_class_factory_proof(
-    input: CrossClassFactoryProofInput<'_>,
-    kind: CrossClassFactoryProofKind,
-) -> Result<ValidatedCrossClassFactoryProof<'_>, CrossClassFactoryProofError> {
-    let CrossClassFactoryProofInput {
+/// Scan the complete source-ordered JVM batch for direct, one-formal
+/// `Apply(Select(New(target), <init>), formal)` method bodies and validate each
+/// against canonical source, typed, semantic, and JVM identities. A body with
+/// no such root is ignored; once the structural candidate is present, every
+/// failed provenance or shape check is returned as an error rather than
+/// silently falling back to unproved planning.
+pub fn validate_cross_class_constructor_call_proofs<'session>(
+    input: CrossClassConstructorCallProofInput<'session>,
+) -> Result<
+    Vec<ValidatedCrossClassConstructorCallProof<'session>>,
+    CrossClassConstructorCallProofError,
+> {
+    let CrossClassConstructorCallProofInput {
         source_id,
         source_root,
         store,
@@ -161,332 +216,268 @@ pub fn validate_cross_class_factory_proof(
         source_typed_index,
         jvm_unit,
     } = input;
-    if !std::ptr::eq(jvm_unit.store, store) {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
-            "JVM unit uses a different semantic store",
+    if !std::ptr::eq(jvm_unit.store, store) || !std::ptr::eq(jvm_unit.typed_ast, typed_ast) {
+        return Err(CrossClassConstructorCallProofError::SemanticIdentity(
+            "JVM unit and source proof must borrow the same semantic and typed stores",
         ));
     }
-    if !std::ptr::eq(jvm_unit.typed_ast, typed_ast) {
-        return Err(CrossClassFactoryProofError::TypedBinding(
-            "JVM unit uses a different typed AST",
-        ));
-    }
-    if store.types.try_get(definitions.int).is_none()
-        || store.types.try_get(definitions.no_prefix).is_none()
-    {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
-            "primitive definitions do not belong to the supplied semantic store",
-        ));
-    }
-    let root = source_ast
-        .try_get(source_root)
-        .ok_or(CrossClassFactoryProofError::SourceShape(
-            "package root is stale",
-        ))?;
+    let root =
+        source_ast
+            .try_get(source_root)
+            .ok_or(CrossClassConstructorCallProofError::SourceShape(
+                "package root is stale",
+            ))?;
     let TreeKind::PackageDef(package) = &root.kind else {
-        return Err(CrossClassFactoryProofError::SourceShape(
+        return Err(CrossClassConstructorCallProofError::SourceShape(
             "source root must be a package",
         ));
     };
-    let [counter_tree, owner_tree] = package.stats.as_slice() else {
-        return Err(CrossClassFactoryProofError::SourceShape(
-            "source unit must contain exactly Counter and one proof class",
-        ));
-    };
-    let source_class_name = |tree| match source_ast.try_get(tree).map(|node| &node.kind) {
-        Some(TreeKind::TypeDef(definition)) => {
-            store.names.resolve(definition.name.as_name().text())
-        }
-        _ => "",
-    };
-    let owner_name = source_class_name(*owner_tree).to_owned();
-    if source_class_name(*counter_tree) != "Counter"
-        || match kind {
-            CrossClassFactoryProofKind::Factory => owner_name != "CounterFactory",
-            CrossClassFactoryProofKind::Identity => {
-                owner_name != "CounterFactory" && owner_name != "CounterIdentity"
-            }
-        }
-    {
-        return Err(CrossClassFactoryProofError::SourceShape(
-            "source declarations must be Counter followed by the expected proof class",
-        ));
-    }
-    validate_plain_class_source(source_ast, *counter_tree).map_err(|_| {
-        CrossClassFactoryProofError::SourceShape(
-            "Counter must be an ordinary primary-constructor class",
-        )
-    })?;
-    validate_plain_class_source(source_ast, *owner_tree).map_err(|_| {
-        CrossClassFactoryProofError::SourceShape("proof owner must be an ordinary class")
-    })?;
-    let counter = source_index.symbol_at(source_id, *counter_tree).ok_or(
-        CrossClassFactoryProofError::SourceIdentity("Counter has no canonical source symbol"),
-    )?;
-    let owner = source_index.symbol_at(source_id, *owner_tree).ok_or(
-        CrossClassFactoryProofError::SourceIdentity("proof owner has no canonical source symbol"),
-    )?;
-    validate_canonical_definition(source_index, source_id, *counter_tree, counter).map_err(
-        |_| {
-            CrossClassFactoryProofError::SourceIdentity(
-                "Counter identity is not bound to this exact source declaration",
-            )
-        },
-    )?;
-    validate_canonical_definition(source_index, source_id, *owner_tree, owner).map_err(|_| {
-        CrossClassFactoryProofError::SourceIdentity(
-            "proof owner is not bound to this exact source declaration",
-        )
-    })?;
-    let counter_declarations = factory_class_declarations(store, source_index, counter)?;
-    let owner_declarations = factory_class_declarations(store, source_index, owner)?;
-    if !store.symbols.contains(counter) || !store.symbols.contains(owner) || counter == owner {
-        return Err(CrossClassFactoryProofError::SourceIdentity(
-            "class identity is stale or aliased",
-        ));
-    }
-    let counter_symbol = store.symbols.get(counter);
-    let owner_symbol = store.symbols.get(owner);
-    if counter_symbol.kind != SymbolKind::Class
-        || owner_symbol.kind != SymbolKind::Class
-        || counter_symbol.visibility != dotty_core::Visibility::Public
-        || owner_symbol.visibility != dotty_core::Visibility::Public
-        || has_any_flag(
-            counter_symbol.flags,
-            SymbolFlags::CASE | SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
-        )
-        || has_any_flag(
-            owner_symbol.flags,
-            SymbolFlags::CASE | SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
-        )
-    {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
-            "both classes must be public ordinary concrete classes",
-        ));
-    }
-    let package_owner =
-        counter_symbol
-            .owner
-            .ok_or(CrossClassFactoryProofError::SemanticIdentity(
-                "Counter has no canonical package owner",
-            ))?;
-    if !store.symbols.contains(package_owner)
-        || owner_symbol.owner != Some(package_owner)
-        || store.symbols.get(package_owner).kind != SymbolKind::Package
-    {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
-            "both classes must have the exact same package owner",
-        ));
-    }
-    let package_scope =
-        source_index
-            .scope_of(package_owner)
-            .ok_or(CrossClassFactoryProofError::SourceIdentity(
-                "canonical package has no declaration scope in the source index",
-            ))?;
-    if source_index.symbol_at(source_id, source_root) != Some(package_owner)
-        || !store.scopes.contains(package_scope)
-        || store.scopes.get(package_scope).owner != Some(package_owner)
-        || [counter, owner].iter().any(|class| {
-            !store
-                .scopes
-                .get(package_scope)
-                .entered_symbols()
-                .any(|member| member == *class)
-        })
-    {
-        return Err(CrossClassFactoryProofError::SourceIdentity(
-            "Counter and proof owner must be members of the exact source package scope",
-        ));
-    }
-    let TreeKind::TypeDef(counter_def) = &source_ast.get(*counter_tree).kind else {
-        unreachable!()
-    };
-    let TreeKind::Template(counter_template) = &source_ast.get(counter_def.rhs).kind else {
-        unreachable!()
-    };
-    let ctor_tree = counter_template.constructor;
-    let TreeKind::DefDef(ctor_def) = &source_ast.get(ctor_tree).kind else {
-        unreachable!()
-    };
-    if counter_template.body.iter().any(|tree| source_ast.try_get(*tree).is_none_or(|node| matches!(&node.kind,
-        TreeKind::DefDef(definition) if store.names.resolve(definition.name.as_name().text()) == "<init>"))) {
-        return Err(CrossClassFactoryProofError::SourceShape("secondary Counter constructors are unsupported"));
-    }
-    if !ctor_def.type_params.is_empty()
-        || ctor_def.value_param_clauses.len() != 1
-        || ctor_def.value_param_clauses[0].len() != 1
-    {
-        return Err(CrossClassFactoryProofError::SourceShape(
-            "Counter must have one plain Int primary-constructor formal",
-        ));
-    }
-    let constructor = source_index.symbol_at(source_id, ctor_tree).ok_or(
-        CrossClassFactoryProofError::SourceIdentity(
-            "Counter primary constructor has no canonical identity",
+    let package_owner = source_index.symbol_at(source_id, source_root).ok_or(
+        CrossClassConstructorCallProofError::SourceIdentity(
+            "package root is not bound to the supplied source identity",
         ),
     )?;
-    if !counter_declarations
-        .entered_symbols()
-        .any(|symbol| symbol == constructor)
+    if !store.symbols.contains(package_owner)
+        || store.symbols.get(package_owner).kind != SymbolKind::Package
     {
-        return Err(CrossClassFactoryProofError::SourceIdentity(
-            "Counter primary constructor is absent from its canonical declaration scope",
+        return Err(CrossClassConstructorCallProofError::SourceIdentity(
+            "source root does not retain its canonical package symbol",
         ));
     }
-    validate_canonical_definition(source_index, source_id, ctor_tree, constructor).map_err(
-        |_| {
-            CrossClassFactoryProofError::SourceIdentity(
-                "constructor is not bound to its exact source tree",
-            )
-        },
-    )?;
-    let ctor_formal_tree = ctor_def.value_param_clauses[0][0];
-    let ctor_formal_node =
-        source_ast
-            .try_get(ctor_formal_tree)
-            .ok_or(CrossClassFactoryProofError::SourceShape(
-                "constructor formal source tree is stale",
-            ))?;
-    if !matches!(&ctor_formal_node.kind, TreeKind::ValDef(parameter) if parameter.rhs.is_none()) {
-        return Err(CrossClassFactoryProofError::SourceShape(
-            "Counter constructor formal must not have a default value",
-        ));
-    }
-    let ctor_formal = source_index
-        .derived_symbol_at(constructor, source_id, ctor_formal_tree)
-        .ok_or(CrossClassFactoryProofError::SourceIdentity(
-            "constructor formal is not canonically owned by the constructor",
-        ))?;
-    if !store.symbols.contains(constructor)
-        || store.symbols.get(constructor).kind != SymbolKind::Constructor
-        || store.symbols.get(constructor).owner != Some(counter)
-        || store.symbols.get(constructor).visibility != dotty_core::Visibility::Public
-        || has_any_flag(
-            store.symbols.get(constructor).flags,
-            SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
-        )
-        || !store.symbols.contains(ctor_formal)
-        || store.symbols.get(ctor_formal).owner != Some(constructor)
+    if package.stats.len() != jvm_unit.classes.len()
+        || package.stats.is_empty()
+        || package.stats.len() > 32
     {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
-            "Counter primary constructor must be public and canonically owned by Counter",
+        return Err(CrossClassConstructorCallProofError::JvmPlan(
+            "JVM batch must contain 1 to 32 source classes exactly once in declaration order",
         ));
     }
-    let SymbolInfo::Complete(ctor_type) = store.symbols.get(constructor).info else {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
-            "Counter constructor signature is incomplete",
-        ));
-    };
-    let Some(Type::Method(ctor_signature)) = store.types.try_get(ctor_type) else {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
-            "Counter constructor must have one plain method type",
-        ));
-    };
-    let SymbolInfo::Complete(ctor_formal_type) = store.symbols.get(ctor_formal).info else {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
-            "constructor formal type is incomplete",
-        ));
-    };
-    if ctor_def.metadata.visibility.is_some()
-        || ctor_signature.kind != dotty_core::MethodKind::Plain
-        || ctor_signature.params.len() != 1
-        || ctor_signature.params[0].ty != definitions.int
-        || ctor_formal_type != definitions.int
-    {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
-            "Counter constructor must have exactly one Int formal",
-        ));
-    }
-    let TreeKind::TypeDef(owner_def) = &source_ast.get(*owner_tree).kind else {
-        unreachable!()
-    };
-    let TreeKind::Template(owner_template) = &source_ast.get(owner_def.rhs).kind else {
-        unreachable!()
-    };
-    if !owner_template.body.iter().any(|tree| {
-        source_ast
-            .try_get(*tree)
-            .is_some_and(|node| matches!(node.kind, TreeKind::DefDef(_)))
-    }) {
-        return Err(CrossClassFactoryProofError::SourceShape(
-            "proof class must declare its concrete method",
-        ));
-    }
-    let method_name = match kind {
-        CrossClassFactoryProofKind::Factory => "create",
-        CrossClassFactoryProofKind::Identity => "identity",
-    };
-    let method_trees = owner_template
-        .body
-        .iter()
-        .copied()
-        .filter_map(
-            |tree| match source_ast.try_get(tree).map(|node| &node.kind) {
-                Some(TreeKind::DefDef(definition))
-                    if store.names.resolve(definition.name.as_name().text()) == method_name =>
-                {
-                    Some((tree, definition))
-                }
-                _ => None,
-            },
-        )
-        .collect::<Vec<_>>();
-    let [(method_tree, method_def)] = method_trees.as_slice() else {
-        return Err(CrossClassFactoryProofError::SourceShape(
-            "proof class must declare exactly one method of the expected name",
-        ));
-    };
-    if !method_def.type_params.is_empty()
-        || method_def.value_param_clauses.len() != 1
-        || method_def.value_param_clauses[0].len() != 1
-        || method_def.rhs.is_none()
-        || method_def.metadata.visibility.is_some()
-    {
-        return Err(CrossClassFactoryProofError::SourceShape(
-            "method must be concrete, non-generic, and have one plain formal",
-        ));
-    }
-    let method = source_index.symbol_at(source_id, *method_tree).ok_or(
-        CrossClassFactoryProofError::SourceIdentity("method has no canonical source symbol"),
-    )?;
-    if !owner_declarations
-        .entered_symbols()
-        .any(|symbol| symbol == method)
-    {
-        return Err(CrossClassFactoryProofError::SourceIdentity(
-            "proof method is absent from its canonical declaration scope",
-        ));
-    }
-    validate_canonical_definition(source_index, source_id, *method_tree, method).map_err(|_| {
-        CrossClassFactoryProofError::SourceIdentity("method is not bound to its exact source tree")
+    let metadata = jvm_unit.metadata(definitions).map_err(|_| {
+        CrossClassConstructorCallProofError::JvmPlan("complete JVM batch metadata is invalid")
     })?;
-    let method_formal_tree = method_def.value_param_clauses[0][0];
-    let method_formal_node =
-        source_ast
-            .try_get(method_formal_tree)
-            .ok_or(CrossClassFactoryProofError::SourceShape(
-                "method formal source tree is stale",
-            ))?;
-    if !matches!(&method_formal_node.kind, TreeKind::ValDef(parameter) if parameter.rhs.is_none()) {
-        return Err(CrossClassFactoryProofError::SourceShape(
-            "proof method formal must not have a default value",
+    let mut proofs = Vec::new();
+    let mut seen_methods = std::collections::HashSet::new();
+    for (ordinal, &class_tree) in package.stats.iter().enumerate() {
+        let TreeKind::TypeDef(class_def) = &source_ast
+            .try_get(class_tree)
+            .ok_or(CrossClassConstructorCallProofError::SourceShape(
+                "source class declaration is stale",
+            ))?
+            .kind
+        else {
+            return Err(CrossClassConstructorCallProofError::SourceShape(
+                "source package may contain only planned ordinary classes",
+            ));
+        };
+        let caller_class = source_index.symbol_at(source_id, class_tree).ok_or(
+            CrossClassConstructorCallProofError::SourceIdentity(
+                "class declaration has no canonical symbol",
+            ),
+        )?;
+        if source_index.definition_of(caller_class)
+            != Some(SourceDefinition::Canonical {
+                source: source_id,
+                tree: class_tree,
+            })
+            || jvm_unit.classes[ordinal].class != caller_class
+            || !store.symbols.contains(caller_class)
+            || !has_source_origin(store, caller_class, source_id)
+            || store.symbols.get(caller_class).kind != SymbolKind::Class
+            || store.symbols.get(caller_class).owner != Some(package_owner)
+        {
+            return Err(CrossClassConstructorCallProofError::SourceIdentity(
+                "source and JVM class order must retain the exact canonical class identities",
+            ));
+        }
+        let TreeKind::Template(template) = &source_ast
+            .try_get(class_def.rhs)
+            .ok_or(CrossClassConstructorCallProofError::SourceShape(
+                "class template is stale",
+            ))?
+            .kind
+        else {
+            return Err(CrossClassConstructorCallProofError::SourceShape(
+                "class must have a template",
+            ));
+        };
+        let caller_plan = unique_constructor_call_class_plan(jvm_unit, caller_class)?;
+        for &method_tree in &template.body {
+            let Some(TreeKind::DefDef(method_def)) =
+                source_ast.try_get(method_tree).map(|node| &node.kind)
+            else {
+                continue;
+            };
+            let Some(source_rhs) = method_def.rhs else {
+                continue;
+            };
+            if !is_direct_constructor_call_candidate(source_ast, source_rhs) {
+                continue;
+            }
+            let method = source_index.symbol_at(source_id, method_tree).ok_or(
+                CrossClassConstructorCallProofError::SourceIdentity(
+                    "candidate method has no canonical source symbol",
+                ),
+            )?;
+            if !seen_methods.insert(method) {
+                return Err(CrossClassConstructorCallProofError::SourceIdentity(
+                    "a source method cannot receive duplicate constructor-call proofs",
+                ));
+            }
+            let proof = validate_constructor_call_candidate(
+                source_id,
+                caller_class,
+                &package.stats,
+                method_tree,
+                method_def,
+                method,
+                source_rhs,
+                store,
+                definitions,
+                source_ast,
+                typed_ast,
+                source_index,
+                source_typed_index,
+                jvm_unit,
+                caller_plan,
+                &metadata,
+            )?;
+            proofs.push(proof);
+        }
+    }
+    Ok(proofs)
+}
+
+fn is_direct_constructor_call_candidate(ast: &AstArena<Untyped>, rhs: TreeId<Untyped>) -> bool {
+    let Some(TreeKind::Apply(application)) = ast.try_get(rhs).map(|node| &node.kind) else {
+        return false;
+    };
+    let Some(TreeKind::Select(selection)) =
+        ast.try_get(application.function).map(|node| &node.kind)
+    else {
+        return false;
+    };
+    matches!(
+        ast.try_get(selection.qualifier).map(|node| &node.kind),
+        Some(TreeKind::New(_))
+    )
+}
+
+fn require_source_position(
+    source_ast: &AstArena<Untyped>,
+    source_id: SourceId,
+    source_tree: TreeId<Untyped>,
+    description: &'static str,
+) -> Result<dotty_core::SourceSpan, CrossClassConstructorCallProofError> {
+    let position = source_ast
+        .try_get(source_tree)
+        .and_then(|tree| tree.position)
+        .ok_or(CrossClassConstructorCallProofError::SourceIdentity(
+            "a canonical source tree is missing its source position",
+        ))?;
+    if position.source() != source_id {
+        return Err(CrossClassConstructorCallProofError::SourceIdentity(
+            description,
         ));
     }
-    let method_formal = source_index
-        .symbol_at(source_id, method_formal_tree)
-        .ok_or(CrossClassFactoryProofError::SourceIdentity(
-            "method formal has no canonical source symbol",
+    Ok(position)
+}
+
+fn has_source_origin(store: &SemanticStore, symbol: SymbolId, source_id: SourceId) -> bool {
+    store.symbols.contains(symbol)
+        && store.symbols.get(symbol).origin == SymbolOrigin::Source(source_id)
+}
+
+fn require_matching_source_typed_positions(
+    source_ast: &AstArena<Untyped>,
+    typed_ast: &TypedAst,
+    source_id: SourceId,
+    source_tree: TreeId<Untyped>,
+    typed_tree: TreeId<Typed>,
+    description: &'static str,
+) -> Result<(), CrossClassConstructorCallProofError> {
+    let source_position = require_source_position(source_ast, source_id, source_tree, description)?;
+    let typed_position = typed_ast
+        .try_get(typed_tree)
+        .and_then(|tree| tree.position)
+        .ok_or(CrossClassConstructorCallProofError::TypedBinding(
+            "a canonical typed tree is missing its source position",
         ))?;
-    validate_canonical_definition(source_index, source_id, method_formal_tree, method_formal)
-        .map_err(|_| {
-            CrossClassFactoryProofError::SourceIdentity(
-                "method formal is not bound to its exact source tree",
-            )
-        })?;
-    if !store.symbols.contains(method)
+    if typed_position != source_position {
+        return Err(CrossClassConstructorCallProofError::TypedBinding(
+            "source and typed trees do not retain the exact same source position and owner",
+        ));
+    }
+    Ok(())
+}
+
+fn unique_constructor_call_class_plan<'a>(
+    unit: &'a JvmCompilationUnit<'_>,
+    class: SymbolId,
+) -> Result<&'a JvmClassPlan, CrossClassConstructorCallProofError> {
+    let mut plans = unit.classes.iter().filter(|plan| plan.class == class);
+    let plan = plans
+        .next()
+        .ok_or(CrossClassConstructorCallProofError::JvmPlan(
+            "canonical source class is absent from the complete JVM batch",
+        ))?;
+    if plans.next().is_some() {
+        return Err(CrossClassConstructorCallProofError::JvmPlan(
+            "canonical source class occurs more than once in the JVM batch",
+        ));
+    }
+    Ok(plan)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_constructor_call_candidate<'session>(
+    source_id: SourceId,
+    caller_class: SymbolId,
+    source_class_trees: &[TreeId<Untyped>],
+    method_tree: TreeId<Untyped>,
+    method_def: &dotty_core::ast::DefDef<Untyped>,
+    method: SymbolId,
+    source_rhs: TreeId<Untyped>,
+    store: &'session SemanticStore,
+    definitions: &'session Definitions,
+    source_ast: &'session AstArena<Untyped>,
+    typed_ast: &'session TypedAst,
+    source_index: &'session SourceSemanticIndex,
+    source_typed_index: &'session SourceTypedIndex,
+    jvm_unit: &'session JvmCompilationUnit<'session>,
+    caller_plan: &JvmClassPlan,
+    metadata: &[dotty_jvm::JvmClassMetadata],
+) -> Result<ValidatedCrossClassConstructorCallProof<'session>, CrossClassConstructorCallProofError>
+{
+    let source_error = |s| CrossClassConstructorCallProofError::SourceShape(s);
+    let identity_error = |s| CrossClassConstructorCallProofError::SourceIdentity(s);
+    let semantic_error = |s| CrossClassConstructorCallProofError::SemanticIdentity(s);
+    let typed_error = |s| CrossClassConstructorCallProofError::TypedBinding(s);
+    let caller_source_tree = match source_index.definition_of(caller_class) {
+        Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+        _ => return Err(identity_error("caller class has a foreign source origin")),
+    };
+    require_source_position(
+        source_ast,
+        source_id,
+        caller_source_tree,
+        "caller class has a foreign source position",
+    )?;
+    require_source_position(
+        source_ast,
+        source_id,
+        method_tree,
+        "calling method has a foreign source position",
+    )?;
+    if source_index.symbol_at(source_id, method_tree) != Some(method)
+        || source_index.definition_of(method)
+            != Some(SourceDefinition::Canonical {
+                source: source_id,
+                tree: method_tree,
+            })
+        || !store.symbols.contains(method)
+        || !has_source_origin(store, method, source_id)
         || store.symbols.get(method).kind != SymbolKind::Method
-        || store.symbols.get(method).owner != Some(owner)
+        || store.symbols.get(method).owner != Some(caller_class)
         || store.symbols.get(method).visibility != dotty_core::Visibility::Public
         || has_any_flag(
             store.symbols.get(method).flags,
@@ -498,398 +489,684 @@ pub fn validate_cross_class_factory_proof(
                 | SymbolFlags::ERASED
                 | SymbolFlags::EXTENSION,
         )
+    {
+        return Err(identity_error(
+            "candidate method is not the public canonical method owned by its source class",
+        ));
+    }
+    if !method_def.type_params.is_empty()
+        || method_def.value_param_clauses.len() != 1
+        || method_def.value_param_clauses[0].len() != 1
+        || method_def.metadata.visibility.is_some()
+    {
+        return Err(source_error(
+            "candidate method must have one plain formal clause and a concrete public body",
+        ));
+    }
+    let method_formal_tree = method_def.value_param_clauses[0][0];
+    require_source_position(
+        source_ast,
+        source_id,
+        method_formal_tree,
+        "caller formal has a foreign source position",
+    )?;
+    let TreeKind::ValDef(formal_def) = &source_ast
+        .try_get(method_formal_tree)
+        .ok_or_else(|| source_error("method formal source tree is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "candidate method formal must be a value parameter",
+        ));
+    };
+    if formal_def.rhs.is_some() {
+        return Err(source_error(
+            "candidate method formal cannot use a default value",
+        ));
+    }
+    let method_formal = source_index
+        .symbol_at(source_id, method_formal_tree)
+        .ok_or_else(|| identity_error("method formal has no canonical source symbol"))?;
+    if source_index.definition_of(method_formal)
+        != Some(SourceDefinition::Canonical {
+            source: source_id,
+            tree: method_formal_tree,
+        })
         || !store.symbols.contains(method_formal)
+        || !has_source_origin(store, method_formal, source_id)
+        || store.symbols.get(method_formal).kind != SymbolKind::Parameter
         || store.symbols.get(method_formal).owner != Some(method)
     {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
-            "proof method must be public, concrete, source-defined, and own its formal",
+        return Err(identity_error(
+            "method formal is not the canonical parameter owned by this method",
         ));
     }
     let SymbolInfo::Complete(method_type) = store.symbols.get(method).info else {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
-            "proof method signature is incomplete",
+        return Err(semantic_error("candidate method signature is incomplete"));
+    };
+    let Some(Type::Method(method_signature)) = store.types.try_get(method_type) else {
+        return Err(semantic_error(
+            "candidate method must have one plain method type",
         ));
     };
-    let Some(Type::Method(signature)) = store.types.try_get(method_type) else {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
-            "proof method must have one plain method type",
-        ));
+    let SymbolInfo::Complete(formal_type) = store.symbols.get(method_formal).info else {
+        return Err(semantic_error("candidate method formal type is incomplete"));
     };
-    let expected_formal_type = if kind == CrossClassFactoryProofKind::Factory {
-        definitions.int
-    } else {
-        let SymbolInfo::Complete(formal_type) = store.symbols.get(method_formal).info else {
-            return Err(CrossClassFactoryProofError::SemanticIdentity(
-                "identity formal type is incomplete",
-            ));
-        };
-        formal_type
-    };
-    let SymbolInfo::Complete(method_formal_type) = store.symbols.get(method_formal).info else {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
-            "method formal type is incomplete",
-        ));
-    };
-    if signature.kind != dotty_core::MethodKind::Plain
-        || signature.params.len() != 1
-        || signature.params[0].ty != expected_formal_type
-        || method_formal_type != expected_formal_type
-        || (kind == CrossClassFactoryProofKind::Identity
-            && !is_canonical_class_type_ref(
-                store,
-                expected_formal_type,
-                counter,
-                package_owner,
-                definitions.no_prefix,
-            ))
-        || !is_canonical_class_type_ref(
-            store,
-            signature.result,
-            counter,
-            package_owner,
-            definitions.no_prefix,
-        )
+    let package = store
+        .symbols
+        .get(caller_class)
+        .owner
+        .ok_or_else(|| semantic_error("caller has no package owner"))?;
+    let formal_class =
+        canonical_class_type_symbol(store, formal_type, package, definitions.no_prefix);
+    if let Some(formal_class) = formal_class
+        && (formal_class == caller_class
+            || source_index.definition_of(formal_class).is_none_or(
+                |definition| !matches!(definition, SourceDefinition::Canonical { source, .. } if source == source_id),
+            )
+            || unique_constructor_call_class_plan(jvm_unit, formal_class).is_err())
     {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
-            "method signature must use the exact Counter reference result and planned formal",
+        return Err(semantic_error(
+            "reference formal must be a different canonical class planned in this source batch",
         ));
     }
-    let source_rhs = method_def
-        .rhs
-        .ok_or(CrossClassFactoryProofError::SourceShape(
-            "proof method body is missing",
-        ))?;
-    let source_rhs_node =
-        source_ast
-            .try_get(source_rhs)
-            .ok_or(CrossClassFactoryProofError::SourceShape(
-                "method RHS source root is stale",
-            ))?;
-    let typed_rhs = source_typed_index.get(source_id, source_rhs).ok_or(
-        CrossClassFactoryProofError::TypedBinding(
-            "method RHS has no exact source-to-typed mapping",
-        ),
-    )?;
-    let typed_root =
-        typed_ast
-            .try_get(typed_rhs)
-            .ok_or(CrossClassFactoryProofError::TypedBinding(
-                "typed RHS root is stale",
-            ))?;
-    let (typed_constructor_select, typed_new) = match kind {
-        CrossClassFactoryProofKind::Factory => {
-            let TreeKind::Apply(source_apply) = &source_rhs_node.kind else {
-                return Err(CrossClassFactoryProofError::SourceShape(
-                    "factory RHS must be Apply(Select(New(Counter), <init>), [seed])",
-                ));
-            };
-            let source_function = source_ast.try_get(source_apply.function).ok_or(
-                CrossClassFactoryProofError::SourceShape("factory function source root is stale"),
-            )?;
-            let TreeKind::Select(source_select) = &source_function.kind else {
-                return Err(CrossClassFactoryProofError::SourceShape(
-                    "factory Apply must select the constructor",
-                ));
-            };
-            let source_qualifier = source_ast.try_get(source_select.qualifier).ok_or(
-                CrossClassFactoryProofError::SourceShape("factory constructor qualifier is stale"),
-            )?;
-            let TreeKind::New(_) = &source_qualifier.kind else {
-                return Err(CrossClassFactoryProofError::SourceShape(
-                    "factory constructor selection must qualify New(Counter)",
-                ));
-            };
-            let argument_tree =
-                *source_apply
-                    .args
-                    .first()
-                    .ok_or(CrossClassFactoryProofError::SourceShape(
-                        "factory call has no argument",
-                    ))?;
-            let source_argument_node = source_ast.try_get(argument_tree).ok_or(
-                CrossClassFactoryProofError::SourceShape("factory argument source root is stale"),
-            )?;
-            let TreeKind::Ident(source_argument) = &source_argument_node.kind else {
-                return Err(CrossClassFactoryProofError::SourceShape(
-                    "factory argument must be the seed identifier",
-                ));
-            };
-            let formal_name = match &method_formal_node.kind {
-                TreeKind::ValDef(definition) => {
-                    store.names.resolve(definition.name.as_name().text())
-                }
-                _ => {
-                    return Err(CrossClassFactoryProofError::SourceShape(
-                        "method formal must be a value parameter",
-                    ));
-                }
-            };
-            if source_apply.kind != ApplyKind::Regular || source_apply.args.len() != 1 {
-                return Err(CrossClassFactoryProofError::SourceShape(
-                    "factory source body must use one regular constructor argument",
-                ));
-            }
-            if store.names.resolve(source_argument.name.text()) != formal_name {
-                return Err(CrossClassFactoryProofError::SourceShape(
-                    "factory source argument must be the seed identifier",
-                ));
-            }
-            if store.names.resolve(source_select.name.text()) != "<init>" {
-                return Err(CrossClassFactoryProofError::SourceShape(
-                    "factory source selection must name <init>",
-                ));
-            }
-            let source_function_typed = source_typed_index
-                .get(source_id, source_apply.function)
-                .ok_or(CrossClassFactoryProofError::TypedBinding(
-                    "constructor selection has no typed source mapping",
-                ))?;
-            let source_new_typed = source_typed_index
-                .get(source_id, source_select.qualifier)
-                .ok_or(CrossClassFactoryProofError::TypedBinding(
-                    "New expression has no typed source mapping",
-                ))?;
-            let source_argument_typed = source_typed_index
-                .get(source_id, source_apply.args[0])
-                .ok_or(CrossClassFactoryProofError::TypedBinding(
-                    "constructor argument has no typed source mapping",
-                ))?;
-            if [
-                source_function_typed,
-                source_new_typed,
-                source_argument_typed,
-            ]
-            .iter()
-            .any(|tree| typed_ast.try_get(*tree).is_none())
-            {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "source mapping points outside the typed tree arena",
-                ));
-            }
-            let TreeKind::Apply(typed_apply) = &typed_root.kind else {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "typed factory RHS is not Apply",
-                ));
-            };
-            if typed_apply.kind != ApplyKind::Regular
-                || typed_apply.args.len() != 1
-                || source_typed_index.get(source_id, source_apply.function)
-                    != Some(typed_apply.function)
-                || source_typed_index.get(source_id, source_apply.args[0])
-                    != Some(typed_apply.args[0])
-            {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "typed factory Apply does not preserve exact source function and argument bindings",
-                ));
-            }
-            let Some(typed_function) = typed_ast.try_get(typed_apply.function) else {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "typed factory function is stale",
-                ));
-            };
-            let TreeKind::Select(typed_select) = &typed_function.kind else {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "typed factory function is not Select",
-                ));
-            };
-            if source_typed_index.get(source_id, source_select.qualifier)
-                != Some(typed_select.qualifier)
-            {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "typed constructor receiver is not the exact mapped source New",
-                ));
-            }
-            let Some(typed_new_node) = typed_ast.try_get(typed_select.qualifier) else {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "typed New is stale",
-                ));
-            };
-            let TreeKind::New(typed_new_tree) = &typed_new_node.kind else {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "typed constructor receiver is not New",
-                ));
-            };
-            let Some(typed_argument) = typed_ast.try_get(typed_apply.args[0]) else {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "typed constructor argument is stale",
-                ));
-            };
-            if !matches!(&typed_argument.kind, TreeKind::Ident(ident) if store.names.resolve(ident.name.text()) == formal_name)
-                || !matches!(store.types.try_get(typed_argument.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(target), .. }) if *target == method_formal)
-            {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "typed factory argument is not the canonical seed formal",
-                ));
-            }
-            if !matches!(store.types.try_get(typed_function.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(target), .. }) if *target == constructor)
-            {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "typed factory selection does not target Counter's canonical constructor",
-                ));
-            }
-            let typed_new_type_tree = typed_ast.try_get(typed_new_tree.tpt).ok_or(
-                CrossClassFactoryProofError::TypedBinding("typed New type tree is stale"),
-            )?;
-            if !is_canonical_class_type_ref(
-                store,
-                typed_new_type_tree.ty,
-                counter,
-                package_owner,
-                definitions.no_prefix,
-            ) {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "typed New does not retain the canonical Counter TypeRef",
-                ));
-            }
-            if !matches!(store.types.try_get(typed_root.ty), Some(Type::TypeRef { target: TypeRefTarget::Symbol(target), .. }) if *target == counter)
-            {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "typed factory result is not the canonical Counter TypeRef",
-                ));
-            }
-            (Some(typed_apply.function), Some(typed_select.qualifier))
-        }
-        CrossClassFactoryProofKind::Identity => {
-            let TreeKind::Ident(source_ident) = &source_rhs_node.kind else {
-                return Err(CrossClassFactoryProofError::SourceShape(
-                    "identity RHS must be the parameter identifier",
-                ));
-            };
-            let TreeKind::Ident(typed_ident) = &typed_root.kind else {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "identity RHS must remain a typed Ident",
-                ));
-            };
-            if source_typed_index.get(source_id, source_rhs) != Some(typed_rhs)
-                || store.names.resolve(source_ident.name.text())
-                    != store.names.resolve(typed_ident.name.text())
-                || !matches!(store.types.try_get(typed_root.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(target), .. }) if *target == method_formal)
-            {
-                return Err(CrossClassFactoryProofError::TypedBinding(
-                    "identity body must return its exact canonical Counter formal",
-                ));
-            }
-            (None, None)
-        }
-    };
-    if kind == CrossClassFactoryProofKind::Factory
-        && !matches!(store.types.try_get(typed_root.ty), Some(Type::TypeRef { target: TypeRefTarget::Symbol(target), .. }) if *target == counter)
+    if method_signature.kind != dotty_core::MethodKind::Plain
+        || method_signature.params.len() != 1
+        || method_signature.params[0].ty != formal_type
     {
-        return Err(CrossClassFactoryProofError::TypedBinding(
-            "typed method RHS is not the declared canonical Counter result type",
+        return Err(semantic_error(
+            "method signature must match its one canonical formal",
         ));
     }
-    let counter_plan = unique_class_plan(jvm_unit, counter, "Counter").map_err(|_| {
-        CrossClassFactoryProofError::JvmPlan("complete JVM unit omits canonical Counter")
-    })?;
-    let mut owner_plans = jvm_unit.classes.iter().filter(|plan| plan.class == owner);
-    let owner_plan = owner_plans
-        .next()
-        .ok_or(CrossClassFactoryProofError::JvmPlan(
-            "complete JVM unit omits proof owner",
-        ))?;
-    if owner_plans.next().is_some() {
-        return Err(CrossClassFactoryProofError::JvmPlan(
-            "proof owner occurs more than once in the JVM unit",
-        ));
-    }
-    let dotty_jvm::JvmClassInitializationPlan::PrimaryConstructor(primary) =
-        &counter_plan.initialization
+
+    let TreeKind::Apply(source_apply) = &source_ast
+        .try_get(source_rhs)
+        .ok_or_else(|| source_error("method RHS source root is stale"))?
+        .kind
     else {
-        return Err(CrossClassFactoryProofError::JvmPlan(
-            "Counter JVM plan has no validated primary constructor",
-        ));
+        unreachable!()
     };
-    if primary.symbol() != constructor || primary.parameters() != [ctor_formal] {
-        return Err(CrossClassFactoryProofError::JvmPlan(
-            "Counter JVM plan does not use the exact planned primary constructor/formal",
+    if source_apply.kind != ApplyKind::Regular || source_apply.args.len() != 1 {
+        return Err(source_error(
+            "constructor application must have one regular argument",
         ));
     }
-    validate_planned_method(
-        jvm_unit,
-        owner_plan,
-        method,
-        &[method_formal],
-        Some(typed_rhs),
-        method_name,
-    )
-    .map_err(|_| {
-        CrossClassFactoryProofError::JvmPlan(
-            "method plan does not retain the exact source formal and typed body",
-        )
-    })?;
-    let metadata = jvm_unit.metadata(definitions).map_err(|_| {
-        CrossClassFactoryProofError::JvmPlan("complete JVM unit metadata is invalid")
-    })?;
-    let counter_metadata = metadata
+    let source_select = source_apply.function;
+    let TreeKind::Select(source_selection) = &source_ast
+        .try_get(source_select)
+        .ok_or_else(|| source_error("constructor selection source root is stale"))?
+        .kind
+    else {
+        unreachable!()
+    };
+    if store.names.resolve(source_selection.name.text()) != "<init>" {
+        return Err(source_error(
+            "constructor call must select the primary constructor",
+        ));
+    }
+    let source_new = source_selection.qualifier;
+    let TreeKind::New(source_new_tree) = &source_ast
+        .try_get(source_new)
+        .ok_or_else(|| source_error("New source root is stale"))?
+        .kind
+    else {
+        unreachable!()
+    };
+    let source_argument = source_apply.args[0];
+    let TreeKind::Ident(_) = &source_ast
+        .try_get(source_argument)
+        .ok_or_else(|| source_error("constructor argument source root is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "constructor argument must be the exact caller formal identifier",
+        ));
+    };
+    let TreeKind::Ident(argument_ident) = &source_ast
+        .try_get(source_argument)
+        .ok_or_else(|| source_error("constructor argument source root is stale"))?
+        .kind
+    else {
+        unreachable!()
+    };
+    if store.names.resolve(formal_def.name.as_name().text())
+        != store.names.resolve(argument_ident.name.text())
+    {
+        return Err(source_error(
+            "constructor argument spelling must resolve to the caller formal",
+        ));
+    }
+
+    let typed_rhs = source_typed_index
+        .get(source_id, source_rhs)
+        .ok_or_else(|| typed_error("candidate RHS has no source-to-typed binding"))?;
+    let typed_select = source_typed_index
+        .get(source_id, source_select)
+        .ok_or_else(|| typed_error("constructor selection has no source-to-typed binding"))?;
+    let typed_new = source_typed_index
+        .get(source_id, source_new)
+        .ok_or_else(|| typed_error("New has no source-to-typed binding"))?;
+    let typed_new_tpt = source_typed_index
+        .get(source_id, source_new_tree.tpt)
+        .ok_or_else(|| typed_error("New type tree has no source-to-typed binding"))?;
+    let typed_argument = source_typed_index
+        .get(source_id, source_argument)
+        .ok_or_else(|| typed_error("constructor argument has no source-to-typed binding"))?;
+    let typed_root = typed_ast
+        .try_get(typed_rhs)
+        .ok_or_else(|| typed_error("typed method RHS is stale"))?;
+    for (source_tree, typed_tree, description) in [
+        (source_rhs, typed_rhs, "method RHS"),
+        (source_select, typed_select, "constructor Select"),
+        (source_new, typed_new, "constructor New"),
+        (source_new_tree.tpt, typed_new_tpt, "New type tree"),
+        (source_argument, typed_argument, "constructor argument"),
+    ] {
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_tree,
+            typed_tree,
+            description,
+        )?;
+    }
+    let TreeKind::Apply(typed_apply) = &typed_root.kind else {
+        return Err(typed_error("typed candidate RHS is not Apply"));
+    };
+    if typed_apply.kind != ApplyKind::Regular
+        || typed_apply.args != [typed_argument]
+        || typed_apply.function != typed_select
+        || source_typed_index.get(source_id, source_apply.function) != Some(typed_select)
+    {
+        return Err(typed_error(
+            "typed Apply does not preserve the exact source function and argument roots",
+        ));
+    }
+    let TreeKind::Select(typed_selection) = &typed_ast
+        .try_get(typed_select)
+        .ok_or_else(|| typed_error("typed constructor selection is stale"))?
+        .kind
+    else {
+        return Err(typed_error("typed constructor function is not Select"));
+    };
+    if typed_selection.qualifier != typed_new
+        || source_typed_index.get(source_id, source_selection.qualifier) != Some(typed_new)
+    {
+        return Err(typed_error(
+            "typed constructor receiver is not the exact mapped New root",
+        ));
+    }
+    let TreeKind::New(typed_new_tree) = &typed_ast
+        .try_get(typed_new)
+        .ok_or_else(|| typed_error("typed New is stale"))?
+        .kind
+    else {
+        return Err(typed_error("typed constructor receiver is not New"));
+    };
+    if typed_new_tree.tpt != typed_new_tpt {
+        return Err(typed_error(
+            "typed New does not retain its exact source type tree",
+        ));
+    }
+    let TreeKind::Ident(typed_argument_ident) = &typed_ast
+        .try_get(typed_argument)
+        .ok_or_else(|| typed_error("typed argument is stale"))?
+        .kind
+    else {
+        return Err(typed_error("typed argument is not an identifier"));
+    };
+    let typed_argument_type = typed_ast
+        .try_get(typed_argument)
+        .ok_or_else(|| typed_error("typed argument is stale"))?
+        .ty;
+    if store.names.resolve(typed_argument_ident.name.text())
+        != store.names.resolve(formal_def.name.as_name().text())
+        || !matches!(store.types.try_get(typed_argument_type), Some(Type::TermRef { target: TermRefTarget::Symbol(target), .. }) if *target == method_formal)
+    {
+        return Err(typed_error(
+            "typed constructor argument does not reference the canonical caller formal",
+        ));
+    }
+
+    let typed_new_type = typed_ast
+        .try_get(typed_new_tpt)
+        .ok_or_else(|| typed_error("typed New type tree is stale"))?
+        .ty;
+    let target_class = match store.types.try_get(typed_new_type) {
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(target),
+            ..
+        }) => *target,
+        _ => {
+            return Err(typed_error(
+                "New type tree does not retain a canonical class TypeRef",
+            ));
+        }
+    };
+    if target_class == caller_class
+        || formal_class == Some(target_class)
+        || !store.symbols.contains(target_class)
+        || !has_source_origin(store, target_class, source_id)
+        || store.symbols.get(target_class).kind != SymbolKind::Class
+    {
+        return Err(identity_error(
+            "constructor target must be another canonical class",
+        ));
+    }
+    let target_source = match source_index.definition_of(target_class) {
+        Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+        _ => {
+            return Err(identity_error(
+                "constructor target class is not declared in this source unit",
+            ));
+        }
+    };
+    let Some(target_ordinal) = source_class_trees
         .iter()
-        .find(|class| class.identity().symbol() == counter)
-        .ok_or(CrossClassFactoryProofError::JvmPlan(
-            "Counter metadata is missing",
+        .position(|tree| *tree == target_source)
+    else {
+        return Err(identity_error(
+            "constructor target class is outside the exact package source root",
+        ));
+    };
+    if jvm_unit
+        .classes
+        .get(target_ordinal)
+        .is_none_or(|plan| plan.class != target_class)
+    {
+        return Err(CrossClassConstructorCallProofError::JvmPlan(
+            "selected constructor target is absent from the same ordered JVM batch",
+        ));
+    }
+    let TreeKind::TypeDef(target_def) = &source_ast
+        .try_get(target_source)
+        .ok_or_else(|| identity_error("target class source tree is stale"))?
+        .kind
+    else {
+        return Err(identity_error("target class source definition is invalid"));
+    };
+    let TreeKind::Template(target_template) = &source_ast
+        .try_get(target_def.rhs)
+        .ok_or_else(|| identity_error("target class template source tree is stale"))?
+        .kind
+    else {
+        return Err(identity_error("target class template is invalid"));
+    };
+    let target_constructor_tree = target_template.constructor;
+    require_source_position(
+        source_ast,
+        source_id,
+        target_source,
+        "constructor target has a foreign source position",
+    )?;
+    require_source_position(
+        source_ast,
+        source_id,
+        target_constructor_tree,
+        "primary constructor has a foreign source position",
+    )?;
+    let target_constructor = source_index
+        .symbol_at(source_id, target_constructor_tree)
+        .ok_or_else(|| {
+            identity_error("target primary constructor has no canonical source symbol")
+        })?;
+    if source_index.definition_of(target_constructor)
+        != Some(SourceDefinition::Canonical {
+            source: source_id,
+            tree: target_constructor_tree,
+        })
+    {
+        return Err(identity_error(
+            "selected target constructor is not bound to its exact primary-constructor source tree",
+        ));
+    }
+    let typed_select_type = typed_ast
+        .try_get(typed_select)
+        .ok_or_else(|| typed_error("typed constructor selection is stale"))?
+        .ty;
+    let selected_constructor = match store.types.try_get(typed_select_type) {
+        Some(Type::TermRef {
+            target: TermRefTarget::Symbol(target),
+            ..
+        }) => *target,
+        _ => {
+            return Err(typed_error(
+                "typed Select does not retain a canonical constructor TermRef",
+            ));
+        }
+    };
+    if selected_constructor != target_constructor
+        || !store.symbols.contains(target_constructor)
+        || !has_source_origin(store, target_constructor, source_id)
+        || !has_source_origin(store, selected_constructor, source_id)
+        || store.symbols.get(selected_constructor).kind != SymbolKind::Constructor
+        || store.symbols.get(selected_constructor).owner != Some(target_class)
+    {
+        return Err(CrossClassConstructorCallProofError::SemanticIdentity(
+            "typed Select must choose the exact target class primary constructor",
+        ));
+    }
+    if target_template.body.iter().any(|tree| {
+        source_index
+            .symbol_at(source_id, *tree)
+            .is_some_and(|symbol| {
+                store.symbols.get(symbol).kind == SymbolKind::Constructor
+                    && symbol != target_constructor
+            })
+    }) {
+        return Err(source_error(
+            "secondary or overloaded constructors are unsupported",
+        ));
+    }
+    if !target_def.metadata.modifiers.is_empty()
+        || !target_def.metadata.annotations.is_empty()
+        || !target_template.parents.is_empty()
+        || target_template.self_val.is_some()
+    {
+        return Err(source_error(
+            "target must be an ordinary class without explicit parents or annotations",
+        ));
+    }
+    let TreeKind::DefDef(target_constructor_def) = &source_ast
+        .try_get(target_constructor_tree)
+        .ok_or_else(|| identity_error("primary constructor source tree is stale"))?
+        .kind
+    else {
+        return Err(identity_error("primary constructor source is invalid"));
+    };
+    if !target_constructor_def.type_params.is_empty()
+        || target_constructor_def.value_param_clauses.len() != 1
+        || target_constructor_def.value_param_clauses[0].len() != 1
+        || target_constructor_def.metadata.visibility.is_some()
+    {
+        return Err(source_error(
+            "target constructor must be one plain public non-generic formal clause",
+        ));
+    }
+    let constructor_formal_tree = target_constructor_def.value_param_clauses[0][0];
+    require_source_position(
+        source_ast,
+        source_id,
+        constructor_formal_tree,
+        "constructor formal has a foreign source position",
+    )?;
+    let TreeKind::ValDef(constructor_formal_def) = &source_ast
+        .try_get(constructor_formal_tree)
+        .ok_or_else(|| identity_error("constructor formal source tree is stale"))?
+        .kind
+    else {
+        return Err(source_error("target constructor formal is invalid"));
+    };
+    if constructor_formal_def.rhs.is_some() {
+        return Err(source_error(
+            "default constructor parameters are unsupported",
+        ));
+    }
+    let constructor_formal = source_index
+        .derived_symbol_at(target_constructor, source_id, constructor_formal_tree)
+        .ok_or_else(|| {
+            identity_error(
+                "target constructor formal is not canonically derived from its primary constructor",
+            )
+        })?;
+    if !has_source_origin(store, constructor_formal, source_id) {
+        return Err(identity_error(
+            "target constructor formal does not have the supplied source origin",
+        ));
+    }
+    let SymbolInfo::Complete(constructor_type) = store.symbols.get(target_constructor).info else {
+        return Err(semantic_error("target constructor signature is incomplete"));
+    };
+    let Some(Type::Method(constructor_signature)) = store.types.try_get(constructor_type) else {
+        return Err(semantic_error(
+            "target constructor must have one plain method type",
+        ));
+    };
+    let SymbolInfo::Complete(constructor_formal_type) = store.symbols.get(constructor_formal).info
+    else {
+        return Err(semantic_error(
+            "target constructor formal type is incomplete",
+        ));
+    };
+    let same_reference_type = |left: TypeId, right: TypeId| {
+        let left = canonical_class_type_symbol(store, left, package, definitions.no_prefix);
+        left.is_some()
+            && left == canonical_class_type_symbol(store, right, package, definitions.no_prefix)
+    };
+    if constructor_signature.kind != dotty_core::MethodKind::Plain
+        || constructor_signature.params.len() != 1
+        || constructor_signature.params[0].ty != constructor_formal_type
+        || (constructor_formal_type != formal_type
+            && !same_reference_type(constructor_formal_type, formal_type))
+    {
+        return Err(semantic_error(
+            "caller formal and primary constructor formal must have the same exact completed type",
+        ));
+    }
+    if store.symbols.get(target_class).visibility != dotty_core::Visibility::Public
+        || has_any_flag(
+            store.symbols.get(target_class).flags,
+            SymbolFlags::CASE | SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
+        )
+        || store.symbols.get(target_constructor).visibility != dotty_core::Visibility::Public
+        || has_any_flag(
+            store.symbols.get(target_constructor).flags,
+            SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
+        )
+    {
+        return Err(semantic_error(
+            "target must be public, ordinary, concrete, and have a public primary constructor",
+        ));
+    }
+    let caller_symbol = store.symbols.get(caller_class);
+    if caller_symbol.visibility != dotty_core::Visibility::Public
+        || has_any_flag(
+            caller_symbol.flags,
+            SymbolFlags::CASE | SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
+        )
+    {
+        return Err(semantic_error(
+            "caller must be a public ordinary concrete class",
+        ));
+    }
+    if store.symbols.get(target_class).owner != Some(package)
+        || store.symbols.get(package).kind != SymbolKind::Package
+    {
+        return Err(semantic_error(
+            "caller and constructor target must share one exact package owner",
+        ));
+    }
+    for class in [caller_class, target_class] {
+        let scope = factory_class_declarations(store, source_index, class)?;
+        if scope.entered_symbols().any(|symbol| {
+            store.symbols.contains(symbol)
+                && store.symbols.get(symbol).kind == SymbolKind::TypeParameter
+                && store.symbols.get(symbol).owner == Some(class)
+        }) {
+            return Err(source_error(
+                "generic caller and target classes are unsupported",
+            ));
+        }
+        if !scope.entered_symbols().any(|symbol| {
+            symbol
+                == if class == caller_class {
+                    method
+                } else {
+                    target_constructor
+                }
+        }) {
+            return Err(identity_error(
+                "method or constructor is absent from its canonical owner declaration scope",
+            ));
+        }
+    }
+    let result_type = method_signature.result;
+    if !is_canonical_class_type_ref(
+        store,
+        result_type,
+        target_class,
+        package,
+        definitions.no_prefix,
+    ) {
+        return Err(semantic_error(
+            "method signature result must retain the exact target class TypeRef",
+        ));
+    }
+    let typed_rhs_type = typed_ast
+        .try_get(typed_rhs)
+        .ok_or_else(|| typed_error("typed method RHS is stale"))?
+        .ty;
+    if !matches!(
+        store.types.try_get(typed_rhs_type),
+        Some(Type::TypeRef { target: TypeRefTarget::Symbol(target), .. }) if *target == target_class
+    ) {
+        return Err(typed_error(
+            "typed method result must retain the exact target class TypeRef",
+        ));
+    }
+    if !is_canonical_class_type_ref(
+        store,
+        typed_new_type,
+        target_class,
+        package,
+        definitions.no_prefix,
+    ) {
+        return Err(typed_error(
+            "New type tree must retain the exact target class TypeRef",
+        ));
+    }
+    if let Some(typed_result_syntax) = source_typed_index.get(source_id, method_def.tpt) {
+        let typed_result_syntax = typed_ast
+            .try_get(typed_result_syntax)
+            .ok_or_else(|| typed_error("source result annotation binding is stale"))?;
+        if !is_canonical_class_type_ref(
+            store,
+            typed_result_syntax.ty,
+            target_class,
+            package,
+            definitions.no_prefix,
+        ) {
+            return Err(typed_error(
+                "source result annotation does not resolve to the exact target class",
+            ));
+        }
+    }
+    if let Some(typed_formal_syntax) = source_typed_index.get(source_id, formal_def.tpt) {
+        let typed_formal_syntax = typed_ast
+            .try_get(typed_formal_syntax)
+            .ok_or_else(|| typed_error("source formal annotation binding is stale"))?;
+        if typed_formal_syntax.ty != formal_type {
+            return Err(typed_error(
+                "source formal type annotation does not match the completed formal type",
+            ));
+        }
+    }
+    if let Some(typed_constructor_formal_syntax) =
+        source_typed_index.get(source_id, constructor_formal_def.tpt)
+    {
+        let typed_constructor_formal_syntax = typed_ast
+            .try_get(typed_constructor_formal_syntax)
+            .ok_or_else(|| typed_error("constructor formal annotation binding is stale"))?;
+        if typed_constructor_formal_syntax.ty != formal_type {
+            return Err(typed_error(
+                "constructor formal type annotation does not match the caller formal type",
+            ));
+        }
+    }
+    let method_plan = caller_plan
+        .methods
+        .iter()
+        .filter(|plan| plan.method == method)
+        .collect::<Vec<_>>();
+    if method_plan.len() != 1
+        || method_plan[0].parameters != [method_formal]
+        || method_plan[0].body != Some(typed_rhs)
+    {
+        return Err(CrossClassConstructorCallProofError::JvmPlan(
+            "JVM method plan must retain the exact canonical formal and typed RHS",
+        ));
+    }
+    let target_plan = unique_constructor_call_class_plan(jvm_unit, target_class)?;
+    let dotty_jvm::JvmClassInitializationPlan::PrimaryConstructor(primary) =
+        &target_plan.initialization
+    else {
+        return Err(CrossClassConstructorCallProofError::JvmPlan(
+            "target JVM class has no validated primary constructor",
+        ));
+    };
+    if primary.symbol() != target_constructor || primary.parameters() != [constructor_formal] {
+        return Err(CrossClassConstructorCallProofError::JvmPlan(
+            "target JVM constructor plan does not retain the canonical primary constructor and formal",
+        ));
+    }
+    let target_metadata = metadata
+        .iter()
+        .find(|entry| entry.identity().symbol() == target_class)
+        .ok_or(CrossClassConstructorCallProofError::JvmPlan(
+            "target JVM metadata is missing",
+        ))?;
+    let caller_metadata = metadata
+        .iter()
+        .find(|entry| entry.identity().symbol() == caller_class)
+        .ok_or(CrossClassConstructorCallProofError::JvmPlan(
+            "caller JVM metadata is missing",
         ))?;
     let constructor_metadata =
-        counter_metadata
+        target_metadata
             .constructor()
-            .ok_or(CrossClassFactoryProofError::JvmPlan(
-                "Counter JVM constructor metadata is missing",
+            .ok_or(CrossClassConstructorCallProofError::JvmPlan(
+                "target primary constructor metadata is missing",
             ))?;
-    if constructor_metadata.symbol() != constructor
+    let method_metadata = caller_metadata
+        .methods()
+        .iter()
+        .find(|entry| entry.symbol() == method)
+        .ok_or(CrossClassConstructorCallProofError::JvmPlan(
+            "calling method metadata is missing",
+        ))?;
+    if constructor_metadata.symbol() != target_constructor
         || constructor_metadata
             .parameters()
             .iter()
-            .map(|parameter| parameter.symbol())
+            .map(|p| p.symbol())
             .collect::<Vec<_>>()
-            != [ctor_formal]
+            != [constructor_formal]
         || !constructor_metadata
             .access_flags()
             .contains(dotty_classfile::access_flags::ACC_PUBLIC)
-        || constructor_metadata.descriptor().as_str() != "(I)V"
-    {
-        return Err(CrossClassFactoryProofError::JvmPlan(
-            "Counter primary constructor must be the exact public (I)V plan",
-        ));
-    }
-    let owner_metadata = metadata
-        .iter()
-        .find(|class| class.identity().symbol() == owner)
-        .ok_or(CrossClassFactoryProofError::JvmPlan(
-            "proof owner metadata is missing",
-        ))?;
-    let method_metadata = owner_metadata
-        .methods()
-        .iter()
-        .find(|candidate| candidate.symbol() == method)
-        .ok_or(CrossClassFactoryProofError::JvmPlan(
-            "method JVM metadata is missing",
-        ))?;
-    let descriptor = method_metadata.descriptor();
-    if method_metadata.name() != method_name
         || method_metadata
             .parameters()
             .iter()
-            .map(|parameter| parameter.symbol())
+            .map(|p| p.symbol())
             .collect::<Vec<_>>()
             != [method_formal]
         || !method_metadata
             .access_flags()
             .contains(dotty_classfile::access_flags::ACC_PUBLIC)
     {
-        return Err(CrossClassFactoryProofError::JvmPlan(
-            "method JVM metadata does not retain its public name and exact formal",
+        return Err(CrossClassConstructorCallProofError::JvmPlan(
+            "JVM metadata must retain public method and constructor identities/formals",
         ));
     }
-    let expected_descriptor = if kind == CrossClassFactoryProofKind::Factory {
-        "(I)Lexample/Counter;"
-    } else {
-        "(Lexample/Counter;)Lexample/Counter;"
-    };
-    let counter_internal_name = counter_metadata.identity().internal_name();
-    if counter_internal_name != "example/Counter" || descriptor.as_str() != expected_descriptor {
-        return Err(CrossClassFactoryProofError::JvmPlan(
-            "method JVM descriptor does not match the canonical proof signature",
+    let constructor_descriptor = constructor_metadata.descriptor().as_str();
+    let method_descriptor = method_metadata.descriptor().as_str();
+    let constructor_params = constructor_descriptor
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(")V"))
+        .ok_or(CrossClassConstructorCallProofError::JvmPlan(
+            "constructor descriptor is not one supported parameter clause",
+        ))?;
+    let expected_method_descriptor = format!(
+        "({constructor_params})L{};",
+        target_metadata.identity().internal_name()
+    );
+    if method_descriptor != expected_method_descriptor {
+        return Err(CrossClassConstructorCallProofError::JvmPlan(
+            "method and constructor descriptors do not preserve the exact argument and result class identities",
         ));
     }
-    Ok(ValidatedCrossClassFactoryProof {
+    Ok(ValidatedCrossClassConstructorCallProof {
         _store: store,
         _source_ast: source_ast,
         _typed_ast: typed_ast,
@@ -897,17 +1174,24 @@ pub fn validate_cross_class_factory_proof(
         _source_typed_index: source_typed_index,
         _jvm_unit: jvm_unit,
         source_id,
-        kind,
-        counter_class: counter,
-        owner_class: owner,
-        constructor,
+        caller_class,
         method,
         method_formal,
+        formal_class,
+        target_class,
+        constructor: target_constructor,
         source_rhs,
+        source_select,
+        source_new,
+        source_argument,
         typed_rhs,
-        typed_constructor_select,
+        typed_select,
         typed_new,
-        descriptor: descriptor.as_str().to_owned(),
+        typed_argument,
+        formal_type,
+        result_type,
+        method_descriptor: method_descriptor.to_owned(),
+        constructor_descriptor: constructor_descriptor.to_owned(),
     })
 }
 
@@ -915,20 +1199,20 @@ fn factory_class_declarations<'a>(
     store: &'a SemanticStore,
     source_index: &SourceSemanticIndex,
     class: SymbolId,
-) -> Result<&'a dotty_core::Scope, CrossClassFactoryProofError> {
+) -> Result<&'a dotty_core::Scope, CrossClassConstructorCallProofError> {
     if !store.symbols.contains(class) {
-        return Err(CrossClassFactoryProofError::SourceIdentity(
+        return Err(CrossClassConstructorCallProofError::SourceIdentity(
             "class identity is stale",
         ));
     }
     let symbol = store.symbols.get(class);
     let SymbolInfo::Complete(class_type) = symbol.info else {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
+        return Err(CrossClassConstructorCallProofError::SemanticIdentity(
             "class info is incomplete",
         ));
     };
     let Some(Type::ClassInfo(info)) = store.types.try_get(class_type) else {
-        return Err(CrossClassFactoryProofError::SemanticIdentity(
+        return Err(CrossClassConstructorCallProofError::SemanticIdentity(
             "class symbol does not carry ClassInfo",
         ));
     };
@@ -937,7 +1221,7 @@ fn factory_class_declarations<'a>(
         || store.scopes.get(info.declarations).owner != Some(class)
         || source_index.scope_of(class) != Some(info.declarations)
     {
-        return Err(CrossClassFactoryProofError::SourceIdentity(
+        return Err(CrossClassConstructorCallProofError::SourceIdentity(
             "class declaration scope is not associated with its canonical source identity",
         ));
     }
@@ -1718,6 +2002,29 @@ fn is_canonical_class_type_ref(
                 target: TypeRefTarget::Symbol(package_target),
             }) if *package_prefix == no_prefix && *package_target == package
         )
+}
+
+fn canonical_class_type_symbol(
+    store: &SemanticStore,
+    ty: TypeId,
+    package: SymbolId,
+    no_prefix: dotty_core::TypeId,
+) -> Option<SymbolId> {
+    let Some(Type::TypeRef {
+        prefix,
+        target: TypeRefTarget::Symbol(class),
+    }) = store.types.try_get(ty)
+    else {
+        return None;
+    };
+    matches!(
+        store.types.try_get(*prefix),
+        Some(Type::TypeRef {
+            prefix: package_prefix,
+            target: TypeRefTarget::Symbol(package_target),
+        }) if *package_prefix == no_prefix && *package_target == package
+    )
+    .then_some(*class)
 }
 
 fn complete_method_type<'a>(

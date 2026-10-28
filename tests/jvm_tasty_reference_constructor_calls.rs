@@ -151,6 +151,17 @@ fn paired_failure(source: &str, source_id: u32) -> PairedPlanError {
     .expect_err("the changed control must fail through the real paired source pipeline")
 }
 
+fn assert_unit_failure(error: PairedPlanError, expected_phase: &str, expected_reason: &str) {
+    assert!(
+        matches!(
+            error,
+            PairedPlanError::BatchUnit { phase, ref reason }
+                if phase == expected_phase && reason.contains(expected_reason)
+        ),
+        "unexpected measured rejection: {error:?}"
+    );
+}
+
 fn assert_batch_failure(
     error: PairedPlanError,
     expected_class_index: usize,
@@ -728,11 +739,10 @@ fn mismatched_factory_result_is_rejected_by_jvm_tasty_cross_contract_validation(
         "def wrap(counter: Counter): CounterOwner =",
         "def wrap(counter: Counter): Counter =",
     );
-    assert_batch_failure(
+    assert_unit_failure(
         paired_failure(&source, 17937),
-        2,
-        "JVM/TASTy cross-contract validation",
-        "BodyType",
+        "cross-class constructor-call identity proof",
+        "method signature result must retain the exact target class TypeRef",
     );
 }
 
@@ -742,11 +752,10 @@ fn private_owner_constructor_is_rejected_by_tasty_plan_validation() {
         "class CounterOwner(counter: Counter):",
         "class CounterOwner private (counter: Counter):",
     );
-    assert_batch_failure(
+    assert_unit_failure(
         paired_failure(&source, 17938),
-        1,
-        "TASTy plan validation",
-        "PrimaryConstructorInput",
+        "cross-class constructor-call identity proof",
+        "target constructor must be one plain public non-generic formal clause",
     );
 }
 
@@ -799,11 +808,10 @@ fn nested_constructor_application_reaches_the_existing_int_only_tasty_gate() {
         "new CounterOwner(counter)",
         "new CounterOwner(new Counter(1))",
     );
-    assert_batch_failure(
+    assert_unit_failure(
         paired_failure(&source, 17942),
-        2,
-        "JVM/TASTy cross-contract validation",
-        "UnsupportedTypeReference",
+        "cross-class constructor-call identity proof",
+        "constructor argument must be the exact caller formal identifier",
     );
 }
 

@@ -132,6 +132,43 @@ Rust producer failure. The paired plan does not produce a JVM-only artifact
 before the TASTy cross-contract failure, so this audit does not claim the
 three-class JVM artifact batch succeeds.
 
+## Generic source/typed constructor-call proof (#1794)
+
+The batch planner now scans concrete source method RHS roots structurally for
+`Apply(Select(New(target), <init>), argument)`. Once that shape is present, the
+proof fails closed unless the source method, formal, target class, selected
+primary constructor, argument `TermRef`, typed roots, and JVM metadata all have
+canonical same-session identities. Every source tree in the proof must carry a
+position owned by the proof's `SourceId`, and each mapped expression tree must
+retain the exact same source position after typing. Stale typed annotation
+bindings return a typed proof error. The caller and constructed class must be
+different public ordinary classes in the same package and ordered source/JVM
+batch. A reference-valued formal must itself be another planned same-batch
+class. The exact erased method and constructor descriptors are retained in an
+immutable `ValidatedCrossClassConstructorCallProof` receipt.
+
+This route handles both the earlier `CounterFactory.create(seed: Int):
+Counter = new Counter(seed)` fixture and the `CounterOwnerFactory.wrap`
+reference-argument source without consulting class names, method names, or
+class positions. The test also renames/reorders the three classes and adds an
+unrelated same-named method as a decoy; the receipt still points to the
+original canonical Builder method and Owner constructor. A source unit with
+no direct matching constructor application receives an empty receipt list.
+
+For the three-class fixture, this proof succeeds before the existing TASTy
+body validator rejects the Int-only constructor argument path described above.
+The complete paired TASTy plan therefore remains unavailable in this
+increment; the standalone proof API and receipt preserve exact source/typed
+roots and session references for later signature/body and cross-ABI work. No
+TASTy or JVM bytes are emitted or changed by this proof.
+
+Negative regressions verify rejection for a mismatched `SourceId`, an omitted
+target sibling, a stale typed RHS binding, and an argument mapped to the wrong
+typed tree. The existing paired planner also rejects non-formal constructor
+arguments before returning a completed batch. These are validation-only
+checks; they do not claim forged foreign symbols are constructible through the
+real typer.
+
 ## Variants and negative controls
 
 The focused Rust regression renames the package and all three class names, and

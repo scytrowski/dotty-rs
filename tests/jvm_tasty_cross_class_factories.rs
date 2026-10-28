@@ -567,7 +567,7 @@ fn paired_tasty_planning_rejects_constructor_shapes_outside_the_exact_slice() {
         (
             "computed constructor argument",
             FACTORY_SOURCE.replace("new Counter(seed)", "new Counter(seed + 1)"),
-            Some("BodyExpression"),
+            Some("cross-class constructor-call identity proof"),
         ),
         (
             "wrong constructor arity",
@@ -607,7 +607,7 @@ fn paired_tasty_planning_rejects_constructor_shapes_outside_the_exact_slice() {
         if let Some(expected) = expected_error {
             assert!(
                 evidence.contains(expected),
-                "{case} should fail in TASTy expression validation: {evidence}"
+                "{case} should fail at its expected validation phase: {evidence}"
             );
         }
     }
