@@ -310,5 +310,48 @@ package/classes/method and after reversing the class declaration order. The
 contract regression rejects a missing third classfile, a damaged Factory
 sidecar, and a Factory allocation/constructor edge changed to `Object`.
 These checks establish deterministic Rust output and complete in-memory
-validation; they do not claim runtime execution or Scala consumer
-interoperability, which remain separate gates.
+validation. The strict runtime proof is described below; Scala consumer
+interoperability remains a separate gate.
+
+## Strict Rust classfile runtime proof (#1798)
+
+`tests/jvm_tasty_artifacts.rs::reference_constructor_factory_executes_original_rust_object_graph_on_verified_jvm`
+publishes the complete six-artifact batch into a fresh directory, then stages
+only the three original Rust-produced `.class` files into the runtime
+classpath. It decodes all three classfiles (major version 65), checks the
+source ABI, and inspects the Factory allocation and constructor call through
+their actual constant-pool references. The verified Factory sequence is
+`new CounterOwner; dup; aload_1; invokespecial CounterOwner.<init>(Counter);
+areturn`, with `max_stack = 3` and `max_locals = 2`. The Owner constructor
+calls `Object.<init>` before storing its exact parameter in the sole
+`private final inner: Counter` field; `read` loads that field and calls
+`Counter.get()I`. `javap -p -v -c` checks these generated methods and their
+descriptors.
+
+The test compiles a separate Java harness against those original Rust classes
+and runs it with `java -Xverify:all`. Reflection proves `Owner.inner == counter`
+by reference identity. Two calls to `wrap` with the same Counter produce
+distinct Owner objects retaining that same Counter. Mutations 7 → 42 → −9 are
+observed through both owners; a separate Counter/Owner pair remains
+independent. SHA-256 and byte comparisons before and after `javac` and Java
+execution ensure the toolchain did not replace Rust output. Repeated source
+emission with distinct `SourceId`s still compares byte-for-byte. The test is in
+the required JDK job and fails when JDK 21+ tools are absent under
+`DOTTY_CLASSFILE_REQUIRE_JDK=1`.
+
+Negative runtime controls remove either linked class and require the JVM to
+report the missing class. Mutated bytecode that skips the constructor call,
+omits `dup`, loads an integer instead of the reference parameter, returns an
+integer in place of the Owner, or uses the Counter as the Owner receiver must
+fail `-Xverify:all` with `VerifyError`. The publisher separately rejects a
+corrupted third class's TASTy link before promotion. Source-level negative
+tests reject a wrong Factory result type, wrong constructor argument type,
+inaccessible or generic constructors, nested allocation, and invalid identity
+provenance before a complete batch is returned.
+
+This lane proves execution of the bounded Rust classfile producer. It does not
+consume the Rust TASTy sidecars with Scala, and it adds no production API or
+public alias accessor. Other constructor shapes, reference widening, arbitrary
+constructor expressions, extra arguments, generic/secondary constructors,
+and broader object-graph lowering remain unsupported. Scala TASTy
+interoperability remains the separate #1799 lane.
