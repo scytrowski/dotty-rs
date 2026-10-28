@@ -522,6 +522,86 @@ fn deferred_case_class_apply_keeps_sibling_typing_and_fails_at_use() {
 }
 
 #[test]
+fn deferred_top_level_case_class_apply_fails_only_when_the_generated_member_is_used() {
+    let text =
+        "case class Node(value: Int = 1)\ndef unrelated: Int = 42\ndef construct: Node = Node(1)";
+    let source = SourceId::from_index(1825);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "top-level-deferred-case-class-apply.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("an unsupported generated apply must not reject the source class");
+    let method_and_body = |wanted: &str| {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == wanted).then(|| {
+                    (
+                        index.symbol_at(source, tree).unwrap(),
+                        definition.rhs.unwrap(),
+                    )
+                })
+            })
+            .unwrap_or_else(|| panic!("source should contain method {wanted}"))
+    };
+    let (unrelated, unrelated_body) = method_and_body("unrelated");
+    let (construct, construct_body) = method_and_body("construct");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(NoResolver));
+
+    let unrelated_context = typer.expression_context_for(unrelated).unwrap();
+    let typed_unrelated = typer
+        .type_expression(unrelated_body, unrelated_context)
+        .expect("a valid sibling method should type after deferred companion naming");
+    assert_eq!(
+        typer
+            .widen_expression_type(typer.typed_ast().get(typed_unrelated).ty)
+            .unwrap(),
+        definitions.int
+    );
+    assert_eq!(
+        typer.source_typed_index().get(source, unrelated_body),
+        Some(typed_unrelated)
+    );
+
+    let construct_context = typer.expression_context_for(construct).unwrap();
+    let constructed = typer.type_expression(construct_body, construct_context);
+    assert!(
+        matches!(
+            constructed,
+            Err(TyperError::OverloadedSelectionDeferred { .. })
+        ),
+        "an absent generated apply must fail explicitly at its use, got {constructed:?}"
+    );
+}
+
+#[test]
 fn deferred_case_class_apply_rejects_an_explicit_companion_overload_in_whole_method_typing() {
     let text = "object O { case class N(x: Int = 1); object N { def apply(x: Any): Int = 2; def unqualified = apply(1); def locallyShadowed = { def apply(x: Any): Int = 3; apply(1) } }; def test = N(1); def explicit = N.apply(1) }";
     let source = SourceId::from_index(1810);
