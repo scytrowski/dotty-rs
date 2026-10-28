@@ -137,6 +137,80 @@ impl SourceTyper<'_> {
         {
             return Ok(Some(symbol));
         }
+        // A nested Scala package can refer to declarations in its package or
+        // an enclosing package without an import. The lexical package scopes
+        // above cover source declarations already entered in this session;
+        // ask the resolver for the same exact package member when it lives in
+        // the classpath. Keep the search nearest-package-first and type-only.
+        let mut seen_packages = Vec::new();
+        let builtin_type = self
+            .definitions
+            .source_builtin_type(self.store, name)
+            .is_some();
+        for context_id in &contexts {
+            let package = self.index.source_context(*context_id).owner;
+            if !self.store.symbols.contains(package)
+                || self.store.symbols.get(package).kind != SymbolKind::Package
+                || seen_packages.contains(&package)
+            {
+                continue;
+            }
+            seen_packages.push(package);
+            if builtin_type {
+                // Keep primitive and top/bottom source spellings bound to
+                // this session's canonical Definitions entry; package
+                // resolver aliases for these names are not substitutes for
+                // that identity, regardless of the current package.
+                continue;
+            }
+            let request = MemberRequest {
+                prefix: self.package_type_prefix(package),
+                name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let Some(symbol) =
+                self.resolver
+                    .resolve_member(self.store, &request)
+                    .map_err(|error| TyperError::SymbolResolution {
+                        source: self.source,
+                        tree_index,
+                        error,
+                    })?
+            else {
+                continue;
+            };
+            if !self.store.symbols.contains(symbol) {
+                return Err(TyperError::UnknownSymbol { symbol });
+            }
+            let entry = self.store.symbols.get(symbol);
+            if !is_type_symbol(entry.kind) {
+                return Err(TyperError::WrongTypeNameKind {
+                    source: self.source,
+                    tree_index,
+                    name,
+                    symbol,
+                    kind: entry.kind,
+                    position,
+                });
+            }
+            let package_path = self.package_path(package);
+            let owner_path = entry
+                .owner
+                .filter(|owner| self.store.symbols.get(*owner).kind == SymbolKind::Package)
+                .map(|owner| self.package_path(owner));
+            let owner_is_visible = owner_path.as_ref().is_some_and(|owner_path| {
+                owner_path == &package_path
+                    || (!owner_path.is_empty() && package_path.starts_with(owner_path))
+            });
+            if !owner_is_visible {
+                // A resolver may search a wider scope than this unqualified
+                // package lookup. Ignore results from sibling or unrelated
+                // packages and continue the normal import/builtin fallback.
+                continue;
+            }
+            return Ok(Some(symbol));
+        }
         let is_builtin = self
             .definitions
             .source_builtin_type(self.store, name)
