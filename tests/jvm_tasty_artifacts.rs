@@ -28,6 +28,8 @@ const COUNTER_OWNER_ALIAS: &str =
     include_str!("fixtures/jvm_tasty_constructor_injection/CounterOwner.scala");
 const REFERENCE_CONSTRUCTOR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_reference_constructor_calls/CounterOwnerFactory.scala");
+const NESTED_CONSTRUCTOR_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala");
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
 const COUNTER_FACTORY_REFERENCE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def create(counter: Counter): Counter = counter\n";
@@ -1304,10 +1306,196 @@ fn reference_constructor_graph_emits_six_complete_deterministic_linked_artifacts
 }
 
 #[test]
+fn nested_constructor_factory_emits_six_linked_artifacts_from_one_session() {
+    let first = emit_paired_jvm_tasty_batch(
+        NESTED_CONSTRUCTOR_BATCH,
+        "NestedConstructorCalls.scala",
+        SourceId::from_index(18181),
+    )
+    .unwrap();
+    let second = emit_paired_jvm_tasty_batch(
+        NESTED_CONSTRUCTOR_BATCH,
+        "NestedConstructorCalls.scala",
+        SourceId::from_index(18182),
+    )
+    .unwrap();
+    assert_ne!(first.source_id(), second.source_id());
+    assert_eq!(first.classes().len(), 3);
+    assert_eq!(second.classes().len(), 3);
+
+    let expected = [
+        ("example/Counter.class", "example/Counter.tasty"),
+        ("example/CounterOwner.class", "example/CounterOwner.tasty"),
+        (
+            "example/CounterOwnerFactory.class",
+            "example/CounterOwnerFactory.tasty",
+        ),
+    ];
+    for (index, (artifact, repeat)) in first.classes().iter().zip(second.classes()).enumerate() {
+        assert_eq!(
+            (artifact.classfile_path(), artifact.tasty_path()),
+            expected[index]
+        );
+        assert_eq!(artifact.source_id(), first.source_id());
+        assert_eq!(artifact.classfile_bytes(), repeat.classfile_bytes());
+        assert_eq!(artifact.tasty_bytes(), repeat.tasty_bytes());
+        assert_eq!(artifact.tasty_link_id(), repeat.tasty_link_id());
+        let mut reader = Reader::new(artifact.classfile_bytes());
+        let class = ClassFile::decode(&mut reader).unwrap();
+        assert!(reader.is_at_end());
+        assert_eq!((class.version.major, class.version.minor), (65, 0));
+        assert_eq!(
+            class.tasty_link_id().unwrap(),
+            Some(artifact.tasty_link_id())
+        );
+        let tasty = TastyFile::parse_and_validate_scala_3_9(artifact.tasty_bytes()).unwrap();
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version,
+            ),
+            (28, 9, 0)
+        );
+        validate_classfile_tasty_link(&class, artifact.tasty_bytes()).unwrap();
+    }
+
+    let mut reader = Reader::new(first.classes()[2].classfile_bytes());
+    let factory = ClassFile::decode(&mut reader).unwrap();
+    let create = factory
+        .methods
+        .iter()
+        .find(|method| factory.constant_pool.utf8(method.name_index).unwrap() == "create")
+        .unwrap();
+    assert_eq!(
+        factory.constant_pool.utf8(create.descriptor_index).unwrap(),
+        "(I)Lexample/CounterOwner;"
+    );
+    let [Attribute::Code(code)] = create.attributes.as_slice() else {
+        panic!("Factory.create has one Code attribute");
+    };
+    assert_eq!(code.code.len(), 16);
+    assert_eq!(
+        [
+            code.code[0],
+            code.code[3],
+            code.code[4],
+            code.code[7],
+            code.code[8]
+        ],
+        [0xbb, 0x59, 0xbb, 0x59, 0x1b]
+    );
+    assert_eq!(
+        (code.code[9], code.code[12], code.code[15]),
+        (0xb7, 0xb7, 0xb0)
+    );
+    assert_eq!(code.max_stack, 5);
+    assert_eq!(code.max_locals, 2);
+    let method_ref = |offset: usize| {
+        let index = ConstantPoolIndex(u16::from_be_bytes([
+            code.code[offset],
+            code.code[offset + 1],
+        ]));
+        let ConstantPoolEntry::Methodref {
+            class_index,
+            name_and_type_index,
+        } = factory.constant_pool.get(index).unwrap()
+        else {
+            panic!("constructor invocation references a Methodref");
+        };
+        (
+            factory.constant_pool.class_name(*class_index).unwrap(),
+            factory
+                .constant_pool
+                .name_and_type(*name_and_type_index)
+                .unwrap(),
+        )
+    };
+    assert_eq!(method_ref(10), ("example/Counter", ("<init>", "(I)V")));
+    assert_eq!(
+        method_ref(13),
+        ("example/CounterOwner", ("<init>", "(Lexample/Counter;)V"))
+    );
+}
+
+#[test]
+fn nested_constructor_factory_is_name_and_declaration_order_independent() {
+    let renamed = NESTED_CONSTRUCTOR_BATCH
+        .replace("package example", "package renamed")
+        .replace("CounterOwnerFactory", "WidgetBuilder")
+        .replace("CounterOwner", "WidgetHolder")
+        .replace("Counter", "Widget");
+    let reordered = NESTED_CONSTRUCTOR_BATCH
+        .replace(
+            "class Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass CounterOwner(counter: Counter):",
+            "class CounterOwner(counter: Counter):",
+        )
+        .replace(
+            "\nclass CounterOwnerFactory:",
+            "\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n\nclass CounterOwnerFactory:",
+        );
+
+    for (source, source_id, expected_paths) in [
+        (
+            renamed.as_str(),
+            18184,
+            [
+                ("renamed/Widget.class", "renamed/Widget.tasty"),
+                ("renamed/WidgetHolder.class", "renamed/WidgetHolder.tasty"),
+                ("renamed/WidgetBuilder.class", "renamed/WidgetBuilder.tasty"),
+            ],
+        ),
+        (
+            reordered.as_str(),
+            18186,
+            [
+                ("example/CounterOwner.class", "example/CounterOwner.tasty"),
+                ("example/Counter.class", "example/Counter.tasty"),
+                (
+                    "example/CounterOwnerFactory.class",
+                    "example/CounterOwnerFactory.tasty",
+                ),
+            ],
+        ),
+    ] {
+        let first = emit_paired_jvm_tasty_batch(
+            source,
+            "NestedConstructorCalls.scala",
+            SourceId::from_index(source_id),
+        )
+        .unwrap();
+        let second = emit_paired_jvm_tasty_batch(
+            source,
+            "NestedConstructorCalls.scala",
+            SourceId::from_index(source_id + 1),
+        )
+        .unwrap();
+        for ((artifact, repeat), expected_path) in first
+            .classes()
+            .iter()
+            .zip(second.classes())
+            .zip(expected_paths)
+        {
+            assert_eq!(
+                (artifact.classfile_path(), artifact.tasty_path()),
+                expected_path
+            );
+            assert_eq!(artifact.classfile_bytes(), repeat.classfile_bytes());
+            assert_eq!(artifact.tasty_bytes(), repeat.tasty_bytes());
+            assert_eq!(artifact.tasty_link_id(), repeat.tasty_link_id());
+            let mut reader = Reader::new(artifact.classfile_bytes());
+            let class = ClassFile::decode(&mut reader).unwrap();
+            assert!(reader.is_at_end());
+            validate_classfile_tasty_link(&class, artifact.tasty_bytes()).unwrap();
+        }
+    }
+}
+
+#[test]
 fn reference_constructor_batch_publisher_contains_all_six_artifact_failures() {
     let batch = emit_paired_jvm_tasty_batch(
-        REFERENCE_CONSTRUCTOR_BATCH,
-        "CounterOwnerFactory.scala",
+        NESTED_CONSTRUCTOR_BATCH,
+        "NestedConstructorCalls.scala",
         SourceId::from_index(18001),
     )
     .expect("emit the complete Counter/Owner/Factory batch");
@@ -1345,6 +1533,19 @@ fn reference_constructor_batch_publisher_contains_all_six_artifact_failures() {
     ));
     assert!(!missing_factory_class_destination.exists());
 
+    let mut missing_owner_class = pairs.clone();
+    missing_owner_class[1].classfile_path = "";
+    let missing_owner_class_destination = base.path().join("missing-owner-class");
+    assert!(matches!(
+        publish_batch_pairs(&missing_owner_class_destination, &missing_owner_class, None),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 1,
+            phase: "class-file path",
+            ..
+        })
+    ));
+    assert!(!missing_owner_class_destination.exists());
+
     let mut corrupt_factory_class = pairs.clone();
     corrupt_factory_class[2].classfile_bytes = &[];
     let corrupt_factory_class_destination = base.path().join("corrupt-factory-class");
@@ -1361,6 +1562,19 @@ fn reference_constructor_batch_publisher_contains_all_six_artifact_failures() {
         })
     ));
     assert!(!corrupt_factory_class_destination.exists());
+
+    let mut corrupt_owner_class = pairs.clone();
+    corrupt_owner_class[1].classfile_bytes = &[];
+    let corrupt_owner_class_destination = base.path().join("corrupt-owner-class");
+    assert!(matches!(
+        publish_batch_pairs(&corrupt_owner_class_destination, &corrupt_owner_class, None),
+        Err(BatchPublishError::InvalidManifest {
+            class_index: 1,
+            phase: "class-file decode",
+            ..
+        })
+    ));
+    assert!(!corrupt_owner_class_destination.exists());
 
     let mut forged_source = pairs.clone();
     forged_source[2].source_id = SourceId::from_index(18002);

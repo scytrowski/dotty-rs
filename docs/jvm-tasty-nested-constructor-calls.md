@@ -244,3 +244,41 @@ generic/default/using/secondary constructors, and forged or stale identities
 remain rejected before complete sidecar output. The change does not alter
 Typer or JVM emission and does not claim client runtime interoperability for
 Rust-produced artifacts. Scala oracle fixture hashes above remain unchanged.
+
+## Six-artifact paired integration (#1818)
+
+The paired source-batch emitter now accepts this exact source shape after both
+producer outputs have been encoded. Its post-encoding cross-class invocation
+validator uses the already validated one-session nested constructor proof and
+the checked JVM metadata to verify the Factory method's complete straight-line
+sequence:
+
+```text
+new CounterOwner; dup; new Counter; dup; iload_1;
+invokespecial Counter.<init>:(I)V;
+invokespecial CounterOwner.<init>:(LCounter;)V; areturn
+```
+
+The byte-level check requires both allocation class references and both
+constructor `Methodref`s in evaluation order, with descriptors matching the
+Counter, Owner, and Factory plans. Existing direct constructor forms continue
+through their previous validator. Batch artifact validation checks all
+expected package-relative paths, class-file major version 65, TASTy 28.9.0,
+each class's own `TASTY` UUID link, and sidecar bytes against the validated
+class plan before returning the six-artifact batch.
+
+`nested_constructor_factory_emits_six_linked_artifacts_from_one_session`
+checks all three genuine classfile/sidecar pairs, their paths and UUIDs, the
+two constructor references in Factory bytecode, and byte-for-byte determinism
+across fresh source sessions. The publisher regression reuses the six-file
+staging and promotion fault matrix for this nested batch. A contract-level
+corrupted-byte regression changes the inner constructor call to the outer
+constructor's `(LCounter;)V` Methodref and verifies that the artifact
+validator rejects the batch at `cross-class invocation` before a manifest can
+be returned.
+
+The publisher tests cover handled staging and promotion failures; they do not
+claim multi-file crash-atomic durability. This increment adds no runtime or
+Scala consumer acceptance. Branch-valued arguments, deeper nested `New`,
+foreign classes, generic or secondary constructors, and unplanned classpath
+members remain unsupported at their earlier documented validation stages.

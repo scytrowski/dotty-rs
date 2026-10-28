@@ -549,3 +549,113 @@ fn validate_decoded_members(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod batch_artifact_regressions {
+    use super::*;
+    use dotty_classfile::class_file::ClassFile;
+    use dotty_classfile::reader::Reader;
+    use dotty_core::SourceId;
+
+    const NESTED_SOURCE: &str = include_str!(
+        "../tests/fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala"
+    );
+
+    #[test]
+    fn nested_batch_rejects_a_wrong_inner_constructor_methodref_descriptor() {
+        let result = with_paired_jvm_tasty_batch_plan(
+            NESTED_SOURCE,
+            "NestedConstructorCalls.scala",
+            SourceId::from_index(18183),
+            |plan| {
+                let tasty_plans = plan
+                    .classes
+                    .iter()
+                    .map(|class| class.tasty_plan)
+                    .collect::<Vec<_>>();
+                let validated_batch =
+                    validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans).unwrap();
+                let mut class_artifacts = Vec::new();
+                for class in plan.classes {
+                    let tasty_output =
+                        emit_tasty_output(class.tasty_plan, &class.tasty_path).unwrap();
+                    class_artifacts.push(
+                        emit_classfile_for_pair(
+                            ValidatedPairInput {
+                                jvm_unit: plan.jvm_unit,
+                                class: class.class,
+                                source_id: plan.source_id,
+                                source_member_order: class.source_member_order.clone(),
+                                classfile_path: class.classfile_path.clone(),
+                                tasty_path: class.tasty_path.clone(),
+                                tasty_plan: class.tasty_plan,
+                                compatibility: class.compatibility,
+                            },
+                            tasty_output,
+                        )
+                        .unwrap(),
+                    );
+                }
+                let mut artifacts = JvmTastyBatchArtifacts {
+                    classfiles: class_artifacts
+                        .iter()
+                        .map(|class| JvmTastyClassFileArtifact {
+                            classfile_path: class.classfile_path.clone(),
+                            classfile_bytes: class.classfile_bytes.clone(),
+                        })
+                        .collect(),
+                    sidecars: class_artifacts
+                        .iter()
+                        .map(|class| JvmTastySidecarArtifact {
+                            tasty_path: class.tasty_path.clone(),
+                            tasty_bytes: class.tasty_bytes.clone(),
+                        })
+                        .collect(),
+                };
+                let factory = artifacts
+                    .classfiles
+                    .iter_mut()
+                    .find(|class| class.classfile_path.ends_with("CounterOwnerFactory.class"))
+                    .unwrap();
+                let original_code = {
+                    let mut reader = Reader::new(&factory.classfile_bytes);
+                    let decoded = ClassFile::decode(&mut reader).unwrap();
+                    let create = decoded
+                        .methods
+                        .iter()
+                        .find(|method| {
+                            decoded.constant_pool.utf8(method.name_index).unwrap() == "create"
+                        })
+                        .unwrap();
+                    let [dotty_classfile::attribute::Attribute::Code(code)] =
+                        create.attributes.as_slice()
+                    else {
+                        panic!("Factory.create has one Code attribute");
+                    };
+                    code.code.to_vec()
+                };
+                let mut corrupted_code = original_code.clone();
+                corrupted_code[10..12].copy_from_slice(&original_code[13..15]);
+                let position = factory
+                    .classfile_bytes
+                    .windows(original_code.len())
+                    .position(|window| window == original_code)
+                    .expect("Factory.create code occurs in encoded class bytes");
+                factory.classfile_bytes[position..position + original_code.len()]
+                    .copy_from_slice(&corrupted_code);
+
+                validate_jvm_tasty_batch_artifacts(&validated_batch, artifacts)
+            },
+        )
+        .unwrap()
+        .unwrap_err();
+        assert!(matches!(
+            result,
+            JvmTastyContractError::BatchArtifact {
+                class_index: 2,
+                phase: "cross-class invocation",
+                ..
+            }
+        ));
+    }
+}
