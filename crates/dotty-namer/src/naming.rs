@@ -2049,7 +2049,7 @@ impl Namer<'_> {
                                 // Without completing those types here, spelling alone
                                 // cannot prove either equivalence or distinction.
                                 (None, None) => None,
-                                (Some(_), None) | (None, Some(_)) => Some(false),
+                                (Some(_), None) | (None, Some(_)) => None,
                             }
                         }
                         _ => None,
