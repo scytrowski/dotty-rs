@@ -19,7 +19,7 @@ conformance, owned typed tree, and exact source-to-typed mapping are present.
 - Two-pass normalized audit SHA-256: main
   `2be03443d031397c61fa32049fa7b3c47ed635656aef98379b0834957538a847`;
   analysis
-  `3730ce339eafabcb4d71c0a0913fc90f2998bd61b22fc8408a49e3fcdfcac701`.
+  `93952a0614a125eba72543a12c2fd121ddfeaaab89d0f77c2d231ae7c2acf36a`.
   Both used `--verify-determinism`; the separate 50-method union audit also
   passed its two-pass comparison.
 
@@ -94,9 +94,12 @@ javap -classpath target/member-lookup-oracle/classes -p -s -c 'MemberLookupOracl
 
 Compile `ClasspathMatchable.scala` first, then compile
 `ClasspathMatchableUse.scala` with its output on the classpath to reproduce the
-current-package/builtin spelling control. Compile each `Negative*.scala`
-separately and expect a nonzero exit. The project prefix-operator regression
-asserts the selected identity for a source-owned unary operator.
+current-package/builtin spelling control. The same two-step compile with
+`ClasspathNestedMatchable.scala` and `ClasspathNestedMatchableUse.scala`
+checks a declaration in `scala.collection`; its consumer descriptor must name
+`scala.collection.Matchable`. Compile each `Negative*.scala` separately and
+expect a nonzero exit. The project prefix-operator regression asserts the
+selected identity for a source-owned unary operator.
 
 ```sh
 mkdir -p target/classpath-matchable/classes
@@ -108,6 +111,16 @@ java -cp "$ORACLE_CP" dotty.tools.dotc.Main \
   -d target/classpath-matchable/classes \
   crates/dotty-typer/tests/fixtures/member-lookup-oracle-3.9.0/ClasspathMatchableUse.scala
 javap -classpath target/classpath-matchable/classes -p -s sample.MatchableUse
+mkdir -p target/nested-classpath-matchable/classes
+java -cp "$ORACLE_CP" dotty.tools.dotc.Main \
+  -classpath "$ORACLE_CP" -d target/nested-classpath-matchable/classes \
+  crates/dotty-typer/tests/fixtures/member-lookup-oracle-3.9.0/ClasspathNestedMatchable.scala
+java -cp "$ORACLE_CP" dotty.tools.dotc.Main \
+  -classpath "target/nested-classpath-matchable/classes:$ORACLE_CP" \
+  -d target/nested-classpath-matchable/classes \
+  crates/dotty-typer/tests/fixtures/member-lookup-oracle-3.9.0/ClasspathNestedMatchableUse.scala
+javap -classpath target/nested-classpath-matchable/classes -p -s \
+  scala.collection.NestedMatchableUse
 ```
 
 ## Reproduction and validation
@@ -142,6 +155,6 @@ the 1,236-file corpus are not part of these results.
 
 The focused 31-method smoke baseline includes deterministic unresolved package
 probes introduced by current-package classpath lookup; method outcomes remain
-unchanged. Lookup in the Scala package tree keeps canonical builtin spellings,
-while unrelated packages can resolve a same-named classpath declaration before
-the builtin fallback.
+unchanged. Builtins remain canonical for aliases in the exact `scala` package.
+Nested packages are checked for exact classpath declarations before the builtin
+fallback, as the `scala.collection.Matchable` Scala 3.9 oracle demonstrates.

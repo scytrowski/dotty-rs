@@ -10078,16 +10078,19 @@ mod tests {
     }
 
     #[test]
-    fn nested_scala_package_builtin_spelling_keeps_its_canonical_definition() {
-        let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("package scala.collection { class Use { val value: Int = 1 } }");
+    fn nested_scala_package_classpath_type_can_shadow_a_builtin_spelling() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala.collection { class Use { val value: Matchable = null } }",
+        );
         let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
         let package = packages.symbol(&["scala", "collection"]).unwrap();
         let external_type = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
-        let int_name = store.names.intern("Int");
-        store.symbols.get_mut(external_type).name = Name::new(int_name, Namespace::Type);
+        let classfile_origin = store.origins.register_classfile();
+        let matchable_name = store.names.intern("Matchable");
+        store.symbols.get_mut(external_type).name = Name::new(matchable_name, Namespace::Type);
         store.symbols.get_mut(external_type).owner = Some(package);
-        let canonical_int = definitions.int;
+        store.symbols.get_mut(external_type).origin = SymbolOrigin::Classfile(classfile_origin);
+        let canonical_matchable = definitions.matchable_class;
         let requests = Rc::new(RefCell::new(Vec::new()));
         let resolver = ScriptedResolver {
             member: Some(external_type),
@@ -10109,8 +10112,49 @@ mod tests {
 
         let projected = typer.type_of_tpt(type_tree, context).unwrap();
 
-        assert_eq!(projected, canonical_int);
-        assert!(requests.borrow().is_empty());
+        assert_eq!(type_symbol(typer.store(), projected), external_type);
+        assert_ne!(type_symbol(typer.store(), projected), canonical_matchable);
+        assert_eq!(
+            typer.store().symbols.get(external_type).owner,
+            Some(package)
+        );
+        assert_eq!(requests.borrow().len(), 1);
+        assert_eq!(
+            typer.store().names.resolve(requests.borrow()[0].text()),
+            "Matchable"
+        );
+    }
+
+    #[test]
+    fn nested_scala_package_builtin_without_a_shadow_keeps_its_canonical_definition() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala.collection { class Use { val value: Matchable = null } }",
+        );
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let canonical_matchable = definitions.matchable_class;
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let resolver = ScriptedResolver {
+            member: None,
+            member_error: None,
+            package: None,
+            member_requests: Rc::clone(&requests),
+            package_requests: Rc::new(RefCell::new(Vec::new())),
+        };
+        let context = index.declaration_context_of(value).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let projected = typer.type_of_tpt(type_tree, context).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), canonical_matchable);
+        assert_eq!(requests.borrow().len(), 1);
     }
 
     #[test]
