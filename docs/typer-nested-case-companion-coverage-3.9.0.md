@@ -33,8 +33,10 @@ result, not evidence that the method body typed successfully. The Namer
 records that the generated apply was deferred. Typer reports
 `OverloadedSelectionDeferred` for calls through that companion, including when
 an explicit apply overload exists, because the absent generated overload could
-change selection. A separate whole-method test confirms that an empty ordinary
-clause still gets a usable zero-argument apply.
+change selection. The guard also covers explicit type applications such as
+`N.apply[Int](1)`, whose member selection happens before call resolution. A
+separate whole-method test confirms that an empty ordinary clause still gets a
+usable zero-argument apply.
 
 The per-method receipt is
 [`typer-nested-case-companion-methods-3.9.0.tsv`](typer-nested-case-companion-methods-3.9.0.tsv).

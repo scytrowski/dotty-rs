@@ -589,6 +589,64 @@ fn deferred_case_class_apply_rejects_an_explicit_companion_overload_in_whole_met
 }
 
 #[test]
+fn deferred_polymorphic_case_class_apply_rejects_explicit_type_arguments() {
+    let text = "object O { case class N[A](x: Int = 1); object N { def apply[A](x: Any): Int = 2 }; def test = N.apply[Int](1) }";
+    let source = SourceId::from_index(1812);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "deferred-polymorphic-companion-overload.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("a valid polymorphic explicit companion should be named");
+    let (test_tree, test_symbol) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "test")
+                .then_some((tree, index.symbol_at(source, tree).unwrap()))
+        })
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(NoResolver));
+    let result = typer.type_method_definition(test_tree);
+    assert!(
+        matches!(
+            result,
+            Err(TyperError::OverloadedTypeApplicationDeferred { .. })
+        ),
+        "explicit type arguments must not hide the missing generated apply overload: {result:?}"
+    );
+    assert!(!matches!(
+        typer.store().symbols.info(test_symbol),
+        SymbolInfo::Complete(_)
+    ));
+}
+
+#[test]
 fn empty_nested_case_class_apply_types_through_its_whole_method() {
     let text = "object O { case class N(); def test: N = N() }";
     let source = SourceId::from_index(1811);
