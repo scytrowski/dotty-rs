@@ -9,7 +9,9 @@ that exact package-qualified type. The classpath entry is still decoded and
 checked before it can establish this view. The source symbol, its `ClassInfo`,
 declaration scope, origin, and source-only members remain untouched. An
 external class loaded afterward can refer to the same source symbol in its
-parent hierarchy.
+parent hierarchy. Hierarchy loading applies this arbitration before parent
+completion even when the external child is the first lookup, so it does not
+allocate a second class symbol in the package scope.
 
 This is not a name-based merge. Reuse requires one package-scope declaration,
 the exact type `Name`, the exact package owner, a matching class-versus-trait
@@ -17,7 +19,9 @@ kind, source provenance, and a valid complete `ClassInfo` whose class and
 declaration-scope owner are the source symbol itself. Incomplete, duplicate,
 malformed, differently owned, or kind-incompatible declarations remain
 unresolved or fail with the existing typed error. Object/ModuleClass and
-companion-term identities use their existing separate paths.
+companion-term identities use their existing separate paths. In particular,
+source class identity reuse does not authorize publishing a binary object or
+module-class companion onto an ordinary source class.
 
 The top-level source-companion change from #1826 now advances the two roots
 that previously stopped at module identity collisions. On the combined tree,
@@ -30,11 +34,13 @@ source classes and fail-closed behavior for incomplete source identities.
 ## Evidence
 
 The focused regression constructs a source-owned class with a source-only
-member and a same-qualified classpath class, then loads an external subclass.
-It verifies that the source `SymbolId` is reused as the external parent and
-that source provenance, `ClassInfo`, declarations, and package membership are
-unchanged. It does not establish Scala compiler parity or a whole-method
-typing result.
+member and a same-qualified classpath class, then loads an external subclass
+first. It verifies that the source `SymbolId` is reused as the external parent
+and that source provenance, `ClassInfo`, declarations, and single package
+membership are unchanged. A companion regression preserves ordinary source
+class identity reuse for type references while rejecting a same-name binary
+object companion without mutating source links or publishing module identities.
+It does not establish Scala compiler parity or a whole-method typing result.
 
 After rebasing this PR onto `main` at `8b14506e83019474317e5223c724f667b2de19e5` (including #1826), the exact three roots were audited against pinned Scala revision `777528f19a58e794c9954a42f433373472ec57f8` and JDK 21 (`/home/vdrake6/.jdks/jdk-21`). The deterministic audit reports 0/3 whole methods typed. `Option.map` now reaches `IfBranchJoinUnsupported`, `Either.swap` reaches `ExtractorUnapplyNotFound`, and `Tuple.toArray` remains at `ApplicationArgumentConformanceUnsupported`. The first two advances match #1826's report; this PR makes no claim to have caused them.
 
@@ -56,6 +62,9 @@ cargo test -p dotty-classloader --lib \
   --locked
 cargo test -p dotty-classloader --lib \
   module_identity_fails_closed_on_an_incomplete_source_case_class_companion_and_can_retry \
+  --locked
+cargo test -p dotty-classloader --lib \
+  module_identity_rejects_a_complete_ordinary_source_companion_class_without_mutation \
   --locked
 cargo test -p dotty-classloader --lib \
   module_identity_keeps_classpath_snapshot_origins_in_independent_stores \

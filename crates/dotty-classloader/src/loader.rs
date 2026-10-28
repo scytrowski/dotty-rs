@@ -1535,6 +1535,16 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         .to_owned(),
                 });
             }
+            if matches!(
+                self.store.symbols.get(class).origin,
+                SymbolOrigin::Source(_)
+            ) {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: name.clone(),
+                    reason: "a source-owned class cannot be published as a binary companion"
+                        .to_owned(),
+                });
+            }
             self.link_class_object_companions(name, class, object)?;
         }
         let nested_type_visibilities = decoded
@@ -4127,6 +4137,18 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         if let Some(profile) = &mut self.active_load_profile {
             profile.hierarchy_loads += 1;
         }
+        // A complete source declaration may own this name even when the
+        // external child is the first class loaded. Arbitrate that source
+        // identity before hierarchy completion; ordinary binary parents
+        // keep the existing single-pass load path.
+        if self.has_complete_source_class_identity(&dependency) {
+            self.ensure_class_identity_inner(&dependency, &mut Vec::new())
+                .map_err(|source| ClassLoadError::DependencyFailure {
+                    owner: owner.clone(),
+                    dependency: dependency.clone(),
+                    source: Rc::new(source),
+                })?;
+        }
         if self.collect_load_profiles {
             self.profiled_load_class(&dependency, inheritance_ancestry)
         } else {
@@ -4137,6 +4159,33 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             dependency,
             source: Rc::new(source),
         })
+    }
+
+    fn has_complete_source_class_identity(&mut self, name: &BinaryName) -> bool {
+        let package = self.session.packages.resolve(self.store, name);
+        let symbol_name = Name::new(self.store.names.intern(name.simple_name()), Namespace::Type);
+        let Some(package_scope) = self.session.packages.scope_of(package) else {
+            return false;
+        };
+        let existing = self
+            .store
+            .scopes
+            .get(package_scope)
+            .lookup_all(&symbol_name);
+        if existing.len() != 1 {
+            return false;
+        }
+        let symbol = existing[0];
+        let candidate = self.store.symbols.get(symbol);
+        candidate.owner == Some(package)
+            && candidate.name == symbol_name
+            && matches!(candidate.kind, SymbolKind::Class | SymbolKind::Trait)
+            && matches!(candidate.origin, SymbolOrigin::Source(_))
+            && matches!(candidate.info, SymbolInfo::Complete(info)
+                if matches!(self.store.types.get(info), Type::ClassInfo(class_info)
+                    if class_info.class == symbol
+                        && self.store.scopes.contains(class_info.declarations)
+                        && self.store.scopes.get(class_info.declarations).owner == Some(symbol)))
     }
 
     /// Establishes a non-hierarchy type reference without completing its class.
@@ -9280,14 +9329,11 @@ mod tests {
             LoadingSession::with_packages(packages),
         );
 
-        let resolved = loader
-            .ensure_class_identity(&name)
-            .expect("the complete source declaration is the canonical shadow");
         let external_child = loader
             .load_class(&BinaryName::from_internal("sample/ExternalChild"))
-            .expect("an external class can retain its source-owned parent identity");
+            .expect("an external child can retain its source-owned parent identity");
 
-        assert_eq!(resolved, source_class);
+        assert_eq!(loader.session.resolved.get(&name), Some(&source_class));
         assert_eq!(
             parent_symbol(
                 loader.store,
@@ -9323,6 +9369,106 @@ mod tests {
                 .get(declarations)
                 .lookup_all(&source_only_name),
             [source_only]
+        );
+    }
+
+    #[test]
+    fn module_identity_rejects_a_complete_ordinary_source_companion_class_without_mutation() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let bytes = semantic_unpickler_fixture_bytes("Both.tasty");
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let source_origin = SymbolOrigin::Source(dotty_core::SourceId::from_index(17));
+        let mut packages = dotty_core::Packages::new();
+        let package = packages
+            .enter(
+                &mut store,
+                source_origin,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .last()
+            .expect("source package")
+            .symbol;
+        let source_name = Name::new(store.names.intern("Both"), Namespace::Type);
+        let source_term_name = Name::new(store.names.intern("Both"), Namespace::Term);
+        let source_class = store.symbols.alloc(Symbol {
+            name: source_name,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: source_origin,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let declarations = store
+            .scopes
+            .alloc(dotty_core::Scope::new(Some(source_class)));
+        let source_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: definitions.no_prefix,
+            class: source_class,
+            parents: Vec::new(),
+            declarations,
+            self_type: None,
+        }));
+        store.symbols.get_mut(source_class).info = SymbolInfo::Complete(source_info);
+        let package_scope = packages.scope_of(package).expect("source package scope");
+        store
+            .scopes
+            .get_mut(package_scope)
+            .enter(source_name, source_class);
+        let original_source_class = store.symbols.get(source_class).clone();
+        let mut loader = ClassLoader::with_definitions(
+            InMemoryTastyClassPath(HashMap::from([(name.clone(), bytes)])),
+            &mut store,
+            definitions,
+            LoadingSession::with_packages(packages),
+        );
+
+        assert_eq!(
+            loader.ensure_class_identity(&name).unwrap(),
+            source_class,
+            "ordinary source identity reuse remains available for type references"
+        );
+        let error = loader.ensure_module_identity(&name).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClassLoadError::IdentityConflict { ref reason, .. }
+                if reason == "a source-owned class cannot be published as a binary companion"
+        ));
+        assert_eq!(
+            loader.store.symbols.get(source_class),
+            &original_source_class
+        );
+        assert_eq!(loader.session.resolved.get(&name), Some(&source_class));
+        assert!(!loader.session.modules.contains_key(&name));
+        assert!(
+            !loader
+                .session
+                .identified
+                .contains_key(&BinaryName::from_internal(format!(
+                    "{}$",
+                    name.as_internal()
+                )))
+        );
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&source_name),
+            [source_class]
+        );
+        assert!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&source_term_name)
+                .is_empty()
         );
     }
 
