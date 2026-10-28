@@ -396,6 +396,34 @@ impl ValidatedClassStatePlan<'_, '_> {
                 )?;
             }
         }
+        for member in p.members {
+            let ClassMemberPicklePlan::Method { symbol, .. } = *member else {
+                continue;
+            };
+            let Some(nested) = p
+                .typed_bindings
+                .nested_constructor_call(p.source.id, symbol)
+            else {
+                continue;
+            };
+            let Some(dotty_core::SourceDefinition::Canonical { source, tree }) =
+                p.source_index.definition_of(nested.class)
+            else {
+                return Err(PickleError::SourceDefinition {
+                    symbol: nested.class,
+                });
+            };
+            if source != p.source.id {
+                return Err(PickleError::SourceDefinition {
+                    symbol: nested.class,
+                });
+            }
+            context.register_planned_source_class(
+                nested.class,
+                tree,
+                p.typed_bindings.planned_class_symbols(),
+            )?;
+        }
         context.reserve_declaration(p.constructor.symbol)?;
         for (source_clause, symbols) in constructor_definition
             .value_param_clauses

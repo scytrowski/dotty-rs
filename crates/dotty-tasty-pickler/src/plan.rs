@@ -55,12 +55,42 @@ pub trait SourceTypedBindings {
         &[]
     }
 
+    /// Exact source/typed identities for the single nested constructor
+    /// argument authorized by the source frontend's cross-class proof.
+    /// Implementations must derive this from the same compilation session.
+    fn nested_constructor_call(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<NestedConstructorCallBinding> {
+        None
+    }
+
     /// Exact source/typed/symbol/scope proofs for method-local value declarations.
     /// Producers that support local values must return the canonical frontend
     /// bindings; the pickler never reconstructs them from names.
     fn local_value_bindings(&self, _source: SourceId, _method: SymbolId) -> Vec<LocalValueBinding> {
         Vec::new()
     }
+}
+
+/// Source and typed tree identities retained by the cross-class constructor
+/// proof for one `new Inner(formal)` used as another constructor's argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NestedConstructorCallBinding {
+    pub source_apply: TreeId<Untyped>,
+    pub typed_apply: TreeId<Typed>,
+    pub source_select: TreeId<Untyped>,
+    pub source_new: TreeId<Untyped>,
+    pub source_argument: TreeId<Untyped>,
+    pub typed_select: TreeId<Typed>,
+    pub typed_new: TreeId<Typed>,
+    pub typed_argument: TreeId<Typed>,
+    pub class: SymbolId,
+    pub constructor: SymbolId,
+    pub formal: SymbolId,
+    pub formal_type: TypeId,
+    pub result_type: TypeId,
 }
 
 impl<F> SourceTypedBindings for F

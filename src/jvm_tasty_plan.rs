@@ -21,8 +21,9 @@ use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty_pickler::{
-    ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, PickleError,
-    PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
+    ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
+    NestedConstructorCallBinding, PickleError, PrimaryConstructorInputPlan, SourceMetadata,
+    SourceTypedBindings, ValidatedClassStatePlan,
 };
 use dotty_typer::{SourceTyper, TyperError};
 
@@ -140,6 +141,7 @@ struct BatchSourceTypedBindings<'a> {
     index: &'a SourceTypedIndex,
     planned_classes: Vec<SymbolId>,
     planned_methods: Vec<SymbolId>,
+    nested_constructor_calls: Vec<(SourceId, SymbolId, NestedConstructorCallBinding)>,
 }
 
 impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
@@ -157,6 +159,18 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
 
     fn planned_method_symbols(&self) -> &[SymbolId] {
         &self.planned_methods
+    }
+
+    fn nested_constructor_call(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<NestedConstructorCallBinding> {
+        self.nested_constructor_calls
+            .iter()
+            .find_map(|(proof_source, proof_method, binding)| {
+                (*proof_source == source && *proof_method == method).then_some(*binding)
+            })
     }
 }
 
@@ -1041,6 +1055,32 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         index: typer.source_typed_index(),
         planned_classes,
         planned_methods,
+        nested_constructor_calls: constructor_call_proofs
+            .iter()
+            .filter_map(|proof| {
+                proof.nested_argument().map(|nested| {
+                    (
+                        proof.source_id(),
+                        proof.method(),
+                        NestedConstructorCallBinding {
+                            source_apply: proof.source_argument(),
+                            typed_apply: proof.typed_argument(),
+                            source_select: nested.source_select(),
+                            source_new: nested.source_new(),
+                            source_argument: nested.source_argument(),
+                            typed_select: nested.typed_select(),
+                            typed_new: nested.typed_new(),
+                            typed_argument: nested.typed_argument(),
+                            class: nested.class(),
+                            constructor: nested.constructor(),
+                            formal: nested.formal(),
+                            formal_type: nested.formal_type(),
+                            result_type: nested.result_type(),
+                        },
+                    )
+                })
+            })
+            .collect(),
     };
     let tasty_inputs = drafts
         .iter()

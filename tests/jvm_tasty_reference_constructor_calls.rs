@@ -327,7 +327,7 @@ fn scala39_nested_constructor_oracle_pins_abi_bytecode_and_tasty_shape() {
 }
 
 #[test]
-fn nested_constructor_rust_first_failures_preserve_the_one_session_trees() {
+fn nested_constructor_rust_preserves_the_one_session_trees_and_requires_the_batch_proof() {
     let source_id = SourceId::from_index(181501);
     let source_text = SourceText::new(NESTED_SOURCE).unwrap();
     let scanner = ContextualScanner::new(NESTED_SOURCE).unwrap();
@@ -613,61 +613,16 @@ fn nested_constructor_rust_first_failures_preserve_the_one_session_trees() {
     let validated = plan
         .validate()
         .expect("the read-only class-state plan validates the one-session identities");
-    let pickler_error = validated
-        .pickle()
-        .expect_err("nested constructor body remains outside bounded pickler emission");
-    println!("nested TASTy pickle first failure: {pickler_error:?}");
-
-    let paired_error = with_paired_jvm_tasty_batch_plan(
-        NESTED_SOURCE,
-        "NestedConstructorCalls.scala",
-        source_id,
-        |_| (),
-    )
-    .expect_err("paired batch reaches the existing unsupported TASTy body boundary");
-    assert_batch_failure(
-        paired_error,
-        2,
-        "JVM/TASTy cross-contract validation",
-        "BodyExpression",
+    let pickler_error = validated.pickle().expect_err(
+        "a standalone class plan without the canonical batch receipt cannot emit nesting",
     );
-
-    let renamed = NESTED_SOURCE
-        .replace("package example", "package renamed")
-        .replace("CounterOwnerFactory", "Builder")
-        .replace("CounterOwner", "Owner")
-        .replace("Counter", "Meter");
-    assert_batch_failure(
-        with_paired_jvm_tasty_batch_plan(
-            &renamed,
-            "NestedConstructorCalls.scala",
-            SourceId::from_index(181502),
-            |_| (),
-        )
-        .expect_err("renamed nested source reaches the same TASTy body boundary"),
-        2,
-        "JVM/TASTy cross-contract validation",
-        "BodyExpression",
-    );
-
-    let chunks = NESTED_SOURCE.split("\n\n").collect::<Vec<_>>();
-    assert_eq!(chunks.len(), 4);
-    let reordered = format!(
-        "{}\n\n{}\n\n{}\n\n{}\n",
-        chunks[0], chunks[2], chunks[1], chunks[3]
-    );
-    assert_batch_failure(
-        with_paired_jvm_tasty_batch_plan(
-            &reordered,
-            "NestedConstructorCalls.scala",
-            SourceId::from_index(181503),
-            |_| (),
-        )
-        .expect_err("reordered nested source reaches the same TASTy body boundary"),
-        2,
-        "JVM/TASTy cross-contract validation",
-        "BodyExpression",
-    );
+    assert!(matches!(
+        pickler_error,
+        dotty_tasty_pickler::PickleError::Unsupported {
+            feature: dotty_tasty_pickler::UnsupportedFeature::BodyExpression,
+            symbol: Some(symbol),
+        } if symbol == create
+    ));
 }
 
 #[test]
@@ -1924,19 +1879,162 @@ fn constructor_val_accessor_is_rejected_by_jvm_unit_validation() {
 }
 
 #[test]
-fn nested_constructor_proof_advances_failure_to_the_existing_tasty_contract_boundary() {
-    let error = paired_failure(NESTED_SOURCE, 181604);
-    assert!(
-        matches!(
-            error,
-            PairedPlanError::BatchClass {
-                phase: "JVM/TASTy cross-contract validation",
-                ref reason,
-                ..
-            } if reason.contains("BodyExpression")
-        ),
-        "the nested source proof succeeds before the unchanged TASTy-body limitation: {error:?}"
+fn nested_constructor_proof_serializes_the_original_nested_tasty_expression() {
+    let output = with_paired_jvm_tasty_batch_plan(
+        NESTED_SOURCE,
+        "NestedConstructorCalls.scala",
+        SourceId::from_index(181604),
+        |batch| {
+            assert_eq!(batch.constructor_call_proofs.len(), 1);
+            batch.classes[2]
+                .tasty_plan
+                .pickle()
+                .expect("the proof-backed nested factory body is serialized")
+                .bytes()
+                .to_vec()
+        },
+    )
+    .expect("the source-proven two-level constructor body passes paired validation");
+    let factory = tasty(&output);
+    let (create_address, body) = method_body(&factory, "create");
+    assert_eq!(body.parameters.len(), 1);
+    assert_eq!(body.return_type.nodes()[0].tag, IDENTTPT_TAG);
+    let RawTree::LengthNode(outer_node) = body.rhs.expect("create has an RHS") else {
+        panic!("Factory.create body is the original outer constructor Apply");
+    };
+    assert_eq!(outer_node.tag, APPLY_TAG);
+    let outer = outer_node.decode_apply().unwrap();
+    let [inner_argument] = outer.arguments.as_slice() else {
+        panic!("Owner constructor has one nested constructor argument");
+    };
+    let RawTree::LengthNode(inner_node) = inner_argument else {
+        panic!("the original Counter constructor Apply remains the Owner argument");
+    };
+    assert_eq!(inner_node.tag, APPLY_TAG);
+    let inner = inner_node.decode_apply().unwrap();
+    let [seed_reference] = inner.arguments.as_slice() else {
+        panic!("Counter constructor receives the original seed formal");
+    };
+    assert_eq!(seed_reference.ast_refs()[0].kind, AstRefKind::TermRefDirect);
+    let index = factory.ast_address_index().unwrap();
+    assert_eq!(
+        seed_reference.ast_refs()[0].address,
+        parameter_address(&index, create_address)
     );
+}
+
+#[test]
+fn pinned_scala_reads_and_from_tasty_compiles_the_rust_nested_factory_sidecar() {
+    if std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
+        != Some(std::ffi::OsStr::new("1"))
+    {
+        return;
+    }
+    let files = with_paired_jvm_tasty_batch_plan(
+        NESTED_SOURCE,
+        "NestedConstructorCalls.scala",
+        SourceId::from_index(181606),
+        |batch| {
+            batch
+                .classes
+                .iter()
+                .map(|class| {
+                    (
+                        class.tasty_path.clone(),
+                        class
+                            .tasty_plan
+                            .pickle()
+                            .expect("the nested source session emits all complete sidecars")
+                            .bytes()
+                            .to_vec(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        },
+    )
+    .expect("nested source batch passes paired validation");
+    run_nested_constructor_scala_oracle(&files);
+}
+
+fn run_nested_constructor_scala_oracle(files: &[(String, Vec<u8>)]) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala root for explicit oracle"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read pinned Scala source revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let version = Command::new(&compiler)
+        .arg("-version")
+        .output()
+        .expect("query pinned Scala 3.9 compiler version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"));
+
+    let root = std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
+        .expect("oracle scratch directory must be explicitly set outside /tmp");
+    assert!(
+        !root.starts_with("/tmp"),
+        "Scala oracle scratch directory must remain outside /tmp"
+    );
+    let temporary = root.join(format!(
+        "dotty-issue-1817-scala-oracle-{}",
+        std::process::id()
+    ));
+    fs::remove_dir_all(&temporary).ok();
+    let candidate = temporary.join("candidate");
+    let compiled = temporary.join("compiled");
+    fs::create_dir_all(&candidate).unwrap();
+    fs::create_dir_all(&compiled).unwrap();
+    for (path, bytes) in files {
+        let path = candidate.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+    let factory_tasty = candidate.join("example/CounterOwnerFactory.tasty");
+    let decompile = Command::new(&compiler)
+        .arg("-decompile")
+        .arg(&factory_tasty)
+        .output()
+        .expect("decompile nested Factory TASTy with pinned Scala 3.9");
+    assert!(
+        decompile.status.success(),
+        "Scala -decompile rejected nested Factory TASTy: {}",
+        String::from_utf8_lossy(&decompile.stderr)
+    );
+    let decompiled = String::from_utf8_lossy(&decompile.stdout);
+    assert!(decompiled.contains("create"), "{decompiled}");
+    assert!(decompiled.contains("CounterOwner"), "{decompiled}");
+    assert!(decompiled.contains("Counter"), "{decompiled}");
+    let from_tasty = Command::new(&compiler)
+        .arg("-from-tasty")
+        .arg("-classpath")
+        .arg(&candidate)
+        .arg("-d")
+        .arg(&compiled)
+        .args([
+            candidate.join("example/Counter.tasty"),
+            candidate.join("example/CounterOwner.tasty"),
+            factory_tasty,
+        ])
+        .output()
+        .expect("consume nested Rust sidecars with pinned Scala 3.9");
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected nested Rust sidecars: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    fs::remove_dir_all(temporary).unwrap();
 }
 
 #[test]
@@ -1947,6 +2045,61 @@ fn nested_constructor_application_with_a_literal_argument_is_rejected_at_source_
         "cross-class constructor-call identity proof",
         "constructor argument must resolve directly to the caller formal",
     );
+}
+
+#[test]
+fn nested_constructor_proof_rejects_computed_field_factory_null_and_third_level_arguments() {
+    let branch = NESTED_SOURCE.replace(
+        "new CounterOwner(new Counter(seed))",
+        "new CounterOwner(if seed > 0 then new Counter(seed) else new Counter(0))",
+    );
+    let factory = NESTED_SOURCE
+        .replace(
+            "class CounterOwnerFactory:\n  def create",
+            "class CounterOwnerFactory:\n  def build(seed: Int): Counter = new Counter(seed)\n  def create",
+        )
+        .replace("new CounterOwner(new Counter(seed))", "new CounterOwner(build(seed))");
+    let field = NESTED_SOURCE
+        .replace(
+            "class CounterOwnerFactory:\n  def create",
+            "class CounterOwnerFactory:\n  private var stored: Int = 1\n  def create",
+        )
+        .replace(
+            "new CounterOwner(new Counter(seed))",
+            "new CounterOwner(new Counter(stored))",
+        );
+    let null = NESTED_SOURCE.replace(
+        "new CounterOwner(new Counter(seed))",
+        "new CounterOwner(null)",
+    );
+    let third_level = NESTED_SOURCE
+        .replace(
+            "class CounterOwner(counter: Counter):\n  private val inner: Counter = counter\n  def read(): Int = inner.get()",
+            "class CounterNest(counter: Counter)\nclass CounterOwner(counter: CounterNest):\n  def read(): Int = 0",
+        )
+        .replace(
+            "new CounterOwner(new Counter(seed))",
+            "new CounterOwner(new CounterNest(new Counter(seed)))",
+        );
+
+    assert_unit_failure(
+        paired_failure(&branch, 181607),
+        "cross-class constructor-call identity proof",
+        "constructor argument",
+    );
+    assert_unit_failure(
+        paired_failure(&factory, 181608),
+        "cross-class constructor-call identity proof",
+        "nested constructor function must be Select",
+    );
+
+    for (offset, source) in [field, null, third_level].iter().enumerate() {
+        assert_unit_failure(
+            paired_failure(source, 181609 + offset as u32),
+            "cross-class constructor-call identity proof",
+            "constructor argument",
+        );
+    }
 }
 
 #[test]
