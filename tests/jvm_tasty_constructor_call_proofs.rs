@@ -207,6 +207,19 @@ fn assert_generic_proof(source: &str, source_number: u32, expected_descriptor: &
         .find(|(_, class, _, _)| *class == caller_class)
         .unwrap();
     let target_class = proof.target_class();
+    assert_eq!(
+        proof.argument_proof().kind(),
+        dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::Formal
+    );
+    let formal = proof
+        .argument_proof()
+        .formal()
+        .expect("direct source formal has an explicit proof variant");
+    assert_eq!(formal.formal(), proof.method_formal());
+    assert_eq!(formal.source_argument(), proof.source_argument());
+    assert_eq!(formal.typed_argument(), proof.typed_argument());
+    assert_eq!(formal.formal_type(), proof.formal_type());
+    assert_eq!(formal.result_type(), formal.formal_type());
     assert_ne!(proof.caller_class(), target_class);
     assert_eq!(proof.caller_class(), caller_plan.1);
     let formal_class = proof
@@ -232,6 +245,10 @@ fn assert_generic_proof(source: &str, source_number: u32, expected_descriptor: &
             .get(source_id, proof.source_argument()),
         Some(proof.typed_argument())
     );
+    assert!(matches!(
+        typer.store().types.get(formal.result_type()),
+        Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == formal_class
+    ));
     assert!(matches!(
         typer.store().types.get(proof.result_type()),
         Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == target_class
@@ -653,9 +670,12 @@ fn constructor_call_candidates_with_unsupported_argument_shapes_fail_closed() {
         |_| (),
     )
     .expect_err("a method-result constructor argument cannot be treated as a formal");
-    assert!(matches!(
-        method_result_error,
-        PairedPlanError::BatchUnit { phase: "cross-class constructor-call identity proof", ref reason }
-            if reason.contains("nested constructor function must be Select")
-    ));
+    assert!(
+        matches!(
+            method_result_error,
+            PairedPlanError::BatchUnit { phase: "cross-class constructor-call identity proof", ref reason }
+                if reason.contains("planned helper body has no established same-batch constructor proof")
+        ),
+        "unexpected method-result rejection: {method_result_error:?}"
+    );
 }

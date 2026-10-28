@@ -1,9 +1,11 @@
-# Factory-result constructor arguments: Scala 3.9 audit
+# Factory-result constructor arguments: Scala 3.9 evidence and Rust proof
 
-Issue [#1832](https://github.com/scytrowski/dotty-rs/issues/1832) records an
-**audit only**. It pins the Scala 3.9 oracle and the current Rust layer
-observations for `new CounterOwner(makeCounter(seed))`. It does not enable a
-Rust TASTy or JVM producer feature.
+Issue [#1832](https://github.com/scytrowski/dotty-rs/issues/1832) pins the
+Scala 3.9 oracle and records the original Rust layer observations for
+`new CounterOwner(makeCounter(seed))`. Issue
+[#1833](https://github.com/scytrowski/dotty-rs/issues/1833) extends the
+read-only source/typed proof to that exact same-instance planned call. It does
+not add expression-body TASTy serialization or change JVM byte generation.
 
 ## Pinned source and oracle provenance
 
@@ -161,34 +163,75 @@ not inferred from the first rejection.
 | --- | --- |
 | Lexer, parser, namer, typer | Succeed on the original one-file source; all listed bindings are present. |
 | Class-state TASTy source plan | `ClassStatePicklePlan::validate` succeeds for the real Factory methods and same-session bindings. This validates class-state/source facts; it is not expression-body encoding. |
-| Source/typed cross-class constructor proof | Rejects with `SourceShape("nested constructor function must be Select")`: the bounded nested-constructor branch expects a selected constructor, but the source factory call retains its original `Ident`. |
-| Paired JVM/TASTy planner | Rejects at `cross-class constructor-call identity proof` with the same `SourceShape` reason before producing the callback plan. |
-| Expression-body TASTy plan/encoding | Unreachable through the current paired batch path. The standalone class-state API validates the signature/state slice but has no expression-body serializer. No complete Rust TASTy bytes were produced for this source. |
-| Paired artifact contract/publisher | Unreachable: the paired planner returns before a complete Rust classfile/TASTy batch exists, so no artifact contract or publisher input is available. No rejection is attributed to these later layers. |
+| Source/typed cross-class constructor proof | Accepts `Formal`, `NestedNew`, and `PlannedCall` receipts. `create` retains the exact original seed, `makeCounter` selection and body, same-class `this` receiver, canonical `Counter` result, outer Owner constructor, and one-session source/typed roots. |
+| Paired JVM/TASTy planner | Reaches `JVM/TASTy cross-contract validation` and rejects with `TastyPlan(Unsupported { feature: BodyExpression, ... })`. The proof no longer fails at source shape; body serialization remains unsupported. |
+| Expression-body TASTy plan/encoding | The paired path stops at its existing unsupported expression contract. The standalone class-state API still validates only signatures/state. No complete Rust TASTy bytes were produced for this source. |
+| Paired artifact contract/publisher | Unreachable: paired planning rejects before returning a complete Rust classfile/TASTy batch, so no artifact contract or publisher input is available. No rejection is attributed to these later layers. |
 | JVM-only emission | The exact original packaged source succeeds through the JVM-only source pipeline with its canonical three-class bindings, field plans (`Counter.current`, `CounterOwner.inner`), and supported initialization plans (primary constructors for Counter and Owner; implicit no-arg for Factory). The emitted Factory `create` method has `new`, `dup`, `aload_0`, `iload_1`, `invokevirtual CounterOwnerFactory.makeCounter:(I)Lexample/Counter;`, `invokespecial CounterOwner.<init>:(Lexample/Counter;)V`, `areturn`; its invocation owners and descriptors are asserted from the emitted classfile. Under the strict JDK 21 gate, a Java harness verifies all three generated classes and checks `create(7)`, `create(-9)`, distinct mutable Counters, and state isolation. This is separate from paired TASTy production. |
 
 ## Controls and unsupported cases
 
 | Control | Evidence / first result |
 | --- | --- |
-| Rename package, classes, and factory method | Genuine source variant reaches the same cross-class proof failure; no fixture spelling is needed to reach it. |
-| Reorder class declarations | Genuine reordered source reaches the same cross-class proof failure. |
+| Rename package, classes, and factory method | Genuine renamed source receives both helper and planned-call proofs; paired planning then reaches the unchanged body-expression rejection. |
+| Reorder class declarations | Genuine reordered source receives both proofs; helper proof linkage is checked after the source-ordered scan, so it does not depend on declaration order. |
+| Explicit `this.makeCounter(seed)` | Accepted as `PlannedCall`; the receipt retains the original source and typed `This` receiver. |
 | Legacy direct formal argument | Existing reference-constructor regression accepts and serializes the exact caller formal. |
 | Nested `new Counter(seed)` argument | Existing pinned nested-constructor regression accepts the source proof and decodes the two constructor applications. |
 | Previous JVM-only object-graph fixture | Remains a separate regression for `new Holder(makeCounter(seed))`; it is not used as evidence for the original packaged source. |
 | Factory call with wrong arity | Source typing rejects with `ApplicationArityMismatch` before proof. |
 | Factory declared with a mismatching result | Source typing rejects with `ApplicationArgumentTypeMismatch` when that result is supplied to the Owner constructor. |
-| Field argument | Source proof rejects: `constructor argument spelling must resolve to the caller formal`. |
-| Null argument | Source proof rejects: `constructor argument must be the exact caller formal identifier or one nested constructor application`. |
-| Conditional argument | Source proof rejects at the same exact-formal shape check. |
+| Field argument | Source proof rejects: `constructor argument must resolve to the exact caller formal`. |
+| Null argument | Source proof rejects: `constructor argument must be the exact caller formal, one nested New, or one planned call`. |
+| Conditional argument | Source proof rejects at the bounded argument-shape check. |
+| Overloaded same-class helper | A real source with a Boolean overload rejects at `SourceShape("overloaded planned helper methods are unsupported")`. |
+| Foreign same-named helper owner | Test-only corruption replaces the selected method `TermRef` with a real same-session method from another planned class; the proof rejects with `SourceIdentity` before returning receipts. |
+| Disconnected explicit receiver | Test-only same-session corruption changes only the typed helper `Select.qualifier`; the proof rejects with `TypedBinding` even though the separately mapped `this`, method `TermRef`, spans, and source mappings remain intact. |
+| Missing planned-call function binding | Test-only removal of the original source-to-typed edge rejects with `TypedBinding("planned helper function has no source-to-typed binding")`. |
 | Local/block argument | Not measured in this increment. The issue allows deferred cases; the matrix uses the direct call path only and does not make a claim about block-root scanning. |
-| Foreign/invalid owner or shadowed same-name method | Unmeasured. The current source uses one canonical same-class method; no foreign or shadowed identity was fabricated. |
-| Private/static/super/overloaded/implicit/using/generic/external factory method | Unmeasured. The source proof rejects the original call shape before its callee-specific method contract is independently evaluated; static and external cases also need separate source/classpath setup. |
+| Private/static/super/implicit/using/generic/external factory method | Not accepted by the proof contract: the helper must be a public, monomorphic, plain instance method with one ordinary formal, a canonical source definition, and an exact same-class `this` receiver. Source typing or earlier planning can reject some of these before the proof stage. |
 | Wrong constructor | Unmeasured. No alternate constructor shape is needed to observe the current factory-call boundary. |
 | Missing/stale typed binding or wrong typed constructor owner | Unmeasured. The issue prohibits forged canonical identities, and the one-session source index supplies the actual mappings. |
 | Missing/corrupt sidecar | Unmeasured for this source. No Rust batch was emitted to serve as a publisher input; the existing linked-batch regression has separate corrupt-sidecar controls. |
 
 Unmeasured controls have no attributed rejection stage.
+
+## Validated proof model and boundary
+
+`ValidatedCrossClassConstructorCallProof` contains one opaque
+`ConstructorArgumentProof`. Its private sum type is `Formal`, `NestedNew`, or
+`PlannedCall`; callers cannot construct a partial variant. The old
+`nested_argument()` accessor remains available and returns a value only for
+`NestedNew`.
+
+Each receipt keeps canonical source and typed tree IDs, the original caller
+formal, expected and result `TypeId`s, and selected owner/member identities.
+For `Formal`, the variant's `result_type` is the value type of the original
+argument expression; the enclosing constructor proof separately retains the
+method's result type. This keeps primitive and reference formals distinct from
+the class constructed by the method.
+`PlannedCall` additionally keeps the original helper `Apply` and function,
+optional explicit receiver, helper method definition and body roots, selected
+helper symbol, and helper formal. Validation checks exact `SourceId`-scoped
+source/typed mappings and matching spans; canonical source definitions and
+owners; the caller's original formal; one plain `(A)R` helper method; the
+same-class `this` prefix (including unqualified selections); its exact class
+result; exact `Ident`/`Select` shape parity and the mapped typed `Select`
+qualifier; and its source/JVM method body. A post-scan link requires that helper's
+own direct-formal constructor body have passed the established proof in the
+same `JvmCompilationUnit`, independent of class declaration order.
+
+The proof scan remains read-only and all-or-error: no partial receipts escape
+when any candidate fails. It does not infer identity from fixture names or JVM
+descriptors, synthesize or retype trees, traverse general call graphs, or
+authenticate foreign same-slot arena IDs. The caller must keep the existing
+single-session invariant.
+
+Proof acceptance is separate from expression serialization. In this issue the
+original source reaches `BodyExpression` rejection in the existing
+JVM/TASTy cross-contract validator, before any paired batch or artifact
+publisher result exists. The direct-formal, nested-constructor, and fixture
+artifact hashes remain covered by the focused regression tests.
 
 ## Reproduction
 
