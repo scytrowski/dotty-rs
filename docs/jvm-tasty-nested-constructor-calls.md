@@ -362,3 +362,91 @@ The focused gate was run as:
 DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER=1 \
 cargo test --test jvm_tasty_nested_constructor_scala_consumer --locked -- --nocapture
 ```
+
+
+## Strict JDK 21 runtime and identity acceptance (#1819)
+
+`nested_constructor_factory_executes_original_rust_artifacts_on_jdk21` emits
+the six files from the unchanged `NestedConstructorCalls.scala` source through
+one `emit_paired_jvm_tasty_batch` session. It writes the resulting three class
+files and three sidecars to a Rust-only classpath; `javac` writes only the
+separate Java harness directory. The test checks classfile major version 65,
+the exact `create(I)Lexample/CounterOwner;` descriptor, `max_stack = 5`, and
+the decoded two-site instruction and constant-pool sequence before launching
+`javap -v -p -c` and `java -Xverify:all -ea`. The JDK check requires all three
+tools to report major version 21 exactly; a newer JDK is not accepted.
+For the Rust-side verifier pass, the test reconstructs the typed instruction
+list from the decoded `Factory.create` bytes and their constant-pool operands,
+then calls `dotty_classfile::bytecode::analyze`; it asserts the required stack
+and local bounds are five and two.
+
+The harness calls `create` with `7`, `-9`, and `3`, checks the corresponding
+`read()` values, and uses reflection only to read private `CounterOwner.inner`.
+It confirms three distinct Owner objects each hold a distinct initialized
+`Counter`, then mutates the first Counter to `42` and `-9` and the second to
+`100`, checking that the other two object graphs keep their values. The
+expected harness line is:
+
+```text
+nested-runtime=7,-9,3; independent=true; mutation=42,-9,100
+```
+
+Observed on Temurin `21.0.13+9` (`javac 21.0.13`, `javap 21.0.13`): the test
+passed under `java -Xverify:all -ea` and printed the expected harness line.
+The six producer artifacts had these SHA-256 digests before harness compilation;
+the test confirmed the same values after compilation and after runtime:
+
+| Original Rust artifact | SHA-256 |
+| --- | --- |
+| `example/Counter.class` | `c26c7cc678521d1497c2fa7b6c0071380d347f63635081a05bc7a5abd2d20851` |
+| `example/Counter.tasty` | `ee4e2afc9c7afea1acadf178722ee80f8662c5fd6259a946174b7ec268178dd8` |
+| `example/CounterOwner.class` | `05ac0006ccb7720073eb1aade6ca932d22bc0af1f1aa76f353a2484332071c28` |
+| `example/CounterOwner.tasty` | `198a377a4f7e00b38c5a5173f6a8381abbbf8dd394fa4030ecb20fe96909b50d` |
+| `example/CounterOwnerFactory.class` | `1e4495ec5abfb53ada5f93c6d561c6a288cc1d8b46ab7f90a46169de47d0ae8c` |
+| `example/CounterOwnerFactory.tasty` | `bb5b3d8fc1ac369139a1660b2c06aebf614effb81bcddd035c680b405268f997` |
+
+The test records SHA-256 for each producer artifact before compiling the
+harness, then checks all six hashes after `javac` and again after the strict
+runtime. `javap` only inspects the Rust classfiles. This acceptance does not
+compile, copy, or load Scala-produced classes and makes no Scala TASTy client
+interoperability claim.
+
+Reproduce it with a JDK 21 SDKMAN candidate selected explicitly. For example,
+after installing Temurin 21.0.13, run from the repository root:
+
+```sh
+source "$HOME/.sdkman/bin/sdkman-init.sh"
+sdk use java 21.0.13.0+9-tem
+export TMPDIR="$PWD/target/issue-1819-tmp"
+export CARGO_TARGET_DIR="$PWD/target/issue-1819"
+mkdir -p "$TMPDIR"
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --test jvm_tasty_artifacts \
+  nested_constructor_factory_executes_original_rust_artifacts_on_jdk21 \
+  --locked -- --nocapture
+```
+
+The required environment flag makes the test fail if any tool is missing or
+is not JDK 21. The test intentionally reports the six source-artifact hashes
+so a review receipt can record the exact run. The Scala oracle tree and its
+compiled classes are not on either classpath.
+
+Negative cases remain separated by the component that rejects them:
+
+| Control | First rejection | Evidence |
+| --- | --- | --- |
+| Inner constructor `Methodref` changed to the Owner constructor reference, giving the wrong owner and descriptor for the `Counter` allocation | Paired artifact contract, phase `cross-class invocation`, before a batch manifest is returned | `nested_constructor_batch_contract_rejects_wrong_constructor_reference_and_stack_bound` in `tests/jvm_tasty_contract.rs`. |
+| Constructor argument descriptor does not match the initialized class formal | Classfile analysis (`WrongExactMethodArgument`) before a classfile is encoded | `rejects_wrong_reference_field_value_and_constructor_argument` in `crates/dotty-classfile/tests/class_file_builder.rs`. |
+| Incomplete initialization or an uninitialized alias escaping to ordinary bytecode use | Classfile analysis rejects malformed plans; the deliberately malformed runtime class is rejected by the JVM as `VerifyError` | `exact_reference_returns_reject_wrong_classes_and_uninitialized_values` in `crates/dotty-classfile/tests/class_file_builder.rs`; `reference_constructor_factory_executes_original_rust_object_graph_on_verified_jvm` mutates a linked class and asserts JVM `VerifyError`. |
+| Unauthorized use of `UninitializedThis` | Classfile analysis returns `ConstructorReceiverNotUninitialized` before encoding | `class_builder_verifies_direct_super_invokespecial_and_requires_acc_super` in `crates/dotty-classfile/tests/class_file_builder.rs`. |
+| More than two simultaneously live `new` sites | JVM codegen returns `UnsupportedJvmConstructorArgument`; no class batch is returned | `third-simultaneous-nested-allocation` in `tests/jvm_source_compilation.rs`. |
+| Wrong `Fieldref` value type or invalid reference method argument | Classfile analysis returns `WrongExactFieldValue` or `WrongExactMethodArgument` | `rejects_wrong_reference_field_value_and_constructor_argument` and `linear_virtual_calls_use_exact_reference_analysis_without_reference_signature` in `crates/dotty-classfile/tests/class_file_builder.rs`. |
+| Required Factory stack bound changed from five to zero | Paired artifact contract, phase `cross-class invocation`, before a batch manifest is returned | `nested_constructor_batch_contract_rejects_wrong_constructor_reference_and_stack_bound` in `tests/jvm_tasty_contract.rs`. |
+| Partial class/TASTy batch publication | Publisher rejects before promotion and removes staging output | `reference_constructor_batch_publisher_contains_all_six_artifact_failures` in `tests/jvm_tasty_artifacts.rs`. |
+
+These stages are intentionally not conflated: `AnalysisError` and paired
+contract errors are Rust-side pre-publication rejections; `VerifyError` is the
+JVM's result after loading a deliberately corrupted classfile. None of these
+negative controls changes producer behavior or publishes a partial artifact
+batch. Branch-valued arguments, deeper nested `New`, foreign classes, generic
+or secondary constructors, and unplanned classpath members remain unsupported
+at their earlier documented validation stages.

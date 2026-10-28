@@ -12,6 +12,10 @@ use dotty::jvm_tasty_artifacts::{
 };
 use dotty::jvm_tasty_plan::PairedPlanError;
 use dotty_classfile::attribute::Attribute;
+use dotty_classfile::bytecode::{
+    ClassReference, ConstantPoolIndexOperand, Instruction, LocalIndex, SpecialMethodReference,
+    analyze as analyze_instructions,
+};
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use std::process::Command;
 
@@ -1416,6 +1420,337 @@ fn nested_constructor_factory_emits_six_linked_artifacts_from_one_session() {
         method_ref(13),
         ("example/CounterOwner", ("<init>", "(Lexample/Counter;)V"))
     );
+}
+
+#[test]
+fn nested_constructor_factory_executes_original_rust_artifacts_on_jdk21() {
+    let batch = emit_paired_jvm_tasty_batch(
+        NESTED_CONSTRUCTOR_BATCH,
+        "NestedConstructorCalls.scala",
+        SourceId::from_index(18189),
+    )
+    .unwrap();
+    assert_eq!(batch.classes().len(), 3);
+
+    let output = TestDirectory::new("nested-constructor-jdk21-runtime");
+    let class_root = output.path().join("rust-classes");
+    std::fs::create_dir_all(&class_root).unwrap();
+    let mut artifact_paths = Vec::with_capacity(6);
+    let mut original_hashes = Vec::with_capacity(6);
+    for artifact in batch.classes() {
+        let classfile = class_root.join(artifact.classfile_path());
+        let tasty = class_root.join(artifact.tasty_path());
+        std::fs::create_dir_all(classfile.parent().unwrap()).unwrap();
+        std::fs::write(&classfile, artifact.classfile_bytes()).unwrap();
+        std::fs::write(&tasty, artifact.tasty_bytes()).unwrap();
+        artifact_paths.extend([classfile, tasty]);
+    }
+    for path in &artifact_paths {
+        let hash = sha256sum(path);
+        eprintln!(
+            "nested-constructor-original-sha256 {} {hash}",
+            path.display()
+        );
+        original_hashes.push(hash);
+    }
+    if !require_exact_jdk_21_or_skip() {
+        return;
+    }
+
+    let factory = &batch.classes()[2];
+    let mut reader = Reader::new(factory.classfile_bytes());
+    let factory_class = ClassFile::decode(&mut reader).unwrap();
+    assert!(reader.is_at_end());
+    assert_eq!(
+        (factory_class.version.major, factory_class.version.minor),
+        (65, 0)
+    );
+    let create = factory_class
+        .methods
+        .iter()
+        .find(|method| factory_class.constant_pool.utf8(method.name_index).unwrap() == "create")
+        .unwrap();
+    assert_eq!(
+        factory_class
+            .constant_pool
+            .utf8(create.descriptor_index)
+            .unwrap(),
+        "(I)Lexample/CounterOwner;"
+    );
+    let [Attribute::Code(code)] = create.attributes.as_slice() else {
+        panic!("Factory.create has one Code attribute");
+    };
+    assert_eq!(code.max_stack, 5);
+    assert_eq!(code.max_locals, 2);
+    assert_eq!(code.code.len(), 16);
+    assert_eq!(
+        [
+            code.code[0],
+            code.code[3],
+            code.code[4],
+            code.code[7],
+            code.code[8]
+        ],
+        [0xbb, 0x59, 0xbb, 0x59, 0x1b]
+    );
+    assert_eq!(
+        (code.code[9], code.code[12], code.code[15]),
+        (0xb7, 0xb7, 0xb0)
+    );
+    let constructor_target = |offset: usize| {
+        let index = ConstantPoolIndex(u16::from_be_bytes([
+            code.code[offset],
+            code.code[offset + 1],
+        ]));
+        let ConstantPoolEntry::Methodref {
+            class_index,
+            name_and_type_index,
+        } = factory_class.constant_pool.get(index).unwrap()
+        else {
+            panic!("constructor call uses a Methodref");
+        };
+        (
+            factory_class
+                .constant_pool
+                .class_name(*class_index)
+                .unwrap(),
+            factory_class
+                .constant_pool
+                .name_and_type(*name_and_type_index)
+                .unwrap(),
+        )
+    };
+    assert_eq!(
+        constructor_target(10),
+        ("example/Counter", ("<init>", "(I)V"))
+    );
+    assert_eq!(
+        constructor_target(13),
+        ("example/CounterOwner", ("<init>", "(Lexample/Counter;)V"))
+    );
+    let pool_operand = |offset: usize| {
+        ConstantPoolIndexOperand::try_from(u16::from_be_bytes([
+            code.code[offset],
+            code.code[offset + 1],
+        ]))
+        .unwrap()
+    };
+    let analysis = analyze_instructions(
+        "(I)Lexample/CounterOwner;",
+        false,
+        &[
+            Instruction::New(ClassReference::new(pool_operand(1))),
+            Instruction::Dup,
+            Instruction::New(ClassReference::new(pool_operand(5))),
+            Instruction::Dup,
+            Instruction::ILoad(LocalIndex::new(1)),
+            Instruction::InvokeSpecial(SpecialMethodReference::new(pool_operand(10))),
+            Instruction::InvokeSpecial(SpecialMethodReference::new(pool_operand(13))),
+            Instruction::AReturn,
+        ],
+        &factory_class.constant_pool,
+    )
+    .expect("Rust classfile analyzer accepts the decoded nested constructor sequence");
+    assert_eq!(analysis.max_stack, 5);
+    assert_eq!(analysis.max_locals, 2);
+
+    let mut reader = Reader::new(batch.classes()[1].classfile_bytes());
+    let owner_class = ClassFile::decode(&mut reader).unwrap();
+    assert!(reader.is_at_end());
+    assert_eq!(
+        (owner_class.version.major, owner_class.version.minor),
+        (65, 0)
+    );
+    assert_eq!(owner_class.fields.len(), 1);
+    let inner = &owner_class.fields[0];
+    assert_eq!(
+        owner_class.constant_pool.utf8(inner.name_index).unwrap(),
+        "inner"
+    );
+    assert_eq!(
+        owner_class
+            .constant_pool
+            .utf8(inner.descriptor_index)
+            .unwrap(),
+        "Lexample/Counter;"
+    );
+    assert!(
+        inner
+            .access_flags
+            .contains(dotty_classfile::access_flags::ACC_PRIVATE)
+    );
+    assert!(
+        inner
+            .access_flags
+            .contains(dotty_classfile::access_flags::ACC_FINAL)
+    );
+    assert!(owner_class.methods.iter().any(|method| {
+        owner_class.constant_pool.utf8(method.name_index) == Ok("<init>")
+            && owner_class.constant_pool.utf8(method.descriptor_index) == Ok("(Lexample/Counter;)V")
+    }));
+
+    let harness_root = output.path().join("harness-classes");
+    std::fs::create_dir(&harness_root).unwrap();
+    let harness = output.path().join("NestedConstructorIdentityHarness.java");
+    std::fs::write(
+        &harness,
+        r#"import java.lang.reflect.Field;
+
+public final class NestedConstructorIdentityHarness {
+    public static void main(String[] args) throws ReflectiveOperationException {
+        example.CounterOwnerFactory factory = new example.CounterOwnerFactory();
+        example.CounterOwner positive = factory.create(7);
+        example.CounterOwner negative = factory.create(-9);
+        example.CounterOwner third = factory.create(3);
+        if (positive == negative || positive == third || negative == third) {
+            throw new AssertionError("each create must return a distinct Owner");
+        }
+        example.Counter positiveInner = inner(positive);
+        example.Counter negativeInner = inner(negative);
+        example.Counter thirdInner = inner(third);
+        if (positiveInner == negativeInner || positiveInner == thirdInner || negativeInner == thirdInner) {
+            throw new AssertionError("each create must allocate an independent Counter");
+        }
+        expect(positive.read(), 7);
+        expect(negative.read(), -9);
+        expect(third.read(), 3);
+        positiveInner.set(42);
+        expect(positive.read(), 42);
+        expect(negative.read(), -9);
+        expect(third.read(), 3);
+        positiveInner.set(-9);
+        expect(positive.read(), -9);
+        expect(negative.read(), -9);
+        expect(third.read(), 3);
+        negativeInner.set(100);
+        expect(positive.read(), -9);
+        expect(negative.read(), 100);
+        expect(third.read(), 3);
+        System.out.println("nested-runtime=7,-9,3; independent=true; mutation=42,-9,100");
+    }
+
+    private static example.Counter inner(example.CounterOwner owner)
+        throws ReflectiveOperationException {
+        Field field = example.CounterOwner.class.getDeclaredField("inner");
+        field.setAccessible(true);
+        Object value = field.get(owner);
+        if (!(value instanceof example.Counter)) {
+            throw new AssertionError("Owner.inner must hold an initialized Counter");
+        }
+        return (example.Counter) value;
+    }
+
+    private static void expect(int actual, int expected) {
+        if (actual != expected) throw new AssertionError("expected " + expected + ", got " + actual);
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let javac = Command::new("javac")
+        .args([
+            "-classpath",
+            class_root.to_str().unwrap(),
+            "-d",
+            harness_root.to_str().unwrap(),
+        ])
+        .arg(&harness)
+        .output()
+        .expect("start JDK 21 javac for the original Rust classfiles");
+    assert!(
+        javac.status.success(),
+        "javac rejected test-only harness:\n{}\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    for (path, expected_hash) in artifact_paths.iter().zip(&original_hashes) {
+        assert_eq!(
+            sha256sum(path),
+            expected_hash.as_str(),
+            "javac changed {}",
+            path.display()
+        );
+    }
+
+    let javap = Command::new("javap")
+        .args(["-classpath", class_root.to_str().unwrap(), "-v", "-p", "-c"])
+        .arg("example.CounterOwnerFactory")
+        .output()
+        .expect("start JDK 21 javap on the original Rust Factory classfile");
+    assert!(
+        javap.status.success(),
+        "javap rejected original Rust Factory.class:\n{}",
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap = String::from_utf8_lossy(&javap.stdout);
+    for expected in [
+        "major version: 65",
+        "create(int)",
+        "descriptor: (I)Lexample/CounterOwner;",
+        "new           #",
+        "example/CounterOwner",
+        "example/Counter",
+        "Counter.\"<init>\":(I)V",
+        "CounterOwner.\"<init>\":(Lexample/Counter;)V",
+        "areturn",
+    ] {
+        assert!(
+            javap.contains(expected),
+            "javap omitted {expected:?}:\n{javap}"
+        );
+    }
+
+    let javap_owner = Command::new("javap")
+        .args(["-classpath", class_root.to_str().unwrap(), "-v", "-p", "-c"])
+        .arg("example.CounterOwner")
+        .output()
+        .expect("start JDK 21 javap on the original Rust Owner classfile");
+    assert!(
+        javap_owner.status.success(),
+        "javap rejected original Rust CounterOwner.class:\n{}",
+        String::from_utf8_lossy(&javap_owner.stderr)
+    );
+    let javap_owner = String::from_utf8_lossy(&javap_owner.stdout);
+    for expected in [
+        "major version: 65",
+        "private final example.Counter inner;",
+        "descriptor: Lexample/Counter;",
+        "public example.CounterOwner(example.Counter);",
+        "descriptor: (Lexample/Counter;)V",
+    ] {
+        assert!(
+            javap_owner.contains(expected),
+            "javap omitted {expected:?}:\n{javap_owner}"
+        );
+    }
+
+    let classpath = std::env::join_paths([harness_root.as_path(), class_root.as_path()]).unwrap();
+    let java = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(classpath)
+        .arg("NestedConstructorIdentityHarness")
+        .output()
+        .expect("start strict JDK 21 verification of the original Rust classfiles");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all -ea rejected or failed original Rust classfiles:\n{}\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "nested-runtime=7,-9,3; independent=true; mutation=42,-9,100"
+    );
+
+    for (path, expected_hash) in artifact_paths.iter().zip(&original_hashes) {
+        assert_eq!(
+            sha256sum(path),
+            expected_hash.as_str(),
+            "java changed {}",
+            path.display()
+        );
+    }
 }
 
 #[test]
@@ -3561,6 +3896,29 @@ fn require_jdk_21_or_skip() -> bool {
     false
 }
 
+fn require_exact_jdk_21_or_skip() -> bool {
+    let unavailable = ["java", "javac", "javap"]
+        .into_iter()
+        .filter_map(|tool| match jdk_tool_major_version(tool) {
+            Some(21) => None,
+            Some(version) => Some(format!("{tool} {version} (requires JDK 21 exactly)")),
+            None => Some(format!("{tool} (missing or version unavailable)")),
+        })
+        .collect::<Vec<_>>();
+    if unavailable.is_empty() {
+        return true;
+    }
+    let message = format!(
+        "nested constructor acceptance requires java, javac, and javap from JDK 21 exactly on PATH; unavailable: {}",
+        unavailable.join(", ")
+    );
+    if std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1") {
+        panic!("{message}");
+    }
+    eprintln!("skipping optional nested constructor JDK 21 acceptance: {message}");
+    false
+}
+
 fn jdk_tool_major_version(tool: &str) -> Option<u32> {
     let output = Command::new(tool).arg("-version").output().ok()?;
     if !output.status.success() {
@@ -3571,9 +3929,29 @@ fn jdk_tool_major_version(tool: &str) -> Option<u32> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    version_text
-        .split(|character: char| !character.is_ascii_digit())
-        .find_map(|component| component.parse::<u32>().ok())
+    let version_line = version_text.lines().find_map(|line| {
+        let line = line.trim();
+        if line.starts_with("openjdk version ") || line.starts_with("java version ") {
+            line.split('"').nth(1)
+        } else if let Some(version) = line.strip_prefix("javac ") {
+            Some(version)
+        } else if tool == "javap"
+            && line
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '.')
+        {
+            Some(line)
+        } else {
+            None
+        }
+    })?;
+    let components = version_line.split('.').collect::<Vec<_>>();
+    let major = if components.first() == Some(&"1") {
+        *components.get(1)?
+    } else {
+        *components.first()?
+    };
+    major.parse().ok()
 }
 
 #[test]
