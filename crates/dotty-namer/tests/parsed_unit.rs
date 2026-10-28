@@ -6312,6 +6312,62 @@ fn top_level_case_class_reuses_explicit_companion_without_duplicate_identities()
 }
 
 #[test]
+fn top_level_case_class_companions_are_owned_by_independent_semantic_stores() {
+    fn assert_local_companion(named: &NamedSource) {
+        use dotty_core::{SymbolKind, SymbolOrigin, TermName, TypeName};
+
+        let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+            panic!("compilation unit should have a package root");
+        };
+        let class_tree = package.stats[0];
+        let class = named.index.symbol_at(named.source, class_tree).unwrap();
+        let owner = named.store.symbols.get(class).owner.unwrap();
+        let scope = named.index.scope_of(owner).unwrap();
+        let object_name = *TermName::new(named.store.names.get("Shared").unwrap()).as_name();
+        let module_class_name = *TypeName::new(named.store.names.get("Shared$").unwrap()).as_name();
+        let object = named.store.scopes.get(scope).lookup(&object_name).unwrap();
+        let module_class = named
+            .store
+            .scopes
+            .get(scope)
+            .lookup(&module_class_name)
+            .unwrap();
+
+        assert_eq!(
+            named.store.symbols.get(class).origin,
+            SymbolOrigin::Source(named.source)
+        );
+        assert_eq!(named.store.symbols.get(object).kind, SymbolKind::Object);
+        assert_eq!(
+            named.store.symbols.get(object).origin,
+            SymbolOrigin::Synthetic
+        );
+        assert_eq!(named.store.symbols.get(object).owner, Some(owner));
+        assert_eq!(
+            named.store.symbols.get(module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(named.store.symbols.get(module_class).owner, Some(owner));
+        assert_eq!(named.store.symbols.get(class).links.companion, Some(object));
+        assert_eq!(named.store.symbols.get(object).links.companion, Some(class));
+        assert_eq!(named.index.symbol_at(named.source, class_tree), Some(class));
+        assert_eq!(
+            named
+                .index
+                .derived_symbol_at(owner, named.source, class_tree),
+            Some(module_class)
+        );
+    }
+
+    let first = named_source("case class Shared[A](value: A)", 1840);
+    let second = named_source("case class Shared[A](value: A)", 1841);
+
+    assert_ne!(first.source, second.source);
+    assert_local_companion(&first);
+    assert_local_companion(&second);
+}
+
+#[test]
 fn unsupported_top_level_case_class_apply_shapes_keep_the_class_and_defer_apply() {
     let sources = [
         "case class Node(value: Int = 1)",

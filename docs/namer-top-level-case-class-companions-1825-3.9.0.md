@@ -37,7 +37,7 @@ first-blocker advance only.
   pair, namespaces/owners/scopes/origins, bidirectional links, source mappings,
   covariant type-parameter and value-parameter order, explicit companions,
   unsupported defaults/multiple/empty/repeated/by-name/bounded shapes,
-  ambiguity rollback/retry, and deterministic output coverage.
+  ambiguity rollback/retry, and independently named semantic stores.
 - The focused typer test confirms an unsupported generated `apply` fails only
   when requested, while a sibling method still types and keeps its exact
   source-to-typed mapping.
