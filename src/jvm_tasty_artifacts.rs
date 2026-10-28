@@ -562,8 +562,8 @@ mod batch_artifact_regressions {
     );
 
     #[test]
-    fn nested_batch_rejects_a_wrong_inner_constructor_methodref_descriptor() {
-        let result = with_paired_jvm_tasty_batch_plan(
+    fn nested_batch_rejects_corrupted_constructor_methodref_and_max_stack() {
+        with_paired_jvm_tasty_batch_plan(
             NESTED_SOURCE,
             "NestedConstructorCalls.scala",
             SourceId::from_index(18183),
@@ -596,7 +596,7 @@ mod batch_artifact_regressions {
                         .unwrap(),
                     );
                 }
-                let mut artifacts = JvmTastyBatchArtifacts {
+                let artifacts = JvmTastyBatchArtifacts {
                     classfiles: class_artifacts
                         .iter()
                         .map(|class| JvmTastyClassFileArtifact {
@@ -612,12 +612,13 @@ mod batch_artifact_regressions {
                         })
                         .collect(),
                 };
-                let factory = artifacts
+                let factory_index = artifacts
                     .classfiles
-                    .iter_mut()
-                    .find(|class| class.classfile_path.ends_with("CounterOwnerFactory.class"))
+                    .iter()
+                    .position(|class| class.classfile_path.ends_with("CounterOwnerFactory.class"))
                     .unwrap();
-                let original_code = {
+                let (original_code, code_position) = {
+                    let factory = &artifacts.classfiles[factory_index];
                     let mut reader = Reader::new(&factory.classfile_bytes);
                     let decoded = ClassFile::decode(&mut reader).unwrap();
                     let create = decoded
@@ -632,30 +633,51 @@ mod batch_artifact_regressions {
                     else {
                         panic!("Factory.create has one Code attribute");
                     };
-                    code.code.to_vec()
+                    let original_code = code.code.to_vec();
+                    let code_position = factory
+                        .classfile_bytes
+                        .windows(original_code.len())
+                        .position(|window| window == original_code)
+                        .expect("Factory.create code occurs in encoded class bytes");
+                    (original_code, code_position)
                 };
-                let mut corrupted_code = original_code.clone();
-                corrupted_code[10..12].copy_from_slice(&original_code[13..15]);
-                let position = factory
-                    .classfile_bytes
-                    .windows(original_code.len())
-                    .position(|window| window == original_code)
-                    .expect("Factory.create code occurs in encoded class bytes");
-                factory.classfile_bytes[position..position + original_code.len()]
-                    .copy_from_slice(&corrupted_code);
-
-                validate_jvm_tasty_batch_artifacts(&validated_batch, artifacts)
+                for corruption in ["constructor Methodref", "max_stack"] {
+                    let mut corrupted_artifacts = artifacts.clone();
+                    let factory = &mut corrupted_artifacts.classfiles[factory_index];
+                    if corruption == "constructor Methodref" {
+                        let mut corrupted_code = original_code.clone();
+                        corrupted_code[10..12].copy_from_slice(&original_code[13..15]);
+                        factory.classfile_bytes[code_position..code_position + original_code.len()]
+                            .copy_from_slice(&corrupted_code);
+                    } else {
+                        // Code attributes put max_stack eight bytes before
+                        // code[0]: max_locals (2) and code_length (4) intervene.
+                        assert_eq!(
+                            &factory.classfile_bytes[code_position - 8..code_position - 6],
+                            &[0, 5]
+                        );
+                        factory.classfile_bytes[code_position - 8..code_position - 6]
+                            .copy_from_slice(&[0, 0]);
+                    }
+                    let error =
+                        validate_jvm_tasty_batch_artifacts(&validated_batch, corrupted_artifacts)
+                            .unwrap_err();
+                    assert!(
+                        matches!(
+                            error,
+                            JvmTastyContractError::BatchArtifact {
+                                class_index: 2,
+                                phase: "cross-class invocation",
+                                ..
+                            }
+                        ),
+                        "corruption {corruption} must be rejected by the cross-class validator"
+                    );
+                }
+                Ok::<_, JvmTastyContractError>(())
             },
         )
         .unwrap()
-        .unwrap_err();
-        assert!(matches!(
-            result,
-            JvmTastyContractError::BatchArtifact {
-                class_index: 2,
-                phase: "cross-class invocation",
-                ..
-            }
-        ));
+        .unwrap();
     }
 }

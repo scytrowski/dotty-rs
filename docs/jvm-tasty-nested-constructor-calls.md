@@ -275,7 +275,9 @@ staging and promotion fault matrix for this nested batch. A contract-level
 corrupted-byte regression changes the inner constructor call to the outer
 constructor's `(LCounter;)V` Methodref and verifies that the artifact
 validator rejects the batch at `cross-class invocation` before a manifest can
-be returned.
+be returned. A second corruption sets the Factory method's `Code.max_stack`
+from five to zero; the validator rejects it because the proven instruction
+sequence requires five operand-stack slots at its peak.
 
 The publisher tests cover handled staging and promotion failures; they do not
 claim multi-file crash-atomic durability. This increment adds no runtime or

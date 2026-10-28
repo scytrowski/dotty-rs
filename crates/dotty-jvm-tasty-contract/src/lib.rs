@@ -1680,6 +1680,7 @@ fn validate_cross_class_call_code(
                 || code.code[9] != 0xb7
                 || code.code[12] != 0xb7
                 || code.code[15] != 0xb0
+                || code.max_stack < 5
                 || code.max_locals != 2
                 || !code.exception_table.is_empty()
             {
