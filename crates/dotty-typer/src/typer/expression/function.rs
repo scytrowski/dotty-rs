@@ -12,6 +12,12 @@ pub(in crate::typer) struct FunctionLiteralIndex {
     parameters: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
 }
 
+#[derive(Clone, Copy)]
+pub(in crate::typer) struct FunctionLiteralTypingContext {
+    pub context: ExpressionContext,
+    pub expected_function1: Option<(TypeId, TypeId)>,
+}
+
 #[derive(Clone)]
 struct FunctionLiteralDefinition {
     method: SymbolId,
@@ -63,15 +69,57 @@ impl FunctionLiteralIndex {
 }
 
 impl SourceTyper<'_> {
+    pub(in crate::typer) fn ordinary_function1_parts(
+        &mut self,
+        expected: TypeId,
+        tree_index: u32,
+    ) -> Result<Option<(TypeId, TypeId)>, TyperError> {
+        let Some(Type::Applied { tycon, args }) = self.store.types.try_get(expected) else {
+            return Ok(None);
+        };
+        if args.len() != 2 {
+            return Ok(None);
+        }
+        let (tycon, arguments) = (*tycon, [args[0], args[1]]);
+        let Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(class),
+        }) = self.store.types.try_get(tycon)
+        else {
+            return Ok(None);
+        };
+        let class = *class;
+        let prefix = *prefix;
+        let canonical = self.source_function_class(SourceFunctionKind::Ordinary, 1, tree_index)?;
+        let canonical_package = self.store.symbols.get(canonical).owner;
+        let canonical_prefix = canonical_package.is_some_and(|package| {
+            matches!(
+                self.store.types.try_get(prefix),
+                Some(Type::TypeRef {
+                    prefix: root,
+                    target: TypeRefTarget::Symbol(target),
+                }) if *root == self.definitions.no_prefix && *target == package
+            )
+        });
+        if class != canonical || !canonical_prefix {
+            return Ok(None);
+        }
+        Ok(Some((arguments[0], arguments[1])))
+    }
+
     pub(in crate::typer) fn type_function_literal(
         &mut self,
         tree: TreeId<Untyped>,
         function: Function,
         position: Option<SourceSpan>,
-        context: ExpressionContext,
+        typing_context: FunctionLiteralTypingContext,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
+        let FunctionLiteralTypingContext {
+            context,
+            expected_function1,
+        } = typing_context;
         let mut parameters = Vec::with_capacity(function.params.len());
         for parameter_tree in function.params.iter().copied() {
             let Some(parameter_node) = self.arena.try_get(parameter_tree).cloned() else {
@@ -103,11 +151,21 @@ impl SourceTyper<'_> {
                 info_journal,
             ) {
                 Err(TyperError::MissingDeclaredType { .. }) => {
-                    return Err(TyperError::UnsupportedFunctionLiteralParameter {
-                        source: self.source,
-                        tree_index: parameter_tree.index(),
-                        reason: "an explicit parameter type is required",
-                    });
+                    let Some((inferred, _)) = expected_function1 else {
+                        return Err(TyperError::UnsupportedFunctionLiteralParameter {
+                            source: self.source,
+                            tree_index: parameter_tree.index(),
+                            reason: "an explicit parameter type is required",
+                        });
+                    };
+                    if function.params.len() != 1 {
+                        return Err(TyperError::UnsupportedFunctionLiteralParameter {
+                            source: self.source,
+                            tree_index: parameter_tree.index(),
+                            reason: "Function1 expectations require exactly one lambda parameter",
+                        });
+                    }
+                    inferred
                 }
                 result => result?,
             };

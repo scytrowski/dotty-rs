@@ -18,7 +18,7 @@ mod new;
 mod patterns;
 mod references;
 pub(super) use blocks::LocalMethodIndex;
-pub(super) use function::FunctionLiteralIndex;
+pub(super) use function::{FunctionLiteralIndex, FunctionLiteralTypingContext};
 
 impl SourceTyper<'_> {
     /// Returns the canonical widened type for supported constants.
@@ -412,7 +412,13 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let typed = self.type_value_expression_inner(tree, context, info_journal, new_mappings)?;
+        let typed = self.type_value_expression_expected_inner(
+            tree,
+            context,
+            expected,
+            info_journal,
+            new_mappings,
+        )?;
         let expression_type = self.typed_arena.get(typed).ty;
         let mut actual =
             self.adapt_expression_type_to_expected(expression_type, expected, info_journal)?;
@@ -455,6 +461,102 @@ impl SourceTyper<'_> {
                 expected,
                 error: Box::new(error),
             }),
+        }
+    }
+
+    pub(in crate::typer) fn type_value_expression_expected_inner(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        expected: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if let Some(typed) = self.typed_index.get(self.source, tree) {
+            self.validate_value_expression(tree, typed)?;
+            return Ok(typed);
+        }
+        let node = self
+            .arena
+            .try_get(tree)
+            .cloned()
+            .ok_or(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            })?;
+        let typed = match node.kind {
+            TreeKind::PhaseSpecific(UntypedNode::Function(function)) => {
+                let expected_function1 = if self.has_unannotated_function_literal_parameter(tree) {
+                    self.ordinary_function1_parts(expected, tree.index())?
+                } else {
+                    None
+                };
+                self.type_function_literal(
+                    tree,
+                    function,
+                    node.position,
+                    FunctionLiteralTypingContext {
+                        context,
+                        expected_function1,
+                    },
+                    info_journal,
+                    new_mappings,
+                )?
+            }
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => self
+                .type_value_expression_expected_inner(
+                    parens.inner,
+                    context,
+                    expected,
+                    info_journal,
+                    new_mappings,
+                )?,
+            TreeKind::Block(block) if block.stats.is_empty() => self
+                .type_value_expression_expected_inner(
+                    block.expr,
+                    context,
+                    expected,
+                    info_journal,
+                    new_mappings,
+                )?,
+            _ => {
+                return self.type_value_expression_inner(tree, context, info_journal, new_mappings);
+            }
+        };
+        self.validate_value_expression(tree, typed)?;
+        self.typed_index
+            .insert(self.source, tree, typed)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, tree));
+        Ok(typed)
+    }
+
+    pub(in crate::typer) fn has_unannotated_function_literal_parameter(
+        &self,
+        tree: TreeId<Untyped>,
+    ) -> bool {
+        match self.arena.try_get(tree).map(|node| &node.kind) {
+            Some(TreeKind::PhaseSpecific(UntypedNode::Function(function))) => {
+                function.params.iter().any(|parameter| {
+                    matches!(
+                        self.arena.try_get(*parameter).map(|node| &node.kind),
+                        Some(TreeKind::ValDef(parameter))
+                            if matches!(self.arena.try_get(parameter.tpt).map(|node| &node.kind), Some(TreeKind::TypeTree(_)))
+                    )
+                })
+            }
+            Some(TreeKind::PhaseSpecific(UntypedNode::Parens(parens))) => {
+                self.has_unannotated_function_literal_parameter(parens.inner)
+            }
+            Some(TreeKind::Block(block)) if block.stats.is_empty() => {
+                self.has_unannotated_function_literal_parameter(block.expr)
+            }
+            _ => false,
         }
     }
 

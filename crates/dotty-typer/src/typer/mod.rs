@@ -623,7 +623,10 @@ impl<'a> SourceTyper<'a> {
                 tree,
                 function,
                 source_tree.position,
-                context,
+                expression::FunctionLiteralTypingContext {
+                    context,
+                    expected_function1: None,
+                },
                 info_journal,
                 new_mappings,
             ),
@@ -6148,6 +6151,212 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn function1_expectation_infers_lambda_parameter_and_checks_body() {
+        let source_text = concat!(
+            "class C { ",
+            "def expected: Int => Int = x => x; ",
+            "def accepts(function: Int => Int): Int = 1; ",
+            "def argument: Int = accepts(x => x); ",
+            "def blockArgument: Int = accepts({ x => x }); ",
+            "def explicit: Int => Int = (x: Int) => x; ",
+            "def bad: Int => Boolean = x => x; ",
+            "def wrongArity: Int => Int = (x, y) => x; ",
+            "def wrongExpected: Int = x => x",
+            " }",
+        );
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name(source_text);
+        enter_scala_function_classes(&mut store, &mut packages, [0, 1]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let (owner, lambda) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "expected");
+        let context = typer.expression_context_for(owner).unwrap();
+        typer.complete_symbol(owner).unwrap();
+        assert!(typer.function_literal_method_at(source, lambda).is_some());
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                (index.symbol_at(source, tree) == Some(owner)
+                    && matches!(node.kind, TreeKind::DefDef(_)))
+                .then_some(tree)
+            })
+            .unwrap();
+        let TreeKind::DefDef(method) = &parsed.ast.get(method_tree).kind else {
+            panic!("expected a method declaration");
+        };
+        let expected = typer
+            .type_of_tpt(method.tpt, index.declaration_context_of(owner).unwrap())
+            .unwrap();
+        let typed = typer
+            .type_expression_expected(lambda, context, expected)
+            .unwrap();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parsed.ast.get(lambda).kind
+        else {
+            panic!("expected source lambda");
+        };
+        let parameter = function.params[0];
+        let parameter_symbol = typer
+            .function_literal_parameter_symbol_at(source, parameter)
+            .unwrap();
+        let Type::Applied { args, .. } = typer.store().types.get(expected) else {
+            panic!("expected Function1 application");
+        };
+        let (input_type, output_type) = (args[0], args[1]);
+        assert_eq!(
+            typer.store().symbols.get(parameter_symbol).info,
+            SymbolInfo::Complete(input_type)
+        );
+        let foreign_tycon = typer.store.types.alloc(Type::TypeRef {
+            prefix: typer.definitions.no_prefix,
+            target: TypeRefTarget::Symbol(typer.store.symbols.get(owner).owner.unwrap()),
+        });
+        let foreign_function = typer.store.types.alloc(Type::Applied {
+            tycon: foreign_tycon,
+            args: vec![input_type, output_type],
+        });
+        assert!(
+            typer
+                .ordinary_function1_parts(foreign_function, lambda.index())
+                .unwrap()
+                .is_none()
+        );
+        let Type::Applied {
+            tycon: expected_constructor,
+            args: expected_arguments,
+        } = typer.store().types.get(expected)
+        else {
+            unreachable!();
+        };
+        let Type::Applied {
+            tycon: actual_constructor,
+            args: actual_arguments,
+        } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("lambda should have an applied Function1 type");
+        };
+        assert!(matches!(
+            (typer.store().types.get(*actual_constructor), typer.store().types.get(*expected_constructor)),
+            (
+                Type::TypeRef { target: TypeRefTarget::Symbol(actual), .. },
+                Type::TypeRef { target: TypeRefTarget::Symbol(expected), .. }
+            ) if actual == expected
+        ));
+        assert_eq!(actual_arguments[0], expected_arguments[0]);
+        let typed_body = typer
+            .source_typed_index()
+            .get(source, function.body)
+            .unwrap();
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_body).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == parameter_symbol
+        ));
+        assert!(typer.source_typed_index().get(source, parameter).is_some());
+
+        let (owner, lambda) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "bad");
+        let context = typer.expression_context_for(owner).unwrap();
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                (index.symbol_at(source, tree) == Some(owner)
+                    && matches!(node.kind, TreeKind::DefDef(_)))
+                .then_some(tree)
+            })
+            .unwrap();
+        let TreeKind::DefDef(method) = &parsed.ast.get(method_tree).kind else {
+            panic!("expected a method declaration");
+        };
+        let expected = typer
+            .type_of_tpt(method.tpt, index.declaration_context_of(owner).unwrap())
+            .unwrap();
+        let mismatch = typer.type_expression_expected(lambda, context, expected);
+        assert!(
+            matches!(
+                mismatch,
+                Err(TyperError::ExpectedExpressionTypeMismatch { .. }
+                    | TyperError::ExpectedExpressionConformanceUnsupported { .. })
+            ),
+            "unexpected result: {mismatch:?}"
+        );
+        assert_eq!(typer.function_literal_method_at(source, lambda), None);
+        assert_eq!(typer.source_typed_index().get(source, lambda), None);
+
+        for (method_name, expected_error) in [
+            (
+                "wrongArity",
+                "Function1 expectations require exactly one lambda parameter",
+            ),
+            ("wrongExpected", "an explicit parameter type is required"),
+        ] {
+            let (owner, lambda) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, method_name);
+            let context = typer.expression_context_for(owner).unwrap();
+            let method_tree = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    (index.symbol_at(source, tree) == Some(owner)
+                        && matches!(node.kind, TreeKind::DefDef(_)))
+                    .then_some(tree)
+                })
+                .unwrap();
+            let TreeKind::DefDef(method) = &parsed.ast.get(method_tree).kind else {
+                unreachable!();
+            };
+            let expected = typer
+                .type_of_tpt(method.tpt, index.declaration_context_of(owner).unwrap())
+                .unwrap();
+            let store_checkpoint = typer.store().checkpoint();
+            let result = typer.type_expression_expected(lambda, context, expected);
+            assert!(
+                matches!(
+                    &result,
+                    Err(TyperError::UnsupportedFunctionLiteralParameter { reason, .. })
+                        if *reason == expected_error
+                ),
+                "unexpected result for {method_name}: {result:?}"
+            );
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+            assert_eq!(typer.function_literal_method_at(source, lambda), None);
+            assert_eq!(typer.source_typed_index().get(source, lambda), None);
+        }
+
+        let (owner, application) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "argument");
+        let context = typer.expression_context_for(owner).unwrap();
+        let typed_application = typer.type_expression(application, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_application).kind else {
+            panic!("expected an application");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(application.args[0]).kind,
+            TreeKind::Closure(_)
+        ));
+
+        let (owner, application) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "blockArgument");
+        let context = typer.expression_context_for(owner).unwrap();
+        let typed_application = typer.type_expression(application, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_application).kind else {
+            panic!("expected an application");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(application.args[0]).kind,
+            TreeKind::Closure(_)
+        ));
     }
 
     #[test]

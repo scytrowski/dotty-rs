@@ -412,6 +412,23 @@ impl SourceTyper<'_> {
                 info_journal,
             )?
         };
+        if !infer_result
+            && let Some(rhs) = definition.rhs
+            && self.has_unannotated_function_literal_parameter(rhs)
+            && self
+                .ordinary_function1_parts(result_type, method_tree_index)?
+                .is_some()
+        {
+            let context = self.expression_context_for(method)?;
+            let mut new_mappings = Vec::new();
+            self.type_expression_expected_inner(
+                rhs,
+                context,
+                result_type,
+                info_journal,
+                &mut new_mappings,
+            )?;
+        }
         let mut signature = result_type;
         for clause in clauses.into_iter().rev() {
             signature = match clause {
