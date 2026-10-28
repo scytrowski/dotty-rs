@@ -86,10 +86,66 @@ pub struct ValidatedCrossClassConstructorCallProof<'session> {
     typed_select: TreeId<Typed>,
     typed_new: TreeId<Typed>,
     typed_argument: TreeId<Typed>,
+    nested_argument: Option<NestedConstructorArgumentProof>,
     formal_type: TypeId,
+    constructor_formal_type: TypeId,
     result_type: TypeId,
     method_descriptor: String,
     constructor_descriptor: String,
+}
+
+/// Exact original source and typed identities for the supported one-level
+/// nested constructor argument. This is present only when the outer
+/// constructor argument is itself `Apply(Select(New(...), <init>), formal)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NestedConstructorArgumentProof {
+    source_select: TreeId<Untyped>,
+    source_new: TreeId<Untyped>,
+    source_argument: TreeId<Untyped>,
+    typed_select: TreeId<Typed>,
+    typed_new: TreeId<Typed>,
+    typed_argument: TreeId<Typed>,
+    class: SymbolId,
+    constructor: SymbolId,
+    formal: SymbolId,
+    formal_type: TypeId,
+    result_type: TypeId,
+}
+
+impl NestedConstructorArgumentProof {
+    pub const fn source_select(self) -> TreeId<Untyped> {
+        self.source_select
+    }
+    pub const fn source_new(self) -> TreeId<Untyped> {
+        self.source_new
+    }
+    pub const fn source_argument(self) -> TreeId<Untyped> {
+        self.source_argument
+    }
+    pub const fn typed_select(self) -> TreeId<Typed> {
+        self.typed_select
+    }
+    pub const fn typed_new(self) -> TreeId<Typed> {
+        self.typed_new
+    }
+    pub const fn typed_argument(self) -> TreeId<Typed> {
+        self.typed_argument
+    }
+    pub const fn class(self) -> SymbolId {
+        self.class
+    }
+    pub const fn constructor(self) -> SymbolId {
+        self.constructor
+    }
+    pub const fn formal(self) -> SymbolId {
+        self.formal
+    }
+    pub const fn formal_type(self) -> TypeId {
+        self.formal_type
+    }
+    pub const fn result_type(self) -> TypeId {
+        self.result_type
+    }
 }
 
 impl ValidatedCrossClassConstructorCallProof<'_> {
@@ -154,9 +210,21 @@ impl ValidatedCrossClassConstructorCallProof<'_> {
     pub const fn typed_argument(&self) -> TreeId<Typed> {
         self.typed_argument
     }
+    /// Exact nested constructor identities when this proof wraps a one-level
+    /// constructor application. The returned nodes remain borrowed through
+    /// this receipt's session lifetime.
+    pub const fn nested_argument(&self) -> Option<NestedConstructorArgumentProof> {
+        self.nested_argument
+    }
     /// Canonical semantic type of the method formal and constructor argument.
     pub const fn formal_type(&self) -> TypeId {
         self.formal_type
+    }
+    /// Canonical type expected by the selected outer constructor. For a
+    /// nested proof this is the inner constructed class; `formal_type` stays
+    /// the original factory method parameter type.
+    pub const fn constructor_formal_type(&self) -> TypeId {
+        self.constructor_formal_type
     }
     /// Canonical semantic result type, equal to the constructed target class.
     pub const fn result_type(&self) -> TypeId {
@@ -613,21 +681,60 @@ fn validate_constructor_call_candidate<'session>(
         unreachable!()
     };
     let source_argument = source_apply.args[0];
-    let TreeKind::Ident(_) = &source_ast
+    let (argument_formal_tree, nested_source) = match &source_ast
         .try_get(source_argument)
+        .ok_or_else(|| source_error("constructor argument source root is stale"))?
+        .kind
+    {
+        TreeKind::Ident(_) => (source_argument, None),
+        TreeKind::Apply(nested_apply)
+            if nested_apply.kind == ApplyKind::Regular && nested_apply.args.len() == 1 =>
+        {
+            let nested_select = nested_apply.function;
+            let TreeKind::Select(nested_selection) = &source_ast
+                .try_get(nested_select)
+                .ok_or_else(|| source_error("nested constructor selection source root is stale"))?
+                .kind
+            else {
+                return Err(source_error("nested constructor function must be Select"));
+            };
+            if store.names.resolve(nested_selection.name.text()) != "<init>" {
+                return Err(source_error(
+                    "nested constructor call must select the primary constructor",
+                ));
+            }
+            let nested_new = nested_selection.qualifier;
+            let TreeKind::New(nested_new_tree) = &source_ast
+                .try_get(nested_new)
+                .ok_or_else(|| source_error("nested New source root is stale"))?
+                .kind
+            else {
+                return Err(source_error("nested constructor receiver must be New"));
+            };
+            (
+                nested_apply.args[0],
+                Some((nested_select, nested_new, nested_new_tree.tpt)),
+            )
+        }
+        TreeKind::Apply(_) => {
+            return Err(source_error(
+                "nested constructor application must have one regular argument",
+            ));
+        }
+        _ => {
+            return Err(source_error(
+                "constructor argument must be the exact caller formal identifier or one nested constructor application",
+            ));
+        }
+    };
+    let TreeKind::Ident(argument_ident) = &source_ast
+        .try_get(argument_formal_tree)
         .ok_or_else(|| source_error("constructor argument source root is stale"))?
         .kind
     else {
         return Err(source_error(
-            "constructor argument must be the exact caller formal identifier",
+            "constructor argument must resolve directly to the caller formal",
         ));
-    };
-    let TreeKind::Ident(argument_ident) = &source_ast
-        .try_get(source_argument)
-        .ok_or_else(|| source_error("constructor argument source root is stale"))?
-        .kind
-    else {
-        unreachable!()
     };
     if store.names.resolve(formal_def.name.as_name().text())
         != store.names.resolve(argument_ident.name.text())
@@ -652,6 +759,33 @@ fn validate_constructor_call_candidate<'session>(
     let typed_argument = source_typed_index
         .get(source_id, source_argument)
         .ok_or_else(|| typed_error("constructor argument has no source-to-typed binding"))?;
+    let typed_formal_argument = source_typed_index
+        .get(source_id, argument_formal_tree)
+        .ok_or_else(|| typed_error("formal argument has no source-to-typed binding"))?;
+    let nested_typed = if let Some((nested_select, nested_new, nested_new_tpt)) = nested_source {
+        Some((
+            nested_select,
+            nested_new,
+            nested_new_tpt,
+            source_typed_index
+                .get(source_id, nested_select)
+                .ok_or_else(|| {
+                    typed_error("nested constructor Select has no source-to-typed binding")
+                })?,
+            source_typed_index
+                .get(source_id, nested_new)
+                .ok_or_else(|| {
+                    typed_error("nested constructor New has no source-to-typed binding")
+                })?,
+            source_typed_index
+                .get(source_id, nested_new_tpt)
+                .ok_or_else(|| {
+                    typed_error("nested New type tree has no source-to-typed binding")
+                })?,
+        ))
+    } else {
+        None
+    };
     let typed_root = typed_ast
         .try_get(typed_rhs)
         .ok_or_else(|| typed_error("typed method RHS is stale"))?;
@@ -670,6 +804,39 @@ fn validate_constructor_call_candidate<'session>(
             typed_tree,
             description,
         )?;
+    }
+    if let Some((
+        source_inner_select,
+        source_inner_new,
+        source_inner_tpt,
+        typed_inner_select,
+        typed_inner_new,
+        typed_inner_tpt,
+    )) = nested_typed
+    {
+        for (source_tree, typed_tree, description) in [
+            (
+                source_inner_select,
+                typed_inner_select,
+                "nested constructor Select",
+            ),
+            (source_inner_new, typed_inner_new, "nested constructor New"),
+            (source_inner_tpt, typed_inner_tpt, "nested New type tree"),
+            (
+                argument_formal_tree,
+                typed_formal_argument,
+                "nested constructor argument",
+            ),
+        ] {
+            require_matching_source_typed_positions(
+                source_ast,
+                typed_ast,
+                source_id,
+                source_tree,
+                typed_tree,
+                description,
+            )?;
+        }
     }
     let TreeKind::Apply(typed_apply) = &typed_root.kind else {
         return Err(typed_error("typed candidate RHS is not Apply"));
@@ -709,20 +876,17 @@ fn validate_constructor_call_candidate<'session>(
             "typed New does not retain its exact source type tree",
         ));
     }
-    let TreeKind::Ident(typed_argument_ident) = &typed_ast
-        .try_get(typed_argument)
-        .ok_or_else(|| typed_error("typed argument is stale"))?
-        .kind
-    else {
-        return Err(typed_error("typed argument is not an identifier"));
+    let typed_formal_node = typed_ast
+        .try_get(typed_formal_argument)
+        .ok_or_else(|| typed_error("typed formal argument is stale"))?;
+    let TreeKind::Ident(typed_argument_ident) = &typed_formal_node.kind else {
+        return Err(typed_error(
+            "typed constructor leaf argument is not an identifier",
+        ));
     };
-    let typed_argument_type = typed_ast
-        .try_get(typed_argument)
-        .ok_or_else(|| typed_error("typed argument is stale"))?
-        .ty;
     if store.names.resolve(typed_argument_ident.name.text())
         != store.names.resolve(formal_def.name.as_name().text())
-        || !matches!(store.types.try_get(typed_argument_type), Some(Type::TermRef { target: TermRefTarget::Symbol(target), .. }) if *target == method_formal)
+        || !matches!(store.types.try_get(typed_formal_node.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(target), .. }) if *target == method_formal)
     {
         return Err(typed_error(
             "typed constructor argument does not reference the canonical caller formal",
@@ -743,6 +907,363 @@ fn validate_constructor_call_candidate<'session>(
                 "New type tree does not retain a canonical class TypeRef",
             ));
         }
+    };
+    let (nested_argument_proof, argument_type) = if let Some((
+        source_inner_select,
+        source_inner_new,
+        _source_inner_tpt,
+        typed_inner_select,
+        typed_inner_new,
+        typed_inner_tpt,
+    )) = nested_typed
+    {
+        let TreeKind::Apply(inner_apply) = &typed_ast
+            .try_get(typed_argument)
+            .ok_or_else(|| typed_error("typed nested constructor application is stale"))?
+            .kind
+        else {
+            return Err(typed_error(
+                "typed nested constructor argument is not Apply",
+            ));
+        };
+        if inner_apply.kind != ApplyKind::Regular
+            || inner_apply.args != [typed_formal_argument]
+            || inner_apply.function != typed_inner_select
+            || source_typed_index.get(source_id, source_apply.args[0]) != Some(typed_argument)
+        {
+            return Err(typed_error(
+                "typed nested Apply does not preserve its exact source function and formal argument",
+            ));
+        }
+        let TreeKind::Select(inner_selection) = &typed_ast
+            .try_get(typed_inner_select)
+            .ok_or_else(|| typed_error("typed nested constructor Select is stale"))?
+            .kind
+        else {
+            return Err(typed_error(
+                "typed nested constructor function is not Select",
+            ));
+        };
+        let TreeKind::New(inner_new_tree) = &typed_ast
+            .try_get(typed_inner_new)
+            .ok_or_else(|| typed_error("typed nested New is stale"))?
+            .kind
+        else {
+            return Err(typed_error("typed nested constructor receiver is not New"));
+        };
+        if inner_selection.qualifier != typed_inner_new
+            || source_typed_index.get(source_id, source_inner_select) != Some(typed_inner_select)
+            || source_typed_index.get(source_id, source_inner_new) != Some(typed_inner_new)
+            || inner_new_tree.tpt != typed_inner_tpt
+        {
+            return Err(typed_error(
+                "typed nested constructor call does not preserve the exact source Select, New, and type roots",
+            ));
+        }
+        let inner_type = typed_ast
+            .try_get(typed_inner_tpt)
+            .ok_or_else(|| typed_error("typed nested New type tree is stale"))?
+            .ty;
+        let inner_class = match store.types.try_get(inner_type) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            }) => *class,
+            _ => {
+                return Err(typed_error(
+                    "nested New type tree does not retain a canonical class TypeRef",
+                ));
+            }
+        };
+        if inner_class == caller_class || inner_class == target_class || !store.symbols.contains(inner_class)
+            || store.symbols.get(inner_class).kind != SymbolKind::Class
+            || !has_source_origin(store, inner_class, source_id)
+            || source_index.definition_of(inner_class).is_none_or(|definition| !matches!(definition, SourceDefinition::Canonical { source, .. } if source == source_id))
+            || unique_constructor_call_class_plan(jvm_unit, inner_class).is_err()
+        {
+            return Err(identity_error("nested constructor target must be a distinct canonical class planned in the same source batch"));
+        }
+        if !is_canonical_class_type_ref(
+            store,
+            inner_type,
+            inner_class,
+            package,
+            definitions.no_prefix,
+        ) {
+            return Err(typed_error(
+                "nested New type tree must retain the exact canonical inner class TypeRef",
+            ));
+        }
+        let inner_constructor = match store.types.try_get(
+            typed_ast
+                .try_get(typed_inner_select)
+                .ok_or_else(|| typed_error("typed nested Select is stale"))?
+                .ty,
+        ) {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(constructor),
+                ..
+            }) => *constructor,
+            _ => {
+                return Err(typed_error(
+                    "typed nested Select does not retain a canonical constructor TermRef",
+                ));
+            }
+        };
+        if !store.symbols.contains(inner_constructor)
+            || store.symbols.get(inner_constructor).kind != SymbolKind::Constructor
+            || store.symbols.get(inner_constructor).owner != Some(inner_class)
+            || !has_source_origin(store, inner_constructor, source_id)
+        {
+            return Err(semantic_error(
+                "nested Select must choose a canonical constructor owned by its New class",
+            ));
+        }
+        let inner_source = match source_index.definition_of(inner_class) {
+            Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+            _ => {
+                return Err(identity_error(
+                    "nested constructor class has no canonical declaration in this source unit",
+                ));
+            }
+        };
+        let Some(inner_ordinal) = source_class_trees
+            .iter()
+            .position(|tree| *tree == inner_source)
+        else {
+            return Err(identity_error(
+                "nested constructor class is outside the exact package source root",
+            ));
+        };
+        if jvm_unit
+            .classes
+            .get(inner_ordinal)
+            .is_none_or(|plan| plan.class != inner_class)
+        {
+            return Err(CrossClassConstructorCallProofError::JvmPlan(
+                "nested constructor class is absent from the same ordered JVM batch",
+            ));
+        }
+        let inner_tree = source_ast
+            .try_get(inner_source)
+            .ok_or_else(|| identity_error("nested class source tree is stale"))?;
+        let TreeKind::TypeDef(inner_def) = &inner_tree.kind else {
+            return Err(identity_error("nested class source definition is invalid"));
+        };
+        let inner_template_tree = source_ast
+            .try_get(inner_def.rhs)
+            .ok_or_else(|| identity_error("nested class template is stale"))?;
+        let TreeKind::Template(inner_template) = &inner_template_tree.kind else {
+            return Err(identity_error("nested class has no template"));
+        };
+        require_source_position(
+            source_ast,
+            source_id,
+            inner_source,
+            "nested constructor class has a foreign source position",
+        )?;
+        if !inner_def.metadata.modifiers.is_empty()
+            || !inner_def.metadata.annotations.is_empty()
+            || !inner_template.parents.is_empty()
+            || inner_template.self_val.is_some()
+        {
+            return Err(source_error(
+                "nested constructor class must be ordinary and have no explicit parents or annotations",
+            ));
+        }
+        let canonical_inner_constructor = source_index
+            .symbol_at(source_id, inner_template.constructor)
+            .ok_or_else(|| identity_error("nested class has no canonical primary constructor"))?;
+        if canonical_inner_constructor != inner_constructor
+            || source_index.definition_of(inner_constructor)
+                != Some(SourceDefinition::Canonical {
+                    source: source_id,
+                    tree: inner_template.constructor,
+                })
+        {
+            return Err(identity_error(
+                "nested Select does not name the exact source primary constructor",
+            ));
+        }
+        if inner_template.body.iter().any(|tree| {
+            source_index
+                .symbol_at(source_id, *tree)
+                .is_some_and(|symbol| {
+                    store.symbols.contains(symbol)
+                        && store.symbols.get(symbol).kind == SymbolKind::Constructor
+                        && symbol != inner_constructor
+                })
+        }) {
+            return Err(source_error(
+                "secondary or overloaded nested constructors are unsupported",
+            ));
+        }
+        let inner_plan = unique_constructor_call_class_plan(jvm_unit, inner_class)?;
+        let dotty_jvm::JvmClassInitializationPlan::PrimaryConstructor(inner_primary) =
+            &inner_plan.initialization
+        else {
+            return Err(CrossClassConstructorCallProofError::JvmPlan(
+                "nested JVM class has no validated primary constructor",
+            ));
+        };
+        if inner_primary.symbol() != inner_constructor {
+            return Err(CrossClassConstructorCallProofError::JvmPlan(
+                "nested JVM constructor plan does not retain the exact primary constructor",
+            ));
+        }
+        let TreeKind::DefDef(inner_constructor_def) = &source_ast
+            .try_get(inner_template.constructor)
+            .ok_or_else(|| identity_error("nested primary constructor source is stale"))?
+            .kind
+        else {
+            return Err(identity_error(
+                "nested primary constructor source is invalid",
+            ));
+        };
+        require_source_position(
+            source_ast,
+            source_id,
+            inner_template.constructor,
+            "nested primary constructor has a foreign source position",
+        )?;
+        if !inner_constructor_def.type_params.is_empty()
+            || inner_constructor_def.value_param_clauses.len() != 1
+            || inner_constructor_def.value_param_clauses[0].len() != 1
+            || inner_constructor_def.metadata.visibility.is_some()
+        {
+            return Err(source_error(
+                "nested constructor must have one plain non-generic formal clause",
+            ));
+        }
+        let inner_formal_tree = inner_constructor_def.value_param_clauses[0][0];
+        require_source_position(
+            source_ast,
+            source_id,
+            inner_formal_tree,
+            "nested constructor formal has a foreign source position",
+        )?;
+        let TreeKind::ValDef(inner_formal_def) = &source_ast
+            .try_get(inner_formal_tree)
+            .ok_or_else(|| identity_error("nested constructor formal source is stale"))?
+            .kind
+        else {
+            return Err(source_error("nested constructor formal is invalid"));
+        };
+        if inner_formal_def.rhs.is_some() {
+            return Err(source_error(
+                "default nested-constructor parameters are unsupported",
+            ));
+        }
+        let inner_formal = source_index
+            .derived_symbol_at(inner_constructor, source_id, inner_formal_tree)
+            .ok_or_else(|| {
+                identity_error(
+                    "nested constructor formal is not derived from its exact primary constructor",
+                )
+            })?;
+        if !store.symbols.contains(inner_formal)
+            || !has_source_origin(store, inner_formal, source_id)
+            || store.symbols.get(inner_formal).kind != SymbolKind::Parameter
+            || store.symbols.get(inner_formal).owner != Some(inner_constructor)
+        {
+            return Err(identity_error(
+                "nested constructor formal is not the canonical source parameter owned by its constructor",
+            ));
+        }
+        if inner_primary.parameters() != [inner_formal] {
+            return Err(CrossClassConstructorCallProofError::JvmPlan(
+                "nested JVM constructor plan does not retain its canonical formal",
+            ));
+        }
+        if store.symbols.get(inner_class).visibility != dotty_core::Visibility::Public
+            || has_any_flag(
+                store.symbols.get(inner_class).flags,
+                SymbolFlags::CASE
+                    | SymbolFlags::ENUM
+                    | SymbolFlags::ABSTRACT
+                    | SymbolFlags::SYNTHETIC,
+            )
+            || store.symbols.get(inner_constructor).visibility != dotty_core::Visibility::Public
+            || has_any_flag(
+                store.symbols.get(inner_constructor).flags,
+                SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
+            )
+        {
+            return Err(semantic_error(
+                "nested target must have a public ordinary class and public primary constructor",
+            ));
+        }
+        let SymbolInfo::Complete(inner_signature_type) = store.symbols.get(inner_constructor).info
+        else {
+            return Err(semantic_error("nested constructor signature is incomplete"));
+        };
+        let Some(Type::Method(inner_signature)) = store.types.try_get(inner_signature_type) else {
+            return Err(semantic_error(
+                "nested constructor signature is not a method type",
+            ));
+        };
+        let SymbolInfo::Complete(inner_formal_type) = store.symbols.get(inner_formal).info else {
+            return Err(semantic_error(
+                "nested constructor formal type is incomplete",
+            ));
+        };
+        if let Some(typed_formal_syntax) = source_typed_index.get(source_id, inner_formal_def.tpt) {
+            let typed_formal_syntax = typed_ast
+                .try_get(typed_formal_syntax)
+                .ok_or_else(|| typed_error("nested constructor formal type annotation is stale"))?;
+            if typed_formal_syntax.ty != inner_formal_type {
+                return Err(typed_error(
+                    "nested constructor formal annotation does not match its completed signature",
+                ));
+            }
+        }
+        if inner_signature.kind != dotty_core::MethodKind::Plain
+            || inner_signature.params.len() != 1
+            || inner_signature.params[0].ty != inner_formal_type
+            || inner_formal_type != formal_type
+        {
+            return Err(semantic_error(
+                "nested constructor's single formal must preserve the factory's exact Int type",
+            ));
+        }
+        if !matches!(store.types.try_get(typed_formal_node.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == method_formal)
+        {
+            return Err(typed_error(
+                "nested constructor argument must retain the original factory formal TermRef and exact type",
+            ));
+        }
+        if !matches!(store.types.try_get(typed_ast.try_get(typed_argument).ok_or_else(|| typed_error("typed nested Apply is stale"))?.ty), Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == inner_class)
+        {
+            return Err(typed_error(
+                "nested constructor application result must retain its exact inner class TypeRef",
+            ));
+        }
+        (
+            Some(NestedConstructorArgumentProof {
+                source_select: source_inner_select,
+                source_new: source_inner_new,
+                source_argument: argument_formal_tree,
+                typed_select: typed_inner_select,
+                typed_new: typed_inner_new,
+                typed_argument: typed_formal_argument,
+                class: inner_class,
+                constructor: inner_constructor,
+                formal: inner_formal,
+                formal_type: inner_formal_type,
+                result_type: typed_ast
+                    .try_get(typed_argument)
+                    .ok_or_else(|| typed_error("typed nested Apply is stale"))?
+                    .ty,
+            }),
+            inner_type,
+        )
+    } else {
+        if argument_formal_tree != source_argument || typed_formal_argument != typed_argument {
+            return Err(typed_error(
+                "direct constructor argument mapping is inconsistent",
+            ));
+        }
+        (None, formal_type)
     };
     if target_class == caller_class
         || formal_class == Some(target_class)
@@ -934,11 +1455,24 @@ fn validate_constructor_call_candidate<'session>(
         left.is_some()
             && left == canonical_class_type_symbol(store, right, package, definitions.no_prefix)
     };
+    let constructor_argument_type_matches = if let Some(nested) = nested_argument_proof {
+        is_canonical_class_type_ref(
+            store,
+            constructor_formal_type,
+            nested.class(),
+            package,
+            definitions.no_prefix,
+        )
+    } else {
+        constructor_formal_type == formal_type
+            || same_reference_type(constructor_formal_type, formal_type)
+    };
     if constructor_signature.kind != dotty_core::MethodKind::Plain
         || constructor_signature.params.len() != 1
         || constructor_signature.params[0].ty != constructor_formal_type
-        || (constructor_formal_type != formal_type
-            && !same_reference_type(constructor_formal_type, formal_type))
+        || !constructor_argument_type_matches
+        || (nested_argument_proof.is_some()
+            && !same_reference_type(constructor_formal_type, argument_type))
     {
         return Err(semantic_error(
             "caller formal and primary constructor formal must have the same exact completed type",
@@ -977,7 +1511,11 @@ fn validate_constructor_call_candidate<'session>(
             "caller and constructor target must share one exact package owner",
         ));
     }
-    for class in [caller_class, target_class] {
+    let mut proof_classes = vec![caller_class, target_class];
+    if let Some(nested) = nested_argument_proof {
+        proof_classes.push(nested.class());
+    }
+    for class in proof_classes {
         let scope = factory_class_declarations(store, source_index, class)?;
         if scope.entered_symbols().any(|symbol| {
             store.symbols.contains(symbol)
@@ -988,14 +1526,20 @@ fn validate_constructor_call_candidate<'session>(
                 "generic caller and target classes are unsupported",
             ));
         }
-        if !scope.entered_symbols().any(|symbol| {
-            symbol
-                == if class == caller_class {
-                    method
-                } else {
-                    target_constructor
-                }
-        }) {
+        let expected_member = match (class, nested_argument_proof) {
+            (class, _) if class == caller_class => method,
+            (class, _) if class == target_class => target_constructor,
+            (class, Some(nested)) if class == nested.class() => nested.constructor(),
+            _ => {
+                return Err(identity_error(
+                    "proof class has no matching canonical member",
+                ));
+            }
+        };
+        if !scope
+            .entered_symbols()
+            .any(|symbol| symbol == expected_member)
+        {
             return Err(identity_error(
                 "method or constructor is absent from its canonical owner declaration scope",
             ));
@@ -1068,9 +1612,9 @@ fn validate_constructor_call_candidate<'session>(
         let typed_constructor_formal_syntax = typed_ast
             .try_get(typed_constructor_formal_syntax)
             .ok_or_else(|| typed_error("constructor formal annotation binding is stale"))?;
-        if typed_constructor_formal_syntax.ty != formal_type {
+        if typed_constructor_formal_syntax.ty != constructor_formal_type {
             return Err(typed_error(
-                "constructor formal type annotation does not match the caller formal type",
+                "constructor formal type annotation does not match the selected constructor signature",
             ));
         }
     }
@@ -1157,8 +1701,58 @@ fn validate_constructor_call_candidate<'session>(
         .ok_or(CrossClassConstructorCallProofError::JvmPlan(
             "constructor descriptor is not one supported parameter clause",
         ))?;
+    let method_parameter_descriptor = if let Some(nested) = nested_argument_proof {
+        let inner_metadata = metadata
+            .iter()
+            .find(|entry| entry.identity().symbol() == nested.class())
+            .ok_or(CrossClassConstructorCallProofError::JvmPlan(
+                "nested constructor class metadata is missing",
+            ))?;
+        if store.symbols.get(nested.class()).owner != Some(package) {
+            return Err(semantic_error(
+                "nested constructor class must share the exact caller package owner",
+            ));
+        }
+        let inner_constructor_metadata =
+            inner_metadata
+                .constructor()
+                .ok_or(CrossClassConstructorCallProofError::JvmPlan(
+                    "nested primary constructor metadata is missing",
+                ))?;
+        if inner_constructor_metadata.symbol() != nested.constructor()
+            || inner_constructor_metadata
+                .parameters()
+                .iter()
+                .map(|parameter| parameter.symbol())
+                .collect::<Vec<_>>()
+                != [nested.formal()]
+            || !inner_constructor_metadata
+                .access_flags()
+                .contains(dotty_classfile::access_flags::ACC_PUBLIC)
+        {
+            return Err(CrossClassConstructorCallProofError::JvmPlan(
+                "nested JVM constructor metadata must retain its canonical constructor and formal",
+            ));
+        }
+        let nested_descriptor = inner_constructor_metadata.descriptor().as_str();
+        let nested_params = nested_descriptor
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(")V"))
+            .ok_or(CrossClassConstructorCallProofError::JvmPlan(
+                "nested constructor descriptor is not one supported parameter clause",
+            ))?;
+        let expected_outer_parameter = format!("L{};", inner_metadata.identity().internal_name());
+        if constructor_params != expected_outer_parameter {
+            return Err(CrossClassConstructorCallProofError::JvmPlan(
+                "outer constructor descriptor must consume the exact nested class",
+            ));
+        }
+        nested_params
+    } else {
+        constructor_params
+    };
     let expected_method_descriptor = format!(
-        "({constructor_params})L{};",
+        "({method_parameter_descriptor})L{};",
         target_metadata.identity().internal_name()
     );
     if method_descriptor != expected_method_descriptor {
@@ -1188,7 +1782,9 @@ fn validate_constructor_call_candidate<'session>(
         typed_select,
         typed_new,
         typed_argument,
+        nested_argument: nested_argument_proof,
         formal_type,
+        constructor_formal_type,
         result_type,
         method_descriptor: method_descriptor.to_owned(),
         constructor_descriptor: constructor_descriptor.to_owned(),

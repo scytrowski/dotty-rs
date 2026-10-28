@@ -131,7 +131,7 @@ The layers reject at different points:
 | Lexer, parser, namer, typer | Succeeds; the nested body and canonical constructor/parameter identities are preserved. |
 | `ClassStatePicklePlan::validate` | Succeeds; the supplied source, typed trees, and source-to-typed bindings validate. |
 | `ValidatedClassStatePicklePlan::pickle` | Fails with `Unsupported { feature: BodyExpression, symbol: Some(SymbolId(55)) }`; no complete Factory TASTy is returned. |
-| Paired JVM/TASTy batch | Fails earlier, at `cross-class constructor-call identity proof`, because the Owner argument is not exactly the caller formal identifier. Paired TASTy emission is therefore not reached. |
+| Paired JVM/TASTy batch | The bounded source/typed constructor proof succeeds. The batch then fails at `JVM/TASTy cross-contract validation` with `TastyPlan(Unsupported { feature: BodyExpression, symbol: Some(SymbolId(55)) })`; no paired batch or bytes are returned. |
 | JVM-only source emission | The established separate source/JVM path succeeds for a two-site nested constructor argument; it does not create TASTy or relax the paired proof. |
 
 For the final row, the test
@@ -142,36 +142,79 @@ constructor references and executes it under `java -Xverify:all`. The existing
 `nested_new_constructor_arguments_lower_lifo_and_verify_initialized_values`
 test additionally asserts LIFO constructor invocation, two separate
 allocations, deterministic output, and Java verification/execution for the
-general nested-allocation control. Neither path emits TASTy or relaxes the
-paired proof.
+general nested-allocation control. The proof change does not alter that JVM
+path or allow TASTy bytes to be published.
 
 ## Control matrix
 
 The controls below distinguish this nested source from established controls
-for the prior direct-reference path and JVM-only backend. “Existing regression”
-means the cited test exercises that behavior; it does not claim that the
-nested Factory source has reached a producer stage past its measured failure.
+for the prior direct-reference path and JVM-only backend. The nested Factory
+source now reaches the TASTy cross-contract boundary after the source proof;
+it still does not produce TASTy bytes.
 
 | Control | Evidence / first status |
 | --- | --- |
-| Rename package and all classes | This source still reaches the paired identity-proof failure with the same exact-formal reason. |
-| Reorder Counter and CounterOwner declarations | This source still reaches the same paired identity-proof failure; source identity is not inferred from declaration order. |
+| Rename package and all classes | The new real-session proof test accepts the structurally identical shape with renamed package/classes/method. |
+| Reorder Counter and CounterOwner declarations | The new real-session proof test accepts the same shape when declarations are reordered; source identity is not inferred from declaration order. |
 | Direct reference-formal constructor argument | Existing positive paired/TASTy and artifact tests in `jvm_tasty_reference_constructor_calls.rs`; this remains supported. |
 | Constructor arity/type mismatch | This exact source's Owner arity mismatch, Counter argument type mismatch, and Owner argument type mismatch are rejected during method-body typing. Existing direct-path tests `zero_argument_constructor_call_is_rejected_by_method_body_typing` and `wrong_constructor_argument_type_is_rejected_by_method_body_typing` cover the same failure classes. JVM-only equivalents are also covered in `unsupported_counter_object_source_cases_fail_at_their_pipeline_stage`. |
 | Private, abstract, generic, secondary, contextual (`using`), and defaulted constructors | Existing paired/direct-path tests record rejection at cross-class proof, method typing, source collection, member planning, or constructor planning as appropriate. No such case is accepted by this audit. |
 | Stale source-to-typed RHS mapping | Existing `distinct_signature_rejects_a_rolled_back_source_rhs_id` and related provenance tests reject stale/missing/foreign/mismatched roots. These are proof-integrity tests on the supported direct shape. |
 | Third concurrently live uninitialized allocation | Existing `third-simultaneous-nested-allocation` case is rejected in JVM code generation with `UnsupportedJvmConstructorArgument`. |
-| Branch-valued constructor argument | Existing nested branch control is rejected in JVM code generation with `UnsupportedJvmConstructorArgument`; the paired nested source stops earlier at the identity proof. |
-| Deeper nested allocation | Existing two-level JVM-only control is supported. A third simultaneously live site is rejected as above; deeper forms are deferred. |
+| Branch-valued constructor argument | Existing nested branch control is rejected in JVM code generation with `UnsupportedJvmConstructorArgument`; the source proof accepts only the direct nested application shape and rejects a conditional at `SourceShape`. |
+| Deeper nested allocation | Existing two-allocation JVM-only control remains supported. The source proof rejects a third constructor depth at `SourceShape`; backend behavior remains independently bounded. |
 | Missing or corrupt sidecar | Artifact publisher tests reject malformed sidecar input before publishing a partial destination; this is independent of constructor-expression acceptance. |
 | Foreign same-name class / constructor from another owner | Not synthesized or measured: doing so would forge semantic identity outside the required single real frontend session. Name equality is not evidence of same-session ownership. |
 
-## Implementation handoff
+## Bounded source proof added by #1816
 
-A future feature increment should extend the bounded source proof and TASTy
-body validator to carry the exact nested `Apply(Select(New(Counter), <init>),
-seed)` as the outer Owner argument, preserving both original source/typed
-subtrees, the two canonical constructor symbols, parameter identity, and
-class-to-sidecar association. It should then exercise the existing bounded JVM
-lowering and strict JDK verification. This audit makes no Typer, producer, CLI,
-or dependency-boundary changes and claims no Rust-to-Scala interoperability.
+The cross-class constructor-call proof now accepts either its established
+direct argument (`Apply(Select(New(Owner), <init>), formal)`) or exactly one
+nested application as that argument:
+
+```text
+Apply(Select(New(Owner), Owner.<init>),
+  Apply(Select(New(Counter), Counter.<init>), Factory.create.seed))
+```
+
+The validator reads the original source and typed arenas and requires every
+node to retain the exact `SourceTypedIndex` mapping, source position, and
+session identity. It proves the caller method's signed `Int` parameter and
+`Owner` result; the outer constructor's canonical `Counter` formal; the inner
+constructor's canonical `Int` formal; both selected primary-constructor
+symbols and owners; and the original `Factory.create.seed` `TermRef`. It also
+requires the inner class to be another ordinary class in the exact package and
+ordered JVM batch. Class names, file order, and allocation order do not select
+the shape.
+
+`ValidatedCrossClassConstructorCallProof::nested_argument()` returns a
+copyable read-only receipt for the inner `Select`, `New`, leaf argument,
+constructor, class, formal, and canonical formal/result types. The existing
+`source_argument()` and `typed_argument()` remain the original outer argument
+roots; for a nested proof these are the inner `Apply` itself. The proof's
+`formal_type()` is the factory's `Int` parameter type, while
+`constructor_formal_type()` is the outer constructor's `Counter` parameter
+type. These are distinct semantic roles and are not collapsed.
+
+The generic proof continues to accept the direct reference-formal constructor
+call and the `Factory(Int)` constructor-return control. Real-session tests also
+rename the package/classes/method and reorder class declarations. The narrow
+proof rejects malformed nested shapes at their first relevant stage:
+
+| Invalid input | First error type / stage |
+| --- | --- |
+| Literal or non-formal nested leaf | `CrossClassConstructorCallProofError::SourceShape` |
+| Nested apply with wrong arity or non-primary function | `SourceShape` |
+| Missing or mismatched nested source/typed binding | `TypedBinding` |
+| Foreign/stale inner class, constructor, or formal identity | `SourceIdentity` or `SemanticIdentity` |
+| Non-canonical nested or outer result/formal type | `TypedBinding` or `SemanticIdentity` |
+| More than one nested allocation level, conditional, or method-result argument | `SourceShape` |
+
+Existing stale/mismatched direct-root mapping regressions continue to exercise
+the fail-closed source/typed binding checks. Unsupported expression shapes do
+not produce a proof receipt.
+
+This increment changes the structural proof only. It does not serialize the
+nested body into TASTy, emit JVM bytes, change Typer behavior, or claim
+Rust-produced artifact interoperability. The pinned Scala fixtures and their
+hashes above remain the Scala 3.9.0 oracle and are byte-identical.

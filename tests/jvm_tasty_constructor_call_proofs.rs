@@ -601,8 +601,61 @@ fn constructor_call_candidates_with_unsupported_argument_shapes_fail_closed() {
         matches!(
             nested_error,
             PairedPlanError::BatchUnit { phase: "cross-class constructor-call identity proof", ref reason }
-                if reason.contains("exact caller formal identifier")
+                if reason.contains("resolve directly to the caller formal")
         ),
         "unexpected rejection: {nested_error:?}"
     );
+
+    let deeper = "package example\nclass SeedBox(seed: Int)\nclass Counter(seed: SeedBox)\nclass CounterOwner(counter: Counter)\nclass CounterOwnerFactory:\n  def create(seed: Int): CounterOwner =\n    new CounterOwner(new Counter(new SeedBox(seed)))\n";
+    let deeper_error = with_paired_jvm_tasty_batch_plan(
+        deeper,
+        "ThirdDepthConstructorArg.scala",
+        SourceId::from_index(1798),
+        |_| (),
+    )
+    .expect_err("a third constructor depth cannot be treated as the formal leaf");
+    assert!(
+        matches!(
+            deeper_error,
+            PairedPlanError::BatchUnit { phase: "cross-class constructor-call identity proof", ref reason }
+                if reason.contains("resolve directly to the caller formal")
+        ),
+        "unexpected third-depth rejection: {deeper_error:?}"
+    );
+
+    let conditional = SOURCE.replace(
+        "new CounterOwner(counter)",
+        "new CounterOwner(if counter == counter then counter else counter)",
+    );
+    let conditional_error = with_paired_jvm_tasty_batch_plan(
+        &conditional,
+        "ConditionalConstructorArg.scala",
+        SourceId::from_index(1799),
+        |_| (),
+    )
+    .expect_err("a conditional constructor argument cannot be treated as a formal");
+    assert!(matches!(
+        conditional_error,
+        PairedPlanError::BatchUnit { phase: "cross-class constructor-call identity proof", ref reason }
+            if reason.contains("constructor argument must be")
+    ));
+
+    let method_result = SOURCE
+        .replace(
+            "class CounterOwnerFactory:\n  def wrap(counter: Counter): CounterOwner =",
+            "class CounterOwnerFactory:\n  def fromCounter(counter: Counter): Counter = counter\n  def wrap(counter: Counter): CounterOwner =",
+        )
+        .replace("new CounterOwner(counter)", "new CounterOwner(fromCounter(counter))");
+    let method_result_error = with_paired_jvm_tasty_batch_plan(
+        &method_result,
+        "MethodResultConstructorArg.scala",
+        SourceId::from_index(1800),
+        |_| (),
+    )
+    .expect_err("a method-result constructor argument cannot be treated as a formal");
+    assert!(matches!(
+        method_result_error,
+        PairedPlanError::BatchUnit { phase: "cross-class constructor-call identity proof", ref reason }
+            if reason.contains("nested constructor function must be Select")
+    ));
 }

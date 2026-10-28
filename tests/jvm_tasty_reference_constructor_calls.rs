@@ -624,11 +624,12 @@ fn nested_constructor_rust_first_failures_preserve_the_one_session_trees() {
         source_id,
         |_| (),
     )
-    .expect_err("paired batch reports the nested-argument source proof boundary");
-    assert_unit_failure(
+    .expect_err("paired batch reaches the existing unsupported TASTy body boundary");
+    assert_batch_failure(
         paired_error,
-        "cross-class constructor-call identity proof",
-        "constructor argument must be the exact caller formal identifier",
+        2,
+        "JVM/TASTy cross-contract validation",
+        "BodyExpression",
     );
 
     let renamed = NESTED_SOURCE
@@ -636,16 +637,17 @@ fn nested_constructor_rust_first_failures_preserve_the_one_session_trees() {
         .replace("CounterOwnerFactory", "Builder")
         .replace("CounterOwner", "Owner")
         .replace("Counter", "Meter");
-    assert_unit_failure(
+    assert_batch_failure(
         with_paired_jvm_tasty_batch_plan(
             &renamed,
             "NestedConstructorCalls.scala",
             SourceId::from_index(181502),
             |_| (),
         )
-        .expect_err("renamed nested source remains unsupported at the same proof"),
-        "cross-class constructor-call identity proof",
-        "constructor argument must be the exact caller formal identifier",
+        .expect_err("renamed nested source reaches the same TASTy body boundary"),
+        2,
+        "JVM/TASTy cross-contract validation",
+        "BodyExpression",
     );
 
     let chunks = NESTED_SOURCE.split("\n\n").collect::<Vec<_>>();
@@ -654,16 +656,17 @@ fn nested_constructor_rust_first_failures_preserve_the_one_session_trees() {
         "{}\n\n{}\n\n{}\n\n{}\n",
         chunks[0], chunks[2], chunks[1], chunks[3]
     );
-    assert_unit_failure(
+    assert_batch_failure(
         with_paired_jvm_tasty_batch_plan(
             &reordered,
             "NestedConstructorCalls.scala",
             SourceId::from_index(181503),
             |_| (),
         )
-        .expect_err("reordered nested source remains unsupported at the same proof"),
-        "cross-class constructor-call identity proof",
-        "constructor argument must be the exact caller formal identifier",
+        .expect_err("reordered nested source reaches the same TASTy body boundary"),
+        2,
+        "JVM/TASTy cross-contract validation",
+        "BodyExpression",
     );
 }
 
@@ -1921,15 +1924,28 @@ fn constructor_val_accessor_is_rejected_by_jvm_unit_validation() {
 }
 
 #[test]
-fn nested_constructor_application_is_rejected_by_the_bounded_identity_proof() {
-    let source = SOURCE.replace(
-        "new CounterOwner(counter)",
-        "new CounterOwner(new Counter(1))",
+fn nested_constructor_proof_advances_failure_to_the_existing_tasty_contract_boundary() {
+    let error = paired_failure(NESTED_SOURCE, 181604);
+    assert!(
+        matches!(
+            error,
+            PairedPlanError::BatchClass {
+                phase: "JVM/TASTy cross-contract validation",
+                ref reason,
+                ..
+            } if reason.contains("BodyExpression")
+        ),
+        "the nested source proof succeeds before the unchanged TASTy-body limitation: {error:?}"
     );
+}
+
+#[test]
+fn nested_constructor_application_with_a_literal_argument_is_rejected_at_source_shape() {
+    let source = NESTED_SOURCE.replace("new Counter(seed)", "new Counter(1)");
     assert_unit_failure(
-        paired_failure(&source, 17942),
+        paired_failure(&source, 181605),
         "cross-class constructor-call identity proof",
-        "constructor argument must be the exact caller formal identifier",
+        "constructor argument must resolve directly to the caller formal",
     );
 }
 
