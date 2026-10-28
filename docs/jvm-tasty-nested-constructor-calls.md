@@ -455,3 +455,78 @@ negative controls changes producer behavior or publishes a partial artifact
 batch. Branch-valued arguments, deeper nested `New`, foreign classes, generic
 or secondary constructors, and unplanned classpath members remain unsupported
 at their earlier documented validation stages.
+
+## Final merged-main release ledger (#1822)
+
+This ledger reconciles inherited implementation coverage with the final
+integrated checks. The release-gate baseline was merged main
+`b62fbfda7421e2afac423ccc1251d31886e784c7`. Toolchain: Rust `1.98.1`, Scala
+3.9.0 source revision `777528f19a58e794c9954a42f433373472ec57f8` (TASTy
+28.9.0), and Eclipse Temurin `21.0.13+9` (`-release 21`, classfile major 65).
+The consumer sources are separate from the single Rust producer source: nested
+client SHA-256 `b69347492a968aa6304312bf7b402de7732783e5cec78c8e82a8934cb0d38d60`,
+reference client SHA-256
+`86f6f693cbe3fd2e7cf7f3a51f7cf36ce7eb310981fc0b435e2082514ea349c9`.
+
+| AC | Integrated requirement and inherited evidence | First failure boundary for negative controls |
+| --- | --- | --- |
+| AC-1 | Baseline and pinned versions are recorded above; source, oracle, and compiler provenance are pinned in the fixtures and rebuild script. | Scala revision/JDK mismatch is rejected by the oracle setup before compilation; source/oracle drift fails provenance or byte comparison. |
+| AC-2 | `nested_constructor_rust_preserves_the_one_session_trees_and_requires_the_batch_proof` checks one Lexer → Parser → Namer → Typer session, canonical symbols, original nested roots, and source-to-typed bindings. `renamed_and_reordered_three_class_sources_do_not_depend_on_fixture_names_or_order` proves the structural route. | Wrong shapes fail `SourceShape`; missing/stale source-to-typed mappings fail `TypedBinding`; invalid semantic relationships fail `SourceIdentity` or `SemanticIdentity` before a proof is returned. Arena numbers are session-local. Same-slot IDs from foreign arenas are not authenticated by validation and are not claimed as covered. |
+| AC-3 | `nested_constructor_factory_emits_six_linked_artifacts_from_one_session` checks the three canonical class/sidecar paths, major 65, TASTy 28.9, per-class UUID links, exact Factory bytecode references, and byte-identical output from two fresh sessions. The six Rust SHA-256 values and UUIDs are recorded in the strict consumer section above. | Incomplete producer plans fail cross-contract validation; malformed or inconsistent class/TASTy pairs fail batch validation before artifacts are returned. |
+| AC-4 | `nested_constructor_factory_executes_original_rust_artifacts_on_jdk21` runs the original six Rust artifacts with `java -Xverify:all`, checks initialization order, `7,-9,3`, distinct Owner/Counter identities, independent mutation, and unchanged hashes. | Invalid descriptors/instructions fail paired contract or classfile verification; corrupted uninitialized-object paths fail the JVM verifier. The strict JDK flag makes missing or non-21 tools a failure, not a skip. |
+| AC-5 | `pinned_scala_consumes_nested_rust_tasty_and_executes_original_classes` compiles a separately authored client with pinned scalac, exercises three TASTy-only member lookups and their classfile-only controls, decompiles/from-tasty checks the nested body, then runs unchanged Rust classes. The strict reference-constructor consumer is also executed as a prior release gate. | Missing/misplaced sidecars fail Scala binary loading; corrupt sidecars fail TASTy reading; stale links fail under `-Werror`; classfile-only member omissions fail lookup; runtime linkage controls fail with `NoClassDefFoundError` or `NoSuchMethodError`. |
+| AC-6 | Source arity/type, literal/computed/null/field/factory/deeper nesting, generic/using/default/secondary constructors, stale mappings, malformed artifacts, wrong Methodref/descriptor/stack bounds, and missing classfile/sidecar controls are covered by the focused source-proof, pickler, paired-contract, publisher, Scala compiler, and JVM verifier tests cited in the control matrices above. | The first rejecting layer is recorded per case: source typing/proof, TASTy plan or reader, batch contract/publisher, Scala compiler, classfile analysis, or JVM verifier/linker. A failure is not treated as success merely because a later stage also rejects it. Foreign same-name identities are tested where representable; no test claims to authenticate foreign same-slot arena IDs. |
+| AC-7 | `reference_constructor_batch_publisher_contains_all_six_artifact_failures` injects a handled fault after each of the six staged writes, before promotion, and after promotion. It asserts no final tree or private staging tree remains and checks an existing destination sentinel is unchanged. | Each injected publisher error is returned by the publisher; failed batches are not accepted. This is handled-failure cleanup coverage and makes no cross-file crash-durability claim. |
+| AC-8 | The pinned Scala workflow now requires and runs both `DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER=1` and the inherited `DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER=1`, alongside the existing strict consumer flags and Scala pickler oracle. The reference flag/test target had been missing from the hosted gate. Local strict runs are recorded below. | Any absent pinned tool/cache causes strict tests to fail rather than silently skip. The full hosted Scala corpus audit is intentionally outside this gate. |
+| AC-9 | This document records source/client identities, version pins, paths, six hashes/UUIDs, positive and negative stages, and explicit subset limits. CI and local command receipts are listed below; no public compiler CLI or language-surface expansion is introduced. | Unsupported behavior remains rejected at its existing component boundary; no broad fallback or partial artifact acceptance is added. |
+
+The strict Scala run from the isolated issue worktree used the exact environment
+flags for both consumers and `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`. Both
+consumer tests passed. The nested report confirmed runtime outputs `7,-9,3`
+from two unchanged Rust batches, all three TASTy-only lookups, all three
+classfile-only failures, renamed/reordered source execution, and the nested
+Factory body in decompile/from-tasty output. The reference report confirmed
+its three independent lookups, matching classfile-only failures, two unchanged
+Rust-batch runtime results, and the Scala 3.9 TASTy negative diagnostics.
+
+The focused source proof/oracle suite
+`cargo +1.98.1 test --test jvm_tasty_reference_constructor_calls --locked`
+also passed all 25 tests, including nested source identity, serialization,
+renamed/reordered input, malformed-shape rejection, and pinned Scala source
+oracle checks. These are inherited tests executed on the merged release
+baseline; the only implementation change required for this gate was wiring the
+previous strict reference-consumer test into the hosted Scala consumer job.
+
+The strict JDK 21 command from `AGENTS.md` passed with all required executables
+resolved to Temurin `21.0.13+9`. Its six test binaries reported 3, 172, 45,
+378, 17, and 173 passing tests respectively, with no failures. The separate
+`cargo +1.98.1 test --test jvm_tasty_artifacts --locked -- --nocapture` run
+passed all 41 tests, including the nested runtime test and the nested batch
+publisher's eight injected failure points. The strict Scala command was:
+
+```sh
+DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER=1 \
+DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER=1 \
+DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 \
+cargo +1.98.1 test \
+  --test jvm_tasty_nested_constructor_scala_consumer \
+  --test jvm_tasty_reference_constructor_scala_consumer \
+  --test jvm_tasty_reference_constructor_calls \
+  --locked -- --nocapture
+```
+
+All three test targets passed: the two strict independent consumers and all 25
+source-proof/oracle regressions. For this run, `TMPDIR` and `CARGO_TARGET_DIR`
+pointed inside the isolated issue worktree's `target/issue-1822/`; local JDK
+wrappers forwarded Java temporary files there without changing version output.
+
+The complete repository checks passed on this tree:
+
+```sh
+cargo fmt --all -- --check
+python3 tools/check-frontend-boundaries.py
+cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo test --workspace --all-targets --locked
+git diff --check
+```
