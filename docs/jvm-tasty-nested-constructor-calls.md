@@ -280,7 +280,94 @@ from five to zero; the validator rejects it because the proven instruction
 sequence requires five operand-stack slots at its peak.
 
 The publisher tests cover handled staging and promotion failures; they do not
-claim multi-file crash-atomic durability.
+claim multi-file crash-atomic durability. This increment adds no runtime or
+Scala consumer acceptance. Branch-valued arguments, deeper nested `New`,
+foreign classes, generic or secondary constructors, and unplanned classpath
+members remain unsupported at their earlier documented validation stages.
+
+## Independent Scala consumer and runtime receipt (#1820)
+
+`ScalaConsumer.scala` is compiled separately against each fresh Rust six-file
+batch and only the pinned Scala runtime libraries. No Scala compilation of the
+producer source occurs in that step. The consumer calls
+`CounterOwnerFactory.create(7)`, `create(-9)`, and `create(3)`, checks each
+`read()` result, and checks that the three factory-created Owners have
+different identities. Each consumer compilation also runs with `-release 21`;
+the Java launcher executes with `-Xverify:all`. Two independent Rust sessions
+produce identical class and TASTy bytes. The SHA-256 hashes and UUID links
+below are captured from those unchanged Rust outputs; the harness hashes them
+again after compilation and execution.
+
+The strict regression is
+`pinned_scala_consumes_nested_rust_tasty_and_executes_original_classes` in
+[`jvm_tasty_nested_constructor_scala_consumer.rs`](../tests/jvm_tasty_nested_constructor_scala_consumer.rs).
+It is required by the `jvm-tasty-factory-scala-consumer` workflow when
+`DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER=1`; if pinned tools or
+dependencies are missing, that mode fails instead of skipping. The local
+receipt used the Scala checkout at revision
+`777528f19a58e794c9954a42f433373472ec57f8`, the workflow's SHA-256-verified
+Scala 3.9.0 Maven artifacts, Rust 1.98.1, and Temurin-compatible JDK
+`21.0.13` (`-release 21`, class-file major 65). CI installs JDK `21.0.8+9`.
+
+| Class | Rust class SHA-256 | Rust TASTy SHA-256 | Linked TASTY UUID |
+| --- | --- | --- | --- |
+| `example.Counter` | `c26c7cc678521d1497c2fa7b6c0071380d347f63635081a05bc7a5abd2d20851` | `ee4e2afc9c7afea1acadf178722ee80f8662c5fd6259a946174b7ec268178dd8` | `006e01b1069498ac0000000000008193` |
+| `example.CounterOwner` | `05ac0006ccb7720073eb1aade6ca932d22bc0af1f1aa76f353a2484332071c28` | `198a377a4f7e00b38c5a5173f6a8381abbbf8dd394fa4030ecb20fe96909b50d` | `00de8180750ce0ef0000000000008195` |
+| `example.CounterOwnerFactory` | `1e4495ec5abfb53ada5f93c6d561c6a288cc1d8b46ab7f90a46169de47d0ae8c` | `bb5b3d8fc1ac369139a1660b2c06aebf614effb81bcddd035c680b405268f997` | `0095348d9d5ca5c10000000000008197` |
+
+The producer source hash remains
+`8433d71767dc73587e859b1bff982d0c699c1b008b40d26497f7f068c27c7fa4`.
+The independent client source hash is
+`b69347492a968aa6304312bf7b402de7732783e5cec78c8e82a8934cb0d38d60`.
+The positive result from each fresh graph was `7,-9,3`. The original class
+and sidecar hashes were unchanged after the client compile and both runtime
+executions. The report also records the compiler version, runtime version,
+classpath order and Scala compiler dependency hashes.
+
+The three sidecar contribution controls independently remove the classfile
+method while retaining its matching genuine Rust sidecar:
+
+| Sidecar | TASTy-only source lookup | Matched classfile-only result |
+| --- | --- | --- |
+| `Counter.tasty` | `Counter.get()` compiles | `E008`: `get` is not a member of `Counter` |
+| `CounterOwner.tasty` | `CounterOwner.read()` compiles | `E008`: `read` is not a member of `CounterOwner` |
+| `CounterOwnerFactory.tasty` | `CounterOwnerFactory.create(1)` compiles | `E008`: `create` is not a member of `CounterOwnerFactory` |
+
+The official Scala 3.9 decompiler reads the original sidecars and recovers
+`create(seed: scala.Int): example.CounterOwner` with the real nested
+`new example.CounterOwner(new example.Counter(seed))` body. The Owner output
+retains its `inner` alias from the constructor parameter; the Counter output
+retains the `get` and `set` state bodies. `-from-tasty` accepts the three Rust
+sidecars and emits exactly the three class paths. Those reconstructed outputs
+are inspected only; they are never placed on the runtime classpath.
+
+The same pinned tool reports the first failure for the sidecar controls:
+missing or misplaced Factory sidecar reports that `.tasty` is missing, a
+corrupt sidecar reports `not a TASTy file`, and a stale class-to-sidecar UUID
+reports that the classfile is out of sync. The UUID mismatch is run with
+`-Werror` and fails on that warning. An exact six-path inventory rejects a
+partial batch; compiling that partial batch also stops at the pinned compiler's
+missing `.tasty` diagnostic. A separate valid Rust batch with the Factory
+result changed to `Counter` fails a consumer requiring `CounterOwner` with the
+pinned Scala `E007` mismatch (`Found: example.Counter`,
+`Required: example.CounterOwner`, one error). The same probe against an empty
+classpath reproduces `E006 Not Found: example` with two errors and is rejected
+as unrelated. The alternate batch must contain exactly the six class/TASTy
+paths with classfile major 65 and matching, distinct class-to-sidecar UUIDs.
+A compile-only classfile-fallback control removes the Owner sidecar and its
+`<init>(Counter)` member; a Scala source call then fails at constructor
+resolution. The modified classfile is never executed. Finally, a renamed and
+declaration-reordered Rust batch with its own matching sidecars also compiles
+and runs under `-Xverify:all` with the same `7,-9,3` results; its classfile-only
+`create` control fails with Scala `E008`.
+
+The focused gate was run as:
+
+```sh
+DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER=1 \
+cargo test --test jvm_tasty_nested_constructor_scala_consumer --locked -- --nocapture
+```
+
 
 ## Strict JDK 21 runtime and identity acceptance (#1819)
 
