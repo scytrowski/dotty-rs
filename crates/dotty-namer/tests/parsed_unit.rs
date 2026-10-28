@@ -6368,6 +6368,67 @@ fn top_level_case_class_companions_are_owned_by_independent_semantic_stores() {
 }
 
 #[test]
+fn top_level_case_class_reuses_matching_explicit_apply_without_synthesizing_an_overload() {
+    use dotty_core::{SymbolOrigin, TermName, TypeName};
+
+    let mut named = named_source(
+        "case class Node(value: Int)\nobject Node { def apply(value: Int): Node = new Node(value) }\ncase class Other(value: Int)\nobject Other { def apply(value: String): Other = new Other(1) }",
+        1825,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("compilation unit should have a package root");
+    };
+    let class = named
+        .index
+        .symbol_at(named.source, package.stats[0])
+        .unwrap();
+    let owner = named.store.symbols.get(class).owner.unwrap();
+    let package_scope = named.index.scope_of(owner).unwrap();
+    let companion_module_name = *TypeName::new(named.store.names.intern("Node$")).as_name();
+    let companion_module = named
+        .store
+        .scopes
+        .get(package_scope)
+        .lookup(&companion_module_name)
+        .unwrap();
+    let companion_scope = named.index.scope_of(companion_module).unwrap();
+    let apply_name = *TermName::new(named.store.names.intern("apply")).as_name();
+    let apply_candidates = named
+        .store
+        .scopes
+        .get(companion_scope)
+        .lookup_all(&apply_name);
+
+    assert_eq!(apply_candidates.len(), 1);
+    assert_eq!(
+        named.store.symbols.get(apply_candidates[0]).origin,
+        SymbolOrigin::Source(named.source)
+    );
+
+    let other_module_name = *TypeName::new(named.store.names.intern("Other$")).as_name();
+    let other_module = named
+        .store
+        .scopes
+        .get(package_scope)
+        .lookup(&other_module_name)
+        .unwrap();
+    let other_scope = named.index.scope_of(other_module).unwrap();
+    let other_apply_candidates = named.store.scopes.get(other_scope).lookup_all(&apply_name);
+    assert_eq!(other_apply_candidates.len(), 2);
+    assert!(other_apply_candidates.iter().any(|candidate| {
+        named.store.symbols.get(*candidate).origin == SymbolOrigin::Source(named.source)
+    }));
+    assert!(other_apply_candidates.iter().any(|candidate| {
+        named
+            .store
+            .symbols
+            .get(*candidate)
+            .flags
+            .contains(SymbolFlags::SYNTHETIC)
+    }));
+}
+
+#[test]
 fn unsupported_top_level_case_class_apply_shapes_keep_the_class_and_defer_apply() {
     let sources = [
         "case class Node(value: Int = 1)",

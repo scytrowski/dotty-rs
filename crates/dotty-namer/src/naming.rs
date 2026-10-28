@@ -1941,7 +1941,20 @@ impl Namer<'_> {
                 ));
             }
         };
-        if !synthesize_apply {
+        let explicit_apply_comparison = if top_level && synthesize_apply {
+            self.explicit_companion_apply_collides(
+                companion_module_class,
+                &constructor.type_params,
+                value_parameters,
+            )
+        } else {
+            Some(false)
+        };
+        let explicit_apply_collision = explicit_apply_comparison == Some(true);
+        if explicit_apply_collision || explicit_apply_comparison.is_none() {
+            synthesize_apply = false;
+        }
+        if !synthesize_apply && !explicit_apply_collision {
             let class = self.store.symbols.get_mut(class_symbol);
             class.flags = class.flags | SymbolFlags::CASE_CLASS_APPLY_DEFERRED;
         }
@@ -1959,6 +1972,79 @@ impl Namer<'_> {
         // omitting a generated apply whose parameter metadata is incomplete. A source
         // application through that absent apply remains an explicit typer error.
         Ok(())
+    }
+
+    /// Returns whether an explicit companion already has an `apply` whose
+    /// parameter signature matches the one derived from this case class. A
+    /// same-arity signature using unsupported syntax returns `None`, allowing
+    /// the caller to defer generated apply typing instead of guessing.
+    fn explicit_companion_apply_collides(
+        &self,
+        companion_module_class: SymbolId,
+        class_type_parameters: &[TreeId<Untyped>],
+        class_value_parameters: &[TreeId<Untyped>],
+    ) -> Option<bool> {
+        let Some(SourceDefinition::Derived { source, tree }) =
+            self.index.definition_of(companion_module_class)
+        else {
+            return Some(false);
+        };
+        if source != self.source {
+            return Some(false);
+        }
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) = &self.arena.get(tree).kind
+        else {
+            return Some(false);
+        };
+        let TreeKind::Template(template) = &self.arena.get(module.template).kind else {
+            return Some(false);
+        };
+        let mut unsupported_comparison = false;
+        for member in &template.body {
+            let TreeKind::DefDef(method) = &self.arena.get(*member).kind else {
+                continue;
+            };
+            if self.store.names.resolve(method.name.as_name().text()) != "apply"
+                || method.type_params.len() != class_type_parameters.len()
+                || method.value_param_clauses.len() != 1
+                || method.value_param_clauses[0].len() != class_value_parameters.len()
+            {
+                continue;
+            }
+            let comparison = method.value_param_clauses[0]
+                .iter()
+                .zip(class_value_parameters)
+                .map(|(method_parameter, class_parameter)| {
+                    let (TreeKind::ValDef(method_parameter), TreeKind::ValDef(class_parameter)) = (
+                        &self.arena.get(*method_parameter).kind,
+                        &self.arena.get(*class_parameter).kind,
+                    ) else {
+                        return None;
+                    };
+                    match (
+                        &self.arena.get(method_parameter.tpt).kind,
+                        &self.arena.get(class_parameter.tpt).kind,
+                    ) {
+                        (TreeKind::Ident(method_type), TreeKind::Ident(class_type)) => {
+                            Some(method_type.name == class_type.name)
+                        }
+                        _ => None,
+                    }
+                })
+                .try_fold(true, |matches, comparison| {
+                    comparison.map(|comparison| matches && comparison)
+                });
+            match comparison {
+                Some(true) => return Some(true),
+                Some(false) => {}
+                None => unsupported_comparison = true,
+            }
+        }
+        if unsupported_comparison {
+            None
+        } else {
+            Some(false)
+        }
     }
 
     fn enter_case_class_apply(
