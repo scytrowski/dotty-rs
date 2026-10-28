@@ -1246,6 +1246,12 @@ struct CrossClassMethodRef {
     constructor: bool,
     argument_load_opcode: Option<u8>,
     receiver_field: Option<SymbolId>,
+    nested_constructor: Option<NestedConstructorMethodRef>,
+}
+
+struct NestedConstructorMethodRef {
+    owner_internal_name: String,
+    descriptor: String,
 }
 
 fn validate_cross_class_call_code(
@@ -1400,6 +1406,111 @@ fn validate_cross_class_call_code(
                 && application.kind == dotty_core::ast::ApplyKind::Regular
                 && application.args.len() == 1
             {
+                let nested_argument = application.args[0];
+                if let Some(nested_tree) = tasty.typed_ast.try_get(nested_argument)
+                    && let TreeKind::Apply(nested_application) = &nested_tree.kind
+                {
+                    if nested_application.kind != dotty_core::ast::ApplyKind::Regular
+                        || nested_application.args.len() != 1
+                    {
+                        return Err(format!(
+                            "cross-class constructor {target:?} has an unsupported nested argument shape"
+                        ));
+                    }
+                    let nested_function = tasty
+                        .typed_ast
+                        .try_get(nested_application.function)
+                        .ok_or_else(|| "nested constructor selection is stale".to_owned())?;
+                    let TreeKind::Select(nested_selection) = &nested_function.kind else {
+                        return Err("nested constructor function is not a Select".into());
+                    };
+                    let Some(Type::TermRef {
+                        target: TermRefTarget::Symbol(nested_target),
+                        ..
+                    }) = tasty.store.types.try_get(nested_function.ty)
+                    else {
+                        return Err("nested constructor selection has no canonical target".into());
+                    };
+                    let nested_info = tasty.store.symbols.get(*nested_target);
+                    if nested_info.kind != SymbolKind::Constructor {
+                        return Err("nested constructor selection is not a constructor".into());
+                    }
+                    let nested_owner = nested_info
+                        .owner
+                        .ok_or_else(|| "nested constructor has no declaring owner".to_owned())?;
+                    let nested_metadata = all_metadata
+                        .iter()
+                        .find(|metadata| metadata.identity().symbol() == nested_owner)
+                        .ok_or_else(|| {
+                            "nested constructor owner is absent from the JVM batch".to_owned()
+                        })?;
+                    let nested_receiver_is_new = tasty
+                        .typed_ast
+                        .try_get(nested_selection.qualifier)
+                        .is_some_and(|receiver| matches!(receiver.kind, TreeKind::New(_)));
+                    if !nested_receiver_is_new {
+                        return Err("nested constructor receiver is not New".into());
+                    }
+                    let nested_constructor = nested_metadata
+                        .constructor()
+                        .filter(|constructor| constructor.symbol() == *nested_target)
+                        .ok_or_else(|| {
+                            "nested constructor is absent from its JVM plan".to_owned()
+                        })?;
+                    let outer_constructor = target_class_metadata
+                        .constructor()
+                        .filter(|constructor| constructor.symbol() == *target)
+                        .ok_or_else(|| {
+                            "outer constructor is absent from its JVM plan".to_owned()
+                        })?;
+                    let caller_descriptor = source_method_descriptor(
+                        tasty.store,
+                        tasty.definitions,
+                        caller,
+                        &all_metadata,
+                    )
+                    .ok_or_else(|| {
+                        "nested constructor caller has an unsupported signature".to_owned()
+                    })?;
+                    let nested_descriptor = nested_constructor.descriptor().as_str();
+                    let outer_descriptor = outer_constructor.descriptor().as_str();
+                    let nested_owner_descriptor =
+                        format!("L{};", nested_metadata.identity().internal_name());
+                    let outer_result_descriptor =
+                        format!("L{};", target_class_metadata.identity().internal_name());
+                    if !nested_constructor.access_flags().is_public()
+                        || nested_descriptor != "(I)V"
+                        || outer_descriptor != format!("({nested_owner_descriptor})V")
+                        || caller_descriptor != format!("(I){outer_result_descriptor}")
+                        || nested_info.origin != SymbolOrigin::Source(tasty.source.id)
+                    {
+                        return Err(
+                            "nested constructor chain differs from its checked source/JVM ABI"
+                                .into(),
+                        );
+                    }
+                    calls.push(CrossClassMethodRef {
+                        caller,
+                        target: *target,
+                        owner_internal_name: target_class_metadata
+                            .identity()
+                            .internal_name()
+                            .to_owned(),
+                        name: "<init>".to_owned(),
+                        descriptor: outer_descriptor.to_owned(),
+                        constructor: true,
+                        argument_load_opcode: None,
+                        receiver_field: None,
+                        nested_constructor: Some(NestedConstructorMethodRef {
+                            owner_internal_name: nested_metadata
+                                .identity()
+                                .internal_name()
+                                .to_owned(),
+                            descriptor: nested_descriptor.to_owned(),
+                        }),
+                    });
+                    continue;
+                }
                 let constructor = target_class_metadata
                     .constructor()
                     .filter(|constructor| constructor.symbol() == *target)
@@ -1463,6 +1574,7 @@ fn validate_cross_class_call_code(
                     constructor: true,
                     argument_load_opcode: Some(argument_load_opcode),
                     receiver_field: None,
+                    nested_constructor: None,
                 });
                 continue;
             }
@@ -1522,6 +1634,7 @@ fn validate_cross_class_call_code(
                     }),
                 _ => None,
             },
+            nested_constructor: None,
         });
     }
 
@@ -1557,6 +1670,98 @@ fn validate_cross_class_call_code(
                 call.caller
             ));
         };
+        if let Some(nested) = &call.nested_constructor {
+            if code.code.len() != 16
+                || code.code[0] != 0xbb
+                || code.code[3] != 0x59
+                || code.code[4] != 0xbb
+                || code.code[7] != 0x59
+                || code.code[8] != 0x1b
+                || code.code[9] != 0xb7
+                || code.code[12] != 0xb7
+                || code.code[15] != 0xb0
+                || code.max_stack < 5
+                || code.max_locals != 2
+                || !code.exception_table.is_empty()
+            {
+                return Err(format!(
+                    "caller method {:?} does not contain the bounded two-allocation nested-constructor sequence: {:02x?}",
+                    call.caller, code.code
+                ));
+            }
+            let cp_index = |offset: usize| {
+                dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+                    code.code[offset],
+                    code.code[offset + 1],
+                ]))
+            };
+            let allocation_owner = |offset: usize| -> Result<&str, String> {
+                let index = cp_index(offset);
+                let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Class { name_index }) =
+                    class_file.constant_pool.get(index)
+                else {
+                    return Err(
+                        "nested constructor allocation does not reference CONSTANT_Class".into(),
+                    );
+                };
+                class_file
+                    .constant_pool
+                    .utf8(*name_index)
+                    .map_err(|error| format!("invalid nested allocation class name: {error:?}"))
+            };
+            let method_ref = |offset: usize| -> Result<(&str, (&str, &str)), String> {
+                let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+                    class_index,
+                    name_and_type_index,
+                }) = class_file.constant_pool.get(cp_index(offset))
+                else {
+                    return Err(
+                        "nested constructor invocation does not reference CONSTANT_Methodref"
+                            .into(),
+                    );
+                };
+                let owner = class_file
+                    .constant_pool
+                    .class_name(*class_index)
+                    .map_err(|error| format!("invalid nested constructor owner: {error:?}"))?;
+                let method = class_file
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .map_err(|error| {
+                        format!("invalid nested constructor name/descriptor: {error:?}")
+                    })?;
+                Ok((owner, method))
+            };
+            let actual_outer_allocation = allocation_owner(1)?;
+            let actual_inner_allocation = allocation_owner(5)?;
+            if actual_outer_allocation != call.owner_internal_name
+                || actual_inner_allocation != nested.owner_internal_name
+            {
+                return Err(format!(
+                    "caller method {:?} allocates ({actual_outer_allocation}, {actual_inner_allocation}), expected ({}, {})",
+                    call.caller, call.owner_internal_name, nested.owner_internal_name
+                ));
+            }
+            let inner_call = method_ref(10)?;
+            let outer_call = method_ref(13)?;
+            if inner_call
+                != (
+                    nested.owner_internal_name.as_str(),
+                    ("<init>", nested.descriptor.as_str()),
+                )
+                || outer_call
+                    != (
+                        call.owner_internal_name.as_str(),
+                        ("<init>", call.descriptor.as_str()),
+                    )
+            {
+                return Err(format!(
+                    "caller method {:?} does not invoke the exact nested and outer constructors in evaluation order",
+                    call.caller
+                ));
+            }
+            continue;
+        }
         let reference = if call.constructor {
             let load_argument = call.argument_load_opcode.ok_or_else(|| {
                 "cross-class constructor has no validated argument load".to_owned()
