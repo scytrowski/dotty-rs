@@ -64,9 +64,11 @@ result conformance, and source mapping.
 
 ## Cohort regression check
 
-The fresh base was `11ee89ddc7e9e1a672023995f593fa5c831c7213`. Against the
-unchanged frozen manifests, the pinned ordinary-member audit remains `14/25`
-for Tier A and `9/25` for the former holdout (`25/25` attempted in each). The
-holdout is an analysis cohort, not a blind sample. These results show no cohort
-regressions; the two edge roots above are reported separately and do not affect
-either cohort.
+At sprint start the fresh base was `11ee89ddc7e9e1a672023995f593fa5c831c7213`;
+the unchanged frozen manifests measured Tier A `14/25` and the former holdout
+`9/25` (`25/25` attempted in each). Main advanced during implementation to
+`57db74e0662a8dc2b49274f02df40daf515e569d`. Auditing that base without this
+change measured Tier A `14/25` and holdout `15/25`; the PR branch on the same
+base produced the same counts. The holdout uplift therefore predates this
+change. The former holdout is an analysis cohort, not a blind sample. The two
+Function1 edge roots are reported separately and do not alter either cohort.
