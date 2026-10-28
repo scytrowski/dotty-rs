@@ -156,10 +156,12 @@ impl SourceTyper<'_> {
                 continue;
             }
             seen_packages.push(package);
-            if builtin_spelling && self.package_path(package).as_slice() == ["scala"] {
-                // Scala's package-level builtin spellings stay bound to this
-                // session's Definitions entry. A declaration in another
-                // current or enclosing package can still shadow that fallback.
+            let package_path = self.package_path(package);
+            if builtin_spelling && package_path.first().is_some_and(|part| part == "scala") {
+                // Builtin spellings inside the scala package tree stay bound
+                // to this session's Definitions entry. A declaration in an
+                // unrelated current or enclosing package can still shadow
+                // that fallback.
                 continue;
             }
             let request = MemberRequest {

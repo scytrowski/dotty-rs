@@ -19,7 +19,7 @@ conformance, owned typed tree, and exact source-to-typed mapping are present.
 - Two-pass normalized audit SHA-256: main
   `2be03443d031397c61fa32049fa7b3c47ed635656aef98379b0834957538a847`;
   analysis
-  `93952a0614a125eba72543a12c2fd121ddfeaaab89d0f77c2d231ae7c2acf36a`.
+  `3730ce339eafabcb4d71c0a0913fc90f2998bd61b22fc8408a49e3fcdfcac701`.
   Both used `--verify-determinism`; the separate 50-method union audit also
   passed its two-pass comparison.
 
@@ -122,6 +122,7 @@ cargo test -p dotty-classloader compiler_builtin_aliases_are_scala_type_members_
 cargo test -p dotty-typer --lib unqualified_external_type --locked
 cargo test -p dotty-typer --lib unqualified_current_package_type_can_shadow_a_builtin_spelling --locked
 cargo test -p dotty-typer --lib scala_package_builtin_spelling_keeps_its_canonical_definition --locked
+cargo test -p dotty-typer --lib nested_scala_package_builtin_spelling_keeps_its_canonical_definition --locked
 
 tools/typer-classpath-corpus-audit/run --method-kind ordinary \
   --method-manifest docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv \
@@ -138,3 +139,9 @@ checkpoint/source-index rollback on failures and retry. Matchable tests assert
 canonical trait identity, parent, package membership, and behavior when a
 same-named classpath entry is present. Historical local-method denominators and
 the 1,236-file corpus are not part of these results.
+
+The focused 31-method smoke baseline includes deterministic unresolved package
+probes introduced by current-package classpath lookup; method outcomes remain
+unchanged. Lookup in the Scala package tree keeps canonical builtin spellings,
+while unrelated packages can resolve a same-named classpath declaration before
+the builtin fallback.

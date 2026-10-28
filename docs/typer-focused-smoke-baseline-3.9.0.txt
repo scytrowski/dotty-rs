@@ -251,6 +251,7 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=892	dotty/tools/dotc/ast	package success	direct package evidence	package=dotty/tools/dotc/ast::owner=dotty/tools/dotc	kind=Package::origin=synthetic::path=dotty.tools.dotc.ast
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=892	dotty.tools.dotc.ast.tpd::resolved-prefix=dotty.tools.dotc.ast::first-missing=tpd	package unresolved	truly unresolved next segment	-	-
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=892	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
+  library/src/scala/collection/StringParsers.scala#tree=129	prefix=scala.collection::namespace=type::name=Option::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   library/src/scala/collection/StringParsers.scala#tree=129	prefix=scala::namespace=type::name=Option::space=Prefix	external class success	-	-	kind=Class::origin=tasty::path=scala.Option
   library/src/scala/collection/StringParsers.scala#tree=129	prefix=scala::namespace=term::name=None::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=scala.None
   library/src/scala/collection/StringParsers.scala#tree=129	prefix=scala::namespace=term::name=Some::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=scala.Some
@@ -258,9 +259,12 @@ resolver_observations:
   library/src/scala/collection/StringParsers.scala#tree=1361	prefix=scala::namespace=type::name=Function1::space=Prefix	external class success	-	-	kind=Trait::origin=tasty::path=scala.Function1
   library/src/scala/collection/StringParsers.scala#tree=1361	scala/annotation	package success	direct package evidence	package=scala/annotation::owner=scala	kind=Package::origin=synthetic::path=scala.annotation
   library/src/scala/collection/StringParsers.scala#tree=1361	prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix	external class success	-	-	kind=Class::origin=tasty::path=scala.annotation.retainsCap
+  library/src/scala/collection/StringParsers.scala#tree=550	prefix=scala.collection::namespace=type::name=String::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
+  library/src/scala/collection/StringParsers.scala#tree=550	prefix=scala::namespace=type::name=String::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   library/src/scala/collection/StringParsers.scala#tree=550	prefix=scala::namespace=type::name=String::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   library/src/scala/collection/StringParsers.scala#tree=550	java/lang	package success	direct package evidence	package=java/lang::owner=java	kind=Package::origin=synthetic::path=java.lang
   library/src/scala/collection/StringParsers.scala#tree=550	prefix=java.lang::namespace=type::name=String::space=Prefix	external class success	-	-	kind=Class::origin=classfile::path=java.lang.String
+  library/src/scala/collection/StringParsers.scala#tree=550	prefix=scala.collection::namespace=type::name=Option::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   library/src/scala/collection/StringParsers.scala#tree=550	prefix=scala::namespace=type::name=Option::space=Prefix	external class success	-	-	kind=Class::origin=tasty::path=scala.Option
   library/src/scala/collection/StringParsers.scala#tree=550	prefix=scala::namespace=term::name=Some::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=scala.Some
   library/src/scala/collection/StringParsers.scala#tree=550	prefix=scala::namespace=term::name=Int::space=Prefix	package term member unsupported	term/object materialization gap	-	-
@@ -271,9 +275,12 @@ resolver_observations:
   library/src/scala/collection/StringParsers.scala#tree=550	Int::<first-segment-unresolved>	package unresolved	truly unresolved next segment	-	-
   library/src/scala/collection/StringParsers.scala#tree=550	prefix=::namespace=term::name=Int::space=Prefix	package term member unsupported	term/object materialization gap	-	-
   library/src/scala/collection/StringParsers.scala#tree=550	prefix=scala::namespace=term::name=Int::space=Prefix	package term member unsupported	term/object materialization gap	-	-
+  library/src/scala/collection/StringParsers.scala#tree=710	prefix=scala.collection::namespace=type::name=String::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
+  library/src/scala/collection/StringParsers.scala#tree=710	prefix=scala::namespace=type::name=String::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   library/src/scala/collection/StringParsers.scala#tree=710	prefix=scala::namespace=type::name=String::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   library/src/scala/collection/StringParsers.scala#tree=710	java/lang	package success	direct package evidence	package=java/lang::owner=java	kind=Package::origin=synthetic::path=java.lang
   library/src/scala/collection/StringParsers.scala#tree=710	prefix=java.lang::namespace=type::name=String::space=Prefix	external class success	-	-	kind=Class::origin=classfile::path=java.lang.String
+  library/src/scala/collection/StringParsers.scala#tree=710	prefix=scala.collection::namespace=type::name=Option::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   library/src/scala/collection/StringParsers.scala#tree=710	prefix=scala::namespace=type::name=Option::space=Prefix	external class success	-	-	kind=Class::origin=tasty::path=scala.Option
 blocker_counts:
   ApplicationCalleeNotMethod: count=11, files=1
@@ -285,9 +292,9 @@ resolver_metrics:
   package_successes=47
   package_unresolved=81
   package_errors=0
-  member_requests=102
+  member_requests=109
   member_successes=31
-  member_unresolved=71
+  member_unresolved=78
   member_errors=0
   class_symbol_successes=31
 materialized_packages:

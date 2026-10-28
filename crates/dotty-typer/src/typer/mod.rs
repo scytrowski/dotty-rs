@@ -10078,6 +10078,42 @@ mod tests {
     }
 
     #[test]
+    fn nested_scala_package_builtin_spelling_keeps_its_canonical_definition() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package scala.collection { class Use { val value: Int = 1 } }");
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let package = packages.symbol(&["scala", "collection"]).unwrap();
+        let external_type = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        let int_name = store.names.intern("Int");
+        store.symbols.get_mut(external_type).name = Name::new(int_name, Namespace::Type);
+        store.symbols.get_mut(external_type).owner = Some(package);
+        let canonical_int = definitions.int;
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let resolver = ScriptedResolver {
+            member: Some(external_type),
+            member_error: None,
+            package: None,
+            member_requests: Rc::clone(&requests),
+            package_requests: Rc::new(RefCell::new(Vec::new())),
+        };
+        let context = index.declaration_context_of(value).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let projected = typer.type_of_tpt(type_tree, context).unwrap();
+
+        assert_eq!(projected, canonical_int);
+        assert!(requests.borrow().is_empty());
+    }
+
+    #[test]
     fn unqualified_external_type_uses_an_enclosing_package_identity() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("package sample.nested { class Use { val value: Parent = null } }");
