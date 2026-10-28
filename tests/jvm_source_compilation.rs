@@ -43,6 +43,8 @@ const TASTY_CONSTRUCTOR_INJECTION_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_constructor_injection/CounterOwner.scala");
 const TASTY_NESTED_CONSTRUCTOR_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala");
+const FACTORY_RESULT_ARGUMENT_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala");
 
 type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
@@ -15569,6 +15571,208 @@ fn exact_tasty_audit_source_emits_nested_owner_factory_on_the_jvm_only_path() {
         assert!(
             java.status.success(),
             "java -Xverify:all rejected JVM-only nested audit output\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
+
+#[test]
+fn original_factory_result_source_emits_with_complete_state_plans_and_runs_on_jdk() {
+    let output = TestOutputDirectory::new("factory-result-arguments-jvm-only");
+    let source_id = SourceId::from_index(18320);
+    let mut observed = false;
+    let mut observe = |unit: &mut JvmCompilationUnit<'_>, _definitions: &Definitions| {
+        observed = true;
+        let expected_classes = ["Counter", "CounterOwner", "CounterOwnerFactory"];
+        assert_eq!(unit.classes.len(), expected_classes.len());
+        for name in expected_classes {
+            let class = audit_class_named(unit, name);
+            let plan = unit
+                .classes
+                .iter()
+                .find(|plan| plan.class == class)
+                .expect("each canonical source class has a JVM plan");
+            match (name, &plan.initialization) {
+                ("Counter" | "CounterOwner", JvmClassInitializationPlan::PrimaryConstructor(_))
+                | ("CounterOwnerFactory", JvmClassInitializationPlan::ImplicitNoArg) => {}
+                _ => panic!("{name} has its expected source-derived initialization plan"),
+            }
+            for method in &plan.methods {
+                assert!(
+                    method.body.is_some(),
+                    "{} has a typed body",
+                    audit_symbol_name(unit, method.method)
+                );
+            }
+        }
+        let counter = audit_class_named(unit, "Counter");
+        let owner = audit_class_named(unit, "CounterOwner");
+        let factory = audit_class_named(unit, "CounterOwnerFactory");
+        let fields = |class| {
+            &unit
+                .classes
+                .iter()
+                .find(|plan| plan.class == class)
+                .expect("class plan exists")
+                .fields
+        };
+        let field_names = |class| {
+            fields(class)
+                .iter()
+                .map(|field| {
+                    unit.store
+                        .names
+                        .resolve(unit.store.symbols.get(field.field).name.text())
+                        .to_owned()
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            field_names(counter),
+            ["current"].into_iter().map(str::to_owned).collect()
+        );
+        assert_eq!(
+            field_names(owner),
+            ["inner"].into_iter().map(str::to_owned).collect()
+        );
+        assert!(
+            fields(counter)
+                .iter()
+                .all(|field| field.initializer.is_some()),
+            "Counter.current has its typed initializer plan"
+        );
+        assert!(
+            fields(owner)
+                .iter()
+                .all(|field| field.initializer.is_some()),
+            "CounterOwner.inner has its typed initializer plan"
+        );
+        assert!(fields(factory).is_empty(), "the factory has no body fields");
+        let factory_plan = unit
+            .classes
+            .iter()
+            .find(|plan| plan.class == factory)
+            .expect("factory JVM plan exists");
+        assert_eq!(factory_plan.methods.len(), 2);
+        assert!(factory_plan.methods.iter().any(|method| {
+            unit.store
+                .names
+                .resolve(unit.store.symbols.get(method.method).name.text())
+                == "makeCounter"
+        }));
+        assert!(factory_plan.methods.iter().any(|method| {
+            unit.store
+                .names
+                .resolve(unit.store.symbols.get(method.method).name.text())
+                == "create"
+        }));
+    };
+    let artifacts = compile_source_batch_observed(
+        FACTORY_RESULT_ARGUMENT_SOURCE,
+        "CounterOwnerFactory.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut observe),
+    )
+    .expect("the original packaged three-class source emits through the JVM-only path");
+    assert!(observed, "the complete canonical JVM plans were observed");
+    assert_eq!(artifacts.len(), 3);
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            "example/Counter",
+            "example/CounterOwner",
+            "example/CounterOwnerFactory"
+        ]
+        .into_iter()
+        .collect()
+    );
+    let factory_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "example/CounterOwnerFactory")
+        .expect("the original Factory class is emitted");
+    let factory_class = decode_emitted_class(factory_artifact);
+    let create_code = emitted_method_code(&factory_class, "create");
+    assert_opcode_sequence(create_code, &[0xbb, 0x59, 0x2a, 0x1b, 0xb6, 0xb7, 0xb0]);
+    let create_calls = decode_subset_instructions(create_code)
+        .into_iter()
+        .filter_map(|(offset, opcode)| {
+            if !matches!(opcode, 0xb6 | 0xb7) {
+                return None;
+            }
+            let index = u16::from_be_bytes([create_code[offset + 1], create_code[offset + 2]]);
+            let ConstantPoolEntry::Methodref {
+                class_index,
+                name_and_type_index,
+            } = factory_class.constant_pool.get(ConstantPoolIndex(index))?
+            else {
+                panic!("create calls use Methodref entries");
+            };
+            Some((
+                opcode,
+                factory_class
+                    .constant_pool
+                    .class_name(*class_index)
+                    .unwrap(),
+                factory_class
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .unwrap(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        create_calls,
+        vec![
+            (
+                0xb6,
+                "example/CounterOwnerFactory",
+                ("makeCounter", "(I)Lexample/Counter;")
+            ),
+            (
+                0xb7,
+                "example/CounterOwner",
+                ("<init>", "(Lexample/Counter;)V")
+            )
+        ]
+    );
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("FactoryResultArgumentsHarness.java");
+        fs::write(
+            &harness,
+            "public final class FactoryResultArgumentsHarness { public static void main(String[] args) { example.CounterOwnerFactory factory = new example.CounterOwnerFactory(); if (factory.create(7).read() != 7) throw new AssertionError(\"create(7)\"); if (factory.create(-9).read() != -9) throw new AssertionError(\"create(-9)\"); example.Counter first = factory.makeCounter(7); example.Counter second = factory.makeCounter(7); if (first == second) throw new AssertionError(\"factory reuses mutable state\"); first.set(41); if (first.get() != 41 || second.get() != 7) throw new AssertionError(\"Counter state isolation\"); } }\n",
+        )
+        .unwrap();
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .expect("start javac for the original-source JVM harness");
+        assert!(
+            javac.status.success(),
+            "javac rejected the original-source harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "FactoryResultArgumentsHarness",
+            ])
+            .output()
+            .expect("start Java verifier for original-source JVM output");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected original-source JVM output\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&java.stdout),
             String::from_utf8_lossy(&java.stderr)
         );

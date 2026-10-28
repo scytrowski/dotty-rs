@@ -60,9 +60,11 @@ Pinned `javap -v -p -c` reports `create` as follows:
 The method has `stack=4`, `locals=2`, and `ACC_PUBLIC`. The JVM allocates the
 outer Owner first, calls the instance factory on `this` with the original
 `seed`, passes that returned `Counter` to the Owner constructor, and returns
-the initialized Owner. `javap` identifies the method reference owner as
-`CounterOwnerFactory` and the constructor reference owner as `Counter`; no
-instruction offsets, owner or descriptor were inferred from the Rust output.
+the initialized Owner. In `create`, the method reference owner is
+`CounterOwnerFactory`, and the outer constructor reference owner is
+`CounterOwner`. The separate constructor reference in `makeCounter` targets
+`Counter.<init>`. No instruction offsets, owner or descriptor were inferred
+from the Rust output.
 
 ## Decoded Factory TASTy
 
@@ -163,7 +165,7 @@ not inferred from the first rejection.
 | Paired JVM/TASTy planner | Rejects at `cross-class constructor-call identity proof` with the same `SourceShape` reason before producing the callback plan. |
 | Expression-body TASTy plan/encoding | Unreachable through the current paired batch path. The standalone class-state API validates the signature/state slice but has no expression-body serializer. No complete Rust TASTy bytes were produced for this source. |
 | Paired artifact contract/publisher | Unreachable: the paired planner returns before a complete Rust classfile/TASTy batch exists, so no artifact contract or publisher input is available. No rejection is attributed to these later layers. |
-| JVM-only emission | Existing JVM-only object-graph acceptance passes its strict JDK 21 test. Its fixture exercises `new Holder(makeCounter(seed))`, keeps the selected factory method, and verifies the generated class on the JVM. This is separate from paired TASTy production. |
+| JVM-only emission | The exact original packaged source succeeds through the JVM-only source pipeline with its canonical three-class bindings, field plans (`Counter.current`, `CounterOwner.inner`), and supported initialization plans (primary constructors for Counter and Owner; implicit no-arg for Factory). The emitted Factory `create` method has `new`, `dup`, `aload_0`, `iload_1`, `invokevirtual CounterOwnerFactory.makeCounter:(I)Lexample/Counter;`, `invokespecial CounterOwner.<init>:(Lexample/Counter;)V`, `areturn`; its invocation owners and descriptors are asserted from the emitted classfile. Under the strict JDK 21 gate, a Java harness verifies all three generated classes and checks `create(7)`, `create(-9)`, distinct mutable Counters, and state isolation. This is separate from paired TASTy production. |
 
 ## Controls and unsupported cases
 
@@ -173,6 +175,7 @@ not inferred from the first rejection.
 | Reorder class declarations | Genuine reordered source reaches the same cross-class proof failure. |
 | Legacy direct formal argument | Existing reference-constructor regression accepts and serializes the exact caller formal. |
 | Nested `new Counter(seed)` argument | Existing pinned nested-constructor regression accepts the source proof and decodes the two constructor applications. |
+| Previous JVM-only object-graph fixture | Remains a separate regression for `new Holder(makeCounter(seed))`; it is not used as evidence for the original packaged source. |
 | Factory call with wrong arity | Source typing rejects with `ApplicationArityMismatch` before proof. |
 | Factory declared with a mismatching result | Source typing rejects with `ApplicationArgumentTypeMismatch` when that result is supplied to the Owner constructor. |
 | Field argument | Source proof rejects: `constructor argument spelling must resolve to the caller formal`. |
@@ -228,12 +231,12 @@ cargo test -p dotty --test jvm_tasty_factory_result_arguments --locked
 cargo test -p dotty --test jvm_tasty_reference_constructor_calls --locked
 ```
 
-The separate strict JDK 21 gate confirming the JVM-only object-graph path is:
+The strict JDK 21 test for this original source's JVM-only emission is:
 
 ```sh
 DOTTY_CLASSFILE_REQUIRE_JDK=1 \
 PATH="$JAVA_HOME/bin:$PATH" \
 cargo test -p dotty --test jvm_source_compilation \
-  object_graph_acceptance_batch_is_complete_deterministic_and_jdk_verified \
+  original_factory_result_source_emits_with_complete_state_plans_and_runs_on_jdk \
   --locked -- --exact
 ```
