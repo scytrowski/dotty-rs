@@ -1,0 +1,33 @@
+{
+  "scala_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "scala_version": "3.9.0-bin-SNAPSHOT-git-777528f",
+  "jdk": "Temurin 21.0.8+9",
+  "release": 21,
+  "source": "NestedConstructorCalls.scala",
+  "classes": [
+    {
+      "name": "example.Counter",
+      "classfile": "scala39/example/Counter.class",
+      "tasty": "scala39/example/Counter.tasty",
+      "tasty_uuid": "007c0a58da84f5e80079899c5c41291b",
+      "classfile_sha256": "b41dcbdb2d2e1c9f41d1e10466aed184e0a560a57414f0c71daae45b63a7bd91",
+      "tasty_sha256": "29af379e401449734e343c5c651d709c5266d5030b40bed24316ff3661660de0"
+    },
+    {
+      "name": "example.CounterOwner",
+      "classfile": "scala39/example/CounterOwner.class",
+      "tasty": "scala39/example/CounterOwner.tasty",
+      "tasty_uuid": "001861af74153cee0044f99201b53e66",
+      "classfile_sha256": "0917f71cc66418dc8161e6caff35024a5b9abc6913f3dc74ba9614499b2b904f",
+      "tasty_sha256": "a2456d97066929e4767633fde6daefd451f77f9f0dc1a210a8237dc1c9184ee1"
+    },
+    {
+      "name": "example.CounterOwnerFactory",
+      "classfile": "scala39/example/CounterOwnerFactory.class",
+      "tasty": "scala39/example/CounterOwnerFactory.tasty",
+      "tasty_uuid": "006478f6eca9f0ec00704e7ef9f10d1f",
+      "classfile_sha256": "cd7fc772311f755e93448c9316c36c6141c31e5df29eb4536225ebee469ed584",
+      "tasty_sha256": "4bcc567fd594488544eb56863e4577319ec7221fa9c32bd68d45b881ccdf4f87"
+    }
+  ]
+}
