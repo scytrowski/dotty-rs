@@ -2102,6 +2102,9 @@ impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
             });
         }
         let source_rhs = definition.rhs.ok_or(PickleError::MissingBody { method })?;
+        p.source_ast
+            .try_get(source_rhs)
+            .ok_or(PickleError::InvalidSourceTree { tree: source_rhs })?;
         let typed_rhs = p
             .typed_bindings
             .typed_at(p.source.id, source_rhs)

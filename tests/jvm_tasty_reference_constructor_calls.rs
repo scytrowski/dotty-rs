@@ -4,8 +4,8 @@ use dotty_classfile::constant_pool::ConstantPoolEntry;
 use dotty_classfile::reader::Reader as ClassReader;
 use dotty_core::ast::TreeKind;
 use dotty_core::{
-    Definitions, Packages, SemanticStore, SourceId, SourceText, SourceTypedIndex, SymbolId,
-    SymbolInfo, TermRefTarget, TreeId, Type, TypeRefTarget, Typed, Untyped,
+    AstArena, Definitions, Packages, SemanticStore, SourceId, SourceText, SourceTypedIndex,
+    SymbolId, SymbolInfo, TermRefTarget, TreeId, Type, TypeRefTarget, Typed, Untyped,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
@@ -211,6 +211,7 @@ fn assert_distinct_signature_projection(
     parameter_class: &str,
     result_class: &str,
     factory_class: &str,
+    stale_rhs: bool,
 ) {
     let source = SourceText::new(source_text).unwrap();
     let scanner = ContextualScanner::new(source_text).unwrap();
@@ -337,6 +338,19 @@ fn assert_distinct_signature_projection(
         Some(typed_rhs)
     );
     let source_typed_index = typer.source_typed_index();
+    let mut source_ast = AstArena::new();
+    for (_, tree) in parsed.ast.iter() {
+        source_ast.alloc(tree.clone());
+    }
+    if stale_rhs {
+        let checkpoint = source_ast.checkpoint();
+        let stale_rhs = source_ast.alloc(source_ast.get(wrap_tree).clone());
+        source_ast.rollback_to(checkpoint);
+        let TreeKind::DefDef(definition) = &mut source_ast.get_mut(wrap_tree).kind else {
+            panic!("wrap method is a definition")
+        };
+        definition.rhs = Some(stale_rhs);
+    }
     let planned_classes = classes
         .iter()
         .map(|(class, _, _)| *class)
@@ -354,7 +368,7 @@ fn assert_distinct_signature_projection(
     let plan = ClassStatePicklePlan {
         store: typer.store(),
         definitions: &definitions,
-        source_ast: &parsed.ast,
+        source_ast: &source_ast,
         typed_ast: typer.typed_ast(),
         source_index: &source_index,
         typed_bindings: &bindings,
@@ -372,6 +386,14 @@ fn assert_distinct_signature_projection(
         members: &members,
     };
     let validated = plan.validate().unwrap();
+    if stale_rhs {
+        assert!(matches!(
+            validated.distinct_reference_method_signature(wrap),
+            Err(dotty_tasty_pickler::PickleError::InvalidSourceTree { tree })
+                if source_ast.try_get(tree).is_none()
+        ));
+        return;
+    }
     let signature = validated.distinct_reference_method_signature(wrap).unwrap();
     let name = |symbol| {
         typer
@@ -928,6 +950,7 @@ fn renamed_and_reordered_three_class_sources_do_not_depend_on_fixture_names_or_o
         "Tally",
         "WrappedTally",
         "WrapperMaker",
+        false,
     );
     assert_distinct_signature_projection(
         &reordered,
@@ -935,6 +958,19 @@ fn renamed_and_reordered_three_class_sources_do_not_depend_on_fixture_names_or_o
         "Counter",
         "CounterOwner",
         "CounterOwnerFactory",
+        false,
+    );
+}
+
+#[test]
+fn distinct_signature_rejects_a_rolled_back_source_rhs_id() {
+    assert_distinct_signature_projection(
+        SOURCE,
+        SourceId::from_index(17936),
+        "Counter",
+        "CounterOwner",
+        "CounterOwnerFactory",
+        true,
     );
 }
 
