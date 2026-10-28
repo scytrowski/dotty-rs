@@ -9327,7 +9327,7 @@ mod tests {
     }
 
     #[test]
-    fn module_identity_fails_closed_on_an_incomplete_source_case_class_and_can_retry() {
+    fn module_identity_fails_closed_on_an_incomplete_source_case_class_companion_and_can_retry() {
         let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
         let bytes = semantic_unpickler_fixture_bytes("Both.tasty");
         let mut store = SemanticStore::new();
@@ -9361,7 +9361,48 @@ mod tests {
             .scopes
             .get_mut(package_scope)
             .enter(source_name, source_class);
+        // Model the canonical synthetic companion pair now entered by Namer
+        // for a top-level case class whose `ClassInfo` is still incomplete.
+        let source_term_name = Name::new(store.names.intern("Both"), Namespace::Term);
+        let source_object = store.symbols.alloc(Symbol {
+            name: source_term_name,
+            owner: Some(package),
+            kind: SymbolKind::Object,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks {
+                companion: Some(source_class),
+            },
+        });
+        store.symbols.get_mut(source_class).links.companion = Some(source_object);
+        store
+            .scopes
+            .get_mut(package_scope)
+            .enter(source_term_name, source_object);
+        let source_module_name = Name::new(store.names.intern("Both$"), Namespace::Type);
+        let source_module_class = store.symbols.alloc(Symbol {
+            name: source_module_name,
+            owner: Some(package),
+            kind: SymbolKind::ModuleClass,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        store
+            .scopes
+            .get_mut(package_scope)
+            .enter(source_module_name, source_module_class);
         let original_source_class = store.symbols.get(source_class).clone();
+        let original_source_object = store.symbols.get(source_object).clone();
+        let original_source_module_class = store.symbols.get(source_module_class).clone();
         let mut loader = ClassLoader::with_definitions(
             InMemoryTastyClassPath(HashMap::from([(name.clone(), bytes.clone())])),
             &mut store,
@@ -9388,33 +9429,44 @@ mod tests {
                 .lookup_all(&source_name),
             [source_class]
         );
+        assert_eq!(
+            loader.store.symbols.get(source_object).links.companion,
+            Some(source_class)
+        );
+        assert_eq!(
+            loader.store.symbols.get(source_object),
+            &original_source_object
+        );
+        assert_eq!(
+            loader.store.symbols.get(source_module_class),
+            &original_source_module_class
+        );
         assert!(!loader.session.modules.contains_key(&name));
         assert!(loader.session.origins.is_empty());
-        assert!(
+        assert_eq!(
             loader
                 .store
                 .scopes
                 .get(package_scope)
-                .lookup_all(&Name::new(
-                    loader.store.names.intern("Both"),
-                    Namespace::Term
-                ))
-                .is_empty()
+                .lookup_all(&source_term_name),
+            [source_object]
         );
-        assert!(
+        assert_eq!(
             loader
                 .store
                 .scopes
                 .get(package_scope)
-                .lookup_all(&Name::new(
-                    loader.store.names.intern("Both$"),
-                    Namespace::Type
-                ))
-                .is_empty()
+                .lookup_all(&source_module_name),
+            [source_module_class]
         );
 
         let session = loader.into_session();
         store.scopes.get_mut(package_scope).remove(source_class);
+        store.scopes.get_mut(package_scope).remove(source_object);
+        store
+            .scopes
+            .get_mut(package_scope)
+            .remove(source_module_class);
         let mut retry = ClassLoader::with_definitions(
             InMemoryTastyClassPath(HashMap::from([(name.clone(), bytes)])),
             &mut store,

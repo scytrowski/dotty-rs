@@ -55,7 +55,7 @@ cargo test -p dotty-classloader --lib \
   classpath_identity_reuses_a_complete_same_package_source_class_without_overwriting_it \
   --locked
 cargo test -p dotty-classloader --lib \
-  module_identity_fails_closed_on_an_incomplete_source_case_class_and_can_retry \
+  module_identity_fails_closed_on_an_incomplete_source_case_class_companion_and_can_retry \
   --locked
 cargo test -p dotty-classloader --lib \
   module_identity_keeps_classpath_snapshot_origins_in_independent_stores \
