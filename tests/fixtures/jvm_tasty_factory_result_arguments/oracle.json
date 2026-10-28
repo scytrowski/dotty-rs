@@ -1,0 +1,49 @@
+{
+  "initial_checkout_head": "8ddf0f3bd3e3e51b99267159aa5b973bbb97da47",
+  "audit_base_main_sha": "b62fbfda7421e2afac423ccc1251d31886e784c7",
+  "source_sha256": "daecae35c324a26522f13f459d14d5cc730ab22d5260f17384802f20572a550c",
+  "consumer_source_sha256": "aa4da833c75d15391d5f315e6881f47afcd9043ef20057e8c12257c956e93e37",
+  "scala_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "scala_version": "3.9.0-bin-SNAPSHOT-git-777528f",
+  "scala_compiler_jar_sha256": "b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f",
+  "scala_launcher_jars_sha256": {
+    "scala.jar": "cdbd3d20c0a7132e2d5ecca19d10ef938d1ce3c844c1b7df35f6deabd0e7aa13",
+    "with_compiler.jar": "172c8b8384e75ee24d327fce5ec788582bf314f66bf9983ba57e0cac6c3ff498"
+  },
+  "scala_standard_libraries_sha256": {
+    "scala3-library_3-3.9.0-bin-SNAPSHOT.jar": "8c605e1945ae5a3c57d618d02241f7190ecbed744367473c7c3a9b61940c920c",
+    "scala-library-3.9.0-bin-SNAPSHOT.jar": "bc87575e0099514b17f7e84384b4a9a51d7a376720af8974e04a41a202909434"
+  },
+  "jdk": "Temurin 21.0.8+9",
+  "jdk_release_sha256": "93b52921a5efb10ac0dcf9e3c955fa209fc83687df897d6ab034af967e2f5088",
+  "release": 21,
+  "classfile_major": 65,
+  "tasty_version": "28.9.0",
+  "consumer_runtime_output": "scala39-factory-result-arguments=ok",
+  "classes": [
+    {
+      "name": "example.Counter",
+      "classfile": "scala39/example/Counter.class",
+      "tasty": "scala39/example/Counter.tasty",
+      "tasty_uuid": "00d64806c49b36e800ec22da2f7eb01b",
+      "classfile_sha256": "231c429c58b0a4bf03321179d03f9a1e7c3d91e7907c0ac9d65060f43d687cec",
+      "tasty_sha256": "27a05a5fb499ea17cfa3066c44e28f87cecff3ec45fb8f59b82d2e27771404dc"
+    },
+    {
+      "name": "example.CounterOwner",
+      "classfile": "scala39/example/CounterOwner.class",
+      "tasty": "scala39/example/CounterOwner.tasty",
+      "tasty_uuid": "0035b89b8dc3a7ee00dd6c3944864066",
+      "classfile_sha256": "f4abfe5b6ff8581af8971fdf8b72f3ead5b820cff4cf001fec81172cfbf01df9",
+      "tasty_sha256": "394b13c4eb677b8a0c320975bf96dbe602fab5df6b74804fac09094ef0d7b2bc"
+    },
+    {
+      "name": "example.CounterOwnerFactory",
+      "classfile": "scala39/example/CounterOwnerFactory.class",
+      "tasty": "scala39/example/CounterOwnerFactory.tasty",
+      "tasty_uuid": "00526cc942642dd2001c7c921db70921",
+      "classfile_sha256": "989454c0d6a5f207c23d40965456a46949d99b55cbc68b3f5070313bc4ed948a",
+      "tasty_sha256": "6e8fb6697c053c4b0fe84d7ad802fb96f6018ea5e27835703a5166b8e122f923"
+    }
+  ]
+}
