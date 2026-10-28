@@ -1,0 +1,9 @@
+schema=1
+baseline_dotty_sha=21ca7e0d6921166fda810897efa9658956042735
+pinned_scala_revision=777528f19a58e794c9954a42f433373472ec57f8
+oracle_status=not_run_missing_SCALA39_ROOT
+cohort_status=not_run_missing_SCALA39_ROOT
+root	issue_reported_before	current_before	current_after	whole_method
+library/src/scala/Tuple.scala#tree=23	ErrorType/source-classpath-identity	not_run	not_run	not_run
+library/src/scala/Option.scala#tree=214	SymbolResolution/scala.Some-identity	not_run	not_run	not_run
+library/src/scala/util/Either.scala#tree=84	SymbolResolution/scala.util.Left-identity	not_run	not_run	not_run

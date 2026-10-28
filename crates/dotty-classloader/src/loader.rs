@@ -1882,6 +1882,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
         if let Some(&symbol) = existing.first() {
             let candidate = self.store.symbols.get(symbol);
+            let expected_kind = if flags.is_interface() {
+                SymbolKind::Trait
+            } else {
+                SymbolKind::Class
+            };
             let complete_class = match candidate.info {
                 SymbolInfo::Complete(info) => {
                     matches!(self.store.types.get(info), Type::ClassInfo(_))
@@ -1889,6 +1894,24 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 SymbolInfo::Missing => false,
                 _ => false,
             };
+            let source_class_is_canonical = candidate.kind == expected_kind
+                && candidate.name == symbol_name
+                && candidate.owner == Some(package)
+                && matches!(candidate.origin, SymbolOrigin::Source(_))
+                && complete_class
+                && matches!(candidate.info, SymbolInfo::Complete(info)
+                    if matches!(self.store.types.get(info), Type::ClassInfo(class_info)
+                        if class_info.class == symbol
+                            && self.store.scopes.contains(class_info.declarations)
+                            && self.store.scopes.get(class_info.declarations).owner == Some(symbol)));
+            if source_class_is_canonical {
+                // A complete Namer-owned class in this exact package scope is
+                // already the source declaration that shadows this classpath
+                // entry. Reuse its identity without importing classpath
+                // members, hierarchy, or provenance into the source symbol.
+                self.session.cache_resolved(name.clone(), symbol);
+                return Ok(symbol);
+            }
             if !matches!(
                 candidate.kind,
                 SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
@@ -1903,11 +1926,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         .to_owned(),
                 });
             }
-            let expected_kind = if flags.is_interface() {
-                SymbolKind::Trait
-            } else {
-                SymbolKind::Class
-            };
             if candidate.kind != expected_kind {
                 return Err(ClassLoadError::IdentityConflict {
                     name: name.clone(),
@@ -9183,6 +9201,123 @@ mod tests {
 
         assert_eq!(second.ensure_class_identity(&name).unwrap(), identity);
         assert_eq!(second.session.resolved.get(&name), Some(&identity));
+    }
+
+    #[test]
+    fn classpath_identity_reuses_a_complete_same_package_source_class_without_overwriting_it() {
+        let name = BinaryName::from_internal("sample/Shadowed");
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let source_origin = SymbolOrigin::Source(dotty_core::SourceId::from_index(17));
+        let mut packages = dotty_core::Packages::new();
+        let package = packages
+            .enter(&mut store, source_origin, &["sample"])
+            .last()
+            .expect("sample package")
+            .symbol;
+        let name_id = store.names.intern("Shadowed");
+        let symbol_name = Name::new(name_id, Namespace::Type);
+        let source_class = store.symbols.alloc(Symbol {
+            name: symbol_name,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: source_origin,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let source_only_name = Name::new(store.names.intern("sourceOnly"), Namespace::Term);
+        let source_only = store.symbols.alloc(Symbol {
+            name: source_only_name,
+            owner: Some(source_class),
+            kind: SymbolKind::Method,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: source_origin,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let declarations = store
+            .scopes
+            .alloc(dotty_core::Scope::new(Some(source_class)));
+        store
+            .scopes
+            .get_mut(declarations)
+            .enter(source_only_name, source_only);
+        let source_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: definitions.no_prefix,
+            class: source_class,
+            parents: Vec::new(),
+            declarations,
+            self_type: None,
+        }));
+        store.symbols.get_mut(source_class).info = SymbolInfo::Complete(source_info);
+        let package_scope = packages.scope_of(package).expect("package scope");
+        store
+            .scopes
+            .get_mut(package_scope)
+            .enter(symbol_name, source_class);
+        let classpath_entries = HashMap::from([
+            (name.clone(), synthetic_class("sample/Shadowed", None)),
+            (
+                BinaryName::from_internal("sample/ExternalChild"),
+                synthetic_class("sample/ExternalChild", Some("sample/Shadowed")),
+            ),
+        ]);
+        let mut loader = ClassLoader::with_definitions(
+            InMemoryClassPath(classpath_entries),
+            &mut store,
+            definitions,
+            LoadingSession::with_packages(packages),
+        );
+
+        let resolved = loader
+            .ensure_class_identity(&name)
+            .expect("the complete source declaration is the canonical shadow");
+        let external_child = loader
+            .load_class(&BinaryName::from_internal("sample/ExternalChild"))
+            .expect("an external class can retain its source-owned parent identity");
+
+        assert_eq!(resolved, source_class);
+        assert_eq!(
+            parent_symbol(
+                loader.store,
+                class_info(loader.store, external_child).parents[0]
+            ),
+            source_class
+        );
+        assert_eq!(loader.store.symbols.get(source_class).origin, source_origin);
+        assert_eq!(
+            loader.store.symbols.get(source_class).info,
+            SymbolInfo::Complete(source_info)
+        );
+        assert_eq!(
+            class_info(loader.store, source_class).declarations,
+            declarations
+        );
+        assert_eq!(loader.session.resolved.get(&name), Some(&source_class));
+        assert_eq!(loader.session.origins.get(&source_class), None);
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&symbol_name),
+            [source_class]
+        );
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(declarations)
+                .lookup_all(&source_only_name),
+            [source_only]
+        );
     }
 
     #[test]
