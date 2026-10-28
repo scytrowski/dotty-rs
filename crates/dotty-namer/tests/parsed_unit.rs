@@ -6372,7 +6372,7 @@ fn top_level_case_class_reuses_matching_explicit_apply_without_synthesizing_an_o
     use dotty_core::{SymbolOrigin, TermName, TypeName};
 
     let mut named = named_source(
-        "case class Node(value: Int)\nobject Node { def apply(value: Int): Node = new Node(value) }\ncase class Other(value: Int)\nobject Other { def apply(value: String): Other = new Other(1) }",
+        "case class Node(value: Int)\nobject Node { def apply(value: Int): Node = new Node(value) }\ncase class Other(value: Int)\nobject Other { def apply(value: String): Other = new Other(1) }\ncase class Box[A](value: A)\nobject Box { def apply[B](value: B): Box[B] = new Box[B](value) }",
         1825,
     );
     let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
@@ -6426,6 +6426,21 @@ fn top_level_case_class_reuses_matching_explicit_apply_without_synthesizing_an_o
             .flags
             .contains(SymbolFlags::SYNTHETIC)
     }));
+
+    let box_module_name = *TypeName::new(named.store.names.intern("Box$")).as_name();
+    let box_module = named
+        .store
+        .scopes
+        .get(package_scope)
+        .lookup(&box_module_name)
+        .unwrap();
+    let box_scope = named.index.scope_of(box_module).unwrap();
+    let box_apply_candidates = named.store.scopes.get(box_scope).lookup_all(&apply_name);
+    assert_eq!(box_apply_candidates.len(), 1);
+    assert_eq!(
+        named.store.symbols.get(box_apply_candidates[0]).origin,
+        SymbolOrigin::Source(named.source)
+    );
 }
 
 #[test]

@@ -70,12 +70,15 @@ def main() -> int:
             "object Explicit { def sourceOnly: String = \"explicit\" }\n"
             "case class CustomApply(value: Int)\n"
             "object CustomApply { def apply(value: Int): CustomApply = new CustomApply(value) }\n"
+            "case class Box[A](value: A)\n"
+            "object Box { def apply[B](value: B): Box[B] = new Box[B](value) }\n"
             "object Positive {\n"
             "  val shadow: Shadow[Int] = Shadow(1, 2)\n"
             "  val shadowMember: String = Shadow.sourceOnly\n"
             "  val explicit: Explicit[Int] = Explicit(3)\n"
             "  val explicitMember: String = Explicit.sourceOnly\n"
             "  val customApply: CustomApply = CustomApply(4)\n"
+            "  val box: Box[Int] = Box(5)\n"
             "}\n",
             encoding="utf-8",
         )
@@ -140,6 +143,7 @@ def main() -> int:
     print(
         "scala=3.9.0 jdk=21 top_level_case_class=apply_and_signature_ok "
         "explicit_source_companion=preserved matching_custom_apply=one_candidate "
+        "renamed_generic_custom_apply=one_candidate "
         "source_classpath_shadow=source_wins "
         "binary_only_companion_member=rejected unrelated_source_class_merge=rejected"
     )

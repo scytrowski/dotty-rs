@@ -2026,7 +2026,27 @@ impl Namer<'_> {
                         &self.arena.get(class_parameter.tpt).kind,
                     ) {
                         (TreeKind::Ident(method_type), TreeKind::Ident(class_type)) => {
-                            Some(method_type.name == class_type.name)
+                            let method_parameter_index = method.type_params.iter().position(|parameter| {
+                                matches!(
+                                    &self.arena.get(*parameter).kind,
+                                    TreeKind::TypeDef(type_parameter)
+                                        if type_parameter.name.as_name().text() == method_type.name.text()
+                                )
+                            });
+                            let class_parameter_index = class_type_parameters.iter().position(|parameter| {
+                                matches!(
+                                    &self.arena.get(*parameter).kind,
+                                    TreeKind::TypeDef(type_parameter)
+                                        if type_parameter.name.as_name().text() == class_type.name.text()
+                                )
+                            });
+                            match (method_parameter_index, class_parameter_index) {
+                                (Some(method_index), Some(class_index)) => {
+                                    Some(method_index == class_index)
+                                }
+                                (None, None) => Some(method_type.name == class_type.name),
+                                (Some(_), None) | (None, Some(_)) => Some(false),
+                            }
                         }
                         _ => None,
                     }
