@@ -6335,6 +6335,13 @@ fn valid_nested_case_class_shapes_defer_apply_without_losing_the_companion_or_si
             panic!("Owners should have a template");
         };
         let class = index.symbol_at(source, template.body[0]).unwrap();
+        assert!(
+            store
+                .symbols
+                .get(class)
+                .flags
+                .contains(SymbolFlags::CASE_CLASS_APPLY_DEFERRED)
+        );
         let method = index
             .symbol_at(source, *template.body.last().unwrap())
             .unwrap();

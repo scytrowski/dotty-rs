@@ -19,7 +19,8 @@ clauses; repeated parameters; private constructors; secondary constructors;
 bounded and context-bound type parameters; abstract case classes; and an
 explicit companion. Scala rejects by-name parameters, contextual-only clauses,
 missing clauses, and a same-name term/class collision with E055, E144, E004,
-and E083 respectively.
+and E083 respectively. The two multi-clause contextual-first controls also
+produce E144.
 
 ## Frozen cohort result
 
@@ -28,10 +29,12 @@ object-module rows, with no missing or extra methods after the change. Of the
 39 rows previously blocked by `UnsupportedCaseClassCompanionShape`, 39 now pass
 Namer and reach a later Typer stage (9 package-term, 30 object-module). None of
 the 945 methods is fully typed in the current audit. Reaching Typer is a Namer
-result, not evidence that the method body typed successfully. The focused Typer
-regression verifies that constructing a deferred shape reports
-`ApplicationCalleeNotMethod`; an apply is not synthesized from incomplete
-parameter metadata.
+result, not evidence that the method body typed successfully. The Namer
+records that the generated apply was deferred. Typer reports
+`OverloadedSelectionDeferred` for calls through that companion, including when
+an explicit apply overload exists, because the absent generated overload could
+change selection. A separate whole-method test confirms that an empty ordinary
+clause still gets a usable zero-argument apply.
 
 The per-method receipt is
 [`typer-nested-case-companion-methods-3.9.0.tsv`](typer-nested-case-companion-methods-3.9.0.tsv).

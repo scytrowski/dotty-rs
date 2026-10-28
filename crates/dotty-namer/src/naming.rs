@@ -1898,6 +1898,10 @@ impl Namer<'_> {
                 ));
             }
         };
+        if !synthesize_apply {
+            let class = self.store.symbols.get_mut(class_symbol);
+            class.flags = class.flags | SymbolFlags::CASE_CLASS_APPLY_DEFERRED;
+        }
         if synthesize_apply {
             self.enter_case_class_apply(
                 tree,

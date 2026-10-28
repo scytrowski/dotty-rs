@@ -3,6 +3,67 @@
 use super::*;
 
 impl SourceTyper<'_> {
+    pub(in crate::typer) fn deferred_case_class_for_module_class(
+        &self,
+        module_class: SymbolId,
+    ) -> Option<SymbolId> {
+        if !self.store.symbols.contains(module_class) {
+            return None;
+        }
+        let module = self.store.symbols.get(module_class);
+        if module.kind != SymbolKind::ModuleClass
+            || !(matches!(
+                module.origin,
+                SymbolOrigin::Source(source) if source == self.source
+            ) || module.origin == SymbolOrigin::Synthetic)
+        {
+            return None;
+        }
+        let SourceDefinition::Derived { source, tree } = self.index.definition_of(module_class)?
+        else {
+            return None;
+        };
+        if source != self.source {
+            return None;
+        }
+        let declaration = self.index.symbol_at(source, tree)?;
+        if !self.store.symbols.contains(declaration) {
+            return None;
+        }
+        let declaration_symbol = self.store.symbols.get(declaration);
+        let (class, object) = match declaration_symbol.kind {
+            SymbolKind::Class => (declaration, declaration_symbol.links.companion?),
+            SymbolKind::Object => (declaration_symbol.links.companion?, declaration),
+            _ => return None,
+        };
+        if !self.store.symbols.contains(class) || !self.store.symbols.contains(object) {
+            return None;
+        }
+        let object_symbol = self.store.symbols.get(object);
+        if object_symbol.kind != SymbolKind::Object
+            || object_symbol.owner != declaration_symbol.owner
+            || !(matches!(
+                object_symbol.origin,
+                SymbolOrigin::Source(object_source) if object_source == source
+            ) || object_symbol.origin == SymbolOrigin::Synthetic)
+            || self
+                .index
+                .derived_symbol_at(declaration_symbol.owner?, source, tree)
+                != Some(module_class)
+        {
+            return None;
+        }
+        let class_symbol = self.store.symbols.get(class);
+        (class_symbol.kind == SymbolKind::Class
+            && class_symbol.flags.contains(SymbolFlags::CASE)
+            && class_symbol
+                .flags
+                .contains(SymbolFlags::CASE_CLASS_APPLY_DEFERRED)
+            && class_symbol.origin == SymbolOrigin::Source(source)
+            && class_symbol.links.companion == Some(object))
+        .then_some(class)
+    }
+
     pub(super) fn generated_case_class_for_apply(
         &self,
         method: SymbolId,
@@ -94,9 +155,7 @@ impl SourceTyper<'_> {
                 clause_index: 0,
             });
         };
-        if constructor.value_param_clauses.len() != 1
-            || constructor.value_param_clauses[0].is_empty()
-        {
+        if constructor.value_param_clauses.len() != 1 {
             return Err(TyperError::MalformedMethodClause {
                 method,
                 method_tree_index: class_tree.index(),
