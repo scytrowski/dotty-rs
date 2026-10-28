@@ -1296,7 +1296,6 @@ impl<'a> EncodingContext<'a> {
             };
             if signature.kind != MethodKind::Plain
                 || signature.params.len() != 1
-                || signature.params[0].ty != c.definitions.int
                 || signature.params[0].erased
                 || signature.params[0].varargs
                 || !matches!(c.ty(signature.result)?, Type::TypeRef {
@@ -1306,6 +1305,36 @@ impl<'a> EncodingContext<'a> {
             {
                 return Err(reference(constructor, ReferenceError::Metadata));
             }
+            let parameter_class = if signature.params[0].ty == c.definitions.int {
+                None
+            } else {
+                let Type::TypeRef {
+                    prefix: parameter_prefix,
+                    target: TypeRefTarget::Symbol(parameter_class),
+                } = c.ty(signature.params[0].ty)?
+                else {
+                    return Err(reference(constructor, ReferenceError::Metadata));
+                };
+                let parameter_class = *parameter_class;
+                let parameter_record = c.symbol(parameter_class)?;
+                if parameter_class == class
+                    || !c.same_source_external.contains(&parameter_class)
+                    || parameter_record.kind != SymbolKind::Class
+                    || parameter_record.origin != SymbolOrigin::Source(c.source)
+                    || parameter_record.visibility != Visibility::Public
+                    || !parameter_record.flags.is_empty()
+                    || !parameter_record.annotations.is_empty()
+                    || parameter_record.owner != class_record.owner
+                    || !matches!(c.ty(*parameter_prefix)?, Type::TypeRef {
+                        prefix,
+                        target: TypeRefTarget::Symbol(package),
+                    } if *prefix == c.definitions.no_prefix
+                        && Some(*package) == class_record.owner)
+                {
+                    return Err(reference(constructor, ReferenceError::Metadata));
+                }
+                Some(parameter_class)
+            };
             let owner = class_record
                 .owner
                 .ok_or(reference(class, ReferenceError::Owner))?;
@@ -1317,18 +1346,28 @@ impl<'a> EncodingContext<'a> {
             let class_name = c.utf8(c.text(class_record.name.text())?)?;
             let result_signature = c.intern(NameKey::Qualified(package_name, class_name))?;
             let original = c.utf8("<init>")?;
-            let scala = c.utf8("scala")?;
-            let int = c.utf8("Int")?;
-            let int_signature = c.intern(NameKey::Qualified(scala, int))?;
-            let int_signature =
-                i32::try_from(int_signature).map_err(|_| PickleError::LimitExceeded {
+            let parameter_signature = if let Some(parameter_class) = parameter_class {
+                let parameter_record = c.symbol(parameter_class)?;
+                let parameter_package = parameter_record
+                    .owner
+                    .ok_or(reference(parameter_class, ReferenceError::Owner))?;
+                let parameter_package = c.package_name(parameter_package)?;
+                let parameter_name = c.utf8(c.text(parameter_record.name.text())?)?;
+                c.intern(NameKey::Qualified(parameter_package, parameter_name))?
+            } else {
+                let scala = c.utf8("scala")?;
+                let int = c.utf8("Int")?;
+                c.intern(NameKey::Qualified(scala, int))?
+            };
+            let parameter_signature =
+                i32::try_from(parameter_signature).map_err(|_| PickleError::LimitExceeded {
                     kind: LimitKind::Names,
                     limit: i32::MAX as usize,
                 })?;
             let signed_name = c.intern(NameKey::SignedMany(
                 original,
                 result_signature,
-                vec![int_signature],
+                vec![parameter_signature],
             ))?;
             let owner_type = c.lower_same_source_class_type(class, owner_type)?;
             c.wire

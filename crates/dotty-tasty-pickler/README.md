@@ -66,18 +66,25 @@ call to one public, concrete, non-generic method with an explicit empty value
 clause on that exact formal, when both classes and the target method are
 present in the same validated source/JVM/TASTy batch. The selected target must
 be the canonical `TermRef`; its owner type shares the formal's class type node.
-One cross-class constructor body is also supported: `new C(seed)` where `C` is
-the exact public, concrete, non-generic sibling class in the validated batch,
-its one accessible primary constructor has signature `(Int)C`, and `seed` is
-the factory method's canonical Int formal. The pickler validates the source and
-typed `Apply(Select(New(C), <init>), [seed])` roots, constructor owner/signature,
-and target sidecar provenance before emitting `APPLY(SELECTin(NEW(...)), [seed])`.
-It does not copy the sibling constructor declaration into the factory sidecar.
-Other receivers, external or unplanned targets, overloaded/private/abstract
-methods, other constructor arities/types, secondary/default/using/varargs or
-generic constructors, nested allocations, and multiple class formals remain
-unsupported. Constructors outside this exact source-defined shape fail with
-typed validation errors before bytes are returned.
+One cross-class constructor body is also supported: `new C(argument)` where `C`
+is the exact public, concrete, non-generic sibling class in the validated
+batch, its one accessible primary constructor has one plain `Int` or planned
+class-reference formal, and `argument` is the caller method's canonical formal
+of that same exact type. For a class-reference argument, the input class must
+be a different planned sibling from `C`; the enclosing method result remains
+the exact `C` type. The pickler validates the paired source and typed
+`Apply(Select(New(C), <init>), [argument])` roots, original constructor and
+caller formal identities, exact parameter/result TypeRefs, and target sidecar
+provenance before emitting `APPLY(SELECTin(NEW(...)), TERMREFdirect(argument))`.
+The constructor's signed TASTy name carries `C` as the result type and the
+formal class's qualified source type as its parameter type. It does not copy
+the sibling constructor declaration into the caller sidecar. Other receivers,
+external or unplanned targets, arbitrary reference expressions, fields, null,
+factory values, overloaded/private/abstract targets, other arities,
+secondary/default/using/varargs or generic constructors, nested allocations,
+and multiple arguments remain unsupported. Constructors outside this exact
+source-defined shape fail with typed validation errors before bytes are
+returned. The older `new Counter(seed: Int)` wire output remains unchanged.
 
 For a distinct-class signature such as `wrap(counter: Counter): CounterOwner`,
 `ValidatedClassStatePlan::distinct_reference_method_signature` proves the
@@ -85,10 +92,11 @@ canonical method/formal IDs, the separate planned class IDs and source trees,
 the exact completed formal/result `TypeRef`s, and the original source/typed
 body roots. `project_distinct_reference_method_signature` emits only the
 `PARAM` and result `IDENTtpt` wire roots using those two distinct class
-references. This is a type-fragment proof, not a complete method or TASTy
-file. In particular it does not authorize serializing
-`new CounterOwner(counter)`; that body remains unsupported until its own
-constructor-call validation increment.
+references. This is a type-fragment proof, not a complete method or TASTy file.
+The paired constructor-call proof separately authorizes the bounded
+`new CounterOwner(counter)` body only when the original source and typed trees,
+the caller-owned `counter: Counter` formal, and the distinct
+`CounterOwner.<init>(Counter)` target all agree by canonical identity.
 
 A bounded class-state plan may also emit the exact same-batch alias
 `class CounterOwner(counter: Counter): private val inner: Counter = counter`.
