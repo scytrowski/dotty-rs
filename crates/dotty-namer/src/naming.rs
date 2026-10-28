@@ -54,7 +54,7 @@ pub enum NamerError {
         tree_index: u32,
         expected: &'static str,
     },
-    /// A nested case class uses a constructor shape not supported by generated apply synthesis.
+    /// A case class uses a constructor shape not supported by generated apply synthesis.
     UnsupportedCaseClassCompanionShape {
         tree_index: u32,
         reason: &'static str,
@@ -159,7 +159,7 @@ impl fmt::Display for NamerError {
             }
             Self::UnsupportedCaseClassCompanionShape { tree_index, reason } => write!(
                 f,
-                "nested case class tree {tree_index} cannot receive a generated companion: {reason}"
+                "case class tree {tree_index} cannot receive a generated companion: {reason}"
             ),
             Self::InvalidVisibilityQualifier {
                 tree_index,
@@ -1553,12 +1553,17 @@ impl Namer<'_> {
         };
         if definition.metadata.modifiers.contains(&Modifier::Enum) {
             self.ensure_enum_companion(tree, symbol, declaration_context)?;
-        } else if definition.metadata.modifiers.contains(&Modifier::Case)
-            && self.is_source_object_module_class(
-                self.store.symbols.get(symbol).owner.unwrap_or(symbol),
-            )
-        {
-            self.ensure_nested_case_class_companion(tree, symbol, declaration_context)?;
+        } else if definition.metadata.modifiers.contains(&Modifier::Case) {
+            let owner = self.store.symbols.get(symbol).owner.unwrap_or(symbol);
+            match self.store.symbols.get(owner).kind {
+                SymbolKind::Package => {
+                    self.ensure_case_class_companion(tree, symbol, declaration_context, true)?;
+                }
+                SymbolKind::ModuleClass if self.is_source_object_module_class(owner) => {
+                    self.ensure_case_class_companion(tree, symbol, declaration_context, false)?;
+                }
+                _ => {}
+            }
         }
         self.scan_template_body(
             definition.rhs,
@@ -1615,11 +1620,12 @@ impl Namer<'_> {
             )
     }
 
-    fn ensure_nested_case_class_companion(
+    fn ensure_case_class_companion(
         &mut self,
         tree: TreeId<Untyped>,
         class_symbol: SymbolId,
         declaration_context: SourceContextId,
+        top_level: bool,
     ) -> Result<(), NamerError> {
         let TreeKind::TypeDef(definition) = &self.arena.get(tree).kind else {
             return Err(NamerError::MalformedAstShape {
@@ -1655,11 +1661,15 @@ impl Namer<'_> {
         {
             synthesize_apply = false;
         }
-        let Some(leading_clause) = constructor.value_param_clauses.first() else {
+        let Some(leading_clause) = constructor.value_param_clauses.first().map(Vec::as_slice)
+        else {
             return Err(unsupported(
                 "a case class must have a primary constructor parameter clause",
             ));
         };
+        if top_level && leading_clause.is_empty() {
+            synthesize_apply = false;
+        }
         if leading_clause.iter().any(|parameter_tree| {
             matches!(
                 &self.arena.get(*parameter_tree).kind,
@@ -1668,12 +1678,18 @@ impl Namer<'_> {
                         || parameter.metadata.modifiers.contains(&Modifier::Given)
             )
         }) {
-            return Err(unsupported(
-                "a contextual-only primary constructor is invalid for a case class",
-            ));
+            if top_level {
+                synthesize_apply = false;
+            } else {
+                return Err(unsupported(
+                    "a contextual-only primary constructor is invalid for a case class",
+                ));
+            }
         }
-        let value_parameters = if constructor.value_param_clauses.len() == 1 {
-            leading_clause.as_slice()
+        let value_parameters = if constructor.value_param_clauses.len() == 1
+            && (!top_level || !leading_clause.is_empty())
+        {
+            leading_clause
         } else {
             synthesize_apply = false;
             &[]
@@ -1734,9 +1750,13 @@ impl Namer<'_> {
                 self.arena.get(parameter.tpt).kind,
                 TreeKind::ByNameTypeTree(_)
             ) {
-                return Err(unsupported(
-                    "by-name constructor parameters are invalid for case classes",
-                ));
+                if top_level {
+                    synthesize_apply = false;
+                } else {
+                    return Err(unsupported(
+                        "by-name constructor parameters are invalid for case classes",
+                    ));
+                }
             }
             if matches!(
                 self.arena.get(parameter.tpt).kind,
@@ -1753,14 +1773,37 @@ impl Namer<'_> {
                 .owner
                 .ok_or(NamerError::MalformedAstShape {
                     tree_index: tree.index(),
-                    expected: "nested case class with an object owner",
+                    expected: if top_level {
+                        "top-level case class with a package owner"
+                    } else {
+                        "nested case class with an object owner"
+                    },
                 })?;
+        let owner_kind = self.store.symbols.get(owner).kind;
+        if (top_level && owner_kind != SymbolKind::Package)
+            || (!top_level
+                && (owner_kind != SymbolKind::ModuleClass
+                    || !self.is_source_object_module_class(owner)))
+        {
+            return Err(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: if top_level {
+                    "top-level case class with a package owner"
+                } else {
+                    "nested case class with an object owner"
+                },
+            });
+        }
         let owner_scope = self
             .index
             .scope_of(owner)
             .ok_or(NamerError::MalformedAstShape {
                 tree_index: tree.index(),
-                expected: "enclosing object with a declaration scope",
+                expected: if top_level {
+                    "package owner with a declaration scope"
+                } else {
+                    "enclosing object with a declaration scope"
+                },
             })?;
         let class_name = self.store.symbols.get(class_symbol).name;
         let class_type_name = *TypeName::new(class_name.text()).as_name();
@@ -4165,7 +4208,23 @@ mod tests {
     fn entered_class_flags(modifiers: Vec<Modifier>) -> SymbolFlags {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
-        let class = class_definition(&mut arena, &mut store, "Flagged", modifiers, vec![], None);
+        let value_param_clauses = if modifiers.contains(&Modifier::Case) {
+            vec![vec![]]
+        } else {
+            vec![]
+        };
+        let class = class_definition_with_header(
+            &mut arena,
+            &mut store,
+            "Flagged",
+            modifiers,
+            vec![],
+            None,
+            vec![],
+            value_param_clauses,
+            None,
+        )
+        .0;
         let root = package_with_stat(&mut arena, &mut store, "flags", vec![class]);
         let mut packages = Packages::new();
 
@@ -4903,14 +4962,18 @@ mod tests {
     fn case_class_remains_class_kind() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
-        let class = class_definition(
+        let class = class_definition_with_header(
             &mut arena,
             &mut store,
             "Point",
             vec![Modifier::Case],
             vec![],
             None,
-        );
+            vec![],
+            vec![vec![]],
+            None,
+        )
+        .0;
         let root = package_with_stat(&mut arena, &mut store, "geometry", vec![class]);
         let mut packages = Packages::new();
 
@@ -4947,7 +5010,7 @@ mod tests {
 
     #[test]
     fn case_class_sets_the_case_symbol_flag() {
-        assert_eq!(entered_class_flags(vec![Modifier::Case]), SymbolFlags::CASE);
+        assert!(entered_class_flags(vec![Modifier::Case]).contains(SymbolFlags::CASE));
     }
 
     #[test]

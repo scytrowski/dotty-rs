@@ -486,7 +486,10 @@ impl SourceTyper<'_> {
         let object_symbol = self.store.symbols.get(object);
         if object_symbol.origin != SymbolOrigin::Synthetic
             || object_symbol.owner != Some(owner)
-            || self.store.symbols.get(owner).kind != SymbolKind::ModuleClass
+            || !matches!(
+                self.store.symbols.get(owner).kind,
+                SymbolKind::ModuleClass | SymbolKind::Package
+            )
         {
             return None;
         }
