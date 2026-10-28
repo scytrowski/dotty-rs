@@ -3328,19 +3328,77 @@ def consume_nested_constructor_batch(toolchain: Toolchain, batch_root: Path) -> 
         # The valid alternate batch changes the Factory result to Counter.
         # A client requiring CounterOwner must reject the mismatch at typing.
         wrong_result_root = batch_root / "wrong-result"
+        wrong_result_paths = {
+            f"example/{name}.{suffix}"
+            for name in class_methods for suffix in ("class", "tasty")
+        }
+        actual_wrong_result_paths = {
+            path.relative_to(wrong_result_root).as_posix()
+            for path in wrong_result_root.rglob("*") if path.is_file()
+        }
+        if actual_wrong_result_paths != wrong_result_paths:
+            raise RuntimeError(
+                "wrong-result batch must contain exactly the six class/TASTy artifacts: "
+                f"{sorted(actual_wrong_result_paths)}"
+            )
+        wrong_result_uuids: set[bytes] = set()
+        for name in class_methods:
+            class_bytes = (wrong_result_root / f"example/{name}.class").read_bytes()
+            tasty_bytes = (wrong_result_root / f"example/{name}.tasty").read_bytes()
+            link = _class_tasty_link(class_bytes)
+            if class_bytes[6:8] != (65).to_bytes(2, "big"):
+                raise RuntimeError(f"wrong-result {name} classfile is not major version 65")
+            if link is None or link != _tasty_header_uuid(tasty_bytes):
+                raise RuntimeError(f"wrong-result {name} classfile/TASTy UUID mismatch")
+            wrong_result_uuids.add(link)
+        if len(wrong_result_uuids) != len(class_methods):
+            raise RuntimeError("wrong-result batch does not have one distinct TASTY UUID per class")
+
         wrong_result_probe = (
             "package consumer\nobject WrongResult:\n"
             "  def create(value: example.CounterOwnerFactory): example.CounterOwner = value.create(1)\n"
         )
+
+        def is_expected_wrong_result_diagnostic(output: str) -> bool:
+            return (
+                re.search(r"(?m)^-- \[E007\] Type Mismatch Error:", output) is not None
+                and re.search(r"(?m)^\s*\|\s+Found:\s+example\.Counter\s*$", output) is not None
+                and re.search(r"(?m)^\s*\|\s+Required:\s+example\.CounterOwner\s*$", output) is not None
+                and re.search(r"(?m)^1 error found$", output) is not None
+            )
+
         try:
             compile_probe("wrong-factory-result", wrong_result_root, wrong_result_probe)
         except CommandFailure as error:
             failure = error.output
         else:
             raise RuntimeError("altered Factory result unexpectedly typed as CounterOwner")
-        if "Counter" not in failure or "CounterOwner" not in failure:
+        if not is_expected_wrong_result_diagnostic(failure):
             raise RuntimeError(f"altered Factory result failed for an unexpected reason: {failure}")
         reports["wrong_factory_result"] = failure.strip()
+
+        missing_wrong_result_root = work / "wrong-result-missing-classpath"
+        missing_wrong_result_root.mkdir()
+        try:
+            compile_probe(
+                "wrong-factory-result-missing-classpath",
+                missing_wrong_result_root,
+                wrong_result_probe,
+            )
+        except CommandFailure as error:
+            missing_classpath_failure = error.output
+        else:
+            raise RuntimeError("wrong-result control unexpectedly compiled without its classpath")
+        if is_expected_wrong_result_diagnostic(missing_classpath_failure):
+            raise RuntimeError("missing-classpath E006 was accepted as the altered-result E007")
+        if not re.search(r"(?m)^-- \[E006\] Not Found Error:", missing_classpath_failure) or \
+                "Not found: example" not in missing_classpath_failure or \
+                not re.search(r"(?m)^2 errors found$", missing_classpath_failure):
+            raise RuntimeError(
+                "missing-classpath regression did not reach the expected E006 failure: "
+                f"{missing_classpath_failure}"
+            )
+        reports["wrong_factory_result_missing_classpath"] = missing_classpath_failure.strip()
 
         # Compilation-only ABI control: hide the Owner sidecar and remove its
         # reference constructor from the classfile. No modified producer
@@ -3525,6 +3583,7 @@ def consume_nested_constructor_batch(toolchain: Toolchain, batch_root: Path) -> 
         "renamed_reordered_scala_consumer": True,
         "renamed_classfile_only_control_rejected": True,
         "wrong_factory_result_rejected": True,
+        "wrong_factory_result_missing_classpath_rejected": True,
         "wrong_factory_constructor_signature_rejected_at_compile": True,
     }
 

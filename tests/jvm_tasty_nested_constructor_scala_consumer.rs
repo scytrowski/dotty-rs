@@ -129,6 +129,7 @@ fn pinned_scala_consumes_nested_rust_tasty_and_executes_original_classes() {
         "\"renamed_reordered_scala_consumer\": true",
         "\"renamed_classfile_only_control_rejected\": true",
         "\"wrong_factory_result_rejected\": true",
+        "\"wrong_factory_result_missing_classpath_rejected\": true",
         "\"wrong_factory_constructor_signature_rejected_at_compile\": true",
     ] {
         assert!(report.contains(evidence), "missing {evidence} in {report}");

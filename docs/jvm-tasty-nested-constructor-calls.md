@@ -347,9 +347,14 @@ corrupt sidecar reports `not a TASTy file`, and a stale class-to-sidecar UUID
 reports that the classfile is out of sync. The UUID mismatch is run with
 `-Werror` and fails on that warning. An exact six-path inventory rejects a
 partial batch; compiling that partial batch also stops at the pinned compiler's
-missing `.tasty` diagnostic. A separate valid Rust batch with the Factory result changed to
-`Counter` fails a consumer requiring `CounterOwner`. A compile-only
-classfile-fallback control removes the Owner sidecar and its
+missing `.tasty` diagnostic. A separate valid Rust batch with the Factory
+result changed to `Counter` fails a consumer requiring `CounterOwner` with the
+pinned Scala `E007` mismatch (`Found: example.Counter`,
+`Required: example.CounterOwner`, one error). The same probe against an empty
+classpath reproduces `E006 Not Found: example` with two errors and is rejected
+as unrelated. The alternate batch must contain exactly the six class/TASTy
+paths with classfile major 65 and matching, distinct class-to-sidecar UUIDs.
+A compile-only classfile-fallback control removes the Owner sidecar and its
 `<init>(Counter)` member; a Scala source call then fails at constructor
 resolution. The modified classfile is never executed. Finally, a renamed and
 declaration-reordered Rust batch with its own matching sidecars also compiles
