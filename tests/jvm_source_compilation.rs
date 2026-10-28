@@ -41,6 +41,8 @@ const TASTY_OBJECT_COMPOSITION_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_object_composition/CounterOwner.scala");
 const TASTY_CONSTRUCTOR_INJECTION_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_constructor_injection/CounterOwner.scala");
+const TASTY_NESTED_CONSTRUCTOR_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala");
 
 type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
@@ -15373,6 +15375,87 @@ fn nested_new_constructor_arguments_lower_lifo_and_verify_initialized_values() {
         assert!(javap_output.contains("Holder.\"<init>\":(LCounter;)V"));
         assert!(javap_output.contains("Pair.\"<init>\":(LCounter;LCounter;)V"));
         assert!(javap_output.contains("Node.\"<init>\":(LNode;)V"));
+    }
+}
+
+#[test]
+fn exact_tasty_audit_source_emits_nested_owner_factory_on_the_jvm_only_path() {
+    let output = TestOutputDirectory::new("tasty-audit-nested-jvm-only");
+    let artifacts =
+        compile_planned_constructor_source(TASTY_NESTED_CONSTRUCTOR_SOURCE, output.path())
+            .expect("the original three-class source remains supported by JVM-only emission");
+    let factory_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "example/CounterOwnerFactory")
+        .expect("Factory class is emitted");
+    let factory = decode_emitted_class(factory_artifact);
+    let create = emitted_method_code(&factory, "create");
+    assert_opcode_sequence(create, &[0xbb, 0x59, 0xbb, 0x59, 0x1b, 0xb7, 0xb7, 0xb0]);
+    let constructor_references = decode_subset_instructions(create)
+        .into_iter()
+        .filter_map(|(offset, opcode)| {
+            if opcode != 0xb7 {
+                return None;
+            }
+            let index = u16::from_be_bytes([create[offset + 1], create[offset + 2]]);
+            let ConstantPoolEntry::Methodref {
+                class_index,
+                name_and_type_index,
+            } = factory.constant_pool.get(ConstantPoolIndex(index))?
+            else {
+                panic!("invokespecial references Methodref");
+            };
+            Some((
+                factory.constant_pool.class_name(*class_index).unwrap(),
+                factory
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .unwrap(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        constructor_references,
+        vec![
+            ("example/Counter", ("<init>", "(I)V")),
+            ("example/CounterOwner", ("<init>", "(Lexample/Counter;)V")),
+        ]
+    );
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("NestedTastyAuditHarness.java");
+        fs::write(
+            &harness,
+            "public final class NestedTastyAuditHarness { public static void main(String[] args) { example.CounterOwnerFactory factory = new example.CounterOwnerFactory(); if (factory.create(7).read() != 7) throw new AssertionError(\"nested factory result\"); if (factory.create(3).read() != 3) throw new AssertionError(\"second nested factory result\"); } }\n",
+        )
+        .unwrap();
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .unwrap();
+        assert!(
+            javac.status.success(),
+            "javac rejected nested audit harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "NestedTastyAuditHarness",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected JVM-only nested audit output\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
     }
 }
 
