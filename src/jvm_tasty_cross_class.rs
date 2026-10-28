@@ -86,12 +86,109 @@ pub struct ValidatedCrossClassConstructorCallProof<'session> {
     typed_select: TreeId<Typed>,
     typed_new: TreeId<Typed>,
     typed_argument: TreeId<Typed>,
-    nested_argument: Option<NestedConstructorArgumentProof>,
+    argument_proof: ConstructorArgumentProof,
     formal_type: TypeId,
     constructor_formal_type: TypeId,
     result_type: TypeId,
     method_descriptor: String,
     constructor_descriptor: String,
+}
+
+/// Supported shape of a validated cross-class constructor argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstructorArgumentProofKind {
+    /// The outer constructor receives the calling method's exact formal.
+    Formal,
+    /// The outer constructor receives one nested `new Target(formal)` call.
+    NestedNew,
+    /// The outer constructor receives a same-instance planned method result.
+    PlannedCall,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FormalConstructorArgumentProof {
+    source_argument: TreeId<Untyped>,
+    typed_argument: TreeId<Typed>,
+    formal: SymbolId,
+    formal_type: TypeId,
+    result_type: TypeId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConstructorArgumentProofShape {
+    Formal(FormalConstructorArgumentProof),
+    NestedNew(NestedConstructorArgumentProof),
+    PlannedCall(PlannedCallProof),
+}
+
+/// Opaque receipt for one validated constructor-argument expression shape.
+/// Its private sum type prevents callers from manufacturing partially proved
+/// variants while preserving a compact, explicit shape contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConstructorArgumentProof {
+    shape: ConstructorArgumentProofShape,
+}
+
+impl ConstructorArgumentProof {
+    pub const fn kind(self) -> ConstructorArgumentProofKind {
+        match self.shape {
+            ConstructorArgumentProofShape::Formal(_) => ConstructorArgumentProofKind::Formal,
+            ConstructorArgumentProofShape::NestedNew(_) => ConstructorArgumentProofKind::NestedNew,
+            ConstructorArgumentProofShape::PlannedCall(_) => {
+                ConstructorArgumentProofKind::PlannedCall
+            }
+        }
+    }
+
+    pub const fn planned_call(self) -> Option<PlannedCallProof> {
+        match self.shape {
+            ConstructorArgumentProofShape::PlannedCall(proof) => Some(proof),
+            _ => None,
+        }
+    }
+
+    pub const fn formal(self) -> Option<FormalConstructorArgumentProofView> {
+        match self.shape {
+            ConstructorArgumentProofShape::Formal(proof) => {
+                Some(FormalConstructorArgumentProofView {
+                    source_argument: proof.source_argument,
+                    typed_argument: proof.typed_argument,
+                    formal: proof.formal,
+                    formal_type: proof.formal_type,
+                    result_type: proof.result_type,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Read-only identities retained by a direct formal argument proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FormalConstructorArgumentProofView {
+    source_argument: TreeId<Untyped>,
+    typed_argument: TreeId<Typed>,
+    formal: SymbolId,
+    formal_type: TypeId,
+    result_type: TypeId,
+}
+
+impl FormalConstructorArgumentProofView {
+    pub const fn source_argument(self) -> TreeId<Untyped> {
+        self.source_argument
+    }
+    pub const fn typed_argument(self) -> TreeId<Typed> {
+        self.typed_argument
+    }
+    pub const fn formal(self) -> SymbolId {
+        self.formal
+    }
+    pub const fn formal_type(self) -> TypeId {
+        self.formal_type
+    }
+    pub const fn result_type(self) -> TypeId {
+        self.result_type
+    }
 }
 
 /// Exact original source and typed identities for the supported one-level
@@ -139,6 +236,84 @@ impl NestedConstructorArgumentProof {
     }
     pub const fn formal(self) -> SymbolId {
         self.formal
+    }
+    pub const fn formal_type(self) -> TypeId {
+        self.formal_type
+    }
+    pub const fn result_type(self) -> TypeId {
+        self.result_type
+    }
+}
+
+/// Immutable provenance receipt for an exact same-instance helper call used
+/// as a constructor argument. Source and typed roots are the original session
+/// trees; owner and member are the canonical semantic identities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlannedCallProof {
+    source_apply: TreeId<Untyped>,
+    source_function: TreeId<Untyped>,
+    source_argument: TreeId<Untyped>,
+    source_receiver: Option<TreeId<Untyped>>,
+    helper_source_tree: TreeId<Untyped>,
+    helper_source_rhs: TreeId<Untyped>,
+    typed_apply: TreeId<Typed>,
+    typed_function: TreeId<Typed>,
+    typed_argument: TreeId<Typed>,
+    typed_receiver: Option<TreeId<Typed>>,
+    helper_typed_rhs: TreeId<Typed>,
+    owner: SymbolId,
+    method: SymbolId,
+    formal: SymbolId,
+    helper_formal: SymbolId,
+    formal_type: TypeId,
+    result_type: TypeId,
+}
+
+impl PlannedCallProof {
+    pub const fn source_apply(self) -> TreeId<Untyped> {
+        self.source_apply
+    }
+    pub const fn source_function(self) -> TreeId<Untyped> {
+        self.source_function
+    }
+    pub const fn source_argument(self) -> TreeId<Untyped> {
+        self.source_argument
+    }
+    pub const fn source_receiver(self) -> Option<TreeId<Untyped>> {
+        self.source_receiver
+    }
+    pub const fn helper_source_tree(self) -> TreeId<Untyped> {
+        self.helper_source_tree
+    }
+    pub const fn helper_source_rhs(self) -> TreeId<Untyped> {
+        self.helper_source_rhs
+    }
+    pub const fn typed_apply(self) -> TreeId<Typed> {
+        self.typed_apply
+    }
+    pub const fn typed_function(self) -> TreeId<Typed> {
+        self.typed_function
+    }
+    pub const fn typed_argument(self) -> TreeId<Typed> {
+        self.typed_argument
+    }
+    pub const fn typed_receiver(self) -> Option<TreeId<Typed>> {
+        self.typed_receiver
+    }
+    pub const fn helper_typed_rhs(self) -> TreeId<Typed> {
+        self.helper_typed_rhs
+    }
+    pub const fn owner(self) -> SymbolId {
+        self.owner
+    }
+    pub const fn method(self) -> SymbolId {
+        self.method
+    }
+    pub const fn formal(self) -> SymbolId {
+        self.formal
+    }
+    pub const fn helper_formal(self) -> SymbolId {
+        self.helper_formal
     }
     pub const fn formal_type(self) -> TypeId {
         self.formal_type
@@ -210,11 +385,17 @@ impl ValidatedCrossClassConstructorCallProof<'_> {
     pub const fn typed_argument(&self) -> TreeId<Typed> {
         self.typed_argument
     }
+    /// Opaque sum type identifying the fully validated argument shape.
+    pub const fn argument_proof(&self) -> ConstructorArgumentProof {
+        self.argument_proof
+    }
     /// Exact nested constructor identities when this proof wraps a one-level
-    /// constructor application. The returned nodes remain borrowed through
-    /// this receipt's session lifetime.
+    /// constructor application. Retained for source compatibility.
     pub const fn nested_argument(&self) -> Option<NestedConstructorArgumentProof> {
-        self.nested_argument
+        match self.argument_proof.shape {
+            ConstructorArgumentProofShape::NestedNew(proof) => Some(proof),
+            _ => None,
+        }
     }
     /// Canonical semantic type of the method formal and constructor argument.
     pub const fn formal_type(&self) -> TypeId {
@@ -1762,6 +1943,18 @@ fn validate_constructor_call_candidate<'session>(
             "method and constructor descriptors do not preserve the exact argument and result class identities",
         ));
     }
+    let argument_proof = ConstructorArgumentProof {
+        shape: match nested_argument_proof {
+            Some(nested) => ConstructorArgumentProofShape::NestedNew(nested),
+            None => ConstructorArgumentProofShape::Formal(FormalConstructorArgumentProof {
+                source_argument,
+                typed_argument,
+                formal: method_formal,
+                formal_type,
+                result_type,
+            }),
+        },
+    };
     Ok(ValidatedCrossClassConstructorCallProof {
         _store: store,
         _source_ast: source_ast,
@@ -1784,7 +1977,7 @@ fn validate_constructor_call_candidate<'session>(
         typed_select,
         typed_new,
         typed_argument,
-        nested_argument: nested_argument_proof,
+        argument_proof,
         formal_type,
         constructor_formal_type,
         result_type,

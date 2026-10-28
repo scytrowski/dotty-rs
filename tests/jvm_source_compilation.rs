@@ -15411,6 +15411,10 @@ fn exact_tasty_audit_source_emits_nested_owner_factory_on_the_jvm_only_path() {
         let nested = proof
             .nested_argument()
             .expect("the outer argument receipt retains the exact nested call");
+        assert_eq!(
+            proof.argument_proof().kind(),
+            dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::NestedNew
+        );
         assert_eq!(proof.source_id(), source_id);
         assert_eq!(proof.formal_class(), None);
         assert_ne!(nested.class(), proof.target_class());

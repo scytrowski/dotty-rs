@@ -207,6 +207,18 @@ fn assert_generic_proof(source: &str, source_number: u32, expected_descriptor: &
         .find(|(_, class, _, _)| *class == caller_class)
         .unwrap();
     let target_class = proof.target_class();
+    assert_eq!(
+        proof.argument_proof().kind(),
+        dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::Formal
+    );
+    let formal = proof
+        .argument_proof()
+        .formal()
+        .expect("direct source formal has an explicit proof variant");
+    assert_eq!(formal.formal(), proof.method_formal());
+    assert_eq!(formal.source_argument(), proof.source_argument());
+    assert_eq!(formal.typed_argument(), proof.typed_argument());
+    assert_eq!(formal.formal_type(), proof.formal_type());
     assert_ne!(proof.caller_class(), target_class);
     assert_eq!(proof.caller_class(), caller_plan.1);
     let formal_class = proof
