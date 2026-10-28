@@ -1658,11 +1658,9 @@ impl Namer<'_> {
                 "primary constructor has visibility or special modifiers",
             ));
         }
-        if constructor.value_param_clauses.len() != 1
-            || constructor.value_param_clauses[0].is_empty()
-        {
+        if constructor.value_param_clauses.len() != 1 {
             return Err(unsupported(
-                "expected exactly one non-empty ordinary value parameter clause",
+                "expected exactly one ordinary value parameter clause",
             ));
         }
         if template.body.iter().any(|member| {

@@ -1,7 +1,7 @@
 use dotty_core::{
     HardKeyword, Packages, Punctuation, ScannerEvent, SemanticStore, SourceId, SourceText,
-    SymbolFlags, TextRange, Token, TokenKind, TokenSource, TokenValue, TreeKind, TypeName,
-    Visibility,
+    SymbolFlags, SymbolKind, TermName, TextRange, Token, TokenKind, TokenSource, TokenValue,
+    TreeKind, TypeName, Visibility,
 };
 use dotty_namer::{
     NamerDiagnostic, NamerError, NamerIssue, NamingOutcome, SourceContextId, SourceDefinition,
@@ -6202,7 +6202,7 @@ fn unsupported_nested_case_class_shape_rolls_back_and_later_naming_succeeds() {
     assert!(matches!(
         error,
         NamerError::UnsupportedCaseClassCompanionShape {
-            reason: "expected exactly one non-empty ordinary value parameter clause",
+            reason: "expected exactly one ordinary value parameter clause",
             ..
         }
     ));
@@ -6245,6 +6245,58 @@ fn unsupported_nested_case_class_shape_rolls_back_and_later_naming_succeeds() {
     };
     let class = index.symbol_at(valid_source, template.body[0]).unwrap();
     assert!(store.symbols.get(class).links.companion.is_some());
+}
+
+#[test]
+fn nested_empty_case_class_clause_gets_zero_argument_apply_and_preserves_siblings() {
+    let source_text = "object Owners { case class Node(); def unrelated: Int = 1 }";
+    let (parsed, source, mut store) = parsed_source(source_text, 1809);
+    let mut packages = Packages::new();
+    let named = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "EmptyCaseClass.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("an empty primary constructor clause is a supported case-class shape");
+
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("compilation unit should have a package root");
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(owner)) =
+        &parsed.ast.get(package.stats[0]).kind
+    else {
+        panic!("Owners should be an object");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(owner.template).kind else {
+        panic!("Owners should have a template");
+    };
+    let class = named.symbol_at(source, template.body[0]).unwrap();
+    let method = named.symbol_at(source, template.body[1]).unwrap();
+    let companion = store.symbols.get(class).links.companion.unwrap();
+    assert_eq!(store.symbols.get(companion).kind, SymbolKind::Object);
+    let module_class = named
+        .derived_symbol_at(
+            store.symbols.get(class).owner.unwrap(),
+            source,
+            template.body[0],
+        )
+        .unwrap();
+    let companion_scope = named.scope_of(module_class).unwrap();
+    let apply_name = TermName::new(store.names.intern("apply"));
+
+    assert_eq!(
+        store
+            .scopes
+            .get(companion_scope)
+            .lookup_all(apply_name.as_name())
+            .len(),
+        1,
+        "the synthetic companion should contain exactly one generated apply"
+    );
+    assert_eq!(store.symbols.get(method).kind, SymbolKind::Method);
 }
 
 #[test]
