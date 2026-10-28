@@ -812,6 +812,13 @@ impl SourceTyper<'_> {
             position,
             info_journal,
         )?;
+        if self.is_deferred_case_class_companion_apply(ident.name, symbol) {
+            return Err(TyperError::OverloadedSelectionDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                name: ident.name,
+            });
+        }
         let declaration = self.store.symbols.get(symbol);
         if let Some(receiver) = self.uninitialized_parent_receiver
             && self.is_instance_class_member(symbol)

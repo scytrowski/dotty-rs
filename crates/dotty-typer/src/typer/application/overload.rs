@@ -524,6 +524,16 @@ impl SourceTyper<'_> {
                     function_tree.index(),
                     function_node.position,
                 )?;
+                if candidates
+                    .iter()
+                    .any(|symbol| self.is_deferred_case_class_companion_apply(ident.name, *symbol))
+                {
+                    return Err(TyperError::OverloadedSelectionDeferred {
+                        source: self.source,
+                        tree_index: application_tree_index,
+                        name: ident.name,
+                    });
+                }
                 if candidates.len() <= 1 {
                     return Ok(None);
                 }

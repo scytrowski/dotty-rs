@@ -3,6 +3,22 @@
 use super::*;
 
 impl SourceTyper<'_> {
+    pub(in crate::typer) fn is_deferred_case_class_companion_apply(
+        &self,
+        name: Name,
+        symbol: SymbolId,
+    ) -> bool {
+        self.store.names.resolve(name.text()) == "apply"
+            && self.store.symbols.contains(symbol)
+            && self.store.symbols.get(symbol).kind == SymbolKind::Method
+            && self
+                .store
+                .symbols
+                .get(symbol)
+                .owner
+                .is_some_and(|owner| self.deferred_case_class_for_module_class(owner).is_some())
+    }
+
     pub(in crate::typer) fn deferred_case_class_for_module_class(
         &self,
         module_class: SymbolId,

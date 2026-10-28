@@ -523,7 +523,7 @@ fn deferred_case_class_apply_keeps_sibling_typing_and_fails_at_use() {
 
 #[test]
 fn deferred_case_class_apply_rejects_an_explicit_companion_overload_in_whole_method_typing() {
-    let text = "object O { case class N(x: Int = 1); object N { def apply(x: Any): Int = 2 }; def test = N(1); def explicit = N.apply(1) }";
+    let text = "object O { case class N(x: Int = 1); object N { def apply(x: Any): Int = 2; def unqualified = apply(1); def locallyShadowed = { def apply(x: Any): Int = 3; apply(1) } }; def test = N(1); def explicit = N.apply(1) }";
     let source = SourceId::from_index(1810);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -554,7 +554,7 @@ fn deferred_case_class_apply_rejects_an_explicit_companion_overload_in_whole_met
             };
             matches!(
                 store.names.resolve(definition.name.as_name().text()),
-                "test" | "explicit"
+                "test" | "explicit" | "unqualified" | "locallyShadowed"
             )
             .then_some((
                 store
@@ -565,7 +565,7 @@ fn deferred_case_class_apply_rejects_an_explicit_companion_overload_in_whole_met
             ))
         })
         .collect::<Vec<_>>();
-    assert_eq!(test_methods.len(), 2);
+    assert_eq!(test_methods.len(), 4);
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -577,6 +577,13 @@ fn deferred_case_class_apply_rejects_an_explicit_companion_overload_in_whole_met
     .with_resolver(Box::new(NoResolver));
     for (name, tree) in test_methods {
         let result = typer.type_method_definition(tree);
+        if name == "locallyShadowed" {
+            assert!(
+                result.is_ok(),
+                "a local apply should shadow the companion apply: {result:?}"
+            );
+            continue;
+        }
         assert!(
             matches!(
                 result,
@@ -639,6 +646,64 @@ fn deferred_polymorphic_case_class_apply_rejects_explicit_type_arguments() {
             Err(TyperError::OverloadedTypeApplicationDeferred { .. })
         ),
         "explicit type arguments must not hide the missing generated apply overload: {result:?}"
+    );
+    assert!(!matches!(
+        typer.store().symbols.info(test_symbol),
+        SymbolInfo::Complete(_)
+    ));
+}
+
+#[test]
+fn deferred_polymorphic_case_class_apply_rejects_unqualified_type_application() {
+    let text = "object O { case class N[A](x: Int = 1); object N { def apply[A](x: Any): Int = 2; def test = apply[Int](1) } }";
+    let source = SourceId::from_index(1813);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "deferred-polymorphic-unqualified-apply.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("a valid polymorphic explicit companion should be named");
+    let (test_tree, test_symbol) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "test")
+                .then_some((tree, index.symbol_at(source, tree).unwrap()))
+        })
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(NoResolver));
+    let result = typer.type_method_definition(test_tree);
+    assert!(
+        matches!(
+            result,
+            Err(TyperError::OverloadedTypeApplicationDeferred { .. })
+        ),
+        "unqualified explicit type arguments must not hide the missing generated apply overload: {result:?}"
     );
     assert!(!matches!(
         typer.store().symbols.info(test_symbol),
