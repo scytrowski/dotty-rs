@@ -19,13 +19,13 @@ malformed, differently owned, or kind-incompatible declarations remain
 unresolved or fail with the existing typed error. Object/ModuleClass and
 companion-term identities use their existing separate paths.
 
-This change does **not** resolve the three pinned standard-library roots. The
-exact root audit still reports both `Option.map` and `Either.swap` blocked by
-external module identity collisions. `Tuple.toArray` reaches argument
-conformance, but that same diagnostic was already present in the immediate
-pre-change checkout; therefore this PR does not claim a real-root advance.
-The scoped source-owned class reuse is covered synthetically, but it is not
-sufficient evidence for the issue's real-root acceptance criterion.
+The top-level source-companion change from #1826 now advances the two roots
+that previously stopped at module identity collisions. On the combined tree,
+`Option.map` reaches `IfBranchJoinUnsupported` and `Either.swap` reaches
+`ExtractorUnapplyNotFound`; neither whole method types. `Tuple.toArray` remains
+blocked at argument conformance. These root advances come from #1826, not this
+classloader change. This PR separately covers identity reuse for complete
+source classes and fail-closed behavior for incomplete source identities.
 
 ## Evidence
 
@@ -36,17 +36,15 @@ that source provenance, `ClassInfo`, declarations, and package membership are
 unchanged. It does not establish Scala compiler parity or a whole-method
 typing result.
 
-The exact three roots were audited against the pinned Scala checkout at
-`777528f19a58e794c9954a42f433373472ec57f8`, using Scala compiler 3.9.0 and the
-JDK 21 (`/home/vdrake6/.jdks/jdk-21`). The immediate pre-change checkout was `21ca7e0d6921166fda810897efa9658956042735` (the PR base `2738ddf91cfba88a92649aec0f36a27988c7f4f8` adds disjoint JVM-only PR #1805). The result TSV records both method outcomes. The before/after root outcomes were identical: 0/3 fully typed, `Option.map` and `Either.swap` at module identity collisions, and `Tuple.toArray` at argument conformance.
+After rebasing this PR onto `main` at `8b14506e83019474317e5223c724f667b2de19e5` (including #1826), the exact three roots were audited against pinned Scala revision `777528f19a58e794c9954a42f433373472ec57f8` and JDK 21 (`/home/vdrake6/.jdks/jdk-21`). The deterministic audit reports 0/3 whole methods typed. `Option.map` now reaches `IfBranchJoinUnsupported`, `Either.swap` reaches `ExtractorUnapplyNotFound`, and `Tuple.toArray` remains at `ApplicationArgumentConformanceUnsupported`. The first two advances match #1826's report; this PR makes no claim to have caused them.
 
-The full frozen ordinary cohort ran twice with determinism verification under JDK 21 and reported 14/25 complete, 11 blocked, 0 excluded, and 0 not attempted. This preserves the baseline count of 14/25, but the report is not a claim that any blocked method was completed. The three-root focused run also passed twice with identical normalized output.
+The full frozen ordinary cohort passed twice with determinism verification on the combined tree: 14/25 complete, 11 blocked, 0 excluded, 0 not attempted. The three-root audit passed determinism verification, with 0/3 whole methods typed.
 
 The pinned Scala 3.9 import oracle controls passed under JDK 21. A new focused source/classpath oracle also passed. It compiles a binary `Base` and `Child extends Base`, then a source `Base` shadow; Scala accepts the external child as the source parent. For a binary case-class `Product` with a `classpathOnly` companion method, a same-name source case class can be constructed but does not inherit that binary companion method. An unrelated ordinary source `Product` also cannot use that method. Therefore attaching the external `Some`/`Left` module to an incomplete source class based on name, owner, and `CASE` flag would not match Scala 3.9 semantics.
 
-The real root audit's source-side trace records `scala.Some` and `scala.util.Left` as unique package-owned type-namespace `Class` symbols from `SourceId(0)`, with `SymbolInfo::Missing`, case flags, and no companion link. `scala.Tuple` is a source `Trait` with missing info and an existing source companion link. The pinned `scala-library-3.9.0.jar` contains both `.tasty` and `.class` entries for these names; the loader's TASTy-preferred lookup selects that jar's TASTy resource. The root errors are nested `IdentityConflict`s for an occupied canonical package name. The new synthetic collision test verifies rollback leaves the source declaration intact and removes partial module shells, then succeeds on retry after the conflict is removed. A separate test verifies two different classpath snapshot origins remain local to independent stores. These tests do not expose post-failure state from the full typer audit itself.
+The source audit reports `scala.Some` and `scala.util.Left` as package-owned source type `Class` symbols whose `ClassInfo` remains `Missing`. #1826 now supplies each with a canonical synthetic package-owned companion term and module class, bidirectional class/object links, and a derived `apply` for represented constructor shapes. The module identity collisions are gone, but later Typer blockers remain. The loader continues to reject incomplete or incompatible classpath identities rather than importing binary-only companion members. On the rebased tree, all `dotty-classloader` targets pass, including the source-module collision rollback/retry test, independent classpath snapshot test, and complete source-class parent identity test.
 
-No `scalac` executable is on `PATH`; both oracles invoked `dotty.tools.dotc.Main` from the verified Scala 3.9.0 compiler jars. The evidence indicates the unresolved prerequisite is source Namer support for a canonical synthetic companion for top-level case classes (and its `apply` signature from source constructor parameters). That should be handled in the coordinated Namer workstream. The classloader should keep failing closed until it can consume a source-owned companion identity; it must not borrow the binary companion, which the Scala oracle rejects.
+No `scalac` executable is on `PATH`; the pinned Scala controls invoked `dotty.tools.dotc.Main` from the verified Scala 3.9.0 compiler jars. The source/classpath controls confirm that a same-named binary companion's `classpathOnly` member must not flow into a source case class or unrelated source class. The classloader behavior in this PR remains independently useful for complete source-owned parent classes, while incomplete source class and module identities continue to fail closed.
 
 ## Reproduction
 
@@ -71,7 +69,18 @@ PYTHONDONTWRITEBYTECODE=1 python3 \
   tools/typer-classpath-corpus-audit/scala39_source_classpath_identity_oracle.py
 ```
 
-The ordinary method cohort and three-root audit use the pinned-checkout harness:
+The focused three-root audit uses the exact rows from the frozen cohort:
+
+```sh
+awk -F '\t' 'NR == 1 || $1 == "library/src/scala/Tuple.scala#tree=23" || $1 == "library/src/scala/Option.scala#tree=214" || $1 == "library/src/scala/util/Either.scala#tree=84"' \
+  docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv \
+  > target/typer-source-classpath-identity-roots-3.9.0.tsv
+tools/typer-classpath-corpus-audit/run --method-kind ordinary \
+  --method-manifest target/typer-source-classpath-identity-roots-3.9.0.tsv \
+  --verify-determinism OUTPUT.tsv
+```
+
+The frozen ordinary cohort uses the same runner:
 
 ```sh
 tools/typer-classpath-corpus-audit/run --method-kind ordinary \
