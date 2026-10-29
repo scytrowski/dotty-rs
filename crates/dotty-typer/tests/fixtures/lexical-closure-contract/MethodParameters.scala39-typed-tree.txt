@@ -1,0 +1,24 @@
+[[syntax trees at end of                     typer]] // MethodParameters.scala
+package lexicalclosure {
+  final lazy module val MethodParameters: lexicalclosure.MethodParameters =
+    new lexicalclosure.MethodParameters()
+  final module class MethodParameters() extends Object() {
+    this: lexicalclosure.MethodParameters.type =>
+    def addBy(delta: Int): Int => Int = (x: Int) =>
+      {
+        x + delta
+      }
+    def addBoth(first: Int, second: Int): Int => Int = (x: Int) =>
+      {
+        x + first + second + first
+      }
+    def shadow(delta: Int): Int => Int = (delta: Int) =>
+      {
+        delta
+      }
+    def byName(delta: => Int): Int => Int = (x: Int) =>
+      {
+        x + delta
+      }
+  }
+}

@@ -141,17 +141,12 @@ fn lexical_closure_contract_records_whole_method_baseline() {
     let (parameter, parameter_rhs) =
         method_definition_and_rhs(&parsed, typer.store(), &index, source, "parameter");
     let parameter_tree = method_tree(parameter);
-    let parameter_error = typer.type_method_definition(parameter_tree).unwrap_err();
-    let parameter_symbol = match parameter_error {
-        TyperError::FunctionLiteralCaptureUnsupported {
-            symbol: Some(symbol),
-            tree_index,
-            ..
-        } => {
-            assert_error_span(tree_index, source_text.find("x + delta").unwrap() + 4, true);
-            symbol
-        }
-        other => panic!("expected outer parameter capture baseline, got {other:?}"),
+    let typed_parameter_method = typer.type_method_definition(parameter_tree).unwrap();
+    let parameter_symbol = match &parsed.ast.get(parameter_tree).kind {
+        TreeKind::DefDef(definition) => index
+            .symbol_at(source, definition.value_param_clauses[0][0])
+            .unwrap(),
+        _ => unreachable!(),
     };
     assert_eq!(
         typer.store().symbols.get(parameter_symbol).owner,
@@ -172,20 +167,27 @@ fn lexical_closure_contract_records_whole_method_baseline() {
             .resolve(typer.store().symbols.get(parameter_symbol).name.text()),
         "delta"
     );
-    assert_eq!(typer.source_typed_index().get(source, parameter_tree), None);
-    assert_eq!(typer.source_typed_index().get(source, parameter_rhs), None);
     assert_eq!(
-        typer.function_literal_method_at(source, parameter_rhs),
-        None
+        typer.source_typed_index().get(source, parameter_tree),
+        Some(typed_parameter_method)
     );
-    let retry = typer.type_method_definition(parameter_tree).unwrap_err();
+    let typed_parameter_rhs = typer
+        .source_typed_index()
+        .get(source, parameter_rhs)
+        .unwrap();
+    let TreeKind::Closure(parameter_closure) = &typer.typed_ast().get(typed_parameter_rhs).kind
+    else {
+        panic!("parameter method should type to a closure");
+    };
+    assert_eq!(parameter_closure.env.len(), 1);
+    assert_eq!(
+        typer.source_typed_index().get(source, parameter_rhs),
+        Some(typed_parameter_rhs)
+    );
     assert!(
-        matches!(retry, TyperError::FunctionLiteralCaptureUnsupported { symbol: Some(symbol), .. } if symbol == parameter_symbol)
-    );
-    assert_eq!(typer.source_typed_index().get(source, parameter_rhs), None);
-    assert_eq!(
-        typer.function_literal_method_at(source, parameter_rhs),
-        None
+        typer
+            .function_literal_method_at(source, parameter_rhs)
+            .is_some()
     );
 
     let (local, local_rhs) =
@@ -426,8 +428,7 @@ fn future_lexical_capture_receipts_require_identity_order_deduplication_and_owne
 }
 
 #[test]
-#[ignore = "capture-owner validation is completed with the scoped capture work in #1861-#1863"]
-fn future_lexical_capture_rejects_a_canonical_symbol_with_a_foreign_owner() {
+fn method_parameter_capture_rejects_a_canonical_symbol_with_a_foreign_owner() {
     let source_text =
         "class C { def capture(delta: Int): Int => Int = x => x + delta }; class Foreign {}";
     let (parsed, mut store, mut packages, definitions, index, source) = parse_and_name(source_text);

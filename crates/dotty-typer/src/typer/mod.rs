@@ -6159,6 +6159,7 @@ mod tests {
     }
 
     mod lexical_closure_contract;
+    mod method_parameter_capture;
 
     #[test]
     fn function1_expectation_infers_lambda_parameter_and_checks_body() {
