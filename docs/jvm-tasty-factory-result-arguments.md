@@ -291,6 +291,88 @@ by regression tests. Their encoded bytes are not changed by the new result-call
 form; the legacy fixtures and their existing byte expectations continue to
 pass.
 
+## Strict JDK 21 original Rust runtime and rejection controls (#1836)
+
+The issue #1836 acceptance test uses the unchanged packaged
+[`CounterOwnerFactory.scala`](../tests/fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala)
+source and one `emit_paired_jvm_tasty_batch` session. It writes the six Rust
+class/TASTy files to an isolated class directory, then compiles only a separate
+Java harness with `javac --release 21`. Neither a Scala producer nor Scala
+runtime libraries are on the execution classpath.
+
+On base commit `699b20d493` (merged #1844 included), Rust 1.98.1 produced these
+original artifact hashes. The test checks all six before harness compilation,
+after `javac`, and after `java -Xverify:all -ea`, and compares the final files
+byte-for-byte with the returned Rust artifacts.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `example/Counter.class` | `b38143cee8571a6602865ff6062eca92dd771582f539b156100ffc9647af94ae` |
+| `example/Counter.tasty` | `a0e78329d60aba318de825eaddb7668d34838197158653c1b7384188143099c7` |
+| `example/CounterOwner.class` | `d914c2dfc5b8d22079be304fc7c463be171394a528b71603de43342a79db91b2` |
+| `example/CounterOwner.tasty` | `9bcfbbb9d12f71a50122c6b2af960fe76ffd7f629a57738f61f4d384821f7f13` |
+| `example/CounterOwnerFactory.class` | `ecbebc8a5433f559a995364195a6276d85dc736b10ffc8076c3273f805e25981` |
+| `example/CounterOwnerFactory.tasty` | `c3ca6a461041bc590d3c6d51fba86b0633fe652a0a55de72f84374e8e2840e16` |
+
+The decoded `Factory.create(I)Lexample/CounterOwner;` code is consumed in full:
+one `CounterOwner` allocation, its `dup`, `aload_0`, `iload_1`, exactly one
+`invokevirtual CounterOwnerFactory.makeCounter:(I)Lexample/Counter;`, exactly
+one `invokespecial CounterOwner.<init>:(Lexample/Counter;)V`, then `areturn`.
+The helper body contains the `Counter` allocation and its own constructor
+call; `create` does not allocate a `Counter`. `CounterOwner.<init>` stores its
+received `Counter` in the private `inner` field. The class-aware CFG analyzer
+accepts this flow with max stack 4 and two locals while the outer Owner
+allocation remains pending; `javap -v -p -c` reports major version 65 and the
+same owners and descriptors. The exact one-call claim is static bytecode
+inspection, not a dynamic invocation-count claim.
+
+Temurin JDK `21.0.13+9` compiled and executed the harness under
+`java -Xverify:all -ea`. Calls on one factory returned distinct Owners and
+distinct private `inner` Counters for seeds `7`, `-9`, and `3`; a second
+factory's seed `11` graph was also independent. Reflection retrieved each
+private field. Mutating one Counter to `42`, then `-9`, then mutating another
+to `100` changed only its associated Owner. The harness printed:
+`factory-result=7,-9,3,11; distinct=true; mutation=42,-9,100`.
+
+Each corruption starts from a copy of the accepted batch. The first observed
+rejection stages are:
+
+| Control | First authoritative rejection |
+| --- | --- |
+| Factory call operand redirected to the `Counter.<init>(I)V` reference (wrong helper owner/descriptor) | Paired batch contract, `cross-class invocation` |
+| Declared helper result changed to `CounterOwner` | Paired batch contract, `member ABI` |
+| Owner constructor operand redirected to the Factory helper reference | Paired batch contract, `cross-class invocation` |
+| `create` passes an integer as the virtual receiver | Java 21 verifier, `VerifyError` |
+| `create` discards the initialized helper result and returns the still-uninitialized Owner | Java 21 verifier, `VerifyError` |
+| `create.max_stack` lowered below the required depth | Java 21 verifier, `VerifyError` |
+| Factory class omits `makeCounter` while retaining `create` | JVM linkage, `NoSuchMethodError` |
+
+The first three controls are rejected before an accepted batch or publication
+destination is produced. The four runtime probes use private mutated class
+trees; they do not alter the canonical six files or the successful runtime
+classpath. The focused strict test was run as
+`cargo +1.98.1 test --test jvm_tasty_artifacts factory_result_constructor_arguments_preserve_original_identity_on_jdk21 --locked -- --nocapture`
+with `DOTTY_CLASSFILE_REQUIRE_JDK=1`, Temurin 21 on `PATH`, and task-local
+`TMPDIR`/`CARGO_TARGET_DIR`. The full affected artifact test target and
+`cargo +1.98.1 test --workspace --all-targets --locked` also passed. The
+mandatory JDK gate passed with:
+
+```sh
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +1.98.1 test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  --test jvm_stateful_class_contract \
+  --locked -- --nocapture
+```
+
+The gate environment used Temurin 21.0.13+9 and task-local Cargo and Java temp
+directories. `cargo +1.98.1 fmt --all -- --check`, the frontend boundary
+guard, Clippy with `-D warnings`, warning-free workspace docs, and
+`git diff --check` passed. No Scala producer/oracle run is part of this
+Rust-artifact-only acceptance; Scala TASTy consumer interoperability remains
+the separate #1837 scope.
+
 ## Reproduction
 
 Set `SCALA39_ROOT` to the pinned Scala checkout and `JAVA_HOME` to JDK 21.
