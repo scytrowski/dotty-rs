@@ -153,14 +153,17 @@ The scanner does not synthesize or rewrite trees.
 `reference_local_constructor_proof_rejects_unsupported_block_shapes` runs
 mutable, multiple and duplicate locals; nested blocks; branch-controlled
 initializer and use; missing initializer; pre-declaration use; reassignment;
-parameter shadowing; wrong declared type; and locals from another method or
-nested scope through the real frontend and paired planner. Mutable, multiple,
-nested, and branch forms fail at the cross-class proof stage. Duplicate,
-uninitialized, pre-declaration, reassigned, shadowing, wrong-type, and
-out-of-scope cases fail earlier during method body typing. The positive renamed
-and reordered controls continue to pass the proof stage and reach the existing
-later TASTy `BodyType` rejection. A cloned/disconnected `SourceTypedIndex` is
-also rejected at the session-index identity check before proof scanning.
+parameter shadowing; wrong declared type; a parameter used instead of the local
+constructor argument; and locals from another method or nested scope through
+the real frontend and paired planner. Mutable, multiple, nested, and branch
+forms fail at the cross-class proof stage. Duplicate, uninitialized,
+pre-declaration, reassigned, shadowing, wrong-type, parameter-substitution,
+and out-of-scope cases fail earlier during method body typing or source-shape
+validation. A foreign `SourceId` fails at the source-root identity check. The
+positive renamed and reordered controls continue to pass the proof stage and
+reach the existing later TASTy `BodyType` rejection. A cloned/disconnected
+`SourceTypedIndex` is also rejected at the session-index identity check before
+proof scanning.
 
 This receipt proves source/typed constructor argument provenance only. The
 unchanged paired TASTy method-body validator still rejects the original block
