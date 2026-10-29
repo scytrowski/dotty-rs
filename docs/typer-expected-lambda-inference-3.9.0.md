@@ -5,9 +5,10 @@ canonical ordinary `Function1[A, B]`. It binds the lambda's actual parameter
 symbol to `A`, types the body, and checks the resulting function against the
 expected type. The expected type is forwarded for direct and parenthesized
 lambdas, expression-only blocks, ordinary method arguments, and a selected
-single overload candidate. Method-result checking is restricted to methods
-whose declared result is a canonical ordinary `Function1` and whose RHS is a
-lambda under those wrappers. Blocks with statements retain their existing
+single overload candidate. Method-result expectations are applied when the
+method body is typed, after its declared signature is complete. A lambda also
+passes its expected output type to its body, so nested ordinary `Function1`
+lambdas infer recursively. Blocks with statements retain their existing
 behavior. Explicitly annotated parameters continue through their existing
 path.
 
@@ -27,6 +28,19 @@ explicitly typed lambda. The negative control failed with the expected Scala
 diagnostics for output mismatch, wrong arity, missing expected type, and a
 non-function expected type. The compiler was run with
 `dotty.tools.dotc.Main -classpath <Scala 3.9.0 jars> -release 21`.
+
+Nested positive source:
+
+```scala
+object NestedPositive {
+  def nested: Int => (Int => Int) = x => y => y
+  def recursive: Int => Int = x => recursive(x)
+}
+```
+
+This compiled. Its negative output control, `def nested: Int => (Int =>
+Boolean) = x => y => y`, failed with a type mismatch (`Int` found, `Boolean`
+required).
 
 Positive source:
 
