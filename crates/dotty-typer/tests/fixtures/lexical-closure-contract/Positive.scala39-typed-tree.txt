@@ -1,0 +1,25 @@
+[[syntax trees at end of                     typer]] // Positive.scala
+package lexicalclosure {
+  final lazy module val Positive: lexicalclosure.Positive =
+    new lexicalclosure.Positive()
+  final module class Positive() extends Object() {
+    this: lexicalclosure.Positive.type =>
+    val identity: Int => Int = (x: Int) => x
+    def parameter(delta: Int): Int => Int = (x: Int) => x + delta + delta
+    def local: Int => Int =
+      {
+        val delta: Int = 2
+        (x: Int) =>
+          {
+            x + delta
+          }
+      }
+    def shadow(delta: Int): Int => Int = (delta: Int) => delta
+    class C() extends Object() {
+      val base: Int = 40
+      def explicitThis: Int => lexicalclosure.Positive.C = (_$1: Int) => this
+      def explicitMember: Int => Int = (x: Int) => x + this.base
+      def implicitMember: Int => Int = (x: Int) => x + this.base
+    }
+  }
+}
