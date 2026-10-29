@@ -29,6 +29,7 @@ use dotty_tasty_pickler::{
 };
 use dotty_typer::SourceTyper;
 
+use dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_batch;
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 
 const SOURCE: &str =
@@ -2087,11 +2088,17 @@ fn nested_constructor_proof_rejects_computed_field_factory_null_and_third_level_
         "cross-class constructor-call identity proof",
         "constructor argument",
     );
-    assert_batch_failure(
-        paired_failure(&factory, 181608),
-        2,
-        "JVM/TASTy cross-contract validation",
-        "BodyExpression",
+    let factory_batch = emit_paired_jvm_tasty_batch(
+        &factory,
+        "NestedConstructorCalls.scala",
+        SourceId::from_index(181608),
+    )
+    .expect("one same-class direct-formal factory call is a supported constructor argument");
+    assert!(
+        factory_batch
+            .classes()
+            .iter()
+            .any(|artifact| { artifact.tasty_path() == "example/CounterOwnerFactory.tasty" })
     );
 
     for (offset, source) in [field, null, third_level].iter().enumerate() {

@@ -667,6 +667,49 @@ fn lower_expression_inner(
                 reason: crate::ReferenceError::Owner,
             });
         }
+        if tree.ty != context.definitions().int {
+            if application.args.len() != 1 {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::BodyExpression,
+                    symbol: Some(method),
+                });
+            }
+            let Some(binding) = context.planned_call(method) else {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::BodyExpression,
+                    symbol: Some(method),
+                });
+            };
+            let encoded_receiver = match &function.kind {
+                TreeKind::Ident(_) => None,
+                TreeKind::Select(selection) => Some(selection.qualifier),
+                _ => None,
+            };
+            let argument =
+                ast.try_get(application.args[0])
+                    .ok_or(PickleError::InvalidTypedTree {
+                        tree: application.args[0],
+                    })?;
+            if binding.typed_apply != root
+                || binding.typed_function != application.function
+                || binding.typed_argument != application.args[0]
+                || binding.typed_receiver != encoded_receiver
+                || binding.method != *target
+                || binding.owner != class
+                || binding.result_type != tree.ty
+                || binding.formal_type != context.definitions().int
+                || !parameters.contains(&binding.caller_formal)
+                || !matches!(store.types.try_get(argument.ty), Some(Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(symbol),
+                }) if *prefix == context.definitions().no_prefix && *symbol == binding.caller_formal)
+            {
+                return Err(PickleError::Reference {
+                    symbol: binding.method,
+                    reason: crate::ReferenceError::Owner,
+                });
+            }
+        }
         let function_label = context.same_class_method_select_in(
             class,
             *target,

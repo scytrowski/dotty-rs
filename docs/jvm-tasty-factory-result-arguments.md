@@ -4,8 +4,11 @@ Issue [#1832](https://github.com/scytrowski/dotty-rs/issues/1832) pins the
 Scala 3.9 oracle and records the original Rust layer observations for
 `new CounterOwner(makeCounter(seed))`. Issue
 [#1833](https://github.com/scytrowski/dotty-rs/issues/1833) extends the
-read-only source/typed proof to that exact same-instance planned call. It does
-not add expression-body TASTy serialization or change JVM byte generation.
+read-only source/typed proof to that exact same-instance planned call. Issue
+[#1834](https://github.com/scytrowski/dotty-rs/issues/1834) carries that receipt
+through genuine Rust JVM/TASTy batch production, preserves the original method
+bodies in TASTy, and checks the resulting sidecars with the pinned Scala reader.
+The JVM method bodies and ABI remain the existing output of the JVM backend.
 
 ## Pinned source and oracle provenance
 
@@ -164,18 +167,19 @@ not inferred from the first rejection.
 | Lexer, parser, namer, typer | Succeed on the original one-file source; all listed bindings are present. |
 | Class-state TASTy source plan | `ClassStatePicklePlan::validate` succeeds for the real Factory methods and same-session bindings. This validates class-state/source facts; it is not expression-body encoding. |
 | Source/typed cross-class constructor proof | Accepts `Formal`, `NestedNew`, and `PlannedCall` receipts. `create` retains the exact original seed, `makeCounter` selection and body, same-class `this` receiver, canonical `Counter` result, outer Owner constructor, and one-session source/typed roots. |
-| Paired JVM/TASTy planner | Reaches `JVM/TASTy cross-contract validation` and rejects with `TastyPlan(Unsupported { feature: BodyExpression, ... })`. The proof no longer fails at source shape; body serialization remains unsupported. |
-| Expression-body TASTy plan/encoding | The paired path stops at its existing unsupported expression contract. The standalone class-state API still validates only signatures/state. No complete Rust TASTy bytes were produced for this source. |
-| Paired artifact contract/publisher | Unreachable: paired planning rejects before returning a complete Rust classfile/TASTy batch, so no artifact contract or publisher input is available. No rejection is attributed to these later layers. |
+| Paired JVM/TASTy planner | Accepts the original source after validating the proof-backed `makeCounter(seed)` expression and the helper's original constructor body. |
+| Expression-body TASTy plan/encoding | Emits both original `DEFDEF` bodies. The `create` body keeps the outer Owner constructor application, nested Factory `APPLY`, signed `SELECTin`, Factory `this` receiver, and a direct reference to `create.seed`; no source tree or name-based identity is reconstructed. |
+| Paired artifact contract/publisher | Validates the receipt against the same source/typed roots, canonical helper method, JVM descriptors and method plan. The genuine paired batch contains all three linked classfile/TASTy artifacts. |
+| Pinned Scala reader | Scala 3.9.0 `-decompile` displays the Factory call and Owner construction. `-from-tasty` accepts all three Rust sidecars and emits `CounterOwnerFactory.class`. |
 | JVM-only emission | The exact original packaged source succeeds through the JVM-only source pipeline with its canonical three-class bindings, field plans (`Counter.current`, `CounterOwner.inner`), and supported initialization plans (primary constructors for Counter and Owner; implicit no-arg for Factory). The emitted Factory `create` method has `new`, `dup`, `aload_0`, `iload_1`, `invokevirtual CounterOwnerFactory.makeCounter:(I)Lexample/Counter;`, `invokespecial CounterOwner.<init>:(Lexample/Counter;)V`, `areturn`; its invocation owners and descriptors are asserted from the emitted classfile. Under the strict JDK 21 gate, a Java harness verifies all three generated classes and checks `create(7)`, `create(-9)`, distinct mutable Counters, and state isolation. This is separate from paired TASTy production. |
 
 ## Controls and unsupported cases
 
 | Control | Evidence / first result |
 | --- | --- |
-| Rename package, classes, and factory method | Genuine renamed source receives both helper and planned-call proofs; paired planning then reaches the unchanged body-expression rejection. |
-| Reorder class declarations | Genuine reordered source receives both proofs; helper proof linkage is checked after the source-ordered scan, so it does not depend on declaration order. |
-| Explicit `this.makeCounter(seed)` | Accepted as `PlannedCall`; the receipt retains the original source and typed `This` receiver. |
+| Rename package, classes, and factory method | Genuine renamed source emits a complete batch; a fresh identical source session produces equal artifacts. |
+| Reorder class declarations | Genuine reordered source emits a complete batch; a fresh identical source session produces equal artifacts. Helper proof linkage does not depend on declaration order. |
+| Explicit `this.makeCounter(seed)` | Emits the same bounded call form with an explicit TASTy `THIS` receiver; the implicit source form emits `QUALTHIS`. |
 | Legacy direct formal argument | Existing reference-constructor regression accepts and serializes the exact caller formal. |
 | Nested `new Counter(seed)` argument | Existing pinned nested-constructor regression accepts the source proof and decodes the two constructor applications. |
 | Previous JVM-only object-graph fixture | Remains a separate regression for `new Holder(makeCounter(seed))`; it is not used as evidence for the original packaged source. |
@@ -188,7 +192,7 @@ not inferred from the first rejection.
 | Foreign same-named helper owner | Test-only corruption replaces the selected method `TermRef` with a real same-session method from another planned class; the proof rejects with `SourceIdentity` before returning receipts. |
 | Disconnected explicit receiver | Test-only same-session corruption changes only the typed helper `Select.qualifier`; the proof rejects with `TypedBinding` even though the separately mapped `this`, method `TermRef`, spans, and source mappings remain intact. |
 | Missing planned-call function binding | Test-only removal of the original source-to-typed edge rejects with `TypedBinding("planned helper function has no source-to-typed binding")`. |
-| Local/block argument | Not measured in this increment. The issue allows deferred cases; the matrix uses the direct call path only and does not make a claim about block-root scanning. |
+| Local/block argument | Not supported by the receipt: only the exact one-argument call occupying the constructor argument is carried into this encoding path. |
 | Private/static/super/implicit/using/generic/external factory method | Not accepted by the proof contract: the helper must be a public, monomorphic, plain instance method with one ordinary formal, a canonical source definition, and an exact same-class `this` receiver. Source typing or earlier planning can reject some of these before the proof stage. |
 | Wrong constructor | Unmeasured. No alternate constructor shape is needed to observe the current factory-call boundary. |
 | Missing/stale typed binding or wrong typed constructor owner | Unmeasured. The issue prohibits forged canonical identities, and the one-session source index supplies the actual mappings. |
@@ -227,11 +231,32 @@ descriptors, synthesize or retype trees, traverse general call graphs, or
 authenticate foreign same-slot arena IDs. The caller must keep the existing
 single-session invariant.
 
-Proof acceptance is separate from expression serialization. In this issue the
-original source reaches `BodyExpression` rejection in the existing
-JVM/TASTy cross-contract validator, before any paired batch or artifact
-publisher result exists. The direct-formal, nested-constructor, and fixture
-artifact hashes remain covered by the focused regression tests.
+## Rust-produced TASTy and compatibility evidence
+
+The paired artifact test inspects the Rust-produced bytes rather than only the
+Scala oracle. It checks the three output classes, Factory classfile/TASTy UUID
+link, both original method descriptors, and source-order method bodies. In
+`makeCounter`, the constructor argument's `TERMREFdirect` points to that
+method's own `seed` `PARAM`. In `create`, the outer constructor still receives
+one nested `APPLY`; its selected helper retains the signed type
+`scala.Int => example.Counter`, its receiver is `QUALTHIS` (or explicit
+`THIS`), and its `TERMREFdirect` points to `create.seed`. The decoded tree thus
+preserves the separate formal identities of both methods.
+
+The strict reader regression is opt-in for routine test runs. With
+`DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`, it verifies checkout revision
+`777528f19a58e794c9954a42f433373472ec57f8` and compiler version
+`3.9.0-bin-SNAPSHOT-git-777528f`, runs `scalac -decompile` on the Rust
+`CounterOwnerFactory.tasty`, then runs `scalac -from-tasty` over all three Rust
+sidecars. Its scratch directory is supplied through
+`DOTTY_TASTY_PICKLER_ORACLE_TMP` and kept under the issue worktree's `target/`.
+The Scala reader accepts the actual Rust artifacts; this is interoperability
+evidence, distinct from the Scala-produced oracle above.
+
+Existing direct-formal and nested-constructor artifact fixtures remain covered
+by regression tests. Their encoded bytes are not changed by the new result-call
+form; the legacy fixtures and their existing byte expectations continue to
+pass.
 
 ## Reproduction
 

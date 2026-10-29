@@ -17,7 +17,7 @@ use dotty_classfile::reader::Reader as ClassFileReader;
 use dotty_classfile::tasty_link::{TastyLinkError, TastyLinkId};
 use dotty_core::ast::{AstArena, TreeKind, Untyped};
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, SymbolOrigin, Visibility};
-use dotty_core::types::{MethodKind, MethodType, TermRefTarget, Type};
+use dotty_core::types::{MethodKind, MethodType, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{Definitions, SemanticStore, SourceDefinition, SourceId, SymbolId, TreeId, Typed};
 use dotty_jvm::{
     JvmClassInitializationPlan, JvmClassMetadata, JvmCodegenError, JvmCompilationUnit,
@@ -1247,10 +1247,17 @@ struct CrossClassMethodRef {
     argument_load_opcode: Option<u8>,
     receiver_field: Option<SymbolId>,
     nested_constructor: Option<NestedConstructorMethodRef>,
+    factory_method: Option<FactoryMethodRef>,
 }
 
 struct NestedConstructorMethodRef {
     owner_internal_name: String,
+    descriptor: String,
+}
+
+struct FactoryMethodRef {
+    owner_internal_name: String,
+    name: String,
     descriptor: String,
 }
 
@@ -1410,6 +1417,231 @@ fn validate_cross_class_call_code(
                 if let Some(nested_tree) = tasty.typed_ast.try_get(nested_argument)
                     && let TreeKind::Apply(nested_application) = &nested_tree.kind
                 {
+                    if let Some(binding) =
+                        tasty.typed_bindings.planned_call(tasty.source.id, caller)
+                    {
+                        if nested_application.kind != dotty_core::ast::ApplyKind::Regular
+                            || nested_application.args.len() != 1
+                        {
+                            return Err(
+                                "planned factory call has an unsupported application shape".into(),
+                            );
+                        }
+                        let source_call = tasty
+                            .source_ast
+                            .try_get(binding.source_apply)
+                            .ok_or_else(|| "planned factory source call is stale".to_owned())?;
+                        let (
+                            TreeKind::Apply(source_application),
+                            TreeKind::Apply(typed_application),
+                        ) = (&source_call.kind, &nested_tree.kind)
+                        else {
+                            return Err("planned factory call does not retain an Apply".into());
+                        };
+                        let source_function = tasty
+                            .source_ast
+                            .try_get(binding.source_function)
+                            .ok_or_else(|| "planned factory source function is stale".to_owned())?;
+                        let source_rhs = tasty
+                            .source_ast
+                            .try_get(rhs)
+                            .ok_or_else(|| "planned caller source body is stale".to_owned())?;
+                        let source_outer_argument = matches!(
+                            &source_rhs.kind,
+                            TreeKind::Apply(source_outer)
+                                if source_outer.kind == dotty_core::ast::ApplyKind::Regular
+                                    && source_outer.args.as_slice() == [binding.source_apply]
+                        );
+                        let typed_function = tasty
+                            .typed_ast
+                            .try_get(binding.typed_function)
+                            .ok_or_else(|| "planned factory function is stale".to_owned())?;
+                        let Some(Type::TermRef {
+                            prefix: helper_prefix,
+                            target: TermRefTarget::Symbol(helper_symbol),
+                        }) = tasty.store.types.try_get(typed_function.ty)
+                        else {
+                            return Err("planned factory function has no canonical target".into());
+                        };
+                        let source_receiver_valid = match (
+                            &source_function.kind,
+                            binding.source_receiver,
+                        ) {
+                            (TreeKind::Ident(_), None) => binding.typed_receiver.is_none(),
+                            (TreeKind::Select(selection), Some(receiver))
+                                if selection.qualifier == receiver =>
+                            {
+                                match (&typed_function.kind, binding.typed_receiver) {
+                                    (TreeKind::Select(typed_selection), Some(typed_receiver))
+                                        if typed_selection.qualifier == typed_receiver => tasty
+                                            .source_ast
+                                            .try_get(receiver)
+                                            .is_some_and(|tree| matches!(tree.kind, TreeKind::This(_)))
+                                            && tasty.typed_ast.try_get(typed_receiver).is_some_and(
+                                                |tree| matches!(tree.kind, TreeKind::This(_))
+                                                    && matches!(tasty.store.types.try_get(tree.ty), Some(Type::ThisType { class }) if *class == binding.owner),
+                                            ),
+                                    _ => false,
+                                }
+                            }
+                            _ => false,
+                        };
+                        let helper_source = tasty
+                            .source_ast
+                            .try_get(binding.helper_source_tree)
+                            .ok_or_else(|| {
+                                "planned helper source definition is stale".to_owned()
+                            })?;
+                        let TreeKind::DefDef(helper_definition) = &helper_source.kind else {
+                            return Err("planned helper has no source method definition".into());
+                        };
+                        let helper_record = tasty.store.symbols.get(binding.method);
+                        let helper_metadata = all_metadata
+                            .iter()
+                            .find(|metadata| metadata.identity().symbol() == binding.owner)
+                            .ok_or_else(|| {
+                                "planned helper owner is absent from the JVM batch".to_owned()
+                            })?;
+                        let helper_method = helper_metadata
+                            .methods()
+                            .iter()
+                            .find(|method| method.symbol() == binding.method)
+                            .ok_or_else(|| {
+                                "planned helper method is absent from the JVM plan".to_owned()
+                            })?;
+                        let helper_descriptor = source_method_descriptor(
+                            tasty.store,
+                            tasty.definitions,
+                            binding.method,
+                            &all_metadata,
+                        )
+                        .ok_or_else(|| {
+                            "planned helper has an unsupported source signature".to_owned()
+                        })?;
+                        let outer_constructor = target_class_metadata
+                            .constructor()
+                            .filter(|constructor| constructor.symbol() == *target)
+                            .ok_or_else(|| {
+                                "outer constructor is absent from its JVM plan".to_owned()
+                            })?;
+                        let caller_descriptor = source_method_descriptor(
+                            tasty.store,
+                            tasty.definitions,
+                            caller,
+                            &all_metadata,
+                        )
+                        .ok_or_else(|| {
+                            "planned factory caller has an unsupported signature".to_owned()
+                        })?;
+                        let result_class = match tasty.store.types.try_get(binding.result_type) {
+                            Some(Type::TypeRef {
+                                target: TypeRefTarget::Symbol(class),
+                                ..
+                            }) => *class,
+                            _ => return Err("planned factory result is not a class type".into()),
+                        };
+                        let result_metadata = all_metadata
+                            .iter()
+                            .find(|metadata| metadata.identity().symbol() == result_class)
+                            .ok_or_else(|| {
+                                "planned factory result class is absent from the JVM batch"
+                                    .to_owned()
+                            })?;
+                        let result_descriptor =
+                            format!("L{};", result_metadata.identity().internal_name());
+                        let outer_descriptor = outer_constructor.descriptor().as_str();
+                        let outer_parameter = outer_descriptor
+                            .strip_prefix('(')
+                            .and_then(|descriptor| descriptor.split_once(')'))
+                            .map(|(parameters, _)| parameters)
+                            .ok_or_else(|| {
+                                "outer constructor has an invalid descriptor".to_owned()
+                            })?;
+                        let expected_caller_descriptor =
+                            format!("(I)L{};", target_class_metadata.identity().internal_name());
+                        if binding.typed_apply != nested_argument
+                            || binding.typed_function != nested_application.function
+                            || binding.typed_argument != nested_application.args[0]
+                            || source_application.function != binding.source_function
+                            || source_application.args.as_slice() != [binding.source_argument]
+                            || typed_application.function != binding.typed_function
+                            || typed_application.args.as_slice() != [binding.typed_argument]
+                            || source_application.kind != dotty_core::ast::ApplyKind::Regular
+                            || typed_application.kind != dotty_core::ast::ApplyKind::Regular
+                            || !source_outer_argument
+                            || application.args.as_slice() != [binding.typed_apply]
+                            || *helper_symbol != binding.method
+                            || binding.owner != tasty.class
+                            || binding.result_type != nested_tree.ty
+                            || binding.formal_type != tasty.definitions.int
+                            || !source_receiver_valid
+                            || helper_record.kind != SymbolKind::Method
+                            || helper_record.owner != Some(tasty.class)
+                            || helper_record.origin != SymbolOrigin::Source(tasty.source.id)
+                            || helper_record.name != *helper_definition.name.as_name()
+                            || !helper_method.access_flags().is_public()
+                            || helper_method.descriptor().as_str() != helper_descriptor
+                            || helper_descriptor != format!("(I){result_descriptor}")
+                            || outer_parameter != result_descriptor
+                            || caller_descriptor != expected_caller_descriptor
+                            || helper_definition.rhs != Some(binding.helper_source_rhs)
+                            || tasty.source_index.definition_of(binding.method)
+                                != Some(SourceDefinition::Canonical {
+                                    source: tasty.source.id,
+                                    tree: binding.helper_source_tree,
+                                })
+                            || !tasty.members.iter().any(|member| {
+                                matches!(member,
+                                    ClassMemberPicklePlan::Method { symbol, source_tree }
+                                        if *symbol == binding.method
+                                            && *source_tree == binding.helper_source_tree)
+                            })
+                            || tasty
+                                .typed_bindings
+                                .typed_at(tasty.source.id, binding.source_apply)
+                                != Some(binding.typed_apply)
+                            || tasty
+                                .typed_bindings
+                                .typed_at(tasty.source.id, binding.source_function)
+                                != Some(binding.typed_function)
+                            || tasty
+                                .typed_bindings
+                                .typed_at(tasty.source.id, binding.source_argument)
+                                != Some(binding.typed_argument)
+                            || tasty
+                                .typed_bindings
+                                .typed_at(tasty.source.id, binding.helper_source_rhs)
+                                != Some(binding.helper_typed_rhs)
+                            || !matches!(tasty.store.types.try_get(*helper_prefix), Some(Type::ThisType { class }) if *class == tasty.class)
+                        {
+                            return Err(
+                                "planned factory call differs from its source/JVM receipt".into()
+                            );
+                        }
+                        calls.push(CrossClassMethodRef {
+                            caller,
+                            target: *target,
+                            owner_internal_name: target_class_metadata
+                                .identity()
+                                .internal_name()
+                                .to_owned(),
+                            name: "<init>".to_owned(),
+                            descriptor: outer_descriptor.to_owned(),
+                            constructor: true,
+                            argument_load_opcode: None,
+                            receiver_field: None,
+                            nested_constructor: None,
+                            factory_method: Some(FactoryMethodRef {
+                                owner_internal_name: helper_metadata
+                                    .identity()
+                                    .internal_name()
+                                    .to_owned(),
+                                name: helper_method.name().to_owned(),
+                                descriptor: helper_descriptor,
+                            }),
+                        });
+                        continue;
+                    }
                     if nested_application.kind != dotty_core::ast::ApplyKind::Regular
                         || nested_application.args.len() != 1
                     {
@@ -1508,6 +1740,7 @@ fn validate_cross_class_call_code(
                                 .to_owned(),
                             descriptor: nested_descriptor.to_owned(),
                         }),
+                        factory_method: None,
                     });
                     continue;
                 }
@@ -1575,6 +1808,7 @@ fn validate_cross_class_call_code(
                     argument_load_opcode: Some(argument_load_opcode),
                     receiver_field: None,
                     nested_constructor: None,
+                    factory_method: None,
                 });
                 continue;
             }
@@ -1635,6 +1869,7 @@ fn validate_cross_class_call_code(
                 _ => None,
             },
             nested_constructor: None,
+            factory_method: None,
         });
     }
 
@@ -1670,6 +1905,83 @@ fn validate_cross_class_call_code(
                 call.caller
             ));
         };
+        if let Some(factory) = &call.factory_method {
+            if code.code.len() != 13
+                || code.code[0] != 0xbb
+                || code.code[3] != 0x59
+                || code.code[4] != 0x2a
+                || code.code[5] != 0x1b
+                || code.code[6] != 0xb6
+                || code.code[9] != 0xb7
+                || code.code[12] != 0xb0
+                || code.max_stack < 4
+                || code.max_locals != 2
+                || !code.exception_table.is_empty()
+            {
+                return Err(format!(
+                    "caller method {:?} does not contain the bounded factory-result constructor sequence: {:02x?}",
+                    call.caller, code.code
+                ));
+            }
+            let cp_index = |offset: usize| {
+                dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+                    code.code[offset],
+                    code.code[offset + 1],
+                ]))
+            };
+            let allocation = cp_index(1);
+            let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Class { name_index }) =
+                class_file.constant_pool.get(allocation)
+            else {
+                return Err("factory-result allocation does not reference CONSTANT_Class".into());
+            };
+            let allocation_owner = class_file
+                .constant_pool
+                .utf8(*name_index)
+                .map_err(|error| format!("invalid factory-result allocation class: {error:?}"))?;
+            let method_ref = |offset: usize| -> Result<(&str, (&str, &str)), String> {
+                let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+                    class_index,
+                    name_and_type_index,
+                }) = class_file.constant_pool.get(cp_index(offset))
+                else {
+                    return Err(
+                        "factory-result invocation does not reference CONSTANT_Methodref".into(),
+                    );
+                };
+                let owner = class_file
+                    .constant_pool
+                    .class_name(*class_index)
+                    .map_err(|error| format!("invalid factory-result method owner: {error:?}"))?;
+                let method = class_file
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .map_err(|error| {
+                        format!("invalid factory-result method reference: {error:?}")
+                    })?;
+                Ok((owner, method))
+            };
+            let helper_call = method_ref(7)?;
+            let outer_call = method_ref(10)?;
+            if allocation_owner != call.owner_internal_name
+                || helper_call
+                    != (
+                        factory.owner_internal_name.as_str(),
+                        (factory.name.as_str(), factory.descriptor.as_str()),
+                    )
+                || outer_call
+                    != (
+                        call.owner_internal_name.as_str(),
+                        ("<init>", call.descriptor.as_str()),
+                    )
+            {
+                return Err(format!(
+                    "caller method {:?} does not invoke the exact same-instance factory and outer constructor",
+                    call.caller
+                ));
+            }
+            continue;
+        }
         if let Some(nested) = &call.nested_constructor {
             if code.code.len() != 16
                 || code.code[0] != 0xbb

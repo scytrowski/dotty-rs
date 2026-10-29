@@ -2770,7 +2770,7 @@ impl Validator<'_, '_> {
                     tree: binding.helper_source_tree,
                 })
             || p.source_index.symbol_at(source, binding.helper_source_tree) != Some(binding.method)
-            || helper_definition.type_params.len() != 0
+            || !helper_definition.type_params.is_empty()
             || helper_definition.rhs != Some(binding.helper_source_rhs)
             || helper_plan.source_tree != binding.helper_source_tree
             || helper_plan.body != Some(binding.helper_typed_rhs)
@@ -2888,6 +2888,7 @@ impl Validator<'_, '_> {
             || helper_signature.params.len() != 1
             || helper_signature.params[0].erased
             || helper_signature.params[0].varargs
+            || binding.formal_type != p.definitions.int
             || helper_signature.params[0].ty != binding.formal_type
             || helper_signature.result != binding.result_type
         {
@@ -2906,10 +2907,7 @@ impl Validator<'_, '_> {
                 reason: crate::ReferenceError::Owner,
             });
         }
-        // Validation has closed the full source/typed receipt. Keep output
-        // rejected until expression lowering can preserve the reference-result
-        // signature instead of reusing the Int-only same-class wire form.
-        Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(caller.symbol)))
+        Ok(())
     }
 
     fn validate_nested_constructor_argument(
