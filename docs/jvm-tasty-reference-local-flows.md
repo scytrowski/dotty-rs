@@ -576,3 +576,93 @@ The strict helper requires `java`, `javac`, and `javap` to all report Java 21.
 The suite's fresh-session artifact comparison and publisher-failure checks run
 before the JDK harness. The pinned Scala oracle remains the separate #1853
 check described above.
+
+## Issue #1855: pinned Scala consumer for Rust reference-local output
+
+The strict opt-in regression
+[`jvm_tasty_reference_local_scala_consumer.rs`](../tests/jvm_tasty_reference_local_scala_consumer.rs)
+reuses the factory-result consumer harness with the frozen
+[`CounterOwnerFactory.scala`](../tests/fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala)
+as its producer. One call to `emit_paired_jvm_tasty_batch` creates the original
+three-class/six-file batch from one Rust frontend session; a second fresh
+session proves byte-for-byte determinism. A separate Scala-authored
+[`Consumer.scala`](../tests/fixtures/jvm_tasty_reference_local_constructor_flows/Consumer.scala)
+is compiled by the pinned official Scala 3.9 compiler against only the original
+Rust output and the pinned Scala runtime libraries. Java 21 runs the client
+with `-Xverify:all -ea` on those unchanged Rust classfiles. It checks the
+`create(7)`, `create(-9)`, and `create(3)` values, distinct Owner identities,
+and independent `makeCounter` references and state. Hashes of all six Rust
+files are checked before and after compilation and execution.
+
+The test separately compiles one probe for each `Counter.get`, `CounterOwner.read`,
+`CounterOwnerFactory.create`, and `CounterOwnerFactory.makeCounter` after
+removing that method from an isolated classfile copy. Every probe resolves from
+the paired Rust TASTy sidecar; deleting that sidecar makes the matched
+classfile-only probe fail. The original batch is independently decompiled by
+Scala 3.9 and the result must contain the `create` method result
+`example.CounterOwner`, a block, immutable `val counter: example.Counter`,
+the original `makeCounter(seed)` initializer, and the Owner constructor call
+with `counter`. `-from-tasty` reconstructs the three classes under a separate
+output root that is never used for runtime. A Rust TASTy address-index check
+on the same freshly emitted sidecar verifies that the local VALDEF is a child
+of the method BLOCK and that the constructor argument's `TERMREFdirect` targets
+that exact VALDEF address.
+
+The renamed variant changes package, class and helper names, renames the local
+to `item`, and reorders top-level declarations. It gets its own two independent
+Rust producer runs and a separately compiled and executed client; deterministic
+bytes are compared only between those same-source runs.
+
+### #1855 strict evidence receipt
+
+The run used main SHA `764ce6bbdea40aa7d504a1b78249193757465d96`, Rust
+`1.98.1 (48a229cea 2026-09-01)`, Temurin JDK `21.0.13+9`, and Scala source
+revision `777528f19a58e794c9954a42f433373472ec57f8`, whose compiler reports
+`Scala compiler version 3.9.0`. The producer source SHA-256 is
+`379d03ad0ee08d06a31012aeafe306e5b9e30c1942e771acdb0d4eef23c790b6`; the
+client source SHA-256 is
+`1f6e9ba6904b2a53517b03a2adc01c33adb1c7ab147de13bfd8c1c3c7fbcba2c`.
+The compile classpath order is the Rust six-artifact root, then
+`scala3-library_3-3.9.0.jar` and `scala-library-3.9.0.jar`. The compiler
+artifacts are checked against `tests/fixtures/tasty_pickler/provenance.json`.
+
+| Rust output | SHA-256 | Classfile `TASTY` UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `b38143cee8571a6602865ff6062eca92dd771582f539b156100ffc9647af94ae` | `00da82c5ca4ebdac0000000000008193` |
+| `example/Counter.tasty` | `a0e78329d60aba318de825eaddb7668d34838197158653c1b7384188143099c7` | header matches class |
+| `example/CounterOwner.class` | `d914c2dfc5b8d22079be304fc7c463be171394a528b71603de43342a79db91b2` | `004ebc559d6864ef0000000000008195` |
+| `example/CounterOwner.tasty` | `9bcfbbb9d12f71a50122c6b2af960fe76ffd7f629a57738f61f4d384821f7f13` | header matches class |
+| `example/CounterOwnerFactory.class` | `e8e786041ad543af5cd7278c460c2d4f99a70261d41a8f611297c25a51d49c7d` | `00a3832976636fa1000000000000819a` |
+| `example/CounterOwnerFactory.tasty` | `dda2d294a5eaa72c5060bb7089e760ba2576a8c350fcb6e93815c1653bbe52f2` | header matches class |
+
+The Scala reader and isolated ABI controls record their first observed failure:
+
+| Control | First observed stage |
+| --- | --- |
+| Missing or misplaced sidecar for any of the three classes | Scala binary loader reports the `.tasty` file is missing; compilation stops. |
+| Corrupt sidecar for any class | Scala reader reports `not a TASTy file`; the follow-on missing type diagnostic is a cascade. |
+| Mismatched classfile/TASTy UUID for any class | Scala reports out-of-sync TASTy warning; `-Werror` promotes it to failure. |
+| Incomplete six-file batch | Scala binary loader reports the removed Factory `.tasty` file missing. |
+| TASTy-only member probes versus classfile-only controls | TASTy-only compiles; classfile-only fails with the selected member not found. |
+| Helper result descriptor mismatch | A classfile-only baseline compiles; the changed `makeCounter` descriptor fails with Scala `E007` (`Found: CounterOwner`, `Required: Counter`). |
+| Missing Owner constructor | A classfile-only baseline compiles; the altered classfile fails with Scala `E173` constructor access diagnostic. |
+| Missing class, relocated package path, wrong internal owner | Scala name/classfile loader rejects the class before a client can compile. |
+| Missing `create` method or `Counter` class at runtime | Isolated precompiled-client controls reach `NoSuchMethodError` and `NoClassDefFoundError`, respectively. The method-stripped class is never run. |
+| Wrong local type | Existing Rust source proof rejects it at source collection as `LocalValueTypeMismatch`; no malformed producer batch reaches Scala. |
+| Missing or wrong local declaration binding/address | Existing pickler body validation rejects the local receipt before serialization/publication; the valid emitted TASTy address assertion proves the positive target relationship. |
+
+The strict Scala gate is opt-in locally with
+`DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_LOCAL_CONSUMER=1` and is required in
+`.github/workflows/jvm-tasty-factory-scala-consumer.yml`. In required mode the
+harness fails if the pinned Scala checkout, compiler jars, Java, `javac`, or
+`javap` are absent or mismatched. It ran with the Scala consumer flag enabled
+and passed; Rust, Scala, and Java outputs were kept under the issue-local
+root-volume `target/` and `TMPDIR` directories. The prior factory-result
+consumer and the producer-side strict JDK21 test remain in the same workflow.
+
+The Rust consumer test also emits two renamed batches from fresh sessions and
+verifies only same-source equality. No Scala-generated producer artifact is on
+the runtime classpath. Support remains the one immutable, explicitly typed
+reference local in this straight-line constructor-result block; generalized
+local flow, nested scopes, mutable locals and branch-controlled locals remain
+unsupported.

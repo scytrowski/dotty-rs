@@ -3771,7 +3771,8 @@ def _classfile_change_internal_owner(class_bytes: bytes, expected: str, replacem
     return bytes(result)
 
 
-def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict:
+def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path,
+                                 *, reference_local: bool = False) -> dict:
     """Prove independent Scala 3.9 source lookup and runtime against Rust artifacts."""
     methods = {
         "Counter": {"get": "()I"},
@@ -3810,6 +3811,23 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict
         hashes[name] = {"class_sha256": digest(roots[0] / class_path),
                         "tasty_sha256": digest(roots[0] / tasty_path)}
         uuids[name] = link.hex()
+    if reference_local:
+        expected_hashes = {
+            "Counter": {
+                "class_sha256": "b38143cee8571a6602865ff6062eca92dd771582f539b156100ffc9647af94ae",
+                "tasty_sha256": "a0e78329d60aba318de825eaddb7668d34838197158653c1b7384188143099c7",
+            },
+            "CounterOwner": {
+                "class_sha256": "d914c2dfc5b8d22079be304fc7c463be171394a528b71603de43342a79db91b2",
+                "tasty_sha256": "9bcfbbb9d12f71a50122c6b2af960fe76ffd7f629a57738f61f4d384821f7f13",
+            },
+            "CounterOwnerFactory": {
+                "class_sha256": "e8e786041ad543af5cd7278c460c2d4f99a70261d41a8f611297c25a51d49c7d",
+                "tasty_sha256": "dda2d294a5eaa72c5060bb7089e760ba2576a8c350fcb6e93815c1653bbe52f2",
+            },
+        }
+        if hashes != expected_hashes:
+            raise RuntimeError(f"frozen original Rust artifact hashes changed: {hashes}")
     if len(set(uuids.values())) != 3:
         raise RuntimeError(f"expected a distinct TASTy UUID for each producer class: {uuids}")
     for jar in (Path(path) for path in toolchain.classpath.split(os.pathsep)):
@@ -3839,7 +3857,11 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict
     for relative in sorted(renamed_paths):
         renamed_hashes[relative] = digest(renamed_roots[0] / relative)
 
-    client = ROOT / "tests/fixtures/jvm_tasty_factory_result_arguments/FactoryResultConsumer.scala"
+    client = ROOT / (
+        "tests/fixtures/jvm_tasty_reference_local_constructor_flows/Consumer.scala"
+        if reference_local else
+        "tests/fixtures/jvm_tasty_factory_result_arguments/FactoryResultConsumer.scala"
+    )
     client_hash = digest(client)
     before = {f"{root.name}/{relative}": digest(root / relative)
               for root in (*roots, *renamed_roots) for relative in
@@ -3848,7 +3870,7 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict
     runtime_outputs: list[str] = []
     with tempfile.TemporaryDirectory(prefix="dotty-scala-factory-result-", dir=os.environ.get("TMPDIR")) as temporary:
         work = Path(temporary)
-        client_input = work / "FactoryResultConsumer.scala"
+        client_input = work / ("Consumer.scala" if reference_local else "FactoryResultConsumer.scala")
         shutil.copyfile(client, client_input)
 
         def compile_probe(label: str, root: Path, source: str, *, werror: bool = False) -> str:
@@ -3868,10 +3890,16 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict
             toolchain.compiler(["-release", "21", "-d", output, client_input],
                                classpath=os.pathsep.join((str(root), toolchain.runtime_classpath)))
             driver_source = work / f"Runner{index}.java"
-            driver_source.write_text(
-                "public final class Runner%d { public static void main(String[] args) { "
-                "System.out.println(consumer.FactoryResultConsumer$.MODULE$.run()); } }\n" % index
-            )
+            if reference_local:
+                driver_source.write_text(
+                    "public final class Runner%d { public static void main(String[] args) { "
+                    "example.FactoryConsumer$.MODULE$.main(new String[0]); } }\n" % index
+                )
+            else:
+                driver_source.write_text(
+                    "public final class Runner%d { public static void main(String[] args) { "
+                    "System.out.println(consumer.FactoryResultConsumer$.MODULE$.run()); } }\n" % index
+                )
             driver = work / f"driver-{index}"
             driver.mkdir()
             cp = os.pathsep.join((str(root), str(output), toolchain.runtime_classpath))
@@ -3881,8 +3909,12 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict
                                "-classpath", runtime_cp, f"Runner{index}"])
             lines = [line for line in runtime.strip().splitlines()
                      if not line.startswith("Picked up JAVA_TOOL_OPTIONS:")]
-            if lines != ["7,-9,3"]:
-                raise RuntimeError(f"original Rust classfiles returned {lines}, expected ['7,-9,3']")
+            expected_output = (
+                ["scala39-reference-local-constructor-flow=ok"]
+                if reference_local else ["7,-9,3"]
+            )
+            if lines != expected_output:
+                raise RuntimeError(f"original Rust classfiles returned {lines}, expected {expected_output}")
             runtime_outputs.extend(lines)
 
         probes = {
@@ -3923,12 +3955,34 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict
         ):
             if expected not in factory:
                 raise RuntimeError(f"Rust Factory TASTy decompile lacks {expected!r}: {factory}")
-        if not re.search(
-            r"def create\(`?seed(?:₂)?`?: scala\.Int\): example\.CounterOwner = "
-            r"new example\.CounterOwner\(CounterOwnerFactory\.this\.makeCounter\(`?seed(?:₂)?`?\)\)",
-            factory,
-        ):
-            raise RuntimeError(f"Rust Factory TASTy lost create's selected helper call or CounterOwner result: {factory}")
+        if reference_local:
+            if not re.search(
+                r"def create\(`?seed(?:₂)?`?: scala\.Int\): example\.CounterOwner =\s*"
+                r"\{\s*val counter: example\.Counter = "
+                r"CounterOwnerFactory\.this\.makeCounter\(`?seed(?:₂)?`?\)\s*"
+                r"new example\.CounterOwner\(counter\)\s*\}",
+                factory,
+            ):
+                raise RuntimeError(
+                    f"Rust Factory TASTy did not reconstruct create's BLOCK, immutable typed local, "
+                    f"original helper call, local use and CounterOwner result: {factory}"
+                )
+            local_proof = {
+                "factory_create_decompile_has_block_valdef_helper_and_local_use": True,
+                "local_type": "example.Counter",
+                "local_declaration": "counter",
+                "helper_call": "CounterOwnerFactory.makeCounter(seed)",
+                "owner_constructor_argument": "counter",
+                "factory_create_result": "example.CounterOwner",
+            }
+        else:
+            if not re.search(
+                r"def create\(`?seed(?:₂)?`?: scala\.Int\): example\.CounterOwner = "
+                r"new example\.CounterOwner\(CounterOwnerFactory\.this\.makeCounter\(`?seed(?:₂)?`?\)\)",
+                factory,
+            ):
+                raise RuntimeError(f"Rust Factory TASTy lost create's selected helper call or CounterOwner result: {factory}")
+            local_proof = {}
         if "class Counter(start: scala.Int)" not in decompiled["Counter"] or \
                 "class CounterOwner(counter: example.Counter)" not in decompiled["CounterOwner"]:
             raise RuntimeError("Rust TASTy did not retain separate Counter and Owner declarations")
@@ -4073,6 +4127,21 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict
         else:
             raise RuntimeError("missing Counter classfile unexpectedly compiled")
 
+        partial_batch = work / "partial-six-file-batch"
+        shutil.copytree(roots[0], partial_batch)
+        (partial_batch / "example/CounterOwnerFactory.tasty").unlink()
+        try:
+            compile_probe("partial-six-file-batch", partial_batch,
+                          "package witness\nobject PartialBatch:\n"
+                          "  def create(f: example.CounterOwnerFactory): example.CounterOwner = f.create(7)\n",
+                          werror=True)
+        except CommandFailure as error:
+            if "This `.tasty` file is missing" not in error.output:
+                raise RuntimeError(f"incomplete six-file batch failed unexpectedly: {error.output}") from error
+            reports["partial_six_file_batch"] = error.output.strip()
+        else:
+            raise RuntimeError("incomplete six-file Rust batch unexpectedly compiled")
+
         wrong_package = work / "wrong-package-owner"
         shutil.copytree(roots[0], wrong_package)
         misplaced_class_dir = wrong_package / "relocated"
@@ -4146,6 +4215,8 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict
             reports[label] = runtime.strip()
 
         renamed_client = client.read_text()
+        if reference_local:
+            renamed_client = renamed_client.replace("package example", "package renamed")
         for before_name, after_name in (("example.", "renamed."), ("CounterOwnerFactory", "WidgetBuilder"),
                                         ("CounterOwner", "WidgetHolder"), ("Counter", "Widget")):
             renamed_client = renamed_client.replace(before_name, after_name)
@@ -4161,9 +4232,14 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict
             toolchain.compiler(["-release", "21", "-d", output, renamed_input],
                                classpath=os.pathsep.join((str(root), toolchain.runtime_classpath)))
             driver_path = work / f"RenamedRunner{index}.java"
-            driver_path.write_text(
-                "public final class RenamedRunner%d { public static void main(String[] a) { "
-                "System.out.println(consumer.FactoryResultConsumer$.MODULE$.run()); } }\n" % index)
+            if reference_local:
+                driver_path.write_text(
+                    "public final class RenamedRunner%d { public static void main(String[] a) { "
+                    "renamed.FactoryConsumer$.MODULE$.main(new String[0]); } }\n" % index)
+            else:
+                driver_path.write_text(
+                    "public final class RenamedRunner%d { public static void main(String[] a) { "
+                    "System.out.println(consumer.FactoryResultConsumer$.MODULE$.run()); } }\n" % index)
             driver_out = work / f"renamed-driver-{index}"
             driver_out.mkdir()
             cp = os.pathsep.join((str(root), str(output), toolchain.runtime_classpath))
@@ -4173,7 +4249,7 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict
                                "-classpath", runtime_cp, f"RenamedRunner{index}"])
             lines = [line for line in runtime.strip().splitlines()
                      if not line.startswith("Picked up JAVA_TOOL_OPTIONS:")]
-            if lines != ["7,-9,3"]:
+            if lines != expected_output:
                 raise RuntimeError(f"renamed/reordered Rust batch returned {lines}")
             renamed_outputs.extend(lines)
 
@@ -4190,7 +4266,11 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict
         "javac_version": toolchain.javac_version,
         "javap_version": toolchain.javap_version,
         "jdk_release": toolchain.jdk_release,
-        "scala_source_sha256": digest(ROOT / "tests/fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala"),
+        "scala_source_sha256": digest(ROOT / (
+            "tests/fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala"
+            if reference_local else
+            "tests/fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala"
+        )),
         "client_source_sha256": client_hash,
         "rust_artifact_hashes": hashes,
         "tasty_link_uuids": uuids,
@@ -4215,6 +4295,7 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict
         "compile_classpath_order": ["rust-six-artifact-root", *[str(p) for p in toolchain.runtime_jars]],
         "runtime_outputs_are_original_rust_classes": True,
         "compiler_artifacts_sha256": toolchain.artifacts,
+        **local_proof,
     }
 
 def main() -> None:
@@ -4268,6 +4349,7 @@ def main() -> None:
         help="prove pinned Scala consumes factory-call Rust TASTy and executes original classes",
     )
     factory_result.add_argument("batch_root", type=Path)
+    factory_result.add_argument("--reference-local", action="store_true")
     subcommands.add_parser("check", help="regenerate/check fixtures, compile originals/reduced Answer, run negative controls")
     args = parser.parse_args()
     if args.command == "consume-pair":
@@ -4309,7 +4391,9 @@ def main() -> None:
         return
     if args.command == "consume-factory-result":
         toolchain = Toolchain()
-        print(json.dumps(consume_factory_result_batch(toolchain, args.batch_root),
+        print(json.dumps(consume_factory_result_batch(
+            toolchain, args.batch_root, reference_local=args.reference_local,
+        ),
                          indent=2, sort_keys=True))
         return
     binary = inspector()
