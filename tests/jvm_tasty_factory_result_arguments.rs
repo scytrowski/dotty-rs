@@ -1943,7 +1943,7 @@ fn scala39_reference_local_oracle_links_block_valdef_and_local_termref() {
 }
 
 #[test]
-fn reference_local_constructor_flow_preserves_one_session_identity_before_paired_rejection() {
+fn reference_local_constructor_flow_preserves_one_session_identity_through_body_validation() {
     let source = include_str!(
         "fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala"
     );
@@ -2082,15 +2082,47 @@ fn reference_local_constructor_flow_preserves_one_session_identity_before_paired
             typer.complete_symbol(parameter).unwrap();
         }
     }
-    for (method, tree, _) in &methods {
-        let TreeKind::DefDef(definition) = &parsed.ast.get(*tree).kind else {
+    let mut field_initializers = Vec::new();
+    for &class_tree in &package.stats {
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
             unreachable!();
         };
-        if let Some(rhs) = definition.rhs {
-            let context = typer.expression_context_for(*method).unwrap();
-            typer
-                .type_expression(rhs, context)
-                .expect("the exact local block types in the original source session");
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            unreachable!();
+        };
+        for &member_tree in &template.body {
+            match &parsed.ast.get(member_tree).kind {
+                TreeKind::ValDef(field_definition) => {
+                    let field = source_index.symbol_at(source_id, member_tree).unwrap();
+                    typer.complete_symbol(field).unwrap();
+                    let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info
+                    else {
+                        panic!("class field type completes in the recorded session");
+                    };
+                    let rhs = field_definition.rhs.unwrap();
+                    let context = typer.field_initializer_context_for(field).unwrap();
+                    let typed_initializer = typer
+                        .type_expression_expected(rhs, context, field_type)
+                        .expect(
+                            "paired class field initializer typing succeeds in the recorded session",
+                        );
+                    assert_eq!(
+                        typer.source_typed_index().get(source_id, rhs),
+                        Some(typed_initializer)
+                    );
+                    field_initializers.push((field, member_tree, typed_initializer, field_type));
+                }
+                TreeKind::DefDef(definition) if member_tree != template.constructor => {
+                    let method = source_index.symbol_at(source_id, member_tree).unwrap();
+                    if let Some(rhs) = definition.rhs {
+                        let context = typer.expression_context_for(method).unwrap();
+                        typer
+                            .type_expression(rhs, context)
+                            .expect("the exact local block types in the original source session");
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -2180,6 +2212,13 @@ fn reference_local_constructor_flow_preserves_one_session_identity_before_paired
     println!(
         "Rust local flow source/typed identities: SourceId={source_id:?}, class={factory:?}, create={create:?}, local={local_symbol:?}, helper={helper_symbol:?}, source=[rhs:{source_rhs:?},val:{source_local:?},initializer:{source_initializer:?},use:{:?}], typed=[rhs:{typed_rhs:?},val:{typed_local:?},initializer:{typed_initializer:?},use:{typed_local_use:?}]",
         source_local_use
+    );
+    println!(
+        "Rust same-session field initializer bindings: {:?}",
+        field_initializers
+            .iter()
+            .map(|(field, source, typed, ty)| (*field, *source, *typed, *ty))
+            .collect::<Vec<_>>()
     );
 
     let mut jvm_classes = Vec::new();
@@ -2275,9 +2314,83 @@ fn reference_local_constructor_flow_preserves_one_session_identity_before_paired
             .collect::<Vec<_>>()
     );
 
+    let factory_constructor_tree = factory_template.constructor;
+    let TreeKind::DefDef(factory_constructor_definition) =
+        &parsed.ast.get(factory_constructor_tree).kind
+    else {
+        unreachable!();
+    };
+    let factory_constructor_parameters = factory_constructor_definition
+        .value_param_clauses
+        .iter()
+        .map(|clause| {
+            clause
+                .iter()
+                .map(|&tree| {
+                    source_index
+                        .derived_symbol_at(constructors[2], source_id, tree)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let planned_classes = classes.clone();
+    let planned_methods = methods.iter().map(|(method, _, _)| *method).collect();
+    let tasty_bindings = AuditBindings {
+        index: typed_index,
+        classes: planned_classes,
+        methods: planned_methods,
+    };
+    let factory_members = methods
+        .iter()
+        .filter(|(method, _, _)| typer.store().symbols.get(*method).owner == Some(factory))
+        .map(|(method, tree, _)| ClassMemberPicklePlan::Method {
+            symbol: *method,
+            source_tree: *tree,
+        })
+        .collect::<Vec<_>>();
+    let factory_state_plan = ClassStatePicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: typer.typed_ast(),
+        source_index: &source_index,
+        typed_bindings: &tasty_bindings,
+        source: SourceMetadata {
+            id: source_id,
+            name: "CounterOwnerFactory.scala".to_owned(),
+        },
+        class: factory,
+        class_tree: factory_tree,
+        constructor: PrimaryConstructorInputPlan {
+            symbol: constructors[2],
+            source_tree: factory_constructor_tree,
+            parameter_clauses: factory_constructor_parameters,
+        },
+        members: &factory_members,
+    };
+    let validated_factory_state = factory_state_plan
+        .validate()
+        .expect("the body plan validates from the exact recorded source session");
+    let body_error = validated_factory_state
+        .validate_method_bodies()
+        .expect_err("the recorded local block remains unsupported by TASTy body validation");
+    let body_type = typer.typed_ast().get(typed_rhs).ty;
+    assert_eq!(
+        body_error,
+        PickleError::BodyType {
+            tree: typed_rhs,
+            ty: body_type,
+        },
+        "BodyType must refer to the exact block and type recorded above"
+    );
+    println!(
+        "Rust same-session TASTy body validation: {body_error:?} for source block {source_rhs:?} / typed block {typed_rhs:?} / type {body_type:?}"
+    );
+
     let paired_error =
         with_paired_jvm_tasty_batch_plan(source, "CounterOwnerFactory.scala", source_id, |_| ())
-            .expect_err("the existing paired contract rejects this local block");
+            .expect_err("the separate paired end-to-end control rejects this local block");
     assert!(
         matches!(
             &paired_error,
@@ -2286,7 +2399,7 @@ fn reference_local_constructor_flow_preserves_one_session_identity_before_paired
         ),
         "first paired failure was {paired_error:?}"
     );
-    println!("Rust paired local-flow first failure: {paired_error:?}");
+    println!("Separate paired end-to-end control first failure: {paired_error:?}");
 }
 
 #[test]

@@ -84,13 +84,16 @@ observed allocation in that test only; they are not stable public identifiers.
 | Factory class | `SymbolId(42)` | same canonical source class |
 | `create` method | `SymbolId(57)` | body type is `CounterOwner` |
 | `makeCounter` selection | source `Ident` in `TreeId(49)` | canonical `SymbolId(56)`; result type `Counter` |
-| Local declaration | `TreeId(50)` | `TreeId(16)`, `SymbolId(60)`, owned by `create`, type `Counter` |
-| Local initializer Apply | `TreeId(49)` | `TreeId(14)`; source-to-typed index retains this exact edge |
-| Block method body | `TreeId(56)` | `TreeId(22)` |
-| Final local use | `TreeId(54)` | `TreeId(20)`, `TermRef(SymbolId(60))` |
+| Local declaration | `TreeId(50)` | `TreeId(18)`, `SymbolId(60)`, owned by `create`, type `Counter` |
+| Local initializer Apply | `TreeId(49)` | `TreeId(16)`; source-to-typed index retains this exact edge |
+| Block method body | `TreeId(56)` | `TreeId(24)` |
+| Final local use | `TreeId(54)` | `TreeId(22)`, `TermRef(SymbolId(60))` |
 
 The frontend keeps the original block, `ValDef`, initializer call, final
-constructor application, and local `Ident`. `Typer::typed_local_binding_at`
+constructor application, and local `Ident`. Before measuring body validation,
+the test types both class-field initializers and each method body in source
+member order in this same session, matching the paired planner's frontend
+typing path. `Typer::typed_local_binding_at`
 returns the local symbol and its exact typed declaration, keyed by the original
 source `TreeId`; the typed reference in the constructor argument points to that
 same `SymbolId(60)`. The helper selection retains canonical method
@@ -100,14 +103,16 @@ same `SymbolId(60)`. The helper selection retains canonical method
 | --- | --- |
 | Lexer, Parser, Namer, Typer | Succeed in the single source session; source/typed local and method links are retained. |
 | Cross-class constructor proof scan | Completes without error. The scan retains the helper's existing proof but no `create` proof, because `create` returns a `Block` rather than the bounded direct constructor-call shape. |
-| Class-state TASTy plan | Signature/member plan validates in the paired batch before the body contract check. |
-| TASTy method-body validation | First rejection: `BodyType { tree: TreeId(24), ty: TypeId(46) }`. This is surfaced as `JVM/TASTy cross-contract validation` / `TastyPlan(BodyType)`. Those IDs are run-local. |
-| TASTy byte emitter and paired artifact publisher | Not reached. A complete validated method-body plan is required first; no Rust block TASTy artifact was manufactured. |
+| Same-session class-state TASTy plan | Signature/member validation succeeds from the recorded session's store, source AST/index, typed AST, and source-to-typed index. |
+| Same-session TASTy method-body validation | `BodyType { tree: TreeId(24), ty: TypeId(47) }`, asserted against the exact recorded typed block and its type. These IDs are run-local. |
+| Separate paired end-to-end control | A fresh `with_paired_jvm_tasty_batch_plan` run independently reaches `JVM/TASTy cross-contract validation` / `TastyPlan(BodyType { tree: TreeId(24), ty: TypeId(46) })`. The matching tree number is coincidental; its arena and type IDs are not the measured session's identities. |
+| TASTy byte emitter and paired artifact publisher | Not reached in either body-validation run. A complete validated method-body plan is required first; no Rust block TASTy artifact was manufactured. |
 | Separate JVM-only source backend | Succeeds for the same source shape, emits all three classes, and keeps `makeCounter:(I)Lexample/Counter;` and `CounterOwner.<init>:(Lexample/Counter;)V`. The method uses local slot 2. |
 | JDK 21 verification/execution of Rust JVM classes | Succeeds with `-Xverify:all`; the Java harness checks all three seed values, distinct Counter references, and state isolation. This is separate from paired TASTy output. |
 
-The exact paired failure and local identity assertions are in
-`reference_local_constructor_flow_preserves_one_session_identity_before_paired_rejection`
+The exact same-session validation, local identity assertions, and separately
+labeled paired control are in
+`reference_local_constructor_flow_preserves_one_session_identity_through_body_validation`
 in [`jvm_tasty_factory_result_arguments.rs`](../tests/jvm_tasty_factory_result_arguments.rs).
 The independent backend check is
 `reference_local_constructor_flow_emits_and_executes_on_the_jvm_only_path`
@@ -186,7 +191,8 @@ and `javap` inspection all completed with Temurin 21.0.8 and Scala revision
 | Validation | Result |
 | --- | --- |
 | Focused Rust local-flow identity, wire-tree, rename/reorder controls | Passed; source/typed links and local `TERMREFdirect → VALDEF` are asserted. |
-| Paired Rust first-failure measurement | Passed; first rejection is `JVM/TASTy cross-contract validation: TastyPlan(BodyType { .. })`. |
+| Same-session Rust body-validation measurement | Passed; `BodyType` is asserted against the original typed block and its exact type after field initializers and method bodies have been typed in source member order. |
+| Separate paired end-to-end control | Passed; a fresh frontend session independently reaches `JVM/TASTy cross-contract validation: TastyPlan(BodyType { .. })`. Its arena IDs are not used as evidence for the recorded-session audit. |
 | JVM-only local-flow backend regression | Passed; 3 classes emitted, descriptors/opcodes/stack/local bounds asserted, JDK21 `-Xverify:all` harness executed. |
 | Full `jvm_tasty_factory_result_arguments` integration test with required pinned Scala reader | Passed, 11 tests. |
 | Inherited strict JDK21 classfile/JVM/source/TASTy-artifact/stateful gate | Passed with `DOTTY_CLASSFILE_REQUIRE_JDK=1`. |
