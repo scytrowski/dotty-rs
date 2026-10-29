@@ -283,12 +283,22 @@ impl SourceTyper<'_> {
             },
             method_scope,
         )?;
-        let typed_body = self.type_value_expression_inner(
-            function.body,
-            lambda_context,
-            info_journal,
-            new_mappings,
-        );
+        let typed_body = if let Some((_, expected_output)) = expected_function1 {
+            self.type_expression_expected_inner(
+                function.body,
+                lambda_context,
+                expected_output,
+                info_journal,
+                new_mappings,
+            )
+        } else {
+            self.type_value_expression_inner(
+                function.body,
+                lambda_context,
+                info_journal,
+                new_mappings,
+            )
+        };
         let typed_body = typed_body?;
         let body_result = self.widen_expression_type_journaled(
             self.typed_arena.get(typed_body).ty,
