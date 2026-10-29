@@ -1,0 +1,44 @@
+[[syntax trees at end of                     typer]] // LocalValues.scala
+package lexicalclosure {
+  final lazy module val LocalValues: lexicalclosure.LocalValues =
+    new lexicalclosure.LocalValues()
+  final module class LocalValues() extends Object() {
+    this: lexicalclosure.LocalValues.type =>
+    def offset: Int => Int =
+      {
+        val bias: Int = 3
+        (x: Int) =>
+          {
+            x + bias
+          }
+      }
+    def two: Int => Int =
+      {
+        val first: Int = 1
+        val second: Int = 2
+        (x: Int) =>
+          {
+            x + first + second + first
+          }
+      }
+    def shadowed: Int => Int =
+      {
+        val value: Int = 100
+        (value: Int) =>
+          {
+            value
+          }
+      }
+    def nestedShadow: Int => Int =
+      {
+        val value: Int = 100
+        {
+          val value: Int = 3
+          (x: Int) =>
+            {
+              x + value
+            }
+        }
+      }
+  }
+}
