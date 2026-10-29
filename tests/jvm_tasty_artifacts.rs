@@ -17,9 +17,10 @@ use dotty::jvm_tasty_artifacts::{
 use dotty::jvm_tasty_plan::PairedPlanError;
 use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 use dotty_classfile::attribute::Attribute;
+use dotty_classfile::bytecode::CodeSequence;
 use dotty_classfile::bytecode::{
-    ClassReference, ConstantPoolIndexOperand, Instruction, LocalIndex, SpecialMethodReference,
-    analyze as analyze_instructions,
+    CfgCodeAnalyzer, ClassReference, ConstantPoolIndexOperand, ControlFlowGraph, Instruction,
+    LocalIndex, SpecialMethodReference, VirtualMethodReference, analyze as analyze_instructions,
 };
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use std::process::Command;
@@ -1607,6 +1608,527 @@ fn factory_result_batch_contract_rejects_corrupt_create_bytecode_before_publicat
         },
     )
     .unwrap();
+}
+
+#[test]
+fn factory_result_constructor_arguments_preserve_original_identity_on_jdk21() {
+    if !require_exact_jdk_21_or_skip() {
+        return;
+    }
+
+    let batch = emit_paired_jvm_tasty_batch(
+        FACTORY_RESULT_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(18360),
+    )
+    .expect("the unchanged factory-result source emits a complete Rust-owned batch");
+    assert_eq!(batch.classes().len(), 3);
+
+    let output = TestDirectory::new("factory-result-original-jdk21-runtime");
+    let class_root = output.path().join("rust-classes");
+    let harness_root = output.path().join("harness-classes");
+    std::fs::create_dir_all(&class_root).unwrap();
+    std::fs::create_dir_all(&harness_root).unwrap();
+    let expected_paths = [
+        ("example/Counter.class", "example/Counter.tasty"),
+        ("example/CounterOwner.class", "example/CounterOwner.tasty"),
+        (
+            "example/CounterOwnerFactory.class",
+            "example/CounterOwnerFactory.tasty",
+        ),
+    ];
+    let mut original_files = Vec::with_capacity(6);
+    for (artifact, (class_path, tasty_path)) in batch.classes().iter().zip(expected_paths) {
+        assert_eq!(
+            (artifact.classfile_path(), artifact.tasty_path()),
+            (class_path, tasty_path)
+        );
+        for (relative, bytes) in [
+            (artifact.classfile_path(), artifact.classfile_bytes()),
+            (artifact.tasty_path(), artifact.tasty_bytes()),
+        ] {
+            let path = class_root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+            original_files.push((path, bytes.to_vec()));
+        }
+        let mut reader = Reader::new(artifact.classfile_bytes());
+        let class = ClassFile::decode(&mut reader).unwrap();
+        assert!(reader.is_at_end());
+        assert_eq!((class.version.major, class.version.minor), (65, 0));
+        let tasty = TastyFile::parse_and_validate_scala_3_9(artifact.tasty_bytes()).unwrap();
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version
+            ),
+            (28, 9, 0)
+        );
+        assert_eq!(
+            class.tasty_link_id().unwrap(),
+            Some(TastyLinkId::from_bytes(tasty.header().uuid))
+        );
+    }
+    assert_eq!(
+        read_relative_files(&class_root).unwrap(),
+        [
+            "example/Counter.class",
+            "example/Counter.tasty",
+            "example/CounterOwner.class",
+            "example/CounterOwner.tasty",
+            "example/CounterOwnerFactory.class",
+            "example/CounterOwnerFactory.tasty",
+        ]
+    );
+    let original_hashes = original_files
+        .iter()
+        .map(|(path, _)| sha256sum(path))
+        .collect::<Vec<_>>();
+    for ((path, _), hash) in original_files.iter().zip(&original_hashes) {
+        eprintln!("factory-result-original-sha256 {} {hash}", path.display());
+    }
+
+    let factory_artifact = &batch.classes()[2];
+    let mut reader = Reader::new(factory_artifact.classfile_bytes());
+    let factory = ClassFile::decode(&mut reader).unwrap();
+    assert!(reader.is_at_end());
+    let method = |name: &str, descriptor: &str| {
+        factory
+            .methods
+            .iter()
+            .find(|method| {
+                factory.constant_pool.utf8(method.name_index) == Ok(name)
+                    && factory.constant_pool.utf8(method.descriptor_index) == Ok(descriptor)
+            })
+            .unwrap_or_else(|| panic!("missing {name}{descriptor}"))
+    };
+    let create = method("create", "(I)Lexample/CounterOwner;");
+    let [Attribute::Code(create_code)] = create.attributes.as_slice() else {
+        panic!("Factory.create has one Code attribute");
+    };
+    assert_eq!(create_code.max_locals, 2);
+    assert_eq!(create_code.max_stack, 4);
+    assert_eq!(create_code.code.first(), Some(&0xbb));
+    let owner_allocation = ConstantPoolIndex(u16::from_be_bytes([
+        create_code.code[1],
+        create_code.code[2],
+    ]));
+    assert_eq!(
+        factory.constant_pool.class_name(owner_allocation).unwrap(),
+        "example/CounterOwner",
+        "create starts by allocating only the outer Owner"
+    );
+    let (factory_operand, owner_operand) =
+        factory_result_call_operand_offsets(create_code.code).expect(
+            "create consists of one Owner allocation, seed-preserving helper call, Owner constructor and return",
+        );
+    let methodref = |operand: usize| {
+        let index = ConstantPoolIndex(u16::from_be_bytes([
+            create_code.code[operand],
+            create_code.code[operand + 1],
+        ]));
+        let ConstantPoolEntry::Methodref {
+            class_index,
+            name_and_type_index,
+        } = factory.constant_pool.get(index).unwrap()
+        else {
+            panic!("invoke instruction has a CONSTANT_Methodref");
+        };
+        (
+            factory
+                .constant_pool
+                .class_name(*class_index)
+                .unwrap()
+                .to_owned(),
+            factory
+                .constant_pool
+                .name_and_type(*name_and_type_index)
+                .unwrap(),
+        )
+    };
+    assert_eq!(
+        methodref(factory_operand),
+        (
+            "example/CounterOwnerFactory".to_owned(),
+            ("makeCounter", "(I)Lexample/Counter;")
+        )
+    );
+    assert_eq!(
+        methodref(owner_operand),
+        (
+            "example/CounterOwner".to_owned(),
+            ("<init>", "(Lexample/Counter;)V")
+        )
+    );
+    assert_eq!(
+        create_code
+            .code
+            .iter()
+            .filter(|opcode| **opcode == 0xb6)
+            .count(),
+        1
+    );
+
+    let cp_operand = |index: usize| {
+        ConstantPoolIndexOperand::try_from(u16::from_be_bytes([
+            create_code.code[index],
+            create_code.code[index + 1],
+        ]))
+        .unwrap()
+    };
+    let mut create_sequence = CodeSequence::new();
+    create_sequence
+        .instruction(Instruction::New(ClassReference::new(cp_operand(1))))
+        .instruction(Instruction::Dup)
+        .instruction(Instruction::ALoad(LocalIndex::new(0)))
+        .instruction(Instruction::ILoad(LocalIndex::new(1)))
+        .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+            cp_operand(factory_operand),
+        )))
+        .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+            cp_operand(owner_operand),
+        )))
+        .instruction(Instruction::AReturn);
+    let graph = ControlFlowGraph::build(&create_sequence).unwrap();
+    let analyzed = CfgCodeAnalyzer::analyze_with_current_class(
+        &graph,
+        "create",
+        "(I)Lexample/CounterOwner;",
+        false,
+        &factory.constant_pool,
+        factory.this_class,
+    )
+    .expect("class-aware CFG analysis accepts the initialized helper result below a pending Owner");
+    assert_eq!(analyzed.max_stack, create_code.max_stack);
+    assert_eq!(analyzed.max_locals, create_code.max_locals);
+    assert_eq!(
+        create_code
+            .code
+            .iter()
+            .filter(|opcode| **opcode == 0xb7)
+            .count(),
+        1
+    );
+
+    let make_counter = method("makeCounter", "(I)Lexample/Counter;");
+    let [Attribute::Code(helper_code)] = make_counter.attributes.as_slice() else {
+        panic!("Factory.makeCounter has one Code attribute");
+    };
+    let helper_constructor = constructor_operand_offset(helper_code.code).unwrap();
+    let helper_ref = ConstantPoolIndex(u16::from_be_bytes([
+        helper_code.code[helper_constructor],
+        helper_code.code[helper_constructor + 1],
+    ]));
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = factory.constant_pool.get(helper_ref).unwrap()
+    else {
+        panic!("makeCounter invokes the Counter constructor");
+    };
+    assert_eq!(
+        factory.constant_pool.class_name(*class_index).unwrap(),
+        "example/Counter"
+    );
+    assert_eq!(
+        factory
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("<init>", "(I)V")
+    );
+    assert_eq!(
+        helper_code
+            .code
+            .iter()
+            .filter(|opcode| **opcode == 0xbb)
+            .count(),
+        1
+    );
+    assert_eq!(
+        create_code
+            .code
+            .iter()
+            .filter(|opcode| **opcode == 0xbb)
+            .count(),
+        1,
+        "create allocates only the still-uninitialized outer Owner"
+    );
+
+    let mut owner_reader = Reader::new(batch.classes()[1].classfile_bytes());
+    let owner = ClassFile::decode(&mut owner_reader).unwrap();
+    assert!(owner_reader.is_at_end());
+    let inner = owner
+        .fields
+        .iter()
+        .find(|field| {
+            owner.constant_pool.utf8(field.name_index) == Ok("inner")
+                && owner.constant_pool.utf8(field.descriptor_index) == Ok("Lexample/Counter;")
+        })
+        .expect("CounterOwner has its private Counter field");
+    assert!(
+        inner
+            .access_flags
+            .contains(dotty_classfile::access_flags::ACC_PRIVATE)
+    );
+    let owner_ctor = owner
+        .methods
+        .iter()
+        .find(|method| {
+            owner.constant_pool.utf8(method.name_index) == Ok("<init>")
+                && owner.constant_pool.utf8(method.descriptor_index) == Ok("(Lexample/Counter;)V")
+        })
+        .unwrap();
+    let [Attribute::Code(owner_ctor_code)] = owner_ctor.attributes.as_slice() else {
+        panic!("CounterOwner.<init> has one Code attribute");
+    };
+    assert_eq!(
+        owner_ctor_code
+            .code
+            .iter()
+            .filter(|opcode| **opcode == 0xb5)
+            .count(),
+        1,
+        "the exact initialized constructor argument is stored once"
+    );
+    let owner_field_operand = owner_ctor_code
+        .code
+        .windows(3)
+        .position(|instruction| instruction[0] == 0xb5)
+        .map(|offset| {
+            ConstantPoolIndex(u16::from_be_bytes([
+                owner_ctor_code.code[offset + 1],
+                owner_ctor_code.code[offset + 2],
+            ]))
+        })
+        .expect("Owner constructor has a putfield instruction");
+    let ConstantPoolEntry::Fieldref {
+        class_index,
+        name_and_type_index,
+    } = owner.constant_pool.get(owner_field_operand).unwrap()
+    else {
+        panic!("Owner constructor putfield uses a Fieldref");
+    };
+    assert_eq!(
+        owner.constant_pool.class_name(*class_index).unwrap(),
+        "example/CounterOwner"
+    );
+    assert_eq!(
+        owner
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+        ("inner", "Lexample/Counter;")
+    );
+    assert_eq!(
+        owner_ctor_code
+            .code
+            .iter()
+            .filter(|opcode| **opcode == 0xbb)
+            .count(),
+        0,
+        "Owner stores its constructor parameter rather than constructing a replacement Counter"
+    );
+
+    for (class_name, expected) in [
+        (
+            "example.CounterOwnerFactory",
+            &[
+                "major version: 65",
+                "descriptor: (I)Lexample/Counter;",
+                "descriptor: (I)Lexample/CounterOwner;",
+                "Method makeCounter:(I)Lexample/Counter;",
+                "Method example/CounterOwner.\"<init>\":(Lexample/Counter;)V",
+            ][..],
+        ),
+        (
+            "example.CounterOwner",
+            &[
+                "major version: 65",
+                "private final example.Counter inner;",
+                "Field inner:Lexample/Counter;",
+            ][..],
+        ),
+    ] {
+        let javap = Command::new("javap")
+            .args(["-v", "-p", "-c", "-classpath"])
+            .arg(&class_root)
+            .arg(class_name)
+            .output()
+            .expect("start JDK 21 javap for the original Rust classfile");
+        assert!(
+            javap.status.success(),
+            "javap rejected {class_name}: {}",
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let dump = String::from_utf8_lossy(&javap.stdout);
+        for value in expected {
+            assert!(
+                dump.contains(value),
+                "javap {class_name} omitted {value:?}:\n{dump}"
+            );
+        }
+    }
+
+    let harness = output.path().join("FactoryResultIdentityHarness.java");
+    std::fs::write(&harness, r#"import java.lang.reflect.Field;
+
+public final class FactoryResultIdentityHarness {
+    public static void main(String[] args) throws ReflectiveOperationException {
+        example.CounterOwnerFactory factory = new example.CounterOwnerFactory();
+        example.CounterOwner positive = factory.create(7);
+        example.CounterOwner negative = factory.create(-9);
+        example.CounterOwner third = factory.create(3);
+        example.CounterOwner independent = new example.CounterOwnerFactory().create(11);
+        if (positive == negative || positive == third || negative == third || positive == independent)
+            throw new AssertionError("create must return distinct Owners");
+        example.Counter p = inner(positive), n = inner(negative), t = inner(third), i = inner(independent);
+        if (p == n || p == t || p == i || n == t || n == i || t == i)
+            throw new AssertionError("each Owner must retain a distinct helper-created Counter");
+        expect(positive.read(), 7); expect(negative.read(), -9);
+        expect(third.read(), 3); expect(independent.read(), 11);
+        p.set(42);
+        expect(positive.read(), 42); expect(negative.read(), -9);
+        expect(third.read(), 3); expect(independent.read(), 11);
+        p.set(-9);
+        expect(positive.read(), -9); expect(negative.read(), -9);
+        expect(third.read(), 3); expect(independent.read(), 11);
+        n.set(100);
+        expect(positive.read(), -9); expect(negative.read(), 100);
+        expect(third.read(), 3); expect(independent.read(), 11);
+        System.out.println("factory-result=7,-9,3,11; distinct=true; mutation=42,-9,100");
+    }
+    private static example.Counter inner(example.CounterOwner owner) throws ReflectiveOperationException {
+        Field field = example.CounterOwner.class.getDeclaredField("inner");
+        field.setAccessible(true);
+        Object value = field.get(owner);
+        if (!(value instanceof example.Counter)) throw new AssertionError("inner is not a Counter");
+        return (example.Counter)value;
+    }
+    private static void expect(int actual, int expected) {
+        if (actual != expected) throw new AssertionError("expected " + expected + ", got " + actual);
+    }
+}
+"#).unwrap();
+    let javac = Command::new("javac")
+        .args(["--release", "21", "-classpath"])
+        .arg(&class_root)
+        .arg("-d")
+        .arg(&harness_root)
+        .arg(&harness)
+        .output()
+        .expect("start JDK 21 javac for the separate Java harness");
+    assert!(
+        javac.status.success(),
+        "javac --release 21 rejected the harness:\n{}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    for ((path, _), expected_hash) in original_files.iter().zip(&original_hashes) {
+        assert_eq!(
+            sha256sum(path),
+            *expected_hash,
+            "javac changed an original Rust artifact"
+        );
+    }
+    let classpath = std::env::join_paths([harness_root.as_path(), class_root.as_path()]).unwrap();
+    let java = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(&classpath)
+        .arg("FactoryResultIdentityHarness")
+        .output()
+        .expect("start strict JDK 21 verification and Rust artifact runtime");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected or failed original Rust artifacts:\n{}\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "factory-result=7,-9,3,11; distinct=true; mutation=42,-9,100"
+    );
+    for ((path, bytes), expected_hash) in original_files.iter().zip(&original_hashes) {
+        assert_eq!(
+            sha256sum(path),
+            *expected_hash,
+            "JDK tools changed an original artifact"
+        );
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            *bytes,
+            "runtime used unchanged Rust bytes"
+        );
+    }
+
+    // Each runtime negative starts from the valid original class bytes in an isolated tree.
+    let run_negative = |label: &str, factory_bytes: &[u8], expected: &str| {
+        let root = output.path().join(label);
+        for (index, artifact) in batch.classes().iter().enumerate() {
+            let relative = artifact.classfile_path();
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let bytes = if index == 2 {
+                factory_bytes
+            } else {
+                artifact.classfile_bytes()
+            };
+            std::fs::write(path, bytes).unwrap();
+        }
+        let classpath = std::env::join_paths([harness_root.as_path(), root.as_path()]).unwrap();
+        let rejected = Command::new("java")
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("FactoryResultIdentityHarness")
+            .output()
+            .expect("start isolated JVM negative control");
+        assert!(!rejected.status.success(), "JVM accepted {label}");
+        let message = format!(
+            "{}{}",
+            String::from_utf8_lossy(&rejected.stdout),
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(
+            message.contains(expected),
+            "{label} failed at an unexpected first stage; expected {expected}:\n{message}"
+        );
+    };
+
+    let code_start =
+        create_code.code.as_ptr() as usize - factory_artifact.classfile_bytes().as_ptr() as usize;
+    let mut wrong_receiver = factory_artifact.classfile_bytes().to_vec();
+    // In `create`, replace `aload_0` with `iload_1`; the invokevirtual receiver is then an int.
+    wrong_receiver[code_start + factory_operand - 3] = 0x1b;
+    run_negative("wrong-reference-flow", &wrong_receiver, "VerifyError");
+
+    let mut uninitialized_owner = factory_artifact.classfile_bytes().to_vec();
+    uninitialized_owner[code_start + owner_operand - 1..code_start + owner_operand + 2]
+        .copy_from_slice(&[0x57, 0x57, 0x00]);
+    run_negative(
+        "uninitialized-owner-return",
+        &uninitialized_owner,
+        "VerifyError",
+    );
+
+    let mut undersized_stack = factory_artifact.classfile_bytes().to_vec();
+    undersized_stack[code_start - 8..code_start - 6].copy_from_slice(&3u16.to_be_bytes());
+    run_negative("undersized-max-stack", &undersized_stack, "VerifyError");
+
+    let mut missing_helper =
+        ClassFile::decode(&mut Reader::new(factory_artifact.classfile_bytes())).unwrap();
+    missing_helper.methods.retain(|method| {
+        missing_helper
+            .constant_pool
+            .utf8(method.name_index)
+            .unwrap()
+            != "makeCounter"
+    });
+    let missing_helper = missing_helper.encode().unwrap();
+    run_negative(
+        "missing-helper-linkage",
+        &missing_helper,
+        "NoSuchMethodError",
+    );
 }
 
 fn factory_classfile_mut(artifacts: &mut JvmTastyBatchArtifacts) -> &mut JvmTastyClassFileArtifact {
