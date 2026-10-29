@@ -2034,6 +2034,14 @@ fn reference_local_constructor_proof_rejects_unsupported_block_shapes() {
             "LocalValueTypeMismatch",
         ),
         (
+            "parameter Ident cannot stand in for the local constructor argument",
+            baseline
+                .replace("def create(seed: Int)", "def create(seed: Counter)")
+                .replace("makeCounter(seed)", "makeCounter(0)")
+                .replace("new CounterOwner(counter)", "new CounterOwner(seed)"),
+            "constructor argument must resolve directly to the caller formal",
+        ),
+        (
             "local declared in another method",
             baseline
                 .replace(
@@ -2462,6 +2470,27 @@ fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowPro
         dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
             "local binding resolver must borrow the exact proof session stores and indexes"
         )
+    );
+    let foreign_source_error = match validate_cross_class_constructor_call_proofs_with_typer(
+        CrossClassConstructorCallProofInput {
+            source_id: SourceId::from_index(999_1849),
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &source_index,
+            source_typed_index: typed_index,
+            jvm_unit: &jvm_unit,
+        },
+        &typer,
+    ) {
+        Ok(_) => panic!("a foreign source id cannot authenticate the original local proof"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{foreign_source_error:?}").contains("package root is not bound"),
+        "foreign source identity failed at an unexpected gate: {foreign_source_error:?}"
     );
     let proof_result = validate_cross_class_constructor_call_proofs_with_typer(
         CrossClassConstructorCallProofInput {
