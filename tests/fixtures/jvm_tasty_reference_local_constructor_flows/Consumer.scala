@@ -6,6 +6,7 @@ object FactoryConsumer:
     val positive = factory.create(7)
     val negative = factory.create(-9)
     val third = factory.create(3)
+    assert((positive ne negative) && (positive ne third) && (negative ne third))
     assert(positive.read() == 7)
     assert(negative.read() == -9)
     assert(third.read() == 3)
