@@ -42,6 +42,8 @@ const NESTED_CONSTRUCTOR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala");
 const FACTORY_RESULT_BATCH: &str =
     include_str!("fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala");
+const REFERENCE_LOCAL_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala");
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
 const COUNTER_FACTORY_REFERENCE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def create(counter: Counter): Counter = counter\n";
@@ -224,6 +226,280 @@ fn batch_emits_the_complete_ordered_class_and_tasty_manifest() {
             Some(pair.tasty_link_id())
         );
         validate_classfile_tasty_link(&class_file, pair.tasty_bytes()).unwrap();
+    }
+}
+
+#[test]
+fn reference_local_flow_emits_a_deterministic_six_artifact_batch() {
+    let first = emit_paired_jvm_tasty_batch(
+        REFERENCE_LOCAL_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(18530),
+    )
+    .expect("the original one-session reference-local source produces a paired batch");
+    let second = emit_paired_jvm_tasty_batch(
+        REFERENCE_LOCAL_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(18531),
+    )
+    .expect("a fresh semantic session produces the same paired batch");
+
+    assert_eq!(first.source_id(), SourceId::from_index(18530));
+    assert_eq!(first.classes().len(), 3);
+    assert_eq!(first.classes().len(), second.classes().len());
+    assert_eq!(
+        first
+            .classes()
+            .iter()
+            .flat_map(|class| [class.classfile_path(), class.tasty_path()])
+            .collect::<Vec<_>>(),
+        [
+            "example/Counter.class",
+            "example/Counter.tasty",
+            "example/CounterOwner.class",
+            "example/CounterOwner.tasty",
+            "example/CounterOwnerFactory.class",
+            "example/CounterOwnerFactory.tasty",
+        ]
+    );
+    for (left, right) in first.classes().iter().zip(second.classes()) {
+        assert_eq!(left.classfile_path(), right.classfile_path());
+        assert_eq!(left.tasty_path(), right.tasty_path());
+        assert_eq!(left.classfile_bytes(), right.classfile_bytes());
+        assert_eq!(left.tasty_bytes(), right.tasty_bytes());
+        assert_eq!(left.tasty_link_id(), right.tasty_link_id());
+        let tasty = TastyFile::parse_and_validate_scala_3_9(left.tasty_bytes()).unwrap();
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version,
+            ),
+            (28, 9, 0)
+        );
+        assert_eq!(
+            left.tasty_link_id(),
+            TastyLinkId::from_bytes(tasty.header().uuid)
+        );
+        let mut reader = Reader::new(left.classfile_bytes());
+        let class = ClassFile::decode(&mut reader).unwrap();
+        assert!(reader.is_at_end());
+        assert_eq!((class.version.major, class.version.minor), (65, 0));
+        assert_eq!(class.tasty_link_id().unwrap(), Some(left.tasty_link_id()));
+        validate_classfile_tasty_link(&class, left.tasty_bytes()).unwrap();
+    }
+
+    let factory = first
+        .classes()
+        .iter()
+        .find(|class| class.classfile_path() == "example/CounterOwnerFactory.class")
+        .unwrap();
+    let mut reader = Reader::new(factory.classfile_bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let create = class
+        .methods
+        .iter()
+        .find(|method| {
+            class.constant_pool.utf8(method.name_index).unwrap() == "create"
+                && class.constant_pool.utf8(method.descriptor_index).unwrap()
+                    == "(I)Lexample/CounterOwner;"
+        })
+        .unwrap();
+    let [dotty_classfile::attribute::Attribute::Code(code)] = create.attributes.as_slice() else {
+        panic!("create has one Code attribute");
+    };
+    assert_eq!(code.code.len(), 15);
+    assert_eq!(
+        [
+            code.code[0],
+            code.code[1],
+            code.code[2],
+            code.code[5],
+            code.code[6],
+            code.code[9],
+            code.code[10],
+            code.code[11],
+            code.code[14]
+        ],
+        [0x2a, 0x1b, 0xb6, 0x4d, 0xbb, 0x59, 0x2c, 0xb7, 0xb0]
+    );
+    assert_eq!((code.max_stack, code.max_locals), (3, 3));
+    let method_ref = |offset: usize| {
+        let index = ConstantPoolIndex(u16::from_be_bytes([
+            code.code[offset],
+            code.code[offset + 1],
+        ]));
+        let Some(ConstantPoolEntry::Methodref {
+            class_index,
+            name_and_type_index,
+        }) = class.constant_pool.get(index)
+        else {
+            panic!("call operand references a Methodref");
+        };
+        (
+            class.constant_pool.class_name(*class_index).unwrap(),
+            class
+                .constant_pool
+                .name_and_type(*name_and_type_index)
+                .unwrap(),
+        )
+    };
+    assert_eq!(
+        method_ref(3),
+        (
+            "example/CounterOwnerFactory",
+            ("makeCounter", "(I)Lexample/Counter;")
+        )
+    );
+    assert_eq!(
+        method_ref(12),
+        ("example/CounterOwner", ("<init>", "(Lexample/Counter;)V"))
+    );
+
+    let stage = TestDirectory::new("reference-local-six-artifacts");
+    let destination = stage.path().join("classes");
+    let published = publish_paired_batch(&destination, &first, None).unwrap();
+    assert_eq!(published.len(), 6);
+    assert_eq!(read_relative_files(&destination).unwrap().len(), 6);
+    for (index, fault) in (1..=6)
+        .map(BatchPublishFault::AfterStagedFiles)
+        .chain([
+            BatchPublishFault::BeforePromotion,
+            BatchPublishFault::AfterPromotion,
+        ])
+        .enumerate()
+    {
+        let failed_destination = stage.path().join(format!("failed-{index}"));
+        assert!(publish_paired_batch(&failed_destination, &first, Some(fault)).is_err());
+        assert!(!failed_destination.exists(), "fault case {index}");
+    }
+    let sentinel_destination = stage.path().join("existing");
+    std::fs::create_dir(&sentinel_destination).unwrap();
+    let sentinel = sentinel_destination.join("sentinel");
+    std::fs::write(&sentinel, b"leave unchanged").unwrap();
+    assert!(publish_paired_batch(&sentinel_destination, &first, None).is_err());
+    assert_eq!(std::fs::read(sentinel).unwrap(), b"leave unchanged");
+
+    if require_jdk_21_or_skip() {
+        let runtime = TestDirectory::new("reference-local-jdk21-runtime");
+        let classes = runtime.path().join("classes");
+        for class in first.classes() {
+            let destination = classes.join(class.classfile_path());
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::write(&destination, class.classfile_bytes()).unwrap();
+        }
+        let harness = runtime.path().join("ReferenceLocalBatchHarness.java");
+        std::fs::write(
+            &harness,
+            r#"import example.Counter;
+import example.CounterOwner;
+import example.CounterOwnerFactory;
+import java.lang.reflect.Field;
+public final class ReferenceLocalBatchHarness {
+  public static void main(String[] args) throws Exception {
+    CounterOwnerFactory factory = new CounterOwnerFactory();
+    CounterOwner positive = factory.create(7);
+    CounterOwner negative = factory.create(-9);
+    CounterOwner third = factory.create(3);
+    if (positive.read() != 7 || negative.read() != -9 || third.read() != 3)
+      throw new AssertionError("factory result values");
+    Field inner = CounterOwner.class.getDeclaredField("inner");
+    inner.setAccessible(true);
+    Counter first = (Counter) inner.get(positive);
+    Counter second = (Counter) inner.get(negative);
+    if (first == second || first == inner.get(third))
+      throw new AssertionError("each local flow retains a fresh Counter");
+    first.set(41);
+    if (positive.read() != 41 || negative.read() != -9 || third.read() != 3)
+      throw new AssertionError("local references retain independent state");
+    System.out.println("paired-reference-local=ok");
+  }
+}"#,
+        )
+        .unwrap();
+        let harness_classes = runtime.path().join("harness");
+        std::fs::create_dir_all(&harness_classes).unwrap();
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath"])
+            .arg(&classes)
+            .arg("-d")
+            .arg(&harness_classes)
+            .arg(&harness)
+            .output()
+            .expect("start JDK 21 javac for the paired local batch harness");
+        assert!(
+            javac.status.success(),
+            "javac --release 21 rejected the harness:\n{}",
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let classpath =
+            std::env::join_paths([harness_classes.as_path(), classes.as_path()]).unwrap();
+        let java = Command::new("java")
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("ReferenceLocalBatchHarness")
+            .output()
+            .expect("start strict JDK 21 verification for the paired local batch");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected the paired local batch:\n{}\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "paired-reference-local=ok"
+        );
+    }
+}
+
+#[test]
+fn reference_local_renamed_and_reordered_batches_are_independently_deterministic() {
+    let renamed = REFERENCE_LOCAL_BATCH
+        .replace("package example", "package sample")
+        .replace("CounterOwnerFactory", "TokenFactory")
+        .replace("CounterOwner", "TokenBox")
+        .replace("Counter", "Token");
+    let parts = renamed.split("\nclass ").collect::<Vec<_>>();
+    assert_eq!(parts.len(), 4);
+    let reordered = format!(
+        "{}\nclass {}\nclass {}\nclass {}",
+        parts[0], parts[3], parts[1], parts[2]
+    );
+
+    for (source, source_name, source_id, repeat_id, expected_names) in [
+        (
+            renamed.as_str(),
+            "TokenFactory.scala",
+            18532,
+            18533,
+            ["sample/Token", "sample/TokenBox", "sample/TokenFactory"],
+        ),
+        (
+            reordered.as_str(),
+            "TokenFactory.scala",
+            18534,
+            18535,
+            ["sample/TokenFactory", "sample/Token", "sample/TokenBox"],
+        ),
+    ] {
+        let first =
+            emit_paired_jvm_tasty_batch(source, source_name, SourceId::from_index(source_id))
+                .expect("bounded rename/reorder input emits a paired batch");
+        let second =
+            emit_paired_jvm_tasty_batch(source, source_name, SourceId::from_index(repeat_id))
+                .expect("a fresh session repeats the same renamed/reordered batch");
+        assert_eq!(first.classes().len(), 3);
+        for (index, (left, right)) in first.classes().iter().zip(second.classes()).enumerate() {
+            let internal_name = expected_names[index];
+            assert_eq!(left.classfile_path(), format!("{internal_name}.class"));
+            assert_eq!(left.tasty_path(), format!("{internal_name}.tasty"));
+            assert_eq!(left.classfile_path(), right.classfile_path());
+            assert_eq!(left.tasty_path(), right.tasty_path());
+            assert_eq!(left.classfile_bytes(), right.classfile_bytes());
+            assert_eq!(left.tasty_bytes(), right.tasty_bytes());
+            assert_eq!(left.tasty_link_id(), right.tasty_link_id());
+        }
     }
 }
 

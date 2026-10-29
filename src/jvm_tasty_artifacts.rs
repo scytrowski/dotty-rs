@@ -560,6 +560,9 @@ mod batch_artifact_regressions {
     const NESTED_SOURCE: &str = include_str!(
         "../tests/fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala"
     );
+    const REFERENCE_LOCAL_SOURCE: &str = include_str!(
+        "../tests/fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala"
+    );
 
     #[test]
     fn nested_batch_rejects_corrupted_constructor_methodref_and_max_stack() {
@@ -672,6 +675,118 @@ mod batch_artifact_regressions {
                             }
                         ),
                         "corruption {corruption} must be rejected by the cross-class validator"
+                    );
+                }
+                Ok::<_, JvmTastyContractError>(())
+            },
+        )
+        .unwrap()
+        .unwrap();
+    }
+
+    #[test]
+    fn reference_local_batch_rejects_wrong_store_load_slots_and_helper_methodref() {
+        with_paired_jvm_tasty_batch_plan(
+            REFERENCE_LOCAL_SOURCE,
+            "CounterOwnerFactory.scala",
+            SourceId::from_index(18536),
+            |plan| {
+                let tasty_plans = plan
+                    .classes
+                    .iter()
+                    .map(|class| class.tasty_plan)
+                    .collect::<Vec<_>>();
+                let validated_batch =
+                    validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans).unwrap();
+                let class_artifacts = plan
+                    .classes
+                    .iter()
+                    .map(|class| {
+                        let tasty_output =
+                            emit_tasty_output(class.tasty_plan, &class.tasty_path).unwrap();
+                        emit_classfile_for_pair(
+                            ValidatedPairInput {
+                                jvm_unit: plan.jvm_unit,
+                                class: class.class,
+                                source_id: plan.source_id,
+                                source_member_order: class.source_member_order.clone(),
+                                classfile_path: class.classfile_path.clone(),
+                                tasty_path: class.tasty_path.clone(),
+                                tasty_plan: class.tasty_plan,
+                                compatibility: class.compatibility,
+                            },
+                            tasty_output,
+                        )
+                        .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                let artifacts = JvmTastyBatchArtifacts {
+                    classfiles: class_artifacts
+                        .iter()
+                        .map(|class| JvmTastyClassFileArtifact {
+                            classfile_path: class.classfile_path.clone(),
+                            classfile_bytes: class.classfile_bytes.clone(),
+                        })
+                        .collect(),
+                    sidecars: class_artifacts
+                        .iter()
+                        .map(|class| JvmTastySidecarArtifact {
+                            tasty_path: class.tasty_path.clone(),
+                            tasty_bytes: class.tasty_bytes.clone(),
+                        })
+                        .collect(),
+                };
+                let factory_index = artifacts
+                    .classfiles
+                    .iter()
+                    .position(|class| class.classfile_path.ends_with("CounterOwnerFactory.class"))
+                    .unwrap();
+                let (original_code, code_position) = {
+                    let factory = &artifacts.classfiles[factory_index];
+                    let mut reader = Reader::new(&factory.classfile_bytes);
+                    let decoded = ClassFile::decode(&mut reader).unwrap();
+                    let create = decoded
+                        .methods
+                        .iter()
+                        .find(|method| {
+                            decoded.constant_pool.utf8(method.name_index).unwrap() == "create"
+                        })
+                        .unwrap();
+                    let [dotty_classfile::attribute::Attribute::Code(code)] =
+                        create.attributes.as_slice()
+                    else {
+                        panic!("create has one Code attribute");
+                    };
+                    let code = code.code.to_vec();
+                    assert_eq!(code[5], 0x4d, "counter uses local slot 2");
+                    assert_eq!(code[10], 0x2c, "constructor reloads local slot 2");
+                    let position = factory
+                        .classfile_bytes
+                        .windows(code.len())
+                        .position(|window| window == code)
+                        .expect("create code occurs in the encoded class");
+                    (code, position)
+                };
+                for (name, offset, replacement) in [
+                    ("astore slot", 5_usize, 0x4c_u8),
+                    ("aload slot", 10_usize, 0x2b_u8),
+                    ("helper Methodref", 4_usize, original_code[13]),
+                ] {
+                    let mut corrupted = artifacts.clone();
+                    let bytes = &mut corrupted.classfiles[factory_index].classfile_bytes;
+                    bytes[code_position + offset] = replacement;
+                    let error = validate_jvm_tasty_batch_artifacts(&validated_batch, corrupted)
+                        .unwrap_err();
+                    assert!(
+                        matches!(
+                            error,
+                            JvmTastyContractError::BatchArtifact {
+                                class_index: 2,
+                                phase: "cross-class invocation",
+                                ..
+                            }
+                        ),
+                        "{name} corruption must fail the decoded cross-class contract: {error:?}"
                     );
                 }
                 Ok::<_, JvmTastyContractError>(())
