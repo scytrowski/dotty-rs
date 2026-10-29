@@ -832,13 +832,63 @@ impl SourceTyper<'_> {
         let canonical_identity_application =
             candidates.len() == 1 && self.is_any_ref_identity_symbol(candidates[0].symbol);
         let mut arguments = Vec::with_capacity(argument_trees.len());
-        for argument_tree in argument_trees {
-            let typed = self.type_value_expression_inner(
-                *argument_tree,
-                context,
-                info_journal,
-                new_mappings,
-            )?;
+        for (argument_index, argument_tree) in argument_trees.iter().enumerate() {
+            let poly_binder = if candidates.len() == 1
+                && matches!(
+                    self.store.types.try_get(candidates[0].callable),
+                    Some(Type::Poly(_))
+                ) {
+                Some(candidates[0].callable)
+            } else {
+                None
+            };
+            let expected = if candidates.len() == 1 {
+                let callable = candidates[0].callable;
+                let callable = match self.store.types.try_get(callable) {
+                    Some(Type::Poly(poly)) => poly.result,
+                    _ => callable,
+                };
+                match self.store.types.try_get(callable) {
+                    Some(Type::Method(method)) => {
+                        method.params.get(argument_index).map(|parameter| {
+                            match self.store.types.try_get(parameter.ty) {
+                                Some(Type::ByName { result }) => *result,
+                                _ => parameter.ty,
+                            }
+                        })
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let untyped_lambda = self.is_function_literal_value(*argument_tree);
+            let typed = if untyped_lambda {
+                if let Some(expected) = expected {
+                    self.type_value_expression_expected_with_poly_binder(
+                        *argument_tree,
+                        context,
+                        expected,
+                        poly_binder,
+                        info_journal,
+                        new_mappings,
+                    )?
+                } else {
+                    self.type_value_expression_inner(
+                        *argument_tree,
+                        context,
+                        info_journal,
+                        new_mappings,
+                    )?
+                }
+            } else {
+                self.type_value_expression_inner(
+                    *argument_tree,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?
+            };
             let own_type = self.typed_arena.get(typed).ty;
             // String constants have exact singleton relations but no modeled
             // underlying String type to widen to. Keep the raw type until a

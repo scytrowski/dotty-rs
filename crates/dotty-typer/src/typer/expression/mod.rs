@@ -18,7 +18,7 @@ mod new;
 mod patterns;
 mod references;
 pub(super) use blocks::LocalMethodIndex;
-pub(super) use function::FunctionLiteralIndex;
+pub(super) use function::{FunctionLiteralIndex, FunctionLiteralTypingContext};
 
 impl SourceTyper<'_> {
     /// Returns the canonical widened type for supported constants.
@@ -412,7 +412,75 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let typed = self.type_value_expression_inner(tree, context, info_journal, new_mappings)?;
+        self.type_expression_expected_with_poly_binder(
+            tree,
+            context,
+            expected,
+            None,
+            info_journal,
+            new_mappings,
+        )
+    }
+
+    pub(in crate::typer) fn type_expression_expected_with_poly_binder(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        expected: TypeId,
+        poly_binder: Option<TypeId>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let typed = match self.arena.try_get(tree).map(|node| &node.kind) {
+            Some(TreeKind::Block(block)) if block.stats.is_empty() => {
+                if let Some(typed) = self.typed_index.get(self.source, tree) {
+                    self.validate_value_expression(tree, typed)?;
+                    self.validate_cached_parent_argument_receiver_access(tree, typed)?;
+                    typed
+                } else {
+                    // At an expression root, retain the source block node while
+                    // forwarding its expected type to the final expression.
+                    // Value contexts such as application arguments keep Scala's
+                    // transparent wrapper behavior below.
+                    let expr = self.type_value_expression_expected_with_poly_binder(
+                        block.expr,
+                        context,
+                        expected,
+                        poly_binder,
+                        info_journal,
+                        new_mappings,
+                    )?;
+                    let ty = self.typed_arena.get(expr).ty;
+                    let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                        .block(Vec::new(), expr, ty, self.arena.get(tree).position);
+                    self.typed_index
+                        .insert(self.source, tree, typed)
+                        .map_err(|error| TyperError::ConflictingTypedExpression {
+                            source: error.source,
+                            tree_index: error.untyped.index(),
+                            existing: error.existing.index(),
+                            attempted: error.attempted.index(),
+                        })?;
+                    new_mappings.push((self.source, tree));
+                    typed
+                }
+            }
+            _ => self.type_value_expression_expected_with_poly_binder(
+                tree,
+                context,
+                expected,
+                poly_binder,
+                info_journal,
+                new_mappings,
+            )?,
+        };
+        if let Some(binder) = poly_binder
+            && self.type_contains_param_ref(expected, binder)?
+        {
+            // The polymorphic application will instantiate this expectation
+            // after argument typing has supplied its inference constraints.
+            return Ok(typed);
+        }
         let expression_type = self.typed_arena.get(typed).ty;
         let mut actual =
             self.adapt_expression_type_to_expected(expression_type, expected, info_journal)?;
@@ -455,6 +523,134 @@ impl SourceTyper<'_> {
                 expected,
                 error: Box::new(error),
             }),
+        }
+    }
+
+    pub(in crate::typer) fn type_value_expression_expected_inner(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        expected: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        self.type_value_expression_expected_with_poly_binder(
+            tree,
+            context,
+            expected,
+            None,
+            info_journal,
+            new_mappings,
+        )
+    }
+
+    pub(in crate::typer) fn type_value_expression_expected_with_poly_binder(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        expected: TypeId,
+        poly_binder: Option<TypeId>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if let Some(typed) = self.typed_index.get(self.source, tree) {
+            self.validate_value_expression(tree, typed)?;
+            self.validate_cached_parent_argument_receiver_access(tree, typed)?;
+            return Ok(typed);
+        }
+        let node = self
+            .arena
+            .try_get(tree)
+            .cloned()
+            .ok_or(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            })?;
+        let typed = match node.kind {
+            TreeKind::PhaseSpecific(UntypedNode::Function(function)) => {
+                // Keep both Function1 components available even when the
+                // lambda's input is explicitly annotated: the output may
+                // still be needed to type a nested function literal.
+                let expected_function1 = self.ordinary_function1_parts(expected, tree.index())?;
+                let expected_function1 = if let Some((input, output)) = expected_function1 {
+                    let output_contains_poly_parameter = match poly_binder {
+                        Some(binder) => self.type_contains_param_ref(output, binder)?,
+                        None => false,
+                    };
+                    let output_is_nested_function1 = self
+                        .ordinary_function1_parts(output, tree.index())?
+                        .is_some();
+                    if output_contains_poly_parameter && !output_is_nested_function1 {
+                        // Preserve the expected input for parameter inference,
+                        // but let a polymorphic output be inferred from the
+                        // lambda body before checking it against the binder.
+                        Some((input, None))
+                    } else {
+                        // A nested Function1 still receives its own expected
+                        // type; its output is filtered at that lambda boundary.
+                        Some((input, Some(output)))
+                    }
+                } else {
+                    None
+                };
+                self.type_function_literal(
+                    tree,
+                    function,
+                    node.position,
+                    FunctionLiteralTypingContext {
+                        context,
+                        expected_function1,
+                        poly_binder,
+                    },
+                    info_journal,
+                    new_mappings,
+                )?
+            }
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => self
+                .type_value_expression_expected_with_poly_binder(
+                    parens.inner,
+                    context,
+                    expected,
+                    poly_binder,
+                    info_journal,
+                    new_mappings,
+                )?,
+            TreeKind::Block(block) if block.stats.is_empty() => self
+                .type_value_expression_expected_with_poly_binder(
+                    block.expr,
+                    context,
+                    expected,
+                    poly_binder,
+                    info_journal,
+                    new_mappings,
+                )?,
+            _ => {
+                return self.type_value_expression_inner(tree, context, info_journal, new_mappings);
+            }
+        };
+        self.validate_value_expression(tree, typed)?;
+        self.typed_index
+            .insert(self.source, tree, typed)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, tree));
+        Ok(typed)
+    }
+
+    pub(in crate::typer) fn is_function_literal_value(&self, tree: TreeId<Untyped>) -> bool {
+        match self.arena.try_get(tree).map(|node| &node.kind) {
+            Some(TreeKind::PhaseSpecific(UntypedNode::Function(_))) => true,
+            Some(TreeKind::PhaseSpecific(UntypedNode::Parens(parens))) => {
+                self.is_function_literal_value(parens.inner)
+            }
+            Some(TreeKind::Block(block)) if block.stats.is_empty() => {
+                self.is_function_literal_value(block.expr)
+            }
+            _ => false,
         }
     }
 

@@ -556,14 +556,46 @@ impl SourceTyper<'_> {
             let arguments = if let Some(arguments) = typed_arguments.take() {
                 arguments
             } else {
+                let expected_parameters = match self.store.types.try_get(poly.result) {
+                    Some(Type::Method(method)) => method
+                        .params
+                        .iter()
+                        .map(|parameter| match self.store.types.try_get(parameter.ty) {
+                            Some(Type::ByName { result }) => *result,
+                            _ => parameter.ty,
+                        })
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                };
                 let mut arguments = Vec::with_capacity(argument_trees.len());
-                for argument_tree in &argument_trees {
-                    let typed = self.type_value_expression_inner(
-                        *argument_tree,
-                        context,
-                        info_journal,
-                        new_mappings,
-                    )?;
+                for (argument_index, argument_tree) in argument_trees.iter().enumerate() {
+                    let is_lambda = self.is_function_literal_value(*argument_tree);
+                    let typed = if is_lambda {
+                        if let Some(expected) = expected_parameters.get(argument_index).copied() {
+                            self.type_value_expression_expected_with_poly_binder(
+                                *argument_tree,
+                                context,
+                                expected,
+                                Some(callable),
+                                info_journal,
+                                new_mappings,
+                            )?
+                        } else {
+                            self.type_value_expression_inner(
+                                *argument_tree,
+                                context,
+                                info_journal,
+                                new_mappings,
+                            )?
+                        }
+                    } else {
+                        self.type_value_expression_inner(
+                            *argument_tree,
+                            context,
+                            info_journal,
+                            new_mappings,
+                        )?
+                    };
                     let own_type = self.typed_arena.get(typed).ty;
                     let widened_type =
                         self.widen_expression_type_journaled(own_type, info_journal, 0)?;
@@ -743,9 +775,10 @@ impl SourceTyper<'_> {
                     self.this_type_application_argument_view(actual, expected_type)?,
                 )
             } else {
-                let argument = self.type_value_expression_inner(
+                let argument = self.type_value_expression_expected_inner(
                     *argument_tree,
                     context,
+                    expected_type,
                     info_journal,
                     new_mappings,
                 )?;

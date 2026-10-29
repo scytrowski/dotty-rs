@@ -623,7 +623,11 @@ impl<'a> SourceTyper<'a> {
                 tree,
                 function,
                 source_tree.position,
-                context,
+                expression::FunctionLiteralTypingContext {
+                    context,
+                    expected_function1: None,
+                    poly_binder: None,
+                },
                 info_journal,
                 new_mappings,
             ),
@@ -6152,6 +6156,631 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn function1_expectation_infers_lambda_parameter_and_checks_body() {
+        let source_text = concat!(
+            "class C { ",
+            "def expected: Int => Int = x => x; ",
+            "def accepts(function: Int => Int): Int = 1; ",
+            "def argument: Int = accepts(x => x); ",
+            "def blockArgument: Int = accepts({ x => x }); ",
+            "def explicit: Int => Int = (x: Int) => x; ",
+            "def bad: Int => Boolean = x => x; ",
+            "def wrongArity: Int => Int = (x, y) => x; ",
+            "def wrongExpected: Int = x => x",
+            " }",
+        );
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name(source_text);
+        enter_scala_function_classes(&mut store, &mut packages, [0, 1]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let (owner, lambda) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "expected");
+        let context = typer.expression_context_for(owner).unwrap();
+        typer.complete_symbol(owner).unwrap();
+        assert!(typer.function_literal_method_at(source, lambda).is_none());
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                (index.symbol_at(source, tree) == Some(owner)
+                    && matches!(node.kind, TreeKind::DefDef(_)))
+                .then_some(tree)
+            })
+            .unwrap();
+        let TreeKind::DefDef(method) = &parsed.ast.get(method_tree).kind else {
+            panic!("expected a method declaration");
+        };
+        let expected = typer
+            .type_of_tpt(method.tpt, index.declaration_context_of(owner).unwrap())
+            .unwrap();
+        let typed = typer
+            .type_expression_expected(lambda, context, expected)
+            .unwrap();
+        assert!(typer.function_literal_method_at(source, lambda).is_some());
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parsed.ast.get(lambda).kind
+        else {
+            panic!("expected source lambda");
+        };
+        let parameter = function.params[0];
+        let parameter_symbol = typer
+            .function_literal_parameter_symbol_at(source, parameter)
+            .unwrap();
+        let Type::Applied { args, .. } = typer.store().types.get(expected) else {
+            panic!("expected Function1 application");
+        };
+        let (input_type, output_type) = (args[0], args[1]);
+        assert_eq!(
+            typer.store().symbols.get(parameter_symbol).info,
+            SymbolInfo::Complete(input_type)
+        );
+        let foreign_tycon = typer.store.types.alloc(Type::TypeRef {
+            prefix: typer.definitions.no_prefix,
+            target: TypeRefTarget::Symbol(typer.store.symbols.get(owner).owner.unwrap()),
+        });
+        let foreign_function = typer.store.types.alloc(Type::Applied {
+            tycon: foreign_tycon,
+            args: vec![input_type, output_type],
+        });
+        assert!(
+            typer
+                .ordinary_function1_parts(foreign_function, lambda.index())
+                .unwrap()
+                .is_none()
+        );
+        let Type::Applied {
+            tycon: expected_constructor,
+            args: expected_arguments,
+        } = typer.store().types.get(expected)
+        else {
+            unreachable!();
+        };
+        let Type::Applied {
+            tycon: actual_constructor,
+            args: actual_arguments,
+        } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("lambda should have an applied Function1 type");
+        };
+        assert!(matches!(
+            (typer.store().types.get(*actual_constructor), typer.store().types.get(*expected_constructor)),
+            (
+                Type::TypeRef { target: TypeRefTarget::Symbol(actual), .. },
+                Type::TypeRef { target: TypeRefTarget::Symbol(expected), .. }
+            ) if actual == expected
+        ));
+        assert_eq!(actual_arguments[0], expected_arguments[0]);
+        let typed_body = typer
+            .source_typed_index()
+            .get(source, function.body)
+            .unwrap();
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_body).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == parameter_symbol
+        ));
+        assert!(typer.source_typed_index().get(source, parameter).is_some());
+
+        let (owner, lambda) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "bad");
+        let context = typer.expression_context_for(owner).unwrap();
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                (index.symbol_at(source, tree) == Some(owner)
+                    && matches!(node.kind, TreeKind::DefDef(_)))
+                .then_some(tree)
+            })
+            .unwrap();
+        let TreeKind::DefDef(method) = &parsed.ast.get(method_tree).kind else {
+            panic!("expected a method declaration");
+        };
+        let expected = typer
+            .type_of_tpt(method.tpt, index.declaration_context_of(owner).unwrap())
+            .unwrap();
+        let mismatch = typer.type_expression_expected(lambda, context, expected);
+        assert!(
+            matches!(
+                mismatch,
+                Err(TyperError::ExpectedExpressionTypeMismatch { .. }
+                    | TyperError::ExpectedExpressionConformanceUnsupported { .. })
+            ),
+            "unexpected result: {mismatch:?}"
+        );
+        assert_eq!(typer.function_literal_method_at(source, lambda), None);
+        assert_eq!(typer.source_typed_index().get(source, lambda), None);
+
+        for (method_name, expected_error) in [
+            (
+                "wrongArity",
+                "Function1 expectations require exactly one lambda parameter",
+            ),
+            ("wrongExpected", "an explicit parameter type is required"),
+        ] {
+            let (owner, lambda) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, method_name);
+            let context = typer.expression_context_for(owner).unwrap();
+            let method_tree = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    (index.symbol_at(source, tree) == Some(owner)
+                        && matches!(node.kind, TreeKind::DefDef(_)))
+                    .then_some(tree)
+                })
+                .unwrap();
+            let TreeKind::DefDef(method) = &parsed.ast.get(method_tree).kind else {
+                unreachable!();
+            };
+            let expected = typer
+                .type_of_tpt(method.tpt, index.declaration_context_of(owner).unwrap())
+                .unwrap();
+            let store_checkpoint = typer.store().checkpoint();
+            let result = typer.type_expression_expected(lambda, context, expected);
+            assert!(
+                matches!(
+                    &result,
+                    Err(TyperError::UnsupportedFunctionLiteralParameter { reason, .. })
+                        if *reason == expected_error
+                ),
+                "unexpected result for {method_name}: {result:?}"
+            );
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+            assert_eq!(typer.function_literal_method_at(source, lambda), None);
+            assert_eq!(typer.source_typed_index().get(source, lambda), None);
+        }
+
+        let (owner, application) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "argument");
+        let context = typer.expression_context_for(owner).unwrap();
+        let typed_application = typer.type_expression(application, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_application).kind else {
+            panic!("expected an application");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(application.args[0]).kind,
+            TreeKind::Closure(_)
+        ));
+
+        let (owner, application) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "blockArgument");
+        let context = typer.expression_context_for(owner).unwrap();
+        let typed_application = typer.type_expression(application, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_application).kind else {
+            panic!("expected an application");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(application.args[0]).kind,
+            TreeKind::Closure(_)
+        ));
+    }
+
+    #[test]
+    fn function1_expected_output_infers_nested_lambda_and_rolls_back_mismatch() {
+        let source_text = concat!(
+            "class C { ",
+            "def nested: Int => (Int => Int) = x => y => y; ",
+            "def nestedBad: Int => (Int => Boolean) = x => y => y",
+            " }",
+        );
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name(source_text);
+        enter_scala_function_classes(&mut store, &mut packages, [0, 1]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let (nested_method, outer_lambda) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "nested");
+        let TreeKind::PhaseSpecific(UntypedNode::Function(outer)) =
+            &parsed.ast.get(outer_lambda).kind
+        else {
+            panic!("expected outer lambda");
+        };
+        let inner_lambda = outer.body;
+        let TreeKind::PhaseSpecific(UntypedNode::Function(_)) = &parsed.ast.get(inner_lambda).kind
+        else {
+            panic!("expected nested lambda body");
+        };
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                (index.symbol_at(source, tree) == Some(nested_method)
+                    && matches!(node.kind, TreeKind::DefDef(_)))
+                .then_some(tree)
+            })
+            .unwrap();
+        let typed_method = typer.type_method_definition(method_tree).unwrap();
+        assert!(matches!(
+            typer.typed_ast().get(typed_method).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert!(
+            typer
+                .function_literal_method_at(source, outer_lambda)
+                .is_some()
+        );
+        assert!(
+            typer
+                .function_literal_method_at(source, inner_lambda)
+                .is_some()
+        );
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, outer_lambda)
+                .is_some()
+        );
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, inner_lambda)
+                .is_some()
+        );
+
+        let (bad_method, bad_outer) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "nestedBad");
+        let TreeKind::PhaseSpecific(UntypedNode::Function(bad_outer_function)) =
+            &parsed.ast.get(bad_outer).kind
+        else {
+            panic!("expected outer lambda");
+        };
+        let bad_inner = bad_outer_function.body;
+        let bad_method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                (index.symbol_at(source, tree) == Some(bad_method)
+                    && matches!(node.kind, TreeKind::DefDef(_)))
+                .then_some(tree)
+            })
+            .unwrap();
+        let mismatch = typer.type_method_definition(bad_method_tree);
+        assert!(
+            matches!(
+                mismatch,
+                Err(TyperError::ExpectedExpressionTypeMismatch { .. }
+                    | TyperError::ExpectedExpressionConformanceUnsupported { .. })
+            ),
+            "unexpected result: {mismatch:?}"
+        );
+        assert!(
+            typer
+                .function_literal_method_at(source, bad_outer)
+                .is_none()
+        );
+        assert!(
+            typer
+                .function_literal_method_at(source, bad_inner)
+                .is_none()
+        );
+        assert!(typer.source_typed_index().get(source, bad_outer).is_none());
+        assert!(typer.source_typed_index().get(source, bad_inner).is_none());
+    }
+
+    #[test]
+    fn explicitly_typed_function1_input_preserves_nested_output_expectation() {
+        let source_text = concat!(
+            "class C { ",
+            "def explicitNested: Int => (Int => Int) = (x: Int) => y => y; ",
+            "def explicitNestedBad: Int => (Int => Boolean) = (x: Int) => y => y; ",
+            "def accepts(function: Int => (Int => Int)): Int = 1; ",
+            "def acceptsBad(function: Int => (Int => Boolean)): Int = 1; ",
+            "def explicitArgument: Int = accepts((x: Int) => y => y); ",
+            "def explicitArgumentBad: Int = acceptsBad((x: Int) => y => y)",
+            " }",
+        );
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name(source_text);
+        enter_scala_function_classes(&mut store, &mut packages, [0, 1]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let method_tree = |symbol| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    (index.symbol_at(source, tree) == Some(symbol)
+                        && matches!(node.kind, TreeKind::DefDef(_)))
+                    .then_some(tree)
+                })
+                .unwrap()
+        };
+        let (explicit_method, outer) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "explicitNested");
+        let TreeKind::PhaseSpecific(UntypedNode::Function(outer_function)) =
+            &parsed.ast.get(outer).kind
+        else {
+            panic!("expected explicitly typed outer lambda");
+        };
+        let inner = outer_function.body;
+        let TreeKind::PhaseSpecific(UntypedNode::Function(_)) = &parsed.ast.get(inner).kind else {
+            panic!("expected nested lambda body");
+        };
+        let typed_method = typer
+            .type_method_definition(method_tree(explicit_method))
+            .unwrap();
+        assert!(matches!(
+            typer.typed_ast().get(typed_method).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert!(typer.function_literal_method_at(source, outer).is_some());
+        assert!(typer.function_literal_method_at(source, inner).is_some());
+        assert!(typer.source_typed_index().get(source, outer).is_some());
+        assert!(typer.source_typed_index().get(source, inner).is_some());
+        let outer_parameter_symbol = typer
+            .function_literal_parameter_symbol_at(source, outer_function.params[0])
+            .unwrap();
+        let outer_parameter_type = match typer.store().symbols.get(outer_parameter_symbol).info {
+            SymbolInfo::Complete(ty) => ty,
+            ref info => panic!("explicit outer parameter should stay complete: {info:?}"),
+        };
+        assert_eq!(outer_parameter_type, typer.definitions.int);
+
+        let (bad_method, bad_outer) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "explicitNestedBad");
+        let TreeKind::PhaseSpecific(UntypedNode::Function(bad_outer_function)) =
+            &parsed.ast.get(bad_outer).kind
+        else {
+            panic!("expected explicitly typed outer lambda");
+        };
+        let bad_inner = bad_outer_function.body;
+        let mismatch = typer.type_method_definition(method_tree(bad_method));
+        assert!(
+            matches!(
+                mismatch,
+                Err(TyperError::ExpectedExpressionTypeMismatch { .. }
+                    | TyperError::ExpectedExpressionConformanceUnsupported { .. })
+            ),
+            "unexpected result: {mismatch:?}"
+        );
+        assert!(
+            typer
+                .function_literal_method_at(source, bad_outer)
+                .is_none()
+        );
+        assert!(
+            typer
+                .function_literal_method_at(source, bad_inner)
+                .is_none()
+        );
+        assert!(typer.source_typed_index().get(source, bad_outer).is_none());
+        assert!(typer.source_typed_index().get(source, bad_inner).is_none());
+
+        let (argument_method, application) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "explicitArgument");
+        let TreeKind::Apply(application_node) = &parsed.ast.get(application).kind else {
+            panic!("expected method application");
+        };
+        let argument = application_node.args[0];
+        let TreeKind::PhaseSpecific(UntypedNode::Function(argument_function)) =
+            &parsed.ast.get(argument).kind
+        else {
+            panic!("expected explicitly typed lambda argument");
+        };
+        let argument_inner = argument_function.body;
+        let typed_method = typer
+            .type_method_definition(method_tree(argument_method))
+            .unwrap();
+        assert!(matches!(
+            typer.typed_ast().get(typed_method).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert!(typer.function_literal_method_at(source, argument).is_some());
+        assert!(
+            typer
+                .function_literal_method_at(source, argument_inner)
+                .is_some()
+        );
+
+        let (bad_argument_method, bad_application) = method_definition_and_rhs(
+            &parsed,
+            typer.store(),
+            &index,
+            source,
+            "explicitArgumentBad",
+        );
+        let TreeKind::Apply(bad_application_node) = &parsed.ast.get(bad_application).kind else {
+            panic!("expected method application");
+        };
+        let bad_argument = bad_application_node.args[0];
+        let TreeKind::PhaseSpecific(UntypedNode::Function(bad_argument_function)) =
+            &parsed.ast.get(bad_argument).kind
+        else {
+            panic!("expected explicitly typed lambda argument");
+        };
+        let bad_argument_inner = bad_argument_function.body;
+        let context = typer.expression_context_for(bad_argument_method).unwrap();
+        let mismatch = typer.type_expression(bad_application, context);
+        assert!(
+            matches!(
+                mismatch,
+                Err(TyperError::OverloadApplicationNoApplicable { .. }
+                    | TyperError::ExpectedExpressionTypeMismatch { .. }
+                    | TyperError::ExpectedExpressionConformanceUnsupported { .. })
+            ),
+            "unexpected result: {mismatch:?}"
+        );
+        assert!(
+            typer
+                .function_literal_method_at(source, bad_argument)
+                .is_none()
+        );
+        assert!(
+            typer
+                .function_literal_method_at(source, bad_argument_inner)
+                .is_none()
+        );
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, bad_argument)
+                .is_none()
+        );
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, bad_argument_inner)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn generic_function1_argument_infers_output_before_conformance() {
+        let source_text = concat!(
+            "class C { ",
+            "def use[A](function: Int => A): Int = 1; ",
+            "def useNested[A](function: Int => (Int => A)): Int = 1; ",
+            "def inferred: Int = use((x: Int) => x); ",
+            "def explicit: Int = use[Int]((x: Int) => x); ",
+            "def nestedInferred: Int = useNested((x: Int) => (y: Int) => y); ",
+            "def nestedExplicit: Int = useNested[Int]((x: Int) => (y: Int) => y)",
+            " }",
+        );
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name(source_text);
+        enter_scala_function_classes(&mut store, &mut packages, [0, 1]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let method_tree = |symbol| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    (index.symbol_at(source, tree) == Some(symbol)
+                        && matches!(node.kind, TreeKind::DefDef(_)))
+                    .then_some(tree)
+                })
+                .unwrap()
+        };
+        for method_name in ["inferred", "explicit", "nestedInferred", "nestedExplicit"] {
+            let (owner, application) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, method_name);
+            let TreeKind::Apply(application_node) = &parsed.ast.get(application).kind else {
+                panic!("expected generic method application");
+            };
+            let argument = application_node.args[0];
+            let TreeKind::PhaseSpecific(UntypedNode::Function(function)) =
+                &parsed.ast.get(argument).kind
+            else {
+                panic!("expected explicit-parameter lambda argument");
+            };
+            let typed_method = typer.type_method_definition(method_tree(owner)).unwrap();
+            assert!(matches!(
+                typer.typed_ast().get(typed_method).kind,
+                TreeKind::DefDef(_)
+            ));
+            assert!(matches!(
+                typer
+                    .typed_ast()
+                    .get(typer.source_typed_index().get(source, argument).unwrap())
+                    .kind,
+                TreeKind::Closure(_)
+            ));
+            assert!(typer.function_literal_method_at(source, argument).is_some());
+            assert!(
+                typer
+                    .source_typed_index()
+                    .get(source, function.body)
+                    .is_some()
+            );
+            if method_name.starts_with("nested") {
+                assert!(matches!(
+                    parsed.ast.get(function.body).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::Function(_))
+                ));
+                assert!(
+                    typer
+                        .function_literal_method_at(source, function.body)
+                        .is_some()
+                );
+                assert!(
+                    typer
+                        .source_typed_index()
+                        .get(source, function.body)
+                        .is_some()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recursive_function1_method_types_body_after_signature_completion() {
+        let source_text = "class C { def recursive: Int => Int = x => recursive(x) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (recursive, rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "recursive");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                (index.symbol_at(source, tree) == Some(recursive)
+                    && matches!(node.kind, TreeKind::DefDef(_)))
+                .then_some(tree)
+            })
+            .unwrap();
+        let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let resolver = dotty_classloader::classloader::ClasspathSymbolResolver::new(
+            dotty_classloader::classloader::CompositeClassPath::new(vec![
+                Box::new(dotty_classloader::classloader::DirectoryClassPath::new(
+                    library_root,
+                )),
+                Box::new(JavaObjectStubPath),
+            ]),
+            definitions,
+            dotty_classloader::classloader::LoadingSession::with_packages(packages.snapshot()),
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let typed_method = typer.type_method_definition(method_tree).unwrap();
+        assert!(matches!(
+            typer.typed_ast().get(typed_method).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert!(typer.source_typed_index().get(source, rhs).is_some());
+        assert!(typer.function_literal_method_at(source, rhs).is_some());
+        assert!(matches!(
+            typer.store().symbols.get(recursive).info,
+            SymbolInfo::Complete(_)
+        ));
     }
 
     #[test]
@@ -16076,6 +16705,46 @@ mod tests {
         );
         assert_eq!(typer.type_expression(rhs, context).unwrap(), typed);
         assert_eq!(typer.expression_scopes.len(), 2);
+    }
+
+    #[test]
+    fn expected_function_forwards_through_empty_block_and_preserves_block_shape() {
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name("class C { def block: Int => Int = { x => x } }");
+        enter_scala_function_classes(&mut store, &mut packages, [0, 1]);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "block");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                (index.symbol_at(source, tree) == Some(method)
+                    && matches!(node.kind, TreeKind::DefDef(_)))
+                .then_some(tree)
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed_method = typer.type_method_definition(method_tree).unwrap();
+        let TreeKind::DefDef(definition) = &typer.typed_ast().get(typed_method).kind else {
+            panic!("expected typed method definition");
+        };
+        let typed_rhs = definition.rhs.unwrap();
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed_rhs).kind else {
+            panic!("expected expression-only source block to retain typed block shape");
+        };
+        assert!(block.stats.is_empty());
+        assert!(matches!(
+            typer.typed_ast().get(block.expr).kind,
+            TreeKind::Closure(_)
+        ));
+        assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
     }
 
     #[test]

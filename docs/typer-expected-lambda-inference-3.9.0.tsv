@@ -1,0 +1,3 @@
+identity	owner_path	method_name	source_tree	before_status	after_status
+library/src/scala/Function1.scala#tree=86	scala.Function1	compose	86	blocked: UnsupportedFunctionLiteralParameter (explicit parameter type required)	blocked: FunctionLiteralCaptureUnsupported; not fully typed
+library/src/scala/Function1.scala#tree=111	scala.Function1	andThen	111	blocked: UnsupportedFunctionLiteralParameter (explicit parameter type required)	blocked: FunctionLiteralCaptureUnsupported; not fully typed
