@@ -99,7 +99,7 @@ source `TreeId`; the typed reference in the constructor argument points to that
 same `SymbolId(60)`. The helper selection retains canonical method
 `SymbolId(56)`. No local symbol or typed tree is reconstructed from spelling.
 
-| Stage | Observed result for the unchanged local-block source |
+| Stage | Observed result for the unchanged local-block source at the #1849 audit HEAD |
 | --- | --- |
 | Lexer, Parser, Namer, Typer | Succeed in the single source session; source/typed local and method links are retained. |
 | Cross-class constructor proof scan | Completes without error. The scan retains the helper's existing proof but no `create` proof, because `create` returns a `Block` rather than the bounded direct constructor-call shape. |
@@ -127,8 +127,64 @@ in [`jvm_source_compilation.rs`](../tests/jvm_source_compilation.rs).
 | Direct formal, nested `new`, and direct factory-result constructor arguments | Existing linked regressions cover these distinct accepted forms, including Scala 3.9 readers and JDK execution. They do not establish block-local paired TASTy support. See [factory-result arguments](jvm-tasty-factory-result-arguments.md) and [nested constructor calls](jvm-tasty-nested-constructor-calls.md). |
 | Helper shadowing, private/overloaded/generic/defaulted helper, wrong arity/result, external helper, and conditional multi-call forms | Measured by the existing first-gate controls in `jvm_tasty_factory_result_arguments.rs`; these cases fail at their asserted source or member gate. |
 | Wrong source/typed call-edge binding, foreign same-named helper, wrong owner/result/receiver, missing member, malformed JVM invocation, and write failures | Existing focused proof, batch-contract, and publisher regressions check these direct-call paths. They are not local-block receipt tests. |
-| Missing local initializer, mutable `var`, local declared after use, wrong local type, local shadowing, duplicated helper evaluation, nested local blocks, mixed `If`/loop blocks, foreign/cross-method local, and corrupted local source/typed bindings | Deferred or unmeasured. The valid immutable local already reaches the TASTy body-type rejection before body serialization or artifact publication, so these controls cannot establish the local-body contract without manufacturing a downstream plan. This audit records no guessed diagnostics for them. |
+| Missing local initializer, mutable `var`, local declared after use, wrong local type, local shadowing, duplicated helper evaluation, nested local blocks, mixed `If`/loop blocks, foreign/cross-method local, and corrupted local source/typed bindings | Deferred at the #1849 audit HEAD. Issue #1850 adds proof-stage controls for bounded malformed local-block shapes; see below. |
 | Unrelated/external classes and wider Scala ABI forms | Outside this single-source audit. No cross-unit or external-reference support is claimed. |
+
+## Issue #1850: proof-only immutable local receipt
+
+Starting from `fa8b0afa9a859b3f634bcafebaaf000713a63725`, the root
+cross-class proof scanner now recognizes the unchanged original
+`Block → ValDef → makeCounter(seed) → new CounterOwner(counter)` shape. The
+receipt keeps the original source and typed `Block`, declaration, initializer,
+constructor application, and final local `Ident`. Its local component retains
+the `TypedLocalBinding`'s method-owned `SymbolId`, exact block `ScopeId`, typed
+declaration, canonical `TypeRef(Counter)`, and source-to-typed edges. The nested
+initializer receipt is the existing same-instance `PlannedCall` proof for
+`makeCounter(seed)`, preserving the original seed formal and method plan.
+
+The scanner accepts exactly one explicitly typed immutable local with an
+initializer and a final direct constructor call. It checks the exact scope
+membership, method owner, local kind and mutability, declaration-before-use
+source positions, exact typed local reference, and initializer/result class
+identity. The Typer-owned binding is supplied only by the same-session paired
+planner; a disconnected source-to-typed index is rejected before scanning.
+The scanner does not synthesize or rewrite trees.
+
+`reference_local_constructor_proof_rejects_unsupported_block_shapes` runs
+mutable, multiple and duplicate locals; nested blocks; branch-controlled
+initializer and use; missing initializer; pre-declaration use; reassignment;
+parameter shadowing; wrong declared type; and locals from another method or
+nested scope through the real frontend and paired planner. Mutable, multiple,
+nested, and branch forms fail at the cross-class proof stage. Duplicate,
+uninitialized, pre-declaration, reassigned, shadowing, wrong-type, and
+out-of-scope cases fail earlier during method body typing. The positive renamed
+and reordered controls continue to pass the proof stage and reach the existing
+later TASTy `BodyType` rejection. A cloned/disconnected `SourceTypedIndex` is
+also rejected at the session-index identity check before proof scanning.
+
+This receipt proves source/typed constructor argument provenance only. The
+unchanged paired TASTy method-body validator still rejects the original block
+at `BodyType`, before byte serialization or artifact publication. No TASTy
+body validation/encoder, JVM emitter, Typer implementation, or CLI behavior
+was changed, and no Rust local-block artifact or emission support is claimed.
+
+### #1850 validation receipt
+
+The new proof regression runs the exact source through two separate frontend
+sessions (`SourceId(1849)` and `SourceId(1850)`) and compares the resulting
+proof relationships by source/typed roots, helper receipt, canonical names,
+and method-owned scope. Both sessions independently retain the local proof;
+both still reach the same downstream `BodyType` boundary.
+
+| Validation | Result |
+| --- | --- |
+| `cargo test -p dotty --test jvm_tasty_factory_result_arguments --locked` | Passed; 12 tests, including unsupported local-block first gates and two-session proof relationships. |
+| Pinned Scala 3.9 factory-result producer and consumer tests | Passed with source revision `777528f19a58e794c9954a42f433373472ec57f8`, verified release artifact hashes, and Temurin JDK 21.0.13. |
+| Strict JDK21 classfile/JVM/source/stateful gate and local-flow JVM-only regression | Passed with `DOTTY_CLASSFILE_REQUIRE_JDK=1`. |
+| Workspace formatting, frontend boundary guard, Clippy, docs, workspace tests, and `git diff --check` | Passed. |
+
+No TASTy or class-file output is produced for the local-block case; the strict
+Scala consumer above covers the pre-existing factory-result artifact path.
 
 ## Reproduction commands
 
@@ -203,7 +259,9 @@ and `javap` inspection all completed with Temurin 21.0.8 and Scala revision
 | `DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --workspace --all-targets --locked` | Passed. |
 | `git diff --check` and manifest hash/file-inventory verification | Passed. |
 
-There are no production behavior changes and no Rust paired class/TASTy output
-is claimed for the local-block source. The local-body negative matrix marked
-deferred above remains unmeasured because the authentic body validator rejects
-before serialization. The full hosted Scala compatibility corpus was not run.
+The root proof-planning behavior now recognizes the bounded local-block
+constructor flow and retains its canonical session identities. No Rust paired
+class/TASTy output or JVM emission is claimed for the local-block source. The
+local-body negative matrix marked deferred above remains unmeasured because
+the authentic body validator rejects before serialization. The full hosted
+Scala compatibility corpus was not run.
