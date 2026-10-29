@@ -323,6 +323,22 @@ fn reference_local_flow_emits_a_deterministic_six_artifact_batch() {
         ],
         [0x2a, 0x1b, 0xb6, 0x4d, 0xbb, 0x59, 0x2c, 0xb7, 0xb0]
     );
+    assert_eq!(
+        code.code.iter().filter(|opcode| **opcode == 0xb6).count(),
+        1,
+        "create invokes makeCounter exactly once"
+    );
+    assert_eq!(
+        code.code.iter().filter(|opcode| **opcode == 0xbb).count(),
+        1,
+        "create allocates only the outer CounterOwner"
+    );
+    let owner_allocation = ConstantPoolIndex(u16::from_be_bytes([code.code[7], code.code[8]]));
+    assert_eq!(
+        class.constant_pool.class_name(owner_allocation).unwrap(),
+        "example/CounterOwner",
+        "the only allocation in create is its returned Owner"
+    );
     assert_eq!((code.max_stack, code.max_locals), (3, 3));
     let method_ref = |offset: usize| {
         let index = ConstantPoolIndex(u16::from_be_bytes([
@@ -355,6 +371,40 @@ fn reference_local_flow_emits_a_deterministic_six_artifact_batch() {
         method_ref(12),
         ("example/CounterOwner", ("<init>", "(Lexample/Counter;)V"))
     );
+    let operand = |offset: usize| {
+        ConstantPoolIndexOperand::try_from(u16::from_be_bytes([
+            code.code[offset],
+            code.code[offset + 1],
+        ]))
+        .unwrap()
+    };
+    let mut create_sequence = CodeSequence::new();
+    create_sequence
+        .instruction(Instruction::ALoad(LocalIndex::new(0)))
+        .instruction(Instruction::ILoad(LocalIndex::new(1)))
+        .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+            operand(3),
+        )))
+        .instruction(Instruction::AStore(LocalIndex::new(2)))
+        .instruction(Instruction::New(ClassReference::new(operand(7))))
+        .instruction(Instruction::Dup)
+        .instruction(Instruction::ALoad(LocalIndex::new(2)))
+        .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+            operand(12),
+        )))
+        .instruction(Instruction::AReturn);
+    let graph = ControlFlowGraph::build(&create_sequence).unwrap();
+    let analyzed = CfgCodeAnalyzer::analyze_with_current_class(
+        &graph,
+        "create",
+        "(I)Lexample/CounterOwner;",
+        false,
+        &class.constant_pool,
+        class.this_class,
+    )
+    .expect("class-aware CFG analysis preserves the initialized Counter through local slot 2");
+    assert_eq!(analyzed.max_stack, code.max_stack);
+    assert_eq!(analyzed.max_locals, code.max_locals);
 
     let stage = TestDirectory::new("reference-local-six-artifacts");
     let destination = stage.path().join("classes");
@@ -380,14 +430,57 @@ fn reference_local_flow_emits_a_deterministic_six_artifact_batch() {
     assert!(publish_paired_batch(&sentinel_destination, &first, None).is_err());
     assert_eq!(std::fs::read(sentinel).unwrap(), b"leave unchanged");
 
-    if require_jdk_21_or_skip() {
+    if require_exact_jdk_21_or_skip() {
         let runtime = TestDirectory::new("reference-local-jdk21-runtime");
         let classes = runtime.path().join("classes");
+        let mut original_files = Vec::with_capacity(6);
         for class in first.classes() {
-            let destination = classes.join(class.classfile_path());
-            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
-            std::fs::write(&destination, class.classfile_bytes()).unwrap();
+            for (relative, bytes) in [
+                (class.classfile_path(), class.classfile_bytes()),
+                (class.tasty_path(), class.tasty_bytes()),
+            ] {
+                let destination = classes.join(relative);
+                std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                std::fs::write(&destination, bytes).unwrap();
+                original_files.push((destination, bytes.to_vec()));
+            }
         }
+        let original_hashes = original_files
+            .iter()
+            .map(|(path, _)| sha256sum(path))
+            .collect::<Vec<_>>();
+        for ((path, _), hash) in original_files.iter().zip(&original_hashes) {
+            eprintln!("reference-local-original-sha256 {} {hash}", path.display());
+        }
+
+        let javap = Command::new("javap")
+            .args(["-v", "-p", "-c", "-classpath"])
+            .arg(&classes)
+            .arg("example.CounterOwnerFactory")
+            .output()
+            .expect("start JDK 21 javap for original Rust-produced local-flow class");
+        assert!(
+            javap.status.success(),
+            "javap rejected original Rust class: {}",
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let javap = String::from_utf8_lossy(&javap.stdout);
+        for expected in [
+            "descriptor: (I)Lexample/CounterOwner;",
+            "stack=3, locals=3, args_size=2",
+            "invokevirtual #",
+            "// Method makeCounter:(I)Lexample/Counter;",
+            "astore_2",
+            "aload_2",
+            "// Method example/CounterOwner.\"<init>\":(Lexample/Counter;)V",
+            "areturn",
+        ] {
+            assert!(
+                javap.contains(expected),
+                "javap omitted {expected:?}:\n{javap}"
+            );
+        }
+
         let harness = runtime.path().join("ReferenceLocalBatchHarness.java");
         std::fs::write(
             &harness,
@@ -409,10 +502,13 @@ public final class ReferenceLocalBatchHarness {
     Counter second = (Counter) inner.get(negative);
     if (first == second || first == inner.get(third))
       throw new AssertionError("each local flow retains a fresh Counter");
-    first.set(41);
-    if (positive.read() != 41 || negative.read() != -9 || third.read() != 3)
-      throw new AssertionError("local references retain independent state");
-    System.out.println("paired-reference-local=ok");
+    first.set(42);
+    if (positive.read() != 42 || negative.read() != -9 || third.read() != 3)
+      throw new AssertionError("first local mutation crossed Owners");
+    first.set(-9);
+    if (positive.read() != -9 || negative.read() != -9 || third.read() != 3)
+      throw new AssertionError("second local mutation crossed Owners");
+    System.out.println("paired-reference-local=7,-9,3; mutation=42,-9; mutation=-9,-9,3; identities=distinct");
   }
 }"#,
         )
@@ -432,6 +528,14 @@ public final class ReferenceLocalBatchHarness {
             "javac --release 21 rejected the harness:\n{}",
             String::from_utf8_lossy(&javac.stderr)
         );
+        for ((path, _), expected_hash) in original_files.iter().zip(&original_hashes) {
+            assert_eq!(
+                sha256sum(path),
+                *expected_hash,
+                "javac changed {}",
+                path.display()
+            );
+        }
         let classpath =
             std::env::join_paths([harness_classes.as_path(), classes.as_path()]).unwrap();
         let java = Command::new("java")
@@ -448,8 +552,77 @@ public final class ReferenceLocalBatchHarness {
         );
         assert_eq!(
             String::from_utf8_lossy(&java.stdout).trim(),
-            "paired-reference-local=ok"
+            "paired-reference-local=7,-9,3; mutation=42,-9; mutation=-9,-9,3; identities=distinct"
         );
+
+        for ((path, bytes), expected_hash) in original_files.iter().zip(&original_hashes) {
+            assert_eq!(
+                sha256sum(path),
+                *expected_hash,
+                "JDK changed {}",
+                path.display()
+            );
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                *bytes,
+                "JDK changed {}",
+                path.display()
+            );
+        }
+
+        let code_start = code.code.as_ptr() as usize - factory.classfile_bytes().as_ptr() as usize;
+        let run_local_negative = |label: &str, corrupt: &[u8]| {
+            let negative_root = runtime.path().join(label);
+            for artifact in first.classes() {
+                let classfile = negative_root.join(artifact.classfile_path());
+                std::fs::create_dir_all(classfile.parent().unwrap()).unwrap();
+                std::fs::write(
+                    classfile,
+                    if artifact.classfile_path() == "example/CounterOwnerFactory.class" {
+                        corrupt
+                    } else {
+                        artifact.classfile_bytes()
+                    },
+                )
+                .unwrap();
+            }
+            let classpath =
+                std::env::join_paths([harness_classes.as_path(), negative_root.as_path()]).unwrap();
+            let result = Command::new("java")
+                .args(["-Xverify:all", "-ea", "-classpath"])
+                .arg(classpath)
+                .arg("ReferenceLocalBatchHarness")
+                .output()
+                .expect("start isolated JDK 21 local-flow negative control");
+            let output = format!(
+                "{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(
+                !result.status.success() && output.contains("VerifyError"),
+                "{label} should fail verification before the harness runs:\n{output}"
+            );
+            eprintln!(
+                "reference-local-negative {label}: {}",
+                output
+                    .lines()
+                    .find(|line| line.contains("VerifyError"))
+                    .unwrap_or("<VerifyError asserted; JVM emitted no matching line>")
+            );
+        };
+
+        let mut wrong_store = factory.classfile_bytes().to_vec();
+        wrong_store[code_start + 5] = 0x4b; // astore_0 stores the Counter into Factory this.
+        run_local_negative("wrong-reference-local-store", &wrong_store);
+
+        let mut wrong_load = factory.classfile_bytes().to_vec();
+        wrong_load[code_start + 10] = 0x2b; // aload_1 loads the Int seed instead of slot 2.
+        run_local_negative("wrong-reference-local-load", &wrong_load);
+
+        let mut undersized_stack = factory.classfile_bytes().to_vec();
+        undersized_stack[code_start - 8..code_start - 6].copy_from_slice(&2u16.to_be_bytes());
+        run_local_negative("undersized-reference-local-stack", &undersized_stack);
     }
 }
 
