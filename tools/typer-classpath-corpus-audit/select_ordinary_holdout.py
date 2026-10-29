@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select a deterministic, diverse A0 holdout from an ordinary-method inventory."""
+"""Select a deterministic, diverse A0 sample from an ordinary-method inventory."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ OUTPUT_COLUMNS = (
     "feature_bucket",
     "tie_break_sha256",
 )
+SEEDED_OUTPUT_COLUMNS = (*OUTPUT_COLUMNS, "selection_seed")
 
 
 class HoldoutError(ValueError):
@@ -53,8 +54,16 @@ def identities(path: Path) -> set[str]:
         raise HoldoutError(f"cannot read manifest {path}: {error}") from error
 
 
-def select(inventory: Path, main_manifest: Path) -> list[dict[str, str]]:
-    main = identities(main_manifest)
+def select(
+    inventory: Path,
+    main_manifest: Path,
+    *,
+    excluded_manifests: tuple[Path, ...] = (),
+    seed: str | None = None,
+) -> list[dict[str, str]]:
+    excluded = identities(main_manifest)
+    for manifest in excluded_manifests:
+        excluded.update(identities(manifest))
     rows = inventory_rows(inventory)
     candidates = []
     for row in rows:
@@ -67,14 +76,15 @@ def select(inventory: Path, main_manifest: Path) -> list[dict[str, str]]:
             not identity
             or row.get("tier") != "A0"
             or row.get("parameter_kind") != "ordinary"
-            or identity in main
+            or identity in excluded
             or not 6 <= score <= 24
         ):
             continue
         row = dict(row)
         row["identity"] = identity
         row["_score"] = str(score)
-        row["_tie"] = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        tie_input = identity if seed is None else f"{seed}\0{identity}"
+        row["_tie"] = hashlib.sha256(tie_input.encode("utf-8")).hexdigest()
         candidates.append(row)
 
     candidates.sort(key=lambda row: (int(row["_score"]), row["_tie"], row["identity"]))
@@ -98,6 +108,8 @@ def select(inventory: Path, main_manifest: Path) -> list[dict[str, str]]:
                 feature_bucket=features,
                 tie_break_sha256=row["_tie"],
             )
+            if seed is not None:
+                row["selection_seed"] = seed
             selected.append(row)
             selected_files.add(source_file)
             selected_owners.add(owner)
@@ -116,15 +128,23 @@ def main() -> int:
     parser.add_argument("inventory", type=Path)
     parser.add_argument("main_manifest", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--exclude-manifest", type=Path, action="append", default=[])
+    parser.add_argument("--seed", help="seed the static SHA-256 tie-break for a new sample")
     args = parser.parse_args()
     try:
-        rows = select(args.inventory, args.main_manifest)
+        rows = select(
+            args.inventory,
+            args.main_manifest,
+            excluded_manifests=tuple(args.exclude_manifest),
+            seed=args.seed,
+        )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         with args.output.open("w", encoding="utf-8", newline="") as stream:
-            writer = csv.DictWriter(stream, fieldnames=OUTPUT_COLUMNS, delimiter="\t", lineterminator="\n")
+            columns = SEEDED_OUTPUT_COLUMNS if args.seed is not None else OUTPUT_COLUMNS
+            writer = csv.DictWriter(stream, fieldnames=columns, delimiter="\t", lineterminator="\n")
             writer.writeheader()
             for row in rows:
-                writer.writerow({column: row[column] for column in OUTPUT_COLUMNS})
+                writer.writerow({column: row.get(column, "") for column in columns})
     except (OSError, HoldoutError, KeyError) as error:
         print(f"ordinary holdout selection: {error}", file=sys.stderr)
         return 2

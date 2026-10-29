@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reconcile the frozen Tier A cohort and independent A0 holdout."""
+"""Reconcile frozen ordinary-method cohorts and preserve complete audit causes."""
 
 from __future__ import annotations
 
@@ -18,8 +18,10 @@ OUTPUT_COLUMNS = (
     "tier",
     "score_bucket",
     "baseline_status",
+    "baseline_cause",
     "baseline_blocker",
     "final_status",
+    "final_cause",
     "final_blocker",
     "baseline_result",
     "final_result",
@@ -122,8 +124,10 @@ def reconcile(
             "tier": row.get("tier", ""),
             "score_bucket": row.get("score_bucket", ""),
             "baseline_status": "typed" if old_typed else "blocked",
+            "baseline_cause": old["status"],
             "baseline_blocker": blocker_kind(old["status"]),
             "final_status": "typed" if new_typed else "blocked",
+            "final_cause": new["status"],
             "final_blocker": blocker_kind(new["status"]),
             "baseline_result": old["actual_result"],
             "final_result": new["actual_result"],
@@ -152,6 +156,9 @@ def main() -> int:
     parser.add_argument("--main-after", required=True, type=Path)
     parser.add_argument("--holdout-before", required=True, type=Path)
     parser.add_argument("--holdout-after", required=True, type=Path)
+    parser.add_argument("--third-manifest", type=Path)
+    parser.add_argument("--third-before", type=Path)
+    parser.add_argument("--third-after", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     args = parser.parse_args()
     try:
@@ -162,10 +169,31 @@ def main() -> int:
         overlap = {row["identity"] for row in main_manifest} & {row["identity"] for row in holdout_manifest}
         if overlap:
             raise ReconcileError(f"main and holdout overlap at {sorted(overlap)[0]}")
+        third_arguments = (args.third_manifest, args.third_before, args.third_after)
+        if any(value is not None for value in third_arguments) and not all(
+            value is not None for value in third_arguments
+        ):
+            raise ReconcileError("third manifest, before report, and after report must be supplied together")
+        third_manifest = tsv_rows(args.third_manifest) if args.third_manifest else None
+        if third_manifest is not None:
+            if len(third_manifest) != 25:
+                raise ReconcileError("third frozen cohort must contain exactly 25 rows")
+            identities = {row["identity"] for row in main_manifest + holdout_manifest}
+            third_ids = {row["identity"] for row in third_manifest}
+            if len(third_ids) != 25 or identities & third_ids:
+                raise ReconcileError("third cohort must contain 25 unique identities disjoint from main and holdout")
         main = reconcile("main", main_manifest, audit_rows(args.main_before), audit_rows(args.main_after))
         holdout = reconcile("holdout", holdout_manifest, audit_rows(args.holdout_before), audit_rows(args.holdout_after))
         write_rows(args.output_dir / "main.tsv", main)
         write_rows(args.output_dir / "holdout.tsv", holdout)
+        if third_manifest is not None:
+            third = reconcile(
+                "third",
+                third_manifest,
+                audit_rows(args.third_before),
+                audit_rows(args.third_after),
+            )
+            write_rows(args.output_dir / "third.tsv", third)
     except (OSError, ReconcileError, KeyError) as error:
         print(f"acceptance cohort reconciliation: {error}", file=sys.stderr)
         return 2
@@ -174,6 +202,14 @@ def main() -> int:
         typed_before = sum(row["baseline_status"] == "typed" for row in rows)
         typed_after = sum(row["final_status"] == "typed" for row in rows)
         print(f"{name}: {typed_before}/25 -> {typed_after}/25; {counts}")
+    if third_manifest is not None:
+        counts = {
+            value: sum(row["disposition"] == value for row in third)
+            for value in ("newly_typed", "retained_typed", "unchanged_blocked", "blocker_changed")
+        }
+        typed_before = sum(row["baseline_status"] == "typed" for row in third)
+        typed_after = sum(row["final_status"] == "typed" for row in third)
+        print(f"third: {typed_before}/25 -> {typed_after}/25; {counts}")
     return 0
 
 
