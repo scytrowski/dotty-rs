@@ -431,22 +431,18 @@ Executed checks passed:
   issue-local target/temp roots and JDK 21 required:
 
   ```sh
-  PATH=/home/vdrake6/.sdkman/candidates/java/current/bin:$PATH \
-  JAVA_HOME=/home/vdrake6/.sdkman/candidates/java/current \
-  TMPDIR=/var/tmp/dotty-rs-issue-1853/tmp \
-  JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/var/tmp/dotty-rs-issue-1853/tmp \
+  export JAVA_HOME=/path/to/temurin-21.0.13+9
+  export ISSUE_TMP=/path/to/issue-local-root-volume-directory
+  export PATH="$JAVA_HOME/bin:$PATH"
+  export TMPDIR="$ISSUE_TMP/tmp"
+  export JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=$TMPDIR"
+  export CARGO_TARGET_DIR="$ISSUE_TMP/target"
   DOTTY_CLASSFILE_REQUIRE_JDK=1 \
-  CARGO_TARGET_DIR=/var/tmp/dotty-rs-issue-1853/target \
   cargo test -p dotty-classfile --test classfile_jvm_encoder \
     -p dotty-jvm --lib -p dotty --test jvm_source_compilation \
     --test jvm_stateful_class_contract --locked -- --nocapture
 
-  PATH=/home/vdrake6/.sdkman/candidates/java/current/bin:$PATH \
-  JAVA_HOME=/home/vdrake6/.sdkman/candidates/java/current \
-  TMPDIR=/var/tmp/dotty-rs-issue-1853/tmp \
-  JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/var/tmp/dotty-rs-issue-1853/tmp \
   DOTTY_CLASSFILE_REQUIRE_JDK=1 \
-  CARGO_TARGET_DIR=/var/tmp/dotty-rs-issue-1853/target \
   cargo test --workspace --all-targets --locked
   ```
 - `cargo test -p dotty --test jvm_tasty_artifacts --locked -- --nocapture`
@@ -456,14 +452,9 @@ Executed checks passed:
 - The focused Scala oracle command (12 passed):
 
   ```sh
-  PATH=/home/vdrake6/.sdkman/candidates/java/current/bin:$PATH \
-  JAVA_HOME=/home/vdrake6/.sdkman/candidates/java/current \
-  TMPDIR=/var/tmp/dotty-rs-issue-1853/tmp \
-  JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/var/tmp/dotty-rs-issue-1853/tmp \
-  CARGO_TARGET_DIR=/var/tmp/dotty-rs-issue-1853/target \
-  SCALA39_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source \
+  export SCALA39_ROOT=/path/to/pinned-scala-3.9.0-checkout
   DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 \
-  DOTTY_TASTY_PICKLER_ORACLE_TMP=/var/tmp/dotty-rs-issue-1853/tmp \
+  DOTTY_TASTY_PICKLER_ORACLE_TMP="$ISSUE_TMP/tmp" \
   cargo test -p dotty --test jvm_tasty_factory_result_arguments \
     --locked -- --nocapture
   ```
