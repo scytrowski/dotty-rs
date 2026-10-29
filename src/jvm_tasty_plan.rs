@@ -29,7 +29,7 @@ use dotty_typer::{SourceTyper, TyperError};
 
 use crate::jvm_tasty_cross_class::{
     CrossClassConstructorCallProofInput, ValidatedCrossClassConstructorCallProof,
-    validate_cross_class_constructor_call_proofs,
+    validate_cross_class_constructor_call_proofs_with_typer,
 };
 
 /// Errors are tagged by the frontend or producer stage that rejected the
@@ -1032,8 +1032,8 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                 phase: "complete JVM unit validation",
                 reason: format!("{error:?}"),
             })?;
-    let constructor_call_proofs =
-        validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+    let constructor_call_proofs = validate_cross_class_constructor_call_proofs_with_typer(
+        CrossClassConstructorCallProofInput {
             source_id,
             source_root: parsed.root,
             store: typer.store(),
@@ -1043,11 +1043,13 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
             source_index: &index,
             source_typed_index: typer.source_typed_index(),
             jvm_unit: &jvm_unit,
-        })
-        .map_err(|error| PairedPlanError::BatchUnit {
-            phase: "cross-class constructor-call identity proof",
-            reason: format!("{error:?}"),
-        })?;
+        },
+        &typer,
+    )
+    .map_err(|error| PairedPlanError::BatchUnit {
+        phase: "cross-class constructor-call identity proof",
+        reason: format!("{error:?}"),
+    })?;
     let planned_classes = drafts
         .iter()
         .map(|draft| draft.source.class)

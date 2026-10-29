@@ -1,6 +1,7 @@
 use dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_batch;
 use dotty::jvm_tasty_cross_class::{
     CrossClassConstructorCallProofInput, validate_cross_class_constructor_call_proofs,
+    validate_cross_class_constructor_call_proofs_with_typer,
 };
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 use dotty_classfile::attribute::Attribute;
@@ -1716,8 +1717,8 @@ fn staged_factory_scope_controls_report_their_first_typed_gate() {
         &local_argument,
         18402,
         "local block argument",
-        "JVM/TASTy cross-contract validation",
-        "BodyType",
+        "cross-class constructor-call identity proof",
+        "local val must have an explicit source type",
     );
 
     let multiple_calls = SOURCE.replace(
@@ -1943,11 +1944,165 @@ fn scala39_reference_local_oracle_links_block_valdef_and_local_termref() {
 }
 
 #[test]
+fn reference_local_constructor_proof_rejects_unsupported_block_shapes() {
+    let baseline = include_str!(
+        "fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala"
+    );
+    let cases = [
+        (
+            "mutable local",
+            baseline.replace("val counter: Counter", "var counter: Counter"),
+            "local must be the original immutable method-owned source declaration",
+        ),
+        (
+            "two locals",
+            baseline.replace(
+                "    new CounterOwner(counter)",
+                "    val extra: Counter = makeCounter(seed)\n    new CounterOwner(counter)",
+            ),
+            "local constructor Block must have exactly one ValDef",
+        ),
+        (
+            "duplicate local declaration",
+            baseline.replace(
+                "    new CounterOwner(counter)",
+                "    val counter: Counter = makeCounter(seed)\n    new CounterOwner(counter)",
+            ),
+            "DuplicateLocalValue",
+        ),
+        (
+            "nested Block",
+            baseline.replace(
+                "    new CounterOwner(counter)",
+                "    { new CounterOwner(counter) }",
+            ),
+            "local constructor Block result must be one direct constructor application",
+        ),
+        (
+            "branch-controlled initializer",
+            baseline.replace(
+                "val counter: Counter = makeCounter(seed)",
+                "val counter: Counter = if seed == 0 then makeCounter(seed) else makeCounter(seed)",
+            ),
+            "local initializer must be one planned helper call",
+        ),
+        (
+            "branch-controlled use",
+            baseline.replace(
+                "    new CounterOwner(counter)",
+                "    if seed == 0 then new CounterOwner(counter) else new CounterOwner(counter)",
+            ),
+            "local constructor Block result must be one direct constructor application",
+        ),
+        (
+            "pre-declaration use",
+            baseline.replace(
+                "    val counter: Counter = makeCounter(seed)\n    new CounterOwner(counter)",
+                "    val result: CounterOwner = new CounterOwner(counter)\n    val counter: Counter = makeCounter(seed)\n    result",
+            ),
+            "TermNameNotFound",
+        ),
+        (
+            "missing initializer",
+            baseline.replace(
+                "val counter: Counter = makeCounter(seed)",
+                "val counter: Counter",
+            ),
+            "LocalValueRightHandSideMissing",
+        ),
+        (
+            "reassignment",
+            baseline.replace(
+                "    new CounterOwner(counter)",
+                "    counter = makeCounter(seed)\n    new CounterOwner(counter)",
+            ),
+            "AssignmentTargetImmutable",
+        ),
+        (
+            "shadowed parameter name",
+            baseline
+                .replace("def create(seed: Int)", "def create(counter: Int)")
+                .replace("makeCounter(seed)", "makeCounter(counter)"),
+            "RecursiveLocalValueInitializer",
+        ),
+        (
+            "wrong local type",
+            baseline.replace(
+                "val counter: Counter = makeCounter(seed)",
+                "val counter: CounterOwner = makeCounter(seed)",
+            ),
+            "LocalValueTypeMismatch",
+        ),
+        (
+            "parameter Ident cannot stand in for the local constructor argument",
+            baseline
+                .replace("def create(seed: Int)", "def create(seed: Counter)")
+                .replace("makeCounter(seed)", "makeCounter(0)")
+                .replace("new CounterOwner(counter)", "new CounterOwner(seed)"),
+            "constructor argument must resolve directly to the caller formal",
+        ),
+        (
+            "local declared in another method",
+            baseline
+                .replace(
+                    "def makeCounter(seed: Int): Counter = new Counter(seed)",
+                    "def makeCounter(seed: Int): Counter =\n    val counter: Counter = new Counter(seed)\n    counter",
+                )
+                .replace("    val counter: Counter = makeCounter(seed)\n", ""),
+            "TermNameNotFound",
+        ),
+        (
+            "local declared in another nested scope",
+            baseline.replace(
+                "    val counter: Counter = makeCounter(seed)\n    new CounterOwner(counter)",
+                "    val result: Counter = { val counter: Counter = makeCounter(seed); counter }\n    new CounterOwner(counter)",
+            ),
+            "TermNameNotFound",
+        ),
+    ];
+
+    for (index, (case, source, expected)) in cases.into_iter().enumerate() {
+        let error = with_paired_jvm_tasty_batch_plan(
+            &source,
+            "CounterOwnerFactory.scala",
+            SourceId::from_index(1850 + index as u32),
+            |_| (),
+        )
+        .expect_err("unsupported local-block variants fail before a paired plan is accepted");
+        let diagnostic = format!("{error:?}");
+        assert!(
+            expected.is_empty() || diagnostic.contains(expected),
+            "{case} rejected at an unexpected first gate: {diagnostic}"
+        );
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LocalFlowProofObservation {
+    proof_methods: Vec<String>,
+    local_name: String,
+    local_owner_name: String,
+    local_type_name: String,
+    outer_type_name: String,
+    original_source_and_typed_roots_match: bool,
+    helper_receipt_matches_original_initializer: bool,
+    local_scope_is_owned_by_create: bool,
+}
+
+#[test]
 fn reference_local_constructor_flow_preserves_one_session_identity_through_body_validation() {
+    let first = observe_reference_local_constructor_flow(SourceId::from_index(1849));
+    let second = observe_reference_local_constructor_flow(SourceId::from_index(1850));
+    assert_eq!(
+        first, second,
+        "independent sessions preserve the same proof relationships"
+    );
+}
+
+fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowProofObservation {
     let source = include_str!(
         "fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala"
     );
-    let source_id = SourceId::from_index(1849);
     let source_text = SourceText::new(source).unwrap();
     let scanner = ContextualScanner::new(source).unwrap();
     assert!(scanner.diagnostics().is_empty());
@@ -2291,8 +2446,54 @@ fn reference_local_constructor_flow_preserves_one_session_identity_through_body_
         classes: jvm_classes,
     };
     jvm_unit.metadata(&definitions).unwrap();
-    let proof_result =
-        validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+    let mut disconnected_typed_index = typed_index.clone();
+    disconnected_typed_index.remove(source_id, source_local);
+    let disconnected_error = match validate_cross_class_constructor_call_proofs_with_typer(
+        CrossClassConstructorCallProofInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &source_index,
+            source_typed_index: &disconnected_typed_index,
+            jvm_unit: &jvm_unit,
+        },
+        &typer,
+    ) {
+        Ok(_) => panic!("a cloned source-to-typed index cannot authenticate this Typer session"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        disconnected_error,
+        dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+            "local binding resolver must borrow the exact proof session stores and indexes"
+        )
+    );
+    let foreign_source_error = match validate_cross_class_constructor_call_proofs_with_typer(
+        CrossClassConstructorCallProofInput {
+            source_id: SourceId::from_index(999_1849),
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &source_index,
+            source_typed_index: typed_index,
+            jvm_unit: &jvm_unit,
+        },
+        &typer,
+    ) {
+        Ok(_) => panic!("a foreign source id cannot authenticate the original local proof"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{foreign_source_error:?}").contains("package root is not bound"),
+        "foreign source identity failed at an unexpected gate: {foreign_source_error:?}"
+    );
+    let proof_result = validate_cross_class_constructor_call_proofs_with_typer(
+        CrossClassConstructorCallProofInput {
             source_id,
             source_root: parsed.root,
             store: typer.store(),
@@ -2302,10 +2503,55 @@ fn reference_local_constructor_flow_preserves_one_session_identity_through_body_
             source_index: &source_index,
             source_typed_index: typed_index,
             jvm_unit: &jvm_unit,
-        })
-        .expect("the proof scan does not reject the valid local source session");
+        },
+        &typer,
+    )
+    .expect("the proof scan does not reject the valid local source session");
     assert!(proof_result.iter().any(|proof| proof.method() != create));
-    assert!(!proof_result.iter().any(|proof| proof.method() == create));
+    let create_proof = proof_result
+        .iter()
+        .find(|proof| proof.method() == create)
+        .expect("the one original local constructor flow receives an opaque proof");
+    assert_eq!(
+        create_proof.argument_proof().kind(),
+        dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::LocalVal
+    );
+    let local_proof = create_proof
+        .argument_proof()
+        .local_val()
+        .expect("the constructor argument proof retains its local-val roots");
+    assert_eq!(local_proof.source_block(), source_rhs);
+    assert_eq!(local_proof.source_declaration(), source_local);
+    assert_eq!(local_proof.source_initializer(), source_initializer);
+    assert_eq!(local_proof.source_use(), *source_local_use);
+    assert_eq!(local_proof.typed_block(), typed_rhs);
+    assert_eq!(local_proof.typed_declaration(), typed_local);
+    assert_eq!(local_proof.typed_initializer(), typed_initializer);
+    assert_eq!(local_proof.typed_use(), typed_local_use);
+    assert_eq!(local_proof.symbol(), local_symbol);
+    assert_eq!(local_proof.scope(), local_binding.scope());
+    assert_eq!(
+        local_proof.initializer_call().source_apply(),
+        source_initializer
+    );
+    assert_eq!(
+        local_proof.initializer_call().typed_apply(),
+        typed_initializer
+    );
+    assert_eq!(
+        local_proof.result_type(),
+        typer.typed_ast().get(typed_rhs).ty
+    );
+    let helper_proof = proof_result
+        .iter()
+        .find(|proof| proof.method() == helper_symbol)
+        .expect("the same-session factory helper keeps its existing proof");
+    assert_eq!(
+        helper_proof.argument_proof().kind(),
+        dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::Formal
+    );
+    assert_eq!(helper_proof.caller_class(), factory);
+    assert_eq!(helper_proof.target_class(), classes[0]);
     println!(
         "Rust local flow proof scan completed; retained method identities={:?}",
         proof_result
@@ -2400,6 +2646,49 @@ fn reference_local_constructor_flow_preserves_one_session_identity_through_body_
         "first paired failure was {paired_error:?}"
     );
     println!("Separate paired end-to-end control first failure: {paired_error:?}");
+
+    let proof_store = typer.store();
+    let local_symbol_name = proof_store
+        .names
+        .resolve(proof_store.symbols.get(local_symbol).name.text());
+    let local_owner_name = proof_store
+        .names
+        .resolve(proof_store.symbols.get(create).name.text());
+    let local_type_name = proof_store
+        .names
+        .resolve(proof_store.symbols.get(classes[0]).name.text());
+    let outer_type_name = proof_store
+        .names
+        .resolve(proof_store.symbols.get(classes[1]).name.text());
+    LocalFlowProofObservation {
+        proof_methods: proof_result
+            .iter()
+            .map(|proof| {
+                proof_store
+                    .names
+                    .resolve(proof_store.symbols.get(proof.method()).name.text())
+                    .to_owned()
+            })
+            .collect(),
+        local_name: local_symbol_name.to_owned(),
+        local_owner_name: local_owner_name.to_owned(),
+        local_type_name: local_type_name.to_owned(),
+        outer_type_name: outer_type_name.to_owned(),
+        original_source_and_typed_roots_match: local_proof.source_block() == source_rhs
+            && local_proof.source_declaration() == source_local
+            && local_proof.source_initializer() == source_initializer
+            && local_proof.source_use() == *source_local_use
+            && local_proof.typed_block() == typed_rhs
+            && local_proof.typed_declaration() == typed_local
+            && local_proof.typed_initializer() == typed_initializer
+            && local_proof.typed_use() == typed_local_use,
+        helper_receipt_matches_original_initializer: local_proof.initializer_call().source_apply()
+            == source_initializer
+            && local_proof.initializer_call().typed_apply() == typed_initializer,
+        local_scope_is_owned_by_create: local_proof.scope() == local_binding.scope()
+            && proof_store.scopes.get(local_binding.scope()).owner == Some(create)
+            && proof_store.symbols.get(local_symbol).owner == Some(create),
+    }
 }
 
 #[test]

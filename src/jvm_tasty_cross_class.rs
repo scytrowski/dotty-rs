@@ -13,6 +13,7 @@ use dotty_core::{
     TypeId, TypeRefTarget,
 };
 use dotty_jvm::{JvmClassPlan, JvmCompilationUnit};
+use dotty_typer::{SourceTyper, TypedLocalBinding};
 
 /// A typed failure while validating canonical constructor-call proofs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +104,8 @@ pub enum ConstructorArgumentProofKind {
     NestedNew,
     /// The outer constructor receives a same-instance planned method result.
     PlannedCall,
+    /// The outer constructor receives one initialized immutable local val.
+    LocalVal,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +122,24 @@ enum ConstructorArgumentProofShape {
     Formal(FormalConstructorArgumentProof),
     NestedNew(NestedConstructorArgumentProof),
     PlannedCall(PlannedCallProof),
+    LocalVal(LocalValConstructorArgumentProof),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LocalValConstructorArgumentProof {
+    source_block: TreeId<Untyped>,
+    source_declaration: TreeId<Untyped>,
+    source_initializer: TreeId<Untyped>,
+    source_use: TreeId<Untyped>,
+    typed_block: TreeId<Typed>,
+    typed_declaration: TreeId<Typed>,
+    typed_initializer: TreeId<Typed>,
+    typed_use: TreeId<Typed>,
+    symbol: SymbolId,
+    scope: dotty_core::ScopeId,
+    local_type: TypeId,
+    result_type: TypeId,
+    initializer_call: PlannedCallProof,
 }
 
 /// Opaque receipt for one validated constructor-argument expression shape.
@@ -137,12 +158,22 @@ impl ConstructorArgumentProof {
             ConstructorArgumentProofShape::PlannedCall(_) => {
                 ConstructorArgumentProofKind::PlannedCall
             }
+            ConstructorArgumentProofShape::LocalVal(_) => ConstructorArgumentProofKind::LocalVal,
         }
     }
 
     pub const fn planned_call(self) -> Option<PlannedCallProof> {
         match self.shape {
             ConstructorArgumentProofShape::PlannedCall(proof) => Some(proof),
+            _ => None,
+        }
+    }
+
+    pub const fn local_val(self) -> Option<LocalValConstructorArgumentProofView> {
+        match self.shape {
+            ConstructorArgumentProofShape::LocalVal(proof) => {
+                Some(LocalValConstructorArgumentProofView { proof })
+            }
             _ => None,
         }
     }
@@ -160,6 +191,54 @@ impl ConstructorArgumentProof {
             }
             _ => None,
         }
+    }
+}
+
+/// Read-only roots and identities for a validated one-local constructor flow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalValConstructorArgumentProofView {
+    proof: LocalValConstructorArgumentProof,
+}
+
+impl LocalValConstructorArgumentProofView {
+    pub const fn source_block(self) -> TreeId<Untyped> {
+        self.proof.source_block
+    }
+    pub const fn source_declaration(self) -> TreeId<Untyped> {
+        self.proof.source_declaration
+    }
+    pub const fn source_initializer(self) -> TreeId<Untyped> {
+        self.proof.source_initializer
+    }
+    pub const fn source_use(self) -> TreeId<Untyped> {
+        self.proof.source_use
+    }
+    pub const fn typed_block(self) -> TreeId<Typed> {
+        self.proof.typed_block
+    }
+    pub const fn typed_declaration(self) -> TreeId<Typed> {
+        self.proof.typed_declaration
+    }
+    pub const fn typed_initializer(self) -> TreeId<Typed> {
+        self.proof.typed_initializer
+    }
+    pub const fn typed_use(self) -> TreeId<Typed> {
+        self.proof.typed_use
+    }
+    pub const fn symbol(self) -> SymbolId {
+        self.proof.symbol
+    }
+    pub const fn scope(self) -> dotty_core::ScopeId {
+        self.proof.scope
+    }
+    pub const fn local_type(self) -> TypeId {
+        self.proof.local_type
+    }
+    pub const fn result_type(self) -> TypeId {
+        self.proof.result_type
+    }
+    pub const fn initializer_call(self) -> PlannedCallProof {
+        self.proof.initializer_call
     }
 }
 
@@ -283,6 +362,14 @@ enum SourceArgumentShape {
         type_tree: TreeId<Untyped>,
     },
     PlannedCall {
+        formal_tree: TreeId<Untyped>,
+        apply: TreeId<Untyped>,
+        function: TreeId<Untyped>,
+        receiver: Option<TreeId<Untyped>>,
+    },
+    LocalVal {
+        declaration: TreeId<Untyped>,
+        initializer: TreeId<Untyped>,
         formal_tree: TreeId<Untyped>,
         apply: TreeId<Untyped>,
         function: TreeId<Untyped>,
@@ -474,6 +561,28 @@ pub fn validate_cross_class_constructor_call_proofs<'session>(
     Vec<ValidatedCrossClassConstructorCallProof<'session>>,
     CrossClassConstructorCallProofError,
 > {
+    validate_cross_class_constructor_call_proofs_inner(input, None)
+}
+
+/// Variant used by the one-session paired planner, which can supply the
+/// Typer-owned local binding index without reconstructing local identities.
+pub fn validate_cross_class_constructor_call_proofs_with_typer<'session>(
+    input: CrossClassConstructorCallProofInput<'session>,
+    typer: &SourceTyper<'_>,
+) -> Result<
+    Vec<ValidatedCrossClassConstructorCallProof<'session>>,
+    CrossClassConstructorCallProofError,
+> {
+    validate_cross_class_constructor_call_proofs_inner(input, Some(typer))
+}
+
+fn validate_cross_class_constructor_call_proofs_inner<'session>(
+    input: CrossClassConstructorCallProofInput<'session>,
+    typer: Option<&SourceTyper<'_>>,
+) -> Result<
+    Vec<ValidatedCrossClassConstructorCallProof<'session>>,
+    CrossClassConstructorCallProofError,
+> {
     let CrossClassConstructorCallProofInput {
         source_id,
         source_root,
@@ -488,6 +597,15 @@ pub fn validate_cross_class_constructor_call_proofs<'session>(
     if !std::ptr::eq(jvm_unit.store, store) || !std::ptr::eq(jvm_unit.typed_ast, typed_ast) {
         return Err(CrossClassConstructorCallProofError::SemanticIdentity(
             "JVM unit and source proof must borrow the same semantic and typed stores",
+        ));
+    }
+    if let Some(typer) = typer
+        && (!std::ptr::eq(typer.store(), store)
+            || !std::ptr::eq(typer.typed_ast(), typed_ast)
+            || !std::ptr::eq(typer.source_typed_index(), source_typed_index))
+    {
+        return Err(CrossClassConstructorCallProofError::TypedBinding(
+            "local binding resolver must borrow the exact proof session stores and indexes",
         ));
     }
     let root =
@@ -606,6 +724,7 @@ pub fn validate_cross_class_constructor_call_proofs<'session>(
                 typed_ast,
                 source_index,
                 source_typed_index,
+                typer,
                 jvm_unit,
                 caller_plan,
                 &metadata,
@@ -614,7 +733,13 @@ pub fn validate_cross_class_constructor_call_proofs<'session>(
         }
     }
     for proof in &proofs {
-        let Some(planned_call) = proof.argument_proof().planned_call() else {
+        let argument_proof = proof.argument_proof();
+        let planned_call = argument_proof.planned_call().or_else(|| {
+            argument_proof
+                .local_val()
+                .map(LocalValConstructorArgumentProofView::initializer_call)
+        });
+        let Some(planned_call) = planned_call else {
             continue;
         };
         let helper_proof = proofs
@@ -652,18 +777,40 @@ pub fn validate_cross_class_constructor_call_proofs<'session>(
 }
 
 fn is_direct_constructor_call_candidate(ast: &AstArena<Untyped>, rhs: TreeId<Untyped>) -> bool {
-    let Some(TreeKind::Apply(application)) = ast.try_get(rhs).map(|node| &node.kind) else {
-        return false;
-    };
-    let Some(TreeKind::Select(selection)) =
-        ast.try_get(application.function).map(|node| &node.kind)
-    else {
-        return false;
-    };
-    matches!(
-        ast.try_get(selection.qualifier).map(|node| &node.kind),
-        Some(TreeKind::New(_))
-    )
+    fn constructor_application(ast: &AstArena<Untyped>, root: TreeId<Untyped>) -> bool {
+        let Some(TreeKind::Apply(application)) = ast.try_get(root).map(|node| &node.kind) else {
+            return false;
+        };
+        let Some(TreeKind::Select(selection)) =
+            ast.try_get(application.function).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        matches!(
+            ast.try_get(selection.qualifier).map(|node| &node.kind),
+            Some(TreeKind::New(_))
+        )
+    }
+
+    match ast.try_get(rhs).map(|node| &node.kind) {
+        Some(TreeKind::Apply(_)) => constructor_application(ast, rhs),
+        Some(TreeKind::Block(block)) if constructor_application(ast, block.expr) => true,
+        Some(TreeKind::Block(block)) => {
+            block
+                .stats
+                .iter()
+                .any(|statement| constructor_application(ast, *statement))
+                || match ast.try_get(block.expr).map(|node| &node.kind) {
+                    Some(TreeKind::Block(nested)) => constructor_application(ast, nested.expr),
+                    Some(TreeKind::If(branch)) => {
+                        constructor_application(ast, branch.then_branch)
+                            || constructor_application(ast, branch.else_branch)
+                    }
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
 }
 
 fn require_source_position(
@@ -747,6 +894,7 @@ fn validate_constructor_call_candidate<'session>(
     typed_ast: &'session TypedAst,
     source_index: &'session SourceSemanticIndex,
     source_typed_index: &'session SourceTypedIndex,
+    typer: Option<&SourceTyper<'_>>,
     jvm_unit: &'session JvmCompilationUnit<'session>,
     caller_plan: &JvmClassPlan,
     metadata: &[dotty_jvm::JvmClassMetadata],
@@ -883,12 +1031,23 @@ fn validate_constructor_call_candidate<'session>(
         ));
     }
 
-    let TreeKind::Apply(source_apply) = &source_ast
+    let source_block = match &source_ast
         .try_get(source_rhs)
         .ok_or_else(|| source_error("method RHS source root is stale"))?
         .kind
+    {
+        TreeKind::Block(block) => Some(block),
+        _ => None,
+    };
+    let source_constructor_apply = source_block.map_or(source_rhs, |block| block.expr);
+    let TreeKind::Apply(source_apply) = &source_ast
+        .try_get(source_constructor_apply)
+        .ok_or_else(|| source_error("constructor expression source root is stale"))?
+        .kind
     else {
-        unreachable!()
+        return Err(source_error(
+            "local constructor Block result must be one direct constructor application",
+        ));
     };
     if source_apply.kind != ApplyKind::Regular || source_apply.args.len() != 1 {
         return Err(source_error(
@@ -901,7 +1060,7 @@ fn validate_constructor_call_candidate<'session>(
         .ok_or_else(|| source_error("constructor selection source root is stale"))?
         .kind
     else {
-        unreachable!()
+        return Err(source_error("constructor function must be Select"));
     };
     if store.names.resolve(source_selection.name.text()) != "<init>" {
         return Err(source_error(
@@ -914,7 +1073,7 @@ fn validate_constructor_call_candidate<'session>(
         .ok_or_else(|| source_error("New source root is stale"))?
         .kind
     else {
-        unreachable!()
+        return Err(source_error("constructor receiver must be New"));
     };
     let source_argument = source_apply.args[0];
     let argument_shape = match &source_ast
@@ -922,6 +1081,63 @@ fn validate_constructor_call_candidate<'session>(
         .ok_or_else(|| source_error("constructor argument source root is stale"))?
         .kind
     {
+        TreeKind::Ident(_) if source_block.is_some() => {
+            let block = source_block.expect("guarded by the block-body shape");
+            if block.stats.len() != 1 {
+                return Err(source_error(
+                    "local constructor Block must have exactly one ValDef",
+                ));
+            }
+            let declaration = block.stats[0];
+            let TreeKind::ValDef(local) = &source_ast
+                .try_get(declaration)
+                .ok_or_else(|| source_error("local ValDef source tree is stale"))?
+                .kind
+            else {
+                return Err(source_error(
+                    "local constructor Block statistic must be a ValDef",
+                ));
+            };
+            let initializer = local
+                .rhs
+                .ok_or_else(|| source_error("local constructor ValDef must be initialized"))?;
+            let TreeKind::Apply(initializer_apply) = &source_ast
+                .try_get(initializer)
+                .ok_or_else(|| source_error("local initializer source tree is stale"))?
+                .kind
+            else {
+                return Err(source_error(
+                    "local initializer must be one planned helper call",
+                ));
+            };
+            if initializer_apply.kind != ApplyKind::Regular || initializer_apply.args.len() != 1 {
+                return Err(source_error(
+                    "local initializer must be one regular helper call",
+                ));
+            }
+            let function = initializer_apply.function;
+            let function_kind = &source_ast
+                .try_get(function)
+                .ok_or_else(|| source_error("local initializer function source tree is stale"))?
+                .kind;
+            let receiver = match function_kind {
+                TreeKind::Ident(_) => None,
+                TreeKind::Select(selection) => Some(selection.qualifier),
+                _ => {
+                    return Err(source_error(
+                        "local initializer must select one ordinary method",
+                    ));
+                }
+            };
+            SourceArgumentShape::LocalVal {
+                declaration,
+                initializer,
+                formal_tree: initializer_apply.args[0],
+                apply: initializer,
+                function,
+                receiver,
+            }
+        }
         TreeKind::Ident(_) => SourceArgumentShape::Formal {
             formal_tree: source_argument,
         },
@@ -985,7 +1201,8 @@ fn validate_constructor_call_candidate<'session>(
     let argument_formal_tree = match argument_shape {
         SourceArgumentShape::Formal { formal_tree }
         | SourceArgumentShape::NestedNew { formal_tree, .. }
-        | SourceArgumentShape::PlannedCall { formal_tree, .. } => formal_tree,
+        | SourceArgumentShape::PlannedCall { formal_tree, .. }
+        | SourceArgumentShape::LocalVal { formal_tree, .. } => formal_tree,
     };
     let TreeKind::Ident(argument_ident) = &source_ast
         .try_get(argument_formal_tree)
@@ -1052,13 +1269,22 @@ fn validate_constructor_call_candidate<'session>(
     } else {
         None
     };
-    let planned_typed = if let SourceArgumentShape::PlannedCall {
-        apply,
-        function,
-        receiver,
-        ..
-    } = argument_shape
-    {
+    let planned_parts = match argument_shape {
+        SourceArgumentShape::PlannedCall {
+            apply,
+            function,
+            receiver,
+            ..
+        }
+        | SourceArgumentShape::LocalVal {
+            apply,
+            function,
+            receiver,
+            ..
+        } => Some((apply, function, receiver)),
+        _ => None,
+    };
+    let planned_typed = if let Some((apply, function, receiver)) = planned_parts {
         Some((
             apply,
             function,
@@ -1083,6 +1309,80 @@ fn validate_constructor_call_candidate<'session>(
     let typed_root = typed_ast
         .try_get(typed_rhs)
         .ok_or_else(|| typed_error("typed method RHS is stale"))?;
+    let typed_constructor_apply = source_typed_index
+        .get(source_id, source_constructor_apply)
+        .ok_or_else(|| typed_error("constructor expression has no source-to-typed binding"))?;
+    let typed_constructor_root = typed_ast
+        .try_get(typed_constructor_apply)
+        .ok_or_else(|| typed_error("typed constructor expression is stale"))?;
+    if let Some(block) = source_block {
+        let TreeKind::Block(typed_block) = &typed_root.kind else {
+            return Err(typed_error(
+                "typed local method RHS must preserve the original Block",
+            ));
+        };
+        let SourceArgumentShape::LocalVal {
+            declaration,
+            initializer,
+            ..
+        } = argument_shape
+        else {
+            return Err(source_error(
+                "a constructor Block must use the bounded local-val shape",
+            ));
+        };
+        let typed_declaration = source_typed_index
+            .get(source_id, declaration)
+            .ok_or_else(|| typed_error("local declaration has no source-to-typed binding"))?;
+        let typed_initializer = source_typed_index
+            .get(source_id, initializer)
+            .ok_or_else(|| typed_error("local initializer has no source-to-typed binding"))?;
+        if typed_block.stats != [typed_declaration] || typed_block.expr != typed_constructor_apply {
+            return Err(typed_error(
+                "typed Block must preserve its one local and final constructor expression",
+            ));
+        }
+        let TreeKind::ValDef(typed_local) = &typed_ast
+            .try_get(typed_declaration)
+            .ok_or_else(|| typed_error("typed local declaration is stale"))?
+            .kind
+        else {
+            return Err(typed_error("typed local declaration must remain ValDef"));
+        };
+        if typed_local.rhs != Some(typed_initializer) {
+            return Err(typed_error(
+                "typed local initializer must retain its exact original root",
+            ));
+        }
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            declaration,
+            typed_declaration,
+            "local ValDef",
+        )?;
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            initializer,
+            typed_initializer,
+            "local initializer",
+        )?;
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            block.expr,
+            typed_constructor_apply,
+            "Block result",
+        )?;
+    } else if typed_constructor_apply != typed_rhs {
+        return Err(typed_error(
+            "direct constructor body must retain the method RHS root",
+        ));
+    }
     for (source_tree, typed_tree, description) in [
         (source_rhs, typed_rhs, "method RHS"),
         (source_select, typed_select, "constructor Select"),
@@ -1173,8 +1473,8 @@ fn validate_constructor_call_candidate<'session>(
             )?;
         }
     }
-    let TreeKind::Apply(typed_apply) = &typed_root.kind else {
-        return Err(typed_error("typed candidate RHS is not Apply"));
+    let TreeKind::Apply(typed_apply) = &typed_constructor_root.kind else {
+        return Err(typed_error("typed constructor expression is not Apply"));
     };
     if typed_apply.kind != ApplyKind::Regular
         || typed_apply.args != [typed_argument]
@@ -1219,24 +1519,242 @@ fn validate_constructor_call_candidate<'session>(
             "typed constructor leaf argument is not an identifier",
         ));
     };
-    if store.names.resolve(typed_argument_ident.name.text())
-        != store.names.resolve(formal_def.name.as_name().text())
-        || !matches!(store.types.try_get(typed_formal_node.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(target), .. }) if *target == method_formal)
+    let local_val_proof_data = if let SourceArgumentShape::LocalVal {
+        declaration,
+        initializer,
+        ..
+    } = argument_shape
     {
-        return Err(typed_error(
-            "typed constructor argument does not reference the canonical caller formal",
-        ));
-    }
+        let typer = typer.ok_or_else(|| {
+            identity_error(
+                "local constructor proof requires the original Typer local-binding index",
+            )
+        })?;
+        let TreeKind::ValDef(source_local) = &source_ast
+            .try_get(declaration)
+            .ok_or_else(|| source_error("local declaration source tree is stale"))?
+            .kind
+        else {
+            return Err(source_error("local declaration source root must be ValDef"));
+        };
+        if matches!(
+            source_ast.try_get(source_local.tpt).map(|tree| &tree.kind),
+            Some(TreeKind::TypeTree(_))
+        ) {
+            return Err(source_error("local val must have an explicit source type"));
+        }
+        let binding: TypedLocalBinding = typer
+            .typed_local_binding_at(source_id, declaration)
+            .ok_or_else(|| identity_error("local declaration has no canonical Typer binding"))?;
+        let local_symbol = binding.symbol();
+        if !store.symbols.contains(local_symbol)
+            || !has_source_origin(store, local_symbol, source_id)
+            || store.symbols.get(local_symbol).kind != SymbolKind::Local
+            || store.symbols.get(local_symbol).owner != Some(method)
+            || store
+                .symbols
+                .get(local_symbol)
+                .flags
+                .contains(SymbolFlags::MUTABLE)
+            || store
+                .names
+                .resolve(store.symbols.get(local_symbol).name.text())
+                != store.names.resolve(source_local.name.as_name().text())
+            || method_def
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .filter_map(
+                    |tree| match source_ast.try_get(*tree).map(|node| &node.kind) {
+                        Some(TreeKind::ValDef(parameter)) => Some(parameter.name.as_name().text()),
+                        _ => None,
+                    },
+                )
+                .any(|name| {
+                    store.names.resolve(name)
+                        == store.names.resolve(source_local.name.as_name().text())
+                })
+        {
+            return Err(identity_error(
+                "local must be the original immutable method-owned source declaration with an unshadowed name",
+            ));
+        }
+        let local_scope = binding.scope();
+        if !store.scopes.contains(local_scope) {
+            return Err(identity_error("local binding scope is stale"));
+        }
+        let scope = store.scopes.get(local_scope);
+        if scope.owner != Some(method)
+            || scope.lookup(&store.symbols.get(local_symbol).name) != Some(local_symbol)
+            || scope.entered_symbols().count() != 1
+        {
+            return Err(identity_error(
+                "local binding must occupy its exact single-entry method-owned block scope",
+            ));
+        }
+        let SymbolInfo::Complete(local_type) = store.symbols.get(local_symbol).info else {
+            return Err(semantic_error("local symbol type is incomplete"));
+        };
+        let local_class = match store.types.try_get(local_type) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            }) if store.symbols.contains(*class)
+                && store.symbols.get(*class).kind == SymbolKind::Class =>
+            {
+                *class
+            }
+            _ => {
+                return Err(semantic_error(
+                    "local type must be one canonical class TypeRef",
+                ));
+            }
+        };
+        if local_class == caller_class
+            || source_index.definition_of(local_class).is_none_or(
+                |definition| !matches!(definition, SourceDefinition::Canonical { source, .. } if source == source_id),
+            )
+            || unique_constructor_call_class_plan(jvm_unit, local_class).is_err()
+        {
+            return Err(identity_error("local type must be a different canonical class in this source batch"));
+        }
+        let typed_declaration = binding.declaration();
+        let typed_initializer = source_typed_index
+            .get(source_id, initializer)
+            .ok_or_else(|| typed_error("local initializer has no source-to-typed binding"))?;
+        let typed_tpt = source_typed_index
+            .get(source_id, source_local.tpt)
+            .ok_or_else(|| {
+                typed_error("explicit local type tree has no source-to-typed binding")
+            })?;
+        let TreeKind::ValDef(typed_local) = &typed_ast
+            .try_get(typed_declaration)
+            .ok_or_else(|| typed_error("canonical typed local declaration is stale"))?
+            .kind
+        else {
+            return Err(typed_error(
+                "canonical typed local declaration is not ValDef",
+            ));
+        };
+        if source_typed_index.get(source_id, declaration) != Some(typed_declaration)
+            || typed_local.rhs != Some(typed_initializer)
+            || typed_local.tpt != typed_tpt
+            || typed_ast
+                .try_get(typed_tpt)
+                .is_none_or(|tree| tree.ty != local_type)
+        {
+            return Err(typed_error(
+                "local binding, explicit TypeRef, initializer and original typed ValDef must agree",
+            ));
+        }
+        let typed_use = typed_argument;
+        let typed_use_node = typed_ast
+            .try_get(typed_use)
+            .ok_or_else(|| typed_error("typed final local Ident is stale"))?;
+        let TreeKind::Ident(typed_use_ident) = &typed_use_node.kind else {
+            return Err(typed_error("typed final local use must remain Ident"));
+        };
+        if !matches!(
+            store.types.try_get(typed_use_node.ty),
+            Some(Type::TermRef { target: TermRefTarget::Symbol(target), .. }) if *target == local_symbol
+        ) || store.names.resolve(typed_use_ident.name.text())
+            != store
+                .names
+                .resolve(store.symbols.get(local_symbol).name.text())
+        {
+            return Err(typed_error(
+                "final local Ident must select the exact canonical initialized declaration",
+            ));
+        }
+        let source_use_name = match source_ast.try_get(source_argument).map(|tree| &tree.kind) {
+            Some(TreeKind::Ident(ident)) => ident.name,
+            _ => {
+                return Err(source_error(
+                    "final constructor argument must be the original local Ident",
+                ));
+            }
+        };
+        if store.names.resolve(source_use_name.text())
+            != store
+                .names
+                .resolve(store.symbols.get(local_symbol).name.text())
+        {
+            return Err(identity_error(
+                "source local Ident does not name its canonical declaration",
+            ));
+        }
+        let declaration_position = require_source_position(
+            source_ast,
+            source_id,
+            declaration,
+            "local declaration has a foreign source position",
+        )?;
+        let initializer_position = require_source_position(
+            source_ast,
+            source_id,
+            initializer,
+            "local initializer has a foreign source position",
+        )?;
+        let use_position = require_source_position(
+            source_ast,
+            source_id,
+            source_argument,
+            "local use has a foreign source position",
+        )?;
+        if declaration_position.span().range().start()
+            >= initializer_position.span().range().start()
+            || initializer_position.span().range().start() >= use_position.span().range().start()
+        {
+            return Err(source_error(
+                "local declaration and initializer must precede the final local use",
+            ));
+        }
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_local.tpt,
+            typed_tpt,
+            "local declared type",
+        )?;
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_argument,
+            typed_use,
+            "final local Ident",
+        )?;
+        Some((
+            declaration,
+            initializer,
+            typed_declaration,
+            typed_initializer,
+            typed_use,
+            local_symbol,
+            local_scope,
+            local_type,
+        ))
+    } else {
+        None
+    };
+    require_canonical_caller_formal_seed(
+        store.names.resolve(typed_argument_ident.name.text())
+            == store.names.resolve(formal_def.name.as_name().text()),
+        match store.types.try_get(typed_formal_node.ty) {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(target),
+                ..
+            }) => Some(*target),
+            _ => None,
+        },
+        method_formal,
+    )?;
 
     let planned_call_proof = if let (
-        SourceArgumentShape::PlannedCall {
-            formal_tree: _,
-            apply: source_call,
-            function: source_function,
-            receiver: source_receiver,
-        },
+        Some((source_call, source_function, source_receiver)),
         Some((_, _, _, typed_call, typed_function, typed_receiver)),
-    ) = (argument_shape, planned_typed)
+    ) = (planned_parts, planned_typed)
     {
         let TreeKind::Apply(source_call_apply) = &source_ast
             .try_get(source_call)
@@ -1510,7 +2028,7 @@ fn validate_constructor_call_candidate<'session>(
         else {
             return Err(typed_error("planned helper typed call is not Apply"));
         };
-        if typed_call != typed_argument
+        if source_typed_index.get(source_id, source_call) != Some(typed_call)
             || typed_call_apply.kind != ApplyKind::Regular
             || typed_call_apply.function != typed_function
             || typed_call_apply.args != [typed_formal_argument]
@@ -2010,6 +2528,21 @@ fn validate_constructor_call_candidate<'session>(
             }),
             inner_type,
         )
+    } else if let Some((.., local_type)) = local_val_proof_data {
+        let local_symbol = local_val_proof_data.expect("matched local binding").5;
+        let typed_local_argument = typed_ast
+            .try_get(typed_argument)
+            .ok_or_else(|| typed_error("typed constructor local Ident is stale"))?;
+        if !matches!(
+            store.types.try_get(typed_local_argument.ty),
+            Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. })
+                if *symbol == local_symbol
+        ) {
+            return Err(typed_error(
+                "constructor local Ident lost its canonical TermRef",
+            ));
+        }
+        (None, local_type)
     } else if let Some(planned_call) = planned_call_proof {
         (None, planned_call.result_type())
     } else {
@@ -2595,6 +3128,69 @@ fn validate_constructor_call_candidate<'session>(
     let argument_proof = ConstructorArgumentProof {
         shape: match nested_argument_proof {
             Some(nested) => ConstructorArgumentProofShape::NestedNew(nested),
+            None if let Some((
+                source_declaration,
+                source_initializer,
+                typed_declaration,
+                typed_initializer,
+                typed_use,
+                symbol,
+                scope,
+                local_type,
+            )) = local_val_proof_data =>
+            {
+                let initializer_call = planned_call_proof.ok_or_else(|| {
+                    typed_error("local val initializer lacks its validated planned-call receipt")
+                })?;
+                let initializer_class = match store.types.try_get(initializer_call.result_type()) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(class),
+                        ..
+                    }) => *class,
+                    _ => {
+                        return Err(typed_error(
+                            "local initializer result must be a canonical class TypeRef",
+                        ));
+                    }
+                };
+                let local_class =
+                    canonical_class_type_symbol(store, local_type, package, definitions.no_prefix);
+                if local_class != Some(initializer_class)
+                    || !is_canonical_class_type_ref(
+                        store,
+                        local_type,
+                        initializer_class,
+                        package,
+                        definitions.no_prefix,
+                    )
+                    || !is_canonical_class_type_ref(
+                        store,
+                        initializer_call.result_type(),
+                        initializer_class,
+                        package,
+                        definitions.no_prefix,
+                    )
+                {
+                    return Err(typed_error(
+                        "local val type must exactly match its planned initializer result TypeRef",
+                    ));
+                }
+                ConstructorArgumentProofShape::LocalVal(LocalValConstructorArgumentProof {
+                    source_block: source_rhs,
+                    source_declaration,
+                    source_initializer,
+                    source_use: source_argument,
+                    typed_block: typed_rhs,
+                    typed_declaration,
+                    typed_initializer,
+                    typed_use,
+                    symbol,
+                    scope,
+                    local_type,
+                    result_type: typed_rhs_type,
+                    initializer_call,
+                })
+            }
             None if let Some(planned_call) = planned_call_proof => {
                 ConstructorArgumentProofShape::PlannedCall(planned_call)
             }
@@ -3470,6 +4066,20 @@ fn canonical_class_type_symbol(
     .then_some(*class)
 }
 
+fn require_canonical_caller_formal_seed(
+    typed_name_matches_formal: bool,
+    typed_target: Option<SymbolId>,
+    method_formal: SymbolId,
+) -> Result<(), CrossClassConstructorCallProofError> {
+    if typed_name_matches_formal && typed_target == Some(method_formal) {
+        Ok(())
+    } else {
+        Err(CrossClassConstructorCallProofError::TypedBinding(
+            "typed constructor argument does not reference the canonical caller formal",
+        ))
+    }
+}
+
 fn complete_method_type<'a>(
     store: &'a SemanticStore,
     method: SymbolId,
@@ -3558,8 +4168,28 @@ fn validate_planned_method<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{has_any_flag, is_canonical_class_type_ref};
+    use super::{
+        CrossClassConstructorCallProofError, has_any_flag, is_canonical_class_type_ref,
+        require_canonical_caller_formal_seed,
+    };
     use dotty_core::{Definitions, SemanticStore, SymbolFlags, Type, TypeRefTarget};
+
+    #[test]
+    fn wrong_symbol_initializer_seed_is_rejected_before_local_val_receipt_construction() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+
+        assert_eq!(
+            require_canonical_caller_formal_seed(
+                true,
+                Some(definitions.any_class),
+                definitions.object_class,
+            ),
+            Err(CrossClassConstructorCallProofError::TypedBinding(
+                "typed constructor argument does not reference the canonical caller formal",
+            )),
+        );
+    }
 
     #[test]
     fn excluded_class_and_method_flags_are_checked_individually() {
