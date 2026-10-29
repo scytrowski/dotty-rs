@@ -279,10 +279,20 @@ below.
 
 The accepted body is one original method `Block` with exactly one immutable,
 explicitly typed local `val` followed by a direct `CounterOwner` constructor
-application whose sole argument is the exact local `Ident`. The block and
-method result retain the canonical same-batch `CounterOwner` `TypeRef`. The
-local declaration, its type syntax, initializer call, and final use must each
-retain their original source-to-typed binding, matching source span, and
+application whose sole argument is the exact local `Ident`. The original block
+and final constructor `Apply` must have the same exact `TypeId`, equal to the
+selected primary constructor's complete signature result: `TypeRef(NoPrefix,
+CounterOwner)`. This no-prefix constructor result is intentionally distinct
+from the enclosing method's package-prefixed `CounterOwner` result type. The
+method result is validated separately as a canonical public same-batch class
+`TypeRef`; the constructor result, method result, typed `New`, explicit type
+tree, selected constructor prefix, and owner symbol must all identify that
+same canonical class through the original source/typed bindings and planned
+class provenance. A class target match alone is insufficient, and arbitrary
+prefixes are rejected.
+
+The local declaration, its type syntax, initializer call, and final use must
+each retain their original source-to-typed binding, matching source span, and
 session identity. Its method-owned local symbol and block scope come from the
 same-session local binding. The local type syntax must name a canonical public
 same-batch class; the initializer must be the exact helper `PlannedCall`
@@ -300,6 +310,9 @@ planned-call paths remain controls.
 | Case | First pickler validation result |
 | --- | --- |
 | Frozen original, renamed classes/helper, and reordered class declarations with authentic same-session local and initializer receipts | `validate_method_bodies` succeeds. |
+| Both block and final Apply carry the package-prefixed method result instead of the selected constructor's `TypeRef(NoPrefix, CounterOwner)` result | Rejected: the roots must exactly match the complete constructor signature result. |
+| Block and final Apply result TypeIds disagree | Rejected before local/constructor body validation. |
+| Typed `New` type tree points at another planned same-batch class while the source/constructor roots still identify `CounterOwner` | Rejected by the original source/typed type-tree and constructor provenance checks. |
 | Initializer receipt points at another source root | Rejected during local initializer receipt matching; no successful body validation. |
 | Local binding omitted | Rejected during local declaration validation; no successful body validation. |
 | Local binding uses a different, valid scope owned by the factory class | `ScopeMembers { owner: create }`; no successful body validation. |
@@ -320,9 +333,14 @@ explicit unsupported body boundary because its existing batch adapter does
 not project the local receipt; standalone validation uses the authentic
 same-session test adapter.
 
+The approved [reactive scope decision](https://github.com/scytrowski/dotty-rs/issues/1851#issuecomment-6504865258)
+clarifies this constructor-result versus method-result representation. It
+supersedes the earlier scope record linked from the original issue comment.
+
 ### #1851 validation receipt
 
 | Validation | Result |
 | --- | --- |
 | `cargo test -p dotty --test jvm_tasty_factory_result_arguments reference_local_constructor_flow_preserves_one_session_identity_through_body_validation --locked -- --nocapture` | Passed; authentic original and two independent source/typed sessions, renamed/reordered controls, stale initializer receipt, missing local receipt, wrong local scope, and paired adapter boundary. |
 | `cargo test -p dotty-tasty-pickler --lib --locked` | Passed. |
+| `cargo test -p dotty --test jvm_tasty_factory_result_arguments reference_local_constructor_flow_preserves_one_session_identity_through_body_validation --locked -- --nocapture` | Passed after review fix; authentic constructor-result TypeId is preserved, with negative package-prefix mismatch, root-TypeId mismatch, disconnected `New` type tree, and local/helper receipt corruptions. |

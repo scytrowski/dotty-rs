@@ -88,7 +88,7 @@ impl Validator<'_, '_> {
                 method,
                 self.plan.definitions.int,
                 depth,
-                Some(visited),
+                (Some(visited), false),
             ),
         }
     }
@@ -1362,7 +1362,7 @@ impl Validator<'_, '_> {
                 method,
                 self.plan.definitions.int,
                 depth + 1,
-                Some(visited),
+                (Some(visited), false),
             )?;
             return Ok(typed.ty);
         }
@@ -1372,7 +1372,7 @@ impl Validator<'_, '_> {
             method,
             self.plan.definitions.int,
             depth,
-            Some(visited),
+            (Some(visited), false),
         )?;
         Ok(typed.ty)
     }
@@ -1516,7 +1516,7 @@ impl Validator<'_, '_> {
         method: &MethodPicklePlan,
         result_type: TypeId,
     ) -> Result<(), PickleError> {
-        self.validate_method_expression_inner(rhs, body, method, result_type, 0, None)
+        self.validate_method_expression_inner(rhs, body, method, result_type, 0, (None, false))
     }
 
     fn validate_method_expression_inner(
@@ -1526,8 +1526,10 @@ impl Validator<'_, '_> {
         method: &MethodPicklePlan,
         result_type: TypeId,
         depth: usize,
-        mut visited: Option<&mut HashSet<TreeId<Typed>>>,
+        traversal: (Option<&mut HashSet<TreeId<Typed>>>, bool),
     ) -> Result<(), PickleError> {
+        // The identity requirement is enabled only for a reference-valued block tail.
+        let (mut visited, require_constructor_result_identity) = traversal;
         let depth_limit = self.limits.expression_depth_limit();
         if depth > depth_limit {
             return Err(PickleError::LimitExceeded {
@@ -1556,7 +1558,7 @@ impl Validator<'_, '_> {
                 method,
                 result_type,
                 depth,
-                seen,
+                (seen, require_constructor_result_identity),
             );
         }
         if matches!(
@@ -2329,8 +2331,9 @@ impl Validator<'_, '_> {
         method: &MethodPicklePlan,
         result_type: TypeId,
         depth: usize,
-        visited: &mut HashSet<TreeId<Typed>>,
+        traversal: (&mut HashSet<TreeId<Typed>>, bool),
     ) -> Result<(), PickleError> {
+        let (visited, require_constructor_result_identity) = traversal;
         let depth_limit = self.limits.expression_depth_limit();
         if depth > depth_limit {
             return Err(PickleError::LimitExceeded {
@@ -2486,6 +2489,19 @@ impl Validator<'_, '_> {
                 role: TypeRole::ConstructorSignature,
             });
         };
+        let constructor_result_type = constructor_signature.result;
+        if require_constructor_result_identity
+            && (typed_root.ty != constructor_result_type
+                || !matches!(self.ty(constructor_result_type)?, Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(result_class),
+                } if *prefix == p.definitions.no_prefix && *result_class == class))
+        {
+            return Err(PickleError::BodyType {
+                tree: typed_id,
+                ty: typed_root.ty,
+            });
+        }
         let constructor_argument_type = constructor_signature.params[0].ty;
         if source_select.name.text() != self.symbol(constructor)?.name.text()
             || p.store.names.resolve(source_select.name.text()) != "<init>"

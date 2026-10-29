@@ -165,7 +165,7 @@ impl Validator<'_, '_> {
             method,
             target_type,
             depth,
-            Some(visited),
+            (Some(visited), false),
         )?;
         if target_type == self.plan.definitions.int {
             self.validate_int_expression(

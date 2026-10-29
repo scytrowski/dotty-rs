@@ -231,7 +231,7 @@ impl Validator<'_, '_> {
                 method,
                 self.plan.definitions.int,
                 rhs_depth,
-                Some(visited),
+                (Some(visited), false),
             )?;
         }
 

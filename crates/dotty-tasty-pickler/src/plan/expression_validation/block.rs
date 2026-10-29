@@ -247,7 +247,7 @@ impl Validator<'_, '_> {
                 method,
                 self.plan.definitions.int,
                 depth,
-                Some(visited),
+                (Some(visited), false),
             )?;
         }
         let source_result = self.source_tree(source_block.expr)?;
@@ -267,7 +267,7 @@ impl Validator<'_, '_> {
             method,
             result_type,
             depth,
-            Some(visited),
+            (Some(visited), reference_result),
         )
     }
 
@@ -326,7 +326,7 @@ impl Validator<'_, '_> {
                 method,
                 self.plan.definitions.unit,
                 depth,
-                Some(visited),
+                (Some(visited), false),
             ),
             _ => Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))),
         }
