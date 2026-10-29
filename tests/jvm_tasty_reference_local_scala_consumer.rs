@@ -4,11 +4,14 @@ use std::process::Command;
 use dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_batch;
 use dotty_core::SourceId;
 use dotty_tasty::ast::{
-    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, IDENTTPT_TAG, SELECTIN_TAG, TERMREFDIRECT_TAG, VALDEF_TAG,
+    APPLY_TAG, AstError, BLOCK_TAG, DEFDEF_TAG, IDENTTPT_TAG, SELECTIN_TAG, TERMREFDIRECT_TAG,
+    VALDEF_TAG,
 };
 use dotty_tasty::file::TastyFile;
+use dotty_tasty::reader::Reader;
+use dotty_tasty::section::StandardSection;
 use dotty_tasty::tasty::RenderedSignedName;
-use dotty_tasty::term::{AstRefKind, RawTree};
+use dotty_tasty::term::{AstRefKind, RawTree, TermError};
 
 #[path = "support/jvm_tasty_batch_publisher.rs"]
 #[allow(dead_code)]
@@ -211,6 +214,86 @@ fn assert_rust_local_tasty_structure(bytes: &[u8]) {
     assert_eq!(
         index.parent_of(local_address).unwrap().offset as u32,
         block_address
+    );
+
+    let local_reference_offset = argument
+        .nodes()
+        .into_iter()
+        .find(|node| node.tag == TERMREFDIRECT_TAG)
+        .expect("the local constructor argument has its own TERMREFdirect node")
+        .offset;
+    let asts_section = tasty
+        .section(StandardSection::Asts)
+        .expect("Factory has ASTs section");
+    let constructor_payload_offset =
+        owner_node.payload.as_ptr() as usize - asts_section.payload.as_ptr() as usize;
+    let local_reference_offset = constructor_payload_offset + local_reference_offset;
+    let asts_offset = asts_section.offset;
+    assert_eq!(
+        bytes[asts_offset + local_reference_offset],
+        TERMREFDIRECT_TAG
+    );
+    assert_eq!(bytes[asts_offset + local_address as usize], VALDEF_TAG);
+
+    let mut missing_local = bytes.to_vec();
+    missing_local[asts_offset + local_address as usize] = 0;
+    let mut missing_local_node = index
+        .get(local_address)
+        .expect("corrupted node remains at the original local address")
+        .clone();
+    missing_local_node.tag = missing_local[asts_offset + local_address as usize];
+    let missing_local_error = missing_local_node.decode_definition_body();
+    assert!(
+        matches!(
+            missing_local_error,
+            Err(AstError::UnexpectedTag {
+                expected: VALDEF_TAG,
+                actual: 0,
+                offset,
+            }) if offset == local_address as usize
+        ),
+        "missing local VALDEF is rejected by its declaration decoder: {missing_local_error:?}"
+    );
+
+    let mut malformed_reference = bytes.to_vec();
+    malformed_reference[asts_offset + local_reference_offset] = 0;
+    let mut local_reference_reader =
+        Reader::new(&malformed_reference[asts_offset + local_reference_offset..]);
+    let malformed_argument =
+        RawTree::decode_with_base_offset(&mut local_reference_reader, local_reference_offset);
+    assert!(
+        matches!(
+            malformed_argument,
+            Err(TermError::InvalidTag {
+                tag: 0,
+                offset,
+            }) if offset == local_reference_offset
+        ),
+        "local TERMREFdirect is rejected by its term decoder: {malformed_argument:?}"
+    );
+
+    let missing_reference_target = (0..128)
+        .map(|address| address as u32)
+        .find(|address| index.get(*address).is_none())
+        .expect("the small AST address range has an unoccupied node address");
+    let mut dangling_bytes = bytes.to_vec();
+    dangling_bytes[asts_offset + local_reference_offset + 1] =
+        0x80 | missing_reference_target as u8;
+    let mut dangling_reference_reader =
+        Reader::new(&dangling_bytes[asts_offset + local_reference_offset..]);
+    let dangling_term =
+        RawTree::decode_with_base_offset(&mut dangling_reference_reader, local_reference_offset)
+            .expect("dangling local TERMREFdirect still decodes as a reference leaf");
+    let reference = dangling_term
+        .ast_ref()
+        .expect("corrupted local argument remains a direct TASTy reference");
+    assert_eq!(reference.address, missing_reference_target);
+    let dangling_file =
+        TastyFile::parse(&dangling_bytes).expect("parse isolated dangling-reference copy");
+    assert_eq!(
+        dangling_file.resolve_ast_reference(reference).unwrap(),
+        None,
+        "the AST resolver rejects the local reference's unoccupied address"
     );
 }
 

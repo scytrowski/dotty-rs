@@ -29,7 +29,7 @@ use dotty_tasty::term::{AstRefKind, RawTree};
 use dotty_tasty_pickler::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, LimitKind, PickleError,
     PickleLimits, PlannedCallBinding, PrimaryConstructorInputPlan, ProjectionLimits,
-    SourceMetadata, SourceTypedBindings,
+    SourceMetadata, SourceTypedBindings, UnsupportedFeature,
 };
 use dotty_typer::SourceTyper;
 use std::fs;
@@ -3261,7 +3261,13 @@ fn observe_reference_local_constructor_flow(
         call: stale_call,
         ..body_bindings
     };
-    assert!(validate_bodies_with(&stale_call_bindings, typer.typed_ast()).is_err());
+    assert!(matches!(
+        validate_bodies_with(&stale_call_bindings, typer.typed_ast()),
+        Err(PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            symbol: Some(method),
+        }) if method == create
+    ));
     let stale_typed_call_bindings = LocalFlowBindings {
         call: PlannedCallBinding {
             typed_apply: typed_local,
@@ -3269,12 +3275,24 @@ fn observe_reference_local_constructor_flow(
         },
         ..body_bindings
     };
-    assert!(validate_bodies_with(&stale_typed_call_bindings, typer.typed_ast()).is_err());
+    assert!(matches!(
+        validate_bodies_with(&stale_typed_call_bindings, typer.typed_ast()),
+        Err(PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            symbol: Some(method),
+        }) if method == create
+    ));
     let missing_local_bindings = LocalFlowBindings {
         local: None,
         ..body_bindings
     };
-    assert!(validate_bodies_with(&missing_local_bindings, typer.typed_ast()).is_err());
+    assert!(matches!(
+        validate_bodies_with(&missing_local_bindings, typer.typed_ast()),
+        Err(PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            symbol: Some(method),
+        }) if method == create
+    ));
     let stale_scope_bindings = LocalFlowBindings {
         local: Some(dotty_tasty_pickler::LocalValueBinding {
             scope: source_index
@@ -3284,7 +3302,10 @@ fn observe_reference_local_constructor_flow(
         }),
         ..body_bindings
     };
-    assert!(validate_bodies_with(&stale_scope_bindings, typer.typed_ast()).is_err());
+    assert_eq!(
+        validate_bodies_with(&stale_scope_bindings, typer.typed_ast()).unwrap_err(),
+        PickleError::ScopeMembers { owner: create }
+    );
     let foreign_local_bindings = LocalFlowBindings {
         local: Some(dotty_tasty_pickler::LocalValueBinding {
             symbol: helper_symbol,
@@ -3292,7 +3313,14 @@ fn observe_reference_local_constructor_flow(
         }),
         ..body_bindings
     };
-    assert!(validate_bodies_with(&foreign_local_bindings, typer.typed_ast()).is_err());
+    assert!(matches!(
+        validate_bodies_with(&foreign_local_bindings, typer.typed_ast()),
+        Err(PickleError::Kind {
+            symbol,
+            expected: dotty_core::SymbolKind::Local,
+            actual: dotty_core::SymbolKind::Method,
+        }) if symbol == helper_symbol
+    ));
     let wrong_local_address_bindings = LocalFlowBindings {
         local: Some(dotty_tasty_pickler::LocalValueBinding {
             typed_declaration: typed_local_use,
@@ -3300,10 +3328,24 @@ fn observe_reference_local_constructor_flow(
         }),
         ..body_bindings
     };
-    assert!(validate_bodies_with(&wrong_local_address_bindings, typer.typed_ast()).is_err());
+    assert_eq!(
+        validate_bodies_with(&wrong_local_address_bindings, typer.typed_ast()).unwrap_err(),
+        PickleError::BodyBinding {
+            source: source_id,
+            tree: source_local,
+            expected: typed_local_use,
+            actual: Some(typed_local),
+        }
+    );
     let mut wrong_local_type_ast = clone_typed_ast(typer.typed_ast());
     wrong_local_type_ast.get_mut(typed_local).ty = definitions.int;
-    assert!(validate_bodies_with(&body_bindings, &wrong_local_type_ast).is_err());
+    assert_eq!(
+        validate_bodies_with(&body_bindings, &wrong_local_type_ast).unwrap_err(),
+        PickleError::BodyType {
+            tree: typed_local,
+            ty: definitions.int,
+        }
+    );
 
     let original_block_type = typer.typed_ast().get(typed_rhs).ty;
     let original_apply_type = typer.typed_ast().get(typed_result).ty;

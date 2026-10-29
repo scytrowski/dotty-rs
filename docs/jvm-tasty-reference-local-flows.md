@@ -666,3 +666,168 @@ the runtime classpath. Support remains the one immutable, explicitly typed
 reference local in this straight-line constructor-result block; generalized
 local flow, nested scopes, mutable locals and branch-controlled locals remain
 unsupported.
+
+## #1856 integrated release acceptance ledger
+
+This final acceptance run uses integrated `main` baseline
+`11c5b17d59d2e06148ab04b24ae6e4bbd51523f5` (merge #1871), after all seven
+prerequisites were merged. The recorded prerequisite PRs and independent
+review receipts are: [#1857](https://github.com/scytrowski/dotty-rs/pull/1857#reviews)
+(#1849, merge `fa8b0afa9a`), [#1858](https://github.com/scytrowski/dotty-rs/pull/1858#reviews)
+(#1850, `fcbba3eac0`), [#1859](https://github.com/scytrowski/dotty-rs/pull/1859#reviews)
+(#1851, `7f50437897`), [#1866](https://github.com/scytrowski/dotty-rs/pull/1866#reviews)
+(#1852, `ffe342aac1`), [#1868](https://github.com/scytrowski/dotty-rs/pull/1868#reviews)
+(#1853, `14b37628e0`), [#1870](https://github.com/scytrowski/dotty-rs/pull/1870#reviews)
+(#1854, `764ce6bbde`), and [#1871](https://github.com/scytrowski/dotty-rs/pull/1871#reviews)
+(#1855, `11c5b17d59`). The issue scope record reports a READY_FOR_MERGE
+independent review and successful strict Rust, JVM, and Scala checks for each
+final prerequisite head. Earlier receipts above remain historical to their
+stated commits; the gates below were run again on the integrated candidate.
+
+### AC-1: baseline and tool provenance
+
+The clean implementation worktree started at baseline
+`11c5b17d59d2e06148ab04b24ae6e4bbd51523f5`. Rust was
+`1.98.1 (48a229cea 2026-09-01)` with Cargo `1.98.1 (797e8a9bc 2026-08-05)`.
+Scala sources were checked out at
+`777528f19a58e794c9954a42f433373472ec57f8`; the official compiler reports
+`Scala compiler version 3.9.0`. The direct consumer used Eclipse Adoptium
+Temurin `21.0.13+9` (`javac 21.0.13`, `javap 21.0.13`), `-release 21`, and
+classfile major 65. All build output and temporary files used the isolated
+root-volume issue worktree's `target/` and `TMPDIR` paths.
+
+The eight Scala compiler/runtime artifacts were checked against the pinned
+manifest before oracle execution:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `scala3-library_3-3.9.0.jar` | `9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba` |
+| `scala-library-3.9.0.jar` | `b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd` |
+| `scala3-compiler_3-3.9.0.jar` | `3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a` |
+| `tasty-core_3-3.9.0.jar` | `66e12dda98bb23e864f3a31f8527c8338bf47bce9b85cc380b368c69c1ba8d0f` |
+| `scala3-interfaces-3.9.0.jar` | `64dfde1d2c6309d65a01c5f3ea836137eb84338dcadeb16f85764561ef4e10db` |
+| `scala-asm-9.9.0-scala-1.jar` | `75ac366e8ecb691e06a7e85041eed0f67919a646e5262fa0901225698c104375` |
+| `compiler-interface-1.12.0.jar` | `92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3` |
+| `util-interface-1.11.5.jar` | `1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af` |
+
+The frozen producer source hash is
+`379d03ad0ee08d06a31012aeafe306e5b9e30c1942e771acdb0d4eef23c790b6`; the
+separate client source hash is
+`1f6e9ba6904b2a53517b03a2adc01c33adb1c7ab147de13bfd8c1c3c7fbcba2c`.
+
+### AC-2 and AC-3: one-session semantic chain and local proof
+
+`reference_local_constructor_flow_preserves_one_session_identity_through_body_validation`
+and `reference_local_constructor_proof_rejects_unsupported_block_shapes` in
+[`jvm_tasty_factory_result_arguments.rs`](../tests/jvm_tasty_factory_result_arguments.rs)
+exercise the original source through one Lexer → Parser → Namer → SourceTyper
+session. The proof retains the original `Factory.create` block, immutable
+`counter: Counter` ValDef, `makeCounter(seed)` Apply and selected helper, exact
+typed local declaration/use, block-owned local scope, and
+`CounterOwner.<init>(Counter)` argument. The original local symbol is reused;
+source/typed roots are not reconstructed by name. Existing Formal,
+NestedNew, and PlannedCall receipts remain in the same validation path.
+
+The staged unsupported-shape test covers `var`, multiple or duplicate locals,
+nested/conditional blocks, missing initializer, forward use, reassignment,
+parameter shadowing/substitution, wrong local type, and foreign/out-of-scope
+locals. Its source/type and cross-class proof assertions retain the earliest
+existing gate. The acceptance additions now pin typed pickler failures for
+stale source/typed helper applications and missing local receipt
+(`Unsupported(BodyExpression, create)`), wrong local scope (`ScopeMembers`),
+foreign method symbol (`Kind`, expected Local), stale declaration mapping
+(`BodyBinding` with the original source edge), and wrong local type
+(`BodyType` at the exact typed ValDef).
+
+### AC-4: complete deterministic six-artifact batch
+
+The strict reference-local consumer emits exactly `Counter`, `CounterOwner`,
+and `CounterOwnerFactory` class/TASTy pairs from the original Rust frontend
+session. A second independent session produces byte-identical all-six output;
+the Rust proof regression separately checks two independent fresh sessions
+for both the renamed and reordered input. The strict consumer successfully
+compiles a separate Scala client and keeps Scala-reconstructed classes outside
+the runtime classpath. Per-class UUIDs and hashes from the integrated run are:
+
+| Rust output | SHA-256 | Classfile `TASTY` UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `b38143cee8571a6602865ff6062eca92dd771582f539b156100ffc9647af94ae` | `00da82c5ca4ebdac0000000000008193` |
+| `example/Counter.tasty` | `a0e78329d60aba318de825eaddb7668d34838197158653c1b7384188143099c7` | paired header matches |
+| `example/CounterOwner.class` | `d914c2dfc5b8d22079be304fc7c463be171394a528b71603de43342a79db91b2` | `004ebc559d6864ef0000000000008195` |
+| `example/CounterOwner.tasty` | `9bcfbbb9d12f71a50122c6b2af960fe76ffd7f629a57738f61f4d384821f7f13` | paired header matches |
+| `example/CounterOwnerFactory.class` | `e8e786041ad543af5cd7278c460c2d4f99a70261d41a8f611297c25a51d49c7d` | `00a3832976636fa1000000000000819a` |
+| `example/CounterOwnerFactory.tasty` | `dda2d294a5eaa72c5060bb7089e760ba2576a8c350fcb6e93815c1653bbe52f2` | paired header matches |
+
+### AC-5 and AC-6: original JVM output and Java 21 execution
+
+The JVM batch regression asserts the selected
+`Factory.makeCounter:(I)Lexample/Counter;` call, one local store/load in the
+metadata-owned slot, the exact `CounterOwner.<init>(Lexample/Counter;)V`,
+typed return, verifier analysis, and classfile bounds. Wrong local store/load
+slots and a wrong helper Methodref fail the paired artifact contract. The
+strict JDK gate passed with `DOTTY_CLASSFILE_REQUIRE_JDK=1`; its Java harness
+ran the original Rust classes with `-Xverify:all -ea`, checked seeds `7`, `-9`,
+and `3`, object identity and isolated private-field mutation, then confirmed
+all six file hashes remained unchanged. The observed runtime output was
+`reference-local-constructor-flow=ok`.
+
+### AC-7: pinned Scala consumer and TASTy lookup
+
+With `DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_LOCAL_CONSUMER=1`, official Scala
+3.9 compiled only `Consumer.scala` against the original Rust artifacts and
+pinned runtime. The report records successful TASTy-only lookup of
+`Counter.get`, `CounterOwner.read`, `CounterOwnerFactory.create`, and
+`CounterOwnerFactory.makeCounter`; each paired classfile-only control failed
+to find its selected member. Scala decompilation recovered a block, immutable
+local declaration and type, the `makeCounter(seed)` helper call, and the local
+constructor argument. `-from-tasty` reconstructed all three classes in a
+separate directory. Both original and renamed/reordered consumers printed
+`scala39-reference-local-constructor-flow=ok`, and the report confirms the
+runtime used unchanged Rust classes.
+
+### AC-8: negative controls and handled publisher failures
+
+| Negative | First authoritative stage and observed result |
+| --- | --- |
+| Missing/stale local binding, scope, method symbol, or type | Same-session pickler body validation; exact `BodyBinding`, `ScopeMembers`, `Kind`, or `BodyType` value asserted. |
+| Missing local `VALDEF` in an isolated corrupted wire copy | Local definition decoder rejects `tag 0` as `UnexpectedTag(expected=VALDEF, actual=0)` at the original local address. |
+| Malformed local `TERMREFdirect` in an isolated copy | Raw term decoder rejects `tag 0` at the exact local argument offset. |
+| Dangling local `TERMREFdirect` | The decoded reference retains the corrupted target; `resolve_ast_reference` returns `None` for that unoccupied address. |
+| Corrupt/missing/misplaced sidecars, UUID mismatch, incomplete six-file batch | Pinned Scala reader/binary loader fails at the affected TASTy or class/TASTy linkage gate. |
+| Wrong helper result or Owner constructor ABI | Pinned Scala compile fails with the recorded descriptor/type or constructor diagnostic; JVM batch controls reject wrong Methodref/field/instruction/slot/stack bounds before publication. |
+| Publisher fault after each of six writes, before promotion, and after promotion | Existing publisher regression injects all eight handled faults; the final tree is not accepted as partial, and a pre-existing destination sentinel is preserved. This covers handled-error rollback only, not crash-atomic filesystem durability. |
+
+The focused publisher and class-file cases are in
+[`jvm_tasty_artifacts.rs`](../tests/jvm_tasty_artifacts.rs). The scoped
+wire controls validate a specific local declaration/reference node; they do
+not claim that general full-file validation recursively rejects every
+corrupted nested TASTy tree.
+
+### AC-9: integrated strict and workspace gates
+
+All ten `DOTTY_REQUIRE_SCALA_TASTY_*_CONSUMER=1` flags (single class,
+multiclass, cross-class, factory, object composition, constructor injection,
+reference constructor, nested constructor, factory result, and reference
+local) and `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1` were enabled. The workflow's
+consumer/oracle tests, cross-class factory and factory-result proof/batch
+tests, and source-pickling tests passed. No required consumer gate skipped.
+The strict JDK21 gate, including classfile encoder, `dotty-jvm`, source
+compilation, paired artifact/publisher, and stateful class tests, also passed.
+
+The clean integrated baseline passed `cargo fmt --all -- --check`,
+`python3 tools/check-frontend-boundaries.py`, workspace Clippy with `-D
+warnings`, rustdoc with `-D warnings`, and `cargo test --workspace
+--all-targets --locked`. The final candidate is rerun through those same
+workspace checks after these evidence and assertion updates. The closing PR
+description records its tested commit SHA separately from baseline
+`11c5b17d`.
+
+### AC-10: supported and deferred boundary
+
+Accepted support remains this single-file, one-session, straight-line source
+shape: one explicitly typed immutable reference local initialized by one
+same-instance factory call and passed as the direct argument to one planned
+constructor. Mutable locals, branching/conditional initialization, multiple
+locals, nested local scopes, generic or multi-argument constructors,
+cross-unit ABI, and a public compiler CLI remain deferred. No producer or
+Typer semantics were broadened for this evidence closeout.
