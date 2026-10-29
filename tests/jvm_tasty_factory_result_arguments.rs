@@ -2306,6 +2306,16 @@ fn reference_local_constructor_flow_preserves_one_session_identity_through_body_
         .expect("the proof scan does not reject the valid local source session");
     assert!(proof_result.iter().any(|proof| proof.method() != create));
     assert!(!proof_result.iter().any(|proof| proof.method() == create));
+    let helper_proof = proof_result
+        .iter()
+        .find(|proof| proof.method() == helper_symbol)
+        .expect("the same-session factory helper keeps its existing proof");
+    assert_eq!(
+        helper_proof.argument_proof().kind(),
+        dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::Formal
+    );
+    assert_eq!(helper_proof.caller_class(), factory);
+    assert_eq!(helper_proof.target_class(), classes[0]);
     println!(
         "Rust local flow proof scan completed; retained method identities={:?}",
         proof_result
