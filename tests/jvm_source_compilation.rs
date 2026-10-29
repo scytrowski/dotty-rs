@@ -45,6 +45,8 @@ const TASTY_NESTED_CONSTRUCTOR_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala");
 const FACTORY_RESULT_ARGUMENT_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala");
+const REFERENCE_LOCAL_CONSTRUCTOR_FLOW_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala");
 
 type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
@@ -16276,6 +16278,109 @@ fn original_factory_result_source_emits_with_complete_state_plans_and_runs_on_jd
         assert!(
             java.status.success(),
             "java -Xverify:all rejected original-source JVM output\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
+
+#[test]
+fn reference_local_constructor_flow_emits_and_executes_on_the_jvm_only_path() {
+    let output = TestOutputDirectory::new("reference-local-constructor-flow-jvm-only");
+    let artifacts = compile_source_batch(
+        REFERENCE_LOCAL_CONSTRUCTOR_FLOW_SOURCE,
+        "CounterOwnerFactory.scala",
+        output.path(),
+        SourceId::from_index(18490),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("the JVM-only backend accepts the original block-local source");
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        [
+            "example/Counter",
+            "example/CounterOwner",
+            "example/CounterOwnerFactory"
+        ]
+    );
+    assert_eq!(output.class_files().len(), 3);
+    let factory = decode_emitted_class_named(&artifacts, "example/CounterOwnerFactory");
+    let factory_method = factory
+        .methods
+        .iter()
+        .find(|method| factory.constant_pool.utf8(method.name_index) == Ok("create"))
+        .expect("Factory.create is emitted");
+    assert_eq!(
+        factory.constant_pool.utf8(factory_method.descriptor_index),
+        Ok("(I)Lexample/CounterOwner;")
+    );
+    let [Attribute::Code(code)] = factory_method.attributes.as_slice() else {
+        panic!("Factory.create has one Code attribute");
+    };
+    assert_eq!(code.max_stack, 3);
+    assert_eq!(code.max_locals, 3);
+    assert_opcode_sequence(
+        code.code,
+        &[0x2a, 0x1b, 0xb6, 0x4d, 0xbb, 0x59, 0x2c, 0xb7, 0xb0],
+    );
+    assert_method_reference(
+        &factory,
+        code.code,
+        0xb6,
+        "example/CounterOwnerFactory",
+        "makeCounter",
+        "(I)Lexample/Counter;",
+    );
+    assert_method_reference(
+        &factory,
+        code.code,
+        0xb7,
+        "example/CounterOwner",
+        "<init>",
+        "(Lexample/Counter;)V",
+    );
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("ReferenceLocalFlowHarness.java");
+        fs::write(
+            &harness,
+            "package example; public final class ReferenceLocalFlowHarness { public static void main(String[] args) { CounterOwnerFactory factory = new CounterOwnerFactory(); if (factory.create(7).read() != 7) throw new AssertionError(\"create(7)\"); if (factory.create(-9).read() != -9) throw new AssertionError(\"create(-9)\"); if (factory.create(3).read() != 3) throw new AssertionError(\"create(3)\"); Counter first = factory.makeCounter(7); Counter second = factory.makeCounter(7); if (first == second) throw new AssertionError(\"factory reused a reference\"); first.set(41); if (first.get() != 41 || second.get() != 7) throw new AssertionError(\"independent state\"); } }\n",
+        )
+        .unwrap();
+        let javac = Command::new("javac")
+            .args([
+                "--release",
+                "21",
+                "-classpath",
+                output_path,
+                "-d",
+                output_path,
+            ])
+            .arg(&harness)
+            .output()
+            .expect("start JDK21 javac for the local flow harness");
+        assert!(
+            javac.status.success(),
+            "javac rejected the local flow harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "example.ReferenceLocalFlowHarness",
+            ])
+            .output()
+            .expect("start JDK21 verification for Rust JVM output");
+        assert!(
+            java.status.success(),
+            "JDK21 rejected local flow output\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&java.stdout),
             String::from_utf8_lossy(&java.stderr)
         );
