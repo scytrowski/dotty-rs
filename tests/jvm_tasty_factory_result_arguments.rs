@@ -19,8 +19,8 @@ use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty::ast::{
-    APPLY_TAG, DEFDEF_TAG, IDENTTPT_TAG, NEW_TAG, PARAM_TAG, QUALTHIS_TAG, SELECTIN_TAG,
-    TERMREFDIRECT_TAG, THIS_TAG,
+    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, IDENTTPT_TAG, NEW_TAG, PARAM_TAG, QUALTHIS_TAG, SELECTIN_TAG,
+    TERMREFDIRECT_TAG, THIS_TAG, VALDEF_TAG,
 };
 use dotty_tasty::file::TastyFile;
 use dotty_tasty::tasty::{RenderedNameSignature, RenderedParamSig, RenderedSignedName};
@@ -134,6 +134,24 @@ const FACTORY_CLASS: &[u8] = include_bytes!(
 );
 const FACTORY_TASTY: &[u8] = include_bytes!(
     "fixtures/jvm_tasty_factory_result_arguments/scala39/example/CounterOwnerFactory.tasty"
+);
+const REFERENCE_LOCAL_FACTORY_TASTY: &[u8] = include_bytes!(
+    "fixtures/jvm_tasty_reference_local_constructor_flows/scala39/example/CounterOwnerFactory.tasty"
+);
+const REFERENCE_LOCAL_COUNTER_CLASS: &[u8] = include_bytes!(
+    "fixtures/jvm_tasty_reference_local_constructor_flows/scala39/example/Counter.class"
+);
+const REFERENCE_LOCAL_COUNTER_TASTY: &[u8] = include_bytes!(
+    "fixtures/jvm_tasty_reference_local_constructor_flows/scala39/example/Counter.tasty"
+);
+const REFERENCE_LOCAL_OWNER_CLASS: &[u8] = include_bytes!(
+    "fixtures/jvm_tasty_reference_local_constructor_flows/scala39/example/CounterOwner.class"
+);
+const REFERENCE_LOCAL_OWNER_TASTY: &[u8] = include_bytes!(
+    "fixtures/jvm_tasty_reference_local_constructor_flows/scala39/example/CounterOwner.tasty"
+);
+const REFERENCE_LOCAL_FACTORY_CLASS: &[u8] = include_bytes!(
+    "fixtures/jvm_tasty_reference_local_constructor_flows/scala39/example/CounterOwnerFactory.class"
 );
 
 fn decode_class(bytes: &[u8]) -> ClassFile<'_> {
@@ -1792,5 +1810,628 @@ fn staged_factory_scope_controls_report_their_first_typed_gate() {
         "super helper call",
         "source collection",
         "classes with explicit parents or self types are unsupported",
+    );
+}
+
+#[test]
+fn scala39_reference_local_oracle_links_block_valdef_and_local_termref() {
+    for (class_bytes, tasty_bytes, expected_name) in [
+        (
+            REFERENCE_LOCAL_COUNTER_CLASS,
+            REFERENCE_LOCAL_COUNTER_TASTY,
+            "example/Counter",
+        ),
+        (
+            REFERENCE_LOCAL_OWNER_CLASS,
+            REFERENCE_LOCAL_OWNER_TASTY,
+            "example/CounterOwner",
+        ),
+        (
+            REFERENCE_LOCAL_FACTORY_CLASS,
+            REFERENCE_LOCAL_FACTORY_TASTY,
+            "example/CounterOwnerFactory",
+        ),
+    ] {
+        let class = decode_class(class_bytes);
+        let sidecar = tasty(tasty_bytes);
+        assert_eq!(class_name(&class), expected_name);
+        assert_eq!(class.version.major, 65);
+        assert_eq!(
+            class.tasty_link_id().unwrap().unwrap().as_bytes(),
+            &sidecar.header().uuid
+        );
+    }
+    let factory = tasty(REFERENCE_LOCAL_FACTORY_TASTY);
+    let index = factory.ast_address_index().unwrap();
+    let (create_address, create) = method_body(&factory, "create");
+    let RawTree::LengthNode(block_node) = create.rhs.unwrap() else {
+        panic!("Scala 3.9 encodes the local method body as BLOCK");
+    };
+    assert_eq!(block_node.tag, BLOCK_TAG);
+    let block_address = index
+        .iter_nodes_with_tag(BLOCK_TAG)
+        .find(|node| {
+            node.offset as u32 >= create_address && node.offset as u32 > block_node.offset as u32
+        })
+        .expect("the visible AST index contains the source BLOCK address")
+        .offset as u32;
+    let block = index.get(block_address).unwrap().decode_block().unwrap();
+    assert_eq!(block.stats.len(), 1);
+    let RawTree::LengthNode(local_node) = &block.stats[0] else {
+        panic!("the original local declaration is a VALDEF");
+    };
+    assert_eq!(local_node.tag, VALDEF_TAG);
+    let local_address = index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .find(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == block_address)
+        })
+        .expect("the visible AST index contains the original local VALDEF")
+        .offset as u32;
+    let dotty_tasty::ast::DefinitionBody::ValDef {
+        name,
+        type_tree,
+        rhs: Some(initializer),
+        ..
+    } = index
+        .get(local_address)
+        .unwrap()
+        .decode_definition_body()
+        .unwrap()
+    else {
+        panic!("counter remains an initialized immutable value");
+    };
+    assert_eq!(factory.names().render(name).unwrap(), "counter");
+    assert_eq!(type_tree.nodes()[0].tag, IDENTTPT_TAG);
+
+    let RawTree::LengthNode(initializer_node) = initializer else {
+        panic!("counter's initializer is a method application");
+    };
+    assert_eq!(initializer_node.tag, APPLY_TAG);
+    let initializer = initializer_node.decode_apply().unwrap();
+    let RawTree::LengthNode(helper_select_node) = initializer.function else {
+        panic!("the initializer selects the real helper method");
+    };
+    assert_eq!(helper_select_node.tag, SELECTIN_TAG);
+    let helper = helper_select_node.decode_select_in().unwrap();
+    assert_eq!(
+        factory
+            .names()
+            .render_signed_name(helper.name)
+            .unwrap()
+            .unwrap(),
+        RenderedSignedName::Signed {
+            original: "makeCounter".to_owned(),
+            signature: RenderedNameSignature {
+                parameters: [RenderedParamSig::TermParameter("scala.Int".to_owned())].into(),
+                result: "example.Counter".to_owned(),
+            },
+        }
+    );
+
+    let RawTree::LengthNode(owner_apply_node) = block.expression else {
+        panic!("the block result is the original constructor application");
+    };
+    assert_eq!(owner_apply_node.tag, APPLY_TAG);
+    let owner_apply = owner_apply_node.decode_apply().unwrap();
+    let [local_reference] = owner_apply.arguments.as_slice() else {
+        panic!("CounterOwner receives the local once");
+    };
+    let references = local_reference.ast_refs();
+    let [reference] = references.as_slice() else {
+        panic!("the local use contains one TASTy AST reference");
+    };
+    assert_eq!(reference.kind, AstRefKind::TermRefDirect);
+    assert_eq!(reference.address, local_address);
+    assert_eq!(
+        index.parent_of(local_address).unwrap().offset as u32,
+        block_address
+    );
+    let visible = index
+        .iter_nodes()
+        .filter(|node| {
+            node.offset as u32 >= create_address && node.offset as u32 <= local_address + 128
+        })
+        .map(|node| (node.offset as u32, node.tag))
+        .collect::<Vec<_>>();
+    println!(
+        "Scala 3.9 create wire nodes (address, tag): {visible:?}; create={create_address}, block={block_address}, local={local_address}, local-ref={:?}",
+        reference.address
+    );
+}
+
+#[test]
+fn reference_local_constructor_flow_preserves_one_session_identity_through_body_validation() {
+    let source = include_str!(
+        "fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala"
+    );
+    let source_id = SourceId::from_index(1849);
+    let source_text = SourceText::new(source).unwrap();
+    let scanner = ContextualScanner::new(source).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(source_text, source_id, scanner, &mut store.names);
+    assert!(parsed.diagnostics.is_empty());
+    let mut packages = Packages::new();
+    let source_index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "CounterOwnerFactory.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        outcome => panic!("the exact producer names cleanly: {outcome:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("the producer has a package root");
+    };
+    assert_eq!(package.stats.len(), 3);
+
+    let mut methods = Vec::new();
+    let mut constructors = Vec::new();
+    let mut classes = Vec::new();
+    for &class_tree in &package.stats {
+        let class = source_index.symbol_at(source_id, class_tree).unwrap();
+        classes.push(class);
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
+            panic!("each package member is a class");
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            panic!("each class has a template");
+        };
+        let constructor = source_index
+            .symbol_at(source_id, template.constructor)
+            .unwrap();
+        constructors.push(constructor);
+        for &member_tree in &template.body {
+            let TreeKind::DefDef(definition) = &parsed.ast.get(member_tree).kind else {
+                continue;
+            };
+            let method = source_index.symbol_at(source_id, member_tree).unwrap();
+            let parameters = definition
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .map(|&tree| source_index.symbol_at(source_id, tree).unwrap())
+                .collect::<Vec<_>>();
+            methods.push((method, member_tree, parameters));
+        }
+    }
+
+    let factory_tree = *package.stats.last().unwrap();
+    let TreeKind::TypeDef(factory_definition) = &parsed.ast.get(factory_tree).kind else {
+        unreachable!();
+    };
+    let factory = classes[2];
+    let TreeKind::Template(factory_template) = &parsed.ast.get(factory_definition.rhs).kind else {
+        unreachable!();
+    };
+    let create_tree = factory_template
+        .body
+        .iter()
+        .copied()
+        .find(|&tree| matches!(&parsed.ast.get(tree).kind, TreeKind::DefDef(definition) if store.names.resolve(definition.name.as_name().text()) == "create"))
+        .unwrap();
+    let create = source_index.symbol_at(source_id, create_tree).unwrap();
+    let TreeKind::DefDef(create_definition) = &parsed.ast.get(create_tree).kind else {
+        unreachable!();
+    };
+    let source_rhs = create_definition.rhs.unwrap();
+    let TreeKind::Block(block) = &parsed.ast.get(source_rhs).kind else {
+        panic!("the source method body retains its original local block");
+    };
+    assert_eq!(block.stats.len(), 1);
+    let source_local = block.stats[0];
+    let TreeKind::ValDef(local_definition) = &parsed.ast.get(source_local).kind else {
+        panic!("the first block statistic is the immutable local ValDef");
+    };
+    let source_initializer = local_definition.rhs.unwrap();
+    let TreeKind::Apply(initializer_apply) = &parsed.ast.get(source_initializer).kind else {
+        panic!("the local initializer is the original makeCounter application");
+    };
+    let TreeKind::Ident(initializer_function) = &parsed.ast.get(initializer_apply.function).kind
+    else {
+        panic!("the helper call retains its source Ident");
+    };
+    let TreeKind::Apply(source_constructor_apply) = &parsed.ast.get(block.expr).kind else {
+        panic!("the block result is the CounterOwner constructor application");
+    };
+    let [source_local_use] = source_constructor_apply.args.as_slice() else {
+        panic!("the outer constructor receives the local once");
+    };
+    let TreeKind::Ident(local_use) = &parsed.ast.get(*source_local_use).kind else {
+        panic!("the outer constructor argument is the original local Ident");
+    };
+    let create_owner = store.symbols.get(create).owner.unwrap();
+    assert_eq!(create_owner, factory);
+    assert_eq!(
+        store.names.resolve(initializer_function.name.text()),
+        "makeCounter"
+    );
+    assert_eq!(
+        store.names.resolve(local_definition.name.as_name().text()),
+        "counter"
+    );
+    assert_eq!(store.names.resolve(local_use.name.text()), "counter");
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &source_index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for &class in &classes {
+        typer.complete_symbol(class).unwrap();
+    }
+    for &constructor in &constructors {
+        typer.complete_symbol(constructor).unwrap();
+    }
+    for (method, _, parameters) in &methods {
+        typer.complete_symbol(*method).unwrap();
+        for &parameter in parameters {
+            typer.complete_symbol(parameter).unwrap();
+        }
+    }
+    let mut field_initializers = Vec::new();
+    for &class_tree in &package.stats {
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            unreachable!();
+        };
+        for &member_tree in &template.body {
+            match &parsed.ast.get(member_tree).kind {
+                TreeKind::ValDef(field_definition) => {
+                    let field = source_index.symbol_at(source_id, member_tree).unwrap();
+                    typer.complete_symbol(field).unwrap();
+                    let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info
+                    else {
+                        panic!("class field type completes in the recorded session");
+                    };
+                    let rhs = field_definition.rhs.unwrap();
+                    let context = typer.field_initializer_context_for(field).unwrap();
+                    let typed_initializer = typer
+                        .type_expression_expected(rhs, context, field_type)
+                        .expect(
+                            "paired class field initializer typing succeeds in the recorded session",
+                        );
+                    assert_eq!(
+                        typer.source_typed_index().get(source_id, rhs),
+                        Some(typed_initializer)
+                    );
+                    field_initializers.push((field, member_tree, typed_initializer, field_type));
+                }
+                TreeKind::DefDef(definition) if member_tree != template.constructor => {
+                    let method = source_index.symbol_at(source_id, member_tree).unwrap();
+                    if let Some(rhs) = definition.rhs {
+                        let context = typer.expression_context_for(method).unwrap();
+                        typer
+                            .type_expression(rhs, context)
+                            .expect("the exact local block types in the original source session");
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let local_binding = typer
+        .typed_local_binding_at(source_id, source_local)
+        .expect("Typer records the immutable local against its original source declaration");
+    let local_symbol = local_binding.symbol();
+    assert_eq!(typer.store().symbols.get(local_symbol).owner, Some(create));
+
+    let typed_index = typer.source_typed_index();
+    let typed_rhs = typed_index.get(source_id, source_rhs).unwrap();
+    let typed_local = typed_index.get(source_id, source_local).unwrap();
+    let typed_initializer = typed_index.get(source_id, source_initializer).unwrap();
+    let typed_local_use = typed_index.get(source_id, *source_local_use).unwrap();
+    assert_eq!(local_binding.declaration(), typed_local);
+    assert_eq!(
+        typer.local_symbol_at(source_id, source_local),
+        Some(local_symbol)
+    );
+    let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_rhs).kind else {
+        panic!("typed method body remains the source block");
+    };
+    assert_eq!(typed_block.stats.len(), 1);
+    assert_eq!(typed_block.stats[0], typed_local);
+    assert_eq!(
+        typed_block.expr,
+        typed_index.get(source_id, block.expr).unwrap()
+    );
+    let TreeKind::ValDef(typed_definition) = &typer.typed_ast().get(typed_local).kind else {
+        panic!("typed block statistic remains the local ValDef");
+    };
+    assert_eq!(typed_definition.rhs, Some(typed_initializer));
+    let TreeKind::Apply(typed_initializer_apply) = &typer.typed_ast().get(typed_initializer).kind
+    else {
+        panic!("typed local initializer retains its application");
+    };
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(typed_initializer).ty),
+        Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == classes[0]
+    ));
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(selected_helper),
+        ..
+    } = typer
+        .store()
+        .types
+        .get(typer.typed_ast().get(typed_initializer_apply.function).ty)
+    else {
+        panic!("typed initializer function retains canonical helper identity");
+    };
+    let helper_symbol = *selected_helper;
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(used_local),
+        ..
+    } = typer
+        .store()
+        .types
+        .get(typer.typed_ast().get(typed_local_use).ty)
+    else {
+        panic!("typed constructor argument retains canonical local identity");
+    };
+    assert_eq!(*used_local, local_symbol);
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(typed_local).ty),
+        Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == classes[0]
+    ));
+    let typed_result = typed_index.get(source_id, block.expr).unwrap();
+    let TreeKind::Apply(typed_constructor_apply) = &typer.typed_ast().get(typed_result).kind else {
+        panic!("typed block result remains the constructor application");
+    };
+    assert!(matches!(
+        typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(typed_constructor_apply.function).ty),
+        Type::TermRef { target: TermRefTarget::Symbol(constructor), .. }
+            if *constructor == constructors[1]
+    ));
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
+        Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == classes[1]
+    ));
+    assert_eq!(
+        typed_index.get(source_id, *source_local_use),
+        Some(typed_local_use)
+    );
+    println!(
+        "Rust local flow source/typed identities: SourceId={source_id:?}, class={factory:?}, create={create:?}, local={local_symbol:?}, helper={helper_symbol:?}, source=[rhs:{source_rhs:?},val:{source_local:?},initializer:{source_initializer:?},use:{:?}], typed=[rhs:{typed_rhs:?},val:{typed_local:?},initializer:{typed_initializer:?},use:{typed_local_use:?}]",
+        source_local_use
+    );
+    println!(
+        "Rust same-session field initializer bindings: {:?}",
+        field_initializers
+            .iter()
+            .map(|(field, source, typed, ty)| (*field, *source, *typed, *ty))
+            .collect::<Vec<_>>()
+    );
+
+    let mut jvm_classes = Vec::new();
+    for (class_index, &class_tree) in package.stats.iter().enumerate() {
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            unreachable!();
+        };
+        let constructor_tree = template.constructor;
+        let constructor = constructors[class_index];
+        let TreeKind::DefDef(constructor_definition) = &parsed.ast.get(constructor_tree).kind
+        else {
+            unreachable!();
+        };
+        let constructor_parameters = constructor_definition
+            .value_param_clauses
+            .iter()
+            .map(|clause| {
+                clause
+                    .iter()
+                    .map(|&tree| {
+                        source_index
+                            .derived_symbol_at(constructor, source_id, tree)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let class_methods = methods
+            .iter()
+            .filter(|(method, _, _)| {
+                typer.store().symbols.get(*method).owner == Some(classes[class_index])
+            })
+            .map(|(method, tree, parameters)| {
+                let TreeKind::DefDef(definition) = &parsed.ast.get(*tree).kind else {
+                    unreachable!();
+                };
+                let body = definition
+                    .rhs
+                    .map(|rhs| typed_index.get(source_id, rhs).unwrap());
+                JvmMethodPlan {
+                    method: *method,
+                    parameters: parameters.clone(),
+                    locals: Vec::new(),
+                    body,
+                }
+            })
+            .collect::<Vec<_>>();
+        jvm_classes.push(JvmClassPlan {
+            class: classes[class_index],
+            methods: class_methods,
+            fields: Vec::new(),
+            initialization: JvmClassInitializationPlan::PrimaryConstructor(
+                JvmPrimaryConstructorPlan::from_source(
+                    classes[class_index],
+                    constructor,
+                    constructor_parameters.into_iter().flatten().collect(),
+                    &parsed.ast,
+                    &source_index,
+                )
+                .unwrap(),
+            ),
+        });
+    }
+    let jvm_unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: typer.typed_ast(),
+        classes: jvm_classes,
+    };
+    jvm_unit.metadata(&definitions).unwrap();
+    let proof_result =
+        validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+            source_id,
+            source_root: parsed.root,
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &source_index,
+            source_typed_index: typed_index,
+            jvm_unit: &jvm_unit,
+        })
+        .expect("the proof scan does not reject the valid local source session");
+    assert!(proof_result.iter().any(|proof| proof.method() != create));
+    assert!(!proof_result.iter().any(|proof| proof.method() == create));
+    println!(
+        "Rust local flow proof scan completed; retained method identities={:?}",
+        proof_result
+            .iter()
+            .map(|proof| proof.method())
+            .collect::<Vec<_>>()
+    );
+
+    let factory_constructor_tree = factory_template.constructor;
+    let TreeKind::DefDef(factory_constructor_definition) =
+        &parsed.ast.get(factory_constructor_tree).kind
+    else {
+        unreachable!();
+    };
+    let factory_constructor_parameters = factory_constructor_definition
+        .value_param_clauses
+        .iter()
+        .map(|clause| {
+            clause
+                .iter()
+                .map(|&tree| {
+                    source_index
+                        .derived_symbol_at(constructors[2], source_id, tree)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let planned_classes = classes.clone();
+    let planned_methods = methods.iter().map(|(method, _, _)| *method).collect();
+    let tasty_bindings = AuditBindings {
+        index: typed_index,
+        classes: planned_classes,
+        methods: planned_methods,
+    };
+    let factory_members = methods
+        .iter()
+        .filter(|(method, _, _)| typer.store().symbols.get(*method).owner == Some(factory))
+        .map(|(method, tree, _)| ClassMemberPicklePlan::Method {
+            symbol: *method,
+            source_tree: *tree,
+        })
+        .collect::<Vec<_>>();
+    let factory_state_plan = ClassStatePicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: typer.typed_ast(),
+        source_index: &source_index,
+        typed_bindings: &tasty_bindings,
+        source: SourceMetadata {
+            id: source_id,
+            name: "CounterOwnerFactory.scala".to_owned(),
+        },
+        class: factory,
+        class_tree: factory_tree,
+        constructor: PrimaryConstructorInputPlan {
+            symbol: constructors[2],
+            source_tree: factory_constructor_tree,
+            parameter_clauses: factory_constructor_parameters,
+        },
+        members: &factory_members,
+    };
+    let validated_factory_state = factory_state_plan
+        .validate()
+        .expect("the body plan validates from the exact recorded source session");
+    let body_error = validated_factory_state
+        .validate_method_bodies()
+        .expect_err("the recorded local block remains unsupported by TASTy body validation");
+    let body_type = typer.typed_ast().get(typed_rhs).ty;
+    assert_eq!(
+        body_error,
+        PickleError::BodyType {
+            tree: typed_rhs,
+            ty: body_type,
+        },
+        "BodyType must refer to the exact block and type recorded above"
+    );
+    println!(
+        "Rust same-session TASTy body validation: {body_error:?} for source block {source_rhs:?} / typed block {typed_rhs:?} / type {body_type:?}"
+    );
+
+    let paired_error =
+        with_paired_jvm_tasty_batch_plan(source, "CounterOwnerFactory.scala", source_id, |_| ())
+            .expect_err("the separate paired end-to-end control rejects this local block");
+    assert!(
+        matches!(
+            &paired_error,
+            PairedPlanError::BatchClass { phase, reason, .. }
+                if *phase == "JVM/TASTy cross-contract validation" && reason.contains("BodyType")
+        ),
+        "first paired failure was {paired_error:?}"
+    );
+    println!("Separate paired end-to-end control first failure: {paired_error:?}");
+}
+
+#[test]
+fn reference_local_constructor_flow_rename_and_reorder_keep_the_same_first_gate() {
+    let source = include_str!(
+        "fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala"
+    );
+    let renamed = source
+        .replace("makeCounter", "buildCounter")
+        .replace("CounterOwnerFactory", "Factory")
+        .replace("CounterOwner", "Holder")
+        .replace("Counter", "Cell")
+        .replace("example", "renamed.pkg");
+    assert_factory_source_variant_rejected(
+        &renamed,
+        18491,
+        "renamed reference-local constructor flow",
+        "JVM/TASTy cross-contract validation",
+        "BodyType",
+    );
+
+    let owner_start = source.find("\nclass CounterOwner(").unwrap();
+    let factory_start = source.find("\nclass CounterOwnerFactory:").unwrap();
+    let counter = &source[..owner_start];
+    let owner = &source[owner_start..factory_start];
+    let factory = &source[factory_start..];
+    let reordered = format!("{counter}{factory}{owner}");
+    assert_factory_source_variant_rejected(
+        &reordered,
+        18492,
+        "reordered reference-local constructor flow",
+        "JVM/TASTy cross-contract validation",
+        "BodyType",
     );
 }
