@@ -29,6 +29,8 @@ class AcceptanceReconciliationTests(unittest.TestCase):
         row = MODULE.reconcile("main", manifest, before, after)[0]
         self.assertEqual(row["disposition"], "newly_typed")
         self.assertEqual(row["baseline_blocker"], "MemberNotFound")
+        self.assertEqual(row["baseline_cause"], "blocked::MemberNotFound")
+        self.assertEqual(row["final_cause"], "typed")
         self.assertEqual(row["typed_tree_id_changed"], "true")
 
     def test_rejects_a_lost_accepted_method(self):
