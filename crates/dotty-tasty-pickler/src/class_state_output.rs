@@ -400,6 +400,9 @@ impl ValidatedClassStatePlan<'_, '_> {
             let ClassMemberPicklePlan::Method { symbol, .. } = *member else {
                 continue;
             };
+            if let Some(planned_call) = p.typed_bindings.planned_call(p.source.id, symbol) {
+                context.register_planned_call(symbol, planned_call)?;
+            }
             let Some(nested) = p
                 .typed_bindings
                 .nested_constructor_call(p.source.id, symbol)

@@ -82,6 +82,7 @@ pub struct EncodingContext<'a> {
     name_refs: HashMap<NameKey, NameRef>,
     wire: AstBuilder,
     declarations: HashMap<SymbolId, AstLabel>,
+    planned_calls: HashMap<SymbolId, crate::PlannedCallBinding>,
     local_values_by_typed_declaration: HashMap<TreeId<Typed>, SymbolId>,
     local_value_symbols: HashSet<SymbolId>,
     external: HashMap<SymbolId, (NameRef, NameRef)>,
@@ -110,6 +111,34 @@ impl<'a> EncodingContext<'a> {
         self.definitions
     }
 
+    pub(crate) fn planned_call(&self, caller: SymbolId) -> Option<crate::PlannedCallBinding> {
+        self.planned_calls.get(&caller).copied()
+    }
+
+    pub(crate) fn register_planned_call(
+        &mut self,
+        caller: SymbolId,
+        binding: crate::PlannedCallBinding,
+    ) -> Result<(), PickleError> {
+        self.run(|context| {
+            let caller_record = context.symbol(caller)?;
+            let owner = caller_record
+                .owner
+                .ok_or(reference(caller, ReferenceError::Owner))?;
+            let helper_record = context.symbol(binding.method)?;
+            if caller_record.kind != SymbolKind::Method
+                || owner != binding.owner
+                || helper_record.kind != SymbolKind::Method
+                || helper_record.owner != Some(binding.owner)
+                || context.planned_calls.contains_key(&caller)
+            {
+                return Err(reference(caller, ReferenceError::Metadata));
+            }
+            context.planned_calls.insert(caller, binding);
+            Ok(())
+        })
+    }
+
     /// Standalone entry point. IDs, index and Definitions must come from these
     /// borrowed arenas in one session. Each supplied symbol/type is checked.
     pub fn new(
@@ -131,6 +160,7 @@ impl<'a> EncodingContext<'a> {
             name_refs: HashMap::new(),
             wire: AstBuilder::new(limits.wire),
             declarations: HashMap::new(),
+            planned_calls: HashMap::new(),
             local_values_by_typed_declaration: HashMap::new(),
             local_value_symbols: HashSet::new(),
             external: HashMap::new(),
@@ -1076,6 +1106,26 @@ impl<'a> EncodingContext<'a> {
                 return Err(reference(method, ReferenceError::Owner));
             }
             c.local(method)?;
+            let SymbolInfo::Complete(signature_type) = method_record.info else {
+                return Err(PickleError::IncompleteSymbol {
+                    symbol: method,
+                    info: method_record.info,
+                });
+            };
+            let Type::Method(signature) = c.ty(signature_type)? else {
+                return Err(PickleError::MalformedType {
+                    ty: signature_type,
+                    role: crate::TypeRole::Parameter,
+                });
+            };
+            if signature.kind != dotty_core::MethodKind::Plain
+                || signature.params.len() != parameter_count
+                || signature.params.iter().any(|parameter| {
+                    parameter.erased || parameter.varargs || parameter.ty != c.definitions.int
+                })
+            {
+                return Err(reference(method, ReferenceError::Metadata));
+            }
             let package = record
                 .owner
                 .ok_or(reference(class, ReferenceError::Owner))?;
@@ -1083,9 +1133,44 @@ impl<'a> EncodingContext<'a> {
             let owner_package_ref = c.package_reference(package)?;
             let class_name = c.utf8(c.text(record.name.text())?)?;
             let method_name = c.utf8(c.text(method_record.name.text())?)?;
-            let scala = c.utf8("scala")?;
+            let parameter_signature = c.utf8("scala")?;
             let int = c.utf8("Int")?;
-            let int_signature = c.intern(NameKey::Qualified(scala, int))?;
+            let int_signature = c.intern(NameKey::Qualified(parameter_signature, int))?;
+            let result_signature = if signature.result == c.definitions.int {
+                int_signature
+            } else {
+                let Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(result_class),
+                } = c.ty(signature.result)?
+                else {
+                    return Err(reference(method, ReferenceError::Metadata));
+                };
+                let result_record = c.symbol(*result_class)?;
+                let result_owner = result_record
+                    .owner
+                    .ok_or(reference(*result_class, ReferenceError::Owner))?;
+                if !matches!(
+                    c.ty(*prefix)?,
+                    Type::TypeRef {
+                        prefix: package_prefix,
+                        target: TypeRefTarget::Symbol(package),
+                    } if *package_prefix == c.definitions.no_prefix && *package == result_owner
+                ) || result_record.kind != SymbolKind::Class
+                    || result_record.origin != SymbolOrigin::Source(c.source)
+                    || result_record.visibility != Visibility::Public
+                    || !result_record.flags.is_empty()
+                    || !result_record.annotations.is_empty()
+                {
+                    return Err(reference(*result_class, ReferenceError::Metadata));
+                }
+                if !c.same_source_external.contains(result_class) {
+                    return Err(reference(*result_class, ReferenceError::NotRegistered));
+                }
+                let package = c.package_name(result_owner)?;
+                let result_name = c.utf8(c.text(result_record.name.text())?)?;
+                c.intern(NameKey::Qualified(package, result_name))?
+            };
             let parameter_signature =
                 i32::try_from(int_signature).map_err(|_| PickleError::LimitExceeded {
                     kind: LimitKind::Names,
@@ -1093,7 +1178,7 @@ impl<'a> EncodingContext<'a> {
                 })?;
             let signed_name = c.intern(NameKey::SignedMany(
                 method_name,
-                int_signature,
+                result_signature,
                 vec![parameter_signature; parameter_count],
             ))?;
             let type_ref = c

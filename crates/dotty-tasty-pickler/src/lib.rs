@@ -54,8 +54,8 @@ pub use error::{
 pub use plan::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, DefaultConstructorPlan,
     DistinctReferenceMethodSignature, LocalValueBinding, MethodPicklePlan,
-    NestedConstructorCallBinding, PicklePlan, PrimaryConstructorInputPlan, SourceMetadata,
-    SourceTypedBindings, ValidatedClassStatePlan, ValidatedPicklePlan,
+    NestedConstructorCallBinding, PicklePlan, PlannedCallBinding, PrimaryConstructorInputPlan,
+    SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan, ValidatedPicklePlan,
     ValidatedSameBatchReferenceField, ValidationLimits,
 };
 pub use projection::{

@@ -22,8 +22,8 @@ use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_d
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty_pickler::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
-    NestedConstructorCallBinding, PickleError, PrimaryConstructorInputPlan, SourceMetadata,
-    SourceTypedBindings, ValidatedClassStatePlan,
+    NestedConstructorCallBinding, PickleError, PlannedCallBinding, PrimaryConstructorInputPlan,
+    SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
 };
 use dotty_typer::{SourceTyper, TyperError};
 
@@ -142,6 +142,7 @@ struct BatchSourceTypedBindings<'a> {
     planned_classes: Vec<SymbolId>,
     planned_methods: Vec<SymbolId>,
     nested_constructor_calls: Vec<(SourceId, SymbolId, NestedConstructorCallBinding)>,
+    planned_calls: Vec<(SourceId, SymbolId, PlannedCallBinding)>,
 }
 
 impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
@@ -167,6 +168,14 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
         method: SymbolId,
     ) -> Option<NestedConstructorCallBinding> {
         self.nested_constructor_calls
+            .iter()
+            .find_map(|(proof_source, proof_method, binding)| {
+                (*proof_source == source && *proof_method == method).then_some(*binding)
+            })
+    }
+
+    fn planned_call(&self, source: SourceId, method: SymbolId) -> Option<PlannedCallBinding> {
+        self.planned_calls
             .iter()
             .find_map(|(proof_source, proof_method, binding)| {
                 (*proof_source == source && *proof_method == method).then_some(*binding)
@@ -1076,6 +1085,36 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                             formal: nested.formal(),
                             formal_type: nested.formal_type(),
                             result_type: nested.result_type(),
+                        },
+                    )
+                })
+            })
+            .collect(),
+        planned_calls: constructor_call_proofs
+            .iter()
+            .filter_map(|proof| {
+                proof.argument_proof().planned_call().map(|call| {
+                    (
+                        proof.source_id(),
+                        proof.method(),
+                        PlannedCallBinding {
+                            source_apply: call.source_apply(),
+                            typed_apply: call.typed_apply(),
+                            source_function: call.source_function(),
+                            typed_function: call.typed_function(),
+                            source_argument: call.source_argument(),
+                            typed_argument: call.typed_argument(),
+                            source_receiver: call.source_receiver(),
+                            typed_receiver: call.typed_receiver(),
+                            helper_source_tree: call.helper_source_tree(),
+                            helper_source_rhs: call.helper_source_rhs(),
+                            helper_typed_rhs: call.helper_typed_rhs(),
+                            owner: call.owner(),
+                            method: call.method(),
+                            caller_formal: call.formal(),
+                            helper_formal: call.helper_formal(),
+                            formal_type: call.formal_type(),
+                            result_type: call.result_type(),
                         },
                     )
                 })

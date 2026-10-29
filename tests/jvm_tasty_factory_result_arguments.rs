@@ -1,3 +1,4 @@
+use dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_batch;
 use dotty::jvm_tasty_cross_class::{
     CrossClassConstructorCallProofInput, validate_cross_class_constructor_call_proofs,
 };
@@ -19,16 +20,20 @@ use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_d
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty::ast::{
     APPLY_TAG, DEFDEF_TAG, IDENTTPT_TAG, NEW_TAG, PARAM_TAG, QUALTHIS_TAG, SELECTIN_TAG,
-    TERMREFDIRECT_TAG,
+    TERMREFDIRECT_TAG, THIS_TAG,
 };
 use dotty_tasty::file::TastyFile;
 use dotty_tasty::tasty::{RenderedNameSignature, RenderedParamSig, RenderedSignedName};
 use dotty_tasty::term::{AstRefKind, RawTree};
 use dotty_tasty_pickler::{
-    ClassMemberPicklePlan, ClassStatePicklePlan, PrimaryConstructorInputPlan, SourceMetadata,
+    ClassMemberPicklePlan, ClassStatePicklePlan, LimitKind, PickleError, PickleLimits,
+    PlannedCallBinding, PrimaryConstructorInputPlan, ProjectionLimits, SourceMetadata,
     SourceTypedBindings,
 };
 use dotty_typer::SourceTyper;
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 
 const SOURCE: &str =
     include_str!("fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala");
@@ -54,6 +59,63 @@ impl SourceTypedBindings for AuditBindings<'_> {
 
     fn planned_method_symbols(&self) -> &[SymbolId] {
         &self.methods
+    }
+}
+
+struct ReceiptBindings<'a> {
+    base: &'a dyn SourceTypedBindings,
+    caller: SymbolId,
+    receipt: PlannedCallBinding,
+    missing_edge: Option<dotty_core::TreeId<dotty_core::ast::Untyped>>,
+    stale_edge: Option<(
+        dotty_core::TreeId<dotty_core::ast::Untyped>,
+        dotty_core::TreeId<dotty_core::ast::Typed>,
+    )>,
+}
+
+impl SourceTypedBindings for ReceiptBindings<'_> {
+    fn typed_at(
+        &self,
+        source: SourceId,
+        tree: dotty_core::TreeId<dotty_core::ast::Untyped>,
+    ) -> Option<dotty_core::TreeId<dotty_core::ast::Typed>> {
+        if self.missing_edge == Some(tree) {
+            return None;
+        }
+        if let Some((source_tree, typed_tree)) = self.stale_edge
+            && source_tree == tree
+        {
+            return Some(typed_tree);
+        }
+        self.base.typed_at(source, tree)
+    }
+
+    fn planned_class_symbols(&self) -> &[SymbolId] {
+        self.base.planned_class_symbols()
+    }
+
+    fn planned_method_symbols(&self) -> &[SymbolId] {
+        self.base.planned_method_symbols()
+    }
+
+    fn nested_constructor_call(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<dotty_tasty_pickler::NestedConstructorCallBinding> {
+        self.base.nested_constructor_call(source, method)
+    }
+
+    fn planned_call(&self, _source: SourceId, method: SymbolId) -> Option<PlannedCallBinding> {
+        (method == self.caller).then_some(self.receipt)
+    }
+
+    fn local_value_bindings(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Vec<dotty_tasty_pickler::LocalValueBinding> {
+        self.base.local_value_bindings(source, method)
     }
 }
 
@@ -448,6 +510,289 @@ fn scala39_factory_result_oracle_decodes_classes_and_both_factory_methods() {
         "Factory TASTy create.seed TERMREFdirect={}",
         seed_reference.address
     );
+}
+
+#[test]
+fn rust_factory_result_emits_original_methods_and_the_proof_backed_call() {
+    let batch = emit_paired_jvm_tasty_batch(
+        SOURCE,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(18340),
+    )
+    .expect("the one-source producer emits complete linked artifacts");
+    assert_eq!(batch.classes().len(), 3);
+    let factory_artifact = batch
+        .classes()
+        .iter()
+        .find(|artifact| artifact.tasty_path() == "example/CounterOwnerFactory.tasty")
+        .expect("Factory has its own TASTy sidecar");
+    let factory = tasty(factory_artifact.tasty_bytes());
+    let class = decode_class(factory_artifact.classfile_bytes());
+    assert_eq!(class_name(&class), "example/CounterOwnerFactory");
+    assert_eq!(
+        class.tasty_link_id().unwrap().unwrap().as_bytes(),
+        &factory.header().uuid
+    );
+    assert_eq!(
+        class
+            .constant_pool
+            .utf8(method(&class, "makeCounter").descriptor_index),
+        Ok("(I)Lexample/Counter;")
+    );
+    assert_eq!(
+        class
+            .constant_pool
+            .utf8(method(&class, "create").descriptor_index),
+        Ok("(I)Lexample/CounterOwner;")
+    );
+
+    let index = factory.ast_address_index().unwrap();
+    let (helper_address, helper) = method_body(&factory, "makeCounter");
+    let (caller_address, caller) = method_body(&factory, "create");
+    assert!(helper_address < caller_address);
+    let helper_parameter = parameter_address(&index, helper_address);
+    let caller_parameter = parameter_address(&index, caller_address);
+    assert_ne!(helper_parameter, caller_parameter);
+
+    let RawTree::LengthNode(helper_apply_node) = helper.rhs.unwrap() else {
+        panic!("makeCounter retains its source constructor body");
+    };
+    assert_eq!(helper_apply_node.tag, APPLY_TAG);
+    let helper_apply = helper_apply_node.decode_apply().unwrap();
+    let [helper_argument] = helper_apply.arguments.as_slice() else {
+        panic!("makeCounter passes exactly its original formal");
+    };
+    let helper_references = helper_argument.ast_refs();
+    let [helper_reference] = helper_references.as_slice() else {
+        panic!("makeCounter seed is one TASTy reference");
+    };
+    assert_eq!(helper_reference.kind, AstRefKind::TermRefDirect);
+    assert_eq!(helper_reference.address, helper_parameter);
+
+    let RawTree::LengthNode(owner_apply_node) = caller.rhs.unwrap() else {
+        panic!("create retains the original Owner constructor application");
+    };
+    assert_eq!(owner_apply_node.tag, APPLY_TAG);
+    let owner_apply = owner_apply_node.decode_apply().unwrap();
+    let [factory_call] = owner_apply.arguments.as_slice() else {
+        panic!("Owner receives one factory call");
+    };
+    let RawTree::LengthNode(factory_apply_node) = factory_call else {
+        panic!("the constructor argument is an APPLY");
+    };
+    assert_eq!(factory_apply_node.tag, APPLY_TAG);
+    let factory_apply = factory_apply_node.decode_apply().unwrap();
+    let RawTree::LengthNode(factory_select_node) = factory_apply.function else {
+        panic!("the factory call retains its selected original method");
+    };
+    assert_eq!(factory_select_node.tag, SELECTIN_TAG);
+    let factory_select = factory_select_node.decode_select_in().unwrap();
+    assert_eq!(
+        factory
+            .names()
+            .render_signed_name(factory_select.name)
+            .unwrap()
+            .unwrap(),
+        RenderedSignedName::Signed {
+            original: "makeCounter".to_owned(),
+            signature: RenderedNameSignature {
+                parameters: [RenderedParamSig::TermParameter("scala.Int".to_owned())].into(),
+                result: "example.Counter".to_owned(),
+            },
+        }
+    );
+    assert!(matches!(
+        factory_select.qualifier,
+        RawTree::Ast {
+            tag: QUALTHIS_TAG,
+            ..
+        }
+    ));
+    let [caller_argument] = factory_apply.arguments.as_slice() else {
+        panic!("makeCounter receives exactly create's original seed");
+    };
+    let caller_references = caller_argument.ast_refs();
+    let [caller_reference] = caller_references.as_slice() else {
+        panic!("create seed has one TASTy reference");
+    };
+    assert_eq!(caller_reference.kind, AstRefKind::TermRefDirect);
+    assert_eq!(caller_reference.address, caller_parameter);
+}
+
+#[test]
+fn explicit_this_factory_call_emits_the_audited_this_receiver() {
+    let source = SOURCE.replace(
+        "new CounterOwner(makeCounter(seed))",
+        "new CounterOwner(this.makeCounter(seed))",
+    );
+    let batch = emit_paired_jvm_tasty_batch(
+        &source,
+        "ExplicitThisFactoryResult.scala",
+        SourceId::from_index(18342),
+    )
+    .expect("an explicit this receiver retains the same bounded call proof");
+    let artifact = batch
+        .classes()
+        .iter()
+        .find(|artifact| artifact.tasty_path() == "example/CounterOwnerFactory.tasty")
+        .unwrap();
+    let factory = tasty(artifact.tasty_bytes());
+    let (_, create) = method_body(&factory, "create");
+    let RawTree::LengthNode(owner_apply_node) = create.rhs.unwrap() else {
+        panic!("create retains its outer constructor application");
+    };
+    let owner_apply = owner_apply_node.decode_apply().unwrap();
+    let [factory_call] = owner_apply.arguments.as_slice() else {
+        panic!("Owner receives one factory result");
+    };
+    let RawTree::LengthNode(factory_apply_node) = factory_call else {
+        panic!("create argument retains the factory application");
+    };
+    let factory_apply = factory_apply_node.decode_apply().unwrap();
+    let RawTree::LengthNode(factory_select_node) = factory_apply.function else {
+        panic!("factory call retains SELECTin");
+    };
+    let factory_select = factory_select_node.decode_select_in().unwrap();
+    assert!(matches!(
+        factory_select.qualifier,
+        RawTree::Ast { tag: THIS_TAG, .. }
+    ));
+}
+
+#[test]
+fn pinned_scala_decompiles_and_from_tasty_compiles_rust_factory_result_sidecars() {
+    if std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
+        != Some(std::ffi::OsStr::new("1"))
+    {
+        return;
+    }
+    let batch = emit_paired_jvm_tasty_batch(
+        SOURCE,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(18341),
+    )
+    .expect("Rust emits the original three-class source batch");
+    let files = batch
+        .classes()
+        .iter()
+        .map(|class| (class.tasty_path().to_owned(), class.tasty_bytes().to_vec()))
+        .collect::<Vec<_>>();
+    run_factory_result_scala_reader(&files);
+}
+
+fn run_factory_result_scala_reader(files: &[(String, Vec<u8>)]) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala 3.9 source checkout is required"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read pinned Scala revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let version = Command::new(&compiler)
+        .arg("-version")
+        .output()
+        .expect("query pinned Scala compiler version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"));
+
+    let scratch = PathBuf::from(
+        std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
+            .expect("task-specific target scratch must be set for the Scala oracle"),
+    );
+    assert!(scratch.exists());
+    assert!(
+        !scratch.starts_with("/tmp"),
+        "Scala oracle scratch must stay in the issue worktree"
+    );
+    let temporary = scratch.join(format!("issue-1834-scala-reader-{}", std::process::id()));
+    fs::remove_dir_all(&temporary).ok();
+    let candidate = temporary.join("candidate");
+    let compiled = temporary.join("compiled");
+    fs::create_dir_all(&candidate).unwrap();
+    fs::create_dir_all(&compiled).unwrap();
+    for (relative, bytes) in files {
+        let path = candidate.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+    let factory_tasty = candidate.join("example/CounterOwnerFactory.tasty");
+    let decompile = Command::new(&compiler)
+        .arg("-decompile")
+        .arg(&factory_tasty)
+        .output()
+        .expect("run Scala -decompile on Rust Factory.tasty");
+    assert!(
+        decompile.status.success(),
+        "Scala -decompile rejected Rust Factory.tasty: {}",
+        String::from_utf8_lossy(&decompile.stderr)
+    );
+    let decompiled = normalize_decompiled_scala(&String::from_utf8_lossy(&decompile.stdout));
+    let helper = decompiled
+        .split("def create")
+        .next()
+        .expect("decompiler retains the helper before create");
+    assert!(
+        helper.contains("def makeCounter") && helper.contains("new example.Counter(seed)"),
+        "Scala must reconstruct the authentic makeCounter body: {decompiled}"
+    );
+    let create = decompiled
+        .split_once("def create")
+        .map(|(_, body)| body)
+        .expect("decompiler retains create");
+    assert!(
+        create.contains("(`seed₂`: scala.Int): example.CounterOwner = new example.CounterOwner(CounterOwnerFactory.this.makeCounter(`seed₂`))"),
+        "Scala must reconstruct the same-instance makeCounter call with create's original seed formal inside the Owner constructor: {decompiled}"
+    );
+
+    let from_tasty = Command::new(&compiler)
+        .arg("-from-tasty")
+        .arg("-classpath")
+        .arg(&candidate)
+        .arg("-d")
+        .arg(&compiled)
+        .args([
+            candidate.join("example/Counter.tasty"),
+            candidate.join("example/CounterOwner.tasty"),
+            factory_tasty,
+        ])
+        .output()
+        .expect("run Scala -from-tasty on all Rust sidecars");
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected Rust sidecars: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    assert!(compiled.join("example/CounterOwnerFactory.class").exists());
+    fs::remove_dir_all(temporary).unwrap();
+}
+
+fn normalize_decompiled_scala(source: &str) -> String {
+    let mut plain = String::with_capacity(source.len());
+    let mut escape = false;
+    let mut ansi = false;
+    for ch in source.chars() {
+        if escape {
+            escape = false;
+            ansi = true;
+        } else if ansi {
+            if ch.is_ascii_alphabetic() {
+                ansi = false;
+            }
+        } else if ch == '\u{1b}' {
+            escape = true;
+        } else {
+            plain.push(ch);
+        }
+    }
+    plain.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[test]
@@ -973,26 +1318,179 @@ fn rust_original_source_preserves_factory_call_identities_and_exposes_first_reje
         typer.store().types.get(planned_call.result_type()),
         Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == counter_class
     ));
-    let paired_error =
-        with_paired_jvm_tasty_batch_plan(SOURCE, "CounterOwnerFactory.scala", source_id, |_| ())
-            .expect_err("paired planning stops before TASTy encoding");
-    assert!(
-        matches!(
-            &paired_error,
-            PairedPlanError::BatchClass {
-                phase: "JVM/TASTy cross-contract validation",
-                reason,
+    with_paired_jvm_tasty_batch_plan(SOURCE, "CounterOwnerFactory.scala", source_id, |batch| {
+        let planned_proof = batch
+            .constructor_call_proofs
+            .iter()
+            .find_map(|proof| proof.argument_proof().planned_call())
+            .expect("the paired plan carries the complete call receipt");
+        assert_eq!(planned_proof.owner(), factory_class);
+        assert_eq!(planned_proof.method(), make_counter);
+        assert_eq!(planned_proof.helper_formal(), make_counter_parameter);
+        assert_eq!(planned_proof.formal(), create_parameter);
+        let helper_class = batch
+            .constructor_call_proofs
+            .iter()
+            .find(|proof| proof.method() == make_counter)
+            .expect("the original helper body remains in the proof batch")
+            .target_class();
+        let factory = batch
+            .classes
+            .iter()
+            .find(|class| class.class == factory_class)
+            .expect("Factory remains an original batch class");
+        assert!(matches!(
+            factory
+                .tasty_plan
+                .plan()
+                .store
+                .types
+                .get(planned_proof.result_type()),
+            Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == helper_class
+        ));
+        factory
+            .tasty_plan
+            .validate_method_bodies()
+            .expect("the proof-backed calls validate before encoding");
+        let original = factory.tasty_plan.plan();
+        let planned = original
+            .typed_bindings
+            .planned_call(original.source.id, create)
+            .expect("the pickler binding retains the same-session call receipt");
+        let reject_mutation = |receipt: PlannedCallBinding,
+                               missing_edge,
+                               stale_edge,
+                               members: &[ClassMemberPicklePlan]| {
+            let bindings = ReceiptBindings {
+                base: original.typed_bindings,
+                caller: create,
+                receipt,
+                missing_edge,
+                stale_edge,
+            };
+            let mutated = ClassStatePicklePlan {
+                store: original.store,
+                definitions: original.definitions,
+                source_ast: original.source_ast,
+                typed_ast: original.typed_ast,
+                source_index: original.source_index,
+                typed_bindings: &bindings,
+                source: original.source.clone(),
+                class: original.class,
+                class_tree: original.class_tree,
+                constructor: original.constructor.clone(),
+                members,
+            };
+            match mutated.validate() {
+                Ok(validated) => validated
+                    .pickle()
+                    .expect_err("a rejected plan must not produce completed TASTy"),
+                Err(error) => error,
+            }
+        };
+        let members = original.members;
+        let missing_helper_members = members
+            .iter()
+            .copied()
+            .filter(|member| !matches!(member, ClassMemberPicklePlan::Method { symbol, .. } if *symbol == planned.method))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            reject_mutation(planned, None, None, &missing_helper_members),
+            PickleError::SourceOrder { class } if class == factory_class
+        ));
+
+        let missing_edge_error =
+            reject_mutation(planned, Some(planned.source_apply), None, members);
+        assert!(matches!(
+            missing_edge_error,
+            PickleError::BodyBinding {
+                tree,
+                actual: None,
                 ..
-            } if reason.contains("BodyExpression")
-        ),
-        "paired planning still rejects before returning a partial batch: {paired_error:?}"
-    );
+            } if tree == planned.source_apply
+        ), "unexpected missing-edge failure: {missing_edge_error:?}");
+        let wrong_typed_apply = planned.typed_function;
+        assert!(matches!(
+            reject_mutation(
+                planned,
+                None,
+                Some((planned.source_apply, wrong_typed_apply)),
+                members,
+            ),
+            PickleError::BodyBinding {
+                tree,
+                actual: Some(actual),
+                ..
+            } if tree == planned.source_apply && actual == wrong_typed_apply
+        ));
+
+        let mut wrong_member = planned;
+        wrong_member.method = create;
+        assert!(matches!(
+            reject_mutation(wrong_member, None, None, members),
+            PickleError::Reference {
+                symbol,
+                reason: dotty_tasty_pickler::ReferenceError::Owner,
+            } if symbol == create
+        ));
+        let mut wrong_owner = planned;
+        wrong_owner.owner = owner_class;
+        assert!(matches!(
+            reject_mutation(wrong_owner, None, None, members),
+            PickleError::Reference {
+                symbol,
+                reason: dotty_tasty_pickler::ReferenceError::Owner,
+            } if symbol == planned.method
+        ));
+        let mut wrong_result = planned;
+        wrong_result.result_type = planned.formal_type;
+        assert!(matches!(
+            reject_mutation(wrong_result, None, None, members),
+            PickleError::Unsupported {
+                feature: dotty_tasty_pickler::UnsupportedFeature::BodyExpression,
+                ..
+            }
+        ));
+        let mut wrong_receiver = planned;
+        wrong_receiver.typed_receiver = Some(planned.typed_argument);
+        assert!(matches!(
+            reject_mutation(wrong_receiver, None, None, members),
+            PickleError::Unsupported {
+                feature: dotty_tasty_pickler::UnsupportedFeature::BodyExpression,
+                ..
+            }
+        ));
+
+        let mut limits = PickleLimits::default();
+        limits.projection.max_expression_depth = 0;
+        assert!(matches!(
+            factory.tasty_plan.pickle_with_limits(limits),
+            Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: 0,
+            })
+        ));
+        limits.projection.max_expression_depth = 1;
+        assert!(factory.tasty_plan.pickle_with_limits(limits).is_ok());
+        limits.projection = ProjectionLimits {
+            max_items: 1,
+            ..ProjectionLimits::default()
+        };
+        assert!(matches!(
+            factory.tasty_plan.pickle_with_limits(limits),
+            Err(PickleError::LimitExceeded {
+                kind: LimitKind::Items,
+                ..
+            })
+        ));
+    })
+    .expect("proof validation and genuine reference-result planning succeed");
     assert_eq!(
         typed_methods.len(),
         source_methods.iter().filter(|(_, tree)| matches!(&parsed.ast.get(*tree).kind, TreeKind::DefDef(definition) if definition.rhs.is_some())).count()
     );
     println!(
-        "Rust layer observations: class-state TASTy source plan and direct/nested/planned-call source proofs succeed; paired planner still rejects at the unsupported expression encoding boundary: {paired_error:?}; no paired artifacts are published; JVM-only path is covered by the strict object-graph acceptance regression."
+        "Rust layer observations: the paired planner carries the complete planned-call receipt through source/typed validation and output planning."
     );
     let _ = (make_counter_tree, create_tree);
 }
@@ -1005,21 +1503,19 @@ fn factory_argument_variants_retain_semantic_identity_independently_of_names_and
         .replace("CounterOwner", "Box")
         .replace("Counter", "Item")
         .replace("example", "renamed.pkg");
-    let renamed_error = with_paired_jvm_tasty_batch_plan(
+    let renamed_first = emit_paired_jvm_tasty_batch(
         &renamed,
         "RenamedFactoryResult.scala",
         SourceId::from_index(1833),
-        |_| (),
     )
-    .expect_err("renaming does not avoid the bounded proof gate");
-    assert!(matches!(
-        renamed_error,
-        PairedPlanError::BatchClass {
-            phase: "JVM/TASTy cross-contract validation",
-            reason,
-            ..
-        } if reason.contains("BodyExpression")
-    ));
+    .expect("renamed declarations retain their original planned-call identities");
+    let renamed_second = emit_paired_jvm_tasty_batch(
+        &renamed,
+        "RenamedFactoryResult.scala",
+        SourceId::from_index(1833),
+    )
+    .expect("renamed declarations remain deterministic on a fresh session");
+    assert_eq!(renamed_first.classes(), renamed_second.classes());
 
     let owner_start = SOURCE.find("class CounterOwner(").unwrap();
     let factory_start = SOURCE.find("class CounterOwnerFactory:").unwrap();
@@ -1029,21 +1525,19 @@ fn factory_argument_variants_retain_semantic_identity_independently_of_names_and
         &SOURCE[factory_start..],
         &SOURCE[owner_start..factory_start]
     );
-    let reordered_error = with_paired_jvm_tasty_batch_plan(
+    let reordered_first = emit_paired_jvm_tasty_batch(
         &reordered,
         "ReorderedFactoryResult.scala",
         SourceId::from_index(1834),
-        |_| (),
     )
-    .expect_err("declaration order does not avoid the bounded proof gate");
-    assert!(matches!(
-        reordered_error,
-        PairedPlanError::BatchClass {
-            phase: "JVM/TASTy cross-contract validation",
-            reason,
-            ..
-        } if reason.contains("BodyExpression")
-    ));
+    .expect("reordered declarations retain helper linkage independent of source order");
+    let reordered_second = emit_paired_jvm_tasty_batch(
+        &reordered,
+        "ReorderedFactoryResult.scala",
+        SourceId::from_index(1834),
+    )
+    .expect("reordered declarations remain deterministic on a fresh session");
+    assert_eq!(reordered_first.classes(), reordered_second.classes());
 }
 
 #[test]
@@ -1146,4 +1640,157 @@ fn factory_argument_negative_controls_report_their_first_existing_gate() {
             reason,
         } if reason.contains("constructor argument must be the exact caller formal")
     ));
+}
+
+fn assert_factory_source_variant_rejected(
+    source: &str,
+    source_id: u32,
+    label: &str,
+    expected_phase: &str,
+    expected_reason: &str,
+) {
+    let error = with_paired_jvm_tasty_batch_plan(
+        source,
+        "FactoryVariant.scala",
+        SourceId::from_index(source_id),
+        |_| (),
+    )
+    .expect_err("unsupported factory source must not yield a complete paired output plan");
+    let (phase, reason) = match &error {
+        PairedPlanError::BatchClass { phase, reason, .. }
+        | PairedPlanError::BatchUnit { phase, reason } => (*phase, reason.as_str()),
+        other => panic!("{label} failed before a typed planning checkpoint: {other:?}"),
+    };
+    assert_eq!(phase, expected_phase, "{label}: {error:?}");
+    assert!(
+        reason.contains(expected_reason),
+        "{label}: expected first error containing {expected_reason:?}, got {error:?}"
+    );
+}
+
+#[test]
+fn staged_factory_scope_controls_report_their_first_typed_gate() {
+    let shadowed = SOURCE
+        .replace("def create(seed: Int)", "def create(makeCounter: Int)")
+        .replace("makeCounter(seed)", "makeCounter(1)");
+    assert_factory_source_variant_rejected(
+        &shadowed,
+        18400,
+        "parameter shadows helper method",
+        "method body typing",
+        "ApplicationCalleeNotMethod",
+    );
+
+    let private_helper = SOURCE.replace("def makeCounter(seed", "private def makeCounter(seed");
+    assert_factory_source_variant_rejected(
+        &private_helper,
+        18401,
+        "private helper metadata",
+        "cross-class constructor-call identity proof",
+        "candidate method is not the public canonical method owned by its source class",
+    );
+
+    let local_argument = SOURCE.replace(
+        "new CounterOwner(makeCounter(seed))",
+        "{ val local = makeCounter(seed); new CounterOwner(local) }",
+    );
+    assert_factory_source_variant_rejected(
+        &local_argument,
+        18402,
+        "local block argument",
+        "JVM/TASTy cross-contract validation",
+        "BodyType",
+    );
+
+    let multiple_calls = SOURCE.replace(
+        "new CounterOwner(makeCounter(seed))",
+        "new CounterOwner(if seed > 0 then makeCounter(seed) else makeCounter(seed + 1))",
+    );
+    assert_factory_source_variant_rejected(
+        &multiple_calls,
+        18403,
+        "conditional multi-call argument",
+        "cross-class constructor-call identity proof",
+        "constructor argument must be the exact caller formal, one nested New, or one planned call",
+    );
+
+    let overloaded_helper = SOURCE.replace(
+        "  def create(seed",
+        "  def makeCounter(seed: Boolean): Boolean = seed\n\n  def create(seed",
+    );
+    assert_factory_source_variant_rejected(
+        &overloaded_helper,
+        18404,
+        "overloaded helper",
+        "cross-class constructor-call identity proof",
+        "overloaded planned helper methods are unsupported",
+    );
+
+    let generic_helper = SOURCE.replace("def makeCounter(seed", "def makeCounter[A](seed");
+    assert_factory_source_variant_rejected(
+        &generic_helper,
+        18405,
+        "generic helper",
+        "member planning",
+        "generic methods are unsupported",
+    );
+
+    let default_helper = SOURCE.replace("seed: Int): Counter =", "seed: Int = 0): Counter =");
+    assert_factory_source_variant_rejected(
+        &default_helper,
+        18406,
+        "defaulted helper parameter",
+        "cross-class constructor-call identity proof",
+        "candidate method formal cannot use a default value",
+    );
+
+    let using_helper = SOURCE
+        .replace(
+            "def makeCounter(seed: Int)",
+            "def makeCounter(using seed: Int)",
+        )
+        .replace("makeCounter(seed)", "makeCounter");
+    assert_factory_source_variant_rejected(
+        &using_helper,
+        18407,
+        "using helper parameter",
+        "method body typing",
+        "ApplicationArgumentConformanceUnsupported",
+    );
+
+    let external_helper = SOURCE
+        .replace(
+            "class CounterOwnerFactory:",
+            "class CounterMaker:\n  def makeCounter(seed: Int): Counter = new Counter(seed)\n\nclass CounterOwnerFactory:",
+        )
+        .replace("  def makeCounter(seed: Int): Counter =\n    new Counter(seed)\n\n", "")
+        .replace(
+            "new CounterOwner(makeCounter(seed))",
+            "new CounterOwner(new CounterMaker().makeCounter(seed))",
+        );
+    assert_factory_source_variant_rejected(
+        &external_helper,
+        18408,
+        "external owner helper",
+        "cross-class constructor-call identity proof",
+        "planned helper must be a public canonical instance method owned by the caller class",
+    );
+
+    let super_helper = SOURCE
+        .replace(
+            "class CounterOwnerFactory:",
+            "class FactoryBase:\n  def makeCounter(seed: Int): Counter = new Counter(seed)\n\nclass CounterOwnerFactory extends FactoryBase:",
+        )
+        .replace("  def makeCounter(seed: Int): Counter =\n    new Counter(seed)\n\n", "")
+        .replace(
+            "new CounterOwner(makeCounter(seed))",
+            "new CounterOwner(super.makeCounter(seed))",
+        );
+    assert_factory_source_variant_rejected(
+        &super_helper,
+        18409,
+        "super helper call",
+        "source collection",
+        "classes with explicit parents or self types are unsupported",
+    );
 }

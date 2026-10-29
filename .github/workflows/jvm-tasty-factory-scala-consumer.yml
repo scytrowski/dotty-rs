@@ -159,7 +159,9 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
+          DOTTY_TASTY_PICKLER_ORACLE_TMP: ${{ github.workspace }}/target/scala-reader-oracle
         run: |
+          mkdir -p "$DOTTY_TASTY_PICKLER_ORACLE_TMP"
           cargo +1.98.1 test \
             --test jvm_tasty_scala_consumer \
             --test jvm_tasty_multiclass_scala_consumer \
@@ -170,6 +172,7 @@ jobs:
             --test jvm_tasty_reference_constructor_scala_consumer \
             --test jvm_tasty_nested_constructor_scala_consumer \
             --test jvm_tasty_cross_class_factories \
+            --test jvm_tasty_factory_result_arguments \
             --test tasty_source_pickling \
             --locked -- --nocapture
 
