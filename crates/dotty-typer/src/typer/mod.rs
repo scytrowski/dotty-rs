@@ -626,6 +626,7 @@ impl<'a> SourceTyper<'a> {
                 expression::FunctionLiteralTypingContext {
                     context,
                     expected_function1: None,
+                    poly_binder: None,
                 },
                 info_journal,
                 new_mappings,
@@ -6652,8 +6653,11 @@ mod tests {
         let source_text = concat!(
             "class C { ",
             "def use[A](function: Int => A): Int = 1; ",
+            "def useNested[A](function: Int => (Int => A)): Int = 1; ",
             "def inferred: Int = use((x: Int) => x); ",
-            "def explicit: Int = use[Int]((x: Int) => x)",
+            "def explicit: Int = use[Int]((x: Int) => x); ",
+            "def nestedInferred: Int = useNested((x: Int) => (y: Int) => y); ",
+            "def nestedExplicit: Int = useNested[Int]((x: Int) => (y: Int) => y)",
             " }",
         );
         let (parsed, mut store, mut packages, definitions, index, source) =
@@ -6679,7 +6683,7 @@ mod tests {
                 })
                 .unwrap()
         };
-        for method_name in ["inferred", "explicit"] {
+        for method_name in ["inferred", "explicit", "nestedInferred", "nestedExplicit"] {
             let (owner, application) =
                 method_definition_and_rhs(&parsed, typer.store(), &index, source, method_name);
             let TreeKind::Apply(application_node) = &parsed.ast.get(application).kind else {
@@ -6710,6 +6714,23 @@ mod tests {
                     .get(source, function.body)
                     .is_some()
             );
+            if method_name.starts_with("nested") {
+                assert!(matches!(
+                    parsed.ast.get(function.body).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::Function(_))
+                ));
+                assert!(
+                    typer
+                        .function_literal_method_at(source, function.body)
+                        .is_some()
+                );
+                assert!(
+                    typer
+                        .source_typed_index()
+                        .get(source, function.body)
+                        .is_some()
+                );
+            }
         }
     }
 

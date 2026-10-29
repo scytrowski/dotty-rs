@@ -16,6 +16,7 @@ pub(in crate::typer) struct FunctionLiteralIndex {
 pub(in crate::typer) struct FunctionLiteralTypingContext {
     pub context: ExpressionContext,
     pub expected_function1: Option<(TypeId, Option<TypeId>)>,
+    pub poly_binder: Option<TypeId>,
 }
 
 #[derive(Clone)]
@@ -119,6 +120,7 @@ impl SourceTyper<'_> {
         let FunctionLiteralTypingContext {
             context,
             expected_function1,
+            poly_binder,
         } = typing_context;
         let mut parameters = Vec::with_capacity(function.params.len());
         for parameter_tree in function.params.iter().copied() {
@@ -284,10 +286,11 @@ impl SourceTyper<'_> {
             method_scope,
         )?;
         let typed_body = if let Some((_, Some(expected_output))) = expected_function1 {
-            self.type_expression_expected_inner(
+            self.type_expression_expected_with_poly_binder(
                 function.body,
                 lambda_context,
                 expected_output,
+                poly_binder,
                 info_journal,
                 new_mappings,
             )

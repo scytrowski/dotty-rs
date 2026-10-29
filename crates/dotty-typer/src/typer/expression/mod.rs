@@ -412,13 +412,40 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let typed = self.type_value_expression_expected_inner(
+        self.type_expression_expected_with_poly_binder(
             tree,
             context,
             expected,
+            None,
+            info_journal,
+            new_mappings,
+        )
+    }
+
+    pub(in crate::typer) fn type_expression_expected_with_poly_binder(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        expected: TypeId,
+        poly_binder: Option<TypeId>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let typed = self.type_value_expression_expected_with_poly_binder(
+            tree,
+            context,
+            expected,
+            poly_binder,
             info_journal,
             new_mappings,
         )?;
+        if let Some(binder) = poly_binder
+            && self.type_contains_param_ref(expected, binder)?
+        {
+            // The polymorphic application will instantiate this expectation
+            // after argument typing has supplied its inference constraints.
+            return Ok(typed);
+        }
         let expression_type = self.typed_arena.get(typed).ty;
         let mut actual =
             self.adapt_expression_type_to_expected(expression_type, expected, info_journal)?;
@@ -537,6 +564,7 @@ impl SourceTyper<'_> {
                     FunctionLiteralTypingContext {
                         context,
                         expected_function1,
+                        poly_binder,
                     },
                     info_journal,
                     new_mappings,
