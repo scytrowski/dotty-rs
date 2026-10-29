@@ -1906,30 +1906,28 @@ fn validate_cross_class_call_code(
             ));
         };
         if let Some(factory) = &call.factory_method {
-            if code.code.len() != 13
-                || code.code[0] != 0xbb
-                || code.code[3] != 0x59
-                || code.code[4] != 0x2a
-                || code.code[5] != 0x1b
-                || code.code[6] != 0xb6
-                || code.code[9] != 0xb7
-                || code.code[12] != 0xb0
-                || code.max_stack < 4
-                || code.max_locals != 2
-                || !code.exception_table.is_empty()
-            {
+            let mut pc = 0;
+            let allocation = take_factory_call_operand(code.code, &mut pc, 0xbb, "new")?;
+            take_factory_call_opcode(code.code, &mut pc, 0x59, "dup")?;
+            take_factory_call_opcode(code.code, &mut pc, 0x2a, "aload_0")?;
+            take_factory_call_opcode(code.code, &mut pc, 0x1b, "iload_1")?;
+            let helper_call_index =
+                take_factory_call_operand(code.code, &mut pc, 0xb6, "invokevirtual")?;
+            let outer_call_index =
+                take_factory_call_operand(code.code, &mut pc, 0xb7, "invokespecial")?;
+            take_factory_call_opcode(code.code, &mut pc, 0xb0, "areturn")?;
+            if pc != code.code.len() {
                 return Err(format!(
-                    "caller method {:?} does not contain the bounded factory-result constructor sequence: {:02x?}",
-                    call.caller, code.code
+                    "caller method {:?} has trailing instructions after the bounded factory-result sequence",
+                    call.caller
                 ));
             }
-            let cp_index = |offset: usize| {
-                dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
-                    code.code[offset],
-                    code.code[offset + 1],
-                ]))
-            };
-            let allocation = cp_index(1);
+            if code.max_stack < 4 || code.max_locals != 2 || !code.exception_table.is_empty() {
+                return Err(format!(
+                    "caller method {:?} has invalid stack, locals, or exception metadata for the bounded factory-result sequence",
+                    call.caller
+                ));
+            }
             let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Class { name_index }) =
                 class_file.constant_pool.get(allocation)
             else {
@@ -1939,11 +1937,11 @@ fn validate_cross_class_call_code(
                 .constant_pool
                 .utf8(*name_index)
                 .map_err(|error| format!("invalid factory-result allocation class: {error:?}"))?;
-            let method_ref = |offset: usize| -> Result<(&str, (&str, &str)), String> {
+            let method_ref = |index| -> Result<(&str, (&str, &str)), String> {
                 let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
                     class_index,
                     name_and_type_index,
-                }) = class_file.constant_pool.get(cp_index(offset))
+                }) = class_file.constant_pool.get(index)
                 else {
                     return Err(
                         "factory-result invocation does not reference CONSTANT_Methodref".into(),
@@ -1961,8 +1959,8 @@ fn validate_cross_class_call_code(
                     })?;
                 Ok((owner, method))
             };
-            let helper_call = method_ref(7)?;
-            let outer_call = method_ref(10)?;
+            let helper_call = method_ref(helper_call_index)?;
+            let outer_call = method_ref(outer_call_index)?;
             if allocation_owner != call.owner_internal_name
                 || helper_call
                     != (
@@ -2221,6 +2219,50 @@ fn validate_cross_class_call_code(
         }
     }
     Ok(())
+}
+
+/// Consume one instruction from the deliberately bounded factory-result
+/// sequence. This is not a general bytecode decoder: callers enumerate every
+/// supported instruction and require complete consumption of the method body.
+fn take_factory_call_opcode(
+    code: &[u8],
+    pc: &mut usize,
+    expected: u8,
+    mnemonic: &str,
+) -> Result<(), String> {
+    let Some(actual) = code.get(*pc).copied() else {
+        return Err(format!(
+            "truncated factory-result bytecode while reading {mnemonic}"
+        ));
+    };
+    if actual != expected {
+        return Err(format!(
+            "expected {mnemonic} in bounded factory-result bytecode, found opcode 0x{actual:02x}"
+        ));
+    }
+    *pc += 1;
+    Ok(())
+}
+
+fn take_factory_call_operand(
+    code: &[u8],
+    pc: &mut usize,
+    opcode: u8,
+    mnemonic: &str,
+) -> Result<dotty_classfile::constant_pool::ConstantPoolIndex, String> {
+    take_factory_call_opcode(code, pc, opcode, mnemonic)?;
+    let operand = code
+        .get(*pc..pc.saturating_add(2))
+        .ok_or_else(|| format!("truncated constant-pool operand for factory-result {mnemonic}"))?;
+    let [high, low] = operand else {
+        return Err(format!(
+            "truncated constant-pool operand for factory-result {mnemonic}"
+        ));
+    };
+    *pc += 2;
+    Ok(dotty_classfile::constant_pool::ConstantPoolIndex(
+        u16::from_be_bytes([*high, *low]),
+    ))
 }
 
 fn typed_tree_has_sibling_call(

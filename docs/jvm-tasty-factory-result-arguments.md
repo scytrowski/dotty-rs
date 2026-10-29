@@ -1,5 +1,12 @@
 # Factory-result constructor arguments: Scala 3.9 evidence and Rust proof
 
+Issue #1835's batch and bytecode validation regressions are based on
+`04376dc23f92feb423f112e8d3e6c1d4d908414e`, using the repository-pinned Rust
+1.98.1 toolchain. The strict JDK 21 gate and the pinned Scala 3.9 reader were
+rerun for this source. The inherited nested-constructor test also rechecked all
+six recorded Rust SHA-256 values in
+[`jvm-tasty-nested-constructor-calls.md`](jvm-tasty-nested-constructor-calls.md).
+
 Issue [#1832](https://github.com/scytrowski/dotty-rs/issues/1832) pins the
 Scala 3.9 oracle and records the original Rust layer observations for
 `new CounterOwner(makeCounter(seed))`. Issue
@@ -42,6 +49,11 @@ The compiler produced exactly these six files:
 
 The Rust classfile and TASTy decoders assert class names, major version 65,
 TASTy 28.9.0, each class's own UUID link, descriptors, and Factory bytecode.
+The paired batch regression now repeats the exact source through two
+independent frontend sessions with distinct `SourceId`s and compares all six
+relative paths, class bytes, sidecar bytes, and UUIDs. It also checks that the
+Factory retains both `(I)Lexample/Counter;` and
+`(I)Lexample/CounterOwner;` methods.
 
 ## JVM ABI and instruction order
 
@@ -62,10 +74,13 @@ Pinned `javap -v -p -c` reports `create` as follows:
 12: areturn
 ```
 
-The method has `stack=4`, `locals=2`, and `ACC_PUBLIC`. The JVM allocates the
-outer Owner first, calls the instance factory on `this` with the original
-`seed`, passes that returned `Counter` to the Owner constructor, and returns
-the initialized Owner. In `create`, the method reference owner is
+The method has `stack=4`, `locals=2`, and `ACC_PUBLIC`. The batch contract
+consumes this supported instruction sequence one instruction at a time,
+checks each constant-pool operand, and requires complete method-body
+consumption. The check does not assume bytecode program counters. The JVM
+allocates the outer Owner first, calls the instance factory on `this` with the
+original `seed`, passes that returned `Counter` to the Owner constructor, and
+returns the initialized Owner. In `create`, the method reference owner is
 `CounterOwnerFactory`, and the outer constructor reference owner is
 `CounterOwner`. The separate constructor reference in `makeCounter` targets
 `Counter.<init>`. No instruction offsets, owner or descriptor were inferred
@@ -177,6 +192,9 @@ not inferred from the first rejection.
 
 | Control | Evidence / first result |
 | --- | --- |
+| Independent original-source sessions | `jvm_tasty_artifacts::factory_result_argument_emits_six_identical_artifacts_from_independent_sessions` emits the exact source with distinct `SourceId`s and compares all six paths, bytes, and UUIDs. Both class and TASTy versions and each UUID link are decoded. |
+| Malformed Factory `create` bytecode | `jvm_tasty_artifacts::factory_result_batch_contract_rejects_corrupt_create_bytecode_before_publication` first accepts the complete canonical batch, then rejects a missing or additional `invokevirtual`, a Factory invocation redirected to `Counter.<init>`, an outer constructor redirected to `makeCounter`, a missing `create` method, a Factory result descriptor changed to `CounterOwner`, and truncated class bytes. Instruction corruption fails at `cross-class invocation`; missing or ABI-mismatched methods fail at `member ABI`; truncation fails during class-file decoding. No rejected artifact set is passed to the publisher. |
+| Factory-result publisher negatives and handled failures | `jvm_tasty_artifacts::factory_result_batch_publisher_rejects_corruption_and_all_six_write_failures` uses the mandatory source. Missing/corrupt class or sidecar, wrong source identity, stale UUID, duplicate/unsafe paths, each failure after writes 1–6, and failures before/after promotion are rejected. Every handled fault leaves no destination or staging tree; a preexisting destination sentinel is unchanged. These are handled failures, not crash-atomic durability claims. |
 | Rename package, classes, and factory method | Genuine renamed source emits a complete batch; a fresh identical source session produces equal artifacts. |
 | Reorder class declarations | Genuine reordered source emits a complete batch; a fresh identical source session produces equal artifacts. Helper proof linkage does not depend on declaration order. |
 | Explicit `this.makeCounter(seed)` | Emits the same bounded call form with an explicit TASTy `THIS` receiver; the implicit source form emits `QUALTHIS`. |
@@ -208,10 +226,8 @@ not inferred from the first rejection.
 | Using helper parameter | A contextual `using` helper called without an ordinary argument rejects first during method body typing with `ApplicationArgumentConformanceUnsupported`; no paired plan or TASTy batch is returned. |
 | External-owner helper | Calling `CounterMaker.makeCounter` rejects first in the source proof with `SourceIdentity("planned helper must be a public canonical instance method owned by the caller class")`; no paired plan or TASTy batch is returned. |
 | Super helper call | A factory inheriting `makeCounter` through `super` rejects first during source collection because explicit parents remain outside this batch plan; no paired plan or TASTy batch is returned. |
-| Wrong constructor | Unmeasured. No alternate constructor shape is needed to observe the current factory-call boundary. |
-| Missing/corrupt sidecar | Unmeasured for this source. No Rust batch was emitted to serve as a publisher input; the existing linked-batch regression has separate corrupt-sidecar controls. |
-
-Unmeasured controls have no attributed rejection stage.
+| Wrong constructor | Rejected by the complete Factory-result batch contract when `create`'s Owner constructor operand is redirected to the valid Factory helper Methodref; first failure is `cross-class invocation`. |
+| Missing/corrupt Factory sidecar | Rejected by the test-only batch publisher before staging. Missing path fails manifest validation; empty/corrupt TASTy fails TASTy decoding. |
 
 ## Validated proof model and boundary
 
