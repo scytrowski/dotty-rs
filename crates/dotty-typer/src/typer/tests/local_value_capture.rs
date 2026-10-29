@@ -46,6 +46,23 @@ object CaptureLocal:
             typer.typed_ast().get(typed_method).kind,
             TreeKind::DefDef(_)
         ));
+        let SymbolInfo::Complete(method_type) = *typer.store().symbols.info(method) else {
+            panic!("method signature should remain complete after body typing");
+        };
+        let expected_result = method_type;
+        let context = typer.expression_context_for(method).unwrap();
+        let expected_rhs = typer
+            .type_expression_expected(rhs, context, expected_result)
+            .expect("repeated expected typing of the method RHS should succeed");
+        let expected_rhs_again = typer
+            .type_expression_expected(rhs, context, expected_result)
+            .expect("a second expected typing of the method RHS should reuse the cache");
+        assert_eq!(expected_rhs, expected_rhs_again, "{name} RHS identity");
+        assert_eq!(
+            expected_rhs,
+            typer.source_typed_index().get(source, rhs).unwrap(),
+            "{name} cached source mapping"
+        );
         let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
             panic!("{name} source body should be a block");
         };
@@ -176,6 +193,80 @@ fn ordinary_function1_orders_mixed_parameter_and_local_captures_by_first_use() {
         )
         .collect();
     assert_eq!(captured, vec![parameter, binding.symbol]);
+}
+
+#[test]
+fn nested_block_shadowing_captures_the_innermost_canonical_local() {
+    let source_text = r#"
+object NestedLocalCapture:
+  def f: Int => Int = {
+    val value: Int = 100
+    {
+      val value: Int = 3
+      x => x + value
+    }
+  }
+"#;
+    let (parsed, mut store, mut packages, definitions, index, source) = parse_and_name(source_text);
+    enter_scala_function_classes(&mut store, &mut packages, [1]);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "f");
+    let method_tree = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, _)| (index.symbol_at(source, tree) == Some(method)).then_some(tree))
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let typed_method = typer.type_method_definition(method_tree).unwrap();
+    assert!(matches!(
+        typer.typed_ast().get(typed_method).kind,
+        TreeKind::DefDef(_)
+    ));
+    let TreeKind::Block(outer_block) = &parsed.ast.get(rhs).kind else {
+        panic!("source method body should be an outer block");
+    };
+    let outer_local = typer
+        .typed_local_binding_at(source, outer_block.stats[0])
+        .unwrap();
+    let outer_typed_block = typer.source_typed_index().get(source, rhs).unwrap();
+    let TreeKind::Block(typed_outer_block) = &typer.typed_ast().get(outer_typed_block).kind else {
+        panic!("outer typed block should be retained");
+    };
+    let inner_source_block = outer_block.expr;
+    let inner_typed_block = typer
+        .source_typed_index()
+        .get(source, inner_source_block)
+        .expect("nested expected block should retain a source mapping");
+    let TreeKind::Block(inner_block) = &parsed.ast.get(inner_source_block).kind else {
+        panic!("final source expression should be a nested block");
+    };
+    let inner_local = typer
+        .typed_local_binding_at(source, inner_block.stats[0])
+        .unwrap();
+    assert_eq!(
+        typer.source_typed_index().get(source, inner_block.stats[0]),
+        Some(inner_local.declaration)
+    );
+    assert_eq!(typed_outer_block.expr, inner_typed_block);
+    let typed_lambda = typer
+        .source_typed_index()
+        .get(source, inner_block.expr)
+        .expect("inner lambda should be mapped");
+    let TreeKind::Closure(closure) = &typer.typed_ast().get(typed_lambda).kind else {
+        panic!("inner expression should be a closure");
+    };
+    assert_eq!(closure.env.len(), 1);
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(closure.env[0]).ty),
+        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+            if *symbol == inner_local.symbol && *symbol != outer_local.symbol
+    ));
 }
 
 #[test]

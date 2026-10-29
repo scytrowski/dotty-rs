@@ -2235,9 +2235,7 @@ impl SourceTyper<'_> {
         let ty = self.typed_arena.get(expr).ty;
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .block(stats, expr, ty, position);
-        let block_ends_in_function_literal = self.arena.try_get(block.expr).is_some_and(|node| {
-            matches!(node.kind, TreeKind::PhaseSpecific(UntypedNode::Function(_)))
-        });
+        let block_ends_in_function_literal = self.is_function_literal_value(block.expr);
         if contains_local_method || (has_expected && block_ends_in_function_literal) {
             self.typed_index
                 .insert(self.source, tree, typed)

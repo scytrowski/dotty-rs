@@ -433,21 +433,24 @@ impl SourceTyper<'_> {
     ) -> Result<TreeId<Typed>, TyperError> {
         let typed = match self.arena.try_get(tree).map(|node| &node.kind) {
             Some(TreeKind::Block(block))
-                if !block.stats.is_empty()
-                    && self.arena.try_get(block.expr).is_some_and(|node| {
-                        matches!(node.kind, TreeKind::PhaseSpecific(UntypedNode::Function(_)))
-                    }) =>
+                if !block.stats.is_empty() && self.is_function_literal_value(block.expr) =>
             {
-                self.type_block_expression_expected(
-                    tree,
-                    block.clone(),
-                    self.arena.get(tree).position,
-                    context,
-                    expected,
-                    poly_binder,
-                    info_journal,
-                    new_mappings,
-                )?
+                if let Some(typed) = self.typed_index.get(self.source, tree) {
+                    self.validate_value_expression(tree, typed)?;
+                    self.validate_cached_parent_argument_receiver_access(tree, typed)?;
+                    typed
+                } else {
+                    self.type_block_expression_expected(
+                        tree,
+                        block.clone(),
+                        self.arena.get(tree).position,
+                        context,
+                        expected,
+                        poly_binder,
+                        info_journal,
+                        new_mappings,
+                    )?
+                }
             }
             Some(TreeKind::Block(block)) if block.stats.is_empty() => {
                 if let Some(typed) = self.typed_index.get(self.source, tree) {
@@ -632,6 +635,18 @@ impl SourceTyper<'_> {
                     info_journal,
                     new_mappings,
                 )?,
+            TreeKind::Block(block)
+                if !block.stats.is_empty() && self.is_function_literal_value(block.expr) =>
+            {
+                return self.type_expression_expected_with_poly_binder(
+                    tree,
+                    context,
+                    expected,
+                    poly_binder,
+                    info_journal,
+                    new_mappings,
+                );
+            }
             TreeKind::Block(block) if block.stats.is_empty() => self
                 .type_value_expression_expected_with_poly_binder(
                     block.expr,
@@ -664,9 +679,7 @@ impl SourceTyper<'_> {
             Some(TreeKind::PhaseSpecific(UntypedNode::Parens(parens))) => {
                 self.is_function_literal_value(parens.inner)
             }
-            Some(TreeKind::Block(block)) if block.stats.is_empty() => {
-                self.is_function_literal_value(block.expr)
-            }
+            Some(TreeKind::Block(block)) => self.is_function_literal_value(block.expr),
             _ => false,
         }
     }
