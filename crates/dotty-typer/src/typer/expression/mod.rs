@@ -432,6 +432,23 @@ impl SourceTyper<'_> {
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         let typed = match self.arena.try_get(tree).map(|node| &node.kind) {
+            Some(TreeKind::Block(block))
+                if !block.stats.is_empty()
+                    && self.arena.try_get(block.expr).is_some_and(|node| {
+                        matches!(node.kind, TreeKind::PhaseSpecific(UntypedNode::Function(_)))
+                    }) =>
+            {
+                self.type_block_expression_expected(
+                    tree,
+                    block.clone(),
+                    self.arena.get(tree).position,
+                    context,
+                    expected,
+                    poly_binder,
+                    info_journal,
+                    new_mappings,
+                )?
+            }
             Some(TreeKind::Block(block)) if block.stats.is_empty() => {
                 if let Some(typed) = self.typed_index.get(self.source, tree) {
                     self.validate_value_expression(tree, typed)?;

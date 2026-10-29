@@ -844,6 +844,21 @@ impl SourceTyper<'_> {
                 context.owner,
                 symbol,
             );
+        let capture_local =
+            self.function_literals
+                .can_capture_local_value(self.store, context.owner, symbol)
+                && !self.initializing_local_symbols.contains(&symbol)
+                && self
+                    .local_symbols
+                    .iter()
+                    .any(|((source, declaration), local)| {
+                        *source == self.source
+                    && *local == symbol
+                    && self.typed_index.get(*source, *declaration).is_some()
+                    && self.arena.try_get(*declaration).is_some_and(|node| {
+                        matches!(&node.kind, TreeKind::ValDef(value) if value.rhs.is_some())
+                    })
+                    });
         if self.function_literals.is_method(context.owner)
             && declaration.owner != Some(context.owner)
             && (matches!(declaration.kind, SymbolKind::Parameter | SymbolKind::Local)
@@ -852,6 +867,7 @@ impl SourceTyper<'_> {
                     SymbolKind::Field | SymbolKind::Value | SymbolKind::Variable
                 ) && !shared_owner))
             && !capture_parameter
+            && !capture_local
         {
             return Err(TyperError::FunctionLiteralCaptureUnsupported {
                 source: self.source,
@@ -863,7 +879,7 @@ impl SourceTyper<'_> {
             self.expression_type_of_symbol(symbol, context.owner, tree.index(), info_journal)?;
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .ident_with_backquoted(ident.name, ident.backquoted, ty, position);
-        if capture_parameter {
+        if capture_parameter || capture_local {
             self.function_literals.capture(context.owner, symbol, typed);
         }
         Ok(typed)
