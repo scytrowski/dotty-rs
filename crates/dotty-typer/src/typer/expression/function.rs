@@ -24,6 +24,8 @@ struct FunctionLiteralDefinition {
     method: SymbolId,
     scope: ScopeId,
     typed_definition: Option<TreeId<Typed>>,
+    captures: Vec<(SymbolId, TreeId<Typed>)>,
+    capture_method_parameters: bool,
 }
 
 impl FunctionLiteralIndex {
@@ -66,6 +68,75 @@ impl FunctionLiteralIndex {
         tree: TreeId<Untyped>,
     ) -> Option<SymbolId> {
         self.parameters.get(&(source, tree)).copied()
+    }
+
+    pub(in crate::typer) fn capture(
+        &mut self,
+        method: SymbolId,
+        symbol: SymbolId,
+        value: TreeId<Typed>,
+    ) {
+        if let Some(definition) = self
+            .definitions
+            .values_mut()
+            .find(|definition| definition.method == method)
+            && !definition
+                .captures
+                .iter()
+                .any(|(captured, _)| *captured == symbol)
+        {
+            definition.captures.push((symbol, value));
+        }
+    }
+
+    pub(in crate::typer) fn captures(&self, method: SymbolId) -> Vec<TreeId<Typed>> {
+        self.definitions
+            .values()
+            .find(|definition| definition.method == method)
+            .map(|definition| {
+                definition
+                    .captures
+                    .iter()
+                    .map(|(_, value)| *value)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(in crate::typer) fn can_capture_method_parameter(
+        &self,
+        store: &SemanticStore,
+        method: SymbolId,
+        symbol: SymbolId,
+    ) -> bool {
+        if !self
+            .definitions
+            .values()
+            .any(|definition| definition.method == method && definition.capture_method_parameters)
+        {
+            return false;
+        }
+        if !store.symbols.contains(symbol) {
+            return false;
+        }
+        let parameter = store.symbols.get(symbol);
+        let Some(owner) = store.symbols.get(method).owner else {
+            return false;
+        };
+        if parameter.kind != SymbolKind::Parameter
+            || parameter.owner != Some(owner)
+            || parameter.flags.contains(SymbolFlags::MUTABLE)
+            || !store.symbols.contains(owner)
+            || store.symbols.get(owner).kind != SymbolKind::Method
+            || self.is_method(owner)
+        {
+            return false;
+        }
+        matches!(
+            parameter.info,
+            SymbolInfo::Complete(ty)
+                if !matches!(store.types.try_get(ty), Some(Type::ByName { .. } | Type::Repeated { .. }))
+        )
     }
 }
 
@@ -203,6 +274,8 @@ impl SourceTyper<'_> {
                     method,
                     scope: method_scope,
                     typed_definition: None,
+                    captures: Vec::new(),
+                    capture_method_parameters: function.params.len() == 1,
                 },
             )
             .is_some()
@@ -376,9 +449,10 @@ impl SourceTyper<'_> {
 
         let typed_method_reference = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .ident(method_name, method_ref, position);
+        let captures = self.function_literals.captures(method);
         Ok(
             TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).closure(
-                Vec::new(),
+                captures,
                 typed_method_reference,
                 None,
                 function_type,

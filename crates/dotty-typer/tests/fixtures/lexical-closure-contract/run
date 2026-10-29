@@ -69,6 +69,7 @@ compile_positive() {
 }
 
 compile_positive Positive.scala Positive.scala39-typed-tree.txt
+compile_positive MethodParameters.scala MethodParameters.scala39-typed-tree.txt
 compile_positive Mutable.scala Mutable.scala39-typed-tree.txt
 
 expect_failure() {
@@ -90,4 +91,5 @@ expect_failure WrongResult.scala 'Required: Boolean'
 expect_failure UnknownReference.scala 'Not found: missing'
 printf 'Scala source revision: %s\nJDK: %s\n' "$actual_revision" "$jdk_release"
 printf '%s\n' 'Positive capture, shadowing, instance-member, and mutable-control typer snapshots match.'
+printf '%s\n' 'Enclosing method parameter capture ordering and deduplication match the pinned typer snapshot.'
 printf '%s\n' 'Wrong-result and unknown-reference controls remain rejected.'

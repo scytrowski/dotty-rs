@@ -838,6 +838,12 @@ impl SourceTyper<'_> {
                     SymbolKind::Object | SymbolKind::ModuleClass | SymbolKind::Package
                 )
             });
+        let capture_parameter = self.function_literals.is_method(context.owner)
+            && self.function_literals.can_capture_method_parameter(
+                self.store,
+                context.owner,
+                symbol,
+            );
         if self.function_literals.is_method(context.owner)
             && declaration.owner != Some(context.owner)
             && (matches!(declaration.kind, SymbolKind::Parameter | SymbolKind::Local)
@@ -845,6 +851,7 @@ impl SourceTyper<'_> {
                     declaration.kind,
                     SymbolKind::Field | SymbolKind::Value | SymbolKind::Variable
                 ) && !shared_owner))
+            && !capture_parameter
         {
             return Err(TyperError::FunctionLiteralCaptureUnsupported {
                 source: self.source,
@@ -854,14 +861,12 @@ impl SourceTyper<'_> {
         }
         let ty =
             self.expression_type_of_symbol(symbol, context.owner, tree.index(), info_journal)?;
-        Ok(
-            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).ident_with_backquoted(
-                ident.name,
-                ident.backquoted,
-                ty,
-                position,
-            ),
-        )
+        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .ident_with_backquoted(ident.name, ident.backquoted, ty, position);
+        if capture_parameter {
+            self.function_literals.capture(context.owner, symbol, typed);
+        }
+        Ok(typed)
     }
 
     pub(in crate::typer) fn type_selection_expression(
