@@ -1,0 +1,16 @@
+[[syntax trees at end of                     typer]] // Mutable.scala
+package lexicalclosure {
+  final lazy module val Mutable: lexicalclosure.Mutable =
+    new lexicalclosure.Mutable()
+  final module class Mutable() extends Object() {
+    this: lexicalclosure.Mutable.type =>
+    def mutableCapture: Int => Int =
+      {
+        var delta: Int = 2
+        (x: Int) =>
+          {
+            x + delta
+          }
+      }
+  }
+}

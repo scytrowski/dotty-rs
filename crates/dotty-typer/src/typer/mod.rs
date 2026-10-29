@@ -6158,6 +6158,8 @@ mod tests {
         }
     }
 
+    mod lexical_closure_contract;
+
     #[test]
     fn function1_expectation_infers_lambda_parameter_and_checks_body() {
         let source_text = concat!(
