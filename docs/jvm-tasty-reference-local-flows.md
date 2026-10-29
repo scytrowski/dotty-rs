@@ -173,3 +173,31 @@ The inherited strict pinned Scala consumer and JDK workflow is
 `.github/workflows/jvm-tasty-factory-scala-consumer.yml`; its path filter
 includes this fixture, documentation, and tests. The full hosted Scala
 compatibility corpus remains out of scope.
+
+## Validation receipt
+
+This audit starts from `origin/main` commit
+`2c9303ea65ab7c6c9d6994cc98be6620906a5bc3`. The pinned Scala source build,
+fresh producer compile, six-file inventory/hash/UUID check, Scala-only client,
+and `javap` inspection all completed with Temurin 21.0.8 and Scala revision
+`777528f19a58e794c9954a42f433373472ec57f8`. The consumer printed
+`scala39-reference-local-constructor-flow=ok` under `-Xverify:all`.
+
+| Validation | Result |
+| --- | --- |
+| Focused Rust local-flow identity, wire-tree, rename/reorder controls | Passed; source/typed links and local `TERMREFdirect → VALDEF` are asserted. |
+| Paired Rust first-failure measurement | Passed; first rejection is `JVM/TASTy cross-contract validation: TastyPlan(BodyType { .. })`. |
+| JVM-only local-flow backend regression | Passed; 3 classes emitted, descriptors/opcodes/stack/local bounds asserted, JDK21 `-Xverify:all` harness executed. |
+| Full `jvm_tasty_factory_result_arguments` integration test with required pinned Scala reader | Passed, 11 tests. |
+| Inherited strict JDK21 classfile/JVM/source/TASTy-artifact/stateful gate | Passed with `DOTTY_CLASSFILE_REQUIRE_JDK=1`. |
+| `cargo fmt --all -- --check` | Passed. |
+| `python3 tools/check-frontend-boundaries.py` | Passed, including self-test. |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | Passed. |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked` | Passed. |
+| `DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --workspace --all-targets --locked` | Passed. |
+| `git diff --check` and manifest hash/file-inventory verification | Passed. |
+
+There are no production behavior changes and no Rust paired class/TASTy output
+is claimed for the local-block source. The local-body negative matrix marked
+deferred above remains unmeasured because the authentic body validator rejects
+before serialization. The full hosted Scala compatibility corpus was not run.
