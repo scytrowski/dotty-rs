@@ -1,5 +1,24 @@
 use super::*;
 
+fn source_function_literal(
+    parsed: &dotty_parser::ParseResult,
+    rhs: TreeId<Untyped>,
+) -> TreeId<Untyped> {
+    match &parsed.ast.get(rhs).kind {
+        TreeKind::PhaseSpecific(UntypedNode::Function(_)) => rhs,
+        TreeKind::Block(block) => {
+            assert!(matches!(
+                parsed.ast.get(block.expr).kind,
+                TreeKind::PhaseSpecific(UntypedNode::Function(_))
+            ));
+            block.expr
+        }
+        other => panic!(
+            "method RHS should be a function literal or a block ending in one, got {other:?}"
+        ),
+    }
+}
+
 #[test]
 fn lexical_closure_contract_records_whole_method_baseline() {
     let source_text =
@@ -171,6 +190,7 @@ fn lexical_closure_contract_records_whole_method_baseline() {
 
     let (local, local_rhs) =
         method_definition_and_rhs(&parsed, typer.store(), &index, source, "local");
+    let local_function = source_function_literal(&parsed, local_rhs);
     let local_tree = method_tree(local);
     let local_start = source_text.find("def local").unwrap();
     let local_capture_start =
@@ -185,7 +205,11 @@ fn lexical_closure_contract_records_whole_method_baseline() {
     }
     assert_eq!(typer.source_typed_index().get(source, local_tree), None);
     assert_eq!(typer.source_typed_index().get(source, local_rhs), None);
-    assert_eq!(typer.function_literal_method_at(source, local_rhs), None);
+    assert_eq!(typer.source_typed_index().get(source, local_function), None);
+    assert_eq!(
+        typer.function_literal_method_at(source, local_function),
+        None
+    );
 
     let (mutable, mutable_rhs) =
         method_definition_and_rhs(&parsed, typer.store(), &index, source, "mutable");
@@ -325,6 +349,7 @@ fn future_lexical_capture_receipts_require_identity_order_deduplication_and_owne
     );
     for (name, expected_env_len) in [("ordered", 2), ("local", 1), ("explicitThis", 1)] {
         let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let lambda_tree = source_function_literal(&parsed, rhs);
         let method_tree = parsed
             .ast
             .iter()
@@ -345,7 +370,23 @@ fn future_lexical_capture_receipts_require_identity_order_deduplication_and_owne
             typer.source_typed_index().get(source, method_tree),
             Some(typed_method)
         );
-        let typed_closure = typer.source_typed_index().get(source, rhs).unwrap();
+        let typed_rhs = typer
+            .source_typed_index()
+            .get(source, rhs)
+            .expect("the complete method RHS should retain its source mapping");
+        let typed_lambda = typer
+            .source_typed_index()
+            .get(source, lambda_tree)
+            .expect("the source lambda should retain its own source mapping");
+        if lambda_tree != rhs {
+            let TreeKind::Block(block) = &typer.typed_ast().get(typed_rhs).kind else {
+                panic!("a block-wrapped source lambda should preserve a typed Block RHS");
+            };
+            assert_eq!(block.expr, typed_lambda);
+        } else {
+            assert_eq!(typed_rhs, typed_lambda);
+        }
+        let typed_closure = typed_lambda;
         let TreeKind::Closure(ref closure) = typer.typed_ast().get(typed_closure).kind else {
             panic!("source lambda root must map to its typed Closure");
         };
@@ -376,7 +417,11 @@ fn future_lexical_capture_receipts_require_identity_order_deduplication_and_owne
                 .collect::<Vec<_>>();
             assert_eq!(captured_symbols, [right, left]);
         }
-        assert!(typer.function_literal_method_at(source, rhs).is_some());
+        assert!(
+            typer
+                .function_literal_method_at(source, lambda_tree)
+                .is_some()
+        );
     }
 }
 
