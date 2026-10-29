@@ -505,13 +505,15 @@ Missing and misplaced sidecars were rejected by the reader with
 with its TASTy, and `-Werror` made that warning fatal. Additional isolated
 controls reached these first failures:
 
-- A classfile-only `makeCounter` result descriptor changed from Counter to
-  CounterOwner produced E007 (`Found: Counter`, `Required: Counter`) when the
-  consumer required Counter.
-- Removing the Factory sidecar and `makeCounter` declaration produced E008
-  “value makeCounter is not a member”.
-- Hiding Owner's primary `(Counter)Owner` constructor and sidecar produced
-  E173, “constructor CounterOwner cannot be accessed”.
+- In the retained #1837 run, a classfile-only `makeCounter` result descriptor
+  changed from Counter to CounterOwner produced the reader's “This `.tasty`
+  file is missing” diagnostic first, followed by E007 (`Found:
+  example.CounterOwner`, `Required: example.Counter`) when the consumer
+  required Counter. The missing-helper control likewise reported the missing
+  sidecar before E008, “value makeCounter is not a member”. The Owner
+  constructor control reported the missing sidecar before E173,
+  “constructor CounterOwner cannot be accessed”. These were secondary ABI
+  diagnostics, not the first failures.
 - Removing both Counter artifacts and relocating both under another package
   failed with E008, “type Counter is not a member of example”.
 - Changing Counter's classfile-internal owner to `example.Coupler` while leaving
@@ -543,3 +545,137 @@ gate emits a JSON evidence report with the compiler revision/version, JDK
 release, eight compiler artifact hashes, all original and renamed hashes and
 UUIDs, compile classpath order, runtime outputs, control diagnostics, and
 first failing stages.
+
+## Integrated release gate (#1838)
+
+The final integration run started from clean `origin/main` at
+`2c9303ea65ab7c6c9d6994cc98be6620906a5bc3`, containing merged prerequisites
+#1832–#1837. Their independently reviewed `READY_FOR_MERGE` receipts and merge
+commits are [#1832/#1840](https://github.com/scytrowski/dotty-rs/pull/1840)
+(`55ad298dd3863e00ce3a80d8d20d6b2ae781b552),
+[#1833/#1841](https://github.com/scytrowski/dotty-rs/pull/1841)
+(`a34c50ffc397b052edee67e4ec9321b9a0121849),
+[#1834/#1843](https://github.com/scytrowski/dotty-rs/pull/1843)
+(`04376dc23f92feb423f112e8d3e6c1d4d908414e),
+[#1835/#1844](https://github.com/scytrowski/dotty-rs/pull/1844)
+(`a316d967ec6c4c698ee9e28329c50fd7636772cc),
+[#1836/#1845](https://github.com/scytrowski/dotty-rs/pull/1845)
+(`2f138ecb86a834318a82c527ce3f7944507c627d), and
+[#1837/#1847](https://github.com/scytrowski/dotty-rs/pull/1847)
+(`2c9303ea65ab7c6c9d6994cc98be6620906a5bc3).
+
+The strict Scala consumer and producer suite were rerun against that tree with
+Rust/Cargo 1.98.1, Scala checkout
+`777528f19a58e794c9954a42f433373472ec57f8` (compiler 3.9.0), and Eclipse
+Temurin 21.0.13+9 on x86_64. The consumer used `-release 21`; all eight
+compiler JARs matched the workflow SHA-256 manifest. Build outputs, temporary
+files, Scala reader output and dependency cache were isolated under the issue
+worktree. The producer source SHA-256 is
+`daecae35c324a26522f13f459d14d5cc730ab22d5260f17384802f20572a550c`; the
+separate Scala client SHA-256 is
+`6f40cd586653aefbf735f5d511428399b9f71b12c6550ff820cec8d79a5a7d4a`.
+
+The strict consumer reported all six original Rust outputs byte-identical to
+the recorded inventory above, class-file major version 65, TASTy 28.9.0, and
+the following classfile-to-sidecar links:
+
+| Class | Classfile SHA-256 | TASTy SHA-256 | TASTY UUID |
+| --- | --- | --- | --- |
+| `example/Counter` | `b38143cee8571a6602865ff6062eca92dd771582f539b156100ffc9647af94ae` | `a0e78329d60aba318de825eaddb7668d34838197158653c1b7384188143099c7` | `00da82c5ca4ebdac0000000000008193` |
+| `example/CounterOwner` | `d914c2dfc5b8d22079be304fc7c463be171394a528b71603de43342a79db91b2` | `9bcfbbb9d12f71a50122c6b2af960fe76ffd7f629a57738f61f4d384821f7f13` | `004ebc559d6864ef0000000000008195` |
+| `example/CounterOwnerFactory` | `ecbebc8a5433f559a995364195a6276d85dc736b10ffc8076c3273f805e25981` | `c3ca6a461041bc590d3c6d51fba86b0633fe652a0a55de72f84374e8e2840e16` | `00ae6e0b2a42b1a10000000000008199` |
+
+Two fresh sessions emitted identical bytes for all six original files. The
+renamed/reordered producer also emitted deterministic six-file batches. The
+official Scala client compiled against each original Rust batch and ran
+unchanged producer classes with `java -Xverify:all -ea`, printing `7,-9,3`;
+each renamed/reordered client printed the same result. The strict JDK gate
+decoded exactly one `CounterOwnerFactory.makeCounter:(I)Lexample/Counter;`
+invoke in `create` and the `CounterOwner.<init>:(Lexample/Counter;)V` call,
+then executed the original Rust classes with Owner/Counter identity and
+mutation-isolation assertions. The Scala reader's TASTy-only lookups and their
+classfile-only member controls ran for
+Counter, Owner, Factory.create, and Factory.makeCounter. Before/after hashes
+matched around compilation and runtime. Scala `-decompile` preserved both
+Factory method bodies and the selected `makeCounter(seed)` call inside the
+Owner constructor argument; `-from-tasty` accepted the three original Rust
+sidecars. The independent original source session and shared Formal,
+NestedNew, and PlannedCall proof regressions passed without compiler or
+artifact changes.
+
+The #1847 ABI note is closed by paired classfile-only probes. Each probe
+renames the classfile `TASTY` attribute and removes the sidecar; the unchanged
+classfile baseline must compile before the mutated classfile is tested:
+
+| Probe | Unchanged classfile-only baseline | Mutated first failure |
+| --- | --- | --- |
+| `makeCounter` result descriptor changed from `(I)Lexample/Counter;` to `(I)Lexample/CounterOwner;` | Compiles with the original descriptor | E007 only: `Found: example.CounterOwner`, `Required: example.Counter`; one error, no missing-sidecar diagnostic |
+| Owner reference constructor removed from the classfile | Compiles with `(Lexample/Counter;)V` present | E173 only: `constructor CounterOwner cannot be accessed as a member`; one error, no missing-sidecar diagnostic |
+
+Other sidecar controls intentionally keep the Scala 3 `TASTY` marker. Their
+first result remains the Scala reader's missing, corrupt, misplaced, or UUID
+out-of-sync diagnostic; any subsequent E007/E008/E173 is recorded as a
+secondary diagnostic. The source/proof/pickler/batch negatives and handled
+fault injection after each of six writes, before promotion, and after
+promotion all passed. The publisher preserves preexisting sentinels and makes
+no crash-atomic durability claim.
+
+The following strict suites executed with their required flags set (not
+skipped): the Scala/oracle suite passed 30 tests across 12 target summaries;
+the JDK 21 gate passed 838 tests across seven target summaries. Neither strict
+suite ignored a test.
+
+```sh
+DOTTY_REQUIRE_SCALA_TASTY_CONSUMER=1 \
+DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER=1 \
+DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER=1 \
+DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER=1 \
+DOTTY_REQUIRE_SCALA_TASTY_OBJECT_COMPOSITION_CONSUMER=1 \
+DOTTY_REQUIRE_SCALA_TASTY_CONSTRUCTOR_INJECTION_CONSUMER=1 \
+DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER=1 \
+DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER=1 \
+DOTTY_REQUIRE_SCALA_TASTY_FACTORY_RESULT_CONSUMER=1 \
+DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 \
+cargo +1.98.1 test \
+  --test jvm_tasty_scala_consumer \
+  --test jvm_tasty_multiclass_scala_consumer \
+  --test jvm_tasty_cross_class_scala_consumer \
+  --test jvm_tasty_factory_scala_consumer \
+  --test jvm_tasty_object_composition_scala_consumer \
+  --test jvm_tasty_constructor_injection_scala_consumer \
+  --test jvm_tasty_reference_constructor_scala_consumer \
+  --test jvm_tasty_nested_constructor_scala_consumer \
+  --test jvm_tasty_factory_result_scala_consumer \
+  --test jvm_tasty_cross_class_factories \
+  --test jvm_tasty_factory_result_arguments \
+  --test tasty_source_pickling --locked -- --nocapture
+
+DOTTY_CLASSFILE_REQUIRE_JDK=1 \
+cargo +1.98.1 test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  --test jvm_tasty_artifacts \
+  --test jvm_stateful_class_contract --locked -- --nocapture
+```
+
+The remaining workspace release checks passed on the issue tree: `cargo
++1.98.1 fmt --all -- --check`, `python3 tools/check-frontend-boundaries.py`,
+workspace Clippy with `-D warnings`, workspace rustdoc with
+`RUSTDOCFLAGS="-D warnings"`, and `cargo +1.98.1 test --workspace
+--all-targets --locked`. Workspace tests reported 7,191 passed, no failures,
+and 18 explicitly ignored tests across 157 target summaries. The separate
+strict Scala and JDK suites above had zero ignored tests. `git diff --check`
+also passed. These checks were run on implementation tree
+`4d0105a50f11d1f13266f77e50ac973be12451de`; this ledger update adds no source
+or test behavior. The hosted full Scala corpus audit is outside this release
+gate.
+
+This bounded result supports one public same-class factory call with one
+ordinary argument, a public instance helper whose result is the exact
+reference type expected by the Owner constructor, and the already covered
+direct-formal and nested-`new` forms. External owners, static/super calls,
+overloads, generic or contextual/using helpers, multi-argument or generic
+constructors, arbitrary method expressions, cross-unit imports, and a public
+source compiler/session API remain deferred. Producer or proof failures belong
+to their owning predecessor and are not hidden by this release ledger.
