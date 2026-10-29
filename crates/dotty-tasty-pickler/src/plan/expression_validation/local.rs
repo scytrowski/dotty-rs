@@ -6,6 +6,7 @@ impl Validator<'_, '_> {
         source_id: TreeId<Untyped>,
         typed_id: TreeId<Typed>,
         method: &MethodPicklePlan,
+        reference_local_type: Option<TypeId>,
         depth: usize,
         visited: &mut HashSet<TreeId<Typed>>,
     ) -> Result<(), PickleError> {
@@ -75,6 +76,9 @@ impl Validator<'_, '_> {
                 );
             }
         };
+        if reference_local_type.is_some() && mutable {
+            return Err(self.unsupported(UnsupportedFeature::SourceMetadata, Some(binding.symbol)));
+        }
         if source_val.metadata.visibility.is_some() || !source_val.metadata.annotations.is_empty() {
             return Err(self.unsupported(UnsupportedFeature::SourceMetadata, Some(binding.symbol)));
         }
@@ -113,20 +117,17 @@ impl Validator<'_, '_> {
         }
 
         let local_type = self.complete(binding.symbol)?;
-        if local_type != self.plan.definitions.int || typed.ty != local_type {
+        if (local_type != self.plan.definitions.int
+            && !reference_local_type.is_some_and(|expected| {
+                expected == local_type && self.is_planned_sibling_class_type(local_type, None)
+            }))
+            || typed.ty != local_type
+        {
             return Err(PickleError::BodyType {
                 tree: typed_id,
                 ty: typed.ty,
             });
         }
-        let int_symbol = self
-            .ty(self.plan.definitions.int)?
-            .reference_symbol()
-            .ok_or(PickleError::BuiltinIdentity {
-                builtin: Builtin::Int,
-                ty: self.plan.definitions.int,
-            })?;
-        let int_name = self.symbol(int_symbol)?.name;
         let source_tpt = self.source_tree(source_val.tpt)?;
         let typed_tpt =
             self.plan
@@ -135,7 +136,27 @@ impl Validator<'_, '_> {
                 .ok_or(PickleError::InvalidTypedTree {
                     tree: typed_val.tpt,
                 })?;
-        if !matches!(&source_tpt.kind, TreeKind::Ident(ident) if ident.name == int_name)
+        if reference_local_type.is_some()
+            && (source.position.is_none()
+                || typed.position.is_none()
+                || source_tpt.position.is_none()
+                || typed_tpt.position.is_none())
+        {
+            return Err(PickleError::BodySpan { tree: typed_id });
+        }
+        let declared_name = match self.ty(local_type)? {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } => self.symbol(*symbol)?.name,
+            _ => return Err(PickleError::UnsupportedTypeReference { ty: local_type }),
+        };
+        if reference_local_type.is_some()
+            && !self.is_planned_sibling_class_type(local_type, Some(declared_name))
+        {
+            return Err(PickleError::UnsupportedTypeReference { ty: local_type });
+        }
+        if !matches!(&source_tpt.kind, TreeKind::Ident(ident) if ident.name == declared_name)
             || !matches!(typed_tpt.kind, TreeKind::TypeTree(_))
             || typed_tpt.ty != local_type
         {
@@ -147,6 +168,18 @@ impl Validator<'_, '_> {
         let (Some(source_rhs), Some(typed_rhs)) = (source_val.rhs, typed_val.rhs) else {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         };
+        if reference_local_type.is_some()
+            && (self.source_tree(source_rhs)?.position.is_none()
+                || self
+                    .plan
+                    .typed_ast
+                    .try_get(typed_rhs)
+                    .ok_or(PickleError::InvalidTypedTree { tree: typed_rhs })?
+                    .position
+                    .is_none())
+        {
+            return Err(PickleError::BodySpan { tree: typed_rhs });
+        }
         if self
             .plan
             .typed_bindings
@@ -171,14 +204,36 @@ impl Validator<'_, '_> {
         } else {
             depth
         };
-        self.validate_method_expression_inner(
-            Some(source_rhs),
-            Some(typed_rhs),
-            method,
-            self.plan.definitions.int,
-            rhs_depth,
-            Some(visited),
-        )?;
+        if let Some(reference_type) = reference_local_type {
+            let binding = self
+                .plan
+                .typed_bindings
+                .planned_call(self.plan.source.id, method.symbol)
+                .ok_or_else(|| {
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                })?;
+            if binding.source_apply != source_rhs
+                || binding.typed_apply != typed_rhs
+                || reference_type != local_type
+            {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+            if !visited.insert(typed_rhs) {
+                return Err(PickleError::RepeatedExpression { tree: typed_rhs });
+            }
+            self.validate_planned_call_argument(binding, local_type, method, rhs_depth, visited)?;
+        } else {
+            self.validate_method_expression_inner(
+                Some(source_rhs),
+                Some(typed_rhs),
+                method,
+                self.plan.definitions.int,
+                rhs_depth,
+                Some(visited),
+            )?;
+        }
 
         if self
             .visible_locals

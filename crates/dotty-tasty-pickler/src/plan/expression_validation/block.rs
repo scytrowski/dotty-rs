@@ -78,11 +78,119 @@ impl Validator<'_, '_> {
                 ty: typed.ty,
             });
         }
-        if result_type != self.plan.definitions.int {
+        let reference_result = result_type != self.plan.definitions.int;
+        if reference_result && !self.is_planned_sibling_class_type(result_type, None) {
             return Err(PickleError::BodyType {
                 tree: typed_id,
                 ty: typed.ty,
             });
+        }
+        if reference_result {
+            let Type::TypeRef {
+                target: TypeRefTarget::Symbol(result_class),
+                ..
+            } = self.ty(result_type)?
+            else {
+                return Err(PickleError::BodyType {
+                    tree: typed_id,
+                    ty: typed.ty,
+                });
+            };
+            let result_class = *result_class;
+            let same_class_type = |ty: TypeId| {
+                matches!(self.plan.store.types.try_get(ty), Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(class), ..
+                }) if *class == result_class)
+            };
+            if !same_class_type(typed.ty) || !same_class_type(typed_result.ty) {
+                return Err(PickleError::BodyType {
+                    tree: typed_id,
+                    ty: typed.ty,
+                });
+            }
+            let exact_shape = source_block.stats.len() == 1
+                && matches!(
+                    self.source_tree(source_block.stats[0])?.kind,
+                    TreeKind::ValDef(_)
+                )
+                && matches!(
+                    self.plan
+                        .typed_ast
+                        .try_get(typed_block.stats[0])
+                        .map(|tree| &tree.kind),
+                    Some(TreeKind::ValDef(_))
+                )
+                && matches!(
+                    self.source_tree(source_block.expr)?.kind,
+                    TreeKind::Apply(_)
+                )
+                && matches!(&typed_result.kind, TreeKind::Apply(_));
+            if !exact_shape {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+            let TreeKind::Apply(source_result_apply) = &self.source_tree(source_block.expr)?.kind
+            else {
+                unreachable!("reference block shape was checked")
+            };
+            let (TreeKind::ValDef(source_local), TreeKind::ValDef(typed_local)) = (
+                &self.source_tree(source_block.stats[0])?.kind,
+                &self
+                    .plan
+                    .typed_ast
+                    .try_get(typed_block.stats[0])
+                    .ok_or(PickleError::InvalidTypedTree {
+                        tree: typed_block.stats[0],
+                    })?
+                    .kind,
+            ) else {
+                unreachable!("reference block shape was checked")
+            };
+            if source_result_apply.args.len() != 1
+                || source_local.rhs.is_none()
+                || typed_local.rhs.is_none()
+            {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+            let source_use = self.source_tree(source_result_apply.args[0])?;
+            let typed_result_apply = match &typed_result.kind {
+                TreeKind::Apply(application) if application.args.len() == 1 => application,
+                _ => {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    );
+                }
+            };
+            let typed_use = self
+                .plan
+                .typed_ast
+                .try_get(typed_result_apply.args[0])
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: typed_result_apply.args[0],
+                })?;
+            let (TreeKind::Ident(_), Some(declaration_span), Some(use_span)) = (
+                &source_use.kind,
+                self.source_tree(source_block.stats[0])?.position,
+                source_use.position,
+            ) else {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            };
+            if declaration_span.span().range().end() > use_span.span().range().start()
+                || source.position.is_none()
+                || typed.position.is_none()
+                || self.source_tree(source_block.expr)?.position.is_none()
+                || typed_result.position.is_none()
+                || typed_use.position.is_none()
+            {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
         }
 
         for (&source_stat, &typed_stat) in source_block.stats.iter().zip(&typed_block.stats) {
@@ -102,6 +210,7 @@ impl Validator<'_, '_> {
                     source_stat,
                     typed_stat,
                     method,
+                    reference_result.then_some(stat.ty),
                     depth,
                     visited,
                 )?;
