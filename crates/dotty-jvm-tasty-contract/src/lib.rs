@@ -1248,6 +1248,8 @@ struct CrossClassMethodRef {
     receiver_field: Option<SymbolId>,
     nested_constructor: Option<NestedConstructorMethodRef>,
     factory_method: Option<FactoryMethodRef>,
+    factory_local_slot: Option<u16>,
+    factory_local_max_locals: Option<u16>,
 }
 
 struct NestedConstructorMethodRef {
@@ -1259,6 +1261,300 @@ struct FactoryMethodRef {
     owner_internal_name: String,
     name: String,
     descriptor: String,
+}
+
+fn reference_local_factory_call(
+    proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
+    caller: SymbolId,
+    source_rhs: dotty_core::TreeId<dotty_core::Untyped>,
+    typed_rhs: dotty_core::TreeId<dotty_core::Typed>,
+    all_metadata: &[JvmClassMetadata],
+) -> Result<Option<CrossClassMethodRef>, String> {
+    use dotty_core::ast::{ApplyKind, TreeKind};
+
+    let tasty = proof.tasty_plan.plan();
+    let Some(TreeKind::Block(source_block)) =
+        tasty.source_ast.try_get(source_rhs).map(|tree| &tree.kind)
+    else {
+        return Ok(None);
+    };
+    let Some(TreeKind::Block(typed_block)) =
+        tasty.typed_ast.try_get(typed_rhs).map(|tree| &tree.kind)
+    else {
+        return Ok(None);
+    };
+    let [source_declaration] = source_block.stats.as_slice() else {
+        return Ok(None);
+    };
+    let [typed_declaration] = typed_block.stats.as_slice() else {
+        return Ok(None);
+    };
+    let bindings = tasty
+        .typed_bindings
+        .local_value_bindings(tasty.source.id, caller);
+    let [binding] = bindings.as_slice() else {
+        return Ok(None);
+    };
+    if binding.source_tree != *source_declaration || binding.typed_declaration != *typed_declaration
+    {
+        return Err("reference-local declaration differs from the canonical TASTy binding".into());
+    }
+    let Some(TreeKind::ValDef(source_val)) = tasty
+        .source_ast
+        .try_get(*source_declaration)
+        .map(|tree| &tree.kind)
+    else {
+        return Err("reference-local source declaration is not a ValDef".into());
+    };
+    let Some(TreeKind::ValDef(typed_val)) = tasty
+        .typed_ast
+        .try_get(*typed_declaration)
+        .map(|tree| &tree.kind)
+    else {
+        return Err("reference-local typed declaration is not a ValDef".into());
+    };
+    let Some(initializer) = source_val.rhs else {
+        return Err("reference-local ValDef has no initializer".into());
+    };
+    let Some(typed_initializer) = typed_val.rhs else {
+        return Err("reference-local typed ValDef has no initializer".into());
+    };
+    let Some(call) = tasty.typed_bindings.planned_call(tasty.source.id, caller) else {
+        return Err("reference-local initializer has no planned helper receipt".into());
+    };
+    if call.source_apply != initializer
+        || call.typed_apply != typed_initializer
+        || tasty.typed_bindings.typed_at(tasty.source.id, initializer) != Some(typed_initializer)
+    {
+        return Err("reference-local initializer differs from its planned helper receipt".into());
+    }
+    let Some(TreeKind::Apply(outer_source)) = tasty
+        .source_ast
+        .try_get(source_block.expr)
+        .map(|tree| &tree.kind)
+    else {
+        return Err("reference-local final expression is not a constructor Apply".into());
+    };
+    let Some(TreeKind::Apply(outer_typed)) = tasty
+        .typed_ast
+        .try_get(typed_block.expr)
+        .map(|tree| &tree.kind)
+    else {
+        return Err("reference-local typed final expression is not a constructor Apply".into());
+    };
+    if outer_source.kind != ApplyKind::Regular
+        || outer_typed.kind != ApplyKind::Regular
+        || outer_source.args.len() != 1
+        || outer_typed.args.len() != 1
+    {
+        return Err("reference-local constructor must have one regular argument".into());
+    }
+    let Some(TreeKind::Ident(source_use)) = tasty
+        .source_ast
+        .try_get(
+            *outer_source
+                .args
+                .first()
+                .ok_or_else(|| "reference-local constructor has no local argument".to_owned())?,
+        )
+        .map(|tree| &tree.kind)
+    else {
+        return Err("reference-local constructor argument is not an Ident".into());
+    };
+    let source_use_name_matches = source_use.name == *source_val.name.as_name();
+    let source_typed_matches = tasty
+        .typed_bindings
+        .typed_at(tasty.source.id, outer_source.args[0])
+        == Some(outer_typed.args[0]);
+    let typed_local_matches = matches!(
+        tasty
+            .typed_ast
+            .try_get(outer_typed.args[0])
+            .map(|tree| &tree.kind),
+        Some(TreeKind::Ident(_))
+    );
+    let typed_symbol_matches = matches!(tasty.store.types.try_get(tasty.typed_ast.get(outer_typed.args[0]).ty), Some(Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) }) if *prefix == tasty.definitions.no_prefix && *symbol == binding.symbol);
+    if !source_use_name_matches
+        || !source_typed_matches
+        || !typed_local_matches
+        || !typed_symbol_matches
+    {
+        return Err(format!(
+            "reference-local use identity mismatch: name={source_use_name_matches}, source-typed={source_typed_matches}, typed-ident={typed_local_matches}, typed-symbol={typed_symbol_matches}"
+        ));
+    }
+    let Some(TreeKind::Select(outer_function)) = tasty
+        .typed_ast
+        .try_get(outer_typed.function)
+        .map(|tree| &tree.kind)
+    else {
+        return Err("reference-local constructor function is not Select".into());
+    };
+    let Some(Type::TermRef {
+        target: TermRefTarget::Symbol(target_constructor),
+        ..
+    }) = tasty
+        .typed_ast
+        .try_get(outer_typed.function)
+        .and_then(|tree| tasty.store.types.try_get(tree.ty))
+    else {
+        return Err("reference-local constructor has no canonical constructor target".into());
+    };
+    if !matches!(
+        tasty
+            .typed_ast
+            .try_get(outer_function.qualifier)
+            .map(|tree| &tree.kind),
+        Some(TreeKind::New(_))
+    ) {
+        return Err("reference-local constructor receiver is not New".into());
+    }
+    let target_owner = tasty
+        .store
+        .symbols
+        .get(*target_constructor)
+        .owner
+        .ok_or_else(|| "reference-local constructor has no owner".to_owned())?;
+    let target_metadata = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == target_owner)
+        .ok_or_else(|| "reference-local target is absent from the JVM batch".to_owned())?;
+    let target_constructor_metadata = target_metadata
+        .constructor()
+        .filter(|metadata| metadata.symbol() == *target_constructor)
+        .ok_or_else(|| "reference-local constructor is absent from its JVM plan".to_owned())?;
+    let caller_plan = proof
+        .jvm_unit
+        .classes
+        .iter()
+        .find(|class| class.class == tasty.class)
+        .and_then(|class| class.methods.iter().find(|method| method.method == caller))
+        .ok_or_else(|| "reference-local caller has no JVM method plan".to_owned())?;
+    let caller_metadata = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == tasty.class)
+        .and_then(|metadata| {
+            metadata
+                .methods()
+                .iter()
+                .find(|method| method.symbol() == caller)
+        })
+        .ok_or_else(|| "reference-local caller has no checked JVM metadata".to_owned())?;
+    let layout = proof
+        .jvm_unit
+        .local_layout_for(caller_metadata, &caller_plan.locals, tasty.definitions)
+        .map_err(|error| format!("cannot derive reference-local slot layout: {error:?}"))?;
+    let local_slot = layout
+        .local(binding.symbol)
+        .map_err(|error| format!("reference-local symbol has no checked slot: {error:?}"))?;
+    if local_slot.declaration() != binding.typed_declaration || local_slot.is_mutable() {
+        return Err("reference-local slot differs from the exact immutable declaration".into());
+    }
+    let helper_owner = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == call.owner)
+        .ok_or_else(|| "reference-local helper owner is absent from the JVM batch".to_owned())?;
+    let helper = helper_owner
+        .methods()
+        .iter()
+        .find(|metadata| metadata.symbol() == call.method)
+        .ok_or_else(|| "reference-local helper is absent from its JVM plan".to_owned())?;
+    let caller_descriptor =
+        source_method_descriptor(tasty.store, tasty.definitions, caller, all_metadata)
+            .ok_or_else(|| "reference-local caller has an unsupported JVM signature".to_owned())?;
+    let constructor_descriptor = target_constructor_metadata.descriptor().as_str();
+    let helper_descriptor = helper.descriptor().as_str();
+    let argument_descriptor = constructor_descriptor
+        .strip_prefix('(')
+        .and_then(|descriptor| descriptor.split_once(')'))
+        .map(|(arguments, _)| arguments)
+        .ok_or_else(|| "reference-local constructor descriptor is malformed".to_owned())?;
+    let local_type = match tasty.store.symbols.get(binding.symbol).info {
+        SymbolInfo::Complete(ty) => ty,
+        _ => return Err("reference-local semantic type is incomplete".into()),
+    };
+    let helper_result_class = match tasty.store.types.try_get(call.result_type) {
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        }) => *class,
+        _ => return Err("reference-local helper result is not a class TypeRef".into()),
+    };
+    let local_package = match tasty.store.types.try_get(local_type) {
+        Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(class),
+        }) if *class == helper_result_class => match tasty.store.types.try_get(*prefix) {
+            Some(Type::TypeRef {
+                prefix: package_prefix,
+                target: TypeRefTarget::Symbol(package),
+            }) if *package_prefix == tasty.definitions.no_prefix => Some(*package),
+            _ => None,
+        },
+        _ => None,
+    };
+    let helper_package = match tasty.store.types.try_get(call.result_type) {
+        Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(class),
+        }) if *class == helper_result_class => match tasty.store.types.try_get(*prefix) {
+            Some(Type::TypeRef {
+                prefix: package_prefix,
+                target: TypeRefTarget::Symbol(package),
+            }) if *package_prefix == tasty.definitions.no_prefix => Some(*package),
+            _ => None,
+        },
+        _ => None,
+    };
+    let local_type_matches_helper = local_package.is_some() && local_package == helper_package;
+    let constructor_result_is_no_prefix = matches!(
+        tasty.store.types.try_get(
+            tasty
+                .typed_ast
+                .try_get(typed_block.expr)
+                .ok_or_else(|| "reference-local constructor result is stale".to_owned())?
+                .ty
+        ),
+        Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(class),
+        }) if *prefix == tasty.definitions.no_prefix && *class == target_owner
+    );
+    if call.owner != tasty.class
+        || call.method == caller
+        || !local_type_matches_helper
+        || !constructor_result_is_no_prefix
+        || local_slot.ty() != dotty_jvm::JvmType::Reference(helper_result_class)
+        || helper_descriptor != format!("(I){argument_descriptor}")
+        || constructor_descriptor != format!("({argument_descriptor})V")
+        || caller_descriptor != format!("(I)L{};", target_metadata.identity().internal_name())
+        || tasty.store.symbols.get(*target_constructor).kind != SymbolKind::Constructor
+        || tasty.store.symbols.get(*target_constructor).origin
+            != SymbolOrigin::Source(tasty.source.id)
+    {
+        return Err(
+            "reference-local helper, local TypeRef, constructor, and method ABI do not agree"
+                .into(),
+        );
+    }
+    Ok(Some(CrossClassMethodRef {
+        caller,
+        target: *target_constructor,
+        owner_internal_name: target_metadata.identity().internal_name().to_owned(),
+        name: "<init>".to_owned(),
+        descriptor: constructor_descriptor.to_owned(),
+        constructor: true,
+        argument_load_opcode: None,
+        receiver_field: None,
+        nested_constructor: None,
+        factory_method: Some(FactoryMethodRef {
+            owner_internal_name: helper_owner.identity().internal_name().to_owned(),
+            name: helper.name().to_owned(),
+            descriptor: helper_descriptor.to_owned(),
+        }),
+        factory_local_slot: Some(local_slot.slot()),
+        factory_local_max_locals: Some(layout.max_locals()),
+    }))
 }
 
 fn validate_cross_class_call_code(
@@ -1297,6 +1593,27 @@ fn validate_cross_class_call_code(
         let Some(root_tree) = tasty.typed_ast.try_get(root) else {
             return Err(format!("method {caller:?} has a stale typed body"));
         };
+        if matches!(root_tree.kind, TreeKind::Block(_)) {
+            if let Some(call) =
+                reference_local_factory_call(proof, caller, rhs, root, &all_metadata)?
+            {
+                calls.push(call);
+                continue;
+            }
+            if typed_tree_has_sibling_call(
+                root,
+                tasty.typed_ast,
+                tasty.store,
+                tasty.class,
+                &all_metadata,
+                &mut Vec::new(),
+            ) {
+                return Err(format!(
+                    "method {caller:?} contains a cross-class call outside the bounded direct-call shape"
+                ));
+            }
+            continue;
+        }
         let TreeKind::Apply(application) = &root_tree.kind else {
             if typed_tree_has_sibling_call(
                 root,
@@ -1639,6 +1956,8 @@ fn validate_cross_class_call_code(
                                 name: helper_method.name().to_owned(),
                                 descriptor: helper_descriptor,
                             }),
+                            factory_local_slot: None,
+                            factory_local_max_locals: None,
                         });
                         continue;
                     }
@@ -1741,6 +2060,8 @@ fn validate_cross_class_call_code(
                             descriptor: nested_descriptor.to_owned(),
                         }),
                         factory_method: None,
+                        factory_local_slot: None,
+                        factory_local_max_locals: None,
                     });
                     continue;
                 }
@@ -1809,6 +2130,8 @@ fn validate_cross_class_call_code(
                     receiver_field: None,
                     nested_constructor: None,
                     factory_method: None,
+                    factory_local_slot: None,
+                    factory_local_max_locals: None,
                 });
                 continue;
             }
@@ -1870,6 +2193,8 @@ fn validate_cross_class_call_code(
             },
             nested_constructor: None,
             factory_method: None,
+            factory_local_slot: None,
+            factory_local_max_locals: None,
         });
     }
 
@@ -1906,6 +2231,84 @@ fn validate_cross_class_call_code(
             ));
         };
         if let Some(factory) = &call.factory_method {
+            if let Some(local_slot) = call.factory_local_slot {
+                let mut pc = 0;
+                take_factory_call_opcode(code.code, &mut pc, 0x2a, "aload_0")?;
+                take_factory_call_opcode(code.code, &mut pc, 0x1b, "iload_1")?;
+                let helper_call_index =
+                    take_factory_call_operand(code.code, &mut pc, 0xb6, "invokevirtual")?;
+                take_factory_local(code.code, &mut pc, true, local_slot)?;
+                let outer_allocation = take_factory_call_operand(code.code, &mut pc, 0xbb, "new")?;
+                take_factory_call_opcode(code.code, &mut pc, 0x59, "dup")?;
+                take_factory_local(code.code, &mut pc, false, local_slot)?;
+                let outer_call_index =
+                    take_factory_call_operand(code.code, &mut pc, 0xb7, "invokespecial")?;
+                take_factory_call_opcode(code.code, &mut pc, 0xb0, "areturn")?;
+                if pc != code.code.len()
+                    || code.max_stack != 3
+                    || Some(code.max_locals) != call.factory_local_max_locals
+                    || !code.exception_table.is_empty()
+                {
+                    return Err(format!(
+                        "caller method {:?} has an invalid local factory sequence, stack/local layout, or exception metadata",
+                        call.caller
+                    ));
+                }
+                let class_name = |index| -> Result<&str, String> {
+                    let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Class {
+                        name_index,
+                    }) = class_file.constant_pool.get(index)
+                    else {
+                        return Err("reference-local new does not reference CONSTANT_Class".into());
+                    };
+                    class_file
+                        .constant_pool
+                        .utf8(*name_index)
+                        .map_err(|error| format!("invalid reference-local class name: {error:?}"))
+                };
+                let method_ref = |index| -> Result<(&str, (&str, &str)), String> {
+                    let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+                        class_index,
+                        name_and_type_index,
+                    }) = class_file.constant_pool.get(index)
+                    else {
+                        return Err(
+                            "reference-local invocation does not reference CONSTANT_Methodref"
+                                .into(),
+                        );
+                    };
+                    let owner =
+                        class_file
+                            .constant_pool
+                            .class_name(*class_index)
+                            .map_err(|error| {
+                                format!("invalid reference-local method owner: {error:?}")
+                            })?;
+                    let method = class_file
+                        .constant_pool
+                        .name_and_type(*name_and_type_index)
+                        .map_err(|error| format!("invalid reference-local Methodref: {error:?}"))?;
+                    Ok((owner, method))
+                };
+                if class_name(outer_allocation)? != call.owner_internal_name
+                    || method_ref(helper_call_index)?
+                        != (
+                            factory.owner_internal_name.as_str(),
+                            (factory.name.as_str(), factory.descriptor.as_str()),
+                        )
+                    || method_ref(outer_call_index)?
+                        != (
+                            call.owner_internal_name.as_str(),
+                            ("<init>", call.descriptor.as_str()),
+                        )
+                {
+                    return Err(format!(
+                        "caller method {:?} does not invoke one exact factory and pass the stored local to its constructor",
+                        call.caller
+                    ));
+                }
+                continue;
+            }
             let mut pc = 0;
             let allocation = take_factory_call_operand(code.code, &mut pc, 0xbb, "new")?;
             take_factory_call_opcode(code.code, &mut pc, 0x59, "dup")?;
@@ -2238,6 +2641,34 @@ fn take_factory_call_opcode(
     if actual != expected {
         return Err(format!(
             "expected {mnemonic} in bounded factory-result bytecode, found opcode 0x{actual:02x}"
+        ));
+    }
+    *pc += 1;
+    Ok(())
+}
+
+fn take_factory_local(code: &[u8], pc: &mut usize, store: bool, slot: u16) -> Result<(), String> {
+    let (compact_base, generic_opcode, mnemonic) = if store {
+        (0x4b_u16, 0x3a_u8, "astore")
+    } else {
+        (0x2a_u16, 0x19_u8, "aload")
+    };
+    if slot <= 3 {
+        return take_factory_call_opcode(
+            code,
+            pc,
+            (compact_base + slot) as u8,
+            &format!("{mnemonic}_{slot}"),
+        );
+    }
+    take_factory_call_opcode(code, pc, generic_opcode, mnemonic)?;
+    let actual = code
+        .get(*pc)
+        .copied()
+        .ok_or_else(|| format!("truncated {mnemonic} local index"))?;
+    if u16::from(actual) != slot {
+        return Err(format!(
+            "expected {mnemonic} local slot {slot}, found {actual}"
         ));
     }
     *pc += 1;

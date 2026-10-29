@@ -3357,19 +3357,20 @@ fn observe_reference_local_constructor_flow(
     assert_eq!(typed_index.get(source_id, source_rhs), Some(typed_rhs));
     assert_eq!(typed_index.get(source_id, block.expr), Some(typed_result));
 
-    let paired_error =
-        with_paired_jvm_tasty_batch_plan(source, "CounterOwnerFactory.scala", source_id, |_| ())
-            .expect_err("the separate paired end-to-end control rejects this local block");
-    assert!(
-        matches!(
-            &paired_error,
-            PairedPlanError::BatchClass { phase, reason, .. }
-                if *phase == "JVM/TASTy cross-contract validation"
-                    && reason.contains("Unsupported")
-        ),
-        "first paired failure was {paired_error:?}"
-    );
-    println!("Separate paired end-to-end control first failure: {paired_error:?}");
+    let paired_batch = emit_paired_jvm_tasty_batch(source, "CounterOwnerFactory.scala", source_id)
+        .expect("the exact local proof now reaches the paired six-artifact path");
+    assert_eq!(paired_batch.classes().len(), 3);
+    for artifact in paired_batch.classes() {
+        let sidecar = tasty_files
+            .iter()
+            .find(|(path, _)| path == artifact.tasty_path())
+            .expect("the standalone and paired paths retain the same class set");
+        assert_eq!(
+            artifact.tasty_bytes(),
+            sidecar.1.as_slice(),
+            "paired TASTy is the exact standalone serialization for the original session"
+        );
+    }
 
     let proof_store = typer.store();
     let local_symbol_name = proof_store
@@ -3417,7 +3418,7 @@ fn observe_reference_local_constructor_flow(
 }
 
 #[test]
-fn reference_local_constructor_flow_rename_and_reorder_keep_the_same_first_gate() {
+fn reference_local_constructor_flow_rename_and_reorder_emit_deterministic_paired_batches() {
     let source = include_str!(
         "fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala"
     );
@@ -3427,13 +3428,20 @@ fn reference_local_constructor_flow_rename_and_reorder_keep_the_same_first_gate(
         .replace("CounterOwner", "Holder")
         .replace("Counter", "Cell")
         .replace("example", "renamed.pkg");
-    assert_factory_source_variant_rejected(
-        &renamed,
-        18491,
-        "renamed reference-local constructor flow",
-        "JVM/TASTy cross-contract validation",
-        "Unsupported",
-    );
+    let renamed_first =
+        emit_paired_jvm_tasty_batch(&renamed, "Factory.scala", SourceId::from_index(18491))
+            .expect("renamed bounded local source emits a paired batch");
+    let renamed_second =
+        emit_paired_jvm_tasty_batch(&renamed, "Factory.scala", SourceId::from_index(18493))
+            .expect("renamed source is deterministic across frontend sessions");
+    assert_eq!(renamed_first.classes().len(), 3);
+    for (first, second) in renamed_first.classes().iter().zip(renamed_second.classes()) {
+        assert_eq!(first.classfile_path(), second.classfile_path());
+        assert_eq!(first.tasty_path(), second.tasty_path());
+        assert_eq!(first.classfile_bytes(), second.classfile_bytes());
+        assert_eq!(first.tasty_bytes(), second.tasty_bytes());
+        assert_eq!(first.tasty_link_id(), second.tasty_link_id());
+    }
 
     let owner_start = source.find("\nclass CounterOwner(").unwrap();
     let factory_start = source.find("\nclass CounterOwnerFactory:").unwrap();
@@ -3441,11 +3449,28 @@ fn reference_local_constructor_flow_rename_and_reorder_keep_the_same_first_gate(
     let owner = &source[owner_start..factory_start];
     let factory = &source[factory_start..];
     let reordered = format!("{counter}{factory}{owner}");
-    assert_factory_source_variant_rejected(
+    let reordered_first = emit_paired_jvm_tasty_batch(
         &reordered,
-        18492,
-        "reordered reference-local constructor flow",
-        "JVM/TASTy cross-contract validation",
-        "Unsupported",
-    );
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(18492),
+    )
+    .expect("reordered bounded local source emits a paired batch");
+    let reordered_second = emit_paired_jvm_tasty_batch(
+        &reordered,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(18494),
+    )
+    .expect("reordered source is deterministic across frontend sessions");
+    assert_eq!(reordered_first.classes().len(), 3);
+    for (first, second) in reordered_first
+        .classes()
+        .iter()
+        .zip(reordered_second.classes())
+    {
+        assert_eq!(first.classfile_path(), second.classfile_path());
+        assert_eq!(first.tasty_path(), second.tasty_path());
+        assert_eq!(first.classfile_bytes(), second.classfile_bytes());
+        assert_eq!(first.tasty_bytes(), second.tasty_bytes());
+        assert_eq!(first.tasty_link_id(), second.tasty_link_id());
+    }
 }

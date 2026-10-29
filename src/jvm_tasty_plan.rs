@@ -14,14 +14,14 @@ use dotty_core::{
 };
 use dotty_jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmFieldPlan,
-    JvmFieldSourceVisibility, JvmMethodPlan, JvmPrimaryConstructorPlan,
+    JvmFieldSourceVisibility, JvmLocalBinding, JvmMethodPlan, JvmPrimaryConstructorPlan,
 };
 use dotty_jvm_tasty_contract::{JvmTastyContractError, ValidatedJvmTastyClass};
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty_pickler::{
-    ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
+    ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, LocalValueBinding,
     NestedConstructorCallBinding, PickleError, PlannedCallBinding, PrimaryConstructorInputPlan,
     SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
 };
@@ -143,6 +143,7 @@ struct BatchSourceTypedBindings<'a> {
     planned_methods: Vec<SymbolId>,
     nested_constructor_calls: Vec<(SourceId, SymbolId, NestedConstructorCallBinding)>,
     planned_calls: Vec<(SourceId, SymbolId, PlannedCallBinding)>,
+    local_values: Vec<(SourceId, SymbolId, LocalValueBinding)>,
 }
 
 impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
@@ -180,6 +181,15 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
             .find_map(|(proof_source, proof_method, binding)| {
                 (*proof_source == source && *proof_method == method).then_some(*binding)
             })
+    }
+
+    fn local_value_bindings(&self, source: SourceId, method: SymbolId) -> Vec<LocalValueBinding> {
+        self.local_values
+            .iter()
+            .filter_map(|(binding_source, binding_method, binding)| {
+                (*binding_source == source && *binding_method == method).then_some(*binding)
+            })
+            .collect()
     }
 }
 
@@ -970,10 +980,55 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                         symbol: method,
                         source_tree: tree,
                     });
+                    // The only reference local projected by this paired
+                    // adapter is the exact immutable ValDef consumed by the
+                    // final one-argument constructor application. The
+                    // cross-class proof below revalidates the complete shape;
+                    // this projection only makes its canonical local
+                    // identity available to the existing JVM layout/codegen.
+                    let locals = match &parsed.ast.get(rhs).kind {
+                        TreeKind::Block(block)
+                            if block.stats.len() == 1
+                                && matches!(
+                                    parsed.ast.try_get(block.stats[0]).map(|node| &node.kind),
+                                    Some(TreeKind::ValDef(_))
+                                ) =>
+                        {
+                            let declaration = block.stats[0];
+                            let final_constructor_uses_local = matches!(
+                                parsed.ast.try_get(block.expr).map(|node| &node.kind),
+                                Some(TreeKind::Apply(application))
+                                    if application.args.len() == 1
+                                        && matches!(
+                                            parsed.ast.try_get(application.args[0]).map(|node| &node.kind),
+                                            Some(TreeKind::Ident(_))
+                                        )
+                            );
+                            if !final_constructor_uses_local {
+                                Vec::new()
+                            } else {
+                                let binding = typer
+                                    .typed_local_binding_at(source_id, declaration)
+                                    .filter(|binding| {
+                                        typer.store().symbols.get(binding.symbol()).flags.is_empty()
+                                    });
+                                binding
+                                    .map(|binding| {
+                                        vec![JvmLocalBinding {
+                                            declaration: binding.declaration(),
+                                            symbol: binding.symbol(),
+                                            mutable: false,
+                                        }]
+                                    })
+                                    .unwrap_or_default()
+                            }
+                        }
+                        _ => Vec::new(),
+                    };
                     jvm_methods.push(JvmMethodPlan {
                         method,
                         parameters,
-                        locals: Vec::new(),
+                        locals,
                         body: Some(body),
                     });
                     source_member_order.push(method);
@@ -1095,28 +1150,54 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         planned_calls: constructor_call_proofs
             .iter()
             .filter_map(|proof| {
-                proof.argument_proof().planned_call().map(|call| {
+                proof
+                    .argument_proof()
+                    .planned_call()
+                    .or_else(|| {
+                        proof
+                            .argument_proof()
+                            .local_val()
+                            .map(|local| local.initializer_call())
+                    })
+                    .map(|call| {
+                        (
+                            proof.source_id(),
+                            proof.method(),
+                            PlannedCallBinding {
+                                source_apply: call.source_apply(),
+                                typed_apply: call.typed_apply(),
+                                source_function: call.source_function(),
+                                typed_function: call.typed_function(),
+                                source_argument: call.source_argument(),
+                                typed_argument: call.typed_argument(),
+                                source_receiver: call.source_receiver(),
+                                typed_receiver: call.typed_receiver(),
+                                helper_source_tree: call.helper_source_tree(),
+                                helper_source_rhs: call.helper_source_rhs(),
+                                helper_typed_rhs: call.helper_typed_rhs(),
+                                owner: call.owner(),
+                                method: call.method(),
+                                caller_formal: call.formal(),
+                                helper_formal: call.helper_formal(),
+                                formal_type: call.formal_type(),
+                                result_type: call.result_type(),
+                            },
+                        )
+                    })
+            })
+            .collect(),
+        local_values: constructor_call_proofs
+            .iter()
+            .filter_map(|proof| {
+                proof.argument_proof().local_val().map(|local| {
                     (
                         proof.source_id(),
                         proof.method(),
-                        PlannedCallBinding {
-                            source_apply: call.source_apply(),
-                            typed_apply: call.typed_apply(),
-                            source_function: call.source_function(),
-                            typed_function: call.typed_function(),
-                            source_argument: call.source_argument(),
-                            typed_argument: call.typed_argument(),
-                            source_receiver: call.source_receiver(),
-                            typed_receiver: call.typed_receiver(),
-                            helper_source_tree: call.helper_source_tree(),
-                            helper_source_rhs: call.helper_source_rhs(),
-                            helper_typed_rhs: call.helper_typed_rhs(),
-                            owner: call.owner(),
-                            method: call.method(),
-                            caller_formal: call.formal(),
-                            helper_formal: call.helper_formal(),
-                            formal_type: call.formal_type(),
-                            result_type: call.result_type(),
+                        LocalValueBinding {
+                            source_tree: local.source_declaration(),
+                            symbol: local.symbol(),
+                            typed_declaration: local.typed_declaration(),
+                            scope: local.scope(),
                         },
                     )
                 })
