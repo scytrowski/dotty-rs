@@ -192,10 +192,17 @@ not inferred from the first rejection.
 | Foreign same-named helper owner | Test-only corruption replaces the selected method `TermRef` with a real same-session method from another planned class; the proof rejects with `SourceIdentity` before returning receipts. |
 | Disconnected explicit receiver | Test-only same-session corruption changes only the typed helper `Select.qualifier`; the proof rejects with `TypedBinding` even though the separately mapped `this`, method `TermRef`, spans, and source mappings remain intact. |
 | Missing planned-call function binding | Test-only removal of the original source-to-typed edge rejects with `TypedBinding("planned helper function has no source-to-typed binding")`. |
+| Missing helper member in the TASTy plan | With a real same-session call receipt, omitting `makeCounter` from Factory members rejects first as `SourceOrder { class: Factory }` during validation; no complete `PickledTasty` is returned. |
+| Missing call-edge mapping at the pickler boundary | With a real receipt, removing its `source_apply` mapping rejects first as `BodyBinding { actual: None }`; no complete output is returned. |
+| Stale call-edge mapping at the pickler boundary | Mapping `source_apply` to the real `typed_function` tree rejects first as `BodyBinding` with that mismatched actual tree; no complete output is returned. |
+| Wrong selected member or owner in the receipt | Replacing the selected helper with `create`, or replacing its owner with `CounterOwner`, rejects first as `Reference(Owner)`; no complete output is returned. |
+| Wrong result type in the receipt | Replacing the result with the real `Int` formal type rejects first as `Unsupported(BodyExpression)` when it disagrees with the typed Apply result; no complete output is returned. |
+| Disconnected typed receiver at the pickler boundary | Replacing the receipt's typed `this` receiver with the real `seed` tree rejects first as `Unsupported(BodyExpression)`; no complete output is returned. |
+| Expression depth and visit budgets | A zero projection depth rejects the nested factory Apply as `LimitExceeded(ExpressionDepth, 0)`; depth 1 succeeds. A one-item visit budget rejects with `LimitExceeded(Items)` before output. |
 | Local/block argument | Not supported by the receipt: only the exact one-argument call occupying the constructor argument is carried into this encoding path. |
 | Private/static/super/implicit/using/generic/external factory method | Not accepted by the proof contract: the helper must be a public, monomorphic, plain instance method with one ordinary formal, a canonical source definition, and an exact same-class `this` receiver. Source typing or earlier planning can reject some of these before the proof stage. |
 | Wrong constructor | Unmeasured. No alternate constructor shape is needed to observe the current factory-call boundary. |
-| Missing/stale typed binding or wrong typed constructor owner | Unmeasured. The issue prohibits forged canonical identities, and the one-session source index supplies the actual mappings. |
+| Wrong typed constructor owner | Unmeasured at the pickler boundary. The source proof has separate same-session constructor identity checks. |
 | Missing/corrupt sidecar | Unmeasured for this source. No Rust batch was emitted to serve as a publisher input; the existing linked-batch regression has separate corrupt-sidecar controls. |
 
 Unmeasured controls have no attributed rejection stage.
@@ -247,9 +254,13 @@ The strict reader regression is opt-in for routine test runs. With
 `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`, it verifies checkout revision
 `777528f19a58e794c9954a42f433373472ec57f8` and compiler version
 `3.9.0-bin-SNAPSHOT-git-777528f`, runs `scalac -decompile` on the Rust
-`CounterOwnerFactory.tasty`, then runs `scalac -from-tasty` over all three Rust
-sidecars. Its scratch directory is supplied through
+`CounterOwnerFactory.tasty`, checks the reconstructed `makeCounter` body and
+the `create` body calling `CounterOwnerFactory.this.makeCounter` with its own
+source formal inside `new CounterOwner`, then runs `scalac -from-tasty` over all
+three Rust sidecars. Its scratch directory is supplied through
 `DOTTY_TASTY_PICKLER_ORACLE_TMP` and kept under the issue worktree's `target/`.
+The strict `jvm-tasty-factory-scala-consumer` workflow includes this test
+target and creates its scratch directory before running the oracle.
 The Scala reader accepts the actual Rust artifacts; this is interoperability
 evidence, distinct from the Scala-produced oracle above.
 

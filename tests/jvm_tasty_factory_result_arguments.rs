@@ -26,7 +26,8 @@ use dotty_tasty::file::TastyFile;
 use dotty_tasty::tasty::{RenderedNameSignature, RenderedParamSig, RenderedSignedName};
 use dotty_tasty::term::{AstRefKind, RawTree};
 use dotty_tasty_pickler::{
-    ClassMemberPicklePlan, ClassStatePicklePlan, PrimaryConstructorInputPlan, SourceMetadata,
+    ClassMemberPicklePlan, ClassStatePicklePlan, LimitKind, PickleError, PickleLimits,
+    PlannedCallBinding, PrimaryConstructorInputPlan, ProjectionLimits, SourceMetadata,
     SourceTypedBindings,
 };
 use dotty_typer::SourceTyper;
@@ -58,6 +59,63 @@ impl SourceTypedBindings for AuditBindings<'_> {
 
     fn planned_method_symbols(&self) -> &[SymbolId] {
         &self.methods
+    }
+}
+
+struct ReceiptBindings<'a> {
+    base: &'a dyn SourceTypedBindings,
+    caller: SymbolId,
+    receipt: PlannedCallBinding,
+    missing_edge: Option<dotty_core::TreeId<dotty_core::ast::Untyped>>,
+    stale_edge: Option<(
+        dotty_core::TreeId<dotty_core::ast::Untyped>,
+        dotty_core::TreeId<dotty_core::ast::Typed>,
+    )>,
+}
+
+impl SourceTypedBindings for ReceiptBindings<'_> {
+    fn typed_at(
+        &self,
+        source: SourceId,
+        tree: dotty_core::TreeId<dotty_core::ast::Untyped>,
+    ) -> Option<dotty_core::TreeId<dotty_core::ast::Typed>> {
+        if self.missing_edge == Some(tree) {
+            return None;
+        }
+        if let Some((source_tree, typed_tree)) = self.stale_edge
+            && source_tree == tree
+        {
+            return Some(typed_tree);
+        }
+        self.base.typed_at(source, tree)
+    }
+
+    fn planned_class_symbols(&self) -> &[SymbolId] {
+        self.base.planned_class_symbols()
+    }
+
+    fn planned_method_symbols(&self) -> &[SymbolId] {
+        self.base.planned_method_symbols()
+    }
+
+    fn nested_constructor_call(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<dotty_tasty_pickler::NestedConstructorCallBinding> {
+        self.base.nested_constructor_call(source, method)
+    }
+
+    fn planned_call(&self, _source: SourceId, method: SymbolId) -> Option<PlannedCallBinding> {
+        (method == self.caller).then_some(self.receipt)
+    }
+
+    fn local_value_bindings(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Vec<dotty_tasty_pickler::LocalValueBinding> {
+        self.base.local_value_bindings(source, method)
     }
 }
 
@@ -676,11 +734,23 @@ fn run_factory_result_scala_reader(files: &[(String, Vec<u8>)]) {
         "Scala -decompile rejected Rust Factory.tasty: {}",
         String::from_utf8_lossy(&decompile.stderr)
     );
-    let decompiled = String::from_utf8_lossy(&decompile.stdout);
-    assert!(decompiled.contains("makeCounter"), "{decompiled}");
-    assert!(decompiled.contains("create"), "{decompiled}");
-    assert!(decompiled.contains("new"), "{decompiled}");
-    assert!(decompiled.contains("CounterOwner"), "{decompiled}");
+    let decompiled = normalize_decompiled_scala(&String::from_utf8_lossy(&decompile.stdout));
+    let helper = decompiled
+        .split("def create")
+        .next()
+        .expect("decompiler retains the helper before create");
+    assert!(
+        helper.contains("def makeCounter") && helper.contains("new example.Counter(seed)"),
+        "Scala must reconstruct the authentic makeCounter body: {decompiled}"
+    );
+    let create = decompiled
+        .split_once("def create")
+        .map(|(_, body)| body)
+        .expect("decompiler retains create");
+    assert!(
+        create.contains("(`seed₂`: scala.Int): example.CounterOwner = new example.CounterOwner(CounterOwnerFactory.this.makeCounter(`seed₂`))"),
+        "Scala must reconstruct the same-instance makeCounter call with create's original seed formal inside the Owner constructor: {decompiled}"
+    );
 
     let from_tasty = Command::new(&compiler)
         .arg("-from-tasty")
@@ -702,6 +772,27 @@ fn run_factory_result_scala_reader(files: &[(String, Vec<u8>)]) {
     );
     assert!(compiled.join("example/CounterOwnerFactory.class").exists());
     fs::remove_dir_all(temporary).unwrap();
+}
+
+fn normalize_decompiled_scala(source: &str) -> String {
+    let mut plain = String::with_capacity(source.len());
+    let mut escape = false;
+    let mut ansi = false;
+    for ch in source.chars() {
+        if escape {
+            escape = false;
+            ansi = true;
+        } else if ansi {
+            if ch.is_ascii_alphabetic() {
+                ansi = false;
+            }
+        } else if ch == '\u{1b}' {
+            escape = true;
+        } else {
+            plain.push(ch);
+        }
+    }
+    plain.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[test]
@@ -1228,15 +1319,15 @@ fn rust_original_source_preserves_factory_call_identities_and_exposes_first_reje
         Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == counter_class
     ));
     with_paired_jvm_tasty_batch_plan(SOURCE, "CounterOwnerFactory.scala", source_id, |batch| {
-        let planned = batch
+        let planned_proof = batch
             .constructor_call_proofs
             .iter()
             .find_map(|proof| proof.argument_proof().planned_call())
             .expect("the paired plan carries the complete call receipt");
-        assert_eq!(planned.owner(), factory_class);
-        assert_eq!(planned.method(), make_counter);
-        assert_eq!(planned.helper_formal(), make_counter_parameter);
-        assert_eq!(planned.formal(), create_parameter);
+        assert_eq!(planned_proof.owner(), factory_class);
+        assert_eq!(planned_proof.method(), make_counter);
+        assert_eq!(planned_proof.helper_formal(), make_counter_parameter);
+        assert_eq!(planned_proof.formal(), create_parameter);
         let helper_class = batch
             .constructor_call_proofs
             .iter()
@@ -1254,13 +1345,144 @@ fn rust_original_source_preserves_factory_call_identities_and_exposes_first_reje
                 .plan()
                 .store
                 .types
-                .get(planned.result_type()),
+                .get(planned_proof.result_type()),
             Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == helper_class
         ));
         factory
             .tasty_plan
             .validate_method_bodies()
             .expect("the proof-backed calls validate before encoding");
+        let original = factory.tasty_plan.plan();
+        let planned = original
+            .typed_bindings
+            .planned_call(original.source.id, create)
+            .expect("the pickler binding retains the same-session call receipt");
+        let reject_mutation = |receipt: PlannedCallBinding,
+                               missing_edge,
+                               stale_edge,
+                               members: &[ClassMemberPicklePlan]| {
+            let bindings = ReceiptBindings {
+                base: original.typed_bindings,
+                caller: create,
+                receipt,
+                missing_edge,
+                stale_edge,
+            };
+            let mutated = ClassStatePicklePlan {
+                store: original.store,
+                definitions: original.definitions,
+                source_ast: original.source_ast,
+                typed_ast: original.typed_ast,
+                source_index: original.source_index,
+                typed_bindings: &bindings,
+                source: original.source.clone(),
+                class: original.class,
+                class_tree: original.class_tree,
+                constructor: original.constructor.clone(),
+                members,
+            };
+            match mutated.validate() {
+                Ok(validated) => validated
+                    .pickle()
+                    .expect_err("a rejected plan must not produce completed TASTy"),
+                Err(error) => error,
+            }
+        };
+        let members = original.members;
+        let missing_helper_members = members
+            .iter()
+            .copied()
+            .filter(|member| !matches!(member, ClassMemberPicklePlan::Method { symbol, .. } if *symbol == planned.method))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            reject_mutation(planned, None, None, &missing_helper_members),
+            PickleError::SourceOrder { class } if class == factory_class
+        ));
+
+        let missing_edge_error =
+            reject_mutation(planned, Some(planned.source_apply), None, members);
+        assert!(matches!(
+            missing_edge_error,
+            PickleError::BodyBinding {
+                tree,
+                actual: None,
+                ..
+            } if tree == planned.source_apply
+        ), "unexpected missing-edge failure: {missing_edge_error:?}");
+        let wrong_typed_apply = planned.typed_function;
+        assert!(matches!(
+            reject_mutation(
+                planned,
+                None,
+                Some((planned.source_apply, wrong_typed_apply)),
+                members,
+            ),
+            PickleError::BodyBinding {
+                tree,
+                actual: Some(actual),
+                ..
+            } if tree == planned.source_apply && actual == wrong_typed_apply
+        ));
+
+        let mut wrong_member = planned;
+        wrong_member.method = create;
+        assert!(matches!(
+            reject_mutation(wrong_member, None, None, members),
+            PickleError::Reference {
+                symbol,
+                reason: dotty_tasty_pickler::ReferenceError::Owner,
+            } if symbol == create
+        ));
+        let mut wrong_owner = planned;
+        wrong_owner.owner = owner_class;
+        assert!(matches!(
+            reject_mutation(wrong_owner, None, None, members),
+            PickleError::Reference {
+                symbol,
+                reason: dotty_tasty_pickler::ReferenceError::Owner,
+            } if symbol == planned.method
+        ));
+        let mut wrong_result = planned;
+        wrong_result.result_type = planned.formal_type;
+        assert!(matches!(
+            reject_mutation(wrong_result, None, None, members),
+            PickleError::Unsupported {
+                feature: dotty_tasty_pickler::UnsupportedFeature::BodyExpression,
+                ..
+            }
+        ));
+        let mut wrong_receiver = planned;
+        wrong_receiver.typed_receiver = Some(planned.typed_argument);
+        assert!(matches!(
+            reject_mutation(wrong_receiver, None, None, members),
+            PickleError::Unsupported {
+                feature: dotty_tasty_pickler::UnsupportedFeature::BodyExpression,
+                ..
+            }
+        ));
+
+        let mut limits = PickleLimits::default();
+        limits.projection.max_expression_depth = 0;
+        assert!(matches!(
+            factory.tasty_plan.pickle_with_limits(limits),
+            Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: 0,
+            })
+        ));
+        limits.projection.max_expression_depth = 1;
+        assert!(factory.tasty_plan.pickle_with_limits(limits).is_ok());
+        limits.projection = ProjectionLimits {
+            max_items: 1,
+            ..ProjectionLimits::default()
+        };
+        assert!(matches!(
+            factory.tasty_plan.pickle_with_limits(limits),
+            Err(PickleError::LimitExceeded {
+                kind: LimitKind::Items,
+                ..
+            })
+        ));
     })
     .expect("proof validation and genuine reference-result planning succeed");
     assert_eq!(

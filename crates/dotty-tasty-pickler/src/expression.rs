@@ -426,13 +426,17 @@ fn lower_expression_inner(
                 new_expression,
                 type_tree.ty,
             )?;
+            let argument_depth = child_expression_depth(ast, application.args[0], depth);
             let argument = lower_expression_inner(
                 store,
                 ast,
                 application.args[0],
                 method,
                 parameters,
-                ExpressionState { depth, budget },
+                ExpressionState {
+                    depth: argument_depth,
+                    budget,
+                },
                 context,
             )?;
             return context.wire_node(AstNode::Length {
