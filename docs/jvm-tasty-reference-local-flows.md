@@ -790,11 +790,11 @@ runtime used unchanged Rust classes.
 | Negative | First authoritative stage and observed result |
 | --- | --- |
 | Missing/stale local binding, scope, method symbol, or type | Same-session pickler body validation; exact `BodyBinding`, `ScopeMembers`, `Kind`, or `BodyType` value asserted. |
-| Missing local `VALDEF` in an isolated corrupted wire copy | Local definition decoder rejects `tag 0` as `UnexpectedTag(expected=VALDEF, actual=0)` at the original local address. |
+| Missing local `VALDEF` in an isolated corrupted wire copy | The actual emitted bytes are parsed, indexed, and decoded through `create`'s `BLOCK`; its decoder first rejects the local tag as `Term(InvalidTag { tag: 0, offset: 14 })`, where offset 14 is relative to the block payload and points at the corrupted local tag. `TastyFile::parse_and_validate_scala_3_9` alone is lazy for this nested body and is not claimed as the rejecting stage. |
 | Malformed local `TERMREFdirect` in an isolated copy | Raw term decoder rejects `tag 0` at the exact local argument offset. |
 | Dangling local `TERMREFdirect` | The decoded reference retains the corrupted target; `resolve_ast_reference` returns `None` for that unoccupied address. |
 | Corrupt/missing/misplaced sidecars, UUID mismatch, incomplete six-file batch | Pinned Scala reader/binary loader fails at the affected TASTy or class/TASTy linkage gate. |
-| Wrong helper result or Owner constructor ABI | Pinned Scala compile fails with the recorded descriptor/type or constructor diagnostic; JVM batch controls reject wrong Methodref/field/instruction/slot/stack bounds before publication. |
+| Wrong helper result or Owner constructor ABI | Pinned Scala compile fails with the recorded descriptor/type or constructor diagnostic. `reference_local_batch_rejects_wrong_slots_bounds_methodref_and_stackmap` corrupts `create`'s astore/aload slot, helper Methodref, `max_stack`, and `max_locals` separately; the batch contract rejects each first in phase `cross-class invocation` before returning a batch. The same test keeps `create` unchanged and adds a test-only Boolean branch probe to provide a real `StackMapTable`; changing its frame type to reserved `0xc8` is rejected by Java 21 as `ClassFormatError: StackMapTable format error: reserved frame type`, and the failed verifier control never passes the corrupted clone to the publisher. |
 | Publisher fault after each of six writes, before promotion, and after promotion | Existing publisher regression injects all eight handled faults; the final tree is not accepted as partial, and a pre-existing destination sentinel is preserved. This covers handled-error rollback only, not crash-atomic filesystem durability. |
 
 The focused publisher and class-file cases are in

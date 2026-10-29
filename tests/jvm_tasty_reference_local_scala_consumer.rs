@@ -24,13 +24,6 @@ const REQUIRE_CONSUMER: &str = "DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_LOCAL_CONSUM
 
 #[test]
 fn pinned_scala_consumes_reference_local_rust_tasty_and_executes_original_classes() {
-    if std::env::var(REQUIRE_CONSUMER).as_deref() != Ok("1") {
-        eprintln!(
-            "skipped pinned Scala reference-local consumer gate; set {REQUIRE_CONSUMER}=1 to require it"
-        );
-        return;
-    }
-
     let first = emit_paired_jvm_tasty_batch(
         SOURCE,
         "CounterOwnerFactory.scala",
@@ -55,6 +48,13 @@ fn pinned_scala_consumes_reference_local_rust_tasty_and_executes_original_classe
         })
         .expect("the original batch includes Factory");
     assert_rust_local_tasty_structure(factory.tasty_bytes());
+
+    if std::env::var(REQUIRE_CONSUMER).as_deref() != Ok("1") {
+        eprintln!(
+            "skipped pinned Scala reference-local consumer gate; set {REQUIRE_CONSUMER}=1 to require it"
+        );
+        return;
+    }
 
     let renamed_reordered = SOURCE
         .replace("package example", "package renamed")
@@ -237,22 +237,30 @@ fn assert_rust_local_tasty_structure(bytes: &[u8]) {
 
     let mut missing_local = bytes.to_vec();
     missing_local[asts_offset + local_address as usize] = 0;
-    let mut missing_local_node = index
-        .get(local_address)
-        .expect("corrupted node remains at the original local address")
-        .clone();
-    missing_local_node.tag = missing_local[asts_offset + local_address as usize];
-    let missing_local_error = missing_local_node.decode_definition_body();
+    let missing_local_file = TastyFile::parse_and_validate_scala_3_9(&missing_local)
+        .expect("the parser reaches the lazily indexed nested declaration");
+    let missing_local_index = missing_local_file.ast_address_index();
+    let missing_local_index = missing_local_index.expect("index actual corrupted file bytes");
+    let missing_local_block_node = missing_local_index
+        .get(block_address)
+        .expect("create's BLOCK remains indexed in the corrupted file");
+    let missing_asts_section = missing_local_file
+        .section(StandardSection::Asts)
+        .expect("corrupted file retains its ASTs section");
+    let block_payload_address = missing_local_block_node.payload.as_ptr() as usize
+        - missing_asts_section.payload.as_ptr() as usize;
+    let missing_local_offset = local_address as usize - block_payload_address;
+    assert_eq!(missing_local_offset, 14);
+    let missing_local_error = missing_local_block_node.decode_block();
     assert!(
         matches!(
             missing_local_error,
-            Err(AstError::UnexpectedTag {
-                expected: VALDEF_TAG,
-                actual: 0,
+            Err(AstError::Term(TermError::InvalidTag {
+                tag: 0,
                 offset,
-            }) if offset == local_address as usize
+            })) if offset == missing_local_offset
         ),
-        "missing local VALDEF is rejected by its declaration decoder: {missing_local_error:?}"
+        "the actual file/index/BLOCK decoder must reject the missing local tag at its first byte offset: {missing_local_error:?}"
     );
 
     let mut malformed_reference = bytes.to_vec();
