@@ -555,15 +555,18 @@ this JDK run.
 
 ### #1854 strict reproduction
 
-Use Temurin `21.0.13+9`, keep temporary files and Cargo outputs on the root
-volume, and require the JDK gate:
+Validation used Rust `1.98.1 (48a229cea 2026-09-01)` and Temurin JDK
+`21.0.13+9`. Keep temporary files and Cargo outputs on the root volume, and
+require the JDK gate:
 
 ```sh
 export JAVA_HOME=/path/to/temurin-21.0.13+9
 export PATH="$JAVA_HOME/bin:$PATH"
+export ISSUE_ROOT=/path/to/root-volume/issue-1854
 export TMPDIR="$ISSUE_ROOT/tmp"
 export JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=$TMPDIR -XX:+UseSerialGC"
 export CARGO_TARGET_DIR="$ISSUE_ROOT/target"
+mkdir -p "$TMPDIR"
 DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test -p dotty --test jvm_tasty_artifacts \
   reference_local_flow_emits_a_deterministic_six_artifact_batch \
   --locked -- --nocapture
