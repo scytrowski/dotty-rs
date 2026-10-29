@@ -54,7 +54,14 @@ fn lower_local_value_inner(
         context,
     )?;
     let name = context.intern_name(*value.name.as_name())?;
-    let type_syntax = context.primitive_type_syntax(tree.ty)?;
+    let type_syntax = if tree.ty == context.definitions().int
+        || tree.ty == context.definitions().boolean
+        || tree.ty == context.definitions().unit
+    {
+        context.primitive_type_syntax(tree.ty)?
+    } else {
+        context.same_source_reference_type_syntax(tree.ty)?
+    };
     let mut fields = vec![
         AstField::Nat(name),
         AstField::Tree(type_syntax),

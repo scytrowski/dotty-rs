@@ -344,3 +344,35 @@ supersedes the earlier scope record linked from the original issue comment.
 | `cargo test -p dotty --test jvm_tasty_factory_result_arguments reference_local_constructor_flow_preserves_one_session_identity_through_body_validation --locked -- --nocapture` | Passed; authentic original and two independent source/typed sessions, renamed/reordered controls, stale initializer receipt, missing local receipt, wrong local scope, and paired adapter boundary. |
 | `cargo test -p dotty-tasty-pickler --lib --locked` | Passed. |
 | `cargo test -p dotty --test jvm_tasty_factory_result_arguments reference_local_constructor_flow_preserves_one_session_identity_through_body_validation --locked -- --nocapture` | Passed after review fix; authentic constructor-result TypeId is preserved, with negative package-prefix mismatch, root-TypeId mismatch, disconnected `New` type tree, and local/helper receipt corruptions. |
+
+## Issue #1852: standalone TASTy for a reference local
+
+Issue [#1852](https://github.com/scytrowski/dotty-rs/issues/1852) supersedes
+the #1851 statement that standalone `pickle()` rejects this body. The existing
+`ClassStatePicklePlan` path now serializes the validated source `Block`, its
+original immutable reference `VALDEF`, the unchanged helper `PlannedCall`, and
+the final constructor `Apply` with a direct reference to the local declaration.
+The local's `IDENTtpt` is projected only for a canonical same-source class type
+already registered by the validated plan. Primitive local type syntax keeps
+its prior path and bytes. The writer keeps the constructor result's
+`TypeRef(NoPrefix, Owner)` separate from the method result's package-prefixed
+Owner `TypeRef`.
+
+The standalone regression serializes Counter, CounterOwner, and
+CounterOwnerFactory sidecars independently from the same original source
+frontend session. Its decoder checks the Factory method result tree, block and
+single local declaration, local class type tree, helper `SELECTin`/`APPLY` and
+original seed parameter, Owner constructor selection, and exact local
+`TERMREFdirect` address. Two independent sessions emit identical sidecars;
+renamed and reordered class variants pass deterministic output checks. The
+source and typed corruption controls reject missing helper members, local
+bindings, wrong local addresses/types, and foreign owners before output; the
+existing proof matrix continues to reject mutable, duplicate, nested, and
+otherwise unsupported local shapes.
+
+The pinned Scala 3.9.0 reader at revision
+`777528f19a58e794c9954a42f433373472ec57f8` decompiles these Rust-produced
+sidecars, reconstructs the typed local declaration and use, and accepts all
+three with `-from-tasty`. These are standalone TASTy artifacts only: the
+paired JVM/TASTy batch adapter still rejects the local receipt, and this issue
+does not claim runtime acceptance of separately compiled Scala clients.

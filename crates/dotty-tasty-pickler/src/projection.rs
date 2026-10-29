@@ -1963,6 +1963,54 @@ impl<'a> EncodingContext<'a> {
         }
     }
 
+    /// Projects the Scala 3.9 `IDENTtpt` wrapper for a canonical same-source
+    /// reference type already registered from the validated class plan.
+    pub(crate) fn same_source_reference_type_syntax(
+        &mut self,
+        ty: TypeId,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|context| {
+            let Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(class),
+            } = context.ty(ty)?
+            else {
+                return Err(PickleError::UnsupportedTypeReference { ty });
+            };
+            let class = *class;
+            let owner = context
+                .symbol(class)?
+                .owner
+                .ok_or(reference(class, ReferenceError::Owner))?;
+            if context.symbol(class)?.kind != SymbolKind::Class
+                || context.symbol(class)?.origin != SymbolOrigin::Source(context.source)
+                || context.symbol(class)?.visibility != Visibility::Public
+                || !context.symbol(class)?.flags.is_empty()
+                || !context.symbol(class)?.annotations.is_empty()
+                || !context.external.contains_key(&class)
+                || !matches!(
+                    context.ty(*prefix)?,
+                    Type::TypeRef {
+                        prefix: package_prefix,
+                        target: TypeRefTarget::Symbol(package),
+                    } if *package_prefix == context.definitions.no_prefix && *package == owner
+                )
+            {
+                return Err(reference(class, ReferenceError::Metadata));
+            }
+            let child = context.lower(ty, 0)?;
+            let name = context.utf8(context.text(context.symbol(class)?.name.text())?)?;
+            context
+                .wire
+                .push(AstNode::NatAst {
+                    tag: IDENTTPT_TAG,
+                    value: AstOperand::Nat(name),
+                    child,
+                })
+                .map_err(construction)
+        })
+    }
+
     /// Projects the Scala 3.9 `IDENTtpt` wrapper for a validated same-batch
     /// reference field. This returns only a type fragment; it does not make
     /// the pending field initializer serializable.
