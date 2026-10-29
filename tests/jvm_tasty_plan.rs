@@ -20,6 +20,8 @@ const CROSS_CLASS_IDENTITY_RESULT: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterIdentitySource.scala");
 const CROSS_CLASS_FACTORY_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_cross_class_factories/CounterFactory.scala");
+const FACTORY_RESULT_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala");
 const SAME_BATCH_REFERENCE_FIELD: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass CounterOwner(seed: Int):\n  private val inner: Counter = new Counter(seed)\n  def constant(): Int = 0\n";
 const SAME_BATCH_REFERENCE_CONSTRUCTOR: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass CounterOwner(counter: Counter):\n  def constant(): Int = 0\n";
 const SAME_BATCH_REFERENCE_ALIAS: &str = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass CounterOwner(counter: Counter):\n  private val inner: Counter = counter\n  def read(): Int = inner.get()\n";
@@ -2435,6 +2437,84 @@ fn independent_batch_sessions_have_distinct_arenas_and_same_ordered_intent() {
                 },
             )
             .unwrap();
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn factory_result_batch_plan_keeps_both_factory_methods_and_the_original_call_proof() {
+    with_paired_jvm_tasty_batch_plan(
+        FACTORY_RESULT_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(18356),
+        |batch| {
+            assert_eq!(batch.classes.len(), 3);
+            let counter = &batch.classes[0];
+            let owner = &batch.classes[1];
+            let factory = &batch.classes[2];
+            assert_eq!(counter.compatibility.internal_name(), "example/Counter");
+            assert_eq!(owner.compatibility.internal_name(), "example/CounterOwner");
+            assert_eq!(
+                factory.compatibility.internal_name(),
+                "example/CounterOwnerFactory"
+            );
+
+            let methods = factory.compatibility.jvm_metadata().methods();
+            let method_named = |name: &str| {
+                methods
+                    .iter()
+                    .find(|method| {
+                        batch.jvm_unit.store.names.try_resolve(
+                            batch
+                                .jvm_unit
+                                .store
+                                .symbols
+                                .get(method.symbol())
+                                .name
+                                .text(),
+                        ) == Some(name)
+                    })
+                    .unwrap()
+            };
+            let make_counter = method_named("makeCounter");
+            let create = method_named("create");
+            assert_eq!(make_counter.descriptor().as_str(), "(I)Lexample/Counter;");
+            assert_eq!(create.descriptor().as_str(), "(I)Lexample/CounterOwner;");
+            assert!(factory.source_member_order.contains(&make_counter.symbol()));
+            assert!(factory.source_member_order.contains(&create.symbol()));
+
+            let proofs = batch
+                .constructor_call_proofs
+                .iter()
+                .filter(|proof| proof.method() == create.symbol())
+                .collect::<Vec<_>>();
+            let [proof] = proofs.as_slice() else {
+                panic!("the exact create method has one constructor argument proof");
+            };
+            assert_eq!(proof.source_id(), batch.source_id);
+            assert_eq!(proof.caller_class(), factory.class);
+            assert_eq!(proof.target_class(), owner.class);
+            assert_eq!(proof.formal_class(), None);
+            assert_eq!(
+                proof.argument_proof().kind(),
+                dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::PlannedCall
+            );
+            assert!(
+                factory
+                    .tasty_plan
+                    .plan()
+                    .source_ast
+                    .try_get(proof.source_rhs())
+                    .is_some()
+            );
+            assert!(
+                batch
+                    .jvm_unit
+                    .typed_ast
+                    .try_get(proof.typed_rhs())
+                    .is_some()
+            );
         },
     )
     .unwrap();

@@ -3,6 +3,10 @@ use dotty_classfile::classfile::{ClassFile, Reader};
 use dotty_classfile::tasty_link::TastyLinkId;
 use dotty_core::SourceId;
 use dotty_jvm::emit_class;
+use dotty_jvm_tasty_contract::{
+    JvmTastyBatchArtifacts, JvmTastyClassFileArtifact, JvmTastySidecarArtifact,
+    validate_jvm_tasty_batch, validate_jvm_tasty_batch_artifacts,
+};
 use dotty_jvm_tasty_contract::{JvmTastyContractError, validate_classfile_tasty_link};
 use dotty_tasty::tasty::{DefinitionBody, TastyFile};
 
@@ -11,6 +15,7 @@ use dotty::jvm_tasty_artifacts::{
     emit_paired_jvm_tasty_class,
 };
 use dotty::jvm_tasty_plan::PairedPlanError;
+use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::bytecode::{
     ClassReference, ConstantPoolIndexOperand, Instruction, LocalIndex, SpecialMethodReference,
@@ -1406,6 +1411,260 @@ fn factory_result_argument_emits_six_identical_artifacts_from_independent_sessio
 }
 
 #[test]
+fn factory_result_batch_contract_rejects_corrupt_create_bytecode_before_publication() {
+    let batch = emit_paired_jvm_tasty_batch(
+        FACTORY_RESULT_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(18353),
+    )
+    .unwrap();
+    let base = TestDirectory::new("factory-result-contract-rejections");
+
+    with_paired_jvm_tasty_batch_plan(
+        FACTORY_RESULT_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(18354),
+        |plan| {
+            let tasty_plans = plan
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans).unwrap();
+            let valid_artifacts = JvmTastyBatchArtifacts {
+                classfiles: batch
+                    .classes()
+                    .iter()
+                    .map(|artifact| JvmTastyClassFileArtifact {
+                        classfile_path: artifact.classfile_path().to_owned(),
+                        classfile_bytes: artifact.classfile_bytes().to_vec(),
+                    })
+                    .collect(),
+                sidecars: batch
+                    .classes()
+                    .iter()
+                    .map(|artifact| JvmTastySidecarArtifact {
+                        tasty_path: artifact.tasty_path().to_owned(),
+                        tasty_bytes: artifact.tasty_bytes().to_vec(),
+                    })
+                    .collect(),
+            };
+            validate_jvm_tasty_batch_artifacts(&validated, valid_artifacts.clone()).unwrap();
+
+            let factory = valid_artifacts
+                .classfiles
+                .iter()
+                .find(|artifact| artifact.classfile_path == "example/CounterOwnerFactory.class")
+                .unwrap();
+            let mut reader = Reader::new(&factory.classfile_bytes);
+            let decoded = ClassFile::decode(&mut reader).unwrap();
+            let create = decoded
+                .methods
+                .iter()
+                .find(|method| decoded.constant_pool.utf8(method.name_index).unwrap() == "create")
+                .unwrap();
+            let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                panic!("Factory.create has one Code attribute");
+            };
+            let code_start =
+                code.code.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
+            let (factory_operand, constructor_operand) =
+                factory_result_call_operand_offsets(code.code).unwrap();
+            let make_counter = decoded
+                .methods
+                .iter()
+                .find(|method| {
+                    decoded.constant_pool.utf8(method.name_index).unwrap() == "makeCounter"
+                })
+                .unwrap();
+            let [Attribute::Code(helper_code)] = make_counter.attributes.as_slice() else {
+                panic!("Factory.makeCounter has one Code attribute");
+            };
+            let helper_code_start =
+                helper_code.code.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
+            let counter_constructor_operand = constructor_operand_offset(helper_code.code).unwrap();
+
+            let mut cases = Vec::new();
+            let mut missing_invoke = valid_artifacts.clone();
+            factory_classfile_mut(&mut missing_invoke).classfile_bytes
+                [code_start + factory_operand - 1] = 0x00;
+            cases.push(("missing-factory-invoke", missing_invoke));
+
+            let mut wrong_factory = valid_artifacts.clone();
+            let classfile = &mut factory_classfile_mut(&mut wrong_factory).classfile_bytes;
+            classfile[code_start + factory_operand..code_start + factory_operand + 2]
+                .copy_from_slice(
+                    &factory.classfile_bytes[helper_code_start + counter_constructor_operand
+                        ..helper_code_start + counter_constructor_operand + 2],
+                );
+            cases.push(("wrong-factory-owner-result", wrong_factory));
+
+            let mut wrong_constructor = valid_artifacts.clone();
+            let classfile = &mut factory_classfile_mut(&mut wrong_constructor).classfile_bytes;
+            classfile[code_start + constructor_operand..code_start + constructor_operand + 2]
+                .copy_from_slice(
+                    &factory.classfile_bytes
+                        [code_start + factory_operand..code_start + factory_operand + 2],
+                );
+            cases.push(("wrong-owner-constructor", wrong_constructor));
+
+            let mut extra_invoke = valid_artifacts.clone();
+            let classfile = factory_classfile_mut(&mut extra_invoke);
+            let old_code_length = u32::from_be_bytes(
+                classfile.classfile_bytes[code_start - 4..code_start]
+                    .try_into()
+                    .unwrap(),
+            );
+            let attribute_length = u32::from_be_bytes(
+                classfile.classfile_bytes[code_start - 12..code_start - 8]
+                    .try_into()
+                    .unwrap(),
+            );
+            classfile.classfile_bytes.splice(
+                code_start + constructor_operand - 1..code_start + constructor_operand - 1,
+                [
+                    0xb6,
+                    factory.classfile_bytes[factory_operand + code_start],
+                    factory.classfile_bytes[factory_operand + code_start + 1],
+                ],
+            );
+            classfile.classfile_bytes[code_start - 4..code_start]
+                .copy_from_slice(&(old_code_length + 3).to_be_bytes());
+            classfile.classfile_bytes[code_start - 12..code_start - 8]
+                .copy_from_slice(&(attribute_length + 3).to_be_bytes());
+            cases.push(("additional-factory-invoke", extra_invoke));
+
+            let mut missing_create = valid_artifacts.clone();
+            let raw = factory_classfile_mut(&mut missing_create)
+                .classfile_bytes
+                .clone();
+            let mut reader = Reader::new(&raw);
+            let mut decoded = ClassFile::decode(&mut reader).unwrap();
+            decoded.methods.retain(|method| {
+                decoded.constant_pool.utf8(method.name_index).unwrap() != "create"
+            });
+            factory_classfile_mut(&mut missing_create).classfile_bytes = decoded.encode().unwrap();
+            cases.push(("missing-create-method", missing_create));
+
+            let mut wrong_result = valid_artifacts.clone();
+            let raw = factory_classfile_mut(&mut wrong_result)
+                .classfile_bytes
+                .clone();
+            let mut reader = Reader::new(&raw);
+            let mut decoded = ClassFile::decode(&mut reader).unwrap();
+            let create_descriptor = decoded
+                .methods
+                .iter()
+                .find(|method| decoded.constant_pool.utf8(method.name_index).unwrap() == "create")
+                .unwrap()
+                .descriptor_index;
+            let make_counter = decoded
+                .methods
+                .iter_mut()
+                .find(|method| {
+                    decoded.constant_pool.utf8(method.name_index).unwrap() == "makeCounter"
+                })
+                .unwrap();
+            make_counter.descriptor_index = create_descriptor;
+            factory_classfile_mut(&mut wrong_result).classfile_bytes = decoded.encode().unwrap();
+            cases.push(("wrong-factory-result-class", wrong_result));
+
+            for (label, corrupt) in cases {
+                let error = validate_jvm_tasty_batch_artifacts(&validated, corrupt)
+                    .expect_err("corrupt create bytecode must fail whole-batch validation");
+                let expected_phase = match label {
+                    "missing-create-method" | "wrong-factory-result-class" => "member ABI",
+                    _ => "cross-class invocation",
+                };
+                assert!(
+                    matches!(
+                        error,
+                        JvmTastyContractError::BatchArtifact {
+                            class_index: 2,
+                            phase,
+                            ..
+                        } if phase == expected_phase
+                    ),
+                    "{label} must fail at {expected_phase}: {error:?}"
+                );
+                assert!(
+                    !base.path().join(label).exists(),
+                    "a rejected batch has no accepted publication destination"
+                );
+            }
+
+            let mut truncated = valid_artifacts;
+            let classfile = &mut factory_classfile_mut(&mut truncated).classfile_bytes;
+            classfile.truncate(code_start + factory_operand + 1);
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, truncated),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 2,
+                    phase: "class-file decode",
+                    ..
+                })
+            ));
+        },
+    )
+    .unwrap();
+}
+
+fn factory_classfile_mut(artifacts: &mut JvmTastyBatchArtifacts) -> &mut JvmTastyClassFileArtifact {
+    artifacts
+        .classfiles
+        .iter_mut()
+        .find(|artifact| artifact.classfile_path == "example/CounterOwnerFactory.class")
+        .unwrap()
+}
+
+fn factory_result_call_operand_offsets(code: &[u8]) -> Option<(usize, usize)> {
+    let mut pc = 0;
+    for opcode in [0xbb, 0x59, 0x2a, 0x1b] {
+        if code.get(pc) != Some(&opcode) {
+            return None;
+        }
+        pc += 1;
+        if opcode == 0xbb {
+            pc = pc.checked_add(2)?;
+        }
+    }
+    if code.get(pc) != Some(&0xb6) {
+        return None;
+    }
+    let factory_operand = pc + 1;
+    pc += 3;
+    if code.get(pc) != Some(&0xb7) {
+        return None;
+    }
+    let constructor_operand = pc + 1;
+    pc += 3;
+    if code.get(pc) != Some(&0xb0) || pc + 1 != code.len() {
+        return None;
+    }
+    Some((factory_operand, constructor_operand))
+}
+
+fn constructor_operand_offset(code: &[u8]) -> Option<usize> {
+    let mut pc = 0;
+    if code.get(pc) != Some(&0xbb) {
+        return None;
+    }
+    pc += 3;
+    if code.get(pc) != Some(&0x59) {
+        return None;
+    }
+    pc += 1;
+    if code.get(pc) != Some(&0x1b) {
+        return None;
+    }
+    pc += 1;
+    if code.get(pc) != Some(&0xb7) {
+        return None;
+    }
+    Some(pc + 1)
+}
+
+#[test]
 fn nested_constructor_factory_emits_six_linked_artifacts_from_one_session() {
     let first = emit_paired_jvm_tasty_batch(
         NESTED_CONSTRUCTOR_BATCH,
@@ -1923,13 +2182,13 @@ fn nested_constructor_factory_is_name_and_declaration_order_independent() {
 }
 
 #[test]
-fn reference_constructor_batch_publisher_contains_all_six_artifact_failures() {
+fn factory_result_batch_publisher_rejects_corruption_and_all_six_write_failures() {
     let batch = emit_paired_jvm_tasty_batch(
-        NESTED_CONSTRUCTOR_BATCH,
-        "NestedConstructorCalls.scala",
-        SourceId::from_index(18001),
+        FACTORY_RESULT_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(18355),
     )
-    .expect("emit the complete Counter/Owner/Factory batch");
+    .expect("emit the complete Counter/Owner/Factory factory-result batch");
     let pairs = batch_publish_pairs(&batch);
     let base = TestDirectory::new("reference-constructor-publish-faults");
 
@@ -1963,6 +2222,28 @@ fn reference_constructor_batch_publisher_contains_all_six_artifact_failures() {
         })
     ));
     assert!(!missing_factory_class_destination.exists());
+
+    let mut duplicate_factory_path = pairs.clone();
+    duplicate_factory_path[2].classfile_path = pairs[1].classfile_path;
+    let duplicate_factory_destination = base.path().join("duplicate-factory-path");
+    assert!(matches!(
+        publish_batch_pairs(
+            &duplicate_factory_destination,
+            &duplicate_factory_path,
+            None
+        ),
+        Err(BatchPublishError::InvalidManifest { .. })
+    ));
+    assert!(!duplicate_factory_destination.exists());
+
+    let mut unsafe_factory_path = pairs.clone();
+    unsafe_factory_path[2].tasty_path = "../CounterOwnerFactory.tasty";
+    let unsafe_factory_destination = base.path().join("unsafe-factory-path");
+    assert!(matches!(
+        publish_batch_pairs(&unsafe_factory_destination, &unsafe_factory_path, None),
+        Err(BatchPublishError::InvalidManifest { .. })
+    ));
+    assert!(!unsafe_factory_destination.exists());
 
     let mut missing_owner_class = pairs.clone();
     missing_owner_class[1].classfile_path = "";
