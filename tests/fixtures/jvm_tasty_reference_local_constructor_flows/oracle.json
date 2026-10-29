@@ -1,0 +1,82 @@
+{
+  "baseline_main_sha": "2c9303ea65ab7c6c9d6994cc98be6620906a5bc3",
+  "producer_source": "CounterOwnerFactory.scala",
+  "producer_source_sha256": "379d03ad0ee08d06a31012aeafe306e5b9e30c1942e771acdb0d4eef23c790b6",
+  "consumer_source": "Consumer.scala",
+  "consumer_source_sha256": "53f0d1cffdf136958b4914f17426cadd73dd493488ad94426243fb2332bc882f",
+  "producer_output_was_empty": true,
+  "scala_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "scala_version": "3.9.0-bin-SNAPSHOT-git-777528f",
+  "scala_compiler_jar_sha256": "a843aa51ddec035d2e2091edd500a8aabd03747e4b8d627b596c47cd2c0fb573",
+  "scala_launcher_jars_sha256": {
+    "scala.jar": "b0abbb0365420a9216d82bb669ae4010b088ac45b37bb615e97e263e9d629d42",
+    "with_compiler.jar": "4e49b4b398960700afd5322ab73253fd8e4220805444fe068f5dd9e1baa279f9"
+  },
+  "scala_standard_libraries_sha256": {
+    "scala3-library_3-3.9.0-bin-SNAPSHOT.jar": "8c605e1945ae5a3c57d618d02241f7190ecbed744367473c7c3a9b61940c920c",
+    "scala-library-3.9.0-bin-SNAPSHOT.jar": "1a3d93ad5f8c0ff1ecbad3c98595403d88168b82ac7f3e4f461f33345554cf42"
+  },
+  "jdk": "Temurin 21.0.8+9",
+  "jdk_release_sha256": "93b52921a5efb10ac0dcf9e3c955fa209fc83687df897d6ab034af967e2f5088",
+  "release": 21,
+  "classfile_major": 65,
+  "tasty_version": "28.9.0",
+  "scala_consumer_runtime_output": "scala39-reference-local-constructor-flow=ok",
+  "factory_create": {
+    "descriptor": "(I)Lexample/CounterOwner;",
+    "stack": 3,
+    "locals": 3,
+    "local_slots": {
+      "this": 0,
+      "seed": 1,
+      "counter": 2
+    },
+    "instructions": [
+      "aload_0",
+      "iload_1",
+      "invokevirtual CounterOwnerFactory.makeCounter:(I)Lexample/Counter;",
+      "astore_2",
+      "new CounterOwner",
+      "dup",
+      "aload_2",
+      "invokespecial CounterOwner.<init>:(Lexample/Counter;)V",
+      "areturn"
+    ]
+  },
+  "tasty_create_nodes": [
+    { "address": 64, "tag": 130, "kind": "DEFDEF" },
+    { "address": 67, "tag": 134, "kind": "PARAM" },
+    { "address": 80, "tag": 140, "kind": "BLOCK" },
+    { "address": 82, "tag": 136, "kind": "outer APPLY" },
+    { "address": 84, "tag": 176, "kind": "outer SELECTin" },
+    { "address": 96, "tag": 129, "kind": "counter VALDEF" },
+    { "address": 103, "tag": 136, "kind": "initializer APPLY" },
+    { "address": 105, "tag": 176, "kind": "makeCounter SELECTin" }
+  ],
+  "classes": [
+    {
+      "name": "example.Counter",
+      "classfile": "scala39/example/Counter.class",
+      "tasty": "scala39/example/Counter.tasty",
+      "tasty_uuid": "000d755daeddf8e800f237820b44b01b",
+      "classfile_sha256": "a80cd1f8ce0c14e0e6a9c794d2829286fa5608874a3dae243dd218a8d4d53d76",
+      "tasty_sha256": "a57ed76d5a5fed5391f504a8e5e16fb33be8efb8408b45653fc45a18d06394bf"
+    },
+    {
+      "name": "example.CounterOwner",
+      "classfile": "scala39/example/CounterOwner.class",
+      "tasty": "scala39/example/CounterOwner.tasty",
+      "tasty_uuid": "00691eaa004c31ee00dd722c1c8d1966",
+      "classfile_sha256": "4a19bd3e6428c7eb6df006ca33297cb2bb542f2ca1ce230a8ec2e9fc522b457a",
+      "tasty_sha256": "b8bd409d5b214f5e59ff80dbd34021b6cf159b5ac5fdac812e2ece2b759dbe96"
+    },
+    {
+      "name": "example.CounterOwnerFactory",
+      "classfile": "scala39/example/CounterOwnerFactory.class",
+      "tasty": "scala39/example/CounterOwnerFactory.tasty",
+      "tasty_uuid": "00fdc94a3cc1f0d1009abc6ca20df822",
+      "classfile_sha256": "7d954a99ecc5a8745c79c9291d5289c2cc427759f443ec90583063f825b73705",
+      "tasty_sha256": "669aee978ab8857c3029b67dcebc728f4e66cfbf39cdcec4e519f28f9c7403b4"
+    }
+  ]
+}
