@@ -853,7 +853,7 @@ impl SourceTyper<'_> {
             } else {
                 None
             };
-            let untyped_lambda = self.has_unannotated_function_literal_parameter(*argument_tree);
+            let untyped_lambda = self.is_function_literal_value(*argument_tree);
             let typed = if untyped_lambda {
                 if let Some(expected) = expected {
                     self.type_value_expression_expected_inner(

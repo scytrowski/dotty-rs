@@ -569,7 +569,7 @@ impl SourceTyper<'_> {
                 };
                 let mut arguments = Vec::with_capacity(argument_trees.len());
                 for (argument_index, argument_tree) in argument_trees.iter().enumerate() {
-                    let is_lambda = self.has_unannotated_function_literal_parameter(*argument_tree);
+                    let is_lambda = self.is_function_literal_value(*argument_tree);
                     let typed = if is_lambda {
                         if let Some(expected) = expected_parameters.get(argument_index).copied() {
                             self.type_value_expression_expected_inner(

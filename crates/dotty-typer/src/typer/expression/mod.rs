@@ -486,11 +486,10 @@ impl SourceTyper<'_> {
             })?;
         let typed = match node.kind {
             TreeKind::PhaseSpecific(UntypedNode::Function(function)) => {
-                let expected_function1 = if self.has_unannotated_function_literal_parameter(tree) {
-                    self.ordinary_function1_parts(expected, tree.index())?
-                } else {
-                    None
-                };
+                // Keep both Function1 components available even when the
+                // lambda's input is explicitly annotated: the output may
+                // still be needed to type a nested function literal.
+                let expected_function1 = self.ordinary_function1_parts(expected, tree.index())?;
                 self.type_function_literal(
                     tree,
                     function,
@@ -536,25 +535,14 @@ impl SourceTyper<'_> {
         Ok(typed)
     }
 
-    pub(in crate::typer) fn has_unannotated_function_literal_parameter(
-        &self,
-        tree: TreeId<Untyped>,
-    ) -> bool {
+    pub(in crate::typer) fn is_function_literal_value(&self, tree: TreeId<Untyped>) -> bool {
         match self.arena.try_get(tree).map(|node| &node.kind) {
-            Some(TreeKind::PhaseSpecific(UntypedNode::Function(function))) => {
-                function.params.iter().any(|parameter| {
-                    matches!(
-                        self.arena.try_get(*parameter).map(|node| &node.kind),
-                        Some(TreeKind::ValDef(parameter))
-                            if matches!(self.arena.try_get(parameter.tpt).map(|node| &node.kind), Some(TreeKind::TypeTree(_)))
-                    )
-                })
-            }
+            Some(TreeKind::PhaseSpecific(UntypedNode::Function(_))) => true,
             Some(TreeKind::PhaseSpecific(UntypedNode::Parens(parens))) => {
-                self.has_unannotated_function_literal_parameter(parens.inner)
+                self.is_function_literal_value(parens.inner)
             }
             Some(TreeKind::Block(block)) if block.stats.is_empty() => {
-                self.has_unannotated_function_literal_parameter(block.expr)
+                self.is_function_literal_value(block.expr)
             }
             _ => false,
         }
