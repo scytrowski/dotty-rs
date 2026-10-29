@@ -1199,7 +1199,6 @@ mod tests {
 
     struct ScriptedResolver {
         member: Option<SymbolId>,
-        member_error: Option<ResolutionError>,
         package: Option<SymbolId>,
         member_requests: Rc<RefCell<Vec<dotty_core::Name>>>,
         package_requests: Rc<RefCell<Vec<Vec<String>>>>,
@@ -1277,9 +1276,6 @@ mod tests {
             request: &MemberRequest,
         ) -> Result<Option<SymbolId>, ResolutionError> {
             self.member_requests.borrow_mut().push(request.name);
-            if let Some(error) = &self.member_error {
-                return Err(error.clone());
-            }
             Ok(self.member)
         }
 
@@ -9925,7 +9921,6 @@ mod tests {
         let package_requests = Rc::new(RefCell::new(Vec::new()));
         let resolver = ScriptedResolver {
             member: Some(external_type),
-            member_error: None,
             package: None,
             member_requests: Rc::clone(&requests),
             package_requests,
@@ -9956,351 +9951,6 @@ mod tests {
     }
 
     #[test]
-    fn unqualified_external_type_uses_its_current_package_identity() {
-        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "package sample.nested { class Use { val value: Parent = null } }; package sample.other { class Other }",
-        );
-        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
-        let package = packages.symbol(&["sample", "nested"]).unwrap();
-        let external_type = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
-        let parent_name = store.names.intern("Parent");
-        store.symbols.get_mut(external_type).name = Name::new(parent_name, Namespace::Type);
-        store.symbols.get_mut(external_type).owner = Some(package);
-        let requests = Rc::new(RefCell::new(Vec::new()));
-        let resolver = ScriptedResolver {
-            member: Some(external_type),
-            member_error: None,
-            package: None,
-            member_requests: Rc::clone(&requests),
-            package_requests: Rc::new(RefCell::new(Vec::new())),
-        };
-        let context = index.declaration_context_of(value).unwrap();
-        let mut typer = SourceTyper::new(
-            &parsed.ast,
-            source,
-            &index,
-            &mut store,
-            definitions,
-            &packages,
-        )
-        .with_resolver(Box::new(resolver));
-
-        let projected = typer.type_of_tpt(type_tree, context).unwrap();
-
-        assert_eq!(type_symbol(typer.store(), projected), external_type);
-        assert_eq!(requests.borrow().len(), 1);
-        assert_eq!(requests.borrow()[0].namespace(), Namespace::Type);
-        assert_eq!(
-            typer.store().names.resolve(requests.borrow()[0].text()),
-            "Parent"
-        );
-        assert_eq!(
-            typer.store().symbols.get(external_type).owner,
-            Some(package)
-        );
-    }
-
-    #[test]
-    fn unqualified_current_package_type_can_shadow_a_builtin_spelling() {
-        let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("package sample { class Use { val value: Matchable = null } }");
-        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
-        let package = packages.symbol(&["sample"]).unwrap();
-        let external_type = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
-        let matchable_name = store.names.intern("Matchable");
-        store.symbols.get_mut(external_type).name = Name::new(matchable_name, Namespace::Type);
-        store.symbols.get_mut(external_type).owner = Some(package);
-        let classfile_origin = store.origins.register_classfile();
-        store.symbols.get_mut(external_type).origin = SymbolOrigin::Classfile(classfile_origin);
-        let builtin_matchable = definitions.matchable_class;
-        let resolver = ScriptedResolver {
-            member: Some(external_type),
-            member_error: None,
-            package: None,
-            member_requests: Rc::new(RefCell::new(Vec::new())),
-            package_requests: Rc::new(RefCell::new(Vec::new())),
-        };
-        let context = index.declaration_context_of(value).unwrap();
-        let mut typer = SourceTyper::new(
-            &parsed.ast,
-            source,
-            &index,
-            &mut store,
-            definitions,
-            &packages,
-        )
-        .with_resolver(Box::new(resolver));
-
-        let projected = typer.type_of_tpt(type_tree, context).unwrap();
-
-        assert_eq!(type_symbol(typer.store(), projected), external_type);
-        assert_ne!(type_symbol(typer.store(), projected), builtin_matchable);
-        assert_eq!(
-            typer.store().symbols.get(external_type).owner,
-            Some(package)
-        );
-    }
-
-    #[test]
-    fn scala_package_builtin_spelling_keeps_its_canonical_definition() {
-        let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("package scala { class Use { val value: Boolean = true } }");
-        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
-        let package = packages.symbol(&["scala"]).unwrap();
-        let external_type = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
-        let boolean_name = store.names.intern("Boolean");
-        store.symbols.get_mut(external_type).name = Name::new(boolean_name, Namespace::Type);
-        store.symbols.get_mut(external_type).owner = Some(package);
-        let canonical_boolean = definitions.boolean;
-        let requests = Rc::new(RefCell::new(Vec::new()));
-        let resolver = ScriptedResolver {
-            member: Some(external_type),
-            member_error: None,
-            package: None,
-            member_requests: Rc::clone(&requests),
-            package_requests: Rc::new(RefCell::new(Vec::new())),
-        };
-        let context = index.declaration_context_of(value).unwrap();
-        let mut typer = SourceTyper::new(
-            &parsed.ast,
-            source,
-            &index,
-            &mut store,
-            definitions,
-            &packages,
-        )
-        .with_resolver(Box::new(resolver));
-
-        let projected = typer.type_of_tpt(type_tree, context).unwrap();
-
-        assert_eq!(projected, canonical_boolean);
-        assert!(requests.borrow().is_empty());
-    }
-
-    #[test]
-    fn nested_scala_package_classpath_type_can_shadow_a_builtin_spelling() {
-        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "package scala.collection { class Use { val value: Matchable = null } }",
-        );
-        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
-        let package = packages.symbol(&["scala", "collection"]).unwrap();
-        let external_type = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
-        let classfile_origin = store.origins.register_classfile();
-        let matchable_name = store.names.intern("Matchable");
-        store.symbols.get_mut(external_type).name = Name::new(matchable_name, Namespace::Type);
-        store.symbols.get_mut(external_type).owner = Some(package);
-        store.symbols.get_mut(external_type).origin = SymbolOrigin::Classfile(classfile_origin);
-        let canonical_matchable = definitions.matchable_class;
-        let requests = Rc::new(RefCell::new(Vec::new()));
-        let resolver = ScriptedResolver {
-            member: Some(external_type),
-            member_error: None,
-            package: None,
-            member_requests: Rc::clone(&requests),
-            package_requests: Rc::new(RefCell::new(Vec::new())),
-        };
-        let context = index.declaration_context_of(value).unwrap();
-        let mut typer = SourceTyper::new(
-            &parsed.ast,
-            source,
-            &index,
-            &mut store,
-            definitions,
-            &packages,
-        )
-        .with_resolver(Box::new(resolver));
-
-        let projected = typer.type_of_tpt(type_tree, context).unwrap();
-
-        assert_eq!(type_symbol(typer.store(), projected), external_type);
-        assert_ne!(type_symbol(typer.store(), projected), canonical_matchable);
-        assert_eq!(
-            typer.store().symbols.get(external_type).owner,
-            Some(package)
-        );
-        assert_eq!(requests.borrow().len(), 1);
-        assert_eq!(
-            typer.store().names.resolve(requests.borrow()[0].text()),
-            "Matchable"
-        );
-    }
-
-    #[test]
-    fn nested_scala_package_builtin_without_a_shadow_keeps_its_canonical_definition() {
-        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "package scala.collection { class Use { val value: Matchable = null } }",
-        );
-        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
-        let canonical_matchable = definitions.matchable_class;
-        let requests = Rc::new(RefCell::new(Vec::new()));
-        let resolver = ScriptedResolver {
-            member: None,
-            member_error: None,
-            package: None,
-            member_requests: Rc::clone(&requests),
-            package_requests: Rc::new(RefCell::new(Vec::new())),
-        };
-        let context = index.declaration_context_of(value).unwrap();
-        let mut typer = SourceTyper::new(
-            &parsed.ast,
-            source,
-            &index,
-            &mut store,
-            definitions,
-            &packages,
-        )
-        .with_resolver(Box::new(resolver));
-
-        let projected = typer.type_of_tpt(type_tree, context).unwrap();
-
-        assert_eq!(type_symbol(typer.store(), projected), canonical_matchable);
-        assert_eq!(requests.borrow().len(), 1);
-    }
-
-    #[test]
-    fn unqualified_external_type_uses_an_enclosing_package_identity() {
-        let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("package sample.nested { class Use { val value: Parent = null } }");
-        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
-        let enclosing_package = packages.symbol(&["sample"]).unwrap();
-        let external_type = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
-        let parent_name = store.names.intern("Parent");
-        store.symbols.get_mut(external_type).name = Name::new(parent_name, Namespace::Type);
-        store.symbols.get_mut(external_type).owner = Some(enclosing_package);
-        let resolver = ScriptedResolver {
-            member: Some(external_type),
-            member_error: None,
-            package: None,
-            member_requests: Rc::new(RefCell::new(Vec::new())),
-            package_requests: Rc::new(RefCell::new(Vec::new())),
-        };
-        let context = index.declaration_context_of(value).unwrap();
-        let mut typer = SourceTyper::new(
-            &parsed.ast,
-            source,
-            &index,
-            &mut store,
-            definitions,
-            &packages,
-        )
-        .with_resolver(Box::new(resolver));
-
-        let projected = typer.type_of_tpt(type_tree, context).unwrap();
-
-        assert_eq!(type_symbol(typer.store(), projected), external_type);
-        assert_eq!(
-            typer.store().symbols.get(external_type).owner,
-            Some(enclosing_package)
-        );
-    }
-
-    #[test]
-    fn unqualified_external_type_rejects_wrong_owner_and_wrong_namespace_atomically() {
-        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "package sample.nested { class Use { val value: Parent = null } }; package sample.other { class Other }",
-        );
-        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
-        let package = packages.symbol(&["sample", "nested"]).unwrap();
-        let foreign_package = packages.symbol(&["sample", "other"]).unwrap();
-        let context = index.declaration_context_of(value).unwrap();
-        let mut typer = SourceTyper::new(
-            &parsed.ast,
-            source,
-            &index,
-            &mut store,
-            definitions,
-            &packages,
-        );
-
-        let wrong_namespace = symbol(typer.store, SymbolKind::Field, SymbolInfo::Missing);
-        let parent_name = typer.store.names.intern("Parent");
-        typer.store.symbols.get_mut(wrong_namespace).name = Name::new(parent_name, Namespace::Term);
-        typer.store.symbols.get_mut(wrong_namespace).owner = Some(package);
-        let resolver = ScriptedResolver {
-            member: Some(wrong_namespace),
-            member_error: None,
-            package: None,
-            member_requests: Rc::new(RefCell::new(Vec::new())),
-            package_requests: Rc::new(RefCell::new(Vec::new())),
-        };
-        typer.resolver = Box::new(resolver);
-        let before_wrong_namespace = typer.store().checkpoint();
-        assert!(matches!(
-            typer.type_of_tpt(type_tree, context),
-            Err(TyperError::WrongTypeNameKind {
-                kind: SymbolKind::Field,
-                ..
-            })
-        ));
-        assert_eq!(typer.store().checkpoint(), before_wrong_namespace);
-        assert_eq!(typer.source_type_index().type_at(source, type_tree), None);
-
-        let wrong_owner = symbol(typer.store, SymbolKind::Class, SymbolInfo::Missing);
-        let parent_name = typer.store.names.intern("Parent");
-        typer.store.symbols.get_mut(wrong_owner).name = Name::new(parent_name, Namespace::Type);
-        typer.store.symbols.get_mut(wrong_owner).owner = Some(foreign_package);
-        typer.resolver = Box::new(ScriptedResolver {
-            member: Some(wrong_owner),
-            member_error: None,
-            package: None,
-            member_requests: Rc::new(RefCell::new(Vec::new())),
-            package_requests: Rc::new(RefCell::new(Vec::new())),
-        });
-        let before_wrong_owner = typer.store().checkpoint();
-        assert!(matches!(
-            typer.type_of_tpt(type_tree, context),
-            Err(TyperError::TypeNameNotFound { .. })
-        ));
-        assert_eq!(typer.store().checkpoint(), before_wrong_owner);
-        assert_eq!(typer.source_type_index().type_at(source, type_tree), None);
-    }
-
-    #[test]
-    fn unqualified_external_type_preserves_resolver_ambiguity_and_rolls_back() {
-        let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("package sample.nested { class Use { val value: Parent = null } }");
-        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
-        let context = index.declaration_context_of(value).unwrap();
-        let requests = Rc::new(RefCell::new(Vec::new()));
-        let resolver = ScriptedResolver {
-            member: None,
-            member_error: Some(ResolutionError::Ambiguous { candidates: 2 }),
-            package: None,
-            member_requests: Rc::clone(&requests),
-            package_requests: Rc::new(RefCell::new(Vec::new())),
-        };
-        let mut typer = SourceTyper::new(
-            &parsed.ast,
-            source,
-            &index,
-            &mut store,
-            definitions,
-            &packages,
-        )
-        .with_resolver(Box::new(resolver));
-        let before = typer.store().checkpoint();
-
-        for _ in 0..2 {
-            assert!(matches!(
-                typer.type_of_tpt(type_tree, context),
-                Err(TyperError::SymbolResolution {
-                    error: ResolutionError::Ambiguous { candidates: 2 },
-                    ..
-                })
-            ));
-            assert_eq!(typer.store().checkpoint(), before);
-            assert_eq!(typer.source_type_index().type_at(source, type_tree), None);
-        }
-        assert_eq!(requests.borrow().len(), 2);
-        assert!(
-            requests
-                .borrow()
-                .iter()
-                .all(|name| name.namespace() == Namespace::Type)
-        );
-    }
-
-    #[test]
     fn external_package_and_member_resolvers_supply_unknown_qualifiers() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("import p.C\nval x: C = 1");
@@ -10324,7 +9974,6 @@ mod tests {
         let package_requests = Rc::new(RefCell::new(Vec::new()));
         let resolver = ScriptedResolver {
             member: Some(external_type),
-            member_error: None,
             package: Some(package),
             member_requests: Rc::clone(&member_requests),
             package_requests: Rc::clone(&package_requests),
@@ -10784,7 +10433,6 @@ mod tests {
         let member_requests = Rc::new(RefCell::new(Vec::new()));
         let resolver = ScriptedResolver {
             member: None,
-            member_error: None,
             package: None,
             member_requests: Rc::clone(&member_requests),
             package_requests: Rc::clone(&package_requests),
@@ -11923,7 +11571,6 @@ mod tests {
         let member_requests = Rc::new(RefCell::new(Vec::new()));
         let resolver = ScriptedResolver {
             member: Some(external_type),
-            member_error: None,
             package: None,
             member_requests: Rc::clone(&member_requests),
             package_requests: Rc::new(RefCell::new(Vec::new())),

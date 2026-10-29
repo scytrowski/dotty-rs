@@ -2539,6 +2539,24 @@ impl Validator<'_, '_> {
                 visited,
             );
         }
+        if let Some(binding) = p.typed_bindings.planned_call(p.source.id, method.symbol) {
+            if binding.source_apply != source_argument_id
+                || binding.typed_apply != typed_argument_id
+                || binding.caller_formal != formal
+            {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+            return self.validate_planned_call_argument(
+                binding,
+                formal,
+                constructor_argument_type,
+                method,
+                depth + 1,
+                visited,
+            );
+        }
         let (TreeKind::Ident(source_argument), TreeKind::Ident(typed_argument)) =
             (&source_argument.kind, &typed_argument.kind)
         else {
@@ -2569,6 +2587,329 @@ impl Validator<'_, '_> {
             });
         }
         Ok(())
+    }
+
+    fn validate_planned_call_argument(
+        &mut self,
+        binding: crate::PlannedCallBinding,
+        caller_formal: SymbolId,
+        expected_type: TypeId,
+        caller: &MethodPicklePlan,
+        depth: usize,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<(), PickleError> {
+        let p = self.plan;
+        if depth > self.limits.expression_depth_limit() {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: self.limits.expression_depth_limit(),
+            });
+        }
+        let source_apply = self.source_tree(binding.source_apply)?;
+        let typed_apply =
+            p.typed_ast
+                .try_get(binding.typed_apply)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.typed_apply,
+                })?;
+        let (TreeKind::Apply(source_call), TreeKind::Apply(typed_call)) =
+            (&source_apply.kind, &typed_apply.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(caller.symbol)));
+        };
+        if source_call.kind != ApplyKind::Regular
+            || typed_call.kind != ApplyKind::Regular
+            || source_call.function != binding.source_function
+            || typed_call.function != binding.typed_function
+            || source_call.args.as_slice() != [binding.source_argument]
+            || typed_call.args.as_slice() != [binding.typed_argument]
+            || typed_apply.ty != binding.result_type
+        {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(caller.symbol)));
+        }
+        self.source_typed_binding(binding.source_apply, binding.typed_apply)?;
+        self.paired_source_typed_span(
+            source_apply.position,
+            typed_apply.position,
+            binding.typed_apply,
+        )?;
+        let source_function = self.source_tree(binding.source_function)?;
+        let typed_function =
+            p.typed_ast
+                .try_get(binding.typed_function)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.typed_function,
+                })?;
+        self.source_typed_binding(binding.source_function, binding.typed_function)?;
+        self.paired_source_typed_span(
+            source_function.position,
+            typed_function.position,
+            binding.typed_function,
+        )?;
+        self.charge(1)?;
+        if !visited.insert(binding.typed_function) {
+            return Err(PickleError::RepeatedExpression {
+                tree: binding.typed_function,
+            });
+        }
+        let (source_name, source_backquoted) = match &source_function.kind {
+            TreeKind::Ident(identifier) if binding.source_receiver.is_none() => {
+                if self.unqualified_name_is_shadowed(identifier.name, caller) {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(caller.symbol))
+                    );
+                }
+                (identifier.name, identifier.backquoted)
+            }
+            TreeKind::Select(selection) if binding.source_receiver == Some(selection.qualifier) => {
+                let receiver = self.source_tree(selection.qualifier)?;
+                let typed_selection = match &typed_function.kind {
+                    TreeKind::Select(selection)
+                        if binding.typed_receiver == Some(selection.qualifier) =>
+                    {
+                        selection
+                    }
+                    _ => {
+                        return Err(self
+                            .unsupported(UnsupportedFeature::BodyExpression, Some(caller.symbol)));
+                    }
+                };
+                let typed_receiver = p.typed_ast.try_get(typed_selection.qualifier).ok_or(
+                    PickleError::InvalidTypedTree {
+                        tree: typed_selection.qualifier,
+                    },
+                )?;
+                if !matches!(receiver.kind, TreeKind::This(_))
+                    || !matches!(typed_receiver.kind, TreeKind::This(_))
+                    || !matches!(self.ty(typed_receiver.ty)?, Type::ThisType { class } if *class == binding.owner)
+                {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(caller.symbol))
+                    );
+                }
+                self.source_typed_binding(selection.qualifier, typed_selection.qualifier)?;
+                self.charge(1)?;
+                if !visited.insert(typed_selection.qualifier) {
+                    return Err(PickleError::RepeatedExpression {
+                        tree: typed_selection.qualifier,
+                    });
+                }
+                self.paired_source_typed_span(
+                    receiver.position,
+                    typed_receiver.position,
+                    typed_selection.qualifier,
+                )?;
+                (selection.name, selection.backquoted)
+            }
+            _ => {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(caller.symbol))
+                );
+            }
+        };
+        let (typed_name, typed_backquoted) = match &typed_function.kind {
+            TreeKind::Ident(identifier) if binding.typed_receiver.is_none() => {
+                (identifier.name, identifier.backquoted)
+            }
+            TreeKind::Select(selection) if binding.typed_receiver == Some(selection.qualifier) => {
+                (selection.name, selection.backquoted)
+            }
+            _ => {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(caller.symbol))
+                );
+            }
+        };
+        if source_name != typed_name || source_backquoted != typed_backquoted {
+            return Err(PickleError::SourceShape {
+                tree: binding.source_function,
+                expected: SourceRole::Body,
+            });
+        }
+        let Type::TermRef {
+            prefix: selected_prefix,
+            target: TermRefTarget::Symbol(selected),
+        } = self.ty(typed_function.ty)?
+        else {
+            return Err(PickleError::BodyType {
+                tree: binding.typed_function,
+                ty: typed_function.ty,
+            });
+        };
+        let caller_owner = self
+            .symbol(caller.symbol)?
+            .owner
+            .ok_or(PickleError::InvalidSymbol {
+                symbol: caller.symbol,
+            })?;
+        let helper = self.symbol(binding.method)?;
+        let definition = self.source_tree(binding.helper_source_tree)?;
+        let TreeKind::DefDef(helper_definition) = &definition.kind else {
+            return Err(PickleError::SourceShape {
+                tree: binding.helper_source_tree,
+                expected: SourceRole::Method,
+            });
+        };
+        let source = p.source.id;
+        let helper_plan = p.methods.iter().find(|plan| plan.symbol == binding.method);
+        let Some(helper_plan) = helper_plan else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(caller.symbol)));
+        };
+        if binding.owner != caller_owner
+            || helper.owner != Some(binding.owner)
+            || helper.kind != SymbolKind::Method
+            || helper.origin != SymbolOrigin::Source(source)
+            || helper.visibility != Visibility::Public
+            || !helper.flags.is_empty()
+            || !helper.annotations.is_empty()
+            || helper.name != *helper_definition.name.as_name()
+            || helper.name != source_name
+            || p.source_index.definition_of(binding.method)
+                != Some(SourceDefinition::Canonical {
+                    source,
+                    tree: binding.helper_source_tree,
+                })
+            || p.source_index.symbol_at(source, binding.helper_source_tree) != Some(binding.method)
+            || helper_definition.type_params.len() != 0
+            || helper_definition.rhs != Some(binding.helper_source_rhs)
+            || helper_plan.source_tree != binding.helper_source_tree
+            || helper_plan.body != Some(binding.helper_typed_rhs)
+            || helper_plan.parameter_clauses.as_slice() != [vec![binding.helper_formal]]
+            || !p
+                .typed_bindings
+                .planned_method_symbols()
+                .contains(&binding.method)
+            || *selected != binding.method
+            || !matches!(self.ty(*selected_prefix)?, Type::ThisType { class } if *class == binding.owner)
+        {
+            return Err(PickleError::Reference {
+                symbol: binding.method,
+                reason: crate::ReferenceError::Owner,
+            });
+        }
+        self.source_typed_binding(binding.helper_source_rhs, binding.helper_typed_rhs)?;
+        let helper_rhs = self.source_tree(binding.helper_source_rhs)?;
+        let typed_helper_rhs =
+            p.typed_ast
+                .try_get(binding.helper_typed_rhs)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.helper_typed_rhs,
+                })?;
+        self.paired_source_typed_span(
+            helper_rhs.position,
+            typed_helper_rhs.position,
+            binding.helper_typed_rhs,
+        )?;
+
+        let caller_parameter = self.symbol(caller_formal)?;
+        let caller_argument_source = self.source_tree(binding.source_argument)?;
+        let caller_argument_typed =
+            p.typed_ast
+                .try_get(binding.typed_argument)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: binding.typed_argument,
+                })?;
+        let (TreeKind::Ident(source_argument), TreeKind::Ident(typed_argument)) =
+            (&caller_argument_source.kind, &caller_argument_typed.kind)
+        else {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(caller.symbol)));
+        };
+        self.source_typed_binding(binding.source_argument, binding.typed_argument)?;
+        self.paired_source_typed_span(
+            caller_argument_source.position,
+            caller_argument_typed.position,
+            binding.typed_argument,
+        )?;
+        if !visited.insert(binding.typed_argument) {
+            return Err(PickleError::RepeatedExpression {
+                tree: binding.typed_argument,
+            });
+        }
+        self.charge(1)?;
+        let caller_parameters = caller.parameter_clauses.iter().flatten().copied();
+        let helper_parameters = helper_plan.parameter_clauses.iter().flatten().copied();
+        if caller_parameter.kind != SymbolKind::Parameter
+            || caller_parameter.owner != Some(caller.symbol)
+            || caller_parameter.name.text() != source_argument.name.text()
+            || typed_argument.name != source_argument.name
+            || caller_parameter.info != SymbolInfo::Complete(binding.formal_type)
+            || !caller_parameters
+                .into_iter()
+                .any(|symbol| symbol == caller_formal)
+            || !helper_parameters
+                .into_iter()
+                .any(|symbol| symbol == binding.helper_formal)
+            || !matches!(self.ty(caller_argument_typed.ty)?, Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(target),
+            } if *prefix == p.definitions.no_prefix && *target == caller_formal)
+        {
+            return Err(PickleError::Reference {
+                symbol: caller_formal,
+                reason: crate::ReferenceError::Owner,
+            });
+        }
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(result_class),
+            ..
+        } = self.ty(binding.result_type)?
+        else {
+            return Err(PickleError::BodyType {
+                tree: binding.typed_apply,
+                ty: binding.result_type,
+            });
+        };
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(expected_class),
+            ..
+        } = self.ty(expected_type)?
+        else {
+            return Err(PickleError::BodyType {
+                tree: binding.typed_apply,
+                ty: expected_type,
+            });
+        };
+        if result_class != expected_class
+            || !self.is_planned_sibling_class_type(expected_type, None)
+        {
+            return Err(PickleError::BodyType {
+                tree: binding.typed_apply,
+                ty: binding.result_type,
+            });
+        }
+        let helper_signature_type = self.complete(binding.method)?;
+        let Type::Method(helper_signature) = self.ty(helper_signature_type)? else {
+            return Err(PickleError::MalformedType {
+                ty: helper_signature_type,
+                role: TypeRole::Parameter,
+            });
+        };
+        if helper_signature.kind != MethodKind::Plain
+            || helper_signature.params.len() != 1
+            || helper_signature.params[0].erased
+            || helper_signature.params[0].varargs
+            || helper_signature.params[0].ty != binding.formal_type
+            || helper_signature.result != binding.result_type
+        {
+            return Err(PickleError::MalformedType {
+                ty: helper_signature_type,
+                role: TypeRole::Parameter,
+            });
+        }
+        let helper_formal = self.symbol(binding.helper_formal)?;
+        if helper_formal.kind != SymbolKind::Parameter
+            || helper_formal.owner != Some(binding.method)
+            || helper_formal.info != SymbolInfo::Complete(binding.formal_type)
+        {
+            return Err(PickleError::Reference {
+                symbol: binding.helper_formal,
+                reason: crate::ReferenceError::Owner,
+            });
+        }
+        // Validation has closed the full source/typed receipt. Keep output
+        // rejected until expression lowering can preserve the reference-result
+        // signature instead of reusing the Int-only same-class wire form.
+        Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(caller.symbol)))
     }
 
     fn validate_nested_constructor_argument(

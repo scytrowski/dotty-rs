@@ -2055,7 +2055,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 .get(self.definitions.int)
                 .reference_symbol(),
             "scala/Any" => Some(self.definitions.any_class),
-            "scala/Matchable" => Some(self.definitions.matchable_class),
             "scala/AnyRef" => Some(self.definitions.object_class),
             "scala/Nothing" => Some(self.definitions.nothing_class),
             _ => None,
@@ -5828,10 +5827,6 @@ mod tests {
             BinaryName::from_internal("scala/Int"),
             synthetic_class("scala/Int", None),
         );
-        classes.insert(
-            BinaryName::from_internal("scala/Matchable"),
-            synthetic_class("scala/Matchable", None),
-        );
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let definitions = loader.definitions();
@@ -5866,16 +5861,6 @@ mod tests {
                 .load_class(&BinaryName::from_internal("scala/Any"))
                 .unwrap(),
             definitions.any_class
-        );
-        assert_eq!(
-            loader
-                .load_class(&BinaryName::from_internal("scala/Matchable"))
-                .unwrap(),
-            definitions.matchable_class
-        );
-        assert_eq!(
-            class_info(loader.store, definitions.matchable_class).parents,
-            [definitions.any_type]
         );
         assert_eq!(
             loader

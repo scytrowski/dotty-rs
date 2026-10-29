@@ -66,6 +66,13 @@ pub trait SourceTypedBindings {
         None
     }
 
+    /// Exact source/typed/symbol evidence for one same-instance planned method
+    /// call used as a constructor argument. Producers must derive this from
+    /// the same source/typed proof session as `typed_at`.
+    fn planned_call(&self, _source: SourceId, _method: SymbolId) -> Option<PlannedCallBinding> {
+        None
+    }
+
     /// Exact source/typed/symbol/scope proofs for method-local value declarations.
     /// Producers that support local values must return the canonical frontend
     /// bindings; the pickler never reconstructs them from names.
@@ -89,6 +96,29 @@ pub struct NestedConstructorCallBinding {
     pub class: SymbolId,
     pub constructor: SymbolId,
     pub formal: SymbolId,
+    pub formal_type: TypeId,
+    pub result_type: TypeId,
+}
+
+/// Exact provenance retained by the source frontend's opaque planned-call
+/// receipt. Every tree is an original source-session node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlannedCallBinding {
+    pub source_apply: TreeId<Untyped>,
+    pub typed_apply: TreeId<Typed>,
+    pub source_function: TreeId<Untyped>,
+    pub typed_function: TreeId<Typed>,
+    pub source_argument: TreeId<Untyped>,
+    pub typed_argument: TreeId<Typed>,
+    pub source_receiver: Option<TreeId<Untyped>>,
+    pub typed_receiver: Option<TreeId<Typed>>,
+    pub helper_source_tree: TreeId<Untyped>,
+    pub helper_source_rhs: TreeId<Untyped>,
+    pub helper_typed_rhs: TreeId<Typed>,
+    pub owner: SymbolId,
+    pub method: SymbolId,
+    pub caller_formal: SymbolId,
+    pub helper_formal: SymbolId,
     pub formal_type: TypeId,
     pub result_type: TypeId,
 }

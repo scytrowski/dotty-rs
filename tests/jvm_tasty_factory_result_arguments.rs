@@ -973,26 +973,23 @@ fn rust_original_source_preserves_factory_call_identities_and_exposes_first_reje
         typer.store().types.get(planned_call.result_type()),
         Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == counter_class
     ));
-    let paired_error =
+    let emission_rejection =
         with_paired_jvm_tasty_batch_plan(SOURCE, "CounterOwnerFactory.scala", source_id, |_| ())
-            .expect_err("paired planning stops before TASTy encoding");
+            .expect_err("proof validation remains gated until the wire form is added");
     assert!(
         matches!(
-            &paired_error,
-            PairedPlanError::BatchClass {
-                phase: "JVM/TASTy cross-contract validation",
-                reason,
-                ..
-            } if reason.contains("BodyExpression")
+            emission_rejection,
+            PairedPlanError::BatchClass { phase: "JVM/TASTy cross-contract validation", ref reason, .. }
+                if reason.contains("BodyExpression")
         ),
-        "paired planning still rejects before returning a partial batch: {paired_error:?}"
+        "no paired output is accepted before reference-result encoding: {emission_rejection:?}"
     );
     assert_eq!(
         typed_methods.len(),
         source_methods.iter().filter(|(_, tree)| matches!(&parsed.ast.get(*tree).kind, TreeKind::DefDef(definition) if definition.rhs.is_some())).count()
     );
     println!(
-        "Rust layer observations: class-state TASTy source plan and direct/nested/planned-call source proofs succeed; paired planner still rejects at the unsupported expression encoding boundary: {paired_error:?}; no paired artifacts are published; JVM-only path is covered by the strict object-graph acceptance regression."
+        "Rust layer observations: the paired planner carries the complete planned-call receipt through source/typed validation but still fails closed before output: {emission_rejection:?}."
     );
     let _ = (make_counter_tree, create_tree);
 }
@@ -1011,14 +1008,11 @@ fn factory_argument_variants_retain_semantic_identity_independently_of_names_and
         SourceId::from_index(1833),
         |_| (),
     )
-    .expect_err("renaming does not avoid the bounded proof gate");
+    .expect_err("renamed declarations retain the bounded output gate");
     assert!(matches!(
         renamed_error,
-        PairedPlanError::BatchClass {
-            phase: "JVM/TASTy cross-contract validation",
-            reason,
-            ..
-        } if reason.contains("BodyExpression")
+        PairedPlanError::BatchClass { phase: "JVM/TASTy cross-contract validation", ref reason, .. }
+            if reason.contains("BodyExpression")
     ));
 
     let owner_start = SOURCE.find("class CounterOwner(").unwrap();
@@ -1035,14 +1029,11 @@ fn factory_argument_variants_retain_semantic_identity_independently_of_names_and
         SourceId::from_index(1834),
         |_| (),
     )
-    .expect_err("declaration order does not avoid the bounded proof gate");
+    .expect_err("reordered declarations retain the bounded output gate");
     assert!(matches!(
         reordered_error,
-        PairedPlanError::BatchClass {
-            phase: "JVM/TASTy cross-contract validation",
-            reason,
-            ..
-        } if reason.contains("BodyExpression")
+        PairedPlanError::BatchClass { phase: "JVM/TASTy cross-contract validation", ref reason, .. }
+            if reason.contains("BodyExpression")
     ));
 }
 

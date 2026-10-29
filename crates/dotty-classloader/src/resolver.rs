@@ -1170,7 +1170,6 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         match store.names.resolve(member.text()) {
             "Int" => store.types.get(self.definitions.int).reference_symbol(),
             "Any" => Some(self.definitions.any_class),
-            "Matchable" => Some(self.definitions.matchable_class),
             "AnyRef" => Some(self.definitions.object_class),
             "Nothing" => Some(self.definitions.nothing_class),
             _ => None,
@@ -1186,7 +1185,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         package_path_of_symbol(store, package).is_some_and(|path| path.as_slice() == ["scala"])
             && matches!(
                 store.names.resolve(member.text()),
-                "Int" | "Any" | "Matchable" | "AnyRef" | "Nothing"
+                "Int" | "Any" | "AnyRef" | "Nothing"
             )
     }
 
@@ -5938,7 +5937,6 @@ mod tests {
 
         for (name, expected) in [
             ("Any", definitions.any_class),
-            ("Matchable", definitions.matchable_class),
             ("AnyRef", definitions.object_class),
             ("Nothing", definitions.nothing_class),
         ] {

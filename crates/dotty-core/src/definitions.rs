@@ -317,8 +317,6 @@ pub struct Definitions {
     pub object_type: TypeId,
     /// The canonical source `Any` reference type.
     pub any_type: TypeId,
-    /// The canonical compiler-defined `Matchable` reference type.
-    pub matchable_type: TypeId,
     /// The canonical source `Nothing` reference type.
     pub nothing_type: TypeId,
     /// The canonical source `Null` reference type. This is distinct from the
@@ -331,8 +329,6 @@ pub struct Definitions {
     /// Scala's top type, the upper bound `Type::Wildcard`/`Type::Bounds`
     /// lowering uses when a generic signature does not specify one.
     pub any_class: SymbolId,
-    /// The canonical compiler-defined `scala.Matchable` trait identity.
-    pub matchable_class: SymbolId,
     /// Scala's bottom type, the lower bound the same lowering uses when a
     /// wildcard does not specify one (e.g. `? extends Number`).
     pub nothing_class: SymbolId,
@@ -391,22 +387,6 @@ impl Definitions {
         let any_type = store.types.alloc(Type::type_ref(no_prefix, any_class));
         let nothing_type = store.types.alloc(Type::type_ref(no_prefix, nothing_class));
         let null_type = store.types.alloc(Type::type_ref(no_prefix, null_class));
-        let matchable_class = Self::builtin_symbol(store, "Matchable");
-        store.symbols.get_mut(matchable_class).kind = SymbolKind::Trait;
-        store.symbols.get_mut(matchable_class).flags =
-            SymbolFlags::ABSTRACT.union(SymbolFlags::TRANSPARENT);
-        let matchable_type = store
-            .types
-            .alloc(Type::type_ref(no_prefix, matchable_class));
-        let matchable_declarations = store.scopes.alloc(Scope::new(Some(matchable_class)));
-        let matchable_info = store.types.alloc(Type::ClassInfo(ClassInfo {
-            prefix: no_prefix,
-            class: matchable_class,
-            parents: vec![any_type],
-            declarations: matchable_declarations,
-            self_type: None,
-        }));
-        store.symbols.get_mut(matchable_class).info = SymbolInfo::Complete(matchable_info);
 
         let mut definitions = Self {
             no_prefix,
@@ -421,12 +401,10 @@ impl Definitions {
             unit,
             object_type,
             any_type,
-            matchable_type,
             nothing_type,
             null_type,
             object_class,
             any_class,
-            matchable_class,
             nothing_class,
             null_class,
             and_type,
@@ -1531,7 +1509,6 @@ impl Definitions {
             self.unit,
             self.object_type,
             self.any_type,
-            self.matchable_type,
             self.nothing_type,
             self.null_type,
         ]
@@ -1697,43 +1674,6 @@ mod tests {
         assert_eq!(
             definitions.source_builtin_type(&store, null_name),
             Some(definitions.null_type)
-        );
-    }
-
-    #[test]
-    fn matchable_is_a_canonical_compiler_defined_trait_with_any_parent() {
-        let mut store = SemanticStore::new();
-        let definitions = Definitions::bootstrap(&mut store);
-
-        let symbol = store.symbols.get(definitions.matchable_class);
-        assert_eq!(store.names.resolve(symbol.name.text()), "Matchable");
-        assert_eq!(symbol.kind, SymbolKind::Trait);
-        assert_eq!(symbol.origin, SymbolOrigin::Builtin);
-        assert!(matches!(symbol.info, SymbolInfo::Complete(_)));
-        assert_eq!(
-            store
-                .types
-                .get(definitions.matchable_type)
-                .reference_symbol(),
-            Some(definitions.matchable_class)
-        );
-        let matchable_name = Name::new(store.names.intern("Matchable"), Namespace::Type);
-        assert_eq!(
-            definitions.source_builtin_type(&store, matchable_name),
-            Some(definitions.matchable_type)
-        );
-        let SymbolInfo::Complete(info) = symbol.info else {
-            unreachable!();
-        };
-        let Type::ClassInfo(info) = store.types.get(info) else {
-            panic!("Matchable must have compiler-defined class info");
-        };
-        assert_eq!(info.class, definitions.matchable_class);
-        assert_eq!(info.prefix, definitions.no_prefix);
-        assert_eq!(info.parents, [definitions.any_type]);
-        assert_eq!(
-            store.scopes.get(info.declarations).owner,
-            Some(definitions.matchable_class)
         );
     }
 
