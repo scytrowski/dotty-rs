@@ -468,3 +468,108 @@ manifest acceptance. There are no known unresolved implementation risks;
 mutable, multiple, nested, branch-local and broader reference-local forms
 remain explicitly unsupported. Publisher fault tests establish handled-error
 cleanup and sentinel preservation, not crash-atomic filesystem durability.
+
+## Issue #1854: Java 21 proof for the original Rust local flow
+
+The strict regression
+`reference_local_flow_emits_a_deterministic_six_artifact_batch` in
+[`jvm_tasty_artifacts.rs`](../tests/jvm_tasty_artifacts.rs) runs the exact
+fixture above through one paired Rust source pipeline, writes the six
+classfile/TASTy artifacts to an isolated directory, and does not put any Scala
+output on the classpath. Java 21 compiles only a separate Java harness with
+`javac --release 21`. The harness runs with `java -Xverify:all -ea` against the
+original Rust classfiles.
+
+The decoded `CounterOwnerFactory.create(I)Lexample/CounterOwner;` has
+`max_stack=3`, `max_locals=3`; the class-aware analyzer confirms these limits
+for the exact decoded instruction plan. `this` is local slot 0, `seed` is
+slot 1, and the validated `Counter` local is slot 2. `javap -v -p -c` and the
+Rust decoder agree on the flow:
+
+```text
+0:  aload_0
+1:  iload_1
+2:  invokevirtual CounterOwnerFactory.makeCounter:(I)Lexample/Counter;
+5:  astore_2
+6:  new CounterOwner
+9:  dup
+10: aload_2
+11: invokespecial CounterOwner.<init>:(Lexample/Counter;)V
+14: areturn
+```
+
+The Rust decoder asserts the complete instruction sequence, both call owners
+and descriptors, one helper invocation, one allocation in `create` (the
+Owner), and the computed max stack/local counts. The analyzer tracks the
+initialized helper result through `astore 2` and `aload 2` into the Owner
+constructor, then requires an initialized Owner at `areturn`. The helper's
+Counter allocation remains in `makeCounter`. This is bytecode evidence for one
+call site; the runtime test does not infer a dynamic invocation count from the
+returned values.
+
+The Java harness verifies three independent Owners with reads `7`, `-9`, and
+`3`. Test-only reflection retrieves each private `CounterOwner.inner`; those
+references are distinct. Mutating the first Counter to `42`, then `-9`, changes
+only its Owner, while the other Owners continue to read `-9` and `3`. Runtime
+output is:
+
+```text
+paired-reference-local=7,-9,3; mutation=42,-9; mutation=-9,-9,3; identities=distinct
+```
+
+The strict test records SHA-256 before compiling the harness and verifies the
+same hashes and bytes after `javac` and Java execution. These six hashes are
+for the Rust-produced artifacts in manifest order:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `example/Counter.class` | `b38143cee8571a6602865ff6062eca92dd771582f539b156100ffc9647af94ae` |
+| `example/Counter.tasty` | `a0e78329d60aba318de825eaddb7668d34838197158653c1b7384188143099c7` |
+| `example/CounterOwner.class` | `d914c2dfc5b8d22079be304fc7c463be171394a528b71603de43342a79db91b2` |
+| `example/CounterOwner.tasty` | `9bcfbbb9d12f71a50122c6b2af960fe76ffd7f629a57738f61f4d384821f7f13` |
+| `example/CounterOwnerFactory.class` | `e8e786041ad543af5cd7278c460c2d4f99a70261d41a8f611297c25a51d49c7d` |
+| `example/CounterOwnerFactory.tasty` | `dda2d294a5eaa72c5060bb7089e760ba2576a8c350fcb6e93815c1653bbe52f2` |
+
+Three isolated negative executions start from those original Rust classfiles:
+
+| Corruption | First observed stage |
+| --- | --- |
+| Replace `astore_2` with `astore_0` | Java 21 `-Xverify:all`: `VerifyError: Bad local variable type`. |
+| Replace `aload_2` with `aload_1` | Java 21 `-Xverify:all`: `VerifyError: Bad local variable type`; the `Int` seed cannot load as `Counter`. |
+| Reduce `max_stack` below the decoded/analyzed requirement | Java 21 `-Xverify:all`: `VerifyError: Operand stack overflow`. |
+
+The neighboring controls keep malformed references and verifier-state failures
+observable at their first gate:
+
+| Control | Test and first failure |
+| --- | --- |
+| Use of an uninitialized reference | `cfg_rejects_uninitialized_reference_escapes_and_invalid_constructor_calls` in `dotty-classfile`; class-aware analysis rejects escape/use before class emission. |
+| Wrong helper result descriptor or missing `create` ABI | `factory_result_batch_contract_rejects_corrupt_create_bytecode_before_publication`; paired artifact contract rejects before publisher acceptance. |
+| Missing helper | The same contract test rejects missing ABI before publication; its strict JDK runtime control fails at linkage with `NoSuchMethodError`. |
+| Wrong Owner constructor Methodref or cross-class invocation owner | `factory_batch_contract_rejects_missing_dup_wrong_seed_slot_and_constructor_ref` and `cross_class_call_artifact_rejects_a_different_methodref`; artifact validation rejects before publication. |
+| Wrong field reference | `reference_field_receiver_artifact_rejects_a_forged_fieldref_and_missing_final_flag`; classfile/TASTy contract validation rejects the forged field reference. |
+| Bad stack limit or verifier state | The strict local-flow negatives above fail in Java 21 verification; the classfile CFG analyzer also rejects uninitialized escape/use. |
+
+No Scala reader acceptance or TASTy semantic compatibility is inferred from
+this JDK run.
+
+### #1854 strict reproduction
+
+Use Temurin `21.0.13+9`, keep temporary files and Cargo outputs on the root
+volume, and require the JDK gate:
+
+```sh
+export JAVA_HOME=/path/to/temurin-21.0.13+9
+export PATH="$JAVA_HOME/bin:$PATH"
+export TMPDIR="$ISSUE_ROOT/tmp"
+export JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=$TMPDIR -XX:+UseSerialGC"
+export CARGO_TARGET_DIR="$ISSUE_ROOT/target"
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test -p dotty --test jvm_tasty_artifacts \
+  reference_local_flow_emits_a_deterministic_six_artifact_batch \
+  --locked -- --nocapture
+```
+
+The strict helper requires `java`, `javac`, and `javap` to all report Java 21.
+The suite's fresh-session artifact comparison and publisher-failure checks run
+before the JDK harness. The pinned Scala oracle remains the separate #1853
+check described above.
