@@ -275,8 +275,7 @@ impl SourceTyper<'_> {
                     scope: method_scope,
                     typed_definition: None,
                     captures: Vec::new(),
-                    capture_method_parameters: function.params.len() == 1
-                        && expected_function1.is_some(),
+                    capture_method_parameters: function.params.len() == 1,
                 },
             )
             .is_some()

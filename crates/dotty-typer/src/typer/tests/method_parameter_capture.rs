@@ -178,3 +178,70 @@ fn method_parameter_capture_is_session_local() {
         ("delta".to_owned(), SymbolKind::Parameter)
     );
 }
+
+#[test]
+fn method_parameter_capture_works_without_an_expected_function1_type() {
+    let source_text = r#"
+object InferredCapture:
+  def inBlock(delta: Int): Int => Int =
+    val unused: Int = 0
+    (x: Int) => x + delta
+  def inferredResult(delta: Int) =
+    (x: Int) => x + delta
+"#;
+    let (parsed, mut store, mut packages, definitions, index, source) = parse_and_name(source_text);
+    enter_scala_function_classes(&mut store, &mut packages, [1]);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    for name in ["inBlock", "inferredResult"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| (index.symbol_at(source, tree) == Some(method)).then_some(tree))
+            .unwrap();
+        let lambda_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.expr,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_)) => rhs,
+            _ => panic!("{name} should end in a function literal"),
+        };
+        let typed_method = typer.type_method_definition(method_tree).unwrap();
+        assert!(matches!(
+            typer.typed_ast().get(typed_method).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(
+            typer.source_typed_index().get(source, method_tree),
+            Some(typed_method)
+        );
+        let typed_lambda = typer.source_typed_index().get(source, lambda_tree).unwrap();
+        let TreeKind::Closure(closure) = &typer.typed_ast().get(typed_lambda).kind else {
+            panic!("{name} lambda should be a typed closure");
+        };
+        assert_eq!(closure.env.len(), 1, "{name}");
+        let source_parameter = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => index
+                .symbol_at(source, definition.value_param_clauses[0][0])
+                .unwrap(),
+            _ => unreachable!(),
+        };
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(captured),
+            ..
+        } = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(closure.env[0]).ty)
+        else {
+            panic!("capture should retain a canonical parameter reference");
+        };
+        assert_eq!(*captured, source_parameter, "{name}");
+    }
+}
