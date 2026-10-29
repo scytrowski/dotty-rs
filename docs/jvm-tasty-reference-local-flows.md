@@ -2,9 +2,9 @@
 
 Issue [#1849](https://github.com/scytrowski/dotty-rs/issues/1849) audits one
 producer whose immutable `Counter` local is initialized from a same-instance
-factory call, then passed to `CounterOwner` in the same method block. This is an
-audit of existing boundaries. It does not enable or claim paired JVM/TASTy
-support for the local-block expression.
+factory call, then passed to `CounterOwner` in the same method block. The
+original #1849 section records the pre-integration boundary; paired support for
+this exact one-local flow was added by #1853 below.
 
 ## Frozen producer and oracle
 
@@ -159,17 +159,17 @@ the real frontend and paired planner. Mutable, multiple, nested, and branch
 forms fail at the cross-class proof stage. Duplicate, uninitialized,
 pre-declaration, reassigned, shadowing, wrong-type, parameter-substitution,
 and out-of-scope cases fail earlier during method body typing or source-shape
-validation. A foreign `SourceId` fails at the source-root identity check. The
-positive renamed and reordered controls continue to pass the proof stage and
-reach the existing later TASTy `BodyType` rejection. A cloned/disconnected
+validation. A foreign `SourceId` fails at the source-root identity check. At
+the #1849 audit revision, positive renamed and reordered controls passed the
+proof stage and reached the paired TASTy `BodyType` rejection; #1853 supersedes
+that result with complete paired batches. A cloned/disconnected
 `SourceTypedIndex` is also rejected at the session-index identity check before
 proof scanning.
 
 This receipt proves source/typed constructor argument provenance only. The
-unchanged paired TASTy method-body validator still rejects the original block
-at `BodyType`, before byte serialization or artifact publication. No TASTy
-body validation/encoder, JVM emitter, Typer implementation, or CLI behavior
-was changed, and no Rust local-block artifact or emission support is claimed.
+paired TASTy and JVM paths were enabled later by #1853, using the same original
+receipt and existing local layout/codegen mechanisms. No new Typer behavior or
+CLI is part of that integration.
 
 ### #1850 validation receipt
 
@@ -373,6 +373,107 @@ otherwise unsupported local shapes.
 The pinned Scala 3.9.0 reader at revision
 `777528f19a58e794c9954a42f433373472ec57f8` decompiles these Rust-produced
 sidecars, reconstructs the typed local declaration and use, and accepts all
-three with `-from-tasty`. These are standalone TASTy artifacts only: the
-paired JVM/TASTy batch adapter still rejects the local receipt, and this issue
-does not claim runtime acceptance of separately compiled Scala clients.
+three with `-from-tasty`.
+
+## Issue #1853: paired JVM/TASTy reference-local batch
+
+The paired planner now accepts the original source through one real frontend
+session. It carries the Typer's exact local declaration, scope, symbol and type
+into the existing JVM local layout and the existing TASTy local binding. The
+block, immutable `ValDef`, initializer helper call, final constructor
+application and local `Ident` remain the original source/typed roots. No second
+frontend session or spelling-based identity reconstruction is used.
+
+Before the six-file manifest is accepted, the decoded contract checks the
+local's `STORE`/`LOAD` against the validated JVM slot, a single
+`CounterOwnerFactory.makeCounter:(I)Lexample/Counter;` invocation,
+`CounterOwner.<init>(Lexample/Counter;)V`, and the
+`CounterOwnerFactory.create(I)Lexample/CounterOwner;` method result. TASTy
+output is the exact result of the validated same-session plan; it keeps the
+constructor result `TypeRef(NoPrefix, CounterOwner)` distinct from the
+package-prefixed method result. The class batch contains exactly Counter,
+CounterOwner and CounterOwnerFactory, each with a major-version-65 classfile,
+a TASTy-28.9 sidecar and a matching `TASTY` UUID.
+
+The regression compares all six bytes from fresh semantic sessions and checks
+renamed and reordered sources independently. It rejects changed local slots and
+call references. The staged publisher is exercised after each of its six
+artifact writes and on both sides of promotion; handled failures leave no
+partial destination and preserve an existing sentinel. These checks make no
+crash-atomic filesystem durability claim. Support remains limited to one
+immutable reference local in the straight-line constructor-result block;
+mutable, multiple, nested or branch-local forms remain unsupported.
+
+### #1853 validation receipt
+
+The implementation is based on main SHA
+`ffe342aac116e3b76c6a81db4e34cbd5d51f0fa1`. Validation used Rust
+`1.98.1 (48a229cea 2026-09-01)`, Temurin JDK `21.0.13+9`, and the pinned
+Scala 3.9.0 checkout at revision
+`777528f19a58e794c9954a42f433373472ec57f8` (`3.9.0-bin-SNAPSHOT-git-777528f`).
+The mandatory JDK subset and full workspace suite ran with
+`DOTTY_CLASSFILE_REQUIRE_JDK=1`; `java`, `javac` and `javap` were from that
+JDK. All temporary files and Cargo outputs were directed to the issue-local
+root-volume directories.
+
+The exact fixture source SHA-256 is
+`379d03ad0ee08d06a31012aeafe306e5b9e30c1942e771acdb0d4eef23c790b6`.
+Fresh-session determinism is asserted by byte comparison of all six outputs
+and their paths/UUIDs; output digests are not separately persisted.
+
+Executed checks passed:
+
+- `cargo fmt --all -- --check`,
+  `python3 tools/check-frontend-boundaries.py`, and `git diff --check`.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`.
+- The mandatory strict JDK command and the full workspace suite, with the
+  issue-local target/temp roots and JDK 21 required:
+
+  ```sh
+  PATH=/home/vdrake6/.sdkman/candidates/java/current/bin:$PATH \
+  JAVA_HOME=/home/vdrake6/.sdkman/candidates/java/current \
+  TMPDIR=/var/tmp/dotty-rs-issue-1853/tmp \
+  JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/var/tmp/dotty-rs-issue-1853/tmp \
+  DOTTY_CLASSFILE_REQUIRE_JDK=1 \
+  CARGO_TARGET_DIR=/var/tmp/dotty-rs-issue-1853/target \
+  cargo test -p dotty-classfile --test classfile_jvm_encoder \
+    -p dotty-jvm --lib -p dotty --test jvm_source_compilation \
+    --test jvm_stateful_class_contract --locked -- --nocapture
+
+  PATH=/home/vdrake6/.sdkman/candidates/java/current/bin:$PATH \
+  JAVA_HOME=/home/vdrake6/.sdkman/candidates/java/current \
+  TMPDIR=/var/tmp/dotty-rs-issue-1853/tmp \
+  JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/var/tmp/dotty-rs-issue-1853/tmp \
+  DOTTY_CLASSFILE_REQUIRE_JDK=1 \
+  CARGO_TARGET_DIR=/var/tmp/dotty-rs-issue-1853/target \
+  cargo test --workspace --all-targets --locked
+  ```
+- `cargo test -p dotty --test jvm_tasty_artifacts --locked -- --nocapture`
+  with JDK 21 required (46 passed), including six artifact write failures,
+  both promotion failure points, runtime verification and corrupted local
+  store/load/helper-reference rejection.
+- The focused Scala oracle command (12 passed):
+
+  ```sh
+  PATH=/home/vdrake6/.sdkman/candidates/java/current/bin:$PATH \
+  JAVA_HOME=/home/vdrake6/.sdkman/candidates/java/current \
+  TMPDIR=/var/tmp/dotty-rs-issue-1853/tmp \
+  JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/var/tmp/dotty-rs-issue-1853/tmp \
+  CARGO_TARGET_DIR=/var/tmp/dotty-rs-issue-1853/target \
+  SCALA39_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source \
+  DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 \
+  DOTTY_TASTY_PICKLER_ORACLE_TMP=/var/tmp/dotty-rs-issue-1853/tmp \
+  cargo test -p dotty --test jvm_tasty_factory_result_arguments \
+    --locked -- --nocapture
+  ```
+
+  The pinned reader decompiled the local sidecar and `-from-tasty` compiled
+  the Rust-produced artifacts.
+
+Corrupted factory `astore`, `aload` and helper `Methodref` operands fail
+first at decoded `cross-class invocation` validation for class index 2, before
+manifest acceptance. There are no known unresolved implementation risks;
+mutable, multiple, nested, branch-local and broader reference-local forms
+remain explicitly unsupported. Publisher fault tests establish handled-error
+cleanup and sentinel preservation, not crash-atomic filesystem durability.
