@@ -27,9 +27,9 @@ use dotty_tasty::file::TastyFile;
 use dotty_tasty::tasty::{RenderedNameSignature, RenderedParamSig, RenderedSignedName};
 use dotty_tasty::term::{AstRefKind, RawTree};
 use dotty_tasty_pickler::{
-    ClassMemberPicklePlan, ClassStatePicklePlan, LimitKind, PickleError, PickleLimits,
-    PlannedCallBinding, PrimaryConstructorInputPlan, ProjectionLimits, SourceMetadata,
-    SourceTypedBindings,
+    ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, LimitKind, PickleError,
+    PickleLimits, PlannedCallBinding, PrimaryConstructorInputPlan, ProjectionLimits,
+    SourceMetadata, SourceTypedBindings,
 };
 use dotty_typer::SourceTyper;
 use std::fs;
@@ -261,6 +261,150 @@ fn method_body<'a>(
             (tasty.names().render(body.name).unwrap() == name).then_some((address, body))
         })
         .unwrap_or_else(|| panic!("TASTy contains method {name}"))
+}
+
+fn raw_tree_tag(tree: &RawTree<'_>) -> u8 {
+    match tree {
+        RawTree::Leaf(term) => term.tag,
+        RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => *tag,
+        RawTree::LengthNode(node) => node.tag,
+    }
+}
+
+fn assert_standalone_reference_local_factory(
+    bytes: &[u8],
+    helper_result: &str,
+    owner_result: &str,
+) {
+    let factory = tasty(bytes);
+    let index = factory.ast_address_index().unwrap();
+    let (create_address, create) = method_body(&factory, "create");
+    assert_eq!(raw_tree_tag(&create.return_type), IDENTTPT_TAG);
+    let child = match &create.return_type {
+        RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } => child,
+        _ => panic!("the method result has an explicit source type tree"),
+    };
+    assert_eq!(raw_tree_tag(child), dotty_tasty::ast::TYPEREF_TAG);
+    let RawTree::LengthNode(block_node) = create.rhs.unwrap() else {
+        panic!("create retains its original BLOCK");
+    };
+    assert_eq!(block_node.tag, BLOCK_TAG);
+    let block_address = index
+        .iter_nodes_with_tag(BLOCK_TAG)
+        .find(|node| {
+            node.offset as u32 >= create_address
+                && std::iter::successors(index.parent_of(node.offset as u32), |parent| {
+                    index.parent_of(parent.offset as u32)
+                })
+                .any(|parent| parent.offset as u32 == create_address)
+        })
+        .expect("the address index contains create's original BLOCK")
+        .offset as u32;
+    let block = index.get(block_address).unwrap().decode_block().unwrap();
+    assert_eq!(block.stats.len(), 1);
+    let RawTree::LengthNode(local_node) = &block.stats[0] else {
+        panic!("the block retains its original local VALDEF");
+    };
+    assert_eq!(local_node.tag, VALDEF_TAG);
+    let local_address = index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .find(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == block_address)
+        })
+        .expect("the address index contains the block's local VALDEF")
+        .offset as u32;
+    assert_eq!(
+        index.parent_of(local_address).unwrap().offset as u32,
+        block_address
+    );
+    let dotty_tasty::ast::DefinitionBody::ValDef {
+        name,
+        type_tree,
+        rhs: Some(initializer),
+        ..
+    } = index
+        .get(local_address)
+        .unwrap()
+        .decode_definition_body()
+        .unwrap()
+    else {
+        panic!("counter is an initialized immutable VALDEF");
+    };
+    assert_eq!(factory.names().render(name).unwrap(), "counter");
+    assert_eq!(raw_tree_tag(&type_tree), IDENTTPT_TAG);
+    let RawTree::LengthNode(initializer_node) = initializer else {
+        panic!("counter's original initializer is an APPLY");
+    };
+    assert_eq!(initializer_node.tag, APPLY_TAG);
+    let initializer = initializer_node.decode_apply().unwrap();
+    let RawTree::LengthNode(helper_select_node) = initializer.function else {
+        panic!("the local initializer selects its original helper");
+    };
+    assert_eq!(helper_select_node.tag, SELECTIN_TAG);
+    let helper_select = helper_select_node.decode_select_in().unwrap();
+    assert!(matches!(
+        helper_select.qualifier,
+        RawTree::Ast {
+            tag: QUALTHIS_TAG,
+            ..
+        }
+    ));
+    assert!(matches!(
+        factory
+            .names()
+            .render_signed_name(helper_select.name)
+            .unwrap()
+            .unwrap(),
+        RenderedSignedName::Signed {
+            signature: RenderedNameSignature { result, .. },
+            ..
+        } if result == helper_result
+    ));
+    let [seed] = initializer.arguments.as_slice() else {
+        panic!("the helper receives create's original seed");
+    };
+    let seed_references = seed.ast_refs();
+    let [seed_reference] = seed_references.as_slice() else {
+        panic!("the helper seed is one direct local reference");
+    };
+    assert_eq!(seed_reference.kind, AstRefKind::TermRefDirect);
+    assert_eq!(
+        seed_reference.address,
+        parameter_address(&index, create_address)
+    );
+
+    let RawTree::LengthNode(owner_apply_node) = block.expression else {
+        panic!("the block result is the original Owner constructor APPLY");
+    };
+    assert_eq!(owner_apply_node.tag, APPLY_TAG);
+    let owner_apply = owner_apply_node.decode_apply().unwrap();
+    let RawTree::LengthNode(owner_select_node) = owner_apply.function else {
+        panic!("the result application selects the Owner constructor");
+    };
+    assert_eq!(owner_select_node.tag, SELECTIN_TAG);
+    let owner_select = owner_select_node.decode_select_in().unwrap();
+    assert!(matches!(
+        factory
+            .names()
+            .render_signed_name(owner_select.name)
+            .unwrap()
+            .unwrap(),
+        RenderedSignedName::Signed {
+            signature: RenderedNameSignature { result, .. },
+            ..
+        } if result == owner_result
+    ));
+    let [local_use] = owner_apply.arguments.as_slice() else {
+        panic!("the Owner constructor receives the local once");
+    };
+    let local_references = local_use.ast_refs();
+    let [local_reference] = local_references.as_slice() else {
+        panic!("the constructor argument contains one TASTy local reference");
+    };
+    assert_eq!(local_reference.kind, AstRefKind::TermRefDirect);
+    assert_eq!(local_reference.address, local_address);
 }
 
 fn parameter_address(index: &dotty_tasty::ast::AstAddressIndex<'_>, owner: u32) -> u32 {
@@ -840,6 +984,99 @@ fn run_factory_result_scala_reader(files: &[(String, Vec<u8>)]) {
         String::from_utf8_lossy(&from_tasty.stderr)
     );
     assert!(compiled.join("example/CounterOwnerFactory.class").exists());
+    fs::remove_dir_all(temporary).unwrap();
+}
+
+fn run_reference_local_factory_scala_reader(files: &[(String, Vec<u8>)]) {
+    let scala_root = PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("pinned Scala 3.9 source checkout is required"),
+    );
+    let revision = Command::new("git")
+        .arg("-C")
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read pinned Scala revision");
+    assert!(revision.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&revision.stdout).trim(),
+        "777528f19a58e794c9954a42f433373472ec57f8"
+    );
+    let compiler = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let version = Command::new(&compiler)
+        .arg("-version")
+        .output()
+        .expect("query pinned Scala compiler version");
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("3.9.0-bin-SNAPSHOT-git-777528f"));
+
+    let scratch = PathBuf::from(
+        std::env::var_os("DOTTY_TASTY_PICKLER_ORACLE_TMP")
+            .expect("task-specific target scratch must be set for the Scala oracle"),
+    );
+    assert!(scratch.exists());
+    assert!(
+        !scratch.starts_with("/tmp"),
+        "Scala oracle scratch must stay on the root volume"
+    );
+    let temporary = scratch.join(format!("issue-1852-scala-reader-{}", std::process::id()));
+    fs::remove_dir_all(&temporary).ok();
+    let candidate = temporary.join("candidate");
+    let compiled = temporary.join("compiled");
+    fs::create_dir_all(&candidate).unwrap();
+    fs::create_dir_all(&compiled).unwrap();
+    for (relative, bytes) in files {
+        let path = candidate.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+    let factory_tasty = candidate.join("example/CounterOwnerFactory.tasty");
+    let decompile = Command::new(&compiler)
+        .arg("-decompile")
+        .arg(&factory_tasty)
+        .output()
+        .expect("run Scala -decompile on Rust standalone Factory.tasty");
+    assert!(
+        decompile.status.success(),
+        "Scala -decompile rejected Rust Factory.tasty: {}",
+        String::from_utf8_lossy(&decompile.stderr)
+    );
+    let decompiled = normalize_decompiled_scala(&String::from_utf8_lossy(&decompile.stdout));
+    let create = decompiled
+        .split_once("def create")
+        .map(|(_, body)| body)
+        .expect("decompiler retains create");
+    assert!(
+        create.contains("val counter: example.Counter")
+            && create.contains("CounterOwnerFactory.this.makeCounter")
+            && create.contains("new example.CounterOwner(counter)"),
+        "Scala must reconstruct the typed local, original helper call, and local constructor use: {decompiled}"
+    );
+
+    let from_tasty = Command::new(&compiler)
+        .arg("-from-tasty")
+        .arg("-classpath")
+        .arg(&candidate)
+        .arg("-d")
+        .arg(&compiled)
+        .args([
+            candidate.join("example/Counter.tasty"),
+            candidate.join("example/CounterOwner.tasty"),
+            factory_tasty,
+        ])
+        .output()
+        .expect("run Scala -from-tasty on all three Rust standalone sidecars");
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected Rust standalone sidecars: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    for class in ["Counter", "CounterOwner", "CounterOwnerFactory"] {
+        assert!(
+            compiled.join(format!("example/{class}.class")).exists(),
+            "Scala -from-tasty reconstructed {class}.class"
+        );
+    }
     fs::remove_dir_all(temporary).unwrap();
 }
 
@@ -2137,6 +2374,7 @@ struct LocalFlowProofObservation {
     original_source_and_typed_roots_match: bool,
     helper_receipt_matches_original_initializer: bool,
     local_scope_is_owned_by_create: bool,
+    tasty_files: Vec<(String, Vec<u8>)>,
 }
 
 #[test]
@@ -2150,12 +2388,23 @@ fn reference_local_constructor_flow_preserves_one_session_identity_through_body_
         first, second,
         "independent sessions preserve the same proof relationships"
     );
+    if std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        run_reference_local_factory_scala_reader(&first.tasty_files);
+    }
     let renamed = source
         .replace("CounterOwnerFactory", "WidgetFactory")
         .replace("CounterOwner", "WidgetOwner")
         .replace("Counter", "Widget");
     let renamed_observation =
         observe_reference_local_constructor_flow(SourceId::from_index(1851), &renamed);
+    let renamed_repeat =
+        observe_reference_local_constructor_flow(SourceId::from_index(1853), &renamed);
+    assert_eq!(
+        renamed_observation.tasty_files, renamed_repeat.tasty_files,
+        "renamed source emits deterministic standalone sidecars"
+    );
     assert!(renamed_observation.original_source_and_typed_roots_match);
     assert!(renamed_observation.helper_receipt_matches_original_initializer);
     assert!(renamed_observation.local_scope_is_owned_by_create);
@@ -2171,6 +2420,12 @@ fn reference_local_constructor_flow_preserves_one_session_identity_through_body_
     );
     let reordered_observation =
         observe_reference_local_constructor_flow(SourceId::from_index(1852), &reordered);
+    let reordered_repeat =
+        observe_reference_local_constructor_flow(SourceId::from_index(1854), &reordered);
+    assert_eq!(
+        reordered_observation.tasty_files, reordered_repeat.tasty_files,
+        "reordered source emits deterministic standalone sidecars"
+    );
     assert!(reordered_observation.original_source_and_typed_roots_match);
     assert!(reordered_observation.helper_receipt_matches_original_initializer);
     assert!(reordered_observation.local_scope_is_owned_by_create);
@@ -2794,13 +3049,188 @@ fn observe_reference_local_constructor_flow(
     let validated_factory_state = factory_state_plan
         .validate()
         .expect("the body plan validates from the exact recorded source session");
+    let omitted_helper_members = factory_members
+        .iter()
+        .copied()
+        .filter(|member| {
+            !matches!(member, ClassMemberPicklePlan::Method { symbol, .. } if *symbol == helper_symbol)
+        })
+        .collect::<Vec<_>>();
+    let omitted_helper_plan = ClassStatePicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: typer.typed_ast(),
+        source_index: &source_index,
+        typed_bindings: &body_bindings,
+        source: SourceMetadata {
+            id: source_id,
+            name: "CounterOwnerFactory.scala".to_owned(),
+        },
+        class: factory,
+        class_tree: factory_tree,
+        constructor: PrimaryConstructorInputPlan {
+            symbol: factory_constructor,
+            source_tree: factory_constructor_tree,
+            parameter_clauses: factory_constructor_parameters.clone(),
+        },
+        members: &omitted_helper_members,
+    };
+    assert!(
+        omitted_helper_plan.validate().is_err(),
+        "a missing canonical helper member is rejected before standalone output"
+    );
     validated_factory_state
         .validate_method_bodies()
         .expect("the exact local proof authorizes the bounded TASTy body validation shape");
-    assert!(
-        validated_factory_state.pickle().is_err(),
-        "body validation does not imply that the unchanged serializer can encode reference locals"
+    let standalone_factory = validated_factory_state
+        .pickle()
+        .expect("the standalone class-state path serializes the verified reference local");
+    assert_eq!(
+        standalone_factory.intended_tasty_path(),
+        format!(
+            "example/{}.tasty",
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(factory).name.text())
+        )
     );
+    let local_type = typer.typed_ast().get(typed_local).ty;
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(local_type_class),
+        ..
+    } = typer.store().types.get(local_type)
+    else {
+        panic!("the local has its original class type");
+    };
+    let helper_result = format!(
+        "example.{}",
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(*local_type_class).name.text())
+    );
+    let create_type = match typer.store().symbols.get(create).info {
+        SymbolInfo::Complete(ty) => ty,
+        info => panic!("create has a complete result signature: {info:?}"),
+    };
+    let owner_type = match typer.store().types.get(create_type) {
+        Type::Method(signature) => signature.result,
+        _ => create_type,
+    };
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(owner_type_class),
+        ..
+    } = typer.store().types.get(owner_type)
+    else {
+        panic!("create has its original class result");
+    };
+    let owner_result = format!(
+        "example.{}",
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(*owner_type_class).name.text())
+    );
+    assert_standalone_reference_local_factory(
+        standalone_factory.bytes(),
+        &helper_result,
+        &owner_result,
+    );
+    let mut tasty_files = vec![(
+        standalone_factory.intended_tasty_path().to_owned(),
+        standalone_factory.bytes().to_vec(),
+    )];
+    let standalone_bindings = AuditBindings {
+        index: typed_index,
+        classes: classes.clone(),
+        methods: methods.iter().map(|(method, _, _)| *method).collect(),
+    };
+    for (class_index, &class_tree) in package.stats.iter().enumerate() {
+        let class = source_index.symbol_at(source_id, class_tree).unwrap();
+        if class == factory {
+            continue;
+        }
+        let TreeKind::TypeDef(class_definition) = &parsed.ast.get(class_tree).kind else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+            unreachable!();
+        };
+        let mut members = Vec::new();
+        for &member_tree in &template.body {
+            match &parsed.ast.get(member_tree).kind {
+                TreeKind::ValDef(_) => {
+                    let field = source_index.symbol_at(source_id, member_tree).unwrap();
+                    let (_, _, typed_initializer, declared_type) = field_initializers
+                        .iter()
+                        .find(|(candidate, _, _, _)| *candidate == field)
+                        .expect("each standalone class field has its original typed initializer");
+                    members.push(ClassMemberPicklePlan::Field(ClassFieldPicklePlan {
+                        symbol: field,
+                        source_tree: member_tree,
+                        typed_initializer: *typed_initializer,
+                        declared_type: *declared_type,
+                    }));
+                }
+                TreeKind::DefDef(_) => members.push(ClassMemberPicklePlan::Method {
+                    symbol: source_index.symbol_at(source_id, member_tree).unwrap(),
+                    source_tree: member_tree,
+                }),
+                _ => panic!("standalone class member is in the bounded source subset"),
+            }
+        }
+        let constructor_tree = template.constructor;
+        let constructor = constructors[class_index];
+        let TreeKind::DefDef(constructor_definition) = &parsed.ast.get(constructor_tree).kind
+        else {
+            unreachable!();
+        };
+        let parameter_clauses = constructor_definition
+            .value_param_clauses
+            .iter()
+            .map(|clause| {
+                clause
+                    .iter()
+                    .map(|&tree| {
+                        source_index
+                            .derived_symbol_at(constructor, source_id, tree)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let plan = ClassStatePicklePlan {
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast: typer.typed_ast(),
+            source_index: &source_index,
+            typed_bindings: &standalone_bindings,
+            source: SourceMetadata {
+                id: source_id,
+                name: "CounterOwnerFactory.scala".to_owned(),
+            },
+            class,
+            class_tree,
+            constructor: PrimaryConstructorInputPlan {
+                symbol: constructor,
+                source_tree: constructor_tree,
+                parameter_clauses,
+            },
+            members: &members,
+        };
+        let standalone = plan
+            .validate()
+            .and_then(|validated| validated.pickle())
+            .expect("sibling sidecars use the same-session standalone class-state path");
+        tasty_files.push((
+            standalone.intended_tasty_path().to_owned(),
+            standalone.bytes().to_vec(),
+        ));
+    }
+    tasty_files.sort_by(|left, right| left.0.cmp(&right.0));
 
     let validate_bodies_with = |bindings: &dyn SourceTypedBindings, typed_ast: &TypedAst| {
         let plan = ClassStatePicklePlan {
@@ -2863,6 +3293,17 @@ fn observe_reference_local_constructor_flow(
         ..body_bindings
     };
     assert!(validate_bodies_with(&foreign_local_bindings, typer.typed_ast()).is_err());
+    let wrong_local_address_bindings = LocalFlowBindings {
+        local: Some(dotty_tasty_pickler::LocalValueBinding {
+            typed_declaration: typed_local_use,
+            ..body_bindings.local.expect("positive local binding")
+        }),
+        ..body_bindings
+    };
+    assert!(validate_bodies_with(&wrong_local_address_bindings, typer.typed_ast()).is_err());
+    let mut wrong_local_type_ast = clone_typed_ast(typer.typed_ast());
+    wrong_local_type_ast.get_mut(typed_local).ty = definitions.int;
+    assert!(validate_bodies_with(&body_bindings, &wrong_local_type_ast).is_err());
 
     let original_block_type = typer.typed_ast().get(typed_rhs).ty;
     let original_apply_type = typer.typed_ast().get(typed_result).ty;
@@ -2971,6 +3412,7 @@ fn observe_reference_local_constructor_flow(
         local_scope_is_owned_by_create: local_proof.scope() == local_binding.scope()
             && proof_store.scopes.get(local_binding.scope()).owner == Some(create)
             && proof_store.symbols.get(local_symbol).owner == Some(create),
+        tasty_files,
     }
 }
 
