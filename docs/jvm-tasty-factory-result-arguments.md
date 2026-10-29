@@ -423,3 +423,123 @@ cargo test -p dotty --test jvm_source_compilation \
   original_factory_result_source_emits_with_complete_state_plans_and_runs_on_jdk \
   --locked -- --exact
 ```
+
+## Independent Scala 3.9 consumer evidence (#1837)
+
+At base `2f138ecb86a834318a82c527ce3f7944507c627d`, the new strict target
+`jvm_tasty_factory_result_scala_consumer` ran with
+`DOTTY_REQUIRE_SCALA_TASTY_FACTORY_RESULT_CONSUMER=1`. It uses the exact source
+above to produce two independent Rust six-artifact batches, a separately
+compiled Scala client, and a renamed/reordered Rust batch. The strict flag
+turns unavailable pinned tools into a failing test. The Scala consumer source
+is `FactoryResultConsumer.scala`, SHA-256
+`6f40cd586653aefbf735f5d511428399b9f71b12c6550ff820cec8d79a5a7d4a`.
+
+The run used Scala source revision
+`777528f19a58e794c9954a42f433373472ec57f8` (compiler reports 3.9.0) and
+Eclipse Temurin `21.0.13+9` (`x86_64`), with compiler and consumer flags
+`-release 21`.
+The consumer compile classpath was the original Rust batch root followed by
+only `scala3-library_3-3.9.0.jar` and `scala-library-3.9.0.jar`. The compiler
+inputs were those libraries plus Scala 3.9.0 compiler, interfaces, TASTy core,
+Scala ASM 9.9.0-scala-1, compiler-interface 1.12.0, and util-interface 1.11.5;
+all eight artifacts matched the SHA-256 manifest in
+`.github/workflows/jvm-tasty-factory-scala-consumer.yml`. The compiler JARs
+were checked for producer classes before compilation. Runtime used the same
+six original Rust artifacts, the independent client and Java driver, and the
+two pinned Scala runtime libraries. No Scala-produced producer classes were
+on either classpath.
+
+| Compiler/library artifact | SHA-256 |
+| --- | --- |
+| `scala3-library_3-3.9.0.jar` | `9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba` |
+| `scala-library-3.9.0.jar` | `b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd` |
+| `scala3-compiler_3-3.9.0.jar` | `3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a` |
+| `tasty-core_3-3.9.0.jar` | `66e12dda98bb23e864f3a31f8527c8338bf47bce9b85cc380b368c69c1ba8d0f` |
+| `scala3-interfaces-3.9.0.jar` | `64dfde1d2c6309d65a01c5f3ea836137eb84338dcadeb16f85764561ef4e10db` |
+| `scala-asm-9.9.0-scala-1.jar` | `75ac366e8ecb691e06a7e85041eed0f67919a646e5262fa0901225698c104375` |
+| `compiler-interface-1.12.0.jar` | `92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3` |
+| `util-interface-1.11.5.jar` | `1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af` |
+
+| Rust producer class | Class SHA-256 | TASTy SHA-256 | TASTY UUID |
+| --- | --- | --- | --- |
+| `example.Counter` | `b38143cee8571a6602865ff6062eca92dd771582f539b156100ffc9647af94ae` | `a0e78329d60aba318de825eaddb7668d34838197158653c1b7384188143099c7` | `00da82c5ca4ebdac0000000000008193` |
+| `example.CounterOwner` | `d914c2dfc5b8d22079be304fc7c463be171394a528b71603de43342a79db91b2` | `9bcfbbb9d12f71a50122c6b2af960fe76ffd7f629a57738f61f4d384821f7f13` | `004ebc559d6864ef0000000000008195` |
+| `example.CounterOwnerFactory` | `ecbebc8a5433f559a995364195a6276d85dc736b10ffc8076c3273f805e25981` | `c3ca6a461041bc590d3c6d51fba86b0633fe652a0a55de72f84374e8e2840e16` | `00ae6e0b2a42b1a10000000000008199` |
+
+The report verified all three classfiles are major version 65, each class's
+TASTY attribute equals its sidecar UUID, and fresh Rust sessions produce equal
+bytes. Before/after SHA-256 inventories were identical across client compile
+and runtime. Running the separate client on the unchanged Rust artifacts with
+`java -Xverify:all -ea` printed `7,-9,3` for both independent batches. The
+client annotates each `create` result as `CounterOwner` and each direct
+`makeCounter` result as `Counter`; it checks the returned values, fresh object
+identity, and independent mutable Counter state.
+
+The pinned compiler separately accepted four TASTy-only source lookups after
+the selected classfile method was removed. The paired classfile-only controls
+then removed that class's sidecar and failed with Scala E008 at member lookup:
+
+| Classfile method hidden | TASTy-only witness | Classfile-only first failure |
+| --- | --- | --- |
+| `Counter.get()I` | accepted | `value get is not a member of example.Counter` |
+| `CounterOwner.read()I` | accepted | `value read is not a member of example.CounterOwner` |
+| `CounterOwnerFactory.create(I)CounterOwner` | accepted | `value create is not a member of example.CounterOwnerFactory` |
+| `CounterOwnerFactory.makeCounter(I)Counter` | accepted | `value makeCounter is not a member of example.CounterOwnerFactory` |
+
+These method-stripped classfiles are compile-only witnesses and never enter a
+runtime classpath. Pinned `-decompile` on the three original Rust sidecars
+showed separate Counter and Owner declarations, `makeCounter(seed): Counter`
+with `new Counter(seed)`, and `create(seed): CounterOwner` with
+`new CounterOwner(CounterOwnerFactory.this.makeCounter(seed₂))` (Scala's
+decompiler alpha-renames the second binder). `-from-tasty` accepted all three
+original sidecars and emitted exactly Counter, CounterOwner, and
+CounterOwnerFactory. Those rebuilt classes were not used by the client or
+runtime.
+
+For each of Counter, CounterOwner, and CounterOwnerFactory, the harness
+separately tested missing, misplaced, corrupt, and UUID-mismatched sidecars.
+Missing and misplaced sidecars were rejected by the reader with
+“This `.tasty` file is missing”; corrupt sidecars failed while loading with
+“not a TASTy file”; UUID mismatches warned that the classfile was out of sync
+with its TASTy, and `-Werror` made that warning fatal. Additional isolated
+controls reached these first failures:
+
+- A classfile-only `makeCounter` result descriptor changed from Counter to
+  CounterOwner produced E007 (`Found: Counter`, `Required: Counter`) when the
+  consumer required Counter.
+- Removing the Factory sidecar and `makeCounter` declaration produced E008
+  “value makeCounter is not a member”.
+- Hiding Owner's primary `(Counter)Owner` constructor and sidecar produced
+  E173, “constructor CounterOwner cannot be accessed”.
+- Removing both Counter artifacts and relocating both under another package
+  failed with E008, “type Counter is not a member of example”.
+- Changing Counter's classfile-internal owner to `example.Coupler` while leaving
+  the artifact at `example/Counter.class` failed during Scala classfile loading:
+  “location not matching its contents: contains class example.Coupler”.
+- A precompiled client against a verifier-valid Factory class whose
+  `create` method entry was renamed reached `NoSuchMethodError`. Omitting
+  Counter at runtime reached `NoClassDefFoundError`. The renamed-method
+  linkage control retains the method body and descriptor; no method-stripped
+  class is run.
+
+The independently emitted batch renamed the package and all three classes and
+reordered the declarations. Scala compiled and ran its own client against each
+of its two deterministic Rust batches; both runs printed `7,-9,3`. The
+following per-class class/TASTy UUID links and hashes were equal across those
+independent emissions:
+
+| Renamed class | Class SHA-256 | TASTy SHA-256 | TASTY UUID |
+| --- | --- | --- | --- |
+| `renamed.Widget` | `f6d53c786231f6c88282932558cfe2cd2469eb5d1bc778ee31eee96f4ecb6fd5` | `a66023e403b8a5a32febb4d189b734bb9cb2378d4caf1f07877a9d5f9a127c04` | `00d39e8d55af90ac0000000000008193` |
+| `renamed.WidgetHolder` | `bc4c2ef76458d79e2c63a10100c9d090ac7ae0002240d1377bba522b22f36ff6` | `775ff29f9ad4579f1711adf01668988defac7f1267e4993f0607ef7d8726ca33` | `001dae5ea91964ef0000000000008195` |
+| `renamed.WidgetBuilder` | `8d159b7be3cb87a130f3e85270757bfcc41bc713801c6c4a62da4462cdcbd350` | `b22546343121af2945592fb63f4727ddec7bfb751c433fdc413990696c64fc68` | `0084d2f370bd3ea10000000000008199` |
+
+The Rust producer source hash is
+`daecae35c324a26522f13f459d14d5cc730ab22d5260f17384802f20572a550c`; the
+consumer hash is
+`6f40cd586653aefbf735f5d511428399b9f71b12c6550ff820cec8d79a5a7d4a`. The
+gate emits a JSON evidence report with the compiler revision/version, JDK
+release, eight compiler artifact hashes, all original and renamed hashes and
+UUIDs, compile classpath order, runtime outputs, control diagnostics, and
+first failing stages.

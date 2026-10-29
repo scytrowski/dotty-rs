@@ -47,6 +47,7 @@ def execute(args: list[str | Path], *, cwd: Path = ROOT) -> str:
             command.insert(1, f"-Djava.io.tmpdir={task_tmp}")
         elif executable in ("javac", "javap"):
             command.insert(1, f"-J-Djava.io.tmpdir={task_tmp}")
+            command.insert(1, "-J-XX:-UsePerfData")
     try:
         result = subprocess.run(command, cwd=cwd, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -3587,6 +3588,603 @@ def consume_nested_constructor_batch(toolchain: Toolchain, batch_root: Path) -> 
         "wrong_factory_constructor_signature_rejected_at_compile": True,
     }
 
+
+def _classfile_with_method_descriptor(class_bytes: bytes, method_name: str,
+                                      old_descriptor: str, new_descriptor: str) -> bytes:
+    """Change one method's descriptor index, preserving the rest of a valid classfile."""
+    offset = 8
+    cp_count = int.from_bytes(class_bytes[offset:offset + 2], "big")
+    offset += 2
+    utf8: dict[int, str] = {}
+    index = 1
+    while index < cp_count:
+        tag = class_bytes[offset]
+        offset += 1
+        if tag == 1:
+            length = int.from_bytes(class_bytes[offset:offset + 2], "big")
+            offset += 2
+            utf8[index] = class_bytes[offset:offset + length].decode("utf-8")
+            offset += length
+        elif tag in (3, 4):
+            offset += 4
+        elif tag in (5, 6):
+            offset += 8
+            index += 1
+        elif tag in (7, 8, 16, 19, 20):
+            offset += 2
+        elif tag in (9, 10, 11, 12, 17, 18):
+            offset += 4
+        elif tag == 15:
+            offset += 3
+        else:
+            raise RuntimeError(f"unknown classfile constant-pool tag {tag}")
+        index += 1
+    new_index = next((i for i, value in utf8.items() if value == new_descriptor), None)
+    if new_index is None:
+        raise RuntimeError(f"classfile lacks descriptor constant {new_descriptor}")
+    offset += 6
+    interfaces = int.from_bytes(class_bytes[offset:offset + 2], "big")
+    offset += 2 + 2 * interfaces
+
+    def skip_members(position: int, count: int) -> int:
+        for _ in range(count):
+            position += 6
+            attributes = int.from_bytes(class_bytes[position:position + 2], "big")
+            position += 2
+            for _ in range(attributes):
+                length = int.from_bytes(class_bytes[position + 2:position + 6], "big")
+                position += 6 + length
+        return position
+
+    field_count = int.from_bytes(class_bytes[offset:offset + 2], "big")
+    offset = skip_members(offset + 2, field_count)
+    method_count = int.from_bytes(class_bytes[offset:offset + 2], "big")
+    offset += 2
+    result = bytearray(class_bytes)
+    changed = 0
+    for _ in range(method_count):
+        name_index = int.from_bytes(class_bytes[offset + 2:offset + 4], "big")
+        descriptor_offset = offset + 4
+        descriptor_index = int.from_bytes(class_bytes[descriptor_offset:descriptor_offset + 2], "big")
+        attributes = int.from_bytes(class_bytes[offset + 6:offset + 8], "big")
+        position = offset + 8
+        for _ in range(attributes):
+            length = int.from_bytes(class_bytes[position + 2:position + 6], "big")
+            position += 6 + length
+        if utf8.get(name_index) == method_name and utf8.get(descriptor_index) == old_descriptor:
+            result[descriptor_offset:descriptor_offset + 2] = new_index.to_bytes(2, "big")
+            changed += 1
+        offset = position
+    if changed != 1:
+        raise RuntimeError(f"expected one {method_name}{old_descriptor}, changed {changed}")
+    return bytes(result)
+
+
+def _classfile_rename_method(class_bytes: bytes, method_name: str, descriptor: str,
+                             replacement_name: str) -> bytes:
+    """Rename a method entry without stripping its body or changing its ABI descriptor."""
+    offset = 8
+    cp_count = int.from_bytes(class_bytes[offset:offset + 2], "big")
+    offset += 2
+    utf8: dict[int, str] = {}
+    index = 1
+    while index < cp_count:
+        tag = class_bytes[offset]
+        offset += 1
+        if tag == 1:
+            length = int.from_bytes(class_bytes[offset:offset + 2], "big")
+            offset += 2
+            utf8[index] = class_bytes[offset:offset + length].decode("utf-8")
+            offset += length
+        elif tag in (3, 4):
+            offset += 4
+        elif tag in (5, 6):
+            offset += 8
+            index += 1
+        elif tag in (7, 8, 16, 19, 20):
+            offset += 2
+        elif tag in (9, 10, 11, 12, 17, 18):
+            offset += 4
+        elif tag == 15:
+            offset += 3
+        else:
+            raise RuntimeError(f"unknown classfile constant-pool tag {tag}")
+        index += 1
+    replacement_index = next((i for i, value in utf8.items() if value == replacement_name), None)
+    if replacement_index is None:
+        raise RuntimeError(f"classfile lacks method name constant {replacement_name}")
+    offset += 6
+    interfaces = int.from_bytes(class_bytes[offset:offset + 2], "big")
+    offset += 2 + 2 * interfaces
+
+    def skip_members(position: int, count: int) -> int:
+        for _ in range(count):
+            position += 6
+            attributes = int.from_bytes(class_bytes[position:position + 2], "big")
+            position += 2
+            for _ in range(attributes):
+                length = int.from_bytes(class_bytes[position + 2:position + 6], "big")
+                position += 6 + length
+        return position
+
+    fields = int.from_bytes(class_bytes[offset:offset + 2], "big")
+    offset = skip_members(offset + 2, fields)
+    method_count = int.from_bytes(class_bytes[offset:offset + 2], "big")
+    offset += 2
+    result = bytearray(class_bytes)
+    changed = 0
+    for _ in range(method_count):
+        name_index = int.from_bytes(class_bytes[offset + 2:offset + 4], "big")
+        descriptor_index = int.from_bytes(class_bytes[offset + 4:offset + 6], "big")
+        attributes = int.from_bytes(class_bytes[offset + 6:offset + 8], "big")
+        position = offset + 8
+        for _ in range(attributes):
+            length = int.from_bytes(class_bytes[position + 2:position + 6], "big")
+            position += 6 + length
+        if utf8.get(name_index) == method_name and utf8.get(descriptor_index) == descriptor:
+            result[offset + 2:offset + 4] = replacement_index.to_bytes(2, "big")
+            changed += 1
+        offset = position
+    if changed != 1:
+        raise RuntimeError(f"expected one {method_name}{descriptor}, renamed {changed}")
+    return bytes(result)
+
+
+def _classfile_change_internal_owner(class_bytes: bytes, expected: str, replacement: str) -> bytes:
+    """Change a classfile's self/internal references with an equal-length name."""
+    old, new = expected.encode("utf-8"), replacement.encode("utf-8")
+    if len(old) != len(new):
+        raise ValueError("owner replacement must preserve UTF-8 length")
+    result = bytearray(class_bytes)
+    offset = 8
+    cp_count = int.from_bytes(result[offset:offset + 2], "big")
+    offset += 2
+    changed = 0
+    index = 1
+    while index < cp_count:
+        tag = result[offset]
+        offset += 1
+        if tag == 1:
+            length = int.from_bytes(result[offset:offset + 2], "big")
+            start = offset + 2
+            end = start + length
+            if result[start:end] == old:
+                result[start:end] = new
+                changed += 1
+            offset = end
+        elif tag in (3, 4):
+            offset += 4
+        elif tag in (5, 6):
+            offset += 8
+            index += 1
+        elif tag in (7, 8, 16, 19, 20):
+            offset += 2
+        elif tag in (9, 10, 11, 12, 17, 18):
+            offset += 4
+        elif tag == 15:
+            offset += 3
+        else:
+            raise RuntimeError(f"unknown classfile constant-pool tag {tag}")
+        index += 1
+    if changed == 0:
+        raise RuntimeError(f"classfile contains no internal owner {expected}")
+    return bytes(result)
+
+
+def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict:
+    """Prove independent Scala 3.9 source lookup and runtime against Rust artifacts."""
+    methods = {
+        "Counter": {"get": "()I"},
+        "CounterOwner": {"read": "()I"},
+        "CounterOwnerFactory": {
+            "create": "(I)Lexample/CounterOwner;",
+            "makeCounter": "(I)Lexample/Counter;",
+        },
+    }
+    relative_paths = {
+        f"example/{name}.{suffix}"
+        for name in methods for suffix in ("class", "tasty")
+    }
+    roots = (batch_root / "fresh-a", batch_root / "fresh-b")
+    renamed_roots = (batch_root / "renamed-a", batch_root / "renamed-b")
+    renamed_paths = {
+        f"renamed/{name}.{suffix}"
+        for name in ("Widget", "WidgetHolder", "WidgetBuilder")
+        for suffix in ("class", "tasty")
+    }
+    hashes: dict[str, dict[str, str]] = {}
+    uuids: dict[str, str] = {}
+    for root in roots:
+        actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+        if actual != relative_paths:
+            raise RuntimeError(f"{root.name} must contain exactly the six Rust artifacts: {sorted(actual)}")
+    for name in methods:
+        class_path, tasty_path = f"example/{name}.class", f"example/{name}.tasty"
+        class_bytes, tasty_bytes = (roots[0] / class_path).read_bytes(), (roots[0] / tasty_path).read_bytes()
+        link = _class_tasty_link(class_bytes)
+        if class_bytes[6:8] != (65).to_bytes(2, "big") or link is None or link != _tasty_header_uuid(tasty_bytes):
+            raise RuntimeError(f"Rust {name} classfile version or TASTy UUID link is invalid")
+        if any((root / class_path).read_bytes() != class_bytes or
+               (root / tasty_path).read_bytes() != tasty_bytes for root in roots[1:]):
+            raise RuntimeError(f"fresh Rust producer batches differ for {name}")
+        hashes[name] = {"class_sha256": digest(roots[0] / class_path),
+                        "tasty_sha256": digest(roots[0] / tasty_path)}
+        uuids[name] = link.hex()
+    if len(set(uuids.values())) != 3:
+        raise RuntimeError(f"expected a distinct TASTy UUID for each producer class: {uuids}")
+    for jar in (Path(path) for path in toolchain.classpath.split(os.pathsep)):
+        with zipfile.ZipFile(jar) as archive:
+            if any(f"example/{name}.class" in archive.namelist() for name in methods):
+                raise RuntimeError(f"Scala compiler jar shadows original Rust classes: {jar}")
+
+    renamed_hashes: dict[str, str] = {}
+    renamed_uuids: dict[str, str] = {}
+    for root in renamed_roots:
+        actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+        if actual != renamed_paths:
+            raise RuntimeError(f"{root.name} must contain the renamed six artifacts: {sorted(actual)}")
+    for name in ("Widget", "WidgetHolder", "WidgetBuilder"):
+        class_path, tasty_path = f"renamed/{name}.class", f"renamed/{name}.tasty"
+        class_bytes, tasty_bytes = (renamed_roots[0] / class_path).read_bytes(), \
+            (renamed_roots[0] / tasty_path).read_bytes()
+        link = _class_tasty_link(class_bytes)
+        if class_bytes[6:8] != (65).to_bytes(2, "big") or link is None or link != _tasty_header_uuid(tasty_bytes):
+            raise RuntimeError(f"renamed Rust {name} classfile/TASTy UUID link is invalid")
+        if any((root / class_path).read_bytes() != class_bytes or
+               (root / tasty_path).read_bytes() != tasty_bytes for root in renamed_roots[1:]):
+            raise RuntimeError(f"renamed fresh Rust producer batches differ for {name}")
+        renamed_uuids[name] = link.hex()
+    if len(set(renamed_uuids.values())) != 3:
+        raise RuntimeError(f"renamed producer classes must have distinct TASTy UUIDs: {renamed_uuids}")
+    for relative in sorted(renamed_paths):
+        renamed_hashes[relative] = digest(renamed_roots[0] / relative)
+
+    client = ROOT / "tests/fixtures/jvm_tasty_factory_result_arguments/FactoryResultConsumer.scala"
+    client_hash = digest(client)
+    before = {f"{root.name}/{relative}": digest(root / relative)
+              for root in (*roots, *renamed_roots) for relative in
+              sorted(relative_paths if root in roots else renamed_paths)}
+    reports: dict[str, str] = {}
+    runtime_outputs: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="dotty-scala-factory-result-", dir=os.environ.get("TMPDIR")) as temporary:
+        work = Path(temporary)
+        client_input = work / "FactoryResultConsumer.scala"
+        shutil.copyfile(client, client_input)
+
+        def compile_probe(label: str, root: Path, source: str, *, werror: bool = False) -> str:
+            source_path = work / f"{label}.scala"
+            source_path.write_text(source)
+            output = work / f"{label}-classes"
+            output.mkdir()
+            args: list[str | Path] = []
+            if werror:
+                args.append("-Werror")
+            args.extend(("-release", "21", "-d", output, source_path))
+            return toolchain.compiler(args, classpath=os.pathsep.join((str(root), toolchain.runtime_classpath)))
+
+        for index, root in enumerate(roots):
+            output = work / f"client-{index}"
+            output.mkdir()
+            toolchain.compiler(["-release", "21", "-d", output, client_input],
+                               classpath=os.pathsep.join((str(root), toolchain.runtime_classpath)))
+            driver_source = work / f"Runner{index}.java"
+            driver_source.write_text(
+                "public final class Runner%d { public static void main(String[] args) { "
+                "System.out.println(consumer.FactoryResultConsumer$.MODULE$.run()); } }\n" % index
+            )
+            driver = work / f"driver-{index}"
+            driver.mkdir()
+            cp = os.pathsep.join((str(root), str(output), toolchain.runtime_classpath))
+            execute([toolchain.javac, "--release", "21", "-classpath", cp, "-d", driver, driver_source])
+            runtime_cp = os.pathsep.join((str(root), str(output), str(driver), toolchain.runtime_classpath))
+            runtime = execute([toolchain.java, "-Xverify:all", "-ea", "-XX:-UsePerfData",
+                               "-classpath", runtime_cp, f"Runner{index}"])
+            lines = [line for line in runtime.strip().splitlines()
+                     if not line.startswith("Picked up JAVA_TOOL_OPTIONS:")]
+            if lines != ["7,-9,3"]:
+                raise RuntimeError(f"original Rust classfiles returned {lines}, expected ['7,-9,3']")
+            runtime_outputs.extend(lines)
+
+        probes = {
+            ("Counter", "get"): "def get(value: example.Counter): Int = value.get()",
+            ("CounterOwner", "read"): "def read(value: example.CounterOwner): Int = value.read()",
+            ("CounterOwnerFactory", "create"): "def create(value: example.CounterOwnerFactory): example.CounterOwner = value.create(1)",
+            ("CounterOwnerFactory", "makeCounter"): "def makeCounter(value: example.CounterOwnerFactory): example.Counter = value.makeCounter(1)",
+        }
+        for (name, member), body in probes.items():
+            descriptor = methods[name][member]
+            source = f"package witness\nobject Probe:\n  {body}\n"
+            root = work / f"tasty-only-{name}-{member}"
+            shutil.copytree(roots[0], root)
+            class_path = root / f"example/{name}.class"
+            class_path.write_bytes(_classfile_without_method(class_path.read_bytes(), member, descriptor))
+            compile_probe(f"tasty-only-{name}-{member}", root, source)
+            reports[f"{name}.{member}.tasty_only"] = "resolved from TASTy"
+            (root / f"example/{name}.tasty").unlink()
+            try:
+                compile_probe(f"classfile-only-{name}-{member}", root, source)
+            except CommandFailure as error:
+                if not re.search(rf"(?i){member}.*(not found|not a member)|no member.*{member}", error.output):
+                    raise RuntimeError(f"{name}.{member} classfile-only probe failed unexpectedly: {error.output}") from error
+                reports[f"{name}.{member}.classfile_only"] = error.output.strip()
+            else:
+                raise RuntimeError(f"{name}.{member} resolved from the classfile without TASTy")
+
+        sidecars = work / "from-tasty-input/example"
+        sidecars.mkdir(parents=True)
+        for name in methods:
+            shutil.copyfile(roots[0] / f"example/{name}.tasty", sidecars / f"{name}.tasty")
+        decompiled = {name: toolchain.compiler([sidecars / f"{name}.tasty"], decompile=True)
+                      for name in methods}
+        factory = decompiled["CounterOwnerFactory"]
+        for expected in (
+            "def makeCounter(seed: scala.Int): example.Counter",
+            "new example.Counter(seed)",
+        ):
+            if expected not in factory:
+                raise RuntimeError(f"Rust Factory TASTy decompile lacks {expected!r}: {factory}")
+        if not re.search(
+            r"def create\(`?seed(?:₂)?`?: scala\.Int\): example\.CounterOwner = "
+            r"new example\.CounterOwner\(CounterOwnerFactory\.this\.makeCounter\(`?seed(?:₂)?`?\)\)",
+            factory,
+        ):
+            raise RuntimeError(f"Rust Factory TASTy lost create's selected helper call or CounterOwner result: {factory}")
+        if "class Counter(start: scala.Int)" not in decompiled["Counter"] or \
+                "class CounterOwner(counter: example.Counter)" not in decompiled["CounterOwner"]:
+            raise RuntimeError("Rust TASTy did not retain separate Counter and Owner declarations")
+        rebuilt = work / "from-tasty-output"
+        rebuilt.mkdir()
+        toolchain.compiler(["-release", "21", "-from-tasty", "-d", rebuilt,
+                            *(sidecars / f"{name}.tasty" for name in methods)],
+                           classpath=os.pathsep.join((str(sidecars.parent), toolchain.runtime_classpath)))
+        rebuilt_classes = sorted(p.relative_to(rebuilt).as_posix() for p in rebuilt.rglob("*.class"))
+        if rebuilt_classes != [f"example/{name}.class" for name in methods]:
+            raise RuntimeError(f"-from-tasty emitted unexpected class set: {rebuilt_classes}")
+
+        # Each class has its own missing/misplaced/corrupt/stale UUID sidecar matrix.
+        sidecar_probes = {"Counter": probes[("Counter", "get")],
+                          "CounterOwner": probes[("CounterOwner", "read")],
+                          "CounterOwnerFactory": probes[("CounterOwnerFactory", "create")]}
+        for name, body in sidecar_probes.items():
+            method = next(iter(methods[name]))
+            descriptor = methods[name][method]
+            source = f"package witness\nobject SidecarProbe:\n  {body}\n"
+            for control in ("missing", "misplaced", "corrupt", "uuid_mismatch"):
+                root = work / f"{control}-{name}"
+                shutil.copytree(roots[0], root)
+                tasty_path, class_path = root / f"example/{name}.tasty", root / f"example/{name}.class"
+                if control == "missing":
+                    tasty_path.unlink()
+                elif control == "misplaced":
+                    moved = root / f"elsewhere/{name}.tasty"
+                    moved.parent.mkdir()
+                    tasty_path.rename(moved)
+                elif control == "corrupt":
+                    tasty_path.write_bytes(b"not a TASTy sidecar")
+                else:
+                    class_path.write_bytes(_flip_tasty_link(class_path.read_bytes()))
+                try:
+                    compile_probe(f"{control}-{name}", root, source, werror=True)
+                except CommandFailure as error:
+                    patterns = {
+                        "missing": r"(?i)this `?\.tasty`? file is missing",
+                        "misplaced": r"(?i)this `?\.tasty`? file is missing",
+                        "corrupt": r"(?is)could not be read.*not a TASTy file",
+                        "uuid_mismatch": r"(?i)out of sync with its TASTy file",
+                    }
+                    if not re.search(patterns[control], error.output):
+                        raise RuntimeError(f"{name} {control} sidecar failed at wrong stage: {error.output}") from error
+                    reports[f"{name}.{control}"] = error.output.strip()
+                else:
+                    raise RuntimeError(f"{name} {control} sidecar was unexpectedly accepted")
+
+        # Mismatched helper ABI, missing declarations, constructor ABI and missing artifact.
+        helper_mismatch = work / "helper-result-descriptor-mismatch"
+        shutil.copytree(roots[0], helper_mismatch)
+        helper_class = helper_mismatch / "example/CounterOwnerFactory.class"
+        helper_class.write_bytes(_classfile_with_method_descriptor(
+            helper_class.read_bytes(), "makeCounter", "(I)Lexample/Counter;",
+            "(I)Lexample/CounterOwner;"))
+        (helper_mismatch / "example/CounterOwnerFactory.tasty").unlink()
+        try:
+            compile_probe("helper-result-descriptor-mismatch", helper_mismatch,
+                          "package witness\nobject HelperMismatch:\n  def use(f: example.CounterOwnerFactory): example.Counter = f.makeCounter(1)\n",
+                          werror=True)
+        except CommandFailure as error:
+            if "example.CounterOwner" not in error.output or "example.Counter" not in error.output:
+                raise RuntimeError(f"helper result descriptor control failed unexpectedly: {error.output}") from error
+            reports["helper_result_descriptor_mismatch"] = error.output.strip()
+        else:
+            raise RuntimeError("mismatched makeCounter result descriptor unexpectedly compiled")
+
+        missing_helper = work / "missing-helper-declaration"
+        shutil.copytree(roots[0], missing_helper)
+        helper_class = missing_helper / "example/CounterOwnerFactory.class"
+        helper_class.write_bytes(_classfile_without_method(helper_class.read_bytes(), "makeCounter", "(I)Lexample/Counter;"))
+        (missing_helper / "example/CounterOwnerFactory.tasty").unlink()
+        try:
+            compile_probe("missing-helper-declaration", missing_helper,
+                          "package witness\nobject MissingHelper:\n  def use(f: example.CounterOwnerFactory): example.Counter = f.makeCounter(1)\n")
+        except CommandFailure as error:
+            if "makeCounter" not in error.output:
+                raise RuntimeError(f"missing helper declaration failed unexpectedly: {error.output}") from error
+            reports["missing_helper_declaration"] = error.output.strip()
+        else:
+            raise RuntimeError("missing makeCounter declaration unexpectedly compiled")
+
+        wrong_owner_ctor = work / "wrong-owner-constructor"
+        shutil.copytree(roots[0], wrong_owner_ctor)
+        owner_class = wrong_owner_ctor / "example/CounterOwner.class"
+        owner_class.write_bytes(_classfile_without_method(owner_class.read_bytes(), "<init>", "(Lexample/Counter;)V"))
+        (wrong_owner_ctor / "example/CounterOwner.tasty").unlink()
+        try:
+            compile_probe("wrong-owner-constructor", wrong_owner_ctor,
+                          "package witness\nobject WrongOwner:\n  def create(): example.CounterOwner = new example.CounterOwner(new example.Counter(1))\n")
+        except CommandFailure as error:
+            if "constructor CounterOwner cannot be accessed" not in error.output:
+                raise RuntimeError(f"wrong Owner constructor control failed unexpectedly: {error.output}") from error
+            reports["wrong_owner_constructor_signature"] = error.output.strip()
+        else:
+            raise RuntimeError("missing Owner primary constructor unexpectedly compiled")
+
+        missing_class = work / "missing-required-artifact"
+        shutil.copytree(roots[0], missing_class)
+        (missing_class / "example/Counter.class").unlink()
+        (missing_class / "example/Counter.tasty").unlink()
+        try:
+            compile_probe("missing-required-artifact", missing_class,
+                          "package witness\nobject MissingArtifact:\n  def read(c: example.Counter): Int = c.get()\n")
+        except CommandFailure as error:
+            if "Counter" not in error.output or "Not Found" not in error.output:
+                raise RuntimeError(f"missing required artifact failed unexpectedly: {error.output}") from error
+            reports["missing_required_artifact"] = error.output.strip()
+        else:
+            raise RuntimeError("missing Counter classfile unexpectedly compiled")
+
+        wrong_package = work / "wrong-package-owner"
+        shutil.copytree(roots[0], wrong_package)
+        misplaced_class_dir = wrong_package / "relocated"
+        misplaced_class_dir.mkdir()
+        for suffix in ("class", "tasty"):
+            (wrong_package / f"example/Counter.{suffix}").rename(
+                misplaced_class_dir / f"Counter.{suffix}")
+        try:
+            compile_probe("wrong-package-owner", wrong_package,
+                          "package witness\nobject WrongPackage:\n  def read(c: example.Counter): Int = c.get()\n")
+        except CommandFailure as error:
+            if "Counter" not in error.output or "Not Found" not in error.output:
+                raise RuntimeError(f"wrong package/owner control failed unexpectedly: {error.output}") from error
+            reports["wrong_package_owner"] = error.output.strip()
+        else:
+            raise RuntimeError("wrong package/owner path unexpectedly resolved example.Counter")
+
+        wrong_internal_owner = work / "wrong-internal-owner"
+        shutil.copytree(roots[0], wrong_internal_owner)
+        owner_path = wrong_internal_owner / "example/Counter.class"
+        owner_path.write_bytes(_classfile_change_internal_owner(
+            owner_path.read_bytes(), "example/Counter", "example/Coupler"))
+        (wrong_internal_owner / "example/Counter.tasty").unlink()
+        try:
+            compile_probe("wrong-internal-owner", wrong_internal_owner,
+                          "package witness\nobject WrongInternalOwner:\n  def read(c: example.Counter): Int = c.get()\n")
+        except CommandFailure as error:
+            if not re.search(r"(?i)(wrong class|class file.*Counter|example\.Coupler)", error.output):
+                raise RuntimeError(f"wrong internal owner failed unexpectedly: {error.output}") from error
+            reports["wrong_internal_owner"] = error.output.strip()
+        else:
+            raise RuntimeError("classfile with a mismatched internal owner unexpectedly compiled")
+
+        # Runtime linkage controls use a precompiled consumer and never execute a
+        # member-stripped classfile. The wrong descriptor and absent class are isolated.
+        linkage_source = work / "LinkageClient.scala"
+        linkage_source.write_text("package witness\nobject LinkageClient:\n  def run(): Int = new example.CounterOwnerFactory().create(5).read()\n")
+        linkage_classes = work / "linkage-client"
+        linkage_classes.mkdir()
+        toolchain.compiler(["-release", "21", "-d", linkage_classes, linkage_source],
+                           classpath=os.pathsep.join((str(roots[0]), toolchain.runtime_classpath)))
+        no_such = work / "no-such-method-runtime"
+        shutil.copytree(roots[0], no_such)
+        factory_class = no_such / "example/CounterOwnerFactory.class"
+        factory_class.write_bytes(_classfile_rename_method(
+            factory_class.read_bytes(), "create", "(I)Lexample/CounterOwner;", "makeCounter"))
+        driver = work / "LinkageDriver.java"
+        driver.write_text("public final class LinkageDriver { public static void main(String[] a) { "
+                          "try { System.out.println(witness.LinkageClient$.MODULE$.run()); } "
+                          "catch (NoSuchMethodError e) { System.out.println(\"NoSuchMethodError\"); } "
+                          "catch (NoClassDefFoundError e) { System.out.println(\"NoClassDefFoundError\"); } } }\n")
+        for label, root, missing in (("no-such-method", no_such, None),
+                                     ("no-class-def", roots[0], "Counter.class")):
+            driver_out = work / f"{label}-driver"
+            driver_out.mkdir()
+            cp = os.pathsep.join((str(root), str(linkage_classes), toolchain.runtime_classpath))
+            execute([toolchain.javac, "--release", "21", "-classpath", cp, "-d", driver_out, driver])
+            run_root = work / f"{label}-runtime"
+            if missing:
+                shutil.copytree(root, run_root)
+                (run_root / "example" / missing).unlink()
+            else:
+                run_root = root
+            runtime_cp = os.pathsep.join((str(run_root), str(linkage_classes), str(driver_out),
+                                          toolchain.runtime_classpath))
+            runtime = execute([toolchain.java, "-Xverify:all", "-ea", "-XX:-UsePerfData",
+                               "-classpath", runtime_cp, "LinkageDriver"])
+            expected = "NoSuchMethodError" if label == "no-such-method" else "NoClassDefFoundError"
+            if expected not in runtime:
+                raise RuntimeError(f"{label} control did not reach {expected}: {runtime}")
+            reports[label] = runtime.strip()
+
+        renamed_client = client.read_text()
+        for before_name, after_name in (("example.", "renamed."), ("CounterOwnerFactory", "WidgetBuilder"),
+                                        ("CounterOwner", "WidgetHolder"), ("Counter", "Widget")):
+            renamed_client = renamed_client.replace(before_name, after_name)
+        renamed_input = work / "RenamedFactoryConsumer.scala"
+        renamed_input.write_text(renamed_client)
+        renamed_outputs: list[str] = []
+        for index, root in enumerate(renamed_roots):
+            actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+            if actual != renamed_paths:
+                raise RuntimeError(f"{root.name} must contain renamed six artifacts: {sorted(actual)}")
+            output = work / f"renamed-client-{index}"
+            output.mkdir()
+            toolchain.compiler(["-release", "21", "-d", output, renamed_input],
+                               classpath=os.pathsep.join((str(root), toolchain.runtime_classpath)))
+            driver_path = work / f"RenamedRunner{index}.java"
+            driver_path.write_text(
+                "public final class RenamedRunner%d { public static void main(String[] a) { "
+                "System.out.println(consumer.FactoryResultConsumer$.MODULE$.run()); } }\n" % index)
+            driver_out = work / f"renamed-driver-{index}"
+            driver_out.mkdir()
+            cp = os.pathsep.join((str(root), str(output), toolchain.runtime_classpath))
+            execute([toolchain.javac, "--release", "21", "-classpath", cp, "-d", driver_out, driver_path])
+            runtime_cp = os.pathsep.join((str(root), str(output), str(driver_out), toolchain.runtime_classpath))
+            runtime = execute([toolchain.java, "-Xverify:all", "-ea", "-XX:-UsePerfData",
+                               "-classpath", runtime_cp, f"RenamedRunner{index}"])
+            lines = [line for line in runtime.strip().splitlines()
+                     if not line.startswith("Picked up JAVA_TOOL_OPTIONS:")]
+            if lines != ["7,-9,3"]:
+                raise RuntimeError(f"renamed/reordered Rust batch returned {lines}")
+            renamed_outputs.extend(lines)
+
+    after = {f"{root.name}/{relative}": digest(root / relative)
+             for root in (*roots, *renamed_roots) for relative in
+             sorted(relative_paths if root in roots else renamed_paths)}
+    if before != after:
+        raise RuntimeError("Scala compile/runtime or isolated negative controls changed original Rust artifacts")
+    return {
+        "scala_consumer": True,
+        "scala_revision": REVISION,
+        "scala_compiler_version": toolchain.compiler_version,
+        "java_version": toolchain.jdk_release["JAVA_VERSION"],
+        "javac_version": toolchain.javac_version,
+        "javap_version": toolchain.javap_version,
+        "jdk_release": toolchain.jdk_release,
+        "scala_source_sha256": digest(ROOT / "tests/fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala"),
+        "client_source_sha256": client_hash,
+        "rust_artifact_hashes": hashes,
+        "tasty_link_uuids": uuids,
+        "renamed_artifact_hashes": renamed_hashes,
+        "renamed_tasty_link_uuids": renamed_uuids,
+        "runtime_outputs": runtime_outputs,
+        "counter_tasty_only_get_resolved": True,
+        "owner_tasty_only_read_resolved": True,
+        "factory_tasty_only_create_resolved": True,
+        "factory_tasty_only_make_counter_resolved": True,
+        "counter_classfile_only_control_rejected": True,
+        "owner_classfile_only_control_rejected": True,
+        "factory_classfile_only_create_control_rejected": True,
+        "factory_classfile_only_make_counter_control_rejected": True,
+        "factory_tasty_methods_decompiled": True,
+        "from_tasty_classes": rebuilt_classes,
+        "per_class_sidecar_matrix_rejected": True,
+        "negative_controls": reports,
+        "renamed_reordered_scala_consumer": True,
+        "renamed_runtime_outputs": renamed_outputs,
+        "rust_artifacts_unchanged_after_compile_and_run": True,
+        "compile_classpath_order": ["rust-six-artifact-root", *[str(p) for p in toolchain.runtime_jars]],
+        "runtime_outputs_are_original_rust_classes": True,
+        "compiler_artifacts_sha256": toolchain.artifacts,
+    }
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -3633,6 +4231,11 @@ def main() -> None:
         help="prove pinned Scala consumes and executes the Rust nested-constructor artifact batch",
     )
     nested_constructor.add_argument("batch_root", type=Path)
+    factory_result = subcommands.add_parser(
+        "consume-factory-result",
+        help="prove pinned Scala consumes factory-call Rust TASTy and executes original classes",
+    )
+    factory_result.add_argument("batch_root", type=Path)
     subcommands.add_parser("check", help="regenerate/check fixtures, compile originals/reduced Answer, run negative controls")
     args = parser.parse_args()
     if args.command == "consume-pair":
@@ -3670,6 +4273,11 @@ def main() -> None:
     if args.command == "consume-nested-constructor":
         toolchain = Toolchain()
         print(json.dumps(consume_nested_constructor_batch(toolchain, args.batch_root),
+                         indent=2, sort_keys=True))
+        return
+    if args.command == "consume-factory-result":
+        toolchain = Toolchain()
+        print(json.dumps(consume_factory_result_batch(toolchain, args.batch_root),
                          indent=2, sort_keys=True))
         return
     binary = inspector()

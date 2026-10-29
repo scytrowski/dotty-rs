@@ -7,12 +7,14 @@ on:
     paths:
       - '.github/workflows/jvm-tasty-factory-scala-consumer.yml'
       - 'docs/jvm-tasty-nested-constructor-calls.md'
+      - 'docs/jvm-tasty-factory-result-arguments.md'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'src/**'
       - 'crates/**'
       - 'tests/**'
+      - 'tests/fixtures/jvm_tasty_factory_result_arguments/**'
       - 'tools/tasty-pickler-oracle/**'
       - 'docs/jvm-tasty-cross-class-factories.md'
   workflow_dispatch:
@@ -158,6 +160,7 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_CONSTRUCTOR_INJECTION_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_FACTORY_RESULT_CONSUMER: '1'
           DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
           DOTTY_TASTY_PICKLER_ORACLE_TMP: ${{ github.workspace }}/target/scala-reader-oracle
         run: |
@@ -171,6 +174,7 @@ jobs:
             --test jvm_tasty_constructor_injection_scala_consumer \
             --test jvm_tasty_reference_constructor_scala_consumer \
             --test jvm_tasty_nested_constructor_scala_consumer \
+            --test jvm_tasty_factory_result_scala_consumer \
             --test jvm_tasty_cross_class_factories \
             --test jvm_tasty_factory_result_arguments \
             --test tasty_source_pickling \
