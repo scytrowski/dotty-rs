@@ -7,7 +7,7 @@ use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::reader::Reader as ClassReader;
-use dotty_core::ast::TreeKind;
+use dotty_core::ast::{TreeKind, TypedAst};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SourceTypedIndex, SymbolId,
     SymbolInfo, TermRefTarget, Type, TypeRefTarget,
@@ -72,6 +72,56 @@ struct ReceiptBindings<'a> {
         dotty_core::TreeId<dotty_core::ast::Untyped>,
         dotty_core::TreeId<dotty_core::ast::Typed>,
     )>,
+}
+
+#[derive(Clone, Copy)]
+struct LocalFlowBindings<'a> {
+    base: &'a dyn SourceTypedBindings,
+    method: SymbolId,
+    call: PlannedCallBinding,
+    local: Option<dotty_tasty_pickler::LocalValueBinding>,
+}
+
+fn clone_typed_ast(ast: &TypedAst) -> TypedAst {
+    let mut cloned = TypedAst::new();
+    for (tree_id, tree) in ast.iter() {
+        assert_eq!(cloned.alloc(tree.clone()), tree_id);
+    }
+    cloned
+}
+
+impl SourceTypedBindings for LocalFlowBindings<'_> {
+    fn typed_at(
+        &self,
+        source: SourceId,
+        tree: dotty_core::TreeId<dotty_core::ast::Untyped>,
+    ) -> Option<dotty_core::TreeId<dotty_core::ast::Typed>> {
+        self.base.typed_at(source, tree)
+    }
+
+    fn planned_class_symbols(&self) -> &[SymbolId] {
+        self.base.planned_class_symbols()
+    }
+
+    fn planned_method_symbols(&self) -> &[SymbolId] {
+        self.base.planned_method_symbols()
+    }
+
+    fn planned_call(&self, _source: SourceId, method: SymbolId) -> Option<PlannedCallBinding> {
+        (method == self.method).then_some(self.call)
+    }
+
+    fn local_value_bindings(
+        &self,
+        _source: SourceId,
+        method: SymbolId,
+    ) -> Vec<dotty_tasty_pickler::LocalValueBinding> {
+        if method == self.method {
+            self.local.into_iter().collect()
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 impl SourceTypedBindings for ReceiptBindings<'_> {
@@ -2091,18 +2141,45 @@ struct LocalFlowProofObservation {
 
 #[test]
 fn reference_local_constructor_flow_preserves_one_session_identity_through_body_validation() {
-    let first = observe_reference_local_constructor_flow(SourceId::from_index(1849));
-    let second = observe_reference_local_constructor_flow(SourceId::from_index(1850));
+    let source = include_str!(
+        "fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala"
+    );
+    let first = observe_reference_local_constructor_flow(SourceId::from_index(1849), source);
+    let second = observe_reference_local_constructor_flow(SourceId::from_index(1850), source);
     assert_eq!(
         first, second,
         "independent sessions preserve the same proof relationships"
     );
+    let renamed = source
+        .replace("CounterOwnerFactory", "WidgetFactory")
+        .replace("CounterOwner", "WidgetOwner")
+        .replace("Counter", "Widget");
+    let renamed_observation =
+        observe_reference_local_constructor_flow(SourceId::from_index(1851), &renamed);
+    assert!(renamed_observation.original_source_and_typed_roots_match);
+    assert!(renamed_observation.helper_receipt_matches_original_initializer);
+    assert!(renamed_observation.local_scope_is_owned_by_create);
+    let counter = source.find("class Counter(").unwrap();
+    let owner = source.find("class CounterOwner(").unwrap();
+    let factory = source.find("class CounterOwnerFactory:").unwrap();
+    let reordered = format!(
+        "{}{}\n{}\n{}",
+        &source[..counter],
+        &source[factory..],
+        &source[owner..factory],
+        &source[counter..owner]
+    );
+    let reordered_observation =
+        observe_reference_local_constructor_flow(SourceId::from_index(1852), &reordered);
+    assert!(reordered_observation.original_source_and_typed_roots_match);
+    assert!(reordered_observation.helper_receipt_matches_original_initializer);
+    assert!(reordered_observation.local_scope_is_owned_by_create);
 }
 
-fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowProofObservation {
-    let source = include_str!(
-        "fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala"
-    );
+fn observe_reference_local_constructor_flow(
+    source_id: SourceId,
+    source: &str,
+) -> LocalFlowProofObservation {
     let source_text = SourceText::new(source).unwrap();
     let scanner = ContextualScanner::new(source).unwrap();
     assert!(scanner.diagnostics().is_empty());
@@ -2161,11 +2238,19 @@ fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowPro
         }
     }
 
-    let factory_tree = *package.stats.last().unwrap();
+    let factory_tree = package
+        .stats
+        .iter()
+        .copied()
+        .find(|&tree| matches!(&parsed.ast.get(tree).kind, TreeKind::TypeDef(definition) if {
+            let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else { return false; };
+            template.body.iter().any(|&member| matches!(&parsed.ast.get(member).kind, TreeKind::DefDef(method) if store.names.resolve(method.name.as_name().text()) == "create"))
+        }))
+        .unwrap();
     let TreeKind::TypeDef(factory_definition) = &parsed.ast.get(factory_tree).kind else {
         unreachable!();
     };
-    let factory = classes[2];
+    let factory = source_index.symbol_at(source_id, factory_tree).unwrap();
     let TreeKind::Template(factory_template) = &parsed.ast.get(factory_definition.rhs).kind else {
         unreachable!();
     };
@@ -2207,9 +2292,11 @@ fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowPro
     };
     let create_owner = store.symbols.get(create).owner.unwrap();
     assert_eq!(create_owner, factory);
-    assert_eq!(
-        store.names.resolve(initializer_function.name.text()),
-        "makeCounter"
+    assert!(
+        store
+            .names
+            .resolve(initializer_function.name.text())
+            .starts_with("make")
     );
     assert_eq!(
         store.names.resolve(local_definition.name.as_name().text()),
@@ -2292,6 +2379,65 @@ fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowPro
     let typed_local = typed_index.get(source_id, source_local).unwrap();
     let typed_initializer = typed_index.get(source_id, source_initializer).unwrap();
     let typed_local_use = typed_index.get(source_id, *source_local_use).unwrap();
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(counter_class),
+        ..
+    } = typer
+        .store()
+        .types
+        .get(typer.typed_ast().get(typed_initializer).ty)
+    else {
+        panic!("the canonical local initializer returns its class TypeRef");
+    };
+    let counter_class = *counter_class;
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(owner_class),
+        ..
+    } = typer.store().types.get(typer.typed_ast().get(typed_rhs).ty)
+    else {
+        panic!("the canonical block result has its class TypeRef");
+    };
+    let owner_class = *owner_class;
+    let factory_constructor = *classes
+        .iter()
+        .position(|&class| class == factory)
+        .map(|index| &constructors[index])
+        .unwrap();
+    let owner_constructor = *classes
+        .iter()
+        .position(|&class| class == owner_class)
+        .map(|index| &constructors[index])
+        .unwrap();
+    let SymbolInfo::Complete(create_signature_type) = typer.store().symbols.get(create).info else {
+        panic!("create has a complete method signature");
+    };
+    let Type::Method(create_signature) = typer.store().types.get(create_signature_type) else {
+        panic!("create has a method type");
+    };
+    let method_result_type = create_signature.result;
+    assert!(matches!(
+        typer.store().types.get(method_result_type),
+        Type::TypeRef { prefix, target: TypeRefTarget::Symbol(class) }
+            if *prefix != definitions.no_prefix && *class == owner_class
+    ));
+    let SymbolInfo::Complete(owner_constructor_signature_type) =
+        typer.store().symbols.get(owner_constructor).info
+    else {
+        panic!("CounterOwner constructor has a complete method signature");
+    };
+    let Type::Method(owner_constructor_signature) =
+        typer.store().types.get(owner_constructor_signature_type)
+    else {
+        panic!("CounterOwner constructor has a method type");
+    };
+    let constructor_result_type = owner_constructor_signature.result;
+    assert!(matches!(
+        typer.store().types.get(constructor_result_type),
+        Type::TypeRef { prefix, target: TypeRefTarget::Symbol(class) }
+            if *prefix == definitions.no_prefix && *class == owner_class
+    ));
+    assert_ne!(method_result_type, constructor_result_type);
+    assert_eq!(typer.typed_ast().get(typed_rhs).ty, constructor_result_type);
     assert_eq!(local_binding.declaration(), typed_local);
     assert_eq!(
         typer.local_symbol_at(source_id, source_local),
@@ -2316,7 +2462,7 @@ fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowPro
     };
     assert!(matches!(
         typer.store().types.get(typer.typed_ast().get(typed_initializer).ty),
-        Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == classes[0]
+        Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == counter_class
     ));
     let Type::TermRef {
         target: TermRefTarget::Symbol(selected_helper),
@@ -2342,7 +2488,7 @@ fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowPro
     assert_eq!(*used_local, local_symbol);
     assert!(matches!(
         typer.store().types.get(typer.typed_ast().get(typed_local).ty),
-        Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == classes[0]
+        Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == counter_class
     ));
     let typed_result = typed_index.get(source_id, block.expr).unwrap();
     let TreeKind::Apply(typed_constructor_apply) = &typer.typed_ast().get(typed_result).kind else {
@@ -2354,11 +2500,11 @@ fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowPro
             .types
             .get(typer.typed_ast().get(typed_constructor_apply.function).ty),
         Type::TermRef { target: TermRefTarget::Symbol(constructor), .. }
-            if *constructor == constructors[1]
+            if *constructor == owner_constructor
     ));
     assert!(matches!(
         typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
-        Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == classes[1]
+        Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == owner_class
     ));
     assert_eq!(
         typed_index.get(source_id, *source_local_use),
@@ -2551,7 +2697,7 @@ fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowPro
         dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::Formal
     );
     assert_eq!(helper_proof.caller_class(), factory);
-    assert_eq!(helper_proof.target_class(), classes[0]);
+    assert_eq!(helper_proof.target_class(), counter_class);
     println!(
         "Rust local flow proof scan completed; retained method identities={:?}",
         proof_result
@@ -2566,7 +2712,7 @@ fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowPro
     else {
         unreachable!();
     };
-    let factory_constructor_parameters = factory_constructor_definition
+    let factory_constructor_parameters: Vec<Vec<SymbolId>> = factory_constructor_definition
         .value_param_clauses
         .iter()
         .map(|clause| {
@@ -2574,7 +2720,7 @@ fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowPro
                 .iter()
                 .map(|&tree| {
                     source_index
-                        .derived_symbol_at(constructors[2], source_id, tree)
+                        .derived_symbol_at(factory_constructor, source_id, tree)
                         .unwrap()
                 })
                 .collect::<Vec<_>>()
@@ -2586,6 +2732,36 @@ fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowPro
         index: typed_index,
         classes: planned_classes,
         methods: planned_methods,
+    };
+    let initializer_call = local_proof.initializer_call();
+    let body_bindings = LocalFlowBindings {
+        base: &tasty_bindings,
+        method: create,
+        call: PlannedCallBinding {
+            source_apply: initializer_call.source_apply(),
+            typed_apply: initializer_call.typed_apply(),
+            source_function: initializer_call.source_function(),
+            typed_function: initializer_call.typed_function(),
+            source_argument: initializer_call.source_argument(),
+            typed_argument: initializer_call.typed_argument(),
+            source_receiver: initializer_call.source_receiver(),
+            typed_receiver: initializer_call.typed_receiver(),
+            helper_source_tree: initializer_call.helper_source_tree(),
+            helper_source_rhs: initializer_call.helper_source_rhs(),
+            helper_typed_rhs: initializer_call.helper_typed_rhs(),
+            owner: initializer_call.owner(),
+            method: initializer_call.method(),
+            caller_formal: initializer_call.formal(),
+            helper_formal: initializer_call.helper_formal(),
+            formal_type: initializer_call.formal_type(),
+            result_type: initializer_call.result_type(),
+        },
+        local: Some(dotty_tasty_pickler::LocalValueBinding {
+            source_tree: local_proof.source_declaration(),
+            symbol: local_proof.symbol(),
+            typed_declaration: local_proof.typed_declaration(),
+            scope: local_proof.scope(),
+        }),
     };
     let factory_members = methods
         .iter()
@@ -2601,7 +2777,7 @@ fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowPro
         source_ast: &parsed.ast,
         typed_ast: typer.typed_ast(),
         source_index: &source_index,
-        typed_bindings: &tasty_bindings,
+        typed_bindings: &body_bindings,
         source: SourceMetadata {
             id: source_id,
             name: "CounterOwnerFactory.scala".to_owned(),
@@ -2609,30 +2785,136 @@ fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowPro
         class: factory,
         class_tree: factory_tree,
         constructor: PrimaryConstructorInputPlan {
-            symbol: constructors[2],
+            symbol: factory_constructor,
             source_tree: factory_constructor_tree,
-            parameter_clauses: factory_constructor_parameters,
+            parameter_clauses: factory_constructor_parameters.clone(),
         },
         members: &factory_members,
     };
     let validated_factory_state = factory_state_plan
         .validate()
         .expect("the body plan validates from the exact recorded source session");
-    let body_error = validated_factory_state
+    validated_factory_state
         .validate_method_bodies()
-        .expect_err("the recorded local block remains unsupported by TASTy body validation");
-    let body_type = typer.typed_ast().get(typed_rhs).ty;
-    assert_eq!(
-        body_error,
-        PickleError::BodyType {
-            tree: typed_rhs,
-            ty: body_type,
+        .expect("the exact local proof authorizes the bounded TASTy body validation shape");
+    assert!(
+        validated_factory_state.pickle().is_err(),
+        "body validation does not imply that the unchanged serializer can encode reference locals"
+    );
+
+    let validate_bodies_with = |bindings: &dyn SourceTypedBindings, typed_ast: &TypedAst| {
+        let plan = ClassStatePicklePlan {
+            store: typer.store(),
+            definitions: &definitions,
+            source_ast: &parsed.ast,
+            typed_ast,
+            source_index: &source_index,
+            typed_bindings: bindings,
+            source: SourceMetadata {
+                id: source_id,
+                name: "CounterOwnerFactory.scala".to_owned(),
+            },
+            class: factory,
+            class_tree: factory_tree,
+            constructor: PrimaryConstructorInputPlan {
+                symbol: factory_constructor,
+                source_tree: factory_constructor_tree,
+                parameter_clauses: factory_constructor_parameters.clone(),
+            },
+            members: &factory_members,
+        };
+        plan.validate()?.validate_method_bodies()
+    };
+    let mut stale_call = body_bindings.call;
+    stale_call.source_apply = source_local;
+    let stale_call_bindings = LocalFlowBindings {
+        call: stale_call,
+        ..body_bindings
+    };
+    assert!(validate_bodies_with(&stale_call_bindings, typer.typed_ast()).is_err());
+    let stale_typed_call_bindings = LocalFlowBindings {
+        call: PlannedCallBinding {
+            typed_apply: typed_local,
+            ..body_bindings.call
         },
-        "BodyType must refer to the exact block and type recorded above"
+        ..body_bindings
+    };
+    assert!(validate_bodies_with(&stale_typed_call_bindings, typer.typed_ast()).is_err());
+    let missing_local_bindings = LocalFlowBindings {
+        local: None,
+        ..body_bindings
+    };
+    assert!(validate_bodies_with(&missing_local_bindings, typer.typed_ast()).is_err());
+    let stale_scope_bindings = LocalFlowBindings {
+        local: Some(dotty_tasty_pickler::LocalValueBinding {
+            scope: source_index
+                .scope_of(factory)
+                .expect("factory scope exists"),
+            ..body_bindings.local.expect("positive local binding")
+        }),
+        ..body_bindings
+    };
+    assert!(validate_bodies_with(&stale_scope_bindings, typer.typed_ast()).is_err());
+    let foreign_local_bindings = LocalFlowBindings {
+        local: Some(dotty_tasty_pickler::LocalValueBinding {
+            symbol: helper_symbol,
+            ..body_bindings.local.expect("positive local binding")
+        }),
+        ..body_bindings
+    };
+    assert!(validate_bodies_with(&foreign_local_bindings, typer.typed_ast()).is_err());
+
+    let original_block_type = typer.typed_ast().get(typed_rhs).ty;
+    let original_apply_type = typer.typed_ast().get(typed_result).ty;
+    assert_eq!(original_block_type, constructor_result_type);
+    assert_eq!(original_apply_type, constructor_result_type);
+
+    let mut wrong_prefix_ast = clone_typed_ast(typer.typed_ast());
+    wrong_prefix_ast.get_mut(typed_rhs).ty = method_result_type;
+    wrong_prefix_ast.get_mut(typed_result).ty = method_result_type;
+    let wrong_prefix_error = validate_bodies_with(&body_bindings, &wrong_prefix_ast);
+    assert!(
+        matches!(
+            wrong_prefix_error,
+            Err(PickleError::BodyType { tree, ty })
+                if tree == typed_result && ty == method_result_type
+        ),
+        "wrong prefix error: {wrong_prefix_error:?}"
     );
-    println!(
-        "Rust same-session TASTy body validation: {body_error:?} for source block {source_rhs:?} / typed block {typed_rhs:?} / type {body_type:?}"
-    );
+
+    let mut mismatched_roots_ast = clone_typed_ast(typer.typed_ast());
+    mismatched_roots_ast.get_mut(typed_rhs).ty = method_result_type;
+    assert!(matches!(
+        validate_bodies_with(&body_bindings, &mismatched_roots_ast),
+        Err(PickleError::BodyType { tree, ty })
+            if tree == typed_rhs && ty == method_result_type
+    ));
+
+    let TreeKind::Select(typed_constructor_select) =
+        &typer.typed_ast().get(typed_constructor_apply.function).kind
+    else {
+        panic!("the final application selects the constructor");
+    };
+    let TreeKind::New(typed_new) = &typer
+        .typed_ast()
+        .get(typed_constructor_select.qualifier)
+        .kind
+    else {
+        panic!("the selected constructor has its original New qualifier");
+    };
+    let new_type_tree = typed_new.tpt;
+    let mut disconnected_new_type_ast = clone_typed_ast(typer.typed_ast());
+    disconnected_new_type_ast.get_mut(new_type_tree).ty = typer.typed_ast().get(typed_local).ty;
+    assert!(matches!(
+        validate_bodies_with(&body_bindings, &disconnected_new_type_ast),
+        Err(PickleError::BodyType { tree, ty })
+            if tree == typed_result && ty == original_apply_type
+    ));
+
+    assert_eq!(typer.typed_ast().get(typed_rhs).ty, original_block_type);
+    assert_eq!(typer.typed_ast().get(typed_result).ty, original_apply_type);
+    assert_eq!(typed_index.get(source_id, source_rhs), Some(typed_rhs));
+    assert_eq!(typed_index.get(source_id, block.expr), Some(typed_result));
 
     let paired_error =
         with_paired_jvm_tasty_batch_plan(source, "CounterOwnerFactory.scala", source_id, |_| ())
@@ -2641,7 +2923,8 @@ fn observe_reference_local_constructor_flow(source_id: SourceId) -> LocalFlowPro
         matches!(
             &paired_error,
             PairedPlanError::BatchClass { phase, reason, .. }
-                if *phase == "JVM/TASTy cross-contract validation" && reason.contains("BodyType")
+                if *phase == "JVM/TASTy cross-contract validation"
+                    && reason.contains("Unsupported")
         ),
         "first paired failure was {paired_error:?}"
     );
@@ -2707,7 +2990,7 @@ fn reference_local_constructor_flow_rename_and_reorder_keep_the_same_first_gate(
         18491,
         "renamed reference-local constructor flow",
         "JVM/TASTy cross-contract validation",
-        "BodyType",
+        "Unsupported",
     );
 
     let owner_start = source.find("\nclass CounterOwner(").unwrap();
@@ -2721,6 +3004,6 @@ fn reference_local_constructor_flow_rename_and_reorder_keep_the_same_first_gate(
         18492,
         "reordered reference-local constructor flow",
         "JVM/TASTy cross-contract validation",
-        "BodyType",
+        "Unsupported",
     );
 }

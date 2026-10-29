@@ -88,7 +88,7 @@ impl Validator<'_, '_> {
                 method,
                 self.plan.definitions.int,
                 depth,
-                Some(visited),
+                (Some(visited), false),
             ),
         }
     }
@@ -1362,7 +1362,7 @@ impl Validator<'_, '_> {
                 method,
                 self.plan.definitions.int,
                 depth + 1,
-                Some(visited),
+                (Some(visited), false),
             )?;
             return Ok(typed.ty);
         }
@@ -1372,7 +1372,7 @@ impl Validator<'_, '_> {
             method,
             self.plan.definitions.int,
             depth,
-            Some(visited),
+            (Some(visited), false),
         )?;
         Ok(typed.ty)
     }
@@ -1516,7 +1516,7 @@ impl Validator<'_, '_> {
         method: &MethodPicklePlan,
         result_type: TypeId,
     ) -> Result<(), PickleError> {
-        self.validate_method_expression_inner(rhs, body, method, result_type, 0, None)
+        self.validate_method_expression_inner(rhs, body, method, result_type, 0, (None, false))
     }
 
     fn validate_method_expression_inner(
@@ -1526,8 +1526,10 @@ impl Validator<'_, '_> {
         method: &MethodPicklePlan,
         result_type: TypeId,
         depth: usize,
-        mut visited: Option<&mut HashSet<TreeId<Typed>>>,
+        traversal: (Option<&mut HashSet<TreeId<Typed>>>, bool),
     ) -> Result<(), PickleError> {
+        // The identity requirement is enabled only for a reference-valued block tail.
+        let (mut visited, require_constructor_result_identity) = traversal;
         let depth_limit = self.limits.expression_depth_limit();
         if depth > depth_limit {
             return Err(PickleError::LimitExceeded {
@@ -1556,7 +1558,7 @@ impl Validator<'_, '_> {
                 method,
                 result_type,
                 depth,
-                seen,
+                (seen, require_constructor_result_identity),
             );
         }
         if matches!(
@@ -1602,6 +1604,15 @@ impl Validator<'_, '_> {
             let mut local_visited = HashSet::new();
             let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
             return self.validate_cross_class_noarg_call(rhs, body, method, depth, seen);
+        }
+        if result_type != p.definitions.int
+            && self.is_planned_sibling_class_type(result_type, None)
+            && matches!(source_rhs.kind, TreeKind::Block(_))
+            && matches!(node.kind, TreeKind::Block(_))
+        {
+            let mut local_visited = HashSet::new();
+            let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
+            return self.validate_block_expression(rhs, body, method, result_type, depth + 1, seen);
         }
         if result_type == p.definitions.boolean
             && matches!(
@@ -1692,7 +1703,11 @@ impl Validator<'_, '_> {
                 } else if self.registered_local_symbols.contains(target) {
                     self.kind(*target, SymbolKind::Local)?;
                     self.owner(*target, Some(method.symbol))?;
-                    if result_type != p.definitions.int
+                    let local_type = self.complete(*target)?;
+                    let type_matches = (result_type == p.definitions.int
+                        && local_type == p.definitions.int)
+                        || self.same_planned_sibling_class_type(local_type, result_type);
+                    if !type_matches
                         || self.symbol(*target)?.name != source_ident.name
                         || !self.visible_locals.contains(target)
                     {
@@ -1703,7 +1718,6 @@ impl Validator<'_, '_> {
                     }
                     if *prefix != p.definitions.no_prefix
                         || !matches!(self.ty(*prefix)?, Type::NoPrefix)
-                        || self.complete(*target)? != p.definitions.int
                     {
                         return Err(PickleError::Reference {
                             symbol: *target,
@@ -2317,8 +2331,9 @@ impl Validator<'_, '_> {
         method: &MethodPicklePlan,
         result_type: TypeId,
         depth: usize,
-        visited: &mut HashSet<TreeId<Typed>>,
+        traversal: (&mut HashSet<TreeId<Typed>>, bool),
     ) -> Result<(), PickleError> {
+        let (visited, require_constructor_result_identity) = traversal;
         let depth_limit = self.limits.expression_depth_limit();
         if depth > depth_limit {
             return Err(PickleError::LimitExceeded {
@@ -2474,6 +2489,19 @@ impl Validator<'_, '_> {
                 role: TypeRole::ConstructorSignature,
             });
         };
+        let constructor_result_type = constructor_signature.result;
+        if require_constructor_result_identity
+            && (typed_root.ty != constructor_result_type
+                || !matches!(self.ty(constructor_result_type)?, Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(result_class),
+                } if *prefix == p.definitions.no_prefix && *result_class == class))
+        {
+            return Err(PickleError::BodyType {
+                tree: typed_id,
+                ty: typed_root.ty,
+            });
+        }
         let constructor_argument_type = constructor_signature.params[0].ty;
         if source_select.name.text() != self.symbol(constructor)?.name.text()
             || p.store.names.resolve(source_select.name.text()) != "<init>"
@@ -2539,18 +2567,18 @@ impl Validator<'_, '_> {
                 visited,
             );
         }
-        if let Some(binding) = p.typed_bindings.planned_call(p.source.id, method.symbol) {
-            if binding.source_apply != source_argument_id
-                || binding.typed_apply != typed_argument_id
-                || binding.caller_formal != formal
-            {
+        if let Some(binding) = p
+            .typed_bindings
+            .planned_call(p.source.id, method.symbol)
+            .filter(|binding| binding.source_apply == source_argument_id)
+        {
+            if binding.typed_apply != typed_argument_id || binding.caller_formal != formal {
                 return Err(
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                 );
             }
             return self.validate_planned_call_argument(
                 binding,
-                formal,
                 constructor_argument_type,
                 method,
                 depth + 1,
@@ -2563,20 +2591,47 @@ impl Validator<'_, '_> {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         };
         let formal_record = self.symbol(formal)?;
-        let argument_type_matches = matches!(formal_record.info,
+        let formal_type_matches = matches!(formal_record.info,
             SymbolInfo::Complete(argument_type)
                 if (constructor_argument_type == p.definitions.int
                     && argument_type == p.definitions.int)
                     || self.same_planned_sibling_class_type(argument_type, constructor_argument_type));
-        if formal_record.kind != SymbolKind::Parameter
-            || formal_record.owner != Some(method.symbol)
-            || formal_record.name.text() != source_argument.name.text()
-            || typed_argument.name != source_argument.name
-            || !argument_type_matches
-            || !matches!(self.ty(typed_argument_type)?, Type::TermRef {
+        let typed_target = match self.ty(typed_argument_type)? {
+            Type::TermRef {
                 prefix,
                 target: TermRefTarget::Symbol(target),
-            } if *prefix == p.definitions.no_prefix && *target == formal)
+            } if *prefix == p.definitions.no_prefix => Some(*target),
+            _ => None,
+        };
+        let argument_identity_matches = match typed_target {
+            Some(target) if target == formal => {
+                formal_record.kind == SymbolKind::Parameter
+                    && formal_record.owner == Some(method.symbol)
+                    && formal_record.name.text() == source_argument.name.text()
+            }
+            Some(target) if self.registered_local_symbols.contains(&target) => {
+                let local = self.symbol(target)?;
+                local.kind == SymbolKind::Local
+                    && local.owner == Some(method.symbol)
+                    && local.name == source_argument.name
+                    && self.visible_locals.contains(&target)
+                    && self.same_planned_sibling_class_type(
+                        self.complete(target)?,
+                        constructor_argument_type,
+                    )
+            }
+            _ => false,
+        };
+        let argument_type_matches = match typed_target {
+            Some(target) if self.registered_local_symbols.contains(&target) => self
+                .same_planned_sibling_class_type(self.complete(target)?, constructor_argument_type),
+            _ => formal_type_matches,
+        };
+        if formal_record.kind != SymbolKind::Parameter
+            || formal_record.owner != Some(method.symbol)
+            || typed_argument.name != source_argument.name
+            || !argument_type_matches
+            || !argument_identity_matches
             || !matches!(self.ty(typed_root.ty)?, Type::TypeRef {
                 target: TypeRefTarget::Symbol(target), ..
             } if *target == class)
@@ -2592,7 +2647,6 @@ impl Validator<'_, '_> {
     fn validate_planned_call_argument(
         &mut self,
         binding: crate::PlannedCallBinding,
-        caller_formal: SymbolId,
         expected_type: TypeId,
         caller: &MethodPicklePlan,
         depth: usize,
@@ -2801,7 +2855,7 @@ impl Validator<'_, '_> {
             binding.helper_typed_rhs,
         )?;
 
-        let caller_parameter = self.symbol(caller_formal)?;
+        let caller_parameter = self.symbol(binding.caller_formal)?;
         let caller_argument_source = self.source_tree(binding.source_argument)?;
         let caller_argument_typed =
             p.typed_ast
@@ -2835,17 +2889,17 @@ impl Validator<'_, '_> {
             || caller_parameter.info != SymbolInfo::Complete(binding.formal_type)
             || !caller_parameters
                 .into_iter()
-                .any(|symbol| symbol == caller_formal)
+                .any(|symbol| symbol == binding.caller_formal)
             || !helper_parameters
                 .into_iter()
                 .any(|symbol| symbol == binding.helper_formal)
             || !matches!(self.ty(caller_argument_typed.ty)?, Type::TermRef {
                 prefix,
                 target: TermRefTarget::Symbol(target),
-            } if *prefix == p.definitions.no_prefix && *target == caller_formal)
+            } if *prefix == p.definitions.no_prefix && *target == binding.caller_formal)
         {
             return Err(PickleError::Reference {
-                symbol: caller_formal,
+                symbol: binding.caller_formal,
                 reason: crate::ReferenceError::Owner,
             });
         }
@@ -2870,6 +2924,7 @@ impl Validator<'_, '_> {
             });
         };
         if result_class != expected_class
+            || !self.is_planned_sibling_class_type(binding.result_type, None)
             || !self.is_planned_sibling_class_type(expected_type, None)
         {
             return Err(PickleError::BodyType {
