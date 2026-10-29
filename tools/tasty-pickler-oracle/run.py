@@ -3978,20 +3978,37 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict
                 else:
                     raise RuntimeError(f"{name} {control} sidecar was unexpectedly accepted")
 
-        # Mismatched helper ABI, missing declarations, constructor ABI and missing artifact.
+        # ABI controls hide the classfile's TASTY attribute and remove its
+        # sidecar. This makes Scala consume the classfile ABI directly so a
+        # missing-sidecar reader error cannot precede the mutation.
+        helper_abi_baseline = work / "helper-result-descriptor-baseline"
+        shutil.copytree(roots[0], helper_abi_baseline)
+        helper_class = helper_abi_baseline / "example/CounterOwnerFactory.class"
+        helper_class.write_bytes(_flip_tasty_link(helper_class.read_bytes(), rename_attribute=True))
+        (helper_abi_baseline / "example/CounterOwnerFactory.tasty").unlink()
+        helper_probe = (
+            "package witness\nobject HelperMismatch:\n"
+            "  def use(f: example.CounterOwnerFactory): example.Counter = f.makeCounter(1)\n"
+        )
+        compile_probe("helper-result-descriptor-baseline", helper_abi_baseline, helper_probe)
+        reports["helper_result_descriptor_baseline"] = "classfile-only ABI baseline compiled"
+
         helper_mismatch = work / "helper-result-descriptor-mismatch"
         shutil.copytree(roots[0], helper_mismatch)
         helper_class = helper_mismatch / "example/CounterOwnerFactory.class"
         helper_class.write_bytes(_classfile_with_method_descriptor(
             helper_class.read_bytes(), "makeCounter", "(I)Lexample/Counter;",
             "(I)Lexample/CounterOwner;"))
+        helper_class.write_bytes(_flip_tasty_link(helper_class.read_bytes(), rename_attribute=True))
         (helper_mismatch / "example/CounterOwnerFactory.tasty").unlink()
         try:
-            compile_probe("helper-result-descriptor-mismatch", helper_mismatch,
-                          "package witness\nobject HelperMismatch:\n  def use(f: example.CounterOwnerFactory): example.Counter = f.makeCounter(1)\n",
-                          werror=True)
+            compile_probe("helper-result-descriptor-mismatch", helper_mismatch, helper_probe)
         except CommandFailure as error:
-            if "example.CounterOwner" not in error.output or "example.Counter" not in error.output:
+            if "This `.tasty` file is missing" in error.output or \
+                    not re.search(r"(?m)^-- \[E007\] Type Mismatch Error:", error.output) or \
+                    not re.search(r"(?m)^\s*\|\s+Found:\s+example\.CounterOwner\s*$", error.output) or \
+                    not re.search(r"(?m)^\s*\|\s+Required:\s+example\.Counter\s*$", error.output) or \
+                    not re.search(r"(?m)^1 error found$", error.output):
                 raise RuntimeError(f"helper result descriptor control failed unexpectedly: {error.output}") from error
             reports["helper_result_descriptor_mismatch"] = error.output.strip()
         else:
@@ -4012,16 +4029,31 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path) -> dict
         else:
             raise RuntimeError("missing makeCounter declaration unexpectedly compiled")
 
+        wrong_owner_baseline = work / "wrong-owner-constructor-baseline"
+        shutil.copytree(roots[0], wrong_owner_baseline)
+        owner_class = wrong_owner_baseline / "example/CounterOwner.class"
+        owner_class.write_bytes(_flip_tasty_link(owner_class.read_bytes(), rename_attribute=True))
+        (wrong_owner_baseline / "example/CounterOwner.tasty").unlink()
+        wrong_owner_probe = (
+            "package witness\nobject WrongOwner:\n"
+            "  def create(): example.CounterOwner = new example.CounterOwner(new example.Counter(1))\n"
+        )
+        compile_probe("wrong-owner-constructor-baseline", wrong_owner_baseline, wrong_owner_probe)
+        reports["wrong_owner_constructor_baseline"] = "classfile-only ABI baseline compiled"
+
         wrong_owner_ctor = work / "wrong-owner-constructor"
         shutil.copytree(roots[0], wrong_owner_ctor)
         owner_class = wrong_owner_ctor / "example/CounterOwner.class"
         owner_class.write_bytes(_classfile_without_method(owner_class.read_bytes(), "<init>", "(Lexample/Counter;)V"))
+        owner_class.write_bytes(_flip_tasty_link(owner_class.read_bytes(), rename_attribute=True))
         (wrong_owner_ctor / "example/CounterOwner.tasty").unlink()
         try:
-            compile_probe("wrong-owner-constructor", wrong_owner_ctor,
-                          "package witness\nobject WrongOwner:\n  def create(): example.CounterOwner = new example.CounterOwner(new example.Counter(1))\n")
+            compile_probe("wrong-owner-constructor", wrong_owner_ctor, wrong_owner_probe)
         except CommandFailure as error:
-            if "constructor CounterOwner cannot be accessed" not in error.output:
+            if "This `.tasty` file is missing" in error.output or \
+                    "-- [E173] Reference Error:" not in error.output or \
+                    "constructor CounterOwner cannot be accessed as a member" not in error.output or \
+                    not re.search(r"(?m)^1 error found$", error.output):
                 raise RuntimeError(f"wrong Owner constructor control failed unexpectedly: {error.output}") from error
             reports["wrong_owner_constructor_signature"] = error.output.strip()
         else:
