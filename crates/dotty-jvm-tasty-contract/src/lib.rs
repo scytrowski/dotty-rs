@@ -1907,15 +1907,15 @@ fn validate_cross_class_call_code(
         };
         if let Some(factory) = &call.factory_method {
             let mut pc = 0;
-            let allocation = take_factory_call_operand(&code.code, &mut pc, 0xbb, "new")?;
-            take_factory_call_opcode(&code.code, &mut pc, 0x59, "dup")?;
-            take_factory_call_opcode(&code.code, &mut pc, 0x2a, "aload_0")?;
-            take_factory_call_opcode(&code.code, &mut pc, 0x1b, "iload_1")?;
+            let allocation = take_factory_call_operand(code.code, &mut pc, 0xbb, "new")?;
+            take_factory_call_opcode(code.code, &mut pc, 0x59, "dup")?;
+            take_factory_call_opcode(code.code, &mut pc, 0x2a, "aload_0")?;
+            take_factory_call_opcode(code.code, &mut pc, 0x1b, "iload_1")?;
             let helper_call_index =
-                take_factory_call_operand(&code.code, &mut pc, 0xb6, "invokevirtual")?;
+                take_factory_call_operand(code.code, &mut pc, 0xb6, "invokevirtual")?;
             let outer_call_index =
-                take_factory_call_operand(&code.code, &mut pc, 0xb7, "invokespecial")?;
-            take_factory_call_opcode(&code.code, &mut pc, 0xb0, "areturn")?;
+                take_factory_call_operand(code.code, &mut pc, 0xb7, "invokespecial")?;
+            take_factory_call_opcode(code.code, &mut pc, 0xb0, "areturn")?;
             if pc != code.code.len() {
                 return Err(format!(
                     "caller method {:?} has trailing instructions after the bounded factory-result sequence",
