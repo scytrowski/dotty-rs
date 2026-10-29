@@ -1738,16 +1738,18 @@ fn validate_constructor_call_candidate<'session>(
     } else {
         None
     };
-    if local_val_proof_data.is_none()
-        && store.names.resolve(typed_argument_ident.name.text())
-            != store.names.resolve(formal_def.name.as_name().text())
-        || !matches!(store.types.try_get(typed_formal_node.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(target), .. }) if *target == method_formal)
-            && local_val_proof_data.is_none()
-    {
-        return Err(typed_error(
-            "typed constructor argument does not reference the canonical caller formal",
-        ));
-    }
+    require_canonical_caller_formal_seed(
+        store.names.resolve(typed_argument_ident.name.text())
+            == store.names.resolve(formal_def.name.as_name().text()),
+        match store.types.try_get(typed_formal_node.ty) {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(target),
+                ..
+            }) => Some(*target),
+            _ => None,
+        },
+        method_formal,
+    )?;
 
     let planned_call_proof = if let (
         Some((source_call, source_function, source_receiver)),
@@ -4064,6 +4066,20 @@ fn canonical_class_type_symbol(
     .then_some(*class)
 }
 
+fn require_canonical_caller_formal_seed(
+    typed_name_matches_formal: bool,
+    typed_target: Option<SymbolId>,
+    method_formal: SymbolId,
+) -> Result<(), CrossClassConstructorCallProofError> {
+    if typed_name_matches_formal && typed_target == Some(method_formal) {
+        Ok(())
+    } else {
+        Err(CrossClassConstructorCallProofError::TypedBinding(
+            "typed constructor argument does not reference the canonical caller formal",
+        ))
+    }
+}
+
 fn complete_method_type<'a>(
     store: &'a SemanticStore,
     method: SymbolId,
@@ -4152,8 +4168,28 @@ fn validate_planned_method<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{has_any_flag, is_canonical_class_type_ref};
+    use super::{
+        CrossClassConstructorCallProofError, has_any_flag, is_canonical_class_type_ref,
+        require_canonical_caller_formal_seed,
+    };
     use dotty_core::{Definitions, SemanticStore, SymbolFlags, Type, TypeRefTarget};
+
+    #[test]
+    fn wrong_symbol_initializer_seed_is_rejected_before_local_val_receipt_construction() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+
+        assert_eq!(
+            require_canonical_caller_formal_seed(
+                true,
+                Some(definitions.any_class),
+                definitions.object_class,
+            ),
+            Err(CrossClassConstructorCallProofError::TypedBinding(
+                "typed constructor argument does not reference the canonical caller formal",
+            )),
+        );
+    }
 
     #[test]
     fn excluded_class_and_method_flags_are_checked_individually() {
