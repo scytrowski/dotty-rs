@@ -431,14 +431,48 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let typed = self.type_value_expression_expected_with_poly_binder(
-            tree,
-            context,
-            expected,
-            poly_binder,
-            info_journal,
-            new_mappings,
-        )?;
+        let typed = match self.arena.try_get(tree).map(|node| &node.kind) {
+            Some(TreeKind::Block(block)) if block.stats.is_empty() => {
+                if let Some(typed) = self.typed_index.get(self.source, tree) {
+                    self.validate_value_expression(tree, typed)?;
+                    typed
+                } else {
+                    // At an expression root, retain the source block node while
+                    // forwarding its expected type to the final expression.
+                    // Value contexts such as application arguments keep Scala's
+                    // transparent wrapper behavior below.
+                    let expr = self.type_value_expression_expected_with_poly_binder(
+                        block.expr,
+                        context,
+                        expected,
+                        poly_binder,
+                        info_journal,
+                        new_mappings,
+                    )?;
+                    let ty = self.typed_arena.get(expr).ty;
+                    let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                        .block(Vec::new(), expr, ty, self.arena.get(tree).position);
+                    self.typed_index
+                        .insert(self.source, tree, typed)
+                        .map_err(|error| TyperError::ConflictingTypedExpression {
+                            source: error.source,
+                            tree_index: error.untyped.index(),
+                            existing: error.existing.index(),
+                            attempted: error.attempted.index(),
+                        })?;
+                    new_mappings.push((self.source, tree));
+                    typed
+                }
+            }
+            _ => self.type_value_expression_expected_with_poly_binder(
+                tree,
+                context,
+                expected,
+                poly_binder,
+                info_journal,
+                new_mappings,
+            )?,
+        };
         if let Some(binder) = poly_binder
             && self.type_contains_param_ref(expected, binder)?
         {

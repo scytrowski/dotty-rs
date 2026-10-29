@@ -16708,6 +16708,46 @@ mod tests {
     }
 
     #[test]
+    fn expected_function_forwards_through_empty_block_and_preserves_block_shape() {
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name("class C { def block: Int => Int = { x => x } }");
+        enter_scala_function_classes(&mut store, &mut packages, [0, 1]);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "block");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                (index.symbol_at(source, tree) == Some(method)
+                    && matches!(node.kind, TreeKind::DefDef(_)))
+                .then_some(tree)
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed_method = typer.type_method_definition(method_tree).unwrap();
+        let TreeKind::DefDef(definition) = &typer.typed_ast().get(typed_method).kind else {
+            panic!("expected typed method definition");
+        };
+        let typed_rhs = definition.rhs.unwrap();
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed_rhs).kind else {
+            panic!("expected expression-only source block to retain typed block shape");
+        };
+        assert!(block.stats.is_empty());
+        assert!(matches!(
+            typer.typed_ast().get(block.expr).kind,
+            TreeKind::Closure(_)
+        ));
+        assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
+    }
+
+    #[test]
     fn empty_unit_style_block_keeps_its_block_shape() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def empty: Unit = {} }");
