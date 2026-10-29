@@ -572,10 +572,11 @@ impl SourceTyper<'_> {
                     let is_lambda = self.is_function_literal_value(*argument_tree);
                     let typed = if is_lambda {
                         if let Some(expected) = expected_parameters.get(argument_index).copied() {
-                            self.type_value_expression_expected_inner(
+                            self.type_value_expression_expected_with_poly_binder(
                                 *argument_tree,
                                 context,
                                 expected,
+                                Some(callable),
                                 info_journal,
                                 new_mappings,
                             )?

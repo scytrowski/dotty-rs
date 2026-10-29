@@ -15,7 +15,7 @@ pub(in crate::typer) struct FunctionLiteralIndex {
 #[derive(Clone, Copy)]
 pub(in crate::typer) struct FunctionLiteralTypingContext {
     pub context: ExpressionContext,
-    pub expected_function1: Option<(TypeId, TypeId)>,
+    pub expected_function1: Option<(TypeId, Option<TypeId>)>,
 }
 
 #[derive(Clone)]
@@ -283,7 +283,7 @@ impl SourceTyper<'_> {
             },
             method_scope,
         )?;
-        let typed_body = if let Some((_, expected_output)) = expected_function1 {
+        let typed_body = if let Some((_, Some(expected_output))) = expected_function1 {
             self.type_expression_expected_inner(
                 function.body,
                 lambda_context,

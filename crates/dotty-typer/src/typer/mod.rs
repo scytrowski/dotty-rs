@@ -6648,6 +6648,72 @@ mod tests {
     }
 
     #[test]
+    fn generic_function1_argument_infers_output_before_conformance() {
+        let source_text = concat!(
+            "class C { ",
+            "def use[A](function: Int => A): Int = 1; ",
+            "def inferred: Int = use((x: Int) => x); ",
+            "def explicit: Int = use[Int]((x: Int) => x)",
+            " }",
+        );
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name(source_text);
+        enter_scala_function_classes(&mut store, &mut packages, [0, 1]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let method_tree = |symbol| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    (index.symbol_at(source, tree) == Some(symbol)
+                        && matches!(node.kind, TreeKind::DefDef(_)))
+                    .then_some(tree)
+                })
+                .unwrap()
+        };
+        for method_name in ["inferred", "explicit"] {
+            let (owner, application) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, method_name);
+            let TreeKind::Apply(application_node) = &parsed.ast.get(application).kind else {
+                panic!("expected generic method application");
+            };
+            let argument = application_node.args[0];
+            let TreeKind::PhaseSpecific(UntypedNode::Function(function)) =
+                &parsed.ast.get(argument).kind
+            else {
+                panic!("expected explicit-parameter lambda argument");
+            };
+            let typed_method = typer.type_method_definition(method_tree(owner)).unwrap();
+            assert!(matches!(
+                typer.typed_ast().get(typed_method).kind,
+                TreeKind::DefDef(_)
+            ));
+            assert!(matches!(
+                typer
+                    .typed_ast()
+                    .get(typer.source_typed_index().get(source, argument).unwrap())
+                    .kind,
+                TreeKind::Closure(_)
+            ));
+            assert!(typer.function_literal_method_at(source, argument).is_some());
+            assert!(
+                typer
+                    .source_typed_index()
+                    .get(source, function.body)
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
     fn recursive_function1_method_types_body_after_signature_completion() {
         let source_text = "class C { def recursive: Int => Int = x => recursive(x) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);

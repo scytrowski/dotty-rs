@@ -472,6 +472,25 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
+        self.type_value_expression_expected_with_poly_binder(
+            tree,
+            context,
+            expected,
+            None,
+            info_journal,
+            new_mappings,
+        )
+    }
+
+    pub(in crate::typer) fn type_value_expression_expected_with_poly_binder(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        expected: TypeId,
+        poly_binder: Option<TypeId>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
             self.validate_value_expression(tree, typed)?;
             return Ok(typed);
@@ -490,6 +509,27 @@ impl SourceTyper<'_> {
                 // lambda's input is explicitly annotated: the output may
                 // still be needed to type a nested function literal.
                 let expected_function1 = self.ordinary_function1_parts(expected, tree.index())?;
+                let expected_function1 = if let Some((input, output)) = expected_function1 {
+                    let output_contains_poly_parameter = match poly_binder {
+                        Some(binder) => self.type_contains_param_ref(output, binder)?,
+                        None => false,
+                    };
+                    let output_is_nested_function1 = self
+                        .ordinary_function1_parts(output, tree.index())?
+                        .is_some();
+                    if output_contains_poly_parameter && !output_is_nested_function1 {
+                        // Preserve the expected input for parameter inference,
+                        // but let a polymorphic output be inferred from the
+                        // lambda body before checking it against the binder.
+                        Some((input, None))
+                    } else {
+                        // A nested Function1 still receives its own expected
+                        // type; its output is filtered at that lambda boundary.
+                        Some((input, Some(output)))
+                    }
+                } else {
+                    None
+                };
                 self.type_function_literal(
                     tree,
                     function,
@@ -503,18 +543,20 @@ impl SourceTyper<'_> {
                 )?
             }
             TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => self
-                .type_value_expression_expected_inner(
+                .type_value_expression_expected_with_poly_binder(
                     parens.inner,
                     context,
                     expected,
+                    poly_binder,
                     info_journal,
                     new_mappings,
                 )?,
             TreeKind::Block(block) if block.stats.is_empty() => self
-                .type_value_expression_expected_inner(
+                .type_value_expression_expected_with_poly_binder(
                     block.expr,
                     context,
                     expected,
+                    poly_binder,
                     info_journal,
                     new_mappings,
                 )?,

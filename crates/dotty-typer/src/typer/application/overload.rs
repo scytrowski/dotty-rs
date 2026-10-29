@@ -833,6 +833,15 @@ impl SourceTyper<'_> {
             candidates.len() == 1 && self.is_any_ref_identity_symbol(candidates[0].symbol);
         let mut arguments = Vec::with_capacity(argument_trees.len());
         for (argument_index, argument_tree) in argument_trees.iter().enumerate() {
+            let poly_binder = if candidates.len() == 1
+                && matches!(
+                    self.store.types.try_get(candidates[0].callable),
+                    Some(Type::Poly(_))
+                ) {
+                Some(candidates[0].callable)
+            } else {
+                None
+            };
             let expected = if candidates.len() == 1 {
                 let callable = candidates[0].callable;
                 let callable = match self.store.types.try_get(callable) {
@@ -856,10 +865,11 @@ impl SourceTyper<'_> {
             let untyped_lambda = self.is_function_literal_value(*argument_tree);
             let typed = if untyped_lambda {
                 if let Some(expected) = expected {
-                    self.type_value_expression_expected_inner(
+                    self.type_value_expression_expected_with_poly_binder(
                         *argument_tree,
                         context,
                         expected,
+                        poly_binder,
                         info_journal,
                         new_mappings,
                     )?
