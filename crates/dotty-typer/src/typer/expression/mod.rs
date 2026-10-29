@@ -435,6 +435,7 @@ impl SourceTyper<'_> {
             Some(TreeKind::Block(block)) if block.stats.is_empty() => {
                 if let Some(typed) = self.typed_index.get(self.source, tree) {
                     self.validate_value_expression(tree, typed)?;
+                    self.validate_cached_parent_argument_receiver_access(tree, typed)?;
                     typed
                 } else {
                     // At an expression root, retain the source block node while
@@ -554,6 +555,7 @@ impl SourceTyper<'_> {
     ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
             self.validate_value_expression(tree, typed)?;
+            self.validate_cached_parent_argument_receiver_access(tree, typed)?;
             return Ok(typed);
         }
         let node = self
