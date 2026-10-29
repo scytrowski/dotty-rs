@@ -1641,3 +1641,156 @@ fn factory_argument_negative_controls_report_their_first_existing_gate() {
         } if reason.contains("constructor argument must be the exact caller formal")
     ));
 }
+
+fn assert_factory_source_variant_rejected(
+    source: &str,
+    source_id: u32,
+    label: &str,
+    expected_phase: &str,
+    expected_reason: &str,
+) {
+    let error = with_paired_jvm_tasty_batch_plan(
+        source,
+        "FactoryVariant.scala",
+        SourceId::from_index(source_id),
+        |_| (),
+    )
+    .expect_err("unsupported factory source must not yield a complete paired output plan");
+    let (phase, reason) = match &error {
+        PairedPlanError::BatchClass { phase, reason, .. }
+        | PairedPlanError::BatchUnit { phase, reason } => (*phase, reason.as_str()),
+        other => panic!("{label} failed before a typed planning checkpoint: {other:?}"),
+    };
+    assert_eq!(phase, expected_phase, "{label}: {error:?}");
+    assert!(
+        reason.contains(expected_reason),
+        "{label}: expected first error containing {expected_reason:?}, got {error:?}"
+    );
+}
+
+#[test]
+fn staged_factory_scope_controls_report_their_first_typed_gate() {
+    let shadowed = SOURCE
+        .replace("def create(seed: Int)", "def create(makeCounter: Int)")
+        .replace("makeCounter(seed)", "makeCounter(1)");
+    assert_factory_source_variant_rejected(
+        &shadowed,
+        18400,
+        "parameter shadows helper method",
+        "method body typing",
+        "ApplicationCalleeNotMethod",
+    );
+
+    let private_helper = SOURCE.replace("def makeCounter(seed", "private def makeCounter(seed");
+    assert_factory_source_variant_rejected(
+        &private_helper,
+        18401,
+        "private helper metadata",
+        "cross-class constructor-call identity proof",
+        "candidate method is not the public canonical method owned by its source class",
+    );
+
+    let local_argument = SOURCE.replace(
+        "new CounterOwner(makeCounter(seed))",
+        "{ val local = makeCounter(seed); new CounterOwner(local) }",
+    );
+    assert_factory_source_variant_rejected(
+        &local_argument,
+        18402,
+        "local block argument",
+        "JVM/TASTy cross-contract validation",
+        "BodyType",
+    );
+
+    let multiple_calls = SOURCE.replace(
+        "new CounterOwner(makeCounter(seed))",
+        "new CounterOwner(if seed > 0 then makeCounter(seed) else makeCounter(seed + 1))",
+    );
+    assert_factory_source_variant_rejected(
+        &multiple_calls,
+        18403,
+        "conditional multi-call argument",
+        "cross-class constructor-call identity proof",
+        "constructor argument must be the exact caller formal, one nested New, or one planned call",
+    );
+
+    let overloaded_helper = SOURCE.replace(
+        "  def create(seed",
+        "  def makeCounter(seed: Boolean): Boolean = seed\n\n  def create(seed",
+    );
+    assert_factory_source_variant_rejected(
+        &overloaded_helper,
+        18404,
+        "overloaded helper",
+        "cross-class constructor-call identity proof",
+        "overloaded planned helper methods are unsupported",
+    );
+
+    let generic_helper = SOURCE.replace("def makeCounter(seed", "def makeCounter[A](seed");
+    assert_factory_source_variant_rejected(
+        &generic_helper,
+        18405,
+        "generic helper",
+        "member planning",
+        "generic methods are unsupported",
+    );
+
+    let default_helper = SOURCE.replace("seed: Int): Counter =", "seed: Int = 0): Counter =");
+    assert_factory_source_variant_rejected(
+        &default_helper,
+        18406,
+        "defaulted helper parameter",
+        "cross-class constructor-call identity proof",
+        "candidate method formal cannot use a default value",
+    );
+
+    let using_helper = SOURCE
+        .replace(
+            "def makeCounter(seed: Int)",
+            "def makeCounter(using seed: Int)",
+        )
+        .replace("makeCounter(seed)", "makeCounter");
+    assert_factory_source_variant_rejected(
+        &using_helper,
+        18407,
+        "using helper parameter",
+        "method body typing",
+        "ApplicationArgumentConformanceUnsupported",
+    );
+
+    let external_helper = SOURCE
+        .replace(
+            "class CounterOwnerFactory:",
+            "class CounterMaker:\n  def makeCounter(seed: Int): Counter = new Counter(seed)\n\nclass CounterOwnerFactory:",
+        )
+        .replace("  def makeCounter(seed: Int): Counter =\n    new Counter(seed)\n\n", "")
+        .replace(
+            "new CounterOwner(makeCounter(seed))",
+            "new CounterOwner(new CounterMaker().makeCounter(seed))",
+        );
+    assert_factory_source_variant_rejected(
+        &external_helper,
+        18408,
+        "external owner helper",
+        "cross-class constructor-call identity proof",
+        "planned helper must be a public canonical instance method owned by the caller class",
+    );
+
+    let super_helper = SOURCE
+        .replace(
+            "class CounterOwnerFactory:",
+            "class FactoryBase:\n  def makeCounter(seed: Int): Counter = new Counter(seed)\n\nclass CounterOwnerFactory extends FactoryBase:",
+        )
+        .replace("  def makeCounter(seed: Int): Counter =\n    new Counter(seed)\n\n", "")
+        .replace(
+            "new CounterOwner(makeCounter(seed))",
+            "new CounterOwner(super.makeCounter(seed))",
+        );
+    assert_factory_source_variant_rejected(
+        &super_helper,
+        18409,
+        "super helper call",
+        "source collection",
+        "classes with explicit parents or self types are unsupported",
+    );
+}

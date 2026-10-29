@@ -188,7 +188,6 @@ not inferred from the first rejection.
 | Field argument | Source proof rejects: `constructor argument must resolve to the exact caller formal`. |
 | Null argument | Source proof rejects: `constructor argument must be the exact caller formal, one nested New, or one planned call`. |
 | Conditional argument | Source proof rejects at the bounded argument-shape check. |
-| Overloaded same-class helper | A real source with a Boolean overload rejects at `SourceShape("overloaded planned helper methods are unsupported")`. |
 | Foreign same-named helper owner | Test-only corruption replaces the selected method `TermRef` with a real same-session method from another planned class; the proof rejects with `SourceIdentity` before returning receipts. |
 | Disconnected explicit receiver | Test-only same-session corruption changes only the typed helper `Select.qualifier`; the proof rejects with `TypedBinding` even though the separately mapped `this`, method `TermRef`, spans, and source mappings remain intact. |
 | Missing planned-call function binding | Test-only removal of the original source-to-typed edge rejects with `TypedBinding("planned helper function has no source-to-typed binding")`. |
@@ -199,10 +198,17 @@ not inferred from the first rejection.
 | Wrong result type in the receipt | Replacing the result with the real `Int` formal type rejects first as `Unsupported(BodyExpression)` when it disagrees with the typed Apply result; no complete output is returned. |
 | Disconnected typed receiver at the pickler boundary | Replacing the receipt's typed `this` receiver with the real `seed` tree rejects first as `Unsupported(BodyExpression)`; no complete output is returned. |
 | Expression depth and visit budgets | A zero projection depth rejects the nested factory Apply as `LimitExceeded(ExpressionDepth, 0)`; depth 1 succeeds. A one-item visit budget rejects with `LimitExceeded(Items)` before output. |
-| Local/block argument | Not supported by the receipt: only the exact one-argument call occupying the constructor argument is carried into this encoding path. |
-| Private/static/super/implicit/using/generic/external factory method | Not accepted by the proof contract: the helper must be a public, monomorphic, plain instance method with one ordinary formal, a canonical source definition, and an exact same-class `this` receiver. Source typing or earlier planning can reject some of these before the proof stage. |
+| Parameter shadows helper method | A real source parameter named `makeCounter` rejects first during method body typing with `ApplicationCalleeNotMethod`; no paired plan or TASTy batch is returned. |
+| Private helper metadata | A real private `makeCounter` rejects first in the cross-class constructor-call identity proof with `SourceIdentity("candidate method is not the public canonical method owned by its source class")`; no paired plan or TASTy batch is returned. |
+| Local/block argument | A real block that stores `makeCounter(seed)` in a local before constructing the Owner rejects first during JVM/TASTy cross-contract validation with `TastyPlan(BodyType)`; no paired plan or TASTy batch is returned. |
+| Conditional multi-call argument | Two `makeCounter` calls in the constructor argument reject first in the source proof with `SourceShape("constructor argument must be the exact caller formal, one nested New, or one planned call")`; no paired plan or TASTy batch is returned. |
+| Overloaded helper | A real Boolean overload rejects first in the source proof with `SourceShape("overloaded planned helper methods are unsupported")`; no paired plan or TASTy batch is returned. |
+| Generic helper | A generic `makeCounter[A]` rejects first during member planning with `generic methods are unsupported`; no paired plan or TASTy batch is returned. |
+| Defaulted helper parameter | A default value on `makeCounter`'s formal rejects first in the source proof with `SourceShape("candidate method formal cannot use a default value")`; no paired plan or TASTy batch is returned. |
+| Using helper parameter | A contextual `using` helper called without an ordinary argument rejects first during method body typing with `ApplicationArgumentConformanceUnsupported`; no paired plan or TASTy batch is returned. |
+| External-owner helper | Calling `CounterMaker.makeCounter` rejects first in the source proof with `SourceIdentity("planned helper must be a public canonical instance method owned by the caller class")`; no paired plan or TASTy batch is returned. |
+| Super helper call | A factory inheriting `makeCounter` through `super` rejects first during source collection because explicit parents remain outside this batch plan; no paired plan or TASTy batch is returned. |
 | Wrong constructor | Unmeasured. No alternate constructor shape is needed to observe the current factory-call boundary. |
-| Wrong typed constructor owner | Unmeasured at the pickler boundary. The source proof has separate same-session constructor identity checks. |
 | Missing/corrupt sidecar | Unmeasured for this source. No Rust batch was emitted to serve as a publisher input; the existing linked-batch regression has separate corrupt-sidecar controls. |
 
 Unmeasured controls have no attributed rejection stage.
