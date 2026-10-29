@@ -270,6 +270,68 @@ object NestedLocalCapture:
 }
 
 #[test]
+fn expected_function_type_reaches_a_lambda_through_parenthesized_blocks() {
+    let source_text = r#"
+object ParenthesizedLocalCapture:
+  def f: Int => Int = {
+    val value: Int = 100
+    (({
+      val value: Int = 3
+      (x => x + value)
+    }))
+  }
+"#;
+    let (parsed, mut store, mut packages, definitions, index, source) = parse_and_name(source_text);
+    enter_scala_function_classes(&mut store, &mut packages, [1]);
+    let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "f");
+    let method_tree = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, _)| (index.symbol_at(source, tree) == Some(method)).then_some(tree))
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer.type_method_definition(method_tree).unwrap();
+    let TreeKind::Block(outer_block) = &parsed.ast.get(rhs).kind else {
+        panic!("method body should be an outer block");
+    };
+    let outer_local = typer
+        .typed_local_binding_at(source, outer_block.stats[0])
+        .unwrap();
+    let mut inner_tree = outer_block.expr;
+    while let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) =
+        &parsed.ast.get(inner_tree).kind
+    {
+        inner_tree = parens.inner;
+    }
+    let TreeKind::Block(inner_block) = &parsed.ast.get(inner_tree).kind else {
+        panic!("parenthesized final block should remain available as a source tree");
+    };
+    let inner_local = typer
+        .typed_local_binding_at(source, inner_block.stats[0])
+        .unwrap();
+    let typed_lambda = typer
+        .source_typed_index()
+        .get(source, inner_block.expr)
+        .expect("lambda should map through the block and parentheses");
+    let TreeKind::Closure(closure) = &typer.typed_ast().get(typed_lambda).kind else {
+        panic!("nested lambda should type as a closure");
+    };
+    assert_eq!(closure.env.len(), 1);
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(closure.env[0]).ty),
+        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+            if *symbol == inner_local.symbol && *symbol != outer_local.symbol
+    ));
+}
+
+#[test]
 fn unsupported_local_shapes_do_not_create_partial_closures() {
     let source_text = r#"
 object UnsupportedLocalCapture:
