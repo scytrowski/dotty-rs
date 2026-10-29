@@ -1,5 +1,12 @@
 # Factory-result constructor arguments: Scala 3.9 evidence and Rust proof
 
+Issue #1835's batch and bytecode validation regressions are based on
+`04376dc23f92feb423f112e8d3e6c1d4d908414e`, using the repository-pinned Rust
+1.98.1 toolchain. The strict JDK 21 gate and the pinned Scala 3.9 reader were
+rerun for this source. The inherited nested-constructor test also rechecked all
+six recorded Rust SHA-256 values in
+[`jvm-tasty-nested-constructor-calls.md`](jvm-tasty-nested-constructor-calls.md).
+
 Issue [#1832](https://github.com/scytrowski/dotty-rs/issues/1832) pins the
 Scala 3.9 oracle and records the original Rust layer observations for
 `new CounterOwner(makeCounter(seed))`. Issue

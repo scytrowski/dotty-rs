@@ -2190,7 +2190,7 @@ fn factory_result_batch_publisher_rejects_corruption_and_all_six_write_failures(
     )
     .expect("emit the complete Counter/Owner/Factory factory-result batch");
     let pairs = batch_publish_pairs(&batch);
-    let base = TestDirectory::new("reference-constructor-publish-faults");
+    let base = TestDirectory::new("factory-result-publish-faults");
 
     assert_eq!(pairs.len(), 3);
     let mut missing_factory_sidecar = pairs.clone();
