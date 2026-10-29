@@ -34,6 +34,8 @@ const REFERENCE_CONSTRUCTOR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_reference_constructor_calls/CounterOwnerFactory.scala");
 const NESTED_CONSTRUCTOR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala");
+const FACTORY_RESULT_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala");
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
 const COUNTER_FACTORY_REFERENCE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def create(counter: Counter): Counter = counter\n";
@@ -1307,6 +1309,100 @@ fn reference_constructor_graph_emits_six_complete_deterministic_linked_artifacts
             .unwrap(),
         ("<init>", "(Lexample/Counter;)V")
     );
+}
+
+#[test]
+fn factory_result_argument_emits_six_identical_artifacts_from_independent_sessions() {
+    let first = emit_paired_jvm_tasty_batch(
+        FACTORY_RESULT_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(18351),
+    )
+    .unwrap();
+    let second = emit_paired_jvm_tasty_batch(
+        FACTORY_RESULT_BATCH,
+        "CounterOwnerFactory.scala",
+        SourceId::from_index(18352),
+    )
+    .unwrap();
+    assert_ne!(first.source_id(), second.source_id());
+    assert_eq!(first.classes().len(), 3);
+    assert_eq!(second.classes().len(), 3);
+
+    let expected = [
+        ("example/Counter.class", "example/Counter.tasty"),
+        ("example/CounterOwner.class", "example/CounterOwner.tasty"),
+        (
+            "example/CounterOwnerFactory.class",
+            "example/CounterOwnerFactory.tasty",
+        ),
+    ];
+    for ((artifact, repeat), paths) in first.classes().iter().zip(second.classes()).zip(expected) {
+        assert_eq!((artifact.classfile_path(), artifact.tasty_path()), paths);
+        assert_eq!(artifact.source_id(), first.source_id());
+        assert_eq!(artifact.classfile_path(), repeat.classfile_path());
+        assert_eq!(artifact.tasty_path(), repeat.tasty_path());
+        assert_eq!(artifact.classfile_bytes(), repeat.classfile_bytes());
+        assert_eq!(artifact.tasty_bytes(), repeat.tasty_bytes());
+        assert_eq!(artifact.tasty_link_id(), repeat.tasty_link_id());
+
+        let tasty = TastyFile::parse_and_validate_scala_3_9(artifact.tasty_bytes()).unwrap();
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version,
+            ),
+            (28, 9, 0)
+        );
+        assert_eq!(
+            artifact.tasty_link_id(),
+            TastyLinkId::from_bytes(tasty.header().uuid)
+        );
+        let mut reader = Reader::new(artifact.classfile_bytes());
+        let class = ClassFile::decode(&mut reader).unwrap();
+        assert!(reader.is_at_end());
+        assert_eq!((class.version.major, class.version.minor), (65, 0));
+        assert_eq!(
+            class.tasty_link_id().unwrap(),
+            Some(artifact.tasty_link_id())
+        );
+        validate_classfile_tasty_link(&class, artifact.tasty_bytes()).unwrap();
+    }
+
+    assert_eq!(
+        first
+            .classes()
+            .iter()
+            .flat_map(|artifact| [artifact.classfile_path(), artifact.tasty_path()])
+            .collect::<Vec<_>>(),
+        [
+            "example/Counter.class",
+            "example/Counter.tasty",
+            "example/CounterOwner.class",
+            "example/CounterOwner.tasty",
+            "example/CounterOwnerFactory.class",
+            "example/CounterOwnerFactory.tasty",
+        ]
+    );
+
+    let mut reader = Reader::new(first.classes()[2].classfile_bytes());
+    let factory = ClassFile::decode(&mut reader).unwrap();
+    assert!(reader.is_at_end());
+    let method_descriptor = |name: &str| {
+        let method = factory
+            .methods
+            .iter()
+            .find(|method| factory.constant_pool.utf8(method.name_index).unwrap() == name)
+            .unwrap();
+        factory
+            .constant_pool
+            .utf8(method.descriptor_index)
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(method_descriptor("makeCounter"), "(I)Lexample/Counter;");
+    assert_eq!(method_descriptor("create"), "(I)Lexample/CounterOwner;");
 }
 
 #[test]
