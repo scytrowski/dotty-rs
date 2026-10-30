@@ -115,6 +115,10 @@ impl SourceTyper<'_> {
         let mut new_mappings = Vec::new();
         let result = operation(self, &mut info_journal, &mut new_mappings);
         let committed = result.is_ok();
+        #[cfg(test)]
+        if !committed && let Some(observer) = self.transaction_failure_observer.clone() {
+            observer(self);
+        }
         let outcome = match result {
             Ok(typed) => Ok(typed),
             Err(error) => {
