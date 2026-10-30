@@ -187,31 +187,64 @@
       ],
       "source_to_typed_rhs_roots": [
         {
-          "member_tree": 8,
-          "source_rhs": 7,
+          "member": "Counter.current initializer",
+          "symbol": 45,
+          "member_tree": 5,
+          "source_rhs": 4,
           "typed_rhs": 0
         },
         {
-          "member_tree": 26,
-          "source_rhs": 25,
+          "member": "Counter.get body",
+          "symbol": 46,
+          "reads_field": 45,
+          "member_tree": 8,
+          "source_rhs": 7,
           "typed_rhs": 1
         },
         {
-          "member_tree": 29,
-          "source_rhs": 28,
-          "typed_rhs": 2
+          "member": "Counter.set body",
+          "symbol": 47,
+          "member_tree": 15,
+          "source_rhs": 14,
+          "typed_rhs": 4
         },
         {
-          "member_tree": 34,
-          "source_rhs": 33,
+          "member": "Pair.left initializer",
+          "symbol": 54,
+          "aliases_constructor_formal": 52,
+          "member_tree": 26,
+          "source_rhs": 25,
           "typed_rhs": 5
         },
         {
+          "member": "Pair.right initializer",
+          "symbol": 55,
+          "aliases_constructor_formal": 53,
+          "member_tree": 29,
+          "source_rhs": 28,
+          "typed_rhs": 6
+        },
+        {
+          "member": "Pair.leftValue body",
+          "symbol": 56,
+          "selects_field": 54,
+          "calls_method": 46,
+          "member_tree": 34,
+          "source_rhs": 33,
+          "typed_rhs": 9
+        },
+        {
+          "member": "Pair.rightValue body",
+          "symbol": 57,
+          "selects_field": 55,
+          "calls_method": 46,
           "member_tree": 39,
           "source_rhs": 38,
-          "typed_rhs": 8
+          "typed_rhs": 12
         }
-      ]
+      ],
+      "Counter_current_field": 45,
+      "Counter_set": 47
     },
     "paired_batch_first_rejection": {
       "class_index": 1,
@@ -220,7 +253,102 @@
       "reason": "Unsupported { feature: PrimaryConstructorInput, symbol: Some(SymbolId(52)) }",
       "emitted_artifacts": 0
     },
-    "boundary": "field-alias-specific pickler validation and TASTy lowering were not reached"
+    "boundary": "The original session passes JVM unit metadata and emits two JVM-only classes; direct class-state validation reaches the primary-constructor signature guard. Field-alias validation and TASTy lowering are masked. A separately reparsed paired batch is supplemental only.",
+    "same_session_jvm_only": {
+      "session_id": 1874,
+      "borrowed_inputs": [
+        "SemanticStore",
+        "parsed source AST",
+        "SourceSemanticIndex",
+        "SourceTypedIndex",
+        "typed AST"
+      ],
+      "source_class_order": [
+        40,
+        41
+      ],
+      "source_class_internal_names": [
+        "example/Counter",
+        "example/Pair"
+      ],
+      "unit_metadata": "passed",
+      "emission": "dotty_jvm::emit_class passed for both classes; JVM-only output, no TASTy sidecars",
+      "artifacts": [
+        {
+          "path": "example/Counter.class",
+          "bytes": 259,
+          "classfile_major": 65
+        },
+        {
+          "path": "example/Pair.class",
+          "bytes": 384,
+          "classfile_major": 65
+        }
+      ],
+      "Pair_constructor_descriptor": "(Lexample/Counter;Lexample/Counter;)V",
+      "Pair_constructor_parameter_slots": [
+        {
+          "parameter_symbol": 52,
+          "source_name": "first",
+          "slot": 1,
+          "width": 1
+        },
+        {
+          "parameter_symbol": 53,
+          "source_name": "second",
+          "slot": 2,
+          "width": 1
+        }
+      ],
+      "Pair_field_source_order": [
+        {
+          "field_symbol": 54,
+          "name": "left",
+          "descriptor": "Lexample/Counter;",
+          "initializer_parameter_symbol": 52
+        },
+        {
+          "field_symbol": 55,
+          "name": "right",
+          "descriptor": "Lexample/Counter;",
+          "initializer_parameter_symbol": 53
+        }
+      ],
+      "Pair_method_source_order": [
+        56,
+        57
+      ]
+    },
+    "same_session_class_state": {
+      "borrowed_inputs": [
+        "SemanticStore",
+        "Definitions",
+        "parsed source AST",
+        "SourceSemanticIndex",
+        "typed AST",
+        "SourceTypedIndex bindings"
+      ],
+      "class_symbol": 41,
+      "constructor_symbol": 51,
+      "member_source_order": [
+        54,
+        55,
+        56,
+        57
+      ],
+      "first_rejection": "Unsupported { feature: PrimaryConstructorInput, symbol: Some(SymbolId(52)) }",
+      "field_alias_validation": "not reached",
+      "tasty_lowering": "not reached",
+      "artifacts_emitted": 0
+    },
+    "separate_paired_batch_control": {
+      "session": "fresh convenience session; IDs not merged with SourceId(1874) receipt",
+      "class_index": 1,
+      "declaration_index": 43,
+      "phase": "TASTy plan validation",
+      "reason": "Unsupported { feature: PrimaryConstructorInput, symbol: Some(SymbolId(52)) }",
+      "artifacts_emitted": 0
+    }
   },
   "unreached_negative_controls": {
     "reason": "the first PrimaryConstructorInput rejection occurs before alias relationship validation",

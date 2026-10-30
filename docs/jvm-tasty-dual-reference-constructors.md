@@ -62,16 +62,46 @@ This validates Scala-produced output only. The separate client also confirms Sca
 | `left`, `right` fields | `SymbolId(54)`, `SymbolId(55)` | owner is `Pair`; field types point to `Counter` |
 | `leftValue`, `rightValue` | `SymbolId(56)`, `SymbolId(57)` | select fields 54/55 and `Counter.get` (`SymbolId(46)`) |
 
-The typed alias `TermRef`s resolve to constructor-owned formals 52 and 53; the Scala TASTy `TERMREFsymbol`s instead point to template PARAM addresses 11 and 20. The source and typed expression roots are retained together in the test and manifest: `left` RHS `TreeId(7) → TreeId(0)`, `right` RHS `TreeId(25) → TreeId(1)`, `leftValue` RHS `TreeId(28) → TreeId(5)`, and `rightValue` RHS `TreeId(33) → TreeId(8)`. Both read roots retain the canonical Int result `TypeRef` and their exact field/method targets.
+The typed field initializer `TermRef`s resolve to constructor-owned formals 52 and 53; Scala's TASTy `TERMREFsymbol`s instead point to template PARAM addresses 11 and 20. The exact session's named source-to-typed roots are:
 
-The separately invoked paired-batch convenience path parses its own session; its IDs are not combined with the preceding receipt. For the unchanged full source, its first rejection is:
+| Source member | Symbol / selected field | Source RHS | Typed RHS |
+| --- | --- | ---: | ---: |
+| `Counter.current` initializer | field `SymbolId(45)` | `TreeId(4)` | `TreeId(0)` |
+| `Counter.get` body | method `SymbolId(46)`, reads field 45 | `TreeId(7)` | `TreeId(1)` |
+| `Counter.set` body | method `SymbolId(47)` | `TreeId(14)` | `TreeId(4)` |
+| `Pair.left` initializer | field `SymbolId(54)`, aliases constructor formal 52 | `TreeId(25)` | `TreeId(5)` |
+| `Pair.right` initializer | field `SymbolId(55)`, aliases constructor formal 53 | `TreeId(28)` | `TreeId(6)` |
+| `Pair.leftValue` body | method `SymbolId(56)`, selects field 54 and `Counter.get` 46 | `TreeId(33)` | `TreeId(9)` |
+| `Pair.rightValue` body | method `SymbolId(57)`, selects field 55 and `Counter.get` 46 | `TreeId(38)` | `TreeId(12)` |
+
+Both Pair reads retain the canonical Int result `TypeRef` (`TypeId(5)`) and their exact field/method targets. These arena IDs are run-local receipts; the named edges, not allocation numbers, explain which roots correspond.
+
+### Reachable JVM-only and class-state controls from the same session
+
+The identity test builds `JvmCompilationUnit` directly from its still-live `SemanticStore`, parsed AST, `SourceSemanticIndex`, `SourceTypedIndex`, and typed roots. It calls the existing unit metadata validator and emits both classes through `dotty_jvm::emit_class`; it does not parse or type the source again. The validated order is `example/Counter` then `example/Pair`; emitted JVM-only classfiles are major 65, with the Pair constructor descriptor `(Lexample/Counter;Lexample/Counter;)V`. Its constructor formal slots are `first` (`SymbolId(52)`) at local 1 and `second` (`SymbolId(53)`) at local 2. The two fields remain in source order: `left` (`SymbolId(54)`) and `right` (`SymbolId(55)`), both `Lexample/Counter;`. The emitted test artifacts are `Counter.class` (259 bytes) and `Pair.class` (384 bytes). The Pair constructor bytecode uses `aload_1` before its first `putfield`, then `aload_2` before its second `putfield`, matching the validated parameter slots and source field order. These are Rust JVM-only classfiles and carry no TASTy sidecars.
+
+A separate direct `ClassStatePicklePlan` in that same live session borrows the same store, definitions, source AST/index, typed AST, and source-to-typed bindings. It reaches the real primary-constructor signature guard and returns `Unsupported { feature: PrimaryConstructorInput, symbol: Some(SymbolId(52)) }`. This is the class-state constructor-signature first failure. Field-alias validation and TASTy lowering are not reached; no downstream error is manufactured.
+
+The reachable-stage results are recorded independently:
+
+| Entry point / stage | Result |
+| --- | --- |
+| Original Lexer → Parser → Namer → SourceTyper session | Passes; all seven named initializer/body roots remain bound in the original `SourceTypedIndex` |
+| Borrowed JVM compilation-unit metadata | Passes for `Counter` then `Pair`; constructor slots and source field/method order are validated |
+| JVM-only class emission from that unit | Passes for both classes; classfile major 65, no TASTy sidecars |
+| Direct borrowed class-state constructor signature | First rejection: `Unsupported(PrimaryConstructorInput, SymbolId(52))` |
+| Class-state field-alias validation | Not reached after the constructor-signature guard |
+| TASTy lowering | Not reached; no downstream error is inferred |
+| Paired batch convenience path | Independently reparses the source and reaches its own first TASTy plan validation rejection below |
+
+The separately invoked paired-batch convenience path parses its own session; its IDs are not combined with the original identity receipt. For the unchanged full source, its independently measured first rejection is:
 
 ```text
 BatchClass { class_index: 1, phase: "TASTy plan validation",
   reason: "Unsupported { feature: PrimaryConstructorInput, symbol: Some(SymbolId(52)) }" }
 ```
 
-The batch has already completed source typing, assembled and validated the JVM unit metadata, and passed its cross-class constructor-call identity proof before this pickler signature rejection. It emits no paired artifact. The field-alias-specific pickler check and TASTy lowering are not reached, so this audit does not invent downstream errors. The existing JVM-only regression `object_graph_construction_audit_emits_after_frontend_identity_validation` independently compiles the bounded two-reference object graph and executes its separate-field behavior under the required JDK gate; it does not claim paired Rust output.
+That path completes source typing, JVM unit metadata validation, and the cross-class constructor-call identity proof before the pickler signature rejection, then emits no paired artifact. The direct and convenience paths therefore agree on the current constructor-input boundary while retaining distinct session provenance.
 
 ## Variation matrix
 
