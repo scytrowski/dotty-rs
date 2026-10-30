@@ -1,0 +1,174 @@
+--------------------------------------------------------------------------------
+target/issue-1874/oracle/producer/example/Pair.tasty
+--------------------------------------------------------------------------------
+Header:
+  version: 28.9.0
+  tooling: Scala 3.9.0-bin-SNAPSHOT-git-777528f
+     UUID: 007fabc3-ccf4-25d3-0043-37297354695b
+
+Names (315 bytes, starting from 60):
+     0: ASTs
+     1: example
+     2: Pair
+     3: first
+     4: Counter
+     5: second
+     6: <init>
+     7: java
+     8: lang
+     9: java[Qualified . lang]
+    10: Object
+    11: java[Qualified . lang][Qualified . Object]
+    12: <init>[Signed Signature(List(),java.lang.Object) @<init>]
+    13: Unit
+    14: scala
+    15: left
+    16: right
+    17: leftValue
+    18: Int
+    19: get
+    20: scala[Qualified . Int]
+    21: get[Signed Signature(List(),scala.Int) @get]
+    22: rightValue
+    23: SourceFile
+    24: annotation
+    25: scala[Qualified . annotation]
+    26: internal
+    27: scala[Qualified . annotation][Qualified . internal]
+    28: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
+    29: String
+    30: java[Qualified . lang][Qualified . String]
+    31: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
+    32: tests/fixtures/jvm_tasty_dual_reference_constructors/Pair.scala
+    33: Positions
+    34: Comments
+    35: Attributes
+
+Trees (155 bytes, starting from 378):
+     0: PACKAGE(152)
+     3:   TERMREFpkg 1 [example]
+     5:   TYPEDEF(147) 2 [Pair]
+     9:     TEMPLATE(124)
+    11:       PARAM(7) 3 [first]
+    14:         TYPEREF 4 [Counter]
+    16:           TERMREFpkg 1 [example]
+    18:         PRIVATE
+    19:         LOCAL
+    20:       PARAM(5) 5 [second]
+    23:         SHAREDtype 14
+    25:         PRIVATE
+    26:         LOCAL
+    27:       APPLY(10)
+    29:         SELECTin(8) 12 [<init>[Signed Signature(List(),java.lang.Object) @<init>]]
+    32:           NEW
+    33:             TYPEREF 10 [Object]
+    35:               TERMREFpkg 9 [java[Qualified . lang]]
+    37:           SHAREDtype 33
+    39:       DEFDEF(19) 6 [<init>]
+    42:         PARAM(5) 3 [first]
+    45:           IDENTtpt 4 [Counter]
+    47:             SHAREDtype 14
+    49:         PARAM(5) 5 [second]
+    52:           IDENTtpt 4 [Counter]
+    54:             SHAREDtype 14
+    56:         TYPEREF 13 [Unit]
+    58:           TERMREFpkg 14 [scala]
+    60:       VALDEF(14) 15 [left]
+    63:         IDENTtpt 4 [Counter]
+    65:           SHAREDtype 14
+    67:         TERMREFsymbol 11
+    69:           THIS
+    70:             TYPEREFsymbol 5
+    72:               SHAREDtype 16
+    74:         PRIVATE
+    75:         LOCAL
+    76:       VALDEF(11) 16 [right]
+    79:         IDENTtpt 4 [Counter]
+    81:           SHAREDtype 14
+    83:         TERMREFsymbol 20
+    85:           SHAREDtype 69
+    87:         PRIVATE
+    88:         LOCAL
+    89:       DEFDEF(22) 17 [leftValue]
+    92:         EMPTYCLAUSE
+    93:         IDENTtpt 18 [Int]
+    95:           TYPEREF 18 [Int]
+    97:             TERMREFpkg 14 [scala]
+    99:         APPLY(12)
+   101:           SELECTin(10) 21 [get[Signed Signature(List(),scala.Int) @get]]
+   104:             SELECT 15 [left]
+   106:               QUALTHIS
+   107:                 IDENTtpt 2 [Pair]
+   109:                   SHAREDtype 70
+   111:             SHAREDtype 14
+   113:       DEFDEF(20) 22 [rightValue]
+   116:         EMPTYCLAUSE
+   117:         IDENTtpt 18 [Int]
+   119:           SHAREDtype 95
+   121:         APPLY(12)
+   123:           SELECTin(10) 21 [get[Signed Signature(List(),scala.Int) @get]]
+   126:             SELECT 16 [right]
+   128:               QUALTHIS
+   129:                 IDENTtpt 2 [Pair]
+   131:                   SHAREDtype 70
+   133:             SHAREDtype 14
+   135:     ANNOTATION(18)
+   137:       TYPEREF 23 [SourceFile]
+   139:         TERMREFpkg 27 [scala[Qualified . annotation][Qualified . internal]]
+   141:       APPLY(12)
+   143:         SELECTin(8) 31 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
+   146:           NEW
+   147:             SHAREDtype 137
+   150:           SHAREDtype 137
+   153:         STRINGconst 32 [tests/fixtures/jvm_tasty_dual_reference_constructors/Pair.scala]
+   155:
+
+Positions (142 bytes, starting from 536):
+  lines: 13
+  line sizes:
+     15, 0, 26, 34, 26, 45, 0, 44, 35, 37, 35, 37, 0
+  positions:
+     0: 0 .. 345
+     5: 153 .. 345
+     9: 163 .. 345
+    11: 164 .. 178
+    14: 171 .. 178
+    20: 180 .. 195
+    23: 188 .. 195
+    33: 159 .. 159
+    39: 163 .. 196
+    42: 164 .. 178
+    45: 171 .. 178
+    49: 180 .. 195
+    52: 188 .. 195
+    56: 195 .. 195
+    60: 200 .. 233
+    63: 218 .. 225
+    67: 228 .. 233
+    76: 236 .. 271
+    79: 255 .. 262
+    83: 265 .. 271
+    89: 274 .. 307
+    93: 291 .. 294
+    99: 297 .. 307
+   101: 297 .. 305
+   104: 297 .. 301
+   107: 297 .. 297
+   113: 310 .. 345
+   117: 328 .. 331
+   121: 334 .. 345
+   123: 334 .. 343
+   126: 334 .. 339
+   129: 334 .. 334
+   141: 153 .. 345
+   147: 153 .. 153
+   153: 153 .. 153
+
+  source paths:
+     0: 32 [tests/fixtures/jvm_tasty_dual_reference_constructors/Pair.scala]
+
+Attributes (2 bytes, starting from 682):
+  SOURCEFILEattr 32 [tests/fixtures/jvm_tasty_dual_reference_constructors/Pair.scala]
+
+
+--------------------------------------------------------------------------------
