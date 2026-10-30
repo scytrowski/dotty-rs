@@ -541,9 +541,11 @@ from the strict run were:
 
 | Isolated control | First observed failure |
 | --- | --- |
-| Pair or Counter sidecar missing/misplaced while matching classfile declaration is hidden | `[E008] Not Found Error` at the selected member access |
+| Pair or Counter sidecar missing/misplaced while the matching classfile declaration is also hidden and its TASTY marker is stripped | `[E008] Not Found Error` for the missing member or constructor |
 | Corrupt Pair or Counter sidecar | `dotty.tools.tasty.UnpickleException: not a TASTy file` |
 | Alias `TERMREFsymbol` changed from its first template PARAM target to an unused AST address | Scala TASTy unpickler first fails with `TreeWithoutOwner` |
+| Constructor PARAM `SHAREDtype` changed to an unused AST address | Scala 3.9 compilation fails while reading the malformed declaration (`-- Error:` at the client source) |
+| Alias VALDEF type `NameRef` changed to an unused name-table address | Scala `-decompile` fails in the TASTy reader with `IndexOutOfBoundsException` for the missing name entry |
 | Pair classfile TASTY UUID differs from the sidecar header | `class is out of sync with its TASTy file` after the TASTy file is loaded |
 | Wrong-arity Pair constructor descriptor with sidecar removed | Scala compile error at the constructor call |
 | Missing Counter classfile and sidecar | `[E006] Not Found Error` for `Counter` |
@@ -559,9 +561,14 @@ uses only the complete, unchanged original batch.
 
 With an altered classfile constructor descriptor or method descriptor, Scala
 compilation still succeeds if the original TASTy sidecar remains and uses its
-source signature. The matched classfile-only fallback fails when that
-sidecar is removed. No altered classfile is run. This behavior distinguishes
-TASTy-based Scala source lookup from the bytecode ABI used at runtime.
+source signature. The classfile-only method fallback is checked with the
+original `()I` method first, which compiles when both its TASTY marker and
+sidecar are removed. Changing the classfile descriptor to `()V` then fails with
+`[E007] Type Mismatch Error` (`Found: Unit`, `Required: Int`). This confirms the
+fallback failure comes from the altered result type rather than an unrelated
+missing-type or TASTy-loading error. No altered classfile is run. This behavior
+distinguishes TASTy-based Scala source lookup from the bytecode ABI used at
+runtime.
 
 The source variants rename the package and both classes, and reverse the
 original class declaration order. Each variant is emitted from independent

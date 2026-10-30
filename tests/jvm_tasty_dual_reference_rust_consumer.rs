@@ -1,10 +1,13 @@
 use dotty::jvm_tasty_artifacts::{PairedJvmTastyBatchArtifacts, emit_paired_jvm_tasty_batch};
+use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::reader::Reader;
 use dotty_core::SourceId;
-use dotty_tasty::ast::TERMREFSYMBOL_TAG;
+use dotty_tasty::ast::{PARAM_TAG, StructuredNode, TERMREFSYMBOL_TAG, VALDEF_TAG};
 use dotty_tasty::section::StandardSection;
 use dotty_tasty::tasty::TastyFile;
+use dotty_tasty::term::{RawTree, TermValue};
+use dotty_tasty::writer::Writer;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -191,6 +194,7 @@ impl Scala {
     fn scalac(&self) -> Command {
         let mut command = Command::new(&self.scalac);
         command.env("JAVA_HOME", &self.java_home);
+        command.env("JAVA_TOOL_OPTIONS", "-XX:-UsePerfData");
         if let Some(path) = std::env::var_os("PATH") {
             let mut paths = vec![self.java_home.join("bin")];
             paths.extend(std::env::split_paths(&path));
@@ -248,6 +252,24 @@ fn without_method(bytes: &[u8], name: &str, descriptor: &str) -> Vec<u8> {
     class
         .encode()
         .expect("encode structurally valid mutated classfile")
+}
+
+fn without_tasty_marker(bytes: &[u8]) -> Vec<u8> {
+    let mut class = decode_class(bytes);
+    let pool = &class.constant_pool;
+    let before = class.attributes.len();
+    class.attributes.retain(|attribute| match attribute {
+        Attribute::Other(raw) => pool.utf8(raw.name_index).unwrap() != "TASTY",
+        _ => true,
+    });
+    assert_eq!(
+        class.attributes.len() + 1,
+        before,
+        "class has one TASTY marker"
+    );
+    class
+        .encode()
+        .expect("encode class without its TASTY marker")
 }
 
 fn wrong_pair_constructor_descriptor(bytes: &[u8]) -> Vec<u8> {
@@ -338,6 +360,132 @@ fn bad_alias_termref_target(tasty_bytes: &[u8]) -> Vec<u8> {
     malformed
 }
 
+fn corrupt_shared_type_target(tasty_bytes: &[u8], address: u32, expected_tag: u8) -> Vec<u8> {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes)
+        .expect("original Rust Pair TASTy validates before mutation");
+    let index = tasty
+        .ast_address_index()
+        .expect("index Pair TASTy AST addresses");
+    let node = index
+        .get(address)
+        .expect("target declaration is a category-five node");
+    assert_eq!(node.tag, expected_tag);
+    let declaration = node
+        .decode_structured()
+        .expect("decode declaration before mutation");
+    let type_tree = match declaration {
+        StructuredNode::Parameter(parameter) => {
+            parameter
+                .decode_body()
+                .expect("decode PARAM body before mutation")
+                .type_tree
+        }
+        StructuredNode::ValDef(definition) => match definition {
+            dotty_tasty::ast::DefinitionBody::ValDef { type_tree, .. } => type_tree,
+            _ => panic!("VALDEF tag has VALDEF body"),
+        },
+        _ => panic!("target tag decodes as PARAM or VALDEF"),
+    };
+    fn shared_type_leaf<'a, 'b>(tree: &'a RawTree<'b>) -> &'a dotty_tasty::term::SimpleTerm {
+        match tree {
+            RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } => shared_type_leaf(child),
+            RawTree::Leaf(simple_term) => simple_term,
+            RawTree::LengthNode(_) => panic!("Counter formal type has no bounded declaration"),
+        }
+    }
+    let simple_term = shared_type_leaf(&type_tree);
+    assert_eq!(simple_term.tag, dotty_tasty::ast::SHAREDTYPE_TAG);
+    let TermValue::AstRef(original_target) = simple_term.value else {
+        panic!("shared type leaf carries an AST address");
+    };
+    let invalid_target = (0..128u32)
+        .find(|address| index.get_node(*address).is_none())
+        .expect("Pair TASTy has an unused one-byte AST address");
+    let mut encoded_target = Writer::default();
+    encoded_target.write_nat(original_target);
+    let encoded_target = encoded_target.into_inner();
+    let mut encoded_invalid_target = Writer::default();
+    encoded_invalid_target.write_nat(invalid_target);
+    let encoded_invalid_target = encoded_invalid_target.into_inner();
+    assert_eq!(encoded_target.len(), encoded_invalid_target.len());
+    let asts = tasty
+        .section(StandardSection::Asts)
+        .expect("Pair TASTy has ASTs section");
+    let payload_offset = node
+        .payload
+        .windows(encoded_target.len() + 1)
+        .position(|window| window[0] == simple_term.tag && window[1..] == encoded_target)
+        .expect("declaration payload contains its shared type AST address");
+    let mut node_reader = dotty_tasty::reader::Reader::new(&asts.payload[node.offset..]);
+    assert_eq!(node_reader.read_u8().unwrap(), expected_tag);
+    node_reader.read_nat().unwrap();
+    let absolute = asts.offset + node.offset + node_reader.position() + payload_offset + 1;
+    let mut malformed = tasty_bytes.to_vec();
+    malformed[absolute..absolute + encoded_invalid_target.len()]
+        .copy_from_slice(&encoded_invalid_target);
+    malformed
+}
+
+fn corrupt_valdef_type_name_address(tasty_bytes: &[u8], address: u32) -> Vec<u8> {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes)
+        .expect("original Rust Pair TASTy validates before mutation");
+    let index = tasty
+        .ast_address_index()
+        .expect("index Pair TASTy AST addresses");
+    let node = index
+        .get(address)
+        .expect("target VALDEF is a category-five node");
+    assert_eq!(node.tag, VALDEF_TAG);
+    let StructuredNode::ValDef(definition) = node
+        .decode_structured()
+        .expect("decode VALDEF before mutation")
+    else {
+        panic!("VALDEF tag decodes as definition");
+    };
+    let dotty_tasty::ast::DefinitionBody::ValDef { type_tree, .. } = definition else {
+        panic!("VALDEF tag has VALDEF body");
+    };
+    fn type_name_leaf<'a, 'b>(tree: &'a RawTree<'b>) -> &'a dotty_tasty::term::SimpleTerm {
+        match tree {
+            RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } => type_name_leaf(child),
+            RawTree::Leaf(simple_term) => simple_term,
+            RawTree::LengthNode(_) => panic!("alias type has no bounded declaration"),
+        }
+    }
+    let simple_term = type_name_leaf(&type_tree);
+    let TermValue::NameRef(original_name) = simple_term.value else {
+        panic!("alias type identifier carries a name-table reference");
+    };
+    let replacement_name = tasty.names().len() as u32;
+    assert_ne!(original_name, replacement_name);
+    let mut old = Writer::default();
+    old.write_nat(original_name);
+    let old = old.into_inner();
+    let mut new = Writer::default();
+    new.write_nat(replacement_name);
+    let new = new.into_inner();
+    assert_eq!(
+        old.len(),
+        new.len(),
+        "type-name edit preserves TASTy lengths"
+    );
+    let asts = tasty
+        .section(StandardSection::Asts)
+        .expect("Pair TASTy has ASTs section");
+    let payload_offset = node
+        .payload
+        .windows(old.len() + 1)
+        .position(|window| window[0] == simple_term.tag && window[1..] == old)
+        .expect("VALDEF payload contains its type name-table reference");
+    let mut reader = dotty_tasty::reader::Reader::new(&asts.payload[node.offset..]);
+    assert_eq!(reader.read_u8().unwrap(), VALDEF_TAG);
+    reader.read_nat().unwrap();
+    let absolute = asts.offset + node.offset + reader.position() + payload_offset + 1;
+    let mut malformed = tasty_bytes.to_vec();
+    malformed[absolute..absolute + new.len()].copy_from_slice(&new);
+    malformed
+}
+
 fn method_lookup_probes(temporary: &Path, scala: &Scala, batch: &PairedJvmTastyBatchArtifacts) {
     let cases = [
         (
@@ -346,6 +494,7 @@ fn method_lookup_probes(temporary: &Path, scala: &Scala, batch: &PairedJvmTastyB
             "get",
             "()I",
             "new Counter(1).get()",
+            "value get is not a member",
         ),
         (
             "counter-set",
@@ -353,6 +502,7 @@ fn method_lookup_probes(temporary: &Path, scala: &Scala, batch: &PairedJvmTastyB
             "set",
             "(I)V",
             "new Counter(1).set(2)",
+            "value set is not a member",
         ),
         (
             "pair-left",
@@ -360,6 +510,7 @@ fn method_lookup_probes(temporary: &Path, scala: &Scala, batch: &PairedJvmTastyB
             "leftValue",
             "()I",
             "new Pair(new Counter(1), new Counter(2)).leftValue()",
+            "value leftValue is not a member",
         ),
         (
             "pair-right",
@@ -367,6 +518,7 @@ fn method_lookup_probes(temporary: &Path, scala: &Scala, batch: &PairedJvmTastyB
             "rightValue",
             "()I",
             "new Pair(new Counter(1), new Counter(2)).rightValue()",
+            "value rightValue is not a member",
         ),
         (
             "pair-constructor",
@@ -374,9 +526,10 @@ fn method_lookup_probes(temporary: &Path, scala: &Scala, batch: &PairedJvmTastyB
             "<init>",
             "(Lexample/Counter;Lexample/Counter;)V",
             "new Pair(new Counter(1), new Counter(2))",
+            "constructor",
         ),
     ];
-    for (name, class_path, member, descriptor, expression) in cases {
+    for (name, class_path, member, descriptor, expression, missing_fragment) in cases {
         let source_root = temporary.join(format!("lookup-{name}"));
         let classes = source_root.join("classes");
         let output = source_root.join("out");
@@ -384,11 +537,8 @@ fn method_lookup_probes(temporary: &Path, scala: &Scala, batch: &PairedJvmTastyB
         fs::create_dir_all(&output).unwrap();
         write_batch(&classes, batch);
         let original = fs::read(classes.join(class_path)).unwrap();
-        fs::write(
-            classes.join(class_path),
-            without_method(&original, member, descriptor),
-        )
-        .unwrap();
+        let hidden_declaration = without_method(&original, member, descriptor);
+        fs::write(classes.join(class_path), &hidden_declaration).unwrap();
         let source = source_root.join("Probe.scala");
         fs::write(
             &source,
@@ -410,6 +560,11 @@ fn method_lookup_probes(temporary: &Path, scala: &Scala, batch: &PairedJvmTastyB
         fs::create_dir_all(&classfile_only).unwrap();
         fs::create_dir_all(&classfile_only_out).unwrap();
         write_batch(&classfile_only, batch);
+        fs::write(
+            classfile_only.join(class_path),
+            without_tasty_marker(&hidden_declaration),
+        )
+        .unwrap();
         fs::remove_file(classfile_only.join(class_path.replace(".class", ".tasty"))).unwrap();
         let classfile_only_result = scala.compile_result(
             &scala.classpath(&classfile_only),
@@ -419,6 +574,15 @@ fn method_lookup_probes(temporary: &Path, scala: &Scala, batch: &PairedJvmTastyB
         assert!(
             !classfile_only_result.status.success(),
             "classfile-only control unexpectedly resolved {member}{descriptor}"
+        );
+        let diagnostic = strip_ansi(&String::from_utf8_lossy(&classfile_only_result.stderr));
+        assert!(
+            !diagnostic.contains("It should have been loaded from `.tasty` file"),
+            "classfile-only control hit the TASTY loader instead of member lookup: {diagnostic}"
+        );
+        assert!(
+            diagnostic.contains(missing_fragment),
+            "classfile-only control did not report missing {member}{descriptor}: {diagnostic}"
         );
         eprintln!(
             "CLASSFILE_ONLY_FIRST_ERROR {member}{descriptor}: {}",
@@ -509,8 +673,15 @@ fn compile_and_run_variant(
 fn first_error(output: &Output) -> String {
     let text = strip_ansi(&String::from_utf8_lossy(&output.stderr));
     text.lines()
-        .find(|line| line.contains("[E") || line.contains("Error:"))
-        .unwrap_or_else(|| text.lines().next().unwrap_or("no diagnostic"))
+        .find(|line| {
+            (line.contains("[E") || line.contains("Error:"))
+                && !line.contains("Picked up JAVA_TOOL_OPTIONS")
+        })
+        .unwrap_or_else(|| {
+            text.lines()
+                .find(|line| !line.contains("Picked up JAVA_TOOL_OPTIONS"))
+                .unwrap_or("no diagnostic")
+        })
         .to_owned()
 }
 
@@ -520,6 +691,10 @@ fn reject_with_first_error(output: &Output, label: &str) -> String {
         "negative probe {label} unexpectedly succeeded"
     );
     let first = first_error(output);
+    assert!(
+        !first.contains("OpenJDK") && !first.contains("shared memory file"),
+        "negative probe {label} failed before reaching Scala diagnostics: {first}"
+    );
     assert_ne!(
         first, "no diagnostic",
         "negative probe {label} emitted no diagnostics"
@@ -828,7 +1003,7 @@ fn pinned_scala39_rejects_corrupt_or_inconsistent_dual_reference_inputs() {
     let simple_client = temporary.join("Lookup.scala");
     fs::write(
         &simple_client,
-        "package example\nobject Lookup { val selected = new Pair(new Counter(1), new Counter(2)).leftValue() }\n",
+        "package example\nobject Lookup { val selected: Int = new Pair(new Counter(1), new Counter(2)).leftValue() }\n",
     )
     .unwrap();
     let mut hidden_left = batch.classes()[1].classfile_bytes().to_vec();
@@ -966,6 +1141,58 @@ fn pinned_scala39_rejects_corrupt_or_inconsistent_dual_reference_inputs() {
         "malformed Pair alias TERMREFsymbol address",
     );
 
+    let bad_parameter = temporary.join("bad-constructor-param-type-address");
+    fs::create_dir_all(&bad_parameter).unwrap();
+    write_batch(&bad_parameter, &batch);
+    fs::write(
+        bad_parameter.join("example/Pair.tasty"),
+        corrupt_shared_type_target(batch.classes()[1].tasty_bytes(), 49, PARAM_TAG),
+    )
+    .unwrap();
+    let bad_parameter_out = temporary.join("bad-constructor-param-type-address-out");
+    fs::create_dir_all(&bad_parameter_out).unwrap();
+    let bad_parameter_error = scala.compile_result(
+        &scala.classpath(&bad_parameter),
+        &bad_parameter_out,
+        &simple_client,
+    );
+    let parameter_first = reject_with_first_error(
+        &bad_parameter_error,
+        "constructor PARAM type SharedType address changed to an unused AST address",
+    );
+    assert!(
+        parameter_first.contains("Error:"),
+        "PARAM corruption should fail during Scala TASTy consumption: {parameter_first}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&bad_parameter_error.stderr)
+            .contains("It should have been loaded from `.tasty` file"),
+        "PARAM corruption must not be obscured by the missing-sidecar loader diagnostic"
+    );
+
+    let bad_valdef = temporary.join("bad-alias-valdef-type-address");
+    fs::create_dir_all(&bad_valdef).unwrap();
+    write_batch(&bad_valdef, &batch);
+    fs::write(
+        bad_valdef.join("example/Pair.tasty"),
+        corrupt_valdef_type_name_address(batch.classes()[1].tasty_bytes(), 68),
+    )
+    .unwrap();
+    let bad_valdef_error = scala
+        .scalac()
+        .arg("-decompile")
+        .arg(bad_valdef.join("example/Pair.tasty"))
+        .output()
+        .unwrap();
+    let valdef_first = reject_with_first_error(
+        &bad_valdef_error,
+        "left alias VALDEF type NameRef changed to an unused name-table address",
+    );
+    assert!(
+        valdef_first.contains("IndexOutOfBoundsException"),
+        "VALDEF type-reference corruption should fail at its invalid name-table address: {valdef_first}"
+    );
+
     let stale_uuid = temporary.join("stale-uuid");
     fs::create_dir_all(&stale_uuid).unwrap();
     write_batch(&stale_uuid, &batch);
@@ -1067,17 +1294,58 @@ fn pinned_scala39_rejects_corrupt_or_inconsistent_dual_reference_inputs() {
     eprintln!(
         "CONTROL_ALTERED_CLASSFILE_METHOD_SIGNATURE_WITH_TASTY: compiled from TASTy method signature"
     );
-    fs::remove_file(bad_method_signature.join("example/Pair.tasty")).unwrap();
-    let bad_method_out = temporary.join("bad-method-signature-out");
-    fs::create_dir_all(&bad_method_out).unwrap();
-    let bad_method_result = scala.compile_result(
-        &scala.classpath(&bad_method_signature),
-        &bad_method_out,
+
+    let classfile_only_method = temporary.join("classfile-only-method-original");
+    fs::create_dir_all(&classfile_only_method).unwrap();
+    write_batch(&classfile_only_method, &batch);
+    fs::write(
+        classfile_only_method.join("example/Pair.class"),
+        without_tasty_marker(pair_class),
+    )
+    .unwrap();
+    fs::remove_file(classfile_only_method.join("example/Pair.tasty")).unwrap();
+    let classfile_only_method_out = temporary.join("classfile-only-method-original-out");
+    fs::create_dir_all(&classfile_only_method_out).unwrap();
+    let classfile_only_method_result = scala.compile_result(
+        &scala.classpath(&classfile_only_method),
+        &classfile_only_method_out,
+        &simple_client,
+    );
+    assert!(
+        classfile_only_method_result.status.success(),
+        "original ()I classfile method resolves as Int without TASTy:\n{}",
+        String::from_utf8_lossy(&classfile_only_method_result.stderr)
+    );
+    eprintln!(
+        "CONTROL_CLASSFILE_ONLY_LEFT_VALUE_INT: original ()I declaration compiles with TASTY marker and sidecar removed"
+    );
+
+    let altered_method_classfile_only = temporary.join("classfile-only-method-altered");
+    fs::create_dir_all(&altered_method_classfile_only).unwrap();
+    write_batch(&altered_method_classfile_only, &batch);
+    fs::write(
+        altered_method_classfile_only.join("example/Pair.class"),
+        without_tasty_marker(&wrong_method_descriptor(pair_class, "leftValue", "()I")),
+    )
+    .unwrap();
+    fs::remove_file(altered_method_classfile_only.join("example/Pair.tasty")).unwrap();
+    let altered_method_out = temporary.join("classfile-only-method-altered-out");
+    fs::create_dir_all(&altered_method_out).unwrap();
+    let altered_method_result = scala.compile_result(
+        &scala.classpath(&altered_method_classfile_only),
+        &altered_method_out,
         &simple_client,
     );
     reject_with_first_error(
-        &bad_method_result,
-        "altered leftValue classfile signature without TASTy",
+        &altered_method_result,
+        "altered leftValue()V classfile method where Int is required",
+    );
+    let altered_method_diagnostic =
+        strip_ansi(&String::from_utf8_lossy(&altered_method_result.stderr));
+    assert!(
+        altered_method_diagnostic.contains("Found:    Unit")
+            && altered_method_diagnostic.contains("Required: Int"),
+        "classfile fallback should expose the altered Unit result as an Int type mismatch: {altered_method_diagnostic}"
     );
 
     let no_counter = temporary.join("missing-classfile");
