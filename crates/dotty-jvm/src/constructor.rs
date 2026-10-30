@@ -488,9 +488,11 @@ impl JvmPrimaryConstructorPlan {
             if type_name != reference.name
                 || template_parameter.kind != SymbolKind::Parameter
                 || template_parameter.owner != Some(self.class)
+                || template_parameter.visibility != Visibility::Private
                 || template_parameter.origin != dotty_core::SymbolOrigin::Source(source)
                 || constructor_parameter.kind != SymbolKind::Parameter
                 || constructor_parameter.owner != Some(self.constructor)
+                || constructor_parameter.visibility != Visibility::Public
                 || constructor_parameter.origin != dotty_core::SymbolOrigin::Source(source)
                 || !template_parameter.flags.is_empty()
                 || !constructor_parameter.flags.is_empty()

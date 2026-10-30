@@ -3,7 +3,7 @@ use dotty_classfile::{attribute::Attribute, class_file::ClassFile, reader::Reade
 use dotty_core::ast::TreeKind;
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SourceTypedIndex, SymbolId,
-    SymbolInfo, SymbolKind, TermRefTarget, TreeId, Type, TypeRefTarget, Typed, Untyped,
+    SymbolInfo, SymbolKind, TermRefTarget, TreeId, Type, TypeRefTarget, Typed, Untyped, Visibility,
 };
 use dotty_jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmFieldPlan,
@@ -920,6 +920,46 @@ fn rust_frontend_session_keeps_two_parameter_and_field_alias_identities() {
         "{source_metadata_corruption:?}"
     );
     *parsed.ast.get_mut(first_source_parameter) = original_parameter_node;
+
+    for (symbol, corrupted_visibility, label) in [
+        (
+            formal_proof.template_parameters()[0],
+            Visibility::Public,
+            "first template-owned parameter",
+        ),
+        (
+            formal_proof.template_parameters()[1],
+            Visibility::Public,
+            "second template-owned parameter",
+        ),
+        (
+            formal_proof.constructor_parameters()[0],
+            Visibility::Private,
+            "first constructor-owned formal",
+        ),
+        (
+            formal_proof.constructor_parameters()[1],
+            Visibility::Private,
+            "second constructor-owned formal",
+        ),
+    ] {
+        let original_visibility = store.symbols.get(symbol).visibility;
+        store.symbols.get_mut(symbol).visibility = corrupted_visibility;
+        let visibility_corruption = proof_plan
+            .prove_ordered_reference_formals(
+                &parsed.ast,
+                &source_index,
+                &store,
+                &definitions,
+                &proof_metadata,
+            )
+            .unwrap_err();
+        assert!(
+            format!("{visibility_corruption:?}").contains("OrderedReferenceFormalIdentity"),
+            "{label}: {visibility_corruption:?}"
+        );
+        store.symbols.get_mut(symbol).visibility = original_visibility;
+    }
 
     let SymbolInfo::Complete(constructor_signature) = store.symbols.get(pair_constructor).info
     else {
