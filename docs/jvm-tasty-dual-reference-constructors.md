@@ -344,3 +344,127 @@ fields with `javap`. It requires compiler revision
 the existing required classfile/JVM/source compilation/stateful test command;
 this issue does not add a source-generated PairFactory or a Rust-source
 `new Pair(a, b)` call, and it does not add a Java runtime consumer.
+
+
+## Issue #1880: Rust Pair dual-reference identity on JDK 21
+
+Issue [#1880](https://github.com/scytrowski/dotty-rs/issues/1880) verifies the
+four original Rust-produced artifacts for the unchanged
+[`Pair.scala`](../tests/fixtures/jvm_tasty_dual_reference_constructors/Pair.scala)
+source. One `emit_paired_jvm_tasty_batch` call runs the actual lexer, parser,
+namer, typer, JVM backend, and TASTy pickler in a single source session. A
+separate Java harness is compiled against the resulting classfiles. The runtime
+classpath contains the harness and those Rust classfiles only; it contains no
+Scala compiler or Scala-produced classes. This is a JDK runtime and reference
+identity result. It makes no Scala consumer or Scala ABI compatibility claim.
+
+### Pinned run and original artifact receipt
+
+The acceptance test requires SDKMAN Eclipse Temurin `21.0.13+9-LTS` for
+`java`, `javac`, and `javap`, and compiles the harness with `javac --release 21`.
+The repository toolchain is Rust `1.98.1`. Classfiles use major version 65.
+All generated and temporary files are under the test worktree's
+`target/issue-1880` directory, with a worktree-local Cargo target directory.
+
+The baseline is merged main commit
+`b90a5e8f2a5a5007818235e2a1621df9c8a57e5d` (#1896, including #1879). From one
+source session, the strict test writes these original outputs:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `example/Counter.class` | `56d46ed31c7406d47c2a8f18798518d08aae10dadf22b43817d28d9b202e4b00` |
+| `example/Counter.tasty` | `6282bf0b2d8b9130b1956bd9fb339c6eab4534cc2fb841de427032785392f050` |
+| `example/Pair.class` | `add99598bf726187b887e569833479c0f5fe7371868b861177a4d7ec29bd0828` |
+| `example/Pair.tasty` | `2cdb802044f46d08fbe8aada64af62bd5669b2c8c6406e69213f1d4394520af4` |
+
+The test records these four hashes before and after `javac` and again after
+`java -Xverify:all -ea`. The bytes are also compared directly to the in-memory
+Rust artifacts after execution. Java tools do not replace any Rust output.
+
+### Pair classfile and runtime observations
+
+Rust classfile decoding and `javap -v -p -c` both report Pair major version 65,
+two fields in source order (`private final left:Lexample/Counter;` and
+`private final right:Lexample/Counter;`), and the public constructor
+`(Lexample/Counter;Lexample/Counter;)V`. The constructor has
+`max_stack=2`, `max_locals=3`, `this` in local 0, `first` in local 1, and
+`second` in local 2. The observed bytecode program counters are:
+
+| PC | Instruction | Stack/local meaning |
+| ---: | --- | --- |
+| 0 | `aload_0` | Push uninitialized `this` |
+| 1 | `invokespecial #15`, `java/lang/Object.<init>:()V` | Initialize the receiver before field writes |
+| 4 | `aload_0` | Pair receiver |
+| 5 | `aload_1` | First caller-provided Counter |
+| 6 | `putfield #17`, `Pair.left:Lexample/Counter;` | Store the first argument in `left` |
+| 9 | `aload_0` | Pair receiver |
+| 10 | `aload_2` | Second caller-provided Counter |
+| 11 | `putfield #19`, `Pair.right:Lexample/Counter;` | Store the second argument in `right` |
+| 14 | `return` | Constructor completes |
+
+These are measured offsets in the emitted original classfile, not expected
+constants copied into the test. `leftValue()I` performs `aload_0`, `getfield
+Pair.left:Lexample/Counter;`, `invokevirtual Counter.get:()I`, `ireturn`;
+`rightValue()I` does the same through `right`. Both getter methods have
+`max_stack=1` and `max_locals=1`. Rust-side classfile decoding checks each
+constant-pool owner, name, descriptor, flags, local slot, and store PC. The
+bounded `CfgCodeAnalyzer` regression separately accepts the emitted getter
+instruction shape. The constructor's initialization-state sequence is checked
+from the decoded Code attribute and by the mandatory strict JDK verifier run;
+the standalone flow analyzer intentionally excludes constructors.
+
+The separate Java harness runs with `java -Xverify:all -ea` and checks:
+
+- `Pair(a, b)` reads `7,3`, and reflection proves `left == a` and `right == b`.
+- Mutating `a` to 42 changes only `leftValue`; mutating `b` to -9 changes only
+  `rightValue`.
+- A positional `Pair(b, a)` constructed before those mutations reads `3,7` and
+  its fields retain `b` then `a` by identity.
+- `Pair(a, a)` is valid and intentionally aliases both fields. Mutating `a`
+  changes both reads; the contract does not require distinct argument objects.
+- Reflection finds the exact supplied objects in both fields. The constructor
+  contains no `new` or Counter constructor call, so it neither allocates nor
+  clones a Counter.
+
+### Isolated negative controls and first rejection
+
+Every mutation starts from the original `Pair.class` bytes in a separate
+classpath directory; `Counter.class` remains the original Rust class except in
+the final missing-class case. The same compiled harness runs under
+`-Xverify:all`. The recorded first failures are:
+
+| Isolated mutation | First observed rejection | Interpretation |
+| --- | --- | --- |
+| Swap the `left` and `right` putfield references | `AssertionError: left field must preserve first argument identity` | The JVM accepts the type-correct class; the reflection identity contract catches the swap. |
+| Load local 1 for both field stores | `AssertionError: right field must preserve second argument identity` | The JVM accepts the type-correct class; the second field lost its input identity. |
+| Point the second putfield at the `left` Fieldref | `AssertionError: left field must preserve first argument identity` | Same-descriptor Fieldref is verifier-valid; identity assertion detects duplicate left storage. |
+| Give `right` the invalid field descriptor `()I` | `ClassFormatError: Field "right" ... has illegal signature "()I"` | Class format parsing rejects the malformed field type. |
+| Set constructor `max_stack` to 1 | `VerifyError: Operand stack overflow` at PC 5 (`aload_1`) | The operand stack exceeds the declared frame limit. |
+| Set constructor `max_locals` to 2 | `ClassFormatError: Arguments can't fit into locals in class file example/Pair` | The two reference parameters require locals 1 and 2. |
+| Change the `Object.<init>()V` Methodref owner to `Counter` | `VerifyError` | `this` cannot be initialized through a non-super constructor owner. |
+| Change the constructor Methodref descriptor to `()I` | `ClassFormatError: Method "<init>" ... has illegal signature "()I"` | Constructor descriptors must return void. |
+| Load local 1 instead of uninitialized `this` before the super call | `VerifyError` | The receiver does not satisfy constructor initialization rules. |
+| Change the selected `Counter.get:()I` name to `leftValue` | `NoSuchMethodError` for `Counter.leftValue()I` | Verification succeeds; method resolution fails at JVM linkage. |
+| Remove `Counter.class` from the isolated classpath | `NoClassDefFoundError: example/Counter` | Runtime class loading/linkage rejects the missing dependency. |
+
+These controls document the first failing layer. They do not modify production
+emitter behavior or the original artifacts. The type-correct swap is the
+reason JVM verification alone cannot establish the required reference order.
+
+### Reproduction
+
+With Temurin JDK 21 on `PATH`, from the repository root:
+
+```sh
+export JAVA_HOME=/home/vdrake6/.sdkman/candidates/java/21.0.13.0+9-tem
+export PATH="$JAVA_HOME/bin:$PATH"
+export TMPDIR="$PWD/target/issue-1880/tmp"
+export JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=$TMPDIR -XX:-UsePerfData"
+export CARGO_TARGET_DIR="$PWD/target/issue-1880/cargo"
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test -p dotty \
+  --test jvm_tasty_dual_reference_identity --locked -- --nocapture
+```
+
+The existing strict one-reference identity regression remains
+`constructor_injected_reference_alias_executes_on_verified_jdk21` in
+`tests/jvm_tasty_artifacts.rs`.
