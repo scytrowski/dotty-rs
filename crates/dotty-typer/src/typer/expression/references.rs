@@ -826,7 +826,10 @@ impl SourceTyper<'_> {
                 name: ident.name,
             });
         }
-        let declaration = self.store.symbols.get(symbol);
+        let (declaration_kind, declaration_owner) = {
+            let declaration = self.store.symbols.get(symbol);
+            (declaration.kind, declaration.owner)
+        };
         if let Some(receiver) = self.uninitialized_parent_receiver
             && self.is_instance_class_member(symbol)
         {
@@ -836,8 +839,7 @@ impl SourceTyper<'_> {
                 receiver,
             });
         }
-        let shared_owner = declaration
-            .owner
+        let shared_owner = declaration_owner
             .filter(|owner| self.store.symbols.contains(*owner))
             .is_some_and(|owner| {
                 matches!(
@@ -867,10 +869,10 @@ impl SourceTyper<'_> {
                     })
                     });
         if self.function_literals.is_method(context.owner)
-            && declaration.owner != Some(context.owner)
-            && (matches!(declaration.kind, SymbolKind::Parameter | SymbolKind::Local)
+            && declaration_owner != Some(context.owner)
+            && (matches!(declaration_kind, SymbolKind::Parameter | SymbolKind::Local)
                 || (matches!(
-                    declaration.kind,
+                    declaration_kind,
                     SymbolKind::Field | SymbolKind::Value | SymbolKind::Variable
                 ) && !shared_owner))
             && !capture_parameter
@@ -888,6 +890,30 @@ impl SourceTyper<'_> {
             .ident_with_backquoted(ident.name, ident.backquoted, ty, position);
         if capture_parameter || capture_local {
             self.function_literals.capture(context.owner, symbol, typed);
+        }
+        if self.function_literals.is_method(context.owner)
+            && declaration_kind == SymbolKind::Method
+            && self.is_instance_class_member(symbol)
+        {
+            let class = self.enclosing_this_owner(None, context.owner, tree.index())?;
+            if declaration_owner == Some(class) {
+                if !self.function_literals.can_capture_enclosing_this(
+                    self.store,
+                    context.owner,
+                    class,
+                ) {
+                    return Err(TyperError::FunctionLiteralCaptureUnsupported {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        symbol: None,
+                    });
+                }
+                let this_type = self.store.types.alloc(Type::ThisType { class });
+                let this_tree = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                    .this(None, this_type, position);
+                self.function_literals
+                    .capture(context.owner, class, this_tree);
+            }
         }
         Ok(typed)
     }

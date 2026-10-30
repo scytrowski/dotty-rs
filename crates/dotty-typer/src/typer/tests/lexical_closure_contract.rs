@@ -299,9 +299,20 @@ fn lexical_closure_contract_records_whole_method_baseline() {
         .source_typed_index()
         .get(source, implicit_member_rhs)
         .unwrap();
-    assert!(
-        matches!(typer.typed_ast().get(typed_member_rhs).kind, TreeKind::Closure(ref closure) if closure.env.is_empty())
-    );
+    let TreeKind::Closure(implicit_member_closure) = &typer.typed_ast().get(typed_member_rhs).kind
+    else {
+        panic!("implicit instance-method lambda should remain a closure");
+    };
+    assert_eq!(implicit_member_closure.env.len(), 1);
+    assert!(matches!(
+        typer.store().types.get(
+            typer
+                .typed_ast()
+                .get(implicit_member_closure.env[0])
+                .ty
+        ),
+        Type::ThisType { class } if *class == typer.store().symbols.get(implicit_member).owner.unwrap()
+    ));
     assert_eq!(
         typer.source_typed_index().get(source, implicit_member_tree),
         Some(typed_member)
