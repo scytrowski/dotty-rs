@@ -6158,6 +6158,7 @@ mod tests {
         }
     }
 
+    mod enclosing_this_capture;
     mod lexical_closure_contract;
     mod local_value_capture;
     mod method_parameter_capture;

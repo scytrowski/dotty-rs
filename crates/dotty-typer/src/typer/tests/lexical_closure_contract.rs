@@ -259,22 +259,33 @@ fn lexical_closure_contract_records_whole_method_baseline() {
     let (explicit_this, explicit_this_rhs) =
         method_definition_and_rhs(&parsed, typer.store(), &index, source, "explicitThis");
     let explicit_this_tree = method_tree(explicit_this);
-    match typer.type_method_definition(explicit_this_tree) {
-        Err(TyperError::FunctionLiteralCaptureUnsupported {
-            symbol: None,
-            tree_index,
-            ..
-        }) => assert_error_span(tree_index, source_text.find("=> this").unwrap() + 3, false),
-        other => panic!("expected explicit this capture baseline, got {other:?}"),
-    }
+    let typed_explicit_this = typer
+        .type_method_definition(explicit_this_tree)
+        .expect("lexical this capture should type the whole source method");
+    assert!(matches!(
+        typer.typed_ast().get(typed_explicit_this).kind,
+        TreeKind::DefDef(_)
+    ));
     assert_eq!(
         typer.source_typed_index().get(source, explicit_this_tree),
-        None
+        Some(typed_explicit_this)
     );
-    assert_eq!(
-        typer.source_typed_index().get(source, explicit_this_rhs),
-        None
-    );
+    let typed_explicit_rhs = typer
+        .source_typed_index()
+        .get(source, explicit_this_rhs)
+        .expect("explicit-this lambda source should map to its typed closure");
+    let TreeKind::Closure(explicit_this_closure) = &typer.typed_ast().get(typed_explicit_rhs).kind
+    else {
+        panic!("explicit-this lambda should be a closure");
+    };
+    assert_eq!(explicit_this_closure.env.len(), 1);
+    assert!(matches!(
+        typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(explicit_this_closure.env[0]).ty),
+        Type::ThisType { .. }
+    ));
 
     let (implicit_member, implicit_member_rhs) =
         method_definition_and_rhs(&parsed, typer.store(), &index, source, "implicitMember");
@@ -348,7 +359,6 @@ fn lexical_closure_identity_and_mapping_are_session_local() {
 }
 
 #[test]
-#[ignore = "capture success receipts are enabled by the scoped downstream issues #1861-#1863"]
 fn future_lexical_capture_receipts_require_identity_order_deduplication_and_owner() {
     let source_text = concat!(
         "class C { ",

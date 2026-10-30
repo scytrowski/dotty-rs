@@ -4,7 +4,7 @@ use super::super::{ExpressionContext, SourceFunctionKind, SourceTyper, TyperErro
 use dotty_core::ast::*;
 use dotty_core::types::*;
 use dotty_core::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Default)]
 pub(in crate::typer) struct FunctionLiteralIndex {
@@ -101,6 +101,61 @@ impl FunctionLiteralIndex {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    pub(in crate::typer) fn can_capture_enclosing_this(
+        &self,
+        store: &SemanticStore,
+        method: SymbolId,
+        class: SymbolId,
+    ) -> bool {
+        if !self
+            .definitions
+            .values()
+            .any(|definition| definition.method == method && definition.capture_enclosing_values)
+            || !store.symbols.contains(method)
+            || !store.symbols.contains(class)
+            || !matches!(
+                store.symbols.get(class).kind,
+                SymbolKind::Class | SymbolKind::Trait
+            )
+        {
+            return false;
+        }
+        let lambda = store.symbols.get(method);
+        let Some(source_method) = lambda.owner else {
+            return false;
+        };
+        if lambda.kind != SymbolKind::Method
+            || !store.symbols.contains(source_method)
+            || store.symbols.get(source_method).kind != SymbolKind::Method
+            || self.is_method(source_method)
+        {
+            return false;
+        }
+        let Some(owner) = store.symbols.get(source_method).owner else {
+            return false;
+        };
+        if !store.symbols.contains(owner)
+            || !matches!(
+                store.symbols.get(owner).kind,
+                SymbolKind::Class | SymbolKind::Trait
+            )
+        {
+            return false;
+        }
+        let mut current = Some(owner);
+        let mut seen = HashSet::new();
+        while let Some(symbol) = current {
+            if symbol == class {
+                return true;
+            }
+            if !seen.insert(symbol) || !store.symbols.contains(symbol) {
+                return false;
+            }
+            current = store.symbols.get(symbol).owner;
+        }
+        false
     }
 
     pub(in crate::typer) fn can_capture_method_parameter(
@@ -409,9 +464,12 @@ impl SourceTyper<'_> {
             0,
         )?;
 
+        let function_result = expected_function1
+            .and_then(|(_, result)| result)
+            .unwrap_or(body_result);
         let method_type = self.store.types.alloc(Type::Method(MethodType {
             params: method_parameters,
-            result: body_result,
+            result: function_result,
             kind: MethodKind::Plain,
         }));
         self.store
@@ -422,7 +480,7 @@ impl SourceTyper<'_> {
             target: TermRefTarget::Symbol(method),
         });
         let typed_result = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
-            .type_tree(body_result, position);
+            .type_tree(function_result, position);
         let typed_method = self.typed_arena.alloc(Tree {
             kind: TreeKind::DefDef(DefDef {
                 name: TermName::new(method_name.text()),
@@ -471,7 +529,7 @@ impl SourceTyper<'_> {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        args.push(body_result);
+        args.push(function_result);
         let function_type = self.store.types.alloc(Type::Applied { tycon, args });
 
         let typed_method_reference = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)

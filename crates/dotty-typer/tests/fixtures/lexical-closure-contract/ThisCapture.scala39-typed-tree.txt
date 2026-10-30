@@ -1,0 +1,10 @@
+[[syntax trees at end of                     typer]] // ThisCapture.scala
+package <empty> {
+  class Outer() extends Object() {
+    def self: Int => Outer = (_$1: Int) => this
+    def explicit: Int => Outer = (x: Int) => this
+  }
+  trait OuterTrait() extends Object {
+    def selfTrait: Int => OuterTrait = (_$2: Int) => this
+  }
+}

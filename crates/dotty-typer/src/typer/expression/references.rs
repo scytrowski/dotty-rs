@@ -667,14 +667,19 @@ impl SourceTyper<'_> {
         position: Option<SourceSpan>,
         context: ExpressionContext,
     ) -> Result<TreeId<Typed>, TyperError> {
-        if self.function_literals.is_method(context.owner) {
+        let class = self.enclosing_this_owner(this.qual, context.owner, tree.index())?;
+        let capture_this = self.function_literals.is_method(context.owner);
+        if capture_this
+            && !self
+                .function_literals
+                .can_capture_enclosing_this(self.store, context.owner, class)
+        {
             return Err(TyperError::FunctionLiteralCaptureUnsupported {
                 source: self.source,
                 tree_index: tree.index(),
                 symbol: None,
             });
         }
-        let class = self.enclosing_this_owner(this.qual, context.owner, tree.index())?;
         if self.uninitialized_parent_receiver == Some(class) {
             return Err(TyperError::UninitializedParentArgumentReceiver {
                 source: self.source,
@@ -683,10 +688,12 @@ impl SourceTyper<'_> {
             });
         }
         let ty = self.store.types.alloc(Type::ThisType { class });
-        Ok(
-            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
-                .this(this.qual, ty, position),
-        )
+        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .this(this.qual, ty, position);
+        if capture_this {
+            self.function_literals.capture(context.owner, class, typed);
+        }
+        Ok(typed)
     }
 
     pub(in crate::typer) fn type_super_expression(
