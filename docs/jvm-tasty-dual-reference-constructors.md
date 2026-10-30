@@ -240,7 +240,7 @@ The Rust decoder regression checks the four distinct template/constructor
 `Counter` type trees, and the two distinct `TERMREFsymbol` targets. It also
 walks each read method's emitted tree and confirms that `leftValue` selects
 `left` before signed `get`, while `rightValue` selects `right` before `get`.
-No classfile or combined Scala ABI claim is made by this producer test.
+That #1877 producer test covers TASTy sidecars only; the combined JVM/TASTy batch is added by #1879 below.
 
 The strict producer test generated both sidecars from the original single
 Rust frontend session, then the pinned Scala 3.9.0 compiler successfully ran
@@ -276,3 +276,71 @@ field byte snapshots are covered by the unchanged focused class-state tests.
 The strict Scala regression is part of
 `.github/workflows/jvm-tasty-factory-scala-consumer.yml` under
 `DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_ALIAS=1`.
+
+
+## Issue #1879: authenticated four-artifact JVM/TASTy batch
+
+Issue #1879 starts at merged main `9dc0fef63dd4245c0b23a4fb438eb19bbb2fd343`.
+Its prerequisites are merged as #1883 (`55201601e6bc1fae5cd85121781abebffab61d0f`),
+#1885 (`52fe12a351dc3baa2f936358ed5b8f17dc1df05e`), #1887
+(`811780450ade51633a5f272195aaafd3a77dec0e`) and #1894 (the stated main
+baseline). Their published PR descriptions record the focused, JDK and Scala
+checks. GitHub's commit-status endpoint returned no status rows for the merge
+commits; the exact issue-1879 validation commands and results are recorded in
+the PR description.
+
+The combined producer uses one `with_paired_jvm_tasty_batch_plan` session for
+the original `Pair.scala`, then validates both TASTy plans and their linked JVM
+classfiles before returning the batch. The contract now accepts exactly two
+same-target reference aliases when their template formals and fields are
+source-ordered and distinct. Its byte check proves that `Object.<init>` runs
+first, local slot 1 initializes `left`, and local slot 2 initializes `right`;
+it resolves both `putfield` references against the owner and checked field
+metadata. Existing cross-class call validation proves that each reader's
+`getfield` is its corresponding field and each `invokevirtual` is the canonical
+`Counter.get()I` member. Other multiple-alias shapes remain rejected. No JVM
+encoder or TASTy serializer change is needed for this integration.
+
+The one-session integration regression returns exactly these four Rust-produced
+files, all linked by their sidecar UUIDs. The source fixture SHA-256 is
+`06266874ed9a7acdfc4d6a1c27bea3967055e474bca5a2f666af5ebfc8669c28`.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `example/Counter.class` | `8b9eed685bede05320ee1e4fbb8da7f87c80eb722ffbeb3841bf3eb549eae922` |
+| `example/Counter.tasty` | `dc631b73b42cb6f92b510a554e0cb8694ed1012d0f492d7bd482a427bb4cb3e2` |
+| `example/Pair.class` | `19f26c87b03ccb20ce6af926246e0e34a7b02317120901a44849c39b84a8593c` |
+| `example/Pair.tasty` | `de0823eac349adf66ed9de5a700d6434a043135354bed107c6a6f75b8d4fd6a0` |
+
+The integration test checks class-file major 65, TASTy 28.9.0, both classfile
+links, the `(Lexample/Counter;Lexample/Counter;)V` constructor, the two private
+final fields, exact constructor local loads and `putfield` targets, and both
+reader `getfield`/`invokevirtual` pairs. It compares all paths, bytes and UUIDs
+across fresh sessions. Renamed and reverse-declaration-order variants are also
+compared within their own source variants.
+
+The bounded artifact checker rejects a wrong second local slot or swapped
+`putfield` targets at `reference-field initializer`; a reader's wrong field or
+`Methodref` at `cross-class invocation`; missing paths at batch-path validation;
+and corrupt classfiles, sidecars and UUID links before a batch is accepted.
+The source matrix confirms that an alias swap fails at TASTy plan validation
+(`UnsafeFieldInitializer`), a missing field whose reader still uses it fails at
+method-body typing (`TermNameNotFound`), and a third alias fails at TASTy plan
+validation (`ClassMembers`). Existing class-state tests retain stale typed-root
+and foreign identity negative coverage.
+
+The test-only publisher accepts the complete four-file batch and injects
+handled failures after each staged write, before promotion, and after promotion.
+Every case leaves no accepted output tree; an existing destination sentinel
+remains intact. This verifies handled failure containment, not crash-atomic
+cross-file durability.
+
+The strict Scala test consumes the Rust sidecars using Scala 3.9.0
+`-decompile` and `-from-tasty`, then checks the rebuilt Pair descriptor and
+fields with `javap`. It requires compiler revision
+`777528f19a58e794c9954a42f433373472ec57f8` and Temurin 21.0.13. CI runs it via
+`DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_BATCH=1` in
+`.github/workflows/jvm-tasty-factory-scala-consumer.yml`. The JDK 21 gate remains
+the existing required classfile/JVM/source compilation/stateful test command;
+this issue does not add a source-generated PairFactory or a Rust-source
+`new Pair(a, b)` call, and it does not add a Java runtime consumer.
