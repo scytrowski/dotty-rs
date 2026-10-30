@@ -1,0 +1,154 @@
+{
+  "format": "dotty-rs-scala-oracle-v1",
+  "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "scalac_version": "Scala compiler version 3.9.0-bin-SNAPSHOT-git-777528f -- Copyright 2002-2026, LAMP/EPFL",
+  "jdk": {
+    "vendor": "Eclipse Adoptium",
+    "version": "21.0.13+9-LTS",
+    "java_sha256": "9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155",
+    "javac_sha256": "2cc288a26beebc50ca7cd924847dffbfb38ef3314e105bba6d4ebce03a0bcb6b",
+    "javap_sha256": "b2146e8dcfe5662c04d14f3fad68756a1a597d01461ca475a2cdbeb44c84a678"
+  },
+  "compiler_artifacts": {
+    "scala3-compiler": {
+      "relative_path": "dist/target/universal/stage/maven2/org/scala-lang/scala3-compiler_3/3.9.0-bin-SNAPSHOT/scala3-compiler_3-3.9.0-bin-SNAPSHOT.jar",
+      "sha256": "b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f"
+    },
+    "scala3-library": {
+      "relative_path": "dist/target/universal/stage/maven2/org/scala-lang/scala3-library_3/3.9.0-bin-SNAPSHOT/scala3-library_3-3.9.0-bin-SNAPSHOT.jar",
+      "sha256": "8c605e1945ae5a3c57d618d02241f7190ecbed744367473c7c3a9b61940c920c"
+    },
+    "scala-library": {
+      "relative_path": "dist/target/universal/stage/maven2/org/scala-lang/scala-library/3.9.0-bin-SNAPSHOT/scala-library-3.9.0-bin-SNAPSHOT.jar",
+      "sha256": "bc87575e0099514b17f7e84384b4a9a51d7a376720af8974e04a41a202909434"
+    }
+  },
+  "scala_sources": {
+    "Pair.scala": "06266874ed9a7acdfc4d6a1c27bea3967055e474bca5a2f666af5ebfc8669c28",
+    "PairSignatureOnly.scala": "6d58bf7b174153418b54d9bdc8991448bf1923d66be57cd226f94b29155bb5a6",
+    "Consumer.scala": "cc1dd0406b031d271ba1cf6fb65f37b37abb106415ab9306c3ca4ed2ab518882"
+  },
+  "producer_command": "scalac -release 21 -d <empty-output> Pair.scala; separate consumer compilation against producer output + pinned Scala 3.9 libraries; java -Xverify:all -ea DualReferenceConsumer",
+  "artifacts": [
+    {
+      "path": "scala39/example/Counter.class",
+      "bytes": 640,
+      "sha256": "5d2c61260a9f88f632c33e43f27a55332a1dce3e8f2bf8293da503c13283da68",
+      "tasty_uuid": "00ad1e24-19c4-d8e8-0068-aa0bd5461a1b",
+      "classfile_major": 65
+    },
+    {
+      "path": "scala39/example/Counter.tasty",
+      "bytes": 586,
+      "sha256": "1366dbeddce0b40618d8c35bd356df333d87fbe6880826a0844dfd057651de6d",
+      "tasty_uuid": "00ad1e24-19c4-d8e8-0068-aa0bd5461a1b",
+      "classfile_major": null
+    },
+    {
+      "path": "scala39/example/Pair.class",
+      "bytes": 764,
+      "sha256": "7f8ae272415673e56f1f856101ed1c6aedea3c99bebfb04b6bbacb62c0155000",
+      "tasty_uuid": "007fabc3-ccf4-25d3-0043-37297354695b",
+      "classfile_major": 65
+    },
+    {
+      "path": "scala39/example/Pair.tasty",
+      "bytes": 684,
+      "sha256": "d0d340e1685eaf3603c6ebe3a97c83753e5e869b36016006afe8f838d7b98db6",
+      "tasty_uuid": "007fabc3-ccf4-25d3-0043-37297354695b",
+      "classfile_major": null
+    },
+    {
+      "path": "scala39/signature-only/example/Counter.class",
+      "bytes": 653,
+      "sha256": "1a49b7b0ebfcdce8d6a1d53086a7b21c679713ca37919092910ff0fa8ff65845",
+      "tasty_uuid": "009546a8-d081-bbe8-00e1-86a1e9c0a11b",
+      "classfile_major": 65
+    },
+    {
+      "path": "scala39/signature-only/example/Counter.tasty",
+      "bytes": 594,
+      "sha256": "961db8ca771e99427440c2b882f53e940fe1eeccc0bd120d67a74d99027fe03d",
+      "tasty_uuid": "009546a8-d081-bbe8-00e1-86a1e9c0a11b",
+      "classfile_major": null
+    },
+    {
+      "path": "scala39/signature-only/example/Pair.class",
+      "bytes": 512,
+      "sha256": "36aa6e7da5d77f7397d5d068755187f6db60185b687f12cce7b511b0a3ac0ec4",
+      "tasty_uuid": "004e1475-1369-27eb-0001-99d7ef246518",
+      "classfile_major": 65
+    },
+    {
+      "path": "scala39/signature-only/example/Pair.tasty",
+      "bytes": 489,
+      "sha256": "034ad68fbc3e5e529cd1140799c4328bd5f11808f8a14a9fa29a375cd396f265",
+      "tasty_uuid": "004e1475-1369-27eb-0001-99d7ef246518",
+      "classfile_major": null
+    }
+  ],
+  "observations": {
+    "counter_constructor_descriptor": "(I)V",
+    "pair_constructor_descriptor": "(Lexample/Counter;Lexample/Counter;)V",
+    "pair_fields": {
+      "left": "private final Lexample/Counter;",
+      "right": "private final Lexample/Counter;"
+    },
+    "pair_constructor_initialization_order": [
+      "left <- local slot 1 / first",
+      "right <- local slot 2 / second"
+    ],
+    "pair_tasty_addresses": {
+      "template_PARAMS": [
+        11,
+        20
+      ],
+      "constructor_PARAMS": [
+        42,
+        49
+      ],
+      "alias_VALDEFs": [
+        60,
+        76
+      ],
+      "read_DEFDEFs": [
+        89,
+        113
+      ]
+    },
+    "consumer_result": "scala39-dual-reference-constructor=ok",
+    "consumer_semantics": [
+      "independent mutation of first and second references",
+      "swapped positional inputs preserve left/right positions",
+      "new Pair(first, first) intentionally aliases both fields"
+    ],
+    "producer_scope": "Scala-generated oracle only; these artifacts are not Rust producer output"
+  },
+  "inspection_files": [
+    {
+      "path": "oracle/Counter.javap.txt",
+      "bytes": 3929,
+      "sha256": "8bbcb212fc0901c70e55eff8f48f890c3d7ee837baeec92a6b42143cf3baeabc"
+    },
+    {
+      "path": "oracle/Counter.tasty.txt",
+      "bytes": 4492,
+      "sha256": "537acc83f071230e30306540d6305f70ed2d40f56d899d90c1175d3db20d2a3d"
+    },
+    {
+      "path": "oracle/Pair.javap.txt",
+      "bytes": 4941,
+      "sha256": "d6b3b72d6e81e8305ab3e2b4beac9aca45de480d37f8d640f578f8274a6dfbcd"
+    },
+    {
+      "path": "oracle/Pair.tasty.txt",
+      "bytes": 5398,
+      "sha256": "f9ef79608ce06b959c6d33e4cd514e5e761b74dc20739726ef61c4171d64e5b1"
+    },
+    {
+      "path": "oracle/PairSignatureOnly.javap.txt",
+      "bytes": 2773,
+      "sha256": "45c218a47a4c99c1c16f294c2675f12909b89773fe59c7630cde7fa0f38f68fd"
+    }
+  ]
+}

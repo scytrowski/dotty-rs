@@ -1,0 +1,111 @@
+Classfile /home/vdrake6/.codex/worktrees/a2c8/dotty-rs/.worktrees/issue-1874/target/issue-1874/oracle/producer/example/Counter.class
+  Last modified Oct 30, 2026; size 640 bytes
+  SHA-256 checksum 5d2c61260a9f88f632c33e43f27a55332a1dce3e8f2bf8293da503c13283da68
+  Compiled from "Pair.scala"
+public class example.Counter extends java.lang.Object
+  minor version: 0
+  major version: 65
+  flags: (0x0021) ACC_PUBLIC, ACC_SUPER
+  this_class: #2                          // example/Counter
+  super_class: #5                         // java/lang/Object
+  interfaces: 0, fields: 1, methods: 3, attributes: 5
+Constant pool:
+   #1 = Utf8               example/Counter
+   #2 = Class              #1             // example/Counter
+   #3 = Utf8               Ljava/lang/Object;
+   #4 = Utf8               java/lang/Object
+   #5 = Class              #4             // java/lang/Object
+   #6 = Utf8               Pair.scala
+   #7 = Utf8               current
+   #8 = Utf8               I
+   #9 = Utf8               <init>
+  #10 = Utf8               (I)V
+  #11 = Utf8               start
+  #12 = Utf8               ()V
+  #13 = NameAndType        #9:#12         // "<init>":()V
+  #14 = Methodref          #5.#13         // java/lang/Object."<init>":()V
+  #15 = NameAndType        #7:#8          // current:I
+  #16 = Fieldref           #2.#15         // example/Counter.current:I
+  #17 = Utf8               this
+  #18 = Utf8               Lexample/Counter;
+  #19 = Utf8               get
+  #20 = Utf8               ()I
+  #21 = Utf8               set
+  #22 = Utf8               value
+  #23 = Utf8               Code
+  #24 = Utf8               LineNumberTable
+  #25 = Utf8               LocalVariableTable
+  #26 = Utf8               MethodParameters
+  #27 = Utf8               Signature
+  #28 = Utf8               SourceFile
+  #29 = Utf8               TASTY
+  #30 = Utf8               Scala3InlineInfo
+  #31 = Utf8               Scala
+{
+  private int current;
+    descriptor: I
+    flags: (0x0002) ACC_PRIVATE
+
+  public example.Counter(int);
+    descriptor: (I)V
+    flags: (0x0001) ACC_PUBLIC
+    Code:
+      stack=2, locals=2, args_size=2
+         0: aload_0
+         1: invokespecial #14                 // Method java/lang/Object."<init>":()V
+         4: aload_0
+         5: iload_1
+         6: putfield      #16                 // Field current:I
+         9: return
+      LineNumberTable:
+        line 3: 0
+        line 4: 4
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+            0      10     0  this   Lexample/Counter;
+            0      10     1 start   I
+    MethodParameters:
+      Name                           Flags
+      start                          final
+
+  public int get();
+    descriptor: ()I
+    flags: (0x0001) ACC_PUBLIC
+    Code:
+      stack=1, locals=1, args_size=1
+         0: aload_0
+         1: getfield      #16                 // Field current:I
+         4: ireturn
+      LineNumberTable:
+        line 5: 0
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+            0       5     0  this   Lexample/Counter;
+
+  public void set(int);
+    descriptor: (I)V
+    flags: (0x0001) ACC_PUBLIC
+    Code:
+      stack=2, locals=2, args_size=2
+         0: aload_0
+         1: iload_1
+         2: putfield      #16                 // Field current:I
+         5: return
+      LineNumberTable:
+        line 6: 0
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+            0       6     0  this   Lexample/Counter;
+            0       6     1 value   I
+    MethodParameters:
+      Name                           Flags
+      value                          final
+}
+Signature: #3                           // Ljava/lang/Object;
+SourceFile: "Pair.scala"
+  TASTY: length = 0x10 (unknown attribute)
+   00 AD 1E 24 19 C4 D8 E8 00 68 AA 0B D5 46 1A 1B
+
+  Scala3InlineInfo: length = 0x4 (unknown attribute)
+   01 00 00 00
+  Scala: length = 0x0 (unknown attribute)
