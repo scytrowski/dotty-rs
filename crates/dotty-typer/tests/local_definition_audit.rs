@@ -12824,9 +12824,16 @@ fn audit_source_inner_filtered(
                 .entry(root)
                 .or_default();
         }
-        let outcome = typer
-            .expression_context_for(method)
-            .and_then(|context| typer.type_expression(rhs, context));
+        // The focused whole-DefDef gate exercises source type-parameter binder
+        // mappings and owned source-to-typed roots; the legacy method audit
+        // remains available for historical RHS-only comparisons.
+        let outcome = if std::env::var_os("DOTTY_AUDIT_TYPE_METHOD_DEFINITION").is_some() {
+            typer.type_method_definition(method_tree)
+        } else {
+            typer
+                .expression_context_for(method)
+                .and_then(|context| typer.type_expression(rhs, context))
+        };
         if profile_timing {
             let result_label = match &outcome {
                 Ok(_) => "success".to_owned(),
