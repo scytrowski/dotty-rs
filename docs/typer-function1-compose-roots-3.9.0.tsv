@@ -1,0 +1,11 @@
+schema=1
+pinned_scala_revision=777528f19a58e794c9954a42f433373472ec57f8
+audit_mode=whole_method_definition
+identity	owner_path	method_name	source_line	source_range	before	before_failure	after	after_source_tree	after_typed_tree	after_result
+library/src/scala/Function1.scala#tree=111	scala.Function1	andThen	88	2993..3076	typed		typed	111	41	scala.Function1[scala.Function1.T1,typeparam#0]
+library/src/scala/Function1.scala#tree=86	scala.Function1	compose	80	2634..2717	blocked	ApplicationArgumentConformanceUnsupported at Apply#tree=81 argument 0; actual TypeId(57), expected TypeId(42); UnsupportedType(found=TypeId(57), expected=TypeId(57))	typed	86	20	scala.Function1[typeparam#0,scala.Function1.R]
+
+# Diagnostic identities: selected apply=SymbolId(58), owner Function1=SymbolId(42);
+# receiver g=SymbolId(64), owner compose=SymbolId(59); expected TypeRef A=SymbolId(63);
+# actual ParamRef binder=TypeId(53), index=0; expected method signature=TypeId(53) Poly.
+# `andThen` and `compose` after-statuses are from two deterministic whole-method passes.

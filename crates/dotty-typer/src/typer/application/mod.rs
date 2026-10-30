@@ -71,6 +71,42 @@ pub(in crate::typer) enum ZeroArgumentSelectionError {
 }
 
 impl SourceTyper<'_> {
+    fn rebind_active_type_parameter_symbols(
+        &mut self,
+        ty: TypeId,
+        actual: TypeId,
+        tree_index: u32,
+    ) -> Result<TypeId, TyperError> {
+        let binders = self.active_local_type_binders.clone();
+        let mut rebound = ty;
+        for (binder, parameters) in binders.iter().rev() {
+            if !self.type_contains_param_ref(actual, *binder)? {
+                continue;
+            }
+            let substitutions = parameters
+                .iter()
+                .enumerate()
+                .map(|(index, symbol)| {
+                    (
+                        *symbol,
+                        self.store.types.alloc(Type::ParamRef {
+                            binder: *binder,
+                            index: index as u32,
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>();
+            rebound =
+                dotty_core::types::substitute_type_symbols(self.store, rebound, &substitutions)
+                    .map_err(|error| TyperError::TypeRebinding {
+                        source: self.source,
+                        tree_index,
+                        error,
+                    })?;
+        }
+        Ok(rebound)
+    }
+
     fn this_type_application_argument_view(
         &mut self,
         actual: TypeId,
@@ -793,6 +829,8 @@ impl SourceTyper<'_> {
                     self.this_type_application_argument_view(actual, expected_type)?,
                 )
             };
+            let expected_type =
+                self.rebind_active_type_parameter_symbols(expected_type, actual, tree_index)?;
             match self.conforms(actual, expected_type) {
                 Ok(true) => {}
                 Ok(false)

@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+scala_root="${SCALA39_ROOT:?set SCALA39_ROOT to the pinned Scala 3.9.0 checkout}"
+java_home="${JAVA_HOME:?set JAVA_HOME to JDK 21}"
+jdk_release="${SCALA39_JDK_RELEASE:?set SCALA39_JDK_RELEASE to 21}"
+maven_root="${COURSIER_MAVEN_ROOT:?set COURSIER_MAVEN_ROOT to the Maven artifact cache}"
+tmp_root="${DOTTY_COMPOSE_ORACLE_TMP_ROOT:?set DOTTY_COMPOSE_ORACLE_TMP_ROOT to a task-local target directory}"
+
+expected_revision=777528f19a58e794c9954a42f433373472ec57f8
+actual_revision="$(git -C "$scala_root" rev-parse HEAD)"
+if [[ "$actual_revision" != "$expected_revision" ]]; then
+    printf 'SCALA39_ROOT revision is %s; expected %s\n' "$actual_revision" "$expected_revision" >&2
+    exit 1
+fi
+jdk_version="$(sed -n 's/^JAVA_VERSION="\([^"]*\)".*/\1/p' "$java_home/release")"
+if [[ "${jdk_version%%.*}" != "$jdk_release" || "$jdk_release" != 21 ]]; then
+    printf 'expected JDK 21; found %s (SCALA39_JDK_RELEASE=%s)\n' "$jdk_version" "$jdk_release" >&2
+    exit 1
+fi
+
+(
+    cd "$maven_root"
+    sha256sum --check "$fixture_dir/scala-artifacts.sha256.tsv"
+)
+
+artifacts=(
+    org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar
+    org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar
+    org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar
+    org/scala-lang/tasty-core_3/3.9.0/tasty-core_3-3.9.0.jar
+    org/scala-lang/scala3-interfaces/3.9.0/scala3-interfaces-3.9.0.jar
+    org/scala-lang/modules/scala-asm/9.9.0-scala-1/scala-asm-9.9.0-scala-1.jar
+    org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar
+    org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar
+)
+scala_classpath=""
+for artifact in "${artifacts[@]}"; do
+    if [[ ! -f "$maven_root/$artifact" ]]; then
+        printf 'missing pinned Scala artifact: %s\n' "$maven_root/$artifact" >&2
+        exit 1
+    fi
+    if [[ -n "$scala_classpath" ]]; then
+        scala_classpath+=:
+    fi
+    scala_classpath+="$maven_root/$artifact"
+done
+
+mkdir -p "$tmp_root"
+scratch="$(mktemp -d "$tmp_root/run.XXXXXXXX")"
+mkdir -p "$scratch/tmp" "$scratch/positive-classes"
+trap 'printf "oracle intermediates retained at %s\\n" "$scratch" >&2' EXIT
+
+"$java_home/bin/java" -Djava.io.tmpdir="$scratch/tmp" -cp "$scala_classpath" \
+    dotty.tools.dotc.Main -classpath "$scala_classpath" \
+    -d "$scratch/positive-classes" -color:never -Vprint:typer \
+    "$fixture_dir/Positive.scala" >"$scratch/positive.txt" 2>&1
+grep -Fq 'def inner[A >: Nothing <: Any](g: A => T1, x: A): Unit' "$scratch/positive.txt"
+grep -Fq 'def outer[A >: Nothing <: Any](g: A => T1, x: A): ComposeFunction.this.R =' "$scratch/positive.txt"
+grep -Fq 'def compose[A >: Nothing <: Any](g: A => T1): A => R =' "$scratch/positive.txt"
+grep -Fq 'val full: Long => String' "$scratch/positive.txt"
+
+if "$java_home/bin/java" -Djava.io.tmpdir="$scratch/tmp" -cp "$scala_classpath" \
+    dotty.tools.dotc.Main -classpath "$scala_classpath" \
+    -d "$scratch/positive-classes" -color:never \
+    "$fixture_dir/Negative.scala" >"$scratch/negative.txt" 2>&1; then
+    printf '%s\n' 'Scala 3.9 unexpectedly accepted the negative controls' >&2
+    exit 1
+fi
+grep -Fq 'Found:    (1 : Int)' "$scratch/negative.txt"
+grep -Fq 'Required: A' "$scratch/negative.txt"
+grep -Fq 'Required: Nothing' "$scratch/negative.txt"
+grep -Fq 'Found:    (A, A)' "$scratch/negative.txt"
+grep -Fq 'Required: String' "$scratch/negative.txt"
+
+printf 'Scala source revision: %s\nJDK: %s\n' "$actual_revision" "$jdk_release"
+printf '%s\n' 'The inner g(x), outer apply(g(x)), full generic compose, and real function-value controls compile.'
+printf '%s\n' 'Wrong input, owner, variance, arity, and unrelated apply controls are rejected.'
