@@ -915,7 +915,7 @@ impl<'a> Validator<'_, 'a> {
         // an accessor-bearing `val`/`var` parameter adds a legitimate field to
         // that scope, but this serializer slice must report it as an
         // unsupported constructor form rather than an opaque scope mismatch.
-        self.constructor(template.constructor)?;
+        let has_two_reference_parameters = self.constructor(template.constructor)?;
         let mut entered = HashSet::new();
         let mut invalid_scope = false;
         for symbol in class_scope.entered_symbols() {
@@ -937,6 +937,12 @@ impl<'a> Validator<'_, 'a> {
                 return Err(PickleError::ScopeMembers { owner: p.class });
             }
         }
+        if has_two_reference_parameters && !p.methods.is_empty() {
+            return Err(self.unsupported(
+                UnsupportedFeature::PrimaryConstructorInput,
+                Some(p.constructor.symbol),
+            ));
+        }
         for method in p.methods {
             self.method(method)?;
         }
@@ -950,13 +956,13 @@ impl<'a> Validator<'_, 'a> {
                 symbol: binding.symbol,
             });
         }
-        if p.methods.is_empty() {
+        if p.methods.is_empty() && !has_two_reference_parameters {
             return Err(self.unsupported(UnsupportedFeature::MethodCount, Some(p.class)));
         }
         Ok(package)
     }
 
-    fn constructor(&mut self, source_tree: TreeId<Untyped>) -> Result<(), PickleError> {
+    fn constructor(&mut self, source_tree: TreeId<Untyped>) -> Result<bool, PickleError> {
         let p = self.plan;
         let constructor = &p.constructor;
         if source_tree != constructor.source_tree {
@@ -1009,7 +1015,8 @@ impl<'a> Validator<'_, 'a> {
                 Some(constructor.symbol),
             ));
         }
-        self.constructor_parameters(definition, &constructor.parameter_clauses)?;
+        let has_two_reference_parameters =
+            self.constructor_parameters(definition, &constructor.parameter_clauses)?;
         if definition.rhs.is_some() {
             return Err(self.unsupported(
                 UnsupportedFeature::ConstructorBody,
@@ -1049,14 +1056,14 @@ impl<'a> Validator<'_, 'a> {
                 role: TypeRole::ConstructorResult,
             });
         }
-        Ok(())
+        Ok(has_two_reference_parameters)
     }
 
     fn constructor_parameters(
         &mut self,
         definition: &DefDef<Untyped>,
         clauses: &[Vec<SymbolId>],
-    ) -> Result<(), PickleError> {
+    ) -> Result<bool, PickleError> {
         let constructor = self.plan.constructor.symbol;
         let class = self.plan.class;
         self.charge(clauses.len())?;
@@ -1074,6 +1081,8 @@ impl<'a> Validator<'_, 'a> {
         let int_name = self.symbol(int)?.name;
         let mut seen_constructor = HashSet::new();
         let mut seen_template = HashSet::new();
+        let mut reference_class = None;
+        let mut reference_parameters = 0usize;
         let actual_parameters = definition.value_param_clauses.iter().flatten().count();
         if actual_parameters != clauses.iter().flatten().count()
             || signature.params.len() != actual_parameters
@@ -1205,14 +1214,86 @@ impl<'a> Validator<'_, 'a> {
                     }
                 };
                 let signature_parameter = signature.params[signature_index];
-                if parameter_type.name != int_name
+                let is_int = semantic_type == self.plan.definitions.int;
+                let _is_reference = if is_int {
+                    false
+                } else {
+                    let Type::TypeRef {
+                        prefix,
+                        target: TypeRefTarget::Symbol(target_class),
+                    } = self.ty(semantic_type)?
+                    else {
+                        return Err(PickleError::UnsupportedTypeReference { ty: semantic_type });
+                    };
+                    let target_class = *target_class;
+                    let target_record = self.symbol(target_class)?;
+                    let target_package = self.symbol(class)?.owner;
+                    let package_prefix_matches = if let Some(package) = target_package {
+                        matches!(self.ty(*prefix)?, Type::TypeRef {
+                            prefix,
+                            target: TypeRefTarget::Symbol(actual_package),
+                        } if *prefix == self.plan.definitions.no_prefix && *actual_package == package)
+                    } else {
+                        false
+                    };
+                    let Some(SourceDefinition::Canonical { source, tree }) =
+                        self.plan.source_index.definition_of(target_class)
+                    else {
+                        return Err(PickleError::SourceDefinition {
+                            symbol: target_class,
+                        });
+                    };
+                    let TreeKind::TypeDef(target_definition) = &self.source_tree(tree)?.kind else {
+                        return Err(PickleError::SourceShape {
+                            tree,
+                            expected: SourceRole::Class,
+                        });
+                    };
+                    if source != self.plan.source.id
+                        || self.plan.source_index.symbol_at(source, tree) != Some(target_class)
+                        || target_record.kind != SymbolKind::Class
+                        || target_record.origin != SymbolOrigin::Source(source)
+                        || target_record.owner != target_package
+                        || target_record.visibility != Visibility::Public
+                        || !target_record.flags.is_empty()
+                        || !target_record.annotations.is_empty()
+                        || target_record.name != parameter_type.name
+                        || target_definition.name.as_name() != &parameter_type.name
+                        || !package_prefix_matches
+                        || !self
+                            .plan
+                            .typed_bindings
+                            .planned_class_symbols()
+                            .contains(&target_class)
+                        || reference_class.is_some_and(|prior| prior != target_class)
+                    {
+                        return Err(PickleError::UnsupportedTypeReference { ty: semantic_type });
+                    }
+                    reference_class = Some(target_class);
+                    reference_parameters += 1;
+                    if !matches!(
+                        self.ty(signature_parameter.ty)?,
+                        Type::TypeRef { prefix: signature_prefix, target: TypeRefTarget::Symbol(signature_class) }
+                            if signature_prefix == prefix && *signature_class == target_class
+                    ) || template_type.is_some_and(|ty| {
+                        !matches!(self.ty(ty), Ok(Type::TypeRef { prefix: template_prefix, target: TypeRefTarget::Symbol(template_class) })
+                            if template_prefix == prefix && *template_class == target_class)
+                    }) {
+                        return Err(PickleError::UnsupportedTypeReference {
+                            ty: signature_parameter.ty,
+                        });
+                    }
+                    true
+                };
+                if (is_int
+                    && (parameter_type.name != int_name
+                        || !matches!(self.ty(signature_parameter.ty)?, Type::TypeRef { prefix, target: TypeRefTarget::Symbol(symbol) }
+                            if *prefix == self.plan.definitions.no_prefix && *symbol == int)
+                        || template_type.is_some_and(|ty| ty != self.plan.definitions.int)))
                     || signature_parameter.name.as_name() != parameter.name.as_name()
                     || signature_parameter.erased
                     || signature_parameter.varargs
-                    || !matches!(self.ty(signature_parameter.ty)?, Type::TypeRef { prefix, target: TypeRefTarget::Symbol(symbol) }
-                        if *prefix == self.plan.definitions.no_prefix && *symbol == int)
-                    || semantic_type != self.plan.definitions.int
-                    || template_type.is_some_and(|ty| ty != self.plan.definitions.int)
+                    || (is_int && semantic_type != self.plan.definitions.int)
                     || self
                         .scope(constructor)?
                         .lookup_all(parameter.name.as_name())
@@ -1226,7 +1307,16 @@ impl<'a> Validator<'_, 'a> {
                 signature_index += 1;
             }
         }
-        Ok(())
+        if reference_parameters != 0
+            && !((reference_parameters == 1 && actual_parameters == 1)
+                || (reference_parameters == 2 && actual_parameters == 2))
+        {
+            return Err(self.unsupported(
+                UnsupportedFeature::PrimaryConstructorInput,
+                Some(constructor),
+            ));
+        }
+        Ok(reference_parameters == 2)
     }
 
     fn method(&mut self, method: &MethodPicklePlan) -> Result<(), PickleError> {

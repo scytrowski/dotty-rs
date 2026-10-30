@@ -139,6 +139,31 @@ All source variants are checked in under [`source-variants/`](../tests/fixtures/
 
 The existing regression `constructor_alias_batch_publication_rejects_invalid_pairs_and_partial_results` and `malformed_second_sidecar_fails_before_creating_staging_or_destination` cover missing artifact paths, corrupt sidecars, and no partial publication. The matrix and all stage distinctions are summarized in `oracle.json`.
 
+## Issue #1876: bounded signature-only Rust producer
+
+The producer increment starts from merged main commit `2b4f666427ec0b0eeb76c09254d5a39abd6abdb5`. It enables exactly two distinct ordered reference formals when both resolve to the same public class planned in the same source batch. The retained identity contract is the one-session proof above: class-owned template PARAM symbols and constructor-owned PARAM symbols remain distinct, source ordinals and MethodType order remain first/second, and the JVM constructor descriptor is `(Lexample/Counter;Lexample/Counter;)V` with parameter slots 1 and 2.
+
+Rust now emits the signature-only `PairSignatureOnly.scala` sidecars with two template `PARAM`s (`PRIVATE`, `LOCAL`) and two constructor `PARAM`s. All four type trees resolve to the planned `Counter`; the class contains no fields and only its primary constructor. The decoder regression checks the ordered names and type trees. A strict Scala 3.9.0 run on those genuine Rust-produced `Counter.tasty` and `Pair.tasty` files passed both `-decompile` and `-from-tasty`; `javap` on the rebuilt Pair reports `(Lexample/Counter;Lexample/Counter;)V` and no fields. This evidence is limited to signature-only Pair and does not add dual-reference field aliases or method bodies.
+
+The strict run used Scala source revision `777528f19a58e794c9954a42f433373472ec57f8`, `scalac 3.9.0-bin-SNAPSHOT-git-777528f`, staged compiler JAR SHA-256 `b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f`, and SDKMAN Eclipse Temurin JDK `21.0.13+9-LTS` (classfile major 65). The authoritative `PairSignatureOnly.scala` source SHA-256 is `6d58bf7b174153418b54d9bdc8991448bf1923d66be57cd226f94b29155bb5a6`. The mandatory `jvm-tasty-factory-scala-consumer` workflow runs `jvm_tasty_dual_reference_signature` with `DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_SIGNATURE=1` and the same JDK pin.
+
+The producer's current first-rejection behavior remains explicit:
+
+| Input | First rejection |
+| --- | --- |
+| Exact two-reference signature with no fields or methods | Accepted by TASTy plan validation and emitted |
+| Full Pair dual-reference fields/methods source | TASTy plan validation: `PrimaryConstructorInput`; dual-reference member emission remains out of scope |
+| Three reference formals | TASTy plan validation: `PrimaryConstructorInput` |
+| One reference plus one `Int` formal | TASTy plan validation: `PrimaryConstructorInput` |
+| Two references to distinct batch classes | Ordered constructor formal proof: `OrderedReferenceFormalIdentity` |
+| Duplicate formal names | Field initializer typing: `AmbiguousTermReference` (the full source fixture reaches this before TASTy validation) |
+| Wrong second type in the full field-alias fixture | Field initializer typing: `ExpectedExpressionTypeMismatch` |
+| Default or contextual formal | Constructor planning: `InvalidPrimaryConstructor(SourceShape)` |
+| Secondary constructor | Member planning: unsupported secondary method ownership |
+| Constructor `val` or `var` accessors | Complete JVM unit validation: `AccessorFieldSignature` |
+
+The exact positive and negative Rust producer regressions run in `jvm_tasty_dual_reference_signature`, `jvm_tasty_dual_reference_session`, and `jvm_tasty_dual_reference_matrix`. The strict Rust-side Scala gate uses `DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_SIGNATURE=1`, plus `SCALA39_ROOT` and `JAVA_HOME`; it writes to the caller's task-local `TMPDIR`.
+
 ## Reproduction
 
 Use the pinned Scala checkout and explicit SDKMAN Temurin 21 paths. Keep temporary files and Rust outputs under the task worktree:

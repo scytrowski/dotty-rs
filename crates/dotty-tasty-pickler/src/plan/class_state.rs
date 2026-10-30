@@ -791,7 +791,7 @@ impl ClassStateValidator<'_, '_> {
         if template_constructor != constructor.source_tree {
             return Err(PickleError::SourceOrder { class: p.class });
         }
-        self.validate_constructor(constructor, p.class)?;
+        self.validate_constructor(constructor, p.class, !p.members.is_empty())?;
 
         if !self.plan.store.scopes.contains(info.declarations) {
             return Err(PickleError::InvalidScope {
@@ -899,6 +899,7 @@ impl ClassStateValidator<'_, '_> {
         &mut self,
         plan: &PrimaryConstructorInputPlan,
         class: SymbolId,
+        has_members: bool,
     ) -> Result<(), PickleError> {
         self.charge(plan.parameter_clauses.len())?;
         let item_count = plan
@@ -978,7 +979,8 @@ impl ClassStateValidator<'_, '_> {
             });
         }
         let mut signature_index = 0;
-        let mut has_reference_parameter = false;
+        let mut reference_parameter_count = 0usize;
+        let mut reference_class = None;
         let int_name = self
             .plan
             .store
@@ -1132,7 +1134,12 @@ impl ClassStateValidator<'_, '_> {
                 let is_reference = if is_int {
                     false
                 } else {
-                    self.same_batch_constructor_class_type(parameter_type, class, tpt.name)?;
+                    let (target_class, _) =
+                        self.same_batch_constructor_class_type(parameter_type, class, tpt.name)?;
+                    if reference_class.is_some_and(|previous| previous != target_class) {
+                        return Err(PickleError::UnsupportedTypeReference { ty: parameter_type });
+                    }
+                    reference_class = Some(target_class);
                     true
                 };
                 match canonical_record.info {
@@ -1165,7 +1172,7 @@ impl ClassStateValidator<'_, '_> {
                             ty: signature_param.ty,
                         });
                     }
-                    has_reference_parameter = true;
+                    reference_parameter_count += 1;
                 }
                 if (is_int && tpt.name != int_name)
                     || signature_param.name.as_name() != parameter.name.as_name()
@@ -1176,16 +1183,14 @@ impl ClassStateValidator<'_, '_> {
                 {
                     return Err(PickleError::UnsupportedTypeReference { ty: parameter_type });
                 }
-                if is_reference && item_count != 1 {
-                    return Err(PickleError::Unsupported {
-                        feature: UnsupportedFeature::PrimaryConstructorInput,
-                        symbol: Some(symbol),
-                    });
-                }
                 signature_index += 1;
             }
         }
-        if has_reference_parameter && item_count != 1 {
+        if reference_parameter_count != 0
+            && ((reference_parameter_count == 1 && item_count != 1)
+                || (reference_parameter_count == 2 && (item_count != 2 || has_members))
+                || reference_parameter_count > 2)
+        {
             return Err(PickleError::Unsupported {
                 feature: UnsupportedFeature::PrimaryConstructorInput,
                 symbol: Some(plan.symbol),

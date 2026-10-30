@@ -35,15 +35,67 @@ fn complete_type(
     }
 }
 
-fn constructor_parameter_type_syntax(
+pub(crate) trait ConstructorParameterSource {
+    fn store(&self) -> &dotty_core::SemanticStore;
+    fn definitions(&self) -> &dotty_core::Definitions;
+    fn source_id(&self) -> dotty_core::SourceId;
+    fn source_ast(&self) -> &dotty_core::ast::AstArena<dotty_core::Untyped>;
+    fn source_index(&self) -> &dotty_core::SourceSemanticIndex;
+    fn typed_bindings(&self) -> &dyn crate::SourceTypedBindings;
+}
+
+impl ConstructorParameterSource for crate::plan::PicklePlan<'_> {
+    fn store(&self) -> &dotty_core::SemanticStore {
+        self.store
+    }
+    fn definitions(&self) -> &dotty_core::Definitions {
+        self.definitions
+    }
+    fn source_id(&self) -> dotty_core::SourceId {
+        self.source.id
+    }
+    fn source_ast(&self) -> &dotty_core::ast::AstArena<dotty_core::Untyped> {
+        self.source_ast
+    }
+    fn source_index(&self) -> &dotty_core::SourceSemanticIndex {
+        self.source_index
+    }
+    fn typed_bindings(&self) -> &dyn crate::SourceTypedBindings {
+        self.typed_bindings
+    }
+}
+
+impl ConstructorParameterSource for crate::ClassStatePicklePlan<'_> {
+    fn store(&self) -> &dotty_core::SemanticStore {
+        self.store
+    }
+    fn definitions(&self) -> &dotty_core::Definitions {
+        self.definitions
+    }
+    fn source_id(&self) -> dotty_core::SourceId {
+        self.source.id
+    }
+    fn source_ast(&self) -> &dotty_core::ast::AstArena<dotty_core::Untyped> {
+        self.source_ast
+    }
+    fn source_index(&self) -> &dotty_core::SourceSemanticIndex {
+        self.source_index
+    }
+    fn typed_bindings(&self) -> &dyn crate::SourceTypedBindings {
+        self.typed_bindings
+    }
+}
+
+pub(crate) fn constructor_parameter_type_syntax<P: ConstructorParameterSource>(
     context: &mut EncodingContext<'_>,
-    plan: &crate::ClassStatePicklePlan<'_>,
+    plan: &P,
     source_parameter: dotty_core::TreeId<dotty_core::Untyped>,
     parameter: SymbolId,
     template_parameter: bool,
 ) -> Result<AstLabel, PickleError> {
-    let parameter_type = complete_type(plan.store, parameter)?;
-    if parameter_type == plan.definitions.int {
+    let store = plan.store();
+    let parameter_type = complete_type(store, parameter)?;
+    if parameter_type == plan.definitions().int {
         return if template_parameter {
             context.lower_type(parameter_type)
         } else {
@@ -53,20 +105,20 @@ fn constructor_parameter_type_syntax(
     let Some(dotty_core::Type::TypeRef {
         target: dotty_core::TypeRefTarget::Symbol(target_class),
         ..
-    }) = plan.store.types.try_get(parameter_type)
+    }) = store.types.try_get(parameter_type)
     else {
         return Err(PickleError::UnsupportedTypeReference { ty: parameter_type });
     };
     let target_class = *target_class;
     let Some(dotty_core::SourceDefinition::Canonical { source, tree }) =
-        plan.source_index.definition_of(target_class)
+        plan.source_index().definition_of(target_class)
     else {
         return Err(PickleError::SourceDefinition {
             symbol: target_class,
         });
     };
     let dotty_core::ast::TreeKind::ValDef(parameter_definition) =
-        &plan.source_ast.get(source_parameter).kind
+        &plan.source_ast().get(source_parameter).kind
     else {
         return Err(PickleError::SourceShape {
             tree: source_parameter,
@@ -74,16 +126,16 @@ fn constructor_parameter_type_syntax(
         });
     };
     let dotty_core::ast::TreeKind::Ident(type_syntax) =
-        &plan.source_ast.get(parameter_definition.tpt).kind
+        &plan.source_ast().get(parameter_definition.tpt).kind
     else {
         return Err(PickleError::SourceShape {
             tree: parameter_definition.tpt,
             expected: crate::SourceRole::TypeSyntax,
         });
     };
-    if source != plan.source.id
-        || plan.source_index.symbol_at(source, tree) != Some(target_class)
-        || plan.store.symbols.get(target_class).name != type_syntax.name
+    if source != plan.source_id()
+        || plan.source_index().symbol_at(source, tree) != Some(target_class)
+        || store.symbols.get(target_class).name != type_syntax.name
     {
         return Err(PickleError::SourceDefinition {
             symbol: target_class,
@@ -92,7 +144,7 @@ fn constructor_parameter_type_syntax(
     context.register_planned_source_class(
         target_class,
         tree,
-        plan.typed_bindings.planned_class_symbols(),
+        plan.typed_bindings().planned_class_symbols(),
     )?;
     let name = context.intern_name(type_syntax.name)?;
     let child = context.lower_type(parameter_type)?;

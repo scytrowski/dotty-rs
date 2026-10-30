@@ -50,12 +50,12 @@ jobs:
           path: scala39-source
           persist-credentials: false
 
-      - name: Install pinned JDK 21.0.8
+      - name: Install pinned JDK 21.0.13
         id: install-jdk
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21.0.8+9.0.LTS'
+          java-version: '21.0.13+9.0.LTS'
           check-latest: false
           cache: sbt
           cache-dependency-path: |
@@ -84,7 +84,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = "$SCALA39_SOURCE_SHA"
-          grep -q '^JAVA_VERSION="21.0.8"$' "$JAVA_HOME/release"
+          grep -q '^JAVA_VERSION="21.0.13"$' "$JAVA_HOME/release"
           test -d "$JAVA_HOME/jmods"
           mkdir -p "$COURSIER_MAVEN_ROOT"
 
@@ -98,7 +98,7 @@ jobs:
           path: |
             scala39-source/target
             scala39-source/**/target
-          key: ${{ runner.os }}-${{ runner.arch }}-scala39-targets-${{ env.SCALA39_SOURCE_SHA }}-jdk21.0.8-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-scala39-targets-${{ env.SCALA39_SOURCE_SHA }}-jdk21.0.13-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
 
       - name: Stage the pinned Scala source compiler
         run: cd "$SCALA39_ROOT" && sbt "dist/universal:stage"
@@ -135,7 +135,7 @@ jobs:
           path: |
             scala39-source/target
             scala39-source/**/target
-          key: ${{ runner.os }}-${{ runner.arch }}-scala39-targets-${{ env.SCALA39_SOURCE_SHA }}-jdk21.0.8-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-scala39-targets-${{ env.SCALA39_SOURCE_SHA }}-jdk21.0.13-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
 
       - name: Record Scala cache state and output size
         env:
@@ -164,9 +164,12 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_FACTORY_RESULT_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_LOCAL_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_SIGNATURE: '1'
           DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
           DOTTY_TASTY_PICKLER_ORACLE_TMP: ${{ github.workspace }}/target/scala-reader-oracle
+          TMPDIR: ${{ github.workspace }}/target/issue-1876-tmp
         run: |
+          mkdir -p "$TMPDIR"
           mkdir -p "$DOTTY_TASTY_PICKLER_ORACLE_TMP"
           cargo +1.98.1 test \
             --test jvm_tasty_scala_consumer \
@@ -179,6 +182,7 @@ jobs:
             --test jvm_tasty_nested_constructor_scala_consumer \
             --test jvm_tasty_factory_result_scala_consumer \
             --test jvm_tasty_reference_local_scala_consumer \
+            --test jvm_tasty_dual_reference_signature \
             --test jvm_tasty_cross_class_factories \
             --test jvm_tasty_factory_result_arguments \
             --test tasty_source_pickling \

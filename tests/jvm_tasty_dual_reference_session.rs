@@ -795,17 +795,17 @@ fn rust_frontend_session_keeps_two_parameter_and_field_alias_identities() {
     };
     let class_state_error = match class_state.validate() {
         Err(error) => error,
-        Ok(_) => panic!("the exact two-reference signature reaches its constructor guard"),
+        Ok(_) => panic!("the full dual-reference field/body shape is outside this increment"),
     };
     assert!(matches!(
         class_state_error,
         dotty_tasty_pickler::PickleError::Unsupported {
             feature: dotty_tasty_pickler::UnsupportedFeature::PrimaryConstructorInput,
             symbol: Some(symbol),
-        } if symbol == constructor_params[0]
+        } if symbol == pair_constructor
     ));
     println!(
-        "same-session class-state first rejection: {class_state_error:?}; field-alias validation and TASTy lowering not reached"
+        "same-session class-state first rejection: {class_state_error:?}; field/body validation and TASTy lowering not reached"
     );
 
     let named_roots = [
