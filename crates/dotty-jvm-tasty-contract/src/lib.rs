@@ -902,13 +902,66 @@ fn validate_reference_field_constructor_code(
     class_file: &ClassFile<'_>,
     proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
 ) -> Result<(), String> {
-    let mut reference_fields = proof.tasty_plan.same_batch_reference_fields();
-    let Some(reference_field) = reference_fields.next() else {
+    let reference_fields = proof
+        .tasty_plan
+        .same_batch_reference_fields()
+        .collect::<Vec<_>>();
+    if reference_fields.is_empty() {
         return Ok(());
-    };
-    if reference_fields.next().is_some() {
-        return Err("more than one same-batch reference field initializer is unsupported".into());
     }
+    if reference_fields.len() == 2 {
+        let aliases = reference_fields
+            .iter()
+            .map(|field| {
+                (
+                    field.field(),
+                    field.target_class(),
+                    field.template_parameter_alias(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let [
+            (first_field, first_target, Some(first_parameter)),
+            (second_field, second_target, Some(second_parameter)),
+        ] = aliases.as_slice()
+        else {
+            return Err(
+                "two same-batch reference fields require distinct constructor aliases".into(),
+            );
+        };
+        if first_target != second_target
+            || first_field == second_field
+            || first_parameter == second_parameter
+        {
+            return Err(
+                "dual-reference aliases must target one class through distinct fields and formals"
+                    .into(),
+            );
+        }
+        let all_metadata = proof
+            .jvm_unit
+            .metadata(proof.tasty_plan.plan().definitions)
+            .map_err(|error| format!("cannot derive planned classes: {error:?}"))?;
+        let target = all_metadata
+            .iter()
+            .find(|metadata| metadata.identity().symbol() == *first_target)
+            .ok_or_else(|| {
+                "reference initializer target is absent from the JVM batch".to_owned()
+            })?;
+        let fields = [*first_field, *second_field];
+        let template_parameters = [*first_parameter, *second_parameter];
+        return validate_dual_reference_field_alias_constructor_code(
+            class_file,
+            proof,
+            target,
+            fields,
+            template_parameters,
+        );
+    }
+    if reference_fields.len() != 1 {
+        return Err("more than two same-batch reference field initializers are unsupported".into());
+    }
+    let reference_field = reference_fields[0];
 
     let field = proof
         .metadata
@@ -1064,6 +1117,212 @@ fn validate_reference_field_constructor_code(
             field.name(),
             field.descriptor()
         ));
+    }
+    Ok(())
+}
+
+fn validate_dual_reference_field_alias_constructor_code(
+    class_file: &ClassFile<'_>,
+    proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
+    target: &JvmClassMetadata,
+    fields: [SymbolId; 2],
+    template_parameters: [SymbolId; 2],
+) -> Result<(), String> {
+    let target_descriptor = format!("L{};", target.identity().internal_name());
+    let expected_descriptor = format!("({target_descriptor}{target_descriptor})V");
+    let constructor_metadata = proof
+        .metadata
+        .constructor()
+        .filter(|constructor| constructor.descriptor().as_str() == expected_descriptor)
+        .ok_or_else(|| {
+            format!("dual-reference alias owner has no checked {expected_descriptor} constructor")
+        })?;
+    if constructor_metadata.parameters().len() != 2
+        || !constructor_metadata.access_flags().is_public()
+    {
+        return Err(
+            "dual-reference alias constructor must be public with two ordered formals".into(),
+        );
+    }
+    let checked_fields = fields
+        .iter()
+        .map(|symbol| {
+            proof
+                .metadata
+                .fields()
+                .iter()
+                .find(|field| field.symbol() == *symbol)
+                .ok_or_else(|| {
+                    format!(
+                        "reference initializer field {symbol:?} is absent from checked JVM metadata"
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if checked_fields
+        .iter()
+        .any(|field| field.descriptor() != target_descriptor)
+    {
+        return Err(format!(
+            "dual-reference alias field descriptor differs from {target_descriptor}"
+        ));
+    }
+
+    let tasty = proof.tasty_plan.plan();
+    let [constructor_clause] = tasty.constructor.parameter_clauses.as_slice() else {
+        return Err("dual-reference TASTy plan must have one constructor clause".into());
+    };
+    let [first_derived, second_derived] = constructor_clause.as_slice() else {
+        return Err("dual-reference TASTy plan must have two ordered constructor formals".into());
+    };
+    let TreeKind::DefDef(constructor_definition) =
+        &tasty.source_ast.get(tasty.constructor.source_tree).kind
+    else {
+        return Err("dual-reference source constructor definition is absent".into());
+    };
+    let [source_clause] = constructor_definition.value_param_clauses.as_slice() else {
+        return Err("dual-reference source constructor must have one clause".into());
+    };
+    let [first_source_tree, second_source_tree] = source_clause.as_slice() else {
+        return Err("dual-reference source constructor must have two ordered formals".into());
+    };
+    for (index, (source_tree, derived, expected_template)) in [
+        (first_source_tree, first_derived, template_parameters[0]),
+        (second_source_tree, second_derived, template_parameters[1]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let source_parameter = tasty
+            .source_index
+            .symbol_at(tasty.source.id, *source_tree)
+            .ok_or_else(|| "dual-reference template formal has no canonical identity".to_owned())?;
+        let template_record = tasty.store.symbols.get(source_parameter);
+        let derived_record = tasty.store.symbols.get(*derived);
+        if source_parameter != expected_template
+            || tasty.source_index.derived_symbol_at(
+                tasty.constructor.symbol,
+                tasty.source.id,
+                *source_tree,
+            ) != Some(*derived)
+            || constructor_metadata.parameters()[index].symbol() != *derived
+            || template_record.kind != SymbolKind::Parameter
+            || template_record.owner != Some(tasty.class)
+            || template_record.origin != SymbolOrigin::Source(tasty.source.id)
+            || derived_record.kind != SymbolKind::Parameter
+            || derived_record.owner != Some(tasty.constructor.symbol)
+            || derived_record.origin != SymbolOrigin::Source(tasty.source.id)
+            || tasty.source_index.definition_of(source_parameter)
+                != Some(SourceDefinition::Canonical {
+                    source: tasty.source.id,
+                    tree: *source_tree,
+                })
+        {
+            return Err(format!(
+                "dual-reference formal at JVM slot {} does not preserve its exact template/derived source identities",
+                index + 1
+            ));
+        }
+    }
+
+    let constructor = class_file
+        .methods
+        .iter()
+        .find(|method| {
+            class_file.constant_pool.utf8(method.name_index).ok() == Some("<init>")
+                && class_file.constant_pool.utf8(method.descriptor_index).ok()
+                    == Some(expected_descriptor.as_str())
+        })
+        .ok_or_else(|| "dual-reference alias constructor is absent from class bytes".to_owned())?;
+    let [dotty_classfile::attribute::Attribute::Code(code)] = constructor.attributes.as_slice()
+    else {
+        return Err("dual-reference alias constructor has no unique Code attribute".into());
+    };
+    if code.code.len() != 15
+        || code.code[0] != 0x2a
+        || code.code[1] != 0xb7
+        || code.code[4] != 0x2a
+        || code.code[5] != 0x2b
+        || code.code[6] != 0xb5
+        || code.code[9] != 0x2a
+        || code.code[10] != 0x2c
+        || code.code[11] != 0xb5
+        || code.code[14] != 0xb1
+        || code.max_locals != 3
+        || code.max_stack != 2
+        || !code.exception_table.is_empty()
+    {
+        return Err(format!(
+            "constructor does not contain the bounded super/aload_0/aload_1/putfield/aload_0/aload_2/putfield/return shape: {:02x?}",
+            code.code
+        ));
+    }
+    let cp_index = |offset: usize| {
+        dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+            code.code[offset],
+            code.code[offset + 1],
+        ]))
+    };
+    let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    }) = class_file.constant_pool.get(cp_index(2))
+    else {
+        return Err("dual-reference alias super invocation is not CONSTANT_Methodref".into());
+    };
+    let parent = proof
+        .metadata
+        .superclass()
+        .ok_or_else(|| "checked owner ABI has no direct parent".to_owned())?
+        .parent_internal_name();
+    if class_file
+        .constant_pool
+        .class_name(*class_index)
+        .map_err(|error| format!("invalid dual-reference superclass reference: {error:?}"))?
+        != parent
+        || class_file
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .map_err(|error| format!("invalid dual-reference superclass constructor: {error:?}"))?
+            != ("<init>", "()V")
+    {
+        return Err(
+            "dual-reference constructor does not call its checked direct superclass first".into(),
+        );
+    }
+
+    for (index, field) in checked_fields.into_iter().enumerate() {
+        let offset = if index == 0 { 7 } else { 12 };
+        let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+            class_index,
+            name_and_type_index,
+        }) = class_file.constant_pool.get(cp_index(offset))
+        else {
+            return Err(format!(
+                "constructor putfield for slot {} is not CONSTANT_Fieldref",
+                index + 1
+            ));
+        };
+        let owner = class_file
+            .constant_pool
+            .class_name(*class_index)
+            .map_err(|error| format!("invalid slot {} field owner: {error:?}", index + 1))?;
+        let initialized_field = class_file
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .map_err(|error| format!("invalid slot {} field reference: {error:?}", index + 1))?;
+        if owner != proof.internal_name() || initialized_field != (field.name(), field.descriptor())
+        {
+            return Err(format!(
+                "constructor slot {} initializes {owner}.{}:{}, expected {}.{}:{}",
+                index + 1,
+                initialized_field.0,
+                initialized_field.1,
+                proof.internal_name(),
+                field.name(),
+                field.descriptor()
+            ));
+        }
     }
     Ok(())
 }
