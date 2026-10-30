@@ -120,9 +120,16 @@ contracts, or this report. It fails if the pinned source, JDK, artifacts, six
 positive roots, any negative test, exact ordinary-method cohort, or either
 deterministic pass is missing, skipped, malformed, or regressed. It uploads
 evidence and resource receipts from worktree-local `target/`; it does not run
-the full 1,236-file corpus. The exact PR Actions run URL, PR head SHA, and its
-pinned environment checksums will be added here after the mandatory run
-completes.
+the full 1,236-file corpus. The mandatory [Typer focused audit run #239](https://github.com/scytrowski/dotty-rs/actions/runs/41113297553)
+passed on PR head `0fc7fa82e58bb517a2df0e2b820ac2025616d057` (base
+`9042c15be3ad708d80f0ad5d637055f1ac6160b6`). It checked out Scala source
+`777528f19a58e794c9954a42f433373472ec57f8`, installed Temurin `21.0.8+9`,
+verified the eight JARs against the pinned manifest, passed the exact positive
+and negative Rust gates, both deterministic cohorts, and the existing focused
+smoke audit. Its [evidence artifact](https://github.com/scytrowski/dotty-rs/actions/runs/41113297553/artifacts/13003988511)
+has SHA-256 `2f2f262789a45dfde6a7bfcb2c849eb9d4f8898df196c11658a2bfb126966357`.
+The local environment and manifest checksums are recorded above; CI checks the
+same frozen manifests, JDK release and binary, and artifact hashes.
 
 Relevant merged prerequisite PRs: [#1893](https://github.com/scytrowski/dotty-rs/pull/1893),
 [#1895](https://github.com/scytrowski/dotty-rs/pull/1895),
