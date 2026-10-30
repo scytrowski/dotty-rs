@@ -97,6 +97,9 @@ fn application_kind_accepts(application_kind: ApplyKind, method_kind: MethodKind
     }
 }
 
+#[cfg(test)]
+type TransactionFailureObserver<'a> = std::rc::Rc<dyn Fn(&SourceTyper<'a>) + 'a>;
+
 /// Completes source declaration signatures against a shared semantic session.
 pub struct SourceTyper<'a> {
     arena: &'a AstArena<Untyped>,
@@ -135,6 +138,8 @@ pub struct SourceTyper<'a> {
     expression_scope_owner: u64,
     synthetic_package_entries: Vec<(ScopeId, SymbolId)>,
     synthetic_class_member_entries: Vec<(ScopeId, SymbolId)>,
+    #[cfg(test)]
+    transaction_failure_observer: Option<TransactionFailureObserver<'a>>,
 }
 
 #[derive(Clone, Copy)]
@@ -295,6 +300,8 @@ impl<'a> SourceTyper<'a> {
             expression_scope_owner: next_expression_scope_owner(),
             synthetic_package_entries: Vec::new(),
             synthetic_class_member_entries: Vec::new(),
+            #[cfg(test)]
+            transaction_failure_observer: None,
         }
     }
 
@@ -6160,6 +6167,7 @@ mod tests {
 
     mod enclosing_this_capture;
     mod lexical_closure_contract;
+    mod lexical_closure_rollback;
     mod local_value_capture;
     mod method_parameter_capture;
 
