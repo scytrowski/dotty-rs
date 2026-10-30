@@ -5,8 +5,8 @@ use crate::{JvmCodegenError, JvmMethodDescriptor, JvmMethodPlan, JvmParameterLoc
 use dotty_classfile::access_flags::{ACC_PRIVATE, ACC_PUBLIC, MethodAccessFlags};
 use dotty_core::ast::{AstArena, Modifier, TreeKind, Typed, TypedAst, Untyped, VisibilitySyntax};
 use dotty_core::{
-    Definitions, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SourceTypedIndex,
-    SymbolId, SymbolInfo, SymbolKind, TreeId, Type, TypeRefTarget, Visibility,
+    Definitions, Namespace, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex,
+    SourceTypedIndex, SymbolId, SymbolInfo, SymbolKind, TreeId, Type, TypeRefTarget, Visibility,
 };
 
 /// A source argument and the exact typed root mapped from it by the frontend.
@@ -200,6 +200,11 @@ pub enum JvmConstructorIssue {
     ParentConstructorTypedShape,
     ParentConstructorIdentity,
     ParentConstructorArgumentIdentity,
+    OrderedReferenceFormalSource,
+    OrderedReferenceFormalIdentity,
+    OrderedReferenceFormalType,
+    OrderedReferenceFormalScope,
+    OrderedReferenceFormalJvmMetadata,
 }
 
 /// Source-checked primary constructor binding. Its private fields retain the
@@ -226,6 +231,60 @@ pub struct JvmConstructorMetadata {
     access_flags: MethodAccessFlags,
 }
 
+/// Read-only proof for two ordered primary-constructor formals that both
+/// reference the same canonical class in the current source batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmOrderedReferenceConstructorFormals {
+    class: SymbolId,
+    constructor: SymbolId,
+    source: SourceId,
+    referenced_class: SymbolId,
+    source_parameters: [TreeId<Untyped>; 2],
+    template_parameters: [SymbolId; 2],
+    constructor_parameters: [SymbolId; 2],
+    descriptor: String,
+    jvm_parameters: [JvmParameterLocal; 2],
+}
+
+impl JvmOrderedReferenceConstructorFormals {
+    /// Canonical class that declares this primary constructor.
+    pub const fn class(&self) -> SymbolId {
+        self.class
+    }
+    /// Canonical primary constructor whose source order was proved.
+    pub const fn constructor(&self) -> SymbolId {
+        self.constructor
+    }
+    /// Original source unit containing the declaration evidence.
+    pub const fn source_id(&self) -> SourceId {
+        self.source
+    }
+    /// Canonical class referenced by both ordered formals.
+    pub const fn referenced_class(&self) -> SymbolId {
+        self.referenced_class
+    }
+    /// Original source constructor parameter declaration trees in order.
+    pub const fn source_parameters(&self) -> &[TreeId<Untyped>; 2] {
+        &self.source_parameters
+    }
+    /// Class-owned canonical parameter identities in source order.
+    pub const fn template_parameters(&self) -> &[SymbolId; 2] {
+        &self.template_parameters
+    }
+    /// Distinct constructor-owned parameter identities in source order.
+    pub const fn constructor_parameters(&self) -> &[SymbolId; 2] {
+        &self.constructor_parameters
+    }
+    /// Validated JVM constructor descriptor.
+    pub fn descriptor(&self) -> &str {
+        &self.descriptor
+    }
+    /// JVM parameter locals in source order, excluding receiver slot zero.
+    pub const fn jvm_parameters(&self) -> &[JvmParameterLocal; 2] {
+        &self.jvm_parameters
+    }
+}
+
 impl JvmPrimaryConstructorPlan {
     /// Canonical primary constructor identity checked against source evidence.
     pub fn symbol(&self) -> SymbolId {
@@ -235,6 +294,282 @@ impl JvmPrimaryConstructorPlan {
     /// Constructor-owned parameter identities in authoritative source order.
     pub fn parameters(&self) -> &[SymbolId] {
         &self.parameters
+    }
+
+    /// Proves exactly two ordinary constructor formals retain distinct
+    /// source, class-owned, and constructor-owned identities in source order,
+    /// and match the existing JVM descriptor and category-one slots.
+    ///
+    /// `metadata` must come from this plan's already validated JVM unit. The
+    /// proof only reads the supplied source session and allocates no semantic
+    /// identities or replacement types.
+    pub fn prove_ordered_reference_formals(
+        &self,
+        ast: &AstArena<Untyped>,
+        index: &SourceSemanticIndex,
+        store: &SemanticStore,
+        definitions: &Definitions,
+        metadata: &JvmConstructorMetadata,
+    ) -> Result<JvmOrderedReferenceConstructorFormals, JvmCodegenError> {
+        let fail = |issue| JvmCodegenError::InvalidPrimaryConstructor {
+            constructor: self.constructor,
+            issue,
+        };
+        if metadata.symbol != self.constructor || self.parameters.len() != 2 {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalJvmMetadata));
+        }
+        let Some(SourceDefinition::Canonical { source, tree }) = index.definition_of(self.class)
+        else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalSource));
+        };
+        if source != self.source || index.symbol_at(source, tree) != Some(self.class) {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalSource));
+        }
+        let Some(TreeKind::TypeDef(class_definition)) = ast.try_get(tree).map(|node| &node.kind)
+        else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalSource));
+        };
+        let Some(TreeKind::Template(template)) =
+            ast.try_get(class_definition.rhs).map(|node| &node.kind)
+        else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalSource));
+        };
+        if index.symbol_at(source, template.constructor) != Some(self.constructor) {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalSource));
+        }
+        let Some(TreeKind::DefDef(constructor_definition)) =
+            ast.try_get(template.constructor).map(|node| &node.kind)
+        else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalSource));
+        };
+        let [source_parameters] = constructor_definition.value_param_clauses.as_slice() else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalSource));
+        };
+        let [first_tree, second_tree] = source_parameters.as_slice() else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalSource));
+        };
+        let source_parameters = [*first_tree, *second_tree];
+        let Some(first_template) = index.symbol_at(source, source_parameters[0]) else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalIdentity));
+        };
+        let Some(second_template) = index.symbol_at(source, source_parameters[1]) else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalIdentity));
+        };
+        let template_parameters = [first_template, second_template];
+        let Some(first_formal) =
+            index.derived_symbol_at(self.constructor, source, source_parameters[0])
+        else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalIdentity));
+        };
+        let Some(second_formal) =
+            index.derived_symbol_at(self.constructor, source, source_parameters[1])
+        else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalIdentity));
+        };
+        let constructor_parameters = [first_formal, second_formal];
+        if template_parameters[0] == template_parameters[1]
+            || constructor_parameters[0] == constructor_parameters[1]
+            || template_parameters
+                .iter()
+                .any(|id| constructor_parameters.contains(id))
+            || self.parameters.as_slice() != constructor_parameters
+        {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalIdentity));
+        }
+
+        if !store.symbols.contains(template_parameters[0]) {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalIdentity));
+        }
+        let first_template_symbol = store.symbols.get(template_parameters[0]);
+        let SymbolInfo::Complete(first_template_type) = first_template_symbol.info else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalType));
+        };
+        let Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(referenced_class),
+        }) = store.types.try_get(first_template_type)
+        else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalType));
+        };
+        let referenced_class = *referenced_class;
+        let reference_prefix = *prefix;
+        if !store.symbols.contains(referenced_class)
+            || !crate::identity::canonical_class_parent_prefix(
+                store,
+                reference_prefix,
+                referenced_class,
+                definitions.no_prefix,
+            )
+        {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalType));
+        }
+        let reference = store.symbols.get(referenced_class);
+        if reference.kind != SymbolKind::Class
+            || reference.visibility != Visibility::Public
+            || reference.origin != dotty_core::SymbolOrigin::Source(source)
+            || !reference.flags.is_empty()
+            || reference.owner.is_none_or(|owner| {
+                !store.symbols.contains(owner)
+                    || store.symbols.get(owner).kind != SymbolKind::Package
+            })
+            || !matches!(
+                index.definition_of(referenced_class),
+                Some(SourceDefinition::Canonical { source: defining_source, tree })
+                    if defining_source == source
+                        && index.symbol_at(source, tree) == Some(referenced_class)
+                        && matches!(ast.try_get(tree).map(|node| &node.kind), Some(TreeKind::TypeDef(_)))
+            )
+        {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalType));
+        }
+
+        let Some(class_scope) = index.scope_of(self.class) else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalScope));
+        };
+        let Some(constructor_scope) = index.scope_of(self.constructor) else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalScope));
+        };
+        if !store.scopes.contains(class_scope)
+            || store.scopes.get(class_scope).owner != Some(self.class)
+            || !store.scopes.contains(constructor_scope)
+            || store.scopes.get(constructor_scope).owner != Some(self.constructor)
+        {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalScope));
+        }
+        let SymbolInfo::Complete(constructor_info) = store.symbols.get(self.constructor).info
+        else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalType));
+        };
+        let Some(Type::Method(signature)) = store.types.try_get(constructor_info) else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalType));
+        };
+        if signature.kind != dotty_core::MethodKind::Plain || signature.params.len() != 2 {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalType));
+        }
+
+        for ordinal in 0..2 {
+            let source_parameter = source_parameters[ordinal];
+            let template_parameter = store.symbols.get(template_parameters[ordinal]);
+            let constructor_parameter = store.symbols.get(constructor_parameters[ordinal]);
+            let Some(TreeKind::ValDef(parameter)) =
+                ast.try_get(source_parameter).map(|node| &node.kind)
+            else {
+                return Err(fail(JvmConstructorIssue::OrderedReferenceFormalSource));
+            };
+            let type_name = match ast.try_get(parameter.tpt).map(|node| &node.kind) {
+                Some(TreeKind::Ident(identifier))
+                    if identifier.name.namespace() == Namespace::Type =>
+                {
+                    identifier.name
+                }
+                _ => return Err(fail(JvmConstructorIssue::OrderedReferenceFormalSource)),
+            };
+            let SymbolInfo::Complete(template_type) = template_parameter.info else {
+                return Err(fail(JvmConstructorIssue::OrderedReferenceFormalType));
+            };
+            let SymbolInfo::Complete(constructor_type) = constructor_parameter.info else {
+                return Err(fail(JvmConstructorIssue::OrderedReferenceFormalType));
+            };
+            let signature_parameter = &signature.params[ordinal];
+            let exact_type = |type_id| {
+                matches!(
+                    store.types.try_get(type_id),
+                    Some(Type::TypeRef { prefix, target: TypeRefTarget::Symbol(symbol) })
+                        if *symbol == referenced_class
+                            && crate::identity::canonical_class_parent_prefix(
+                                store,
+                                *prefix,
+                                referenced_class,
+                                definitions.no_prefix,
+                            )
+                )
+            };
+            let parameter_name = parameter.name.as_name();
+            if type_name != reference.name
+                || template_parameter.kind != SymbolKind::Parameter
+                || template_parameter.owner != Some(self.class)
+                || template_parameter.origin != dotty_core::SymbolOrigin::Source(source)
+                || constructor_parameter.kind != SymbolKind::Parameter
+                || constructor_parameter.owner != Some(self.constructor)
+                || constructor_parameter.origin != dotty_core::SymbolOrigin::Source(source)
+                || !template_parameter.flags.is_empty()
+                || !constructor_parameter.flags.is_empty()
+                || template_parameter.name != *parameter_name
+                || constructor_parameter.name != *parameter_name
+                || parameter.rhs.is_some()
+                || parameter.metadata.visibility.is_some()
+                || !parameter.metadata.annotations.is_empty()
+                || parameter.metadata.modifiers.as_slice()
+                    != [Modifier::ParamAccessor, Modifier::PrivateLocal]
+                || !exact_type(template_type)
+                || !exact_type(constructor_type)
+                || !exact_type(signature_parameter.ty)
+                || signature_parameter.name.as_name().text() != parameter_name.text()
+                || index.definition_of(template_parameters[ordinal])
+                    != Some(SourceDefinition::Canonical {
+                        source,
+                        tree: source_parameter,
+                    })
+                || index.definition_of(constructor_parameters[ordinal])
+                    != Some(SourceDefinition::Derived {
+                        source,
+                        tree: source_parameter,
+                    })
+                || index.declaration_context_of(template_parameters[ordinal])
+                    != index.declaration_context_of(constructor_parameters[ordinal])
+            {
+                return Err(fail(JvmConstructorIssue::OrderedReferenceFormalIdentity));
+            }
+            let Some(context_id) = index.declaration_context_of(constructor_parameters[ordinal])
+            else {
+                return Err(fail(JvmConstructorIssue::OrderedReferenceFormalScope));
+            };
+            let Some(context) = index.try_source_context(context_id) else {
+                return Err(fail(JvmConstructorIssue::OrderedReferenceFormalScope));
+            };
+            if context.owner != self.constructor
+                || context.lexical_scope != constructor_scope
+                || store
+                    .scopes
+                    .get(constructor_scope)
+                    .lookup_all(&constructor_parameter.name)
+                    != [constructor_parameters[ordinal]]
+                || !store
+                    .scopes
+                    .get(class_scope)
+                    .lookup_all(&template_parameter.name)
+                    .is_empty()
+            {
+                return Err(fail(JvmConstructorIssue::OrderedReferenceFormalScope));
+            }
+        }
+
+        let [first_jvm, second_jvm] = metadata.parameters.as_slice() else {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalJvmMetadata));
+        };
+        let expected_jvm_type = crate::JvmType::Reference(referenced_class);
+        if first_jvm.symbol != constructor_parameters[0]
+            || second_jvm.symbol != constructor_parameters[1]
+            || first_jvm.ty != expected_jvm_type
+            || second_jvm.ty != expected_jvm_type
+            || (first_jvm.slot, first_jvm.width) != (1, 1)
+            || (second_jvm.slot, second_jvm.width) != (2, 1)
+            || metadata.descriptor.parameters() != [expected_jvm_type, expected_jvm_type]
+            || metadata.descriptor.result() != crate::JvmReturnType::Void
+        {
+            return Err(fail(JvmConstructorIssue::OrderedReferenceFormalJvmMetadata));
+        }
+        Ok(JvmOrderedReferenceConstructorFormals {
+            class: self.class,
+            constructor: self.constructor,
+            source,
+            referenced_class,
+            source_parameters,
+            template_parameters,
+            constructor_parameters,
+            descriptor: metadata.descriptor.as_str().to_owned(),
+            jvm_parameters: [*first_jvm, *second_jvm],
+        })
     }
 
     /// Source-index-derived accessor bindings in constructor parameter order.

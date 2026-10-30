@@ -48,7 +48,7 @@ fn rust_frontend_session_keeps_two_parameter_and_field_alias_identities() {
     assert!(scanner.diagnostics().is_empty());
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
-    let parsed = parse_compilation_unit(source_text, source_id, scanner, &mut store.names);
+    let mut parsed = parse_compilation_unit(source_text, source_id, scanner, &mut store.names);
     assert!(parsed.diagnostics.is_empty());
     let mut packages = Packages::new();
     let source_index = match name_compilation_unit_with_diagnostics(
@@ -461,6 +461,7 @@ fn rust_frontend_session_keeps_two_parameter_and_field_alias_identities() {
     };
     let counter_constructor = counter_constructor.unwrap();
     let counter_constructor_params = counter_constructor_params.unwrap();
+    let wrong_owner_formal = counter_constructor_params[0];
     let counter_jvm = JvmClassPlan {
         class: counter_class,
         fields: vec![JvmFieldPlan {
@@ -547,6 +548,75 @@ fn rust_frontend_session_keeps_two_parameter_and_field_alias_identities() {
         pair_constructor_slots,
         [(*pair_first, 1, 1), (*pair_second, 2, 1)]
     );
+    let JvmClassInitializationPlan::PrimaryConstructor(pair_constructor_plan) =
+        &jvm_unit.classes[1].initialization
+    else {
+        panic!("Pair retains its primary-constructor source plan");
+    };
+    let formal_proof = pair_constructor_plan
+        .prove_ordered_reference_formals(
+            &parsed.ast,
+            &source_index,
+            typer.store(),
+            &definitions,
+            pair_constructor_metadata,
+        )
+        .unwrap();
+    let proof_plan = pair_constructor_plan.clone();
+    let proof_metadata = pair_constructor_metadata.clone();
+    assert_eq!(formal_proof.class(), pair_class);
+    assert_eq!(formal_proof.constructor(), pair_constructor);
+    assert_eq!(formal_proof.source_id(), source_id);
+    assert_eq!(formal_proof.referenced_class(), counter_class);
+    assert_eq!(
+        formal_proof.constructor_parameters(),
+        &[*pair_first, *pair_second]
+    );
+    assert_eq!(
+        formal_proof.template_parameters(),
+        &[fields[0].4, fields[1].4]
+    );
+    let template_formal_type_ids = formal_proof.template_parameters().map(|parameter| {
+        let SymbolInfo::Complete(ty) = typer.store().symbols.get(parameter).info else {
+            panic!("template formal signatures are complete in this session");
+        };
+        ty
+    });
+    assert_ne!(
+        template_formal_type_ids[0], template_formal_type_ids[1],
+        "different TypeIds still prove one canonical class identity"
+    );
+    assert_eq!(
+        formal_proof.descriptor(),
+        "(Lexample/Counter;Lexample/Counter;)V"
+    );
+    assert_eq!(
+        formal_proof
+            .jvm_parameters()
+            .iter()
+            .map(|parameter| (parameter.symbol(), parameter.slot(), parameter.width()))
+            .collect::<Vec<_>>(),
+        [(*pair_first, 1, 1), (*pair_second, 2, 1)]
+    );
+    for invalid_order in [
+        vec![*pair_second, *pair_first],
+        vec![*pair_first, *pair_first],
+        vec![*pair_first],
+        vec![wrong_owner_formal, *pair_second],
+    ] {
+        let error = JvmPrimaryConstructorPlan::from_source(
+            pair_class,
+            pair_constructor,
+            invalid_order,
+            &parsed.ast,
+            &source_index,
+        )
+        .expect_err("reordered, duplicate, missing, and wrong-owner IDs must be rejected");
+        assert!(
+            format!("{error:?}").contains("ParameterIdentity"),
+            "{error:?}"
+        );
+    }
     assert_eq!(
         pair_metadata
             .fields()
@@ -797,6 +867,80 @@ fn rust_frontend_session_keeps_two_parameter_and_field_alias_identities() {
             .iter()
             .map(|(_, _, _, _, alias, _)| *alias)
             .collect::<Vec<_>>()
+    );
+
+    // Corrupt the exact inputs explicitly in this test-only branch. The
+    // validator must reject stale source syntax and then a wrong completed
+    // constructor signature without rebuilding or guessing identities.
+    drop(class_state);
+    drop(jvm_unit);
+    drop(typer);
+    let first_source_parameter = formal_proof.source_parameters()[0];
+    let original_parameter_node = parsed.ast.get(first_source_parameter).clone();
+    let first_type_tree = match parsed.ast.get(first_source_parameter).kind {
+        TreeKind::ValDef(ref parameter) => parameter.tpt,
+        _ => unreachable!("proof retains source ValDef parameters"),
+    };
+    let original_type_tree = parsed.ast.get(first_type_tree).clone();
+    let wrong_type_name = store.names.intern("DifferentCounter");
+    parsed.ast.get_mut(first_type_tree).kind = TreeKind::Ident(dotty_core::ast::Ident {
+        name: dotty_core::Name::new(wrong_type_name, dotty_core::Namespace::Type),
+        backquoted: false,
+    });
+    let source_corruption = proof_plan
+        .prove_ordered_reference_formals(
+            &parsed.ast,
+            &source_index,
+            &store,
+            &definitions,
+            &proof_metadata,
+        )
+        .expect_err("source type syntax corruption must be rejected");
+    assert!(
+        format!("{source_corruption:?}").contains("OrderedReferenceFormalIdentity"),
+        "{source_corruption:?}"
+    );
+    *parsed.ast.get_mut(first_type_tree) = original_type_tree;
+
+    let TreeKind::ValDef(parameter) = &mut parsed.ast.get_mut(first_source_parameter).kind else {
+        unreachable!("proof retains source ValDef parameters");
+    };
+    parameter.metadata.modifiers = vec![dotty_core::ast::Modifier::ParamAccessor];
+    let source_metadata_corruption = proof_plan
+        .prove_ordered_reference_formals(
+            &parsed.ast,
+            &source_index,
+            &store,
+            &definitions,
+            &proof_metadata,
+        )
+        .expect_err("constructor formal modifier corruption must be rejected");
+    assert!(
+        format!("{source_metadata_corruption:?}").contains("OrderedReferenceFormalIdentity"),
+        "{source_metadata_corruption:?}"
+    );
+    *parsed.ast.get_mut(first_source_parameter) = original_parameter_node;
+
+    let SymbolInfo::Complete(constructor_signature) = store.symbols.get(pair_constructor).info
+    else {
+        panic!("the completed constructor signature remains present");
+    };
+    let Type::Method(signature) = store.types.get_mut(constructor_signature) else {
+        panic!("the constructor retains its MethodType");
+    };
+    signature.params[1].ty = definitions.int;
+    let typed_signature_corruption = proof_plan
+        .prove_ordered_reference_formals(
+            &parsed.ast,
+            &source_index,
+            &store,
+            &definitions,
+            &proof_metadata,
+        )
+        .expect_err("completed signature corruption must be rejected");
+    assert!(
+        format!("{typed_signature_corruption:?}").contains("OrderedReferenceFormalIdentity"),
+        "{typed_signature_corruption:?}"
     );
 }
 

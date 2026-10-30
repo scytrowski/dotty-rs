@@ -27,7 +27,8 @@ mod constructor_initializers;
 mod descriptor;
 pub use constructor::{
     JvmConstructorAccessorBinding, JvmConstructorArgumentBinding, JvmConstructorIssue,
-    JvmConstructorMetadata, JvmDirectSuperConstructorPlan, JvmPrimaryConstructorPlan,
+    JvmConstructorMetadata, JvmDirectSuperConstructorPlan, JvmOrderedReferenceConstructorFormals,
+    JvmPrimaryConstructorPlan,
 };
 pub use constructor_initializers::{
     JvmConstructorAccessorInitializer, JvmConstructorFieldInitializer,
