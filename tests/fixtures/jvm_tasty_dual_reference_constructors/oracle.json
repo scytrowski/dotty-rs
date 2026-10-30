@@ -229,5 +229,113 @@
       "changed-field-alias",
       "reversed-class-order"
     ]
+  },
+  "variation_matrix": {
+    "scala_test": "pinned_scala39_classifies_dual_reference_source_and_consumer_variations",
+    "rust_test": "paired_batch_matrix_records_source_errors_and_unreached_later_stages",
+    "scala_source_variants": [
+      {
+        "path": "source-variants/ConstructorValAccessors.scala",
+        "bytes": 354,
+        "sha256": "41ac16c67a1528a016364214a7f86e47d34c35d0195f64905916a3f10a027084"
+      },
+      {
+        "path": "source-variants/ConstructorVarAccessors.scala",
+        "bytes": 354,
+        "sha256": "3a3e640ea875b96fc43e0e2cccdace7c5e06d66bb40f3827f388875bcf5a9457"
+      },
+      {
+        "path": "source-variants/ContextualConstructor.scala",
+        "bytes": 352,
+        "sha256": "c28838326cbc070d42c417ca40207b55c28d5525ce8b7b5f2c70b3aa2c0a318a"
+      },
+      {
+        "path": "source-variants/DefaultConstructor.scala",
+        "bytes": 363,
+        "sha256": "0f2794b0ebbb967c55d202440e86038645099a6105a4d469e5ca993733533ded"
+      },
+      {
+        "path": "source-variants/DuplicateParameterName.scala",
+        "bytes": 345,
+        "sha256": "5b162cc8313b9e178d945e58a3f0db2cdd34b03757d1b81ef912ae41c4ca7693"
+      },
+      {
+        "path": "source-variants/GenericConstructor.scala",
+        "bytes": 349,
+        "sha256": "3783d216b075d1b142bba09dce4fffa3cb20413c7ccf4031515f32855d0f147c"
+      },
+      {
+        "path": "source-variants/NoFields.scala",
+        "bytes": 198,
+        "sha256": "853d52179dfc3f2aa29afd20b5b40c0ad3afef18b688ae1fff12c5daf9334237"
+      },
+      {
+        "path": "source-variants/ReorderedClasses.scala",
+        "bytes": 347,
+        "sha256": "9e4235bb9f4965be7480823282d891913877d5a2e000b1b052c17f171863fd51"
+      },
+      {
+        "path": "source-variants/ReorderedParameters.scala",
+        "bytes": 346,
+        "sha256": "b46320ebc708bea0a1b082d112015259a814e42f9a916758c6afec3966f13501"
+      },
+      {
+        "path": "source-variants/SecondaryConstructor.scala",
+        "bytes": 424,
+        "sha256": "295a987827ef107546c7363cd2f0789121b2a93751e5cce927112ac20b9d90dc"
+      },
+      {
+        "path": "source-variants/ThirdDistinctReferenceField.scala",
+        "bytes": 402,
+        "sha256": "5bb3ef80af0563b05ab475090999833a6f84715d267c2443d6674d6754d0350a"
+      },
+      {
+        "path": "source-variants/ThreeReferenceFormals.scala",
+        "bytes": 362,
+        "sha256": "0681d455bafb57fca51060c74576ad96ad5106307c5407add1857c5be23e217a"
+      },
+      {
+        "path": "source-variants/WrongFieldAlias.scala",
+        "bytes": 345,
+        "sha256": "f6171a5eb8c5cf8f6d6a6f191de26c97e24be5cc768306fa082e2b353242e28f"
+      },
+      {
+        "path": "source-variants/WrongSecondType.scala",
+        "bytes": 342,
+        "sha256": "1b5c9c7ff8fedd30e4c4618534b6884520e4dd5fb10455a316eb66dd40e8c34a"
+      }
+    ],
+    "scala_consumer_negative_cases": [
+      {
+        "path": "consumer-negative/ForeignCounter.scala",
+        "bytes": 31,
+        "sha256": "eb0853500d1fca23203e2f7c5f3f517b3aa982a91e5dfde6f9d9df6b66042ca8"
+      },
+      {
+        "path": "consumer-negative/WrongArity.scala",
+        "bytes": 92,
+        "sha256": "12fbc335ef0f0d7a1be53a45585221b08fbf9a41473be658d59693c6ea205bb3"
+      },
+      {
+        "path": "consumer-negative/WrongForeignOwner.scala",
+        "bytes": 122,
+        "sha256": "77226ee04b21682920d869b5e7766692961ae18a8f9fc33826468630c9d74df7"
+      },
+      {
+        "path": "consumer-negative/WrongSecondType.scala",
+        "bytes": 100,
+        "sha256": "49894e04a84ddf946fd05b1c0da932d9b7e7a8f4581c39a608bdfd3ee68c3415"
+      }
+    ],
+    "strict_scala_run": "passed with DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_CONSUMER=1, SCALA39_ROOT at source revision 777528f19a58e794c9954a42f433373472ec57f8, and JDK 21.0.13",
+    "strict_rust_first_stage_matrix": "passed; 14 source variants; records first observed planner phase and reason",
+    "masked_later_checks": [
+      "parameter-to-field alias relationship",
+      "TASTy lowering"
+    ]
+  },
+  "sidecar_regressions": {
+    "constructor_alias_batch_publication_rejects_invalid_pairs_and_partial_results": "passed",
+    "malformed_second_sidecar_fails_before_creating_staging_or_destination": "passed"
   }
 }

@@ -1,0 +1,3 @@
+package foreign
+
+class Counter
