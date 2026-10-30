@@ -40,13 +40,25 @@ jobs:
       RUST_TEST_THREADS: 1
       SCALA39_JDK_RELEASE: 21
       SCALA39_ROOT: ${{ github.workspace }}/scala39-source
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      TMPDIR: ${{ github.workspace }}/target/tmp
 
     steps:
+      - name: Prepare worktree-local scratch
+        run: mkdir -p "$TMPDIR"
+
       - name: Check out dotty-rs
         uses: actions/checkout@v4
 
       - name: Run audit tooling unit tests
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/typer-classpath-corpus-audit -p 'test_*.py'
+
+      - name: Validate frozen lexical closure acceptance inputs
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR" "$CARGO_TARGET_DIR/typer-focused-report"
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            tools/typer-classpath-corpus-audit/verify_lexical_closure_acceptance.py inputs
 
       - name: Check out pinned Scala 3.9.0 sources
         uses: actions/checkout@v4
@@ -81,8 +93,8 @@ jobs:
       - name: Verify pinned inputs and record environment
         shell: bash
         env:
-          COURSIER_MAVEN_ROOT: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2
-          DOTTY_AUDIT_REPORT_DIR: ${{ runner.temp }}/typer-focused-report
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
         run: |
           set -euo pipefail
           test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = "777528f19a58e794c9954a42f433373472ec57f8"
@@ -92,18 +104,35 @@ jobs:
           {
             printf 'dotty-rs_commit\t%s\n' "$(git rev-parse HEAD)"
             printf 'scala3_commit\t%s\n' "$(git -C "$SCALA39_ROOT" rev-parse HEAD)"
+            printf 'pull_request_head_sha\t%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
+            printf 'pull_request_base_sha\t%s\n' "${{ github.event.pull_request.base.sha || github.sha }}"
+            printf 'github_actions_run\t%s/%s/actions/runs/%s\n' \
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf 'main_manifest_sha256\t%s\n' \
+              "$(sha256sum docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv | cut -d' ' -f1)"
+            printf 'analysis_manifest_sha256\t%s\n' \
+              "$(sha256sum docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv | cut -d' ' -f1)"
+            printf 'six_root_contract_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/lexical-closure-contract/six-root-gate.tsv | cut -d' ' -f1)"
+            printf 'negative_matrix_sha256\t%s\n' \
+              "$(sha256sum docs/typer-lexical-closure-rollback-matrix-3.9.0.tsv | cut -d' ' -f1)"
             printf 'rust\t%s\n' "$(rustc +1.98.1 --version)"
             printf 'cargo\t%s\n' "$(cargo +1.98.1 --version)"
             printf 'java\t%s\n' "$(java --version | head -1)"
+            sha256sum "$JAVA_HOME/release" "$JAVA_HOME/bin/java"
             printf 'cargo_build_jobs\t%s\n' "$CARGO_BUILD_JOBS"
             printf 'rust_test_threads\t%s\n' "$RUST_TEST_THREADS"
           } > "$DOTTY_AUDIT_REPORT_DIR/environment.tsv"
+          cp crates/dotty-typer/tests/fixtures/lexical-closure-contract/six-root-gate.tsv \
+            "$DOTTY_AUDIT_REPORT_DIR/positive-root-contract.tsv"
+          cp docs/typer-lexical-closure-rollback-matrix-3.9.0.tsv \
+            "$DOTTY_AUDIT_REPORT_DIR/negative-rollback-contract.tsv"
 
       - name: Download and verify pinned Scala runtime artifacts
         shell: bash
         env:
-          COURSIER_MAVEN_ROOT: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2
-          DOTTY_AUDIT_REPORT_DIR: ${{ runner.temp }}/typer-focused-report
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
         run: |
           set -euo pipefail
           while IFS=' ' read -r relative_path sha256; do
@@ -126,20 +155,79 @@ jobs:
           org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar 92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3
           org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar 1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af
           ARTIFACTS
+          cp crates/dotty-typer/tests/fixtures/lexical-closure-contract/scala-artifacts.sha256.tsv \
+            "$DOTTY_AUDIT_REPORT_DIR/scala-artifacts.sha256.tsv"
 
       - name: Run pinned lexical closure source oracle
         shell: bash
         env:
-          COURSIER_MAVEN_ROOT: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2
-          DOTTY_LEXICAL_CLOSURE_TMP_ROOT: ${{ runner.temp }}/lexical-closure-contract-oracle
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_LEXICAL_CLOSURE_TMP_ROOT: ${{ github.workspace }}/target/lexical-closure-contract-oracle
         run: crates/dotty-typer/tests/fixtures/lexical-closure-contract/run
 
-      - name: Run deterministic focused audit and compare baseline
+      - name: Run exact positive and negative Typer acceptance matrices
         shell: bash
         env:
-          COURSIER_MAVEN_ROOT: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2
-          DOTTY_AUDIT_TMP_ROOT: ${{ runner.temp }}/typer-focused-intermediates
-          DOTTY_AUDIT_REPORT_DIR: ${{ runner.temp }}/typer-focused-report
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          positive_test='typer::tests::lexical_closure_contract::six_root_gate::six_frozen_roots_type_as_complete_methods_in_two_independent_sessions'
+          positive_log="$DOTTY_AUDIT_REPORT_DIR/positive-rust.log"
+          cargo +1.98.1 test -p dotty-typer --lib --locked -- \
+            "$positive_test" --exact --nocapture > "$positive_log" 2>&1
+          cat "$positive_log"
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            tools/typer-classpath-corpus-audit/verify_lexical_closure_acceptance.py \
+            test-log --group positive "$positive_log"
+
+          negative_log="$DOTTY_AUDIT_REPORT_DIR/negative-rust.log"
+          cargo +1.98.1 test -p dotty-typer --lib --locked lexical_closure_rollback \
+            -- --nocapture > "$negative_log" 2>&1
+          cat "$negative_log"
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            tools/typer-classpath-corpus-audit/verify_lexical_closure_acceptance.py \
+            test-log --group negative "$negative_log"
+
+      - name: Run deterministic 25 plus 25 ordinary-method cohorts
+        shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_AUDIT_TMP_ROOT: ${{ github.workspace }}/target/typer-focused-intermediates
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOTTY_AUDIT_REPORT_DIR"
+          DOTTY_AUDIT_TYPE_METHOD_DEFINITION=1 /usr/bin/time -v \
+            tools/typer-classpath-corpus-audit/run \
+              --method-kind ordinary \
+              --method-manifest docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv \
+              --require-typed-cohort docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv \
+              --verify-determinism \
+              "$DOTTY_AUDIT_REPORT_DIR/main-cohort.tsv" \
+            2> "$DOTTY_AUDIT_REPORT_DIR/main-resource-usage.txt"
+          MAIN_AUDIT_RUN_DIR="$(python3 tools/typer-classpath-corpus-audit/audit_run_directory.py resolve "$DOTTY_AUDIT_TMP_ROOT")"
+          cp "$MAIN_AUDIT_RUN_DIR/first.ordinary-report.tsv" "$DOTTY_AUDIT_REPORT_DIR/main-cohort-first.tsv"
+          cp "$MAIN_AUDIT_RUN_DIR/second.ordinary-report.tsv" "$DOTTY_AUDIT_REPORT_DIR/main-cohort-second.tsv"
+          DOTTY_AUDIT_TYPE_METHOD_DEFINITION=1 /usr/bin/time -v \
+            tools/typer-classpath-corpus-audit/run \
+              --method-kind ordinary \
+              --method-manifest docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv \
+              --require-typed-cohort docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv \
+              --verify-determinism \
+              "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort.tsv" \
+            2> "$DOTTY_AUDIT_REPORT_DIR/analysis-resource-usage.txt"
+          ANALYSIS_AUDIT_RUN_DIR="$(python3 tools/typer-classpath-corpus-audit/audit_run_directory.py resolve "$DOTTY_AUDIT_TMP_ROOT")"
+          cp "$ANALYSIS_AUDIT_RUN_DIR/first.ordinary-report.tsv" "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort-first.tsv"
+          cp "$ANALYSIS_AUDIT_RUN_DIR/second.ordinary-report.tsv" "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort-second.tsv"
+          printf 'Cohorts: 25 frozen main roots + 25 frozen analysis roots; full corpus NOT RUN.\n' \
+            > "$DOTTY_AUDIT_REPORT_DIR/status.txt"
+
+      - name: Run existing deterministic focused audit baseline
+        shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_AUDIT_TMP_ROOT: ${{ github.workspace }}/target/focused-audit-intermediates
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
         run: |
           set -euo pipefail
           /usr/bin/time -v \
@@ -147,7 +235,7 @@ jobs:
               --focused-manifest docs/typer-focused-smoke-manifest-3.9.0.tsv \
               --verify-determinism \
               "$DOTTY_AUDIT_REPORT_DIR/focused-report.md" \
-            2> "$DOTTY_AUDIT_REPORT_DIR/runtime-resource-usage.txt"
+            2> "$DOTTY_AUDIT_REPORT_DIR/focused-runtime-resource-usage.txt"
           AUDIT_RUN_DIR="$(python3 tools/typer-classpath-corpus-audit/audit_run_directory.py resolve "$DOTTY_AUDIT_TMP_ROOT")"
           python3 tools/typer-classpath-corpus-audit/verify_focused_gate.py \
             --report "$DOTTY_AUDIT_REPORT_DIR/focused-report.md" \
@@ -158,7 +246,7 @@ jobs:
             --timing-log "$AUDIT_RUN_DIR/second.log" \
             --timing-rss "$AUDIT_RUN_DIR/second.rss"
           printf 'Focused-only coverage: 3 files / 31 methods; not a full-corpus result.\n' \
-            > "$DOTTY_AUDIT_REPORT_DIR/status.txt"
+            > "$DOTTY_AUDIT_REPORT_DIR/focused-status.txt"
 
       - name: Upload focused report, timings, and intermediates
         if: always()
@@ -166,8 +254,9 @@ jobs:
         with:
           name: typer-focused-audit-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/typer-focused-report/
-            ${{ runner.temp }}/typer-focused-intermediates/
-            ${{ runner.temp }}/lexical-closure-contract-oracle/
-          if-no-files-found: warn
+            ${{ github.workspace }}/target/typer-focused-report/
+            ${{ github.workspace }}/target/typer-focused-intermediates/
+            ${{ github.workspace }}/target/focused-audit-intermediates/
+            ${{ github.workspace }}/target/lexical-closure-contract-oracle/
+          if-no-files-found: error
           retention-days: 30

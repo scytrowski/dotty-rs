@@ -67,6 +67,67 @@ class OrdinaryCohortGateTests(unittest.TestCase):
             )
             self.assertIn("expected fully typed", MODULE.verify(cohort, report)[0])
 
+    def test_gate_requires_every_frozen_manifest_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            cohort, report = self.write_fixture(directory, "typed")
+            manifest = directory / "manifest.tsv"
+            manifest.write_text(
+                "identity\tsource_tree\n"
+                "scala/Example.scala#tree=7\t7\n"
+                "scala/Example.scala#tree=8\t8\n",
+                encoding="utf-8",
+            )
+            failures = MODULE.verify(cohort, report, manifest)
+            self.assertIn(
+                "scala/Example.scala#tree=8: missing from ordinary audit report",
+                failures,
+            )
+
+    def test_gate_accepts_a_complete_exact_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            cohort, report = self.write_fixture(directory, "typed")
+            manifest = directory / "manifest.tsv"
+            manifest.write_text(
+                "identity\tsource_tree\nscala/Example.scala#tree=7\t7\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(MODULE.verify(cohort, report, manifest), [])
+
+    def test_gate_rejects_an_unlisted_report_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            cohort, report = self.write_fixture(directory, "typed")
+            manifest = directory / "manifest.tsv"
+            manifest.write_text(
+                "identity\tsource_tree\nscala/Example.scala#tree=7\t7\n",
+                encoding="utf-8",
+            )
+            report.write_text(
+                report.read_text(encoding="utf-8")
+                + "scala/Example.scala#tree=9\tExample\textra\t1\t0..1\t[]\tInt\tInt\t1\ttyped\t9\t3\n",
+                encoding="utf-8",
+            )
+            failures = MODULE.verify(cohort, report, manifest)
+            self.assertIn(
+                "scala/Example.scala#tree=9: unexpected in ordinary audit report",
+                failures,
+            )
+
+    def test_gate_rejects_duplicate_report_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            cohort, report = self.write_fixture(directory, "typed")
+            report.write_text(
+                report.read_text(encoding="utf-8")
+                + report.read_text(encoding="utf-8").splitlines()[-1]
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate ordinary-method identity"):
+                MODULE.verify(cohort, report)
+
 
 if __name__ == "__main__":
     unittest.main()

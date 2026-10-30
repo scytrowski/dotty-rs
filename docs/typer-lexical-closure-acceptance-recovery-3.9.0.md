@@ -12,7 +12,10 @@ were changed for issue #1892.
 | --- | --- |
 | Fetched `main` at baseline | `9042c15be3ad708d80f0ad5d637055f1ac6160b6` |
 | Required #1899 merge in history | `22557fe4af779a915b32c697ffa6079cda9f0aca` |
-| #1888 / #1889 / #1890 prerequisite merges | `16968f57` / `5a1e95c1` / `afd1ddea` |
+| #1888 / PR #1893 merge | `16968f5735bd680ca8690b01f875f006d9f728bf` |
+| #1889 / PR #1895 merge | `5a1e95c194ecc9d705b78c18f4df23b14de3a970` |
+| #1890 / PR #1897 merge | `afd1ddeaa0b1260dd39d9a1bd39ec6f69e29a8b6` |
+| #1891 / PR #1899 merge | `22557fe4af779a915b32c697ffa6079cda9f0aca` |
 | Scala 3.9.0 source revision | `777528f19a58e794c9954a42f433373472ec57f8` |
 | JDK | Eclipse Temurin `21.0.8+9` |
 | `JAVA_HOME/release` SHA-256 | `f83f6dcc966043c93cd498ac8e7ee7c310852074970d62c702e4ad2710002898` |

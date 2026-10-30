@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Require frozen baseline-typed ordinary methods to remain fully typed."""
+"""Require prior typed roots and, when supplied, the full frozen manifest."""
 
 from __future__ import annotations
 
@@ -27,14 +27,38 @@ def parse_report(path: Path) -> dict[str, dict[str, str]]:
         )
     except (StopIteration, ValueError) as error:
         raise ValueError(f"{path}: ordinary audit header is missing") from error
-    rows = csv.DictReader(lines[header_index:], delimiter="\t")
-    return {row["method"]: row for row in rows}
+    rows = list(csv.DictReader(lines[header_index:], delimiter="\t"))
+    by_identity = {row["method"]: row for row in rows}
+    if len(by_identity) != len(rows):
+        raise ValueError(f"{path}: duplicate ordinary-method identity")
+    return by_identity
 
 
-def verify(cohort_path: Path, report_path: Path) -> list[str]:
+def verify(
+    cohort_path: Path,
+    report_path: Path,
+    manifest_path: Path | None = None,
+) -> list[str]:
     cohort = read_tsv(cohort_path)
     report = parse_report(report_path)
     failures = []
+    required_rows = [row for row in cohort if row.get("gate") == "required_typed"]
+    required_ids = [row["identity"] for row in required_rows]
+    if len(required_ids) != len(set(required_ids)):
+        failures.append(f"{cohort_path}: duplicate required_typed identity")
+
+    if manifest_path is not None:
+        manifest = read_tsv(manifest_path)
+        manifest_ids = [row["identity"] for row in manifest]
+        if len(manifest_ids) != len(set(manifest_ids)):
+            failures.append(f"{manifest_path}: duplicate frozen manifest identity")
+        expected = set(manifest_ids)
+        actual = set(report)
+        for identity in sorted(expected - actual):
+            failures.append(f"{identity}: missing from ordinary audit report")
+        for identity in sorted(actual - expected):
+            failures.append(f"{identity}: unexpected in ordinary audit report")
+
     for row in cohort:
         if row.get("gate") != "required_typed":
             continue
@@ -71,9 +95,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("cohort", type=Path)
     parser.add_argument("report", type=Path)
+    parser.add_argument("--manifest", type=Path)
     arguments = parser.parse_args()
     try:
-        failures = verify(arguments.cohort, arguments.report)
+        failures = verify(arguments.cohort, arguments.report, arguments.manifest)
     except (OSError, ValueError, KeyError) as error:
         print(error, file=sys.stderr)
         return 2
