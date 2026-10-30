@@ -1256,20 +1256,68 @@ fn pinned_scala39_rejects_corrupt_or_inconsistent_dual_reference_inputs() {
     eprintln!(
         "CONTROL_WRONG_CLASSFILE_CONSTRUCTOR_DESCRIPTOR_WITH_TASTY: compiled from original TASTy source signature"
     );
-    // Exercise the malformed descriptor with the matched classfile-only
-    // fallback control so its actual first failure is recorded.
-    fs::remove_file(bad_descriptor.join("example/Pair.tasty")).unwrap();
-    let descriptor_out = temporary.join("bad-descriptor-out");
-    fs::create_dir_all(&descriptor_out).unwrap();
-    let descriptor_result = scala.compile_result(
-        &scala.classpath(&bad_descriptor),
-        &descriptor_out,
+
+    let classfile_only_constructor = temporary.join("classfile-only-constructor-original");
+    fs::create_dir_all(&classfile_only_constructor).unwrap();
+    write_batch(&classfile_only_constructor, &batch);
+    fs::write(
+        classfile_only_constructor.join("example/Pair.class"),
+        without_tasty_marker(pair_class),
+    )
+    .unwrap();
+    fs::remove_file(classfile_only_constructor.join("example/Pair.tasty")).unwrap();
+    let original_constructor_out = temporary.join("classfile-only-constructor-original-out");
+    fs::create_dir_all(&original_constructor_out).unwrap();
+    let original_constructor_result = scala.compile_result(
+        &scala.classpath(&classfile_only_constructor),
+        &original_constructor_out,
         &simple_client,
     );
-    reject_with_first_error(
-        &descriptor_result,
-        "wrong-arity Pair constructor descriptor",
+    assert!(
+        original_constructor_result.status.success(),
+        "the original two-argument constructor resolves from the same classfile-only setup:\n{}",
+        String::from_utf8_lossy(&original_constructor_result.stderr)
     );
+    eprintln!(
+        "CONTROL_CLASSFILE_ONLY_PAIR_CONSTRUCTOR: original two-argument descriptor compiles with TASTY marker and sidecar removed"
+    );
+
+    let altered_classfile_only_constructor = temporary.join("classfile-only-constructor-altered");
+    fs::create_dir_all(&altered_classfile_only_constructor).unwrap();
+    write_batch(&altered_classfile_only_constructor, &batch);
+    fs::write(
+        altered_classfile_only_constructor.join("example/Pair.class"),
+        without_tasty_marker(&wrong_pair_constructor_descriptor(pair_class)),
+    )
+    .unwrap();
+    fs::remove_file(altered_classfile_only_constructor.join("example/Pair.tasty")).unwrap();
+    let altered_constructor_out = temporary.join("classfile-only-constructor-altered-out");
+    fs::create_dir_all(&altered_constructor_out).unwrap();
+    let altered_constructor_result = scala.compile_result(
+        &scala.classpath(&altered_classfile_only_constructor),
+        &altered_constructor_out,
+        &simple_client,
+    );
+    let constructor_first = reject_with_first_error(
+        &altered_constructor_result,
+        "wrong-arity Pair constructor descriptor in matched classfile-only fallback",
+    );
+    let constructor_diagnostic =
+        strip_ansi(&String::from_utf8_lossy(&altered_constructor_result.stderr));
+    assert!(
+        !constructor_diagnostic.contains("It should have been loaded from `.tasty` file"),
+        "constructor fallback must reach classfile lookup instead of sidecar loading: {constructor_diagnostic}"
+    );
+    assert!(
+        constructor_diagnostic.contains("too many arguments"),
+        "the altered zero-argument descriptor must fail specifically on call arity: {constructor_diagnostic}"
+    );
+    eprintln!("CLASSFILE_ONLY_FIRST_ERROR_PAIR_CONSTRUCTOR: {constructor_first}");
+    let constructor_arity_diagnostic = constructor_diagnostic
+        .lines()
+        .find(|line| line.contains("too many arguments"))
+        .expect("Scala reports the constructor arity error");
+    eprintln!("CLASSFILE_ONLY_FIRST_DIAGNOSTIC_PAIR_CONSTRUCTOR: {constructor_arity_diagnostic}");
 
     let bad_method_signature = temporary.join("bad-method-signature");
     fs::create_dir_all(&bad_method_signature).unwrap();

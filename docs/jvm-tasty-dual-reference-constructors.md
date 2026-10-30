@@ -547,7 +547,7 @@ from the strict run were:
 | Constructor PARAM `SHAREDtype` changed to an unused AST address | Scala 3.9 compilation fails while reading the malformed declaration (`-- Error:` at the client source) |
 | Alias VALDEF type `NameRef` changed to an unused name-table address | Scala `-decompile` fails in the TASTy reader with `IndexOutOfBoundsException` for the missing name entry |
 | Pair classfile TASTY UUID differs from the sidecar header | `class is out of sync with its TASTy file` after the TASTy file is loaded |
-| Wrong-arity Pair constructor descriptor with sidecar removed | Scala compile error at the constructor call |
+| Wrong-arity Pair constructor descriptor in matched classfile-only fallback, with the original two-argument constructor accepted under the same setup | “too many arguments for constructor Pair” with signature `(): example.Pair`; no sidecar-loader failure occurs |
 | Missing Counter classfile and sidecar | `[E006] Not Found Error` for `Counter` |
 | Wrong second argument type or same-spelled `foreign.Counter` | `[E007] Type Mismatch Error` at the second argument |
 
@@ -561,12 +561,15 @@ uses only the complete, unchanged original batch.
 
 With an altered classfile constructor descriptor or method descriptor, Scala
 compilation still succeeds if the original TASTy sidecar remains and uses its
-source signature. The classfile-only method fallback is checked with the
-original `()I` method first, which compiles when both its TASTY marker and
-sidecar are removed. Changing the classfile descriptor to `()V` then fails with
-`[E007] Type Mismatch Error` (`Found: Unit`, `Required: Int`). This confirms the
-fallback failure comes from the altered result type rather than an unrelated
-missing-type or TASTy-loading error. No altered classfile is run. This behavior
+source signature. Both classfile-only fallbacks have matching original
+descriptor controls, with the TASTY marker and sidecar removed in each case.
+The original two-argument Pair constructor compiles; changing its descriptor to
+`()V` fails at the call with “too many arguments for constructor Pair” and
+signature `(): example.Pair`, without a sidecar-loader error. The original
+`leftValue()I` method also compiles; changing its descriptor to `()V` fails
+with `[E007] Type Mismatch Error` (`Found: Unit`, `Required: Int`). These
+controls show each failure comes from its changed classfile signature rather
+than unrelated loading behavior. No altered classfile is run. This
 distinguishes TASTy-based Scala source lookup from the bytecode ABI used at
 runtime.
 
