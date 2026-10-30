@@ -294,7 +294,7 @@ fn scala39_oracle_pins_two_distinct_reference_formals_fields_and_tasty_links() {
         .iter_nodes_with_tag(DEFDEF_TAG)
         .filter_map(|node| {
             let body = index.get(node.offset as u32)?.decode_defdef_body().ok()?;
-            Some(pair_tasty.names().render(body.name).ok()?)
+            pair_tasty.names().render(body.name).ok()
         })
         .collect::<Vec<_>>();
     assert!(methods.contains(&"<init>".to_owned()));
