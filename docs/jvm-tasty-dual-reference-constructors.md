@@ -377,6 +377,9 @@ source session, the strict test writes these original outputs:
 | `example/Pair.class` | `add99598bf726187b887e569833479c0f5fe7371868b861177a4d7ec29bd0828` |
 | `example/Pair.tasty` | `2cdb802044f46d08fbe8aada64af62bd5669b2c8c6406e69213f1d4394520af4` |
 
+The follow-up strict JDK run reproduced the `Pair.tasty` digest above before
+`javac` and after both `javac` and runtime execution.
+
 The test records these four hashes before and after `javac` and again after
 `java -Xverify:all -ea`. The bytes are also compared directly to the in-memory
 Rust artifacts after execution. Java tools do not replace any Rust output.
