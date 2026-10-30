@@ -65,9 +65,10 @@ typing continue to use their existing transactional rollback behavior.
 The focused regression in
 `crates/dotty-typer/src/typer/tests/compose_conformance.rs` exercises a direct
 generic call and a complete generic closure method. It checks the owned typed
-`DefDef`, closure captures (`this` and the canonical `g` parameter), inner
-application source-to-typed mapping and selected `Function1.apply`, method
-binder identity, and final `A => R` result. Negative methods cover a wrong
+`DefDef`, closure captures (`this` and the canonical `g` parameter), inner and
+outer application source-to-typed mappings and their distinct canonical `apply`
+owners, inferred lambda input binder, method binder identity, and final `A => R`
+result. Negative methods cover a wrong
 argument, mismatched function owner/input, wrong function variance, wrong
 output, wrong arity, and an unrelated `apply`. A separate empty-classpath case
 checks that missing `Function1` produces `SourceFunctionClassNotFound` and rolls
@@ -79,9 +80,9 @@ The pinned Scala oracle controls in
 `crates/dotty-typer/tests/fixtures/function1-compose-conformance/` compile
 `g(x): T1`, `apply(g(x)): R`, a full generic `compose[A]`, and a real generic
 function value. Negative controls are rejected for wrong input, wrong owner,
-wrong variance, wrong arity, and unrelated `apply`. The runner verifies the source checkout
-revision, JDK 21, and SHA256 values for its compiler artifacts before invoking
-Scala.
+wrong variance, wrong arity, and unrelated `apply`. The runner verifies the
+source checkout revision, JDK 21, and SHA256 values for its compiler artifacts
+before invoking Scala.
 
 The deterministic two-root whole-method audit contains `andThen#tree=111` and
 `compose#tree=86`: both type successfully after the change, including the

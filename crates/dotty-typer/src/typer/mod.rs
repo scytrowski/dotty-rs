@@ -6165,6 +6165,7 @@ mod tests {
         }
     }
 
+    mod compose_conformance;
     mod enclosing_this_capture;
     mod lexical_closure_contract;
     mod lexical_closure_rollback;
