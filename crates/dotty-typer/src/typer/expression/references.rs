@@ -696,6 +696,40 @@ impl SourceTyper<'_> {
         Ok(typed)
     }
 
+    fn capture_implicit_enclosing_this(
+        &mut self,
+        method: SymbolId,
+        class: SymbolId,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<(), TyperError> {
+        if !self
+            .function_literals
+            .can_capture_enclosing_this(self.store, method, class)
+        {
+            return Err(TyperError::FunctionLiteralCaptureUnsupported {
+                source: self.source,
+                tree_index,
+                symbol: Some(class),
+            });
+        }
+        if self.uninitialized_parent_receiver == Some(class) {
+            return Err(TyperError::UninitializedParentArgumentReceiver {
+                source: self.source,
+                tree_index,
+                receiver: class,
+            });
+        }
+        let ty = self.store.types.alloc(Type::ThisType { class });
+        let this = self.typed_arena.alloc(Tree {
+            kind: TreeKind::This(dotty_core::ast::This { qual: None }),
+            position,
+            ty,
+        });
+        self.function_literals.capture(method, class, this);
+        Ok(())
+    }
+
     pub(in crate::typer) fn type_super_expression(
         &mut self,
         tree: TreeId<Untyped>,
@@ -845,6 +879,24 @@ impl SourceTyper<'_> {
                     SymbolKind::Object | SymbolKind::ModuleClass | SymbolKind::Package
                 )
             });
+        let instance_member = declaration.owner.is_some_and(|owner| {
+            self.store.symbols.contains(owner)
+                && matches!(
+                    self.store.symbols.get(owner).kind,
+                    SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                )
+                && matches!(
+                    declaration.kind,
+                    SymbolKind::Method
+                        | SymbolKind::Field
+                        | SymbolKind::Value
+                        | SymbolKind::Variable
+                )
+                && !declaration.flags.contains(SymbolFlags::STATIC)
+        });
+        let capture_member_owner =
+            self.function_literals
+                .same_owner_instance_member(self.store, context.owner, symbol);
         let capture_parameter = self.function_literals.is_method(context.owner)
             && self.function_literals.can_capture_method_parameter(
                 self.store,
@@ -869,10 +921,7 @@ impl SourceTyper<'_> {
         if self.function_literals.is_method(context.owner)
             && declaration.owner != Some(context.owner)
             && (matches!(declaration.kind, SymbolKind::Parameter | SymbolKind::Local)
-                || (matches!(
-                    declaration.kind,
-                    SymbolKind::Field | SymbolKind::Value | SymbolKind::Variable
-                ) && !shared_owner))
+                || (instance_member && !shared_owner && capture_member_owner.is_none()))
             && !capture_parameter
             && !capture_local
         {
@@ -886,6 +935,9 @@ impl SourceTyper<'_> {
             self.expression_type_of_symbol(symbol, context.owner, tree.index(), info_journal)?;
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .ident_with_backquoted(ident.name, ident.backquoted, ty, position);
+        if let Some(class) = capture_member_owner {
+            self.capture_implicit_enclosing_this(context.owner, class, tree.index(), position)?;
+        }
         if capture_parameter || capture_local {
             self.function_literals.capture(context.owner, symbol, typed);
         }

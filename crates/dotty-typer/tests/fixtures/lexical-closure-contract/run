@@ -73,6 +73,7 @@ compile_positive MethodParameters.scala MethodParameters.scala39-typed-tree.txt
 compile_positive Mutable.scala Mutable.scala39-typed-tree.txt
 compile_positive LocalValues.scala LocalValues.scala39-typed-tree.txt
 compile_positive ThisCapture.scala ThisCapture.scala39-typed-tree.txt
+compile_positive SameOwnerMembers.scala SameOwnerMembers.scala39-typed-tree.txt
 
 expect_failure() {
     local source="$1" expected="$2"
@@ -96,4 +97,5 @@ printf '%s\n' 'Positive capture, shadowing, instance-member, and mutable-control
 printf '%s\n' 'Enclosing method parameter capture ordering and deduplication match the pinned typer snapshot.'
 printf '%s\n' 'Inferred local-value capture ordering, deduplication, shadowing, and nested-block typing match the pinned typer snapshot.'
 printf '%s\n' 'Lexical class/trait this capture and qualified enclosing-this trees match the pinned typer snapshot.'
+printf '%s\n' 'Same-owner implicit/explicit method calls and immutable field reads match the pinned typer snapshot.'
 printf '%s\n' 'Wrong-result and unknown-reference controls remain rejected.'
