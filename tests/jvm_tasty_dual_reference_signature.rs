@@ -4,9 +4,11 @@ use std::process::Command;
 
 use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 use dotty_core::SourceId;
+use dotty_core::ast::TreeKind;
 use dotty_tasty::ast::{DEFDEF_TAG, LOCAL_TAG, PARAM_TAG, PRIVATE_TAG, VALDEF_TAG};
 use dotty_tasty::file::TastyFile;
 use dotty_tasty::tasty::DefinitionTail;
+use dotty_tasty_pickler::{ClassStatePicklePlan, PrimaryConstructorInputPlan, SourceMetadata};
 
 const SOURCE: &str =
     include_str!("fixtures/jvm_tasty_dual_reference_constructors/PairSignatureOnly.scala");
@@ -266,4 +268,106 @@ fn renamed_and_reordered_signature_only_sources_emit_deterministically() {
             "repeat output for {source_name} is deterministic",
         );
     }
+}
+
+#[test]
+fn class_state_rejects_corrupt_dual_formal_identity_before_output() {
+    let source = SOURCE;
+    with_paired_jvm_tasty_batch_plan(
+        source,
+        "PairSignatureOnly.scala",
+        SourceId::from_index(18763),
+        |batch| {
+            let pair = batch
+                .classes
+                .iter()
+                .find(|class| class.tasty_path.ends_with("/Pair.tasty"))
+                .expect("Pair plan exists")
+                .tasty_plan
+                .plan();
+            let constructor = &pair.constructor;
+            let TreeKind::DefDef(definition) = &pair.source_ast.get(constructor.source_tree).kind
+            else {
+                panic!("primary constructor source is a DefDef");
+            };
+            let trees = &definition.value_param_clauses[0];
+            let template_first = pair
+                .source_index
+                .symbol_at(pair.source.id, trees[0])
+                .unwrap();
+            let original = constructor.clone();
+            let check = |candidate: PrimaryConstructorInputPlan, source_id: SourceId| {
+                let corrupted = ClassStatePicklePlan {
+                    store: pair.store,
+                    definitions: pair.definitions,
+                    source_ast: pair.source_ast,
+                    typed_ast: pair.typed_ast,
+                    source_index: pair.source_index,
+                    typed_bindings: pair.typed_bindings,
+                    source: SourceMetadata {
+                        id: source_id,
+                        name: pair.source.name.clone(),
+                    },
+                    class: pair.class,
+                    class_tree: pair.class_tree,
+                    constructor: candidate,
+                    members: pair.members,
+                };
+                match corrupted.validate() {
+                    Err(error) => format!("{error:?}"),
+                    Ok(_) => panic!("corrupt signature must fail before TASTy output"),
+                }
+            };
+
+            let mut missing = original.clone();
+            missing.parameter_clauses[0].pop();
+            let missing_error = check(missing, pair.source.id);
+            assert!(
+                missing_error.contains("PrimaryConstructorInput"),
+                "{missing_error}"
+            );
+
+            let mut duplicate = original.clone();
+            duplicate.parameter_clauses[0][1] = duplicate.parameter_clauses[0][0];
+            let duplicate_error = check(duplicate, pair.source.id);
+            assert!(
+                duplicate_error.contains("SourceBinding")
+                    || duplicate_error.contains("DuplicateDeclaration")
+                    || duplicate_error.contains("ScopeMembers"),
+                "{duplicate_error}"
+            );
+
+            let mut swapped = original.clone();
+            swapped.parameter_clauses[0].reverse();
+            let swapped_error = check(swapped, pair.source.id);
+            assert!(swapped_error.contains("ScopeMembers"), "{swapped_error}");
+
+            let mut confused_owner = original.clone();
+            confused_owner.parameter_clauses[0][0] = template_first;
+            let owner_error = check(confused_owner, pair.source.id);
+            assert!(
+                owner_error.contains("SourceBinding")
+                    || owner_error.contains("Owner")
+                    || owner_error.contains("ScopeMembers"),
+                "{owner_error}"
+            );
+
+            let mut third = original;
+            third.parameter_clauses[0].push(template_first);
+            let third_error = check(third, pair.source.id);
+            assert!(
+                third_error.contains("PrimaryConstructorInput"),
+                "{third_error}"
+            );
+
+            let cross_source_error = check(constructor.clone(), SourceId::from_index(1));
+            assert!(
+                cross_source_error.contains("SourceBinding")
+                    || cross_source_error.contains("SourceOrigin")
+                    || cross_source_error.contains("SourceDefinition"),
+                "{cross_source_error}"
+            );
+        },
+    )
+    .expect("the canonical signature-only batch itself is valid");
 }

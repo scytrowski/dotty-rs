@@ -184,12 +184,7 @@ impl ValidatedPicklePlan<'_, '_> {
                 let template_type_syntax =
                     crate::class_state_output::constructor_parameter_type_syntax(
                         &mut context,
-                        p.store,
-                        p.definitions,
-                        p.source.id,
-                        p.source_ast,
-                        p.source_index,
-                        p.typed_bindings,
+                        p,
                         tree,
                         constructor_parameter,
                         true,
@@ -229,12 +224,7 @@ impl ValidatedPicklePlan<'_, '_> {
                 let constructor_type_syntax =
                     crate::class_state_output::constructor_parameter_type_syntax(
                         &mut context,
-                        p.store,
-                        p.definitions,
-                        p.source.id,
-                        p.source_ast,
-                        p.source_index,
-                        p.typed_bindings,
+                        p,
                         tree,
                         constructor_parameter,
                         false,
