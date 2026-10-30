@@ -85,13 +85,21 @@ fn paired_batch_matrix_records_source_errors_and_unreached_later_stages() {
         &SOURCE[pair_start + 1..],
         counter_source.split_once("\nclass Pair").unwrap().0
     );
-    let variants = [
-        Case {
-            name: "reordered class declaration order",
-            source: reordered_classes,
-            phase: "TASTy plan validation",
-            reason: "PrimaryConstructorInput",
+    let reordered = with_paired_jvm_tasty_batch_plan(
+        &reordered_classes,
+        "Pair.scala",
+        SourceId::from_index(18750),
+        |batch| {
+            batch
+                .classes
+                .iter()
+                .map(|class| class.tasty_path.clone())
+                .collect::<Vec<_>>()
         },
+    )
+    .expect("reordering the same-source class declarations preserves canonical alias identities");
+    assert_eq!(reordered.len(), 2);
+    let variants = [
         Case {
             name: "wrong second field source type",
             source: SOURCE.replace("second: Counter", "second: Int"),
@@ -185,7 +193,7 @@ fn paired_batch_matrix_records_source_errors_and_unreached_later_stages() {
                 "class Pair(second: Counter, first: Counter)",
             ),
             phase: "TASTy plan validation",
-            reason: "PrimaryConstructorInput",
+            reason: "UnsafeFieldInitializer",
         },
         Case {
             name: "wrong field-to-parameter alias",
@@ -194,17 +202,22 @@ fn paired_batch_matrix_records_source_errors_and_unreached_later_stages() {
                 "private val right: Counter = first",
             ),
             phase: "TASTy plan validation",
-            reason: "PrimaryConstructorInput",
+            reason: "UnsafeFieldInitializer",
         },
     ];
     for case in variants {
-        let error = with_paired_jvm_tasty_batch_plan(
+        let result = with_paired_jvm_tasty_batch_plan(
             &case.source,
             "Pair.scala",
             SourceId::from_index(1875),
             |_| (),
-        )
-        .expect_err("each variation must report its real first paired-planner rejection");
+        );
+        let Err(error) = result else {
+            panic!(
+                "unsupported variation was unexpectedly accepted: {}",
+                case.name
+            );
+        };
         let observed = format!("{error:?}");
         assert!(observed.contains(case.phase), "{}: {observed}", case.name);
         assert!(observed.contains(case.reason), "{}: {observed}", case.name);
