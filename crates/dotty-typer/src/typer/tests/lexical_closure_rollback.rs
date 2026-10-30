@@ -20,6 +20,15 @@ fn method_tree_for(
 
 fn rollback_projection(typer: &SourceTyper<'_>, parsed: &dotty_parser::ParseResult) -> String {
     let source = typer.source;
+    // The typed arena is separate from SemanticStore and SourceTypedIndex.
+    // Keep both its allocation boundary and every preexisting node in the
+    // projection so rollback checks catch leaked nodes and in-place mutation.
+    let typed_arena_checkpoint = typer.typed_ast().checkpoint();
+    let typed_arena_nodes = typer
+        .typed_ast()
+        .iter()
+        .map(|(tree, node)| (tree.index(), node.clone()))
+        .collect::<Vec<_>>();
     let mappings = parsed
         .ast
         .iter()
@@ -51,7 +60,7 @@ fn rollback_projection(typer: &SourceTyper<'_>, parsed: &dotty_parser::ParseResu
         })
         .collect::<Vec<_>>();
     format!(
-        "checkpoint={:?}; symbols={:?}; scopes={:?}; types={:?}; mappings={mappings:?}; closures={closure_environments:?}; resolver={:?}",
+        "checkpoint={:?}; typed_arena_checkpoint={typed_arena_checkpoint:?}; typed_arena_nodes={typed_arena_nodes:?}; symbols={:?}; scopes={:?}; types={:?}; mappings={mappings:?}; closures={closure_environments:?}; resolver={:?}",
         typer.store.checkpoint(),
         typer.store.symbols,
         typer.store.scopes,
