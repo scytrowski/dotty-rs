@@ -325,6 +325,93 @@ fn ordinary_function1_captures_implicit_same_owner_members() {
 }
 
 #[test]
+fn overloaded_same_owner_calls_capture_the_canonical_receiver_for_both_syntaxes() {
+    let source_text = concat!(
+        "class Calculator { ",
+        "def convert(x: Int): Int = x + 1; ",
+        "def convert(x: Boolean): Int = if x then 1 else 0; ",
+        "def lifted: Int => Int = x => convert(x); ",
+        "def explicit: Int => Int = x => this.convert(x) ",
+        "}",
+    );
+    let (parsed, mut store, mut packages, definitions, index, source) = parse_and_name(source_text);
+    enter_scala_function_classes(&mut store, &mut packages, [1]);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    let mut selected_symbols = Vec::new();
+    for name in ["lifted", "explicit"] {
+        let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+        typer
+            .type_method_definition(method_tree(&parsed, &index, source, method))
+            .unwrap_or_else(|error| panic!("Calculator.{name} should type: {error:?}"));
+        let typed_rhs = typer.source_typed_index().get(source, rhs).unwrap();
+        let TreeKind::Closure(closure) = &typer.typed_ast().get(typed_rhs).kind else {
+            panic!("Calculator.{name} should produce a closure");
+        };
+        assert_eq!(closure.env.len(), 1, "Calculator.{name} captures one this");
+        let captured = typer.typed_ast().get(closure.env[0]);
+        assert!(matches!(captured.kind, TreeKind::This(_)));
+        assert!(matches!(
+            typer.store().types.get(captured.ty),
+            Type::ThisType { class }
+                if typer.store().names.resolve(typer.store().symbols.get(*class).name.text()) == "Calculator"
+        ));
+
+        let reference = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let selected = match (&node.kind, name) {
+                    (TreeKind::Ident(ident), "lifted") => {
+                        typer.store().names.resolve(ident.name.text()) == "convert"
+                    }
+                    (TreeKind::Select(selection), "explicit") => {
+                        typer.store().names.resolve(selection.name.text()) == "convert"
+                            && matches!(parsed.ast.get(selection.qualifier).kind, TreeKind::This(_))
+                    }
+                    _ => false,
+                };
+                (selected && typer.source_typed_index().get(source, tree).is_some()).then_some(tree)
+            })
+            .unwrap_or_else(|| panic!("Calculator.{name} should map its selected overload"));
+        let typed_reference = typer.source_typed_index().get(source, reference).unwrap();
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        } = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(typed_reference).ty)
+        else {
+            panic!("Calculator.{name} should retain the selected overload symbol");
+        };
+        selected_symbols.push(*symbol);
+    }
+
+    assert_eq!(selected_symbols[0], selected_symbols[1]);
+    let selected = selected_symbols[0];
+    assert_eq!(typer.store().symbols.get(selected).kind, SymbolKind::Method);
+    let SymbolInfo::Complete(signature) = typer.store().symbols.get(selected).info else {
+        panic!("selected Int overload should have a complete signature");
+    };
+    let Type::Method(signature) = typer.store().types.get(signature) else {
+        panic!("selected Int overload should retain its method type");
+    };
+    assert!(matches!(
+        typer.store().types.get(signature.params[0].ty),
+        Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }
+            if typer.store().names.resolve(typer.store().symbols.get(*symbol).name.text()) == "Int"
+    ));
+}
+
+#[test]
 fn same_owner_member_capture_fails_closed_and_rolls_back_rejected_lambdas() {
     let source_text = concat!(
         "class Base { def inherited(x: Int): Int = x }; ",

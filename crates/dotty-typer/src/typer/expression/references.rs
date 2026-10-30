@@ -860,13 +860,35 @@ impl SourceTyper<'_> {
                 name: ident.name,
             });
         }
+        self.type_resolved_identifier_expression(
+            symbol,
+            ident,
+            position,
+            context,
+            tree.index(),
+            info_journal,
+        )
+    }
+
+    pub(in crate::typer) fn type_resolved_identifier_expression(
+        &mut self,
+        symbol: SymbolId,
+        ident: Ident,
+        position: Option<SourceSpan>,
+        context: ExpressionContext,
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if !self.store.symbols.contains(symbol) {
+            return Err(TyperError::UnknownSymbol { symbol });
+        }
         let declaration = self.store.symbols.get(symbol);
         if let Some(receiver) = self.uninitialized_parent_receiver
             && self.is_instance_class_member(symbol)
         {
             return Err(TyperError::UninitializedParentArgumentReceiver {
                 source: self.source,
-                tree_index: tree.index(),
+                tree_index,
                 receiver,
             });
         }
@@ -927,16 +949,15 @@ impl SourceTyper<'_> {
         {
             return Err(TyperError::FunctionLiteralCaptureUnsupported {
                 source: self.source,
-                tree_index: tree.index(),
+                tree_index,
                 symbol: Some(symbol),
             });
         }
-        let ty =
-            self.expression_type_of_symbol(symbol, context.owner, tree.index(), info_journal)?;
+        let ty = self.expression_type_of_symbol(symbol, context.owner, tree_index, info_journal)?;
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .ident_with_backquoted(ident.name, ident.backquoted, ty, position);
         if let Some(class) = capture_member_owner {
-            self.capture_implicit_enclosing_this(context.owner, class, tree.index(), position)?;
+            self.capture_implicit_enclosing_this(context.owner, class, tree_index, position)?;
         }
         if capture_parameter || capture_local {
             self.function_literals.capture(context.owner, symbol, typed);
