@@ -19,10 +19,13 @@ Focused regression coverage lives in
 [`enclosing_this_capture.rs`](../crates/dotty-typer/src/typer/tests/enclosing_this_capture.rs).
 It checks class, trait, qualified, repeated, and mixed parameter/instance
 captures, synthetic lambda ownership, mismatch rollback and retry, module
-receiver rejection, and a non-enclosing qualifier. The pinned Scala 3.9.0 source oracle remains the compatibility reference at
-revision `777528f19a58e794c9954a42f433373472ec57f8`. Its execution was not
-available in this environment: no pinned Scala checkout or cached compiler
-artifacts were present (`SCALA39_ROOT` was unset).
+receiver rejection, and a non-enclosing qualifier. The source and normalized Scala 3.9.0 typer output are
+[`ThisCapture.scala`](../crates/dotty-typer/tests/fixtures/lexical-closure-contract/ThisCapture.scala)
+and [`ThisCapture.scala39-typed-tree.txt`](../crates/dotty-typer/tests/fixtures/lexical-closure-contract/ThisCapture.scala39-typed-tree.txt).
+They are compiled by the pinned closure oracle runner at Scala revision
+`777528f19a58e794c9954a42f433373472ec57f8`, with Eclipse Temurin JDK
+`21.0.8+9`. The hosted Typer focused audit verifies all eight Scala artifacts
+by SHA-256 and diffs the stored typed-tree snapshot on every relevant change.
 
 Unqualified member calls, field reads through a captured receiver, mutable or
 object captures, arbitrary nested closure capture, `super`, JVM lowering, and
