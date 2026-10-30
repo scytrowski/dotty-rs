@@ -1,3 +1,6 @@
+#[path = "lexical_closure_six_root_gate.rs"]
+mod six_root_gate;
+
 use super::*;
 
 fn source_function_literal(
