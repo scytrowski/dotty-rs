@@ -2,9 +2,9 @@
 
 ## Status
 
-Baseline frozen before changing acceptance gates. The semantic sprint gate is
-not yet closed: final mandatory PR CI evidence is pending. No Typer semantics
-were changed for issue #1892.
+The frozen positive and negative gates pass, and the final 25 + 25 cohort audit
+retains every previously typed root. The mandatory GitHub Actions run is
+pending PR creation. No Typer semantics were changed for issue #1892.
 
 ## Baseline provenance
 
@@ -77,6 +77,58 @@ increase the six-root gate denominator.
 | `required-main.tsv` | `05cdcf0f9185a32075ca8f6bfd3a37084e4127384c0940c9783ae2626dc9377f` |
 | `required-analysis.tsv` | `021bb2d5a1e26ea575bf3f89b92c5a5e41acc2e124e753e43715608f0fe4bce4` |
 
+## Integrated acceptance evidence
+
+The pinned Scala oracle, exact six-root Rust test, and complete #1890 rollback
+suite passed on the integrated source revision. All six complete `DefDef`s
+passed in two independent fresh sessions with canonical capture owners,
+result types, and source-to-typed mappings. The pinned combined `this + delta`
+source was compiled and its typed tree verified; all positive and negative
+Scala controls passed. The Rust negative suite passed its three fixed test
+groups, covering all nine frozen cases, rollback, diagnostics, same-session
+retry, and fresh-session stability.
+
+The deterministic final 25 + 25 audit produced identical report bytes on both
+passes. It retained all 16 main and all 15 analysis typed roots, changed no
+blocked root, and introduced no newly typed root. That is zero
+accepted-method regressions and no denominator changes. The complete row
+outcomes, including owner, source `path#tree`, first blocker, result shape, and
+before/after tree IDs, are in [`stdlib-cohorts.tsv`](stdlib-cohorts.tsv).
+Final report SHA-256 values equal their corresponding fresh-baseline values:
+
+| Cohort | Baseline → final | Pass 1 / pass 2 report SHA-256 |
+| --- | --- | --- |
+| Main (25 roots) | 16/25 → 16/25 | `0d96b3b42c3967b6d975ffadee57ea9b157458742f0f8782c73c9156969e4ce4` |
+| Analysis (25 roots) | 15/25 → 15/25 | `93952a0614a125eba72543a12c2fd121ddfeaaab89d0f77c2d231ae7c2acf36a` |
+
+The six rows in [`positive-roots.tsv`](positive-roots.tsv) give each exact
+root, complete result shape, capture identity list, mapping outcome, and a
+SHA-256 receipt for each independent session. The nine rows in
+[`negative-rollback.tsv`](negative-rollback.tsv) preserve each frozen Scala
+classification, Rust diagnostic, rollback projection, retry/follow-up, and
+test group. Raw compiler logs remain in the local worktree and are not
+committed.
+
+`Function1.compose#tree=86` was independently fully typed in the current main
+cohort; this is attributed to merged #1891, not to the six-root closure gate.
+`Function1.andThen#tree=111` remains fully typed and protected.
+
+## CI gate
+
+The PR workflow runs on changes to Typer, acceptance tooling, frozen
+contracts, or this report. It fails if the pinned source, JDK, artifacts, six
+positive roots, any negative test, exact ordinary-method cohort, or either
+deterministic pass is missing, skipped, malformed, or regressed. It uploads
+evidence and resource receipts from worktree-local `target/`; it does not run
+the full 1,236-file corpus. The exact PR Actions run URL, PR head SHA, and its
+pinned environment checksums will be added here after the mandatory run
+completes.
+
+Relevant merged prerequisite PRs: [#1893](https://github.com/scytrowski/dotty-rs/pull/1893),
+[#1895](https://github.com/scytrowski/dotty-rs/pull/1895),
+[#1897](https://github.com/scytrowski/dotty-rs/pull/1897), and
+[#1899](https://github.com/scytrowski/dotty-rs/pull/1899).
+
 ## Reproduction
 
 With the pinned Scala checkout, Temurin JDK, and eight JARs configured as in
@@ -97,5 +149,6 @@ tools/typer-classpath-corpus-audit/run --method-kind ordinary \
   --verify-determinism target/issue-1892/baseline/analysis.tsv
 ```
 
-The exact CI run link and final before/after sidecars will be recorded after
-the acceptance workflow is enforced and its final PR run completes.
+The CI run URL and SHA recorded above identify the mandatory PR run. Reproduce
+the frozen local baseline and final cohorts with these commands; scratch paths
+are beneath the worktree's ignored `target/issue-1892/` directory.
