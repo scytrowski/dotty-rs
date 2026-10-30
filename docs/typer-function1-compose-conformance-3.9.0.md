@@ -84,6 +84,20 @@ wrong variance, wrong arity, and unrelated `apply`. The runner verifies the
 source checkout revision, JDK 21, and SHA256 values for its compiler artifacts
 before invoking Scala.
 
+The Rust regression also exercises two active, same-spelled method binders:
+outer `binderFailure[A](g: A => T1)` contains `inner[A](x: A) = g(x)`. It
+asserts that the canonical symbols and owners for the two `A`s differ, then
+checks the exact `ApplicationArgumentConformanceUnsupported` at the inner
+`g(x)` application: the actual type refers to inner `A`, the expected type to
+outer `A`, and the relation error identifies inner `A` as a non-class-like
+type parameter. The failed outer method leaves semantic and typed stores and
+all relevant source mappings rolled back, repeats with the same error, then
+types a valid generic closure in the same session. A literal nested closure
+that captures outer `g` currently fails earlier with
+`FunctionLiteralCaptureUnsupported`; this is an existing capture boundary, so
+the binder identity control uses a nested method body and does not extend
+capture support.
+
 The deterministic two-root whole-method audit contains `andThen#tree=111` and
 `compose#tree=86`: both type successfully after the change, including the
 complete compose method body and its `A => R` result. The exact before/after
