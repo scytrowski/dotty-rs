@@ -35,15 +35,20 @@ fn complete_type(
     }
 }
 
-fn constructor_parameter_type_syntax(
+pub(crate) fn constructor_parameter_type_syntax(
     context: &mut EncodingContext<'_>,
-    plan: &crate::ClassStatePicklePlan<'_>,
+    store: &dotty_core::SemanticStore,
+    definitions: &dotty_core::Definitions,
+    source_id: dotty_core::SourceId,
+    source_ast: &dotty_core::ast::AstArena<dotty_core::Untyped>,
+    source_index: &dotty_core::SourceSemanticIndex,
+    typed_bindings: &dyn crate::SourceTypedBindings,
     source_parameter: dotty_core::TreeId<dotty_core::Untyped>,
     parameter: SymbolId,
     template_parameter: bool,
 ) -> Result<AstLabel, PickleError> {
-    let parameter_type = complete_type(plan.store, parameter)?;
-    if parameter_type == plan.definitions.int {
+    let parameter_type = complete_type(store, parameter)?;
+    if parameter_type == definitions.int {
         return if template_parameter {
             context.lower_type(parameter_type)
         } else {
@@ -53,20 +58,20 @@ fn constructor_parameter_type_syntax(
     let Some(dotty_core::Type::TypeRef {
         target: dotty_core::TypeRefTarget::Symbol(target_class),
         ..
-    }) = plan.store.types.try_get(parameter_type)
+    }) = store.types.try_get(parameter_type)
     else {
         return Err(PickleError::UnsupportedTypeReference { ty: parameter_type });
     };
     let target_class = *target_class;
     let Some(dotty_core::SourceDefinition::Canonical { source, tree }) =
-        plan.source_index.definition_of(target_class)
+        source_index.definition_of(target_class)
     else {
         return Err(PickleError::SourceDefinition {
             symbol: target_class,
         });
     };
     let dotty_core::ast::TreeKind::ValDef(parameter_definition) =
-        &plan.source_ast.get(source_parameter).kind
+        &source_ast.get(source_parameter).kind
     else {
         return Err(PickleError::SourceShape {
             tree: source_parameter,
@@ -74,16 +79,16 @@ fn constructor_parameter_type_syntax(
         });
     };
     let dotty_core::ast::TreeKind::Ident(type_syntax) =
-        &plan.source_ast.get(parameter_definition.tpt).kind
+        &source_ast.get(parameter_definition.tpt).kind
     else {
         return Err(PickleError::SourceShape {
             tree: parameter_definition.tpt,
             expected: crate::SourceRole::TypeSyntax,
         });
     };
-    if source != plan.source.id
-        || plan.source_index.symbol_at(source, tree) != Some(target_class)
-        || plan.store.symbols.get(target_class).name != type_syntax.name
+    if source != source_id
+        || source_index.symbol_at(source, tree) != Some(target_class)
+        || store.symbols.get(target_class).name != type_syntax.name
     {
         return Err(PickleError::SourceDefinition {
             symbol: target_class,
@@ -92,7 +97,7 @@ fn constructor_parameter_type_syntax(
     context.register_planned_source_class(
         target_class,
         tree,
-        plan.typed_bindings.planned_class_symbols(),
+        typed_bindings.planned_class_symbols(),
     )?;
     let name = context.intern_name(type_syntax.name)?;
     let child = context.lower_type(parameter_type)?;
@@ -544,8 +549,18 @@ impl ValidatedClassStatePlan<'_, '_> {
                     .ok_or(PickleError::SourceDefinition { symbol: parameter })?;
                 let template_record = p.store.symbols.get(template_parameter);
                 let template_name = context.intern_name(template_record.name)?;
-                let parameter_type =
-                    constructor_parameter_type_syntax(&mut context, p, tree, parameter, true)?;
+                let parameter_type = constructor_parameter_type_syntax(
+                    &mut context,
+                    p.store,
+                    p.definitions,
+                    p.source.id,
+                    p.source_ast,
+                    p.source_index,
+                    p.typed_bindings,
+                    tree,
+                    parameter,
+                    true,
+                )?;
                 let private = marker(&mut context, PRIVATE_TAG)?;
                 let local = marker(&mut context, LOCAL_TAG)?;
                 context.bind_declaration(
@@ -571,8 +586,18 @@ impl ValidatedClassStatePlan<'_, '_> {
 
                 let parameter_record = p.store.symbols.get(parameter);
                 let parameter_name = context.intern_name(parameter_record.name)?;
-                let parameter_type =
-                    constructor_parameter_type_syntax(&mut context, p, tree, parameter, false)?;
+                let parameter_type = constructor_parameter_type_syntax(
+                    &mut context,
+                    p.store,
+                    p.definitions,
+                    p.source.id,
+                    p.source_ast,
+                    p.source_index,
+                    p.typed_bindings,
+                    tree,
+                    parameter,
+                    false,
+                )?;
                 context.bind_declaration(
                     parameter,
                     AstNode::Length {

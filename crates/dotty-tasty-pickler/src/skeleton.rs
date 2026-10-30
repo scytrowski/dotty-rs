@@ -181,11 +181,19 @@ impl ValidatedPicklePlan<'_, '_> {
                 )?;
                 let template_record = symbol(self, template_parameter)?;
                 let template_name = context.intern_name(template_record.name)?;
-                // The canonical class-owned template binder may remain
-                // incomplete in SourceSemanticIndex for a plain constructor
-                // parameter. The validated constructor-owned MethodType is the
-                // source of its Int type; the paired identity is still exact.
-                let template_type_syntax = context.lower_type(p.definitions.int)?;
+                let template_type_syntax =
+                    crate::class_state_output::constructor_parameter_type_syntax(
+                        &mut context,
+                        p.store,
+                        p.definitions,
+                        p.source.id,
+                        p.source_ast,
+                        p.source_index,
+                        p.typed_bindings,
+                        tree,
+                        constructor_parameter,
+                        true,
+                    )?;
                 let private = marker(&mut context, PRIVATE_TAG)?;
                 let local = marker(&mut context, LOCAL_TAG)?;
                 context.bind_declaration(
@@ -209,7 +217,7 @@ impl ValidatedPicklePlan<'_, '_> {
 
                 let constructor_record = symbol(self, constructor_parameter)?;
                 let constructor_name = context.intern_name(constructor_record.name)?;
-                let constructor_type = match constructor_record.info {
+                let _constructor_type = match constructor_record.info {
                     SymbolInfo::Complete(ty) => ty,
                     info => {
                         return Err(PickleError::IncompleteSymbol {
@@ -218,7 +226,19 @@ impl ValidatedPicklePlan<'_, '_> {
                         });
                     }
                 };
-                let constructor_type_syntax = context.primitive_type_syntax(constructor_type)?;
+                let constructor_type_syntax =
+                    crate::class_state_output::constructor_parameter_type_syntax(
+                        &mut context,
+                        p.store,
+                        p.definitions,
+                        p.source.id,
+                        p.source_ast,
+                        p.source_index,
+                        p.typed_bindings,
+                        tree,
+                        constructor_parameter,
+                        false,
+                    )?;
                 context.bind_declaration(
                     constructor_parameter,
                     AstNode::Length {
