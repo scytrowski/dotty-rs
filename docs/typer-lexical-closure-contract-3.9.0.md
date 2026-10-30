@@ -111,9 +111,7 @@ first-error source location for the enclosing parameter, retry behavior, and
 absence of lambda/method mappings after failure. These synthetic positive
 fixtures are separate from any standard-library cohort denominator.
 
-Baseline observations at frozen Rust main SHA
-`7f504378974920991ca6779480b40c83f8c904d5` (the `implicitMember` row below
-records the correction made by issue #1888):
+Observed at frozen Rust main SHA `7f504378974920991ca6779480b40c83f8c904d5`:
 
 | Rust source method | Full `DefDef` typed? | First observed outcome |
 | --- | --- | --- |
@@ -123,7 +121,7 @@ records the correction made by issue #1888):
 | `local` | No | `FunctionLiteralCaptureUnsupported` at the immutable local read; failed method/lambda mappings are absent. |
 | `mutable` | No | With an explicitly typed lambda parameter, `FunctionLiteralCaptureUnsupported` is reached for the mutable local read. Mutable capture remains deferred. |
 | `explicitThis` | No | `FunctionLiteralCaptureUnsupported` at `this`, with no selected symbol. |
-| `implicitMember` | Yes | Typed `DefDef` and `Closure`; after issue #1888, the unqualified same-owner method read records one canonical enclosing `C.this` capture. This is a source-Typer receipt, not evidence of a serialized environment or a compose/andThen success claim. |
+| `implicitMember` | Yes | Typed `DefDef` and `Closure`; the current closure environment is empty. This is an observed Typer receipt, not evidence of a serialized environment or a compose/andThen success claim. |
 | `wrong` | No | `ExpectedExpressionTypeMismatch` (or the narrow conformance-unsupported variant), because the body result does not conform to the declared `Function1` result. |
 | `unknown` | No | `TermNameNotFound`; lookup does not invent an enclosing capture. |
 
@@ -137,10 +135,11 @@ failure. The contract requires future successful captures to use canonical
 session symbols; it does not claim post-rollback validity for those error
 payloads.
 
-The Rust method `implicitMember` now records its implicit same-owner method
-receiver in `Closure.env`, matching the explicit `this` identity. This source
-Typer receipt does not settle later lowering or receiver-capture encoding.
-Neither result establishes `Function1.compose` or `andThen` success.
+The Rust method `implicitMember` currently types with an empty `Closure.env`.
+That baseline is kept visible because current success at the source-Typer
+boundary does not settle later lowering or receiver-capture encoding. Explicit
+`this` remains rejected. Neither result establishes `Function1.compose` or
+`andThen` success.
 
 ## Deferred acceptance shapes
 

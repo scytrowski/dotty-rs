@@ -4,6 +4,73 @@ use dotty_core::SourceId;
 const SOURCE: &str = include_str!("fixtures/jvm_tasty_dual_reference_constructors/Pair.scala");
 
 #[test]
+fn signature_only_renamed_pair_passes_ordered_proof_and_tasty_validation() {
+    let source = "package renamed.example\n\nclass Envelope(left: Token, right: Token)\n\nclass Token(start: Int)\n";
+    let files = with_paired_jvm_tasty_batch_plan(
+        source,
+        "SignatureOnly.scala",
+        SourceId::from_index(1875),
+        |batch| {
+            batch
+                .classes
+                .iter()
+                .map(|class| {
+                    class
+                        .tasty_plan
+                        .pickle()
+                        .expect("bounded signature emits TASTy")
+                        .bytes()
+                        .to_vec()
+                })
+                .collect::<Vec<_>>()
+        },
+    )
+    .expect("the signature-only source passes the ordered proof and TASTy producer");
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|bytes| !bytes.is_empty()));
+}
+
+#[test]
+fn mixed_primitive_and_reference_constructor_formals_stop_at_tasty_validation() {
+    let source =
+        "package example\n\nclass Pair(first: Counter, second: Int)\n\nclass Counter(start: Int)\n";
+    let error = with_paired_jvm_tasty_batch_plan(
+        source,
+        "MixedParameters.scala",
+        SourceId::from_index(1876),
+        |_| (),
+    )
+    .expect_err("mixed primitive/reference constructor formals stay outside the bounded ABI");
+    let observed = format!("{error:?}");
+    assert!(
+        observed.contains("phase: \"TASTy plan validation\""),
+        "{observed}"
+    );
+    assert!(observed.contains("PrimaryConstructorInput"), "{observed}");
+}
+
+#[test]
+fn two_reference_formals_to_different_batch_classes_fail_at_ordered_proof() {
+    let source = "package example\n\nclass Pair(first: Counter, second: Other)\n\nclass Counter(start: Int)\n\nclass Other(start: Int)\n";
+    let error = with_paired_jvm_tasty_batch_plan(
+        source,
+        "DifferentReferenceFormals.scala",
+        SourceId::from_index(1875),
+        |_| (),
+    )
+    .expect_err("distinct same-batch target classes must not share one formal proof");
+    let observed = format!("{error:?}");
+    assert!(
+        observed.contains("phase: \"ordered constructor formal proof\""),
+        "{observed}"
+    );
+    assert!(
+        observed.contains("OrderedReferenceFormalIdentity"),
+        "{observed}"
+    );
+}
+
+#[test]
 fn paired_batch_matrix_records_source_errors_and_unreached_later_stages() {
     struct Case {
         name: &'static str,
@@ -108,15 +175,6 @@ fn paired_batch_matrix_records_source_errors_and_unreached_later_stages() {
                     "  private val right: Counter = second",
                     "  private val right: Counter = second\n  private val thirdRef: Counter = third",
                 ),
-            phase: "TASTy plan validation",
-            reason: "PrimaryConstructorInput",
-        },
-        Case {
-            name: "no alias fields",
-            source: SOURCE.replace(
-                "class Pair(first: Counter, second: Counter):\n  private val left: Counter = first\n  private val right: Counter = second\n  def leftValue(): Int = left.get()\n  def rightValue(): Int = right.get()",
-                "class Pair(first: Counter, second: Counter)",
-            ),
             phase: "TASTy plan validation",
             reason: "PrimaryConstructorInput",
         },

@@ -301,17 +301,15 @@ fn lexical_closure_contract_records_whole_method_baseline() {
         .unwrap();
     let TreeKind::Closure(implicit_member_closure) = &typer.typed_ast().get(typed_member_rhs).kind
     else {
-        panic!("implicit instance-method lambda should remain a closure");
+        panic!("implicit-member method should type to a closure");
     };
     assert_eq!(implicit_member_closure.env.len(), 1);
     assert!(matches!(
-        typer.store().types.get(
-            typer
-                .typed_ast()
-                .get(implicit_member_closure.env[0])
-                .ty
-        ),
-        Type::ThisType { class } if *class == typer.store().symbols.get(implicit_member).owner.unwrap()
+        typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(implicit_member_closure.env[0]).ty),
+        Type::ThisType { class } if typer.store().symbols.get(*class).kind == SymbolKind::Class
     ));
     assert_eq!(
         typer.source_typed_index().get(source, implicit_member_tree),

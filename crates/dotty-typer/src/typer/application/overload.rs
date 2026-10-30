@@ -1017,16 +1017,14 @@ impl SourceTyper<'_> {
             }
         };
         let function_type = match function_shape {
-            ApplicationFunctionShape::Ident(ident) => {
-                let ty = self.expression_type_of_symbol(
-                    winner.symbol,
-                    context.owner,
-                    function_tree.index(),
-                    info_journal,
-                )?;
-                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
-                    .ident_with_backquoted(ident.name, ident.backquoted, ty, function_node.position)
-            }
+            ApplicationFunctionShape::Ident(ident) => self.type_resolved_identifier_expression(
+                winner.symbol,
+                ident,
+                function_node.position,
+                context,
+                function_tree.index(),
+                info_journal,
+            )?,
             ApplicationFunctionShape::Select {
                 selection,
                 qualifier,

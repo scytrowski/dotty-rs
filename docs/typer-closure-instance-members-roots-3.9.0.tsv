@@ -1,0 +1,7 @@
+schema=1
+scala_revision=777528f19a58e794c9954a42f433373472ec57f8
+audit_runs=2
+normalized_reports_identical=true
+identity	complete_typed	first_blocker	expected_result	actual_result
+library/src/scala/Function1.scala#tree=111	true		T1 => A	scala.Function1[scala.Function1.T1,typeparam#0]
+library/src/scala/Function1.scala#tree=86	false	ApplicationArgumentConformanceUnsupported at Function1.scala#tree=81	A => R	not_available

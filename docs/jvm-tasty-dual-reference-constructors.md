@@ -76,6 +76,14 @@ The typed field initializer `TermRef`s resolve to constructor-owned formals 52 a
 
 Both Pair reads retain the canonical Int result `TypeRef` (`TypeId(5)`) and their exact field/method targets. These arena IDs are run-local receipts; the named edges, not allocation numbers, explain which roots correspond.
 
+## Ordered JVM formal proof (#1875)
+
+`JvmPrimaryConstructorPlan::prove_ordered_reference_formals` now builds an immutable, read-only receipt for an ordinary two-formal constructor when both source formals are direct type identifiers for their validated same-batch reference targets. It resolves each original constructor `ValDef` through both index paths: `symbol_at(source, tree)` for the class-owned canonical parameter and `derived_symbol_at(constructor, source, tree)` for the distinct constructor-owned formal. It requires two unique IDs at source ordinals 0 and 1, correct source origins and owners, ordinary unannotated/no-default parameter syntax, exact type syntax for the canonical target, matching completed template and constructor signatures, and the constructor scope's exact formal membership. The canonical target must be the same public, source-owned, package-owned class for both parameters. Package prefixes are checked with the JVM identity layer's canonical package rule; separate `TypeId`s are allowed and are not treated as distinct classes.
+
+The receipt includes both source trees, both ordered symbol pairs, the existing descriptor and its JVM parameter locals. It verifies that the complete JVM metadata remains `(Lexample/Counter;Lexample/Counter;)V`, with receiver slot 0 and category-one reference slots 1 and 2. The batch planner completes the canonical class-owned formal signatures through the existing `SourceTyper` before running this proof. It enforces the proof after whole-unit JVM metadata validation and before cross-class proof/TASTy validation. Reversed, repeated, omitted, or foreign constructor-formal IDs supplied to `JvmPrimaryConstructorPlan::from_source` fail at `ParameterIdentity`; a source with a different same-batch class in the second slot fails at the ordered formal proof stage.
+
+The full-source regression inspects the receipt from the original one-file frontend session and compares its JVM metadata to the existing JVM-only `Pair` plan. Explicit test-only negatives mutate one source formal's type syntax or modifiers and one completed constructor signature type; each fails the proof. Reversed, duplicate, missing, and foreign-owner parameter ID sequences fail `from_source` at `ParameterIdentity`. A distinct second reference class in the same package fails at the ordered proof boundary. The signature-only control uses renamed package/class/parameter names in one source session; it passes the same proof before reaching the unchanged TASTy constructor guard. In both paired positive cases the first TASTy failure remains `Unsupported(PrimaryConstructorInput)`. That rejection still occurs before field-alias validation or TASTy lowering; no paired artifact or new TASTy bytes are produced. The emitter and the checked Scala-produced fixture snapshots are unchanged.
+
 ### Reachable JVM-only and class-state controls from the same session
 
 The identity test builds `JvmCompilationUnit` directly from its still-live `SemanticStore`, parsed AST, `SourceSemanticIndex`, `SourceTypedIndex`, and typed roots. It calls the existing unit metadata validator and emits both classes through `dotty_jvm::emit_class`; it does not parse or type the source again. The validated order is `example/Counter` then `example/Pair`; emitted JVM-only classfiles are major 65, with the Pair constructor descriptor `(Lexample/Counter;Lexample/Counter;)V`. Its constructor formal slots are `first` (`SymbolId(52)`) at local 1 and `second` (`SymbolId(53)`) at local 2. The two fields remain in source order: `left` (`SymbolId(54)`) and `right` (`SymbolId(55)`), both `Lexample/Counter;`. The emitted test artifacts are `Counter.class` (259 bytes) and `Pair.class` (384 bytes). The Pair constructor bytecode uses `aload_1` before its first `putfield`, then `aload_2` before its second `putfield`, matching the validated parameter slots and source field order. These are Rust JVM-only classfiles and carry no TASTy sidecars.
@@ -120,15 +128,41 @@ All source variants are checked in under [`source-variants/`](../tests/fixtures/
 | secondary constructor | valid | member planning: secondary constructor is not an owned planned method |
 | generic primary constructor | valid | source collection: generic primary constructors unsupported |
 | default or contextual formal | valid | constructor planning: `InvalidPrimaryConstructor(SourceShape)` |
-| constructor `val` or `var` accessors | valid | JVM unit validation: `AccessorFieldSignature` |
+| constructor `val` or `var` accessors | valid | complete JVM unit validation: `AccessorFieldSignature` |
 | more than two reference formals | valid | TASTy plan validation: `PrimaryConstructorInput` |
 | third distinct reference field | valid | TASTy plan validation rejects the extra constructor input first; field validation is masked |
 | no fields | valid signature-only control | TASTy plan validation: `PrimaryConstructorInput` |
 | `Pair(first, first)` | valid intentional alias | separate consumer confirms both fields share the input |
+| test-only source type or completed constructor signature corruption | not a Scala source variation | ordered constructor proof: source/template/formal type mismatch |
 | missing/stale typed binding | not a Scala source variation | not reached; the canonical two-formal signature rejects earlier. No typed node or foreign identity is fabricated. |
 | missing TASTY link / malformed sidecar / stale UUID | binary controls | focused test observes `MissingTastyLink`, malformed TASTy decode failure, and `StaleTastyLink`; existing publisher regressions ensure incomplete batches are not published |
 
 The existing regression `constructor_alias_batch_publication_rejects_invalid_pairs_and_partial_results` and `malformed_second_sidecar_fails_before_creating_staging_or_destination` cover missing artifact paths, corrupt sidecars, and no partial publication. The matrix and all stage distinctions are summarized in `oracle.json`.
+
+## Issue #1876: bounded signature-only Rust producer
+
+The producer increment starts from merged main commit `2b4f666427ec0b0eeb76c09254d5a39abd6abdb5`. It enables exactly two distinct ordered reference formals when both resolve to the same public class planned in the same source batch. The retained identity contract is the one-session proof above: class-owned template PARAM symbols and constructor-owned PARAM symbols remain distinct, source ordinals and MethodType order remain first/second, and the JVM constructor descriptor is `(Lexample/Counter;Lexample/Counter;)V` with parameter slots 1 and 2.
+
+Rust now emits the signature-only `PairSignatureOnly.scala` sidecars with two template `PARAM`s (`PRIVATE`, `LOCAL`) and two constructor `PARAM`s. All four type trees resolve to the planned `Counter`; the class contains no fields and only its primary constructor. The decoder regression checks the ordered names and type trees. A strict Scala 3.9.0 run on those genuine Rust-produced `Counter.tasty` and `Pair.tasty` files passed both `-decompile` and `-from-tasty`; `javap` on the rebuilt Pair reports `(Lexample/Counter;Lexample/Counter;)V` and no fields. This evidence is limited to signature-only Pair and does not add dual-reference field aliases or method bodies.
+
+The strict run used Scala source revision `777528f19a58e794c9954a42f433373472ec57f8`, `scalac 3.9.0-bin-SNAPSHOT-git-777528f`, staged compiler JAR SHA-256 `b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f`, and SDKMAN Eclipse Temurin JDK `21.0.13+9-LTS` (classfile major 65). The authoritative `PairSignatureOnly.scala` source SHA-256 is `6d58bf7b174153418b54d9bdc8991448bf1923d66be57cd226f94b29155bb5a6`. The mandatory `jvm-tasty-factory-scala-consumer` workflow runs `jvm_tasty_dual_reference_signature` with `DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_SIGNATURE=1` and the same JDK pin.
+
+The producer's current first-rejection behavior remains explicit:
+
+| Input | First rejection |
+| --- | --- |
+| Exact two-reference signature with no fields or methods | Accepted by TASTy plan validation and emitted |
+| Full Pair dual-reference fields/methods source | TASTy plan validation: `PrimaryConstructorInput`; dual-reference member emission remains out of scope |
+| Three reference formals | TASTy plan validation: `PrimaryConstructorInput` |
+| One reference plus one `Int` formal | TASTy plan validation: `PrimaryConstructorInput` |
+| Two references to distinct batch classes | Ordered constructor formal proof: `OrderedReferenceFormalIdentity` |
+| Duplicate formal names | Field initializer typing: `AmbiguousTermReference` (the full source fixture reaches this before TASTy validation) |
+| Wrong second type in the full field-alias fixture | Field initializer typing: `ExpectedExpressionTypeMismatch` |
+| Default or contextual formal | Constructor planning: `InvalidPrimaryConstructor(SourceShape)` |
+| Secondary constructor | Member planning: unsupported secondary method ownership |
+| Constructor `val` or `var` accessors | Complete JVM unit validation: `AccessorFieldSignature` |
+
+The exact positive and negative Rust producer regressions run in `jvm_tasty_dual_reference_signature`, `jvm_tasty_dual_reference_session`, and `jvm_tasty_dual_reference_matrix`. The strict Rust-side Scala gate uses `DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_SIGNATURE=1`, plus `SCALA39_ROOT` and `JAVA_HOME`; it writes to the caller's task-local `TMPDIR`.
 
 ## Reproduction
 

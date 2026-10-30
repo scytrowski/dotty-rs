@@ -158,6 +158,51 @@ impl FunctionLiteralIndex {
         false
     }
 
+    pub(in crate::typer) fn same_owner_instance_member(
+        &self,
+        store: &SemanticStore,
+        method: SymbolId,
+        symbol: SymbolId,
+    ) -> Option<SymbolId> {
+        if !self
+            .definitions
+            .values()
+            .any(|definition| definition.method == method && definition.capture_enclosing_values)
+            || !store.symbols.contains(method)
+            || !store.symbols.contains(symbol)
+        {
+            return None;
+        }
+        let lambda = store.symbols.get(method);
+        let source_method = lambda.owner?;
+        if lambda.kind != SymbolKind::Method
+            || !store.symbols.contains(source_method)
+            || store.symbols.get(source_method).kind != SymbolKind::Method
+            || self.is_method(source_method)
+        {
+            return None;
+        }
+        let owner = store.symbols.get(source_method).owner?;
+        if !store.symbols.contains(owner)
+            || !matches!(
+                store.symbols.get(owner).kind,
+                SymbolKind::Class | SymbolKind::Trait
+            )
+        {
+            return None;
+        }
+        let member = store.symbols.get(symbol);
+        if member.owner != Some(owner) || member.flags.contains(SymbolFlags::STATIC) {
+            return None;
+        }
+        let capturable = match member.kind {
+            SymbolKind::Method => !member.flags.contains(SymbolFlags::EXTENSION),
+            SymbolKind::Field | SymbolKind::Value => !member.flags.contains(SymbolFlags::MUTABLE),
+            _ => false,
+        };
+        capturable.then_some(owner)
+    }
+
     pub(in crate::typer) fn can_capture_method_parameter(
         &self,
         store: &SemanticStore,

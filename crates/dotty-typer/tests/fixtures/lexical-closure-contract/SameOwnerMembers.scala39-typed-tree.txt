@@ -1,0 +1,14 @@
+[[syntax trees at end of                     typer]] // SameOwnerMembers.scala
+package <empty> {
+  class Calculator() extends Object() {
+    val bias: Int = 2
+    def adjust(x: Int): Int = x + this.bias
+    def lifted: Int => Int = (x: Int) => this.adjust(x)
+    def explicit: Int => Int = (x: Int) => this.adjust(x)
+    def withBias: Int => Int = (x: Int) => x + this.bias
+  }
+  trait Adapter() extends Object {
+    def apply(x: Int): Int
+    def lifted: Int => Int = (x: Int) => this.apply(x)
+  }
+}
