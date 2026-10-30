@@ -1,0 +1,10 @@
+[[syntax trees at end of                     typer]] // CombinedCaptures.scala
+package lexicalclosure {
+  class Calculator() extends Object() {
+    def inc(x: Int): Int = x + 1
+    def makeAdder(delta: Int): Int => Int = (x: Int) =>
+      {
+        this.inc(x) + delta
+      }
+  }
+}

@@ -74,6 +74,7 @@ compile_positive Mutable.scala Mutable.scala39-typed-tree.txt
 compile_positive LocalValues.scala LocalValues.scala39-typed-tree.txt
 compile_positive ThisCapture.scala ThisCapture.scala39-typed-tree.txt
 compile_positive SameOwnerMembers.scala SameOwnerMembers.scala39-typed-tree.txt
+compile_positive CombinedCaptures.scala CombinedCaptures.scala39-typed-tree.txt
 
 expect_failure() {
     local source="$1" expected="$2"
@@ -92,6 +93,8 @@ expect_failure() {
 
 expect_failure WrongResult.scala 'Required: Boolean'
 expect_failure UnknownReference.scala 'Not found: missing'
+expect_failure CombinedCapturesWrongArgument.scala 'Required: Int'
+expect_failure CombinedCapturesWrongResult.scala 'Required: Boolean'
 printf 'Scala source revision: %s\nJDK: %s\n' "$actual_revision" "$jdk_release"
 printf '%s\n' 'Positive capture, shadowing, instance-member, and mutable-control typer snapshots match.'
 printf '%s\n' 'Enclosing method parameter capture ordering and deduplication match the pinned typer snapshot.'
@@ -99,3 +102,5 @@ printf '%s\n' 'Inferred local-value capture ordering, deduplication, shadowing, 
 printf '%s\n' 'Lexical class/trait this capture and qualified enclosing-this trees match the pinned typer snapshot.'
 printf '%s\n' 'Same-owner implicit/explicit method calls and immutable field reads match the pinned typer snapshot.'
 printf '%s\n' 'Wrong-result and unknown-reference controls remain rejected.'
+printf '%s\n' 'Combined same-owner instance-method and enclosing-parameter capture matches the pinned typer snapshot.'
+printf '%s\n' 'Combined wrong-argument and wrong-result controls remain rejected.'
