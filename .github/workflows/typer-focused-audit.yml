@@ -127,6 +127,13 @@ jobs:
           org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar 1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af
           ARTIFACTS
 
+      - name: Run pinned lexical closure source oracle
+        shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_LEXICAL_CLOSURE_TMP_ROOT: ${{ runner.temp }}/lexical-closure-contract-oracle
+        run: crates/dotty-typer/tests/fixtures/lexical-closure-contract/run
+
       - name: Run deterministic focused audit and compare baseline
         shell: bash
         env:
@@ -161,5 +168,6 @@ jobs:
           path: |
             ${{ runner.temp }}/typer-focused-report/
             ${{ runner.temp }}/typer-focused-intermediates/
+            ${{ runner.temp }}/lexical-closure-contract-oracle/
           if-no-files-found: warn
           retention-days: 30

@@ -194,24 +194,42 @@ fn lexical_closure_contract_records_whole_method_baseline() {
         method_definition_and_rhs(&parsed, typer.store(), &index, source, "local");
     let local_function = source_function_literal(&parsed, local_rhs);
     let local_tree = method_tree(local);
-    let local_start = source_text.find("def local").unwrap();
-    let local_capture_start =
-        local_start + source_text[local_start..].find("x + delta").unwrap() + 4;
-    match typer.type_method_definition(local_tree) {
-        Err(TyperError::FunctionLiteralCaptureUnsupported {
-            symbol: Some(_),
-            tree_index,
-            ..
-        }) => assert_error_span(tree_index, local_capture_start, true),
-        other => panic!("expected immutable local capture baseline, got {other:?}"),
-    }
-    assert_eq!(typer.source_typed_index().get(source, local_tree), None);
-    assert_eq!(typer.source_typed_index().get(source, local_rhs), None);
-    assert_eq!(typer.source_typed_index().get(source, local_function), None);
+    let typed_local_method = typer.type_method_definition(local_tree).unwrap();
+    assert!(matches!(
+        typer.typed_ast().get(typed_local_method).kind,
+        TreeKind::DefDef(_)
+    ));
     assert_eq!(
-        typer.function_literal_method_at(source, local_function),
-        None
+        typer.source_typed_index().get(source, local_tree),
+        Some(typed_local_method)
     );
+    let TreeKind::Block(local_block) = &parsed.ast.get(local_rhs).kind else {
+        panic!("local capture body should preserve its source block");
+    };
+    let local_binding = typer
+        .typed_local_binding_at(source, local_block.stats[0])
+        .expect("captured local retains its declaration identity");
+    let typed_local_block = typer.source_typed_index().get(source, local_rhs).unwrap();
+    let TreeKind::Block(typed_local_block) = &typer.typed_ast().get(typed_local_block).kind else {
+        panic!("local capture body should preserve its typed block");
+    };
+    assert_eq!(typed_local_block.stats.len(), 1);
+    assert_eq!(
+        typer.source_typed_index().get(source, local_block.stats[0]),
+        Some(local_binding.declaration)
+    );
+    let typed_local_lambda = typer
+        .source_typed_index()
+        .get(source, local_function)
+        .unwrap();
+    let TreeKind::Closure(local_closure) = &typer.typed_ast().get(typed_local_lambda).kind else {
+        panic!("local capture lambda should be a closure");
+    };
+    assert_eq!(local_closure.env.len(), 1);
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(local_closure.env[0]).ty),
+        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == local_binding.symbol
+    ));
 
     let (mutable, mutable_rhs) =
         method_definition_and_rhs(&parsed, typer.store(), &index, source, "mutable");

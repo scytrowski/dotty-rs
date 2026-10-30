@@ -2148,6 +2148,51 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
+        self.type_block_expression_inner(
+            tree,
+            block,
+            position,
+            context,
+            None,
+            info_journal,
+            new_mappings,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::typer) fn type_block_expression_expected(
+        &mut self,
+        tree: TreeId<Untyped>,
+        block: dotty_core::ast::Block<Untyped>,
+        position: Option<SourceSpan>,
+        context: ExpressionContext,
+        expected: TypeId,
+        poly_binder: Option<TypeId>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        self.type_block_expression_inner(
+            tree,
+            block,
+            position,
+            context,
+            Some((expected, poly_binder)),
+            info_journal,
+            new_mappings,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn type_block_expression_inner(
+        &mut self,
+        tree: TreeId<Untyped>,
+        block: dotty_core::ast::Block<Untyped>,
+        position: Option<SourceSpan>,
+        context: ExpressionContext,
+        expected: Option<(TypeId, Option<TypeId>)>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
         let contains_local_method = block.stats.iter().any(|stat| {
             self.arena.try_get(*stat).is_some_and(|node| {
                 matches!(
@@ -2174,16 +2219,24 @@ impl SourceTyper<'_> {
             self.type_block_stat_expansion(stat, block_context, info_journal, new_mappings)?
                 .append_to(&mut stats);
         }
-        let expr = self.type_value_expression_inner(
-            block.expr,
-            block_context,
-            info_journal,
-            new_mappings,
-        )?;
+        let has_expected = expected.is_some();
+        let expr = if let Some((expected, poly_binder)) = expected {
+            self.type_value_expression_expected_with_poly_binder(
+                block.expr,
+                block_context,
+                expected,
+                poly_binder,
+                info_journal,
+                new_mappings,
+            )?
+        } else {
+            self.type_value_expression_inner(block.expr, block_context, info_journal, new_mappings)?
+        };
         let ty = self.typed_arena.get(expr).ty;
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .block(stats, expr, ty, position);
-        if contains_local_method {
+        let block_ends_in_function_literal = self.is_function_literal_value(block.expr);
+        if contains_local_method || (has_expected && block_ends_in_function_literal) {
             self.typed_index
                 .insert(self.source, tree, typed)
                 .map_err(|error| TyperError::ConflictingTypedExpression {

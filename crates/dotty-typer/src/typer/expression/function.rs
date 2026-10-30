@@ -25,7 +25,7 @@ struct FunctionLiteralDefinition {
     scope: ScopeId,
     typed_definition: Option<TreeId<Typed>>,
     captures: Vec<(SymbolId, TreeId<Typed>)>,
-    capture_method_parameters: bool,
+    capture_enclosing_values: bool,
 }
 
 impl FunctionLiteralIndex {
@@ -112,7 +112,7 @@ impl FunctionLiteralIndex {
         if !self
             .definitions
             .values()
-            .any(|definition| definition.method == method && definition.capture_method_parameters)
+            .any(|definition| definition.method == method && definition.capture_enclosing_values)
         {
             return false;
         }
@@ -137,6 +137,33 @@ impl FunctionLiteralIndex {
             SymbolInfo::Complete(ty)
                 if !matches!(store.types.try_get(ty), Some(Type::ByName { .. } | Type::Repeated { .. }))
         )
+    }
+
+    pub(in crate::typer) fn can_capture_local_value(
+        &self,
+        store: &SemanticStore,
+        method: SymbolId,
+        symbol: SymbolId,
+    ) -> bool {
+        if !self
+            .definitions
+            .values()
+            .any(|definition| definition.method == method && definition.capture_enclosing_values)
+            || !store.symbols.contains(symbol)
+        {
+            return false;
+        }
+        let local = store.symbols.get(symbol);
+        let Some(owner) = store.symbols.get(method).owner else {
+            return false;
+        };
+        local.kind == SymbolKind::Local
+            && local.owner == Some(owner)
+            && local.flags.difference(SymbolFlags::FINAL) == SymbolFlags::EMPTY
+            && matches!(local.info, SymbolInfo::Complete(ty) if !matches!(store.types.try_get(ty), Some(Type::ByName { .. } | Type::Repeated { .. })))
+            && store.symbols.contains(owner)
+            && store.symbols.get(owner).kind == SymbolKind::Method
+            && !self.is_method(owner)
     }
 }
 
@@ -275,7 +302,7 @@ impl SourceTyper<'_> {
                     scope: method_scope,
                     typed_definition: None,
                     captures: Vec::new(),
-                    capture_method_parameters: function.params.len() == 1,
+                    capture_enclosing_values: function.params.len() == 1,
                 },
             )
             .is_some()

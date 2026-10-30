@@ -6159,6 +6159,7 @@ mod tests {
     }
 
     mod lexical_closure_contract;
+    mod local_value_capture;
     mod method_parameter_capture;
 
     #[test]
