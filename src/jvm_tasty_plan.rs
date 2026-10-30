@@ -745,6 +745,51 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                     reason: format!("{error:?}"),
                 })?;
         }
+        let TreeKind::TypeDef(class_definition) = &parsed.ast.get(source_class.tree).kind else {
+            return Err(PairedPlanError::UnsupportedSourceShape(
+                "source class declaration for constructor parameters",
+            ));
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+            return Err(PairedPlanError::UnsupportedSourceShape(
+                "source class template for constructor parameters",
+            ));
+        };
+        let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+            return Err(PairedPlanError::UnsupportedSourceShape(
+                "source primary constructor declaration",
+            ));
+        };
+        for parameter_tree in constructor.value_param_clauses.iter().flatten().copied() {
+            // Ordinary private-local constructor inputs have a separate
+            // class-owned source identity whose signature may not otherwise
+            // be requested by a field or method. Complete only that
+            // counterpart for the ordered proof; accessor fields retain
+            // their existing JVM validation boundary.
+            let ordinary_formal = matches!(
+                parsed.ast.try_get(parameter_tree).map(|node| &node.kind),
+                Some(TreeKind::ValDef(definition))
+                    if definition.metadata.modifiers.as_slice()
+                        == [dotty_core::ast::Modifier::ParamAccessor,
+                            dotty_core::ast::Modifier::PrivateLocal]
+            );
+            if !ordinary_formal {
+                continue;
+            }
+            let parameter = index.symbol_at(source_id, parameter_tree).ok_or(
+                PairedPlanError::UnsupportedSourceShape(
+                    "canonical class-owned constructor parameter identity",
+                ),
+            )?;
+            typer
+                .complete_symbol(parameter)
+                .map_err(|error| PairedPlanError::BatchClass {
+                    class_index,
+                    declaration_index,
+                    phase: "constructor template formal typing",
+                    reason: format!("{error:?}"),
+                })?;
+        }
     }
 
     let planned_class_symbols = source_classes
@@ -1080,13 +1125,104 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         typed_ast: typer.typed_ast(),
         classes: drafts.iter().map(|draft| draft.jvm_plan.clone()).collect(),
     };
-    let _metadata =
-        jvm_unit
-            .metadata(&definitions)
-            .map_err(|error| PairedPlanError::BatchUnit {
-                phase: "complete JVM unit validation",
-                reason: format!("{error:?}"),
-            })?;
+    let metadata = jvm_unit
+        .metadata(&definitions)
+        .map_err(|error| PairedPlanError::BatchUnit {
+            phase: "complete JVM unit validation",
+            reason: format!("{error:?}"),
+        })?;
+    for (class_index, draft) in drafts.iter().enumerate() {
+        let Some(constructor_metadata) = metadata[class_index].constructor() else {
+            return Err(PairedPlanError::BatchClass {
+                class_index,
+                declaration_index: draft.source.tree.index() as usize,
+                phase: "ordered constructor formal proof",
+                reason: "primary constructor metadata is absent".to_owned(),
+            });
+        };
+        let ordinary_source_formals = match parsed.ast.try_get(draft.source.constructor_tree) {
+            Some(node) => match &node.kind {
+                TreeKind::DefDef(definition) => match definition.value_param_clauses.as_slice() {
+                    [parameters] if parameters.len() == 2 => {
+                        let ordinary_parameters = parameters.iter().all(|parameter| {
+                            matches!(
+                                parsed.ast.try_get(*parameter).map(|node| &node.kind),
+                                Some(TreeKind::ValDef(definition))
+                                    if definition.metadata.modifiers.as_slice()
+                                        == [dotty_core::ast::Modifier::ParamAccessor,
+                                            dotty_core::ast::Modifier::PrivateLocal]
+                            )
+                        });
+                        let direct_types = parameters
+                            .iter()
+                            .map(|parameter| {
+                                match parsed.ast.try_get(*parameter).map(|node| &node.kind) {
+                                    Some(TreeKind::ValDef(definition)) => match parsed
+                                        .ast
+                                        .try_get(definition.tpt)
+                                        .map(|node| &node.kind)
+                                    {
+                                        Some(TreeKind::Ident(identifier)) => Some(identifier.name),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        ordinary_parameters
+                            && direct_types.len() == constructor_metadata.parameters().len()
+                            && direct_types
+                                .iter()
+                                .zip(constructor_metadata.parameters())
+                                .all(|(source_type, parameter)| {
+                                    match (source_type, parameter.ty()) {
+                                        (
+                                            Some(source_type),
+                                            dotty_jvm::JvmType::Reference(target),
+                                        ) => typer.store().symbols.get(target).name == *source_type,
+                                        _ => false,
+                                    }
+                                })
+                    }
+                    _ => false,
+                },
+                _ => false,
+            },
+            None => false,
+        };
+        let is_two_formal_reference_candidate = ordinary_source_formals
+            && constructor_metadata.parameters().len() == 2
+            && constructor_metadata
+                .parameters()
+                .iter()
+                .any(|parameter| matches!(parameter.ty(), dotty_jvm::JvmType::Reference(_)));
+        if is_two_formal_reference_candidate {
+            let JvmClassInitializationPlan::PrimaryConstructor(constructor_plan) =
+                &draft.jvm_plan.initialization
+            else {
+                return Err(PairedPlanError::BatchClass {
+                    class_index,
+                    declaration_index: draft.source.tree.index() as usize,
+                    phase: "ordered constructor formal proof",
+                    reason: "class does not have a primary constructor plan".to_owned(),
+                });
+            };
+            constructor_plan
+                .prove_ordered_reference_formals(
+                    &parsed.ast,
+                    &index,
+                    typer.store(),
+                    &definitions,
+                    constructor_metadata,
+                )
+                .map_err(|error| PairedPlanError::BatchClass {
+                    class_index,
+                    declaration_index: draft.source.tree.index() as usize,
+                    phase: "ordered constructor formal proof",
+                    reason: format!("{error:?}"),
+                })?;
+        }
+    }
     let constructor_call_proofs = validate_cross_class_constructor_call_proofs_with_typer(
         CrossClassConstructorCallProofInput {
             source_id,
