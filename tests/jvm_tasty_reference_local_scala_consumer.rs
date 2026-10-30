@@ -4,11 +4,14 @@ use std::process::Command;
 use dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_batch;
 use dotty_core::SourceId;
 use dotty_tasty::ast::{
-    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, IDENTTPT_TAG, SELECTIN_TAG, TERMREFDIRECT_TAG, VALDEF_TAG,
+    APPLY_TAG, AstError, BLOCK_TAG, DEFDEF_TAG, IDENTTPT_TAG, SELECTIN_TAG, TERMREFDIRECT_TAG,
+    VALDEF_TAG,
 };
 use dotty_tasty::file::TastyFile;
+use dotty_tasty::reader::Reader;
+use dotty_tasty::section::StandardSection;
 use dotty_tasty::tasty::RenderedSignedName;
-use dotty_tasty::term::{AstRefKind, RawTree};
+use dotty_tasty::term::{AstRefKind, RawTree, TermError};
 
 #[path = "support/jvm_tasty_batch_publisher.rs"]
 #[allow(dead_code)]
@@ -21,13 +24,6 @@ const REQUIRE_CONSUMER: &str = "DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_LOCAL_CONSUM
 
 #[test]
 fn pinned_scala_consumes_reference_local_rust_tasty_and_executes_original_classes() {
-    if std::env::var(REQUIRE_CONSUMER).as_deref() != Ok("1") {
-        eprintln!(
-            "skipped pinned Scala reference-local consumer gate; set {REQUIRE_CONSUMER}=1 to require it"
-        );
-        return;
-    }
-
     let first = emit_paired_jvm_tasty_batch(
         SOURCE,
         "CounterOwnerFactory.scala",
@@ -52,6 +48,13 @@ fn pinned_scala_consumes_reference_local_rust_tasty_and_executes_original_classe
         })
         .expect("the original batch includes Factory");
     assert_rust_local_tasty_structure(factory.tasty_bytes());
+
+    if std::env::var(REQUIRE_CONSUMER).as_deref() != Ok("1") {
+        eprintln!(
+            "skipped pinned Scala reference-local consumer gate; set {REQUIRE_CONSUMER}=1 to require it"
+        );
+        return;
+    }
 
     let renamed_reordered = SOURCE
         .replace("package example", "package renamed")
@@ -211,6 +214,94 @@ fn assert_rust_local_tasty_structure(bytes: &[u8]) {
     assert_eq!(
         index.parent_of(local_address).unwrap().offset as u32,
         block_address
+    );
+
+    let local_reference_offset = argument
+        .nodes()
+        .into_iter()
+        .find(|node| node.tag == TERMREFDIRECT_TAG)
+        .expect("the local constructor argument has its own TERMREFdirect node")
+        .offset;
+    let asts_section = tasty
+        .section(StandardSection::Asts)
+        .expect("Factory has ASTs section");
+    let constructor_payload_offset =
+        owner_node.payload.as_ptr() as usize - asts_section.payload.as_ptr() as usize;
+    let local_reference_offset = constructor_payload_offset + local_reference_offset;
+    let asts_offset = asts_section.offset;
+    assert_eq!(
+        bytes[asts_offset + local_reference_offset],
+        TERMREFDIRECT_TAG
+    );
+    assert_eq!(bytes[asts_offset + local_address as usize], VALDEF_TAG);
+
+    let mut missing_local = bytes.to_vec();
+    missing_local[asts_offset + local_address as usize] = 0;
+    let missing_local_file = TastyFile::parse_and_validate_scala_3_9(&missing_local)
+        .expect("the parser reaches the lazily indexed nested declaration");
+    let missing_local_index = missing_local_file.ast_address_index();
+    let missing_local_index = missing_local_index.expect("index actual corrupted file bytes");
+    let missing_local_block_node = missing_local_index
+        .get(block_address)
+        .expect("create's BLOCK remains indexed in the corrupted file");
+    let missing_asts_section = missing_local_file
+        .section(StandardSection::Asts)
+        .expect("corrupted file retains its ASTs section");
+    let block_payload_address = missing_local_block_node.payload.as_ptr() as usize
+        - missing_asts_section.payload.as_ptr() as usize;
+    let missing_local_offset = local_address as usize - block_payload_address;
+    assert_eq!(missing_local_offset, 14);
+    let missing_local_error = missing_local_block_node.decode_block();
+    assert!(
+        matches!(
+            missing_local_error,
+            Err(AstError::Term(TermError::InvalidTag {
+                tag: 0,
+                offset,
+            })) if offset == missing_local_offset
+        ),
+        "the actual file/index/BLOCK decoder must reject the missing local tag at its first byte offset: {missing_local_error:?}"
+    );
+
+    let mut malformed_reference = bytes.to_vec();
+    malformed_reference[asts_offset + local_reference_offset] = 0;
+    let mut local_reference_reader =
+        Reader::new(&malformed_reference[asts_offset + local_reference_offset..]);
+    let malformed_argument =
+        RawTree::decode_with_base_offset(&mut local_reference_reader, local_reference_offset);
+    assert!(
+        matches!(
+            malformed_argument,
+            Err(TermError::InvalidTag {
+                tag: 0,
+                offset,
+            }) if offset == local_reference_offset
+        ),
+        "local TERMREFdirect is rejected by its term decoder: {malformed_argument:?}"
+    );
+
+    let missing_reference_target = (0..128)
+        .map(|address| address as u32)
+        .find(|address| index.get(*address).is_none())
+        .expect("the small AST address range has an unoccupied node address");
+    let mut dangling_bytes = bytes.to_vec();
+    dangling_bytes[asts_offset + local_reference_offset + 1] =
+        0x80 | missing_reference_target as u8;
+    let mut dangling_reference_reader =
+        Reader::new(&dangling_bytes[asts_offset + local_reference_offset..]);
+    let dangling_term =
+        RawTree::decode_with_base_offset(&mut dangling_reference_reader, local_reference_offset)
+            .expect("dangling local TERMREFdirect still decodes as a reference leaf");
+    let reference = dangling_term
+        .ast_ref()
+        .expect("corrupted local argument remains a direct TASTy reference");
+    assert_eq!(reference.address, missing_reference_target);
+    let dangling_file =
+        TastyFile::parse(&dangling_bytes).expect("parse isolated dangling-reference copy");
+    assert_eq!(
+        dangling_file.resolve_ast_reference(reference).unwrap(),
+        None,
+        "the AST resolver rejects the local reference's unoccupied address"
     );
 }
 

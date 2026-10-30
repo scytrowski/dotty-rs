@@ -553,9 +553,14 @@ fn validate_decoded_members(
 #[cfg(test)]
 mod batch_artifact_regressions {
     use super::*;
+    use dotty_classfile::attribute::Attribute;
     use dotty_classfile::class_file::ClassFile;
     use dotty_classfile::reader::Reader;
     use dotty_core::SourceId;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     const NESTED_SOURCE: &str = include_str!(
         "../tests/fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala"
@@ -685,9 +690,15 @@ mod batch_artifact_regressions {
     }
 
     #[test]
-    fn reference_local_batch_rejects_wrong_store_load_slots_and_helper_methodref() {
+    fn reference_local_batch_rejects_wrong_slots_bounds_methodref_and_stackmap() {
+        // Keep create's approved straight-line local flow unchanged. The
+        // adjacent branch method supplies real StackMapTable metadata in the
+        // same class file for an isolated JVM corruption control.
+        let source = format!(
+            "{REFERENCE_LOCAL_SOURCE}  def frameProbe(flag: Boolean): Int = if flag then 1 else 2\n"
+        );
         with_paired_jvm_tasty_batch_plan(
-            REFERENCE_LOCAL_SOURCE,
+            &source,
             "CounterOwnerFactory.scala",
             SourceId::from_index(18536),
             |plan| {
@@ -741,7 +752,7 @@ mod batch_artifact_regressions {
                     .iter()
                     .position(|class| class.classfile_path.ends_with("CounterOwnerFactory.class"))
                     .unwrap();
-                let (original_code, code_position) = {
+                let (original_code, code_position, stack_map_position) = {
                     let factory = &artifacts.classfiles[factory_index];
                     let mut reader = Reader::new(&factory.classfile_bytes);
                     let decoded = ClassFile::decode(&mut reader).unwrap();
@@ -757,24 +768,69 @@ mod batch_artifact_regressions {
                     else {
                         panic!("create has one Code attribute");
                     };
+                    let code_position =
+                        code.code.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
                     let code = code.code.to_vec();
                     assert_eq!(code[5], 0x4d, "counter uses local slot 2");
                     assert_eq!(code[10], 0x2c, "constructor reloads local slot 2");
-                    let position = factory
-                        .classfile_bytes
-                        .windows(code.len())
-                        .position(|window| window == code)
-                        .expect("create code occurs in the encoded class");
-                    (code, position)
+                    let frame_probe = decoded
+                        .methods
+                        .iter()
+                        .find(|method| {
+                            decoded.constant_pool.utf8(method.name_index).unwrap() == "frameProbe"
+                        })
+                        .expect("the adjacent branch method is emitted");
+                    let [Attribute::Code(frame_probe_code)] = frame_probe.attributes.as_slice()
+                    else {
+                        panic!("frameProbe has one Code attribute");
+                    };
+                    let stack_map = frame_probe_code
+                        .attributes
+                        .iter()
+                        .find_map(|attribute| match attribute {
+                            Attribute::Other(raw)
+                                if decoded.constant_pool.utf8(raw.name_index).ok()
+                                    == Some("StackMapTable") =>
+                            {
+                                Some(raw.bytes)
+                            }
+                            _ => None,
+                        })
+                        .expect("the branch method has StackMapTable metadata");
+                    assert!(stack_map.len() >= 3);
+                    assert_ne!(u16::from_be_bytes([stack_map[0], stack_map[1]]), 0);
+                    let stack_map_position =
+                        stack_map.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
+                    (code, code_position, stack_map_position)
                 };
-                for (name, offset, replacement) in [
-                    ("astore slot", 5_usize, 0x4c_u8),
-                    ("aload slot", 10_usize, 0x2b_u8),
-                    ("helper Methodref", 4_usize, original_code[13]),
+                for corruption in [
+                    "astore slot",
+                    "aload slot",
+                    "helper Methodref",
+                    "max_stack",
+                    "max_locals",
                 ] {
+                    let expected_reason = match corruption {
+                        "astore slot" => "expected astore_2",
+                        "aload slot" => "expected aload_2",
+                        "helper Methodref" => "does not invoke one exact factory",
+                        "max_stack" | "max_locals" => "invalid local factory sequence",
+                        _ => unreachable!(),
+                    };
                     let mut corrupted = artifacts.clone();
                     let bytes = &mut corrupted.classfiles[factory_index].classfile_bytes;
-                    bytes[code_position + offset] = replacement;
+                    match corruption {
+                        "astore slot" => bytes[code_position + 5] = 0x4c,
+                        "aload slot" => bytes[code_position + 10] = 0x2b,
+                        "helper Methodref" => bytes[code_position + 4] = original_code[13],
+                        "max_stack" => {
+                            bytes[code_position - 8..code_position - 6].copy_from_slice(&[0, 2]);
+                        }
+                        "max_locals" => {
+                            bytes[code_position - 6..code_position - 4].copy_from_slice(&[0, 2]);
+                        }
+                        _ => unreachable!(),
+                    }
                     let error = validate_jvm_tasty_batch_artifacts(&validated_batch, corrupted)
                         .unwrap_err();
                     assert!(
@@ -783,16 +839,90 @@ mod batch_artifact_regressions {
                             JvmTastyContractError::BatchArtifact {
                                 class_index: 2,
                                 phase: "cross-class invocation",
+                                ref reason,
                                 ..
-                            }
+                            } if reason.contains(expected_reason)
                         ),
-                        "{name} corruption must fail the decoded cross-class contract: {error:?}"
+                        "{corruption} corruption must fail before batch acceptance: {error:?}"
                     );
                 }
+
+                let mut corrupted_stack_map = artifacts.clone();
+                corrupted_stack_map.classfiles[factory_index].classfile_bytes
+                    [stack_map_position + 2] = 0xc8;
+                assert_stack_map_corruption_is_rejected_by_jdk(&corrupted_stack_map);
                 Ok::<_, JvmTastyContractError>(())
             },
         )
         .unwrap()
         .unwrap();
+    }
+
+    fn assert_stack_map_corruption_is_rejected_by_jdk(artifacts: &JvmTastyBatchArtifacts) {
+        let required = std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1");
+        if Command::new("java").arg("-version").output().is_err()
+            || Command::new("javac").arg("-version").output().is_err()
+        {
+            assert!(!required, "required JDK verifier tools are unavailable");
+            eprintln!("skipped StackMapTable corruption control; JDK tools are unavailable");
+            return;
+        }
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time follows the Unix epoch")
+            .as_nanos();
+        let root = TemporaryVerificationDirectory(std::env::temp_dir().join(format!(
+            "dotty-reference-local-stackmap-{}-{unique}",
+            std::process::id()
+        )));
+        fs::create_dir_all(&root.0).unwrap();
+        for artifact in &artifacts.classfiles {
+            let path = root.0.join(&artifact.classfile_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, &artifact.classfile_bytes).unwrap();
+        }
+        let driver = root.0.join("VerifyLocalFlow.java");
+        fs::write(
+            &driver,
+            "public final class VerifyLocalFlow { public static void main(String[] args) { if (new example.CounterOwnerFactory().create(1).read() != 1) throw new AssertionError(); } }\n",
+        )
+        .unwrap();
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath"])
+            .arg(&root.0)
+            .arg("-d")
+            .arg(&root.0)
+            .arg(&driver)
+            .output()
+            .expect("start javac for isolated StackMapTable control");
+        assert!(
+            javac.status.success(),
+            "javac rejected the isolated verifier driver:\n{}",
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args(["-Xverify:all", "-XX:-UsePerfData", "-classpath"])
+            .arg(&root.0)
+            .arg("VerifyLocalFlow")
+            .output()
+            .expect("start Java for isolated StackMapTable corruption control");
+        let diagnostic = String::from_utf8_lossy(&java.stderr);
+        assert!(
+            !java.status.success()
+                && diagnostic
+                    .contains("ClassFormatError: StackMapTable format error: reserved frame type"),
+            "the JDK verifier must reject the malformed frame table; stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            diagnostic
+        );
+    }
+
+    struct TemporaryVerificationDirectory(PathBuf);
+
+    impl Drop for TemporaryVerificationDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 }
