@@ -793,20 +793,80 @@ fn rust_frontend_session_keeps_two_parameter_and_field_alias_identities() {
         },
         members: &pair_members,
     };
-    let class_state_error = match class_state.validate() {
-        Err(error) => error,
-        Ok(_) => panic!("the full dual-reference field/body shape is outside this increment"),
+    let validated = class_state
+        .validate()
+        .expect("the exact two-field alias class state validates");
+    let reference_fields = validated.same_batch_reference_fields().collect::<Vec<_>>();
+    assert_eq!(reference_fields.len(), 2);
+    assert_eq!(
+        reference_fields
+            .iter()
+            .map(|field| field.field())
+            .collect::<Vec<_>>(),
+        [fields[0].0, fields[1].0]
+    );
+    assert_eq!(
+        reference_fields
+            .iter()
+            .map(|field| field.template_parameter_alias().unwrap())
+            .collect::<Vec<_>>(),
+        fields.iter().map(|field| field.4).collect::<Vec<_>>()
+    );
+    assert_ne!(
+        reference_fields[0].template_parameter_alias(),
+        reference_fields[1].template_parameter_alias()
+    );
+    let mut stale_members = pair_members;
+    let ClassMemberPicklePlan::Field(stale_right) = &mut stale_members[1] else {
+        panic!("the second source-ordered member is the right alias field");
+    };
+    stale_right.typed_initializer = fields[0].3;
+    let stale_plan = ClassStatePicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: typer.typed_ast(),
+        source_index: &source_index,
+        typed_bindings: &typed_bindings,
+        source: SourceMetadata {
+            id: source_id,
+            name: "Pair.scala".to_owned(),
+        },
+        class: pair_class,
+        class_tree: class_state.class_tree,
+        constructor: class_state.constructor.clone(),
+        members: &stale_members,
     };
     assert!(matches!(
-        class_state_error,
-        dotty_tasty_pickler::PickleError::Unsupported {
-            feature: dotty_tasty_pickler::UnsupportedFeature::PrimaryConstructorInput,
-            symbol: Some(symbol),
-        } if symbol == pair_constructor
+        stale_plan.validate(),
+        Err(dotty_tasty_pickler::PickleError::FieldInitializerBinding { .. })
     ));
-    println!(
-        "same-session class-state first rejection: {class_state_error:?}; field/body validation and TASTy lowering not reached"
-    );
+    let mut wrong_type_members = pair_members;
+    let ClassMemberPicklePlan::Field(wrong_type) = &mut wrong_type_members[1] else {
+        unreachable!()
+    };
+    wrong_type.declared_type = definitions.int;
+    let wrong_type_plan = ClassStatePicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: typer.typed_ast(),
+        source_index: &source_index,
+        typed_bindings: &typed_bindings,
+        source: SourceMetadata {
+            id: source_id,
+            name: "Pair.scala".to_owned(),
+        },
+        class: pair_class,
+        class_tree: class_state.class_tree,
+        constructor: class_state.constructor.clone(),
+        members: &wrong_type_members,
+    };
+    assert!(matches!(
+        wrong_type_plan.validate(),
+        Err(dotty_tasty_pickler::PickleError::FieldType { .. })
+    ));
+    println!("same-session class-state alias receipts validated in source order");
 
     let named_roots = [
         (
@@ -985,18 +1045,34 @@ fn rust_frontend_session_keeps_two_parameter_and_field_alias_identities() {
 }
 
 #[test]
-fn paired_batch_reports_the_actual_first_dual_reference_rejection() {
-    let error =
-        with_paired_jvm_tasty_batch_plan(SOURCE, "Pair.scala", SourceId::from_index(1874), |_| ())
-            .expect_err("the bounded paired producer must expose its actual first gate");
-    println!("dual-reference paired batch first rejection: {error:?}");
-    assert!(matches!(
-        error,
-        dotty::jvm_tasty_plan::PairedPlanError::BatchClass {
-            class_index: 1,
-            phase: "TASTy plan validation",
-            ref reason,
-            ..
-        } if reason.starts_with("Unsupported { feature: PrimaryConstructorInput")
-    ));
+fn paired_batch_emits_the_authenticated_dual_reference_alias_shape() {
+    let outputs = with_paired_jvm_tasty_batch_plan(
+        SOURCE,
+        "Pair.scala",
+        SourceId::from_index(1874),
+        |batch| {
+            batch
+                .classes
+                .iter()
+                .map(|class| {
+                    (
+                        class.tasty_path.clone(),
+                        class.tasty_plan.pickle().unwrap().bytes().to_vec(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        },
+    )
+    .expect("the paired producer emits the exact Counter and Pair source batch");
+    assert_eq!(outputs.len(), 2);
+    assert!(
+        outputs
+            .iter()
+            .any(|(path, _)| path.ends_with("/Counter.tasty"))
+    );
+    assert!(
+        outputs
+            .iter()
+            .any(|(path, _)| path.ends_with("/Pair.tasty"))
+    );
 }

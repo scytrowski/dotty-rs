@@ -1332,7 +1332,7 @@ class CounterOwner(counter: foreign.Counter):
                 )
                 .replace("private val inner: Counter = counter", "private val inner: Counter = other"),
             phase: "TASTy plan validation",
-            reason_prefix: "Unsupported { feature: PrimaryConstructorInput",
+            reason_prefix: "Unsupported { feature: ClassMembers",
         },
     ];
     for case in variants {

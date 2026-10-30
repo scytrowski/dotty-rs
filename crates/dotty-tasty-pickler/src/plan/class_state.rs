@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use dotty_core::ast::{
-    AstArena, DefParamClauseOrder, Modifier, NumberKind, Tree, TreeKind, Typed, Untyped,
+    ApplyKind, AstArena, DefParamClauseOrder, Modifier, NumberKind, Tree, TreeKind, Typed, Untyped,
     UntypedNode, VisibilitySyntax,
 };
 use dotty_core::{
@@ -791,7 +791,7 @@ impl ClassStateValidator<'_, '_> {
         if template_constructor != constructor.source_tree {
             return Err(PickleError::SourceOrder { class: p.class });
         }
-        self.validate_constructor(constructor, p.class, !p.members.is_empty())?;
+        self.validate_constructor(constructor, p.class)?;
 
         if !self.plan.store.scopes.contains(info.declarations) {
             return Err(PickleError::InvalidScope {
@@ -809,6 +809,8 @@ impl ClassStateValidator<'_, '_> {
         let mut fields = HashSet::new();
         let mut field_names = HashSet::new();
         let mut reference_fields = Vec::new();
+        let mut field_count = 0usize;
+        let mut method_count = 0usize;
         self.charge(template_body.len())?;
         for (tree, member) in template_body.iter().zip(p.members) {
             self.charge(1)?;
@@ -817,6 +819,7 @@ impl ClassStateValidator<'_, '_> {
             }
             match member {
                 ClassMemberPicklePlan::Field(field) => {
+                    field_count += 1;
                     if !fields.insert(field.symbol) || !expected.insert(field.symbol) {
                         return Err(PickleError::DuplicateDeclaration {
                             symbol: field.symbol,
@@ -837,6 +840,7 @@ impl ClassStateValidator<'_, '_> {
                     symbol,
                     source_tree,
                 } => {
+                    method_count += 1;
                     if !expected.insert(*symbol) {
                         return Err(PickleError::DuplicateDeclaration { symbol: *symbol });
                     }
@@ -886,6 +890,47 @@ impl ClassStateValidator<'_, '_> {
         if invalid || entered != expected {
             return Err(PickleError::ScopeMembers { owner: p.class });
         }
+        // The dual-reference extension is intentionally limited to the exact
+        // ordered Pair shape: two private immutable Counter aliases followed
+        // by two ordinary read methods. The per-field proofs below authenticate
+        // the alias edges; this shape gate prevents unrelated class members
+        // from becoming reachable merely because the constructor has two
+        // same-batch reference inputs.
+        let reference_parameter_count = constructor
+            .parameter_clauses
+            .iter()
+            .flatten()
+            .filter(|&&parameter| {
+                self.completed(parameter)
+                    .is_ok_and(|ty| !self.same_canonical_type(ty, self.plan.definitions.int))
+            })
+            .count();
+        if reference_parameter_count == 2 && !p.members.is_empty() {
+            if field_count != 2
+                || method_count != 2
+                || reference_fields.len() != 2
+                || reference_fields
+                    .iter()
+                    .any(|field| field.template_parameter_alias.is_none())
+            {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::ClassMembers,
+                    symbol: Some(p.class),
+                });
+            }
+            let source_parameters = self.constructor_template_parameters(constructor)?;
+            let aliases = reference_fields
+                .iter()
+                .map(|field| field.template_parameter_alias.expect("checked above"))
+                .collect::<Vec<_>>();
+            if aliases != source_parameters {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::UnsafeFieldInitializer,
+                    symbol: Some(p.class),
+                });
+            }
+            self.validate_dual_reference_read_methods(p.class, &reference_fields, p.members)?;
+        }
         for &symbol in &expected {
             let name = self.symbol(symbol)?.name;
             if !class_scope.lookup_all(&name).contains(&symbol) {
@@ -899,7 +944,6 @@ impl ClassStateValidator<'_, '_> {
         &mut self,
         plan: &PrimaryConstructorInputPlan,
         class: SymbolId,
-        has_members: bool,
     ) -> Result<(), PickleError> {
         self.charge(plan.parameter_clauses.len())?;
         let item_count = plan
@@ -1188,7 +1232,7 @@ impl ClassStateValidator<'_, '_> {
         }
         if reference_parameter_count != 0
             && ((reference_parameter_count == 1 && item_count != 1)
-                || (reference_parameter_count == 2 && (item_count != 2 || has_members))
+                || (reference_parameter_count == 2 && item_count != 2)
                 || reference_parameter_count > 2)
         {
             return Err(PickleError::Unsupported {
@@ -1283,6 +1327,352 @@ impl ClassStateValidator<'_, '_> {
         })
     }
 
+    fn constructor_template_parameters(
+        &self,
+        constructor: &PrimaryConstructorInputPlan,
+    ) -> Result<Vec<SymbolId>, PickleError> {
+        let TreeKind::DefDef(definition) = &self.source_tree(constructor.source_tree)?.kind else {
+            return Err(PickleError::SourceShape {
+                tree: constructor.source_tree,
+                expected: SourceRole::Constructor,
+            });
+        };
+        if definition.value_param_clauses.len() != 1
+            || constructor.parameter_clauses.len() != 1
+            || definition.value_param_clauses[0].len() != 2
+            || constructor.parameter_clauses[0].len() != 2
+        {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::PrimaryConstructorInput,
+                symbol: Some(constructor.symbol),
+            });
+        }
+        definition.value_param_clauses[0]
+            .iter()
+            .map(|&tree| {
+                self.plan
+                    .source_index
+                    .symbol_at(self.plan.source.id, tree)
+                    .ok_or(PickleError::SourceDefinition {
+                        symbol: constructor.symbol,
+                    })
+            })
+            .collect()
+    }
+
+    fn validate_dual_reference_read_methods(
+        &mut self,
+        class: SymbolId,
+        reference_fields: &[SameBatchReferenceFieldData],
+        members: &[ClassMemberPicklePlan],
+    ) -> Result<(), PickleError> {
+        // Keep the newly enabled shape closed: both fields are declared before
+        // the two read methods, and each method's actual typed receiver must
+        // target the corresponding source-ordered field receipt.
+        let [
+            ClassMemberPicklePlan::Field(first_field),
+            ClassMemberPicklePlan::Field(second_field),
+            ClassMemberPicklePlan::Method {
+                symbol: first_method,
+                source_tree: first_tree,
+            },
+            ClassMemberPicklePlan::Method {
+                symbol: second_method,
+                source_tree: second_tree,
+            },
+        ] = members
+        else {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::ClassMembers,
+                symbol: Some(class),
+            });
+        };
+        if reference_fields.len() != 2
+            || first_field.symbol != reference_fields[0].field.symbol
+            || second_field.symbol != reference_fields[1].field.symbol
+            || reference_fields[0].target_class != reference_fields[1].target_class
+        {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::ClassMembers,
+                symbol: Some(class),
+            });
+        }
+        self.validate_dual_reference_reader(
+            class,
+            reference_fields[0],
+            *first_method,
+            *first_tree,
+        )?;
+        self.validate_dual_reference_reader(
+            class,
+            reference_fields[1],
+            *second_method,
+            *second_tree,
+        )
+    }
+
+    fn validate_dual_reference_reader(
+        &mut self,
+        class: SymbolId,
+        field: SameBatchReferenceFieldData,
+        method: SymbolId,
+        source_tree: TreeId<Untyped>,
+    ) -> Result<(), PickleError> {
+        let reject = || PickleError::Unsupported {
+            feature: UnsupportedFeature::ClassMembers,
+            symbol: Some(method),
+        };
+        let source_node = self.source_tree(source_tree)?;
+        let TreeKind::DefDef(definition) = &source_node.kind else {
+            return Err(PickleError::SourceShape {
+                tree: source_tree,
+                expected: SourceRole::Method,
+            });
+        };
+        if !self.plan.store.symbols.contains(method) {
+            return Err(PickleError::InvalidSymbol { symbol: method });
+        }
+        let method_record = self.plan.store.symbols.get(method);
+        let method_type = self.completed(method)?;
+        let Some(Type::Method(method_signature)) = self.plan.store.types.try_get(method_type)
+        else {
+            return Err(reject());
+        };
+        if method_record.kind != SymbolKind::Method
+            || method_record.owner != Some(class)
+            || method_record.origin != SymbolOrigin::Source(self.plan.source.id)
+            || method_record.visibility != Visibility::Public
+            || !method_record.flags.is_empty()
+            || !method_record.annotations.is_empty()
+            || method_record.name != *definition.name.as_name()
+            || self
+                .plan
+                .source_index
+                .symbol_at(self.plan.source.id, source_tree)
+                != Some(method)
+            || self.plan.source_index.definition_of(method)
+                != Some(SourceDefinition::Canonical {
+                    source: self.plan.source.id,
+                    tree: source_tree,
+                })
+            || !definition.type_params.is_empty()
+            || definition.value_param_clauses.len() != 1
+            || !definition.value_param_clauses[0].is_empty()
+            || definition.source_param_clause_order.is_some()
+            || definition.metadata.visibility.is_some()
+            || !definition.metadata.modifiers.is_empty()
+            || !definition.metadata.annotations.is_empty()
+            || method_signature.kind != MethodKind::Plain
+            || !method_signature.params.is_empty()
+            || !self.same_canonical_type(method_signature.result, self.plan.definitions.int)
+        {
+            return Err(reject());
+        }
+        let Some(rhs) = definition.rhs else {
+            return Err(PickleError::MissingBody { method });
+        };
+        let typed_rhs = self
+            .plan
+            .typed_bindings
+            .typed_at(self.plan.source.id, rhs)
+            .ok_or(PickleError::MissingBody { method })?;
+        let source_apply_node = self.source_tree(rhs)?;
+        let typed_apply_node = self.typed_tree(typed_rhs)?;
+        let (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply)) =
+            (&source_apply_node.kind, &typed_apply_node.kind)
+        else {
+            return Err(reject());
+        };
+        if source_apply.kind != ApplyKind::Regular
+            || typed_apply.kind != ApplyKind::Regular
+            || !source_apply.args.is_empty()
+            || !typed_apply.args.is_empty()
+            || !self.same_canonical_type(typed_apply_node.ty, self.plan.definitions.int)
+        {
+            return Err(reject());
+        }
+        let source_select_id = source_apply.function;
+        let typed_select_id = typed_apply.function;
+        let typed_select_binding = self
+            .plan
+            .typed_bindings
+            .typed_at(self.plan.source.id, source_select_id);
+        if typed_select_binding != Some(typed_select_id) {
+            return Err(reject());
+        }
+        let source_select_node = self.source_tree(source_select_id)?;
+        let typed_select_node = self.typed_tree(typed_select_id)?;
+        let (TreeKind::Select(source_select), TreeKind::Select(typed_select)) =
+            (&source_select_node.kind, &typed_select_node.kind)
+        else {
+            return Err(reject());
+        };
+        if source_select.name != typed_select.name
+            || source_select.backquoted != typed_select.backquoted
+            || source_select_node.position.is_none()
+            || source_select_node.position != typed_select_node.position
+        {
+            return Err(reject());
+        }
+        let source_receiver_id = source_select.qualifier;
+        let typed_receiver_id = typed_select.qualifier;
+        if self
+            .plan
+            .typed_bindings
+            .typed_at(self.plan.source.id, source_receiver_id)
+            != Some(typed_receiver_id)
+        {
+            return Err(reject());
+        }
+        let source_receiver = self.source_tree(source_receiver_id)?;
+        let typed_receiver = self.typed_tree(typed_receiver_id)?;
+        let (TreeKind::Ident(source_ident), TreeKind::Ident(typed_ident)) =
+            (&source_receiver.kind, &typed_receiver.kind)
+        else {
+            return Err(reject());
+        };
+        let field_symbol = self.symbol(field.field.symbol)?;
+        if source_ident.name != typed_ident.name
+            || source_ident.backquoted != typed_ident.backquoted
+            || source_ident.name != field_symbol.name
+            || source_receiver.position.is_none()
+            || source_receiver.position != typed_receiver.position
+        {
+            return Err(reject());
+        }
+        let Some(Type::TermRef {
+            prefix: receiver_prefix,
+            target: TermRefTarget::Symbol(receiver_symbol),
+        }) = self.plan.store.types.try_get(typed_receiver.ty)
+        else {
+            return Err(reject());
+        };
+        let Some(Type::ThisType {
+            class: receiver_owner,
+        }) = self.plan.store.types.try_get(*receiver_prefix)
+        else {
+            return Err(reject());
+        };
+        if *receiver_symbol != field.field.symbol || *receiver_owner != class {
+            return Err(reject());
+        }
+
+        let Some(Type::TermRef {
+            prefix: selected_prefix,
+            target: TermRefTarget::Symbol(getter),
+        }) = self.plan.store.types.try_get(typed_select_node.ty)
+        else {
+            return Err(reject());
+        };
+        if *selected_prefix != typed_receiver.ty {
+            return Err(reject());
+        }
+        self.validate_dual_reference_getter(field.target_class, *getter, source_select.name)?;
+        if !self.same_canonical_type(typed_apply_node.ty, self.plan.definitions.int) {
+            return Err(reject());
+        }
+        for (source_tree, typed_tree) in [
+            (rhs, typed_rhs),
+            (source_select_id, typed_select_id),
+            (source_receiver_id, typed_receiver_id),
+        ] {
+            let source = self.source_tree(source_tree)?;
+            let typed = self.typed_tree(typed_tree)?;
+            if source.position.is_none()
+                || source.position != typed.position
+                || source
+                    .position
+                    .is_some_and(|position| position.source() != self.plan.source.id)
+            {
+                return Err(reject());
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_dual_reference_getter(
+        &self,
+        counter: SymbolId,
+        getter: SymbolId,
+        selected_name: Name,
+    ) -> Result<(), PickleError> {
+        let reject = || PickleError::Unsupported {
+            feature: UnsupportedFeature::ClassMembers,
+            symbol: Some(getter),
+        };
+        let Some(SourceDefinition::Canonical { source, tree }) =
+            self.plan.source_index.definition_of(getter)
+        else {
+            return Err(PickleError::SourceDefinition { symbol: getter });
+        };
+        if source != self.plan.source.id
+            || self.plan.source_index.symbol_at(source, tree) != Some(getter)
+            || !self
+                .plan
+                .typed_bindings
+                .planned_method_symbols()
+                .contains(&getter)
+        {
+            return Err(PickleError::SourceDefinition { symbol: getter });
+        }
+        let getter_record = self.symbol(getter)?;
+        let getter_type = self.completed(getter)?;
+        let Some(Type::Method(signature)) = self.plan.store.types.try_get(getter_type) else {
+            return Err(reject());
+        };
+        let getter_tree = self.source_tree(tree)?;
+        let TreeKind::DefDef(definition) = &getter_tree.kind else {
+            return Err(PickleError::SourceShape {
+                tree,
+                expected: SourceRole::Method,
+            });
+        };
+        let counter_type = match self.plan.store.symbols.get(counter).info {
+            SymbolInfo::Complete(ty) => ty,
+            info => {
+                return Err(PickleError::IncompleteSymbol {
+                    symbol: counter,
+                    info,
+                });
+            }
+        };
+        let Some(Type::ClassInfo(class_info)) = self.plan.store.types.try_get(counter_type) else {
+            return Err(PickleError::MalformedType {
+                ty: counter_type,
+                role: TypeRole::ClassInfo,
+            });
+        };
+        if getter_record.kind != SymbolKind::Method
+            || getter_record.owner != Some(counter)
+            || getter_record.origin != SymbolOrigin::Source(self.plan.source.id)
+            || getter_record.visibility != Visibility::Public
+            || !getter_record.flags.is_empty()
+            || !getter_record.annotations.is_empty()
+            || getter_record.name != selected_name
+            || definition.name.as_name() != &selected_name
+            || !definition.type_params.is_empty()
+            || definition.value_param_clauses.len() != 1
+            || !definition.value_param_clauses[0].is_empty()
+            || definition.rhs.is_none()
+            || signature.kind != MethodKind::Plain
+            || !signature.params.is_empty()
+            || !self.same_canonical_type(signature.result, self.plan.definitions.int)
+            || self.plan.store.names.try_resolve(getter_record.name.text()) != Some("get")
+            || class_info.class != counter
+            || !self.plan.store.scopes.contains(class_info.declarations)
+            || !self
+                .plan
+                .store
+                .scopes
+                .get(class_info.declarations)
+                .lookup_all(&getter_record.name)
+                .contains(&getter)
+        {
+            return Err(reject());
+        }
+        Ok(())
+    }
+
     fn validate_pending_reference_initializer(
         &self,
         field: ClassFieldPicklePlan,
@@ -1321,8 +1711,8 @@ impl ClassStateValidator<'_, '_> {
             };
             if constructor_definition.value_param_clauses.len() != 1
                 || constructor.parameter_clauses.len() != 1
-                || constructor_definition.value_param_clauses[0].len() != 1
-                || constructor.parameter_clauses[0].len() != 1
+                || constructor_definition.value_param_clauses[0].len()
+                    != constructor.parameter_clauses[0].len()
                 || source_ident.name != typed_ident.name
             {
                 return Err(PickleError::Unsupported {
@@ -1330,21 +1720,6 @@ impl ClassStateValidator<'_, '_> {
                     symbol: Some(field.symbol),
                 });
             }
-            let parameter_tree = constructor_definition.value_param_clauses[0][0];
-            let Some(template_parameter) =
-                plan.source_index.symbol_at(plan.source.id, parameter_tree)
-            else {
-                return Err(PickleError::SourceDefinition {
-                    symbol: constructor.symbol,
-                });
-            };
-            let constructor_parameter = constructor.parameter_clauses[0][0];
-            let derived_parameter = plan.source_index.derived_symbol_at(
-                constructor.symbol,
-                plan.source.id,
-                parameter_tree,
-            );
-            let source_definition = plan.source_index.definition_of(template_parameter);
             let typed_target = match plan.store.types.try_get(typed_root.ty) {
                 Some(Type::TermRef {
                     prefix,
@@ -1352,6 +1727,30 @@ impl ClassStateValidator<'_, '_> {
                 }) if *prefix == plan.definitions.no_prefix => Some(*target),
                 _ => None,
             };
+            let Some(parameter_index) = constructor.parameter_clauses[0]
+                .iter()
+                .position(|&parameter| typed_target == Some(parameter))
+            else {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::UnsafeFieldInitializer,
+                    symbol: Some(field.symbol),
+                });
+            };
+            let parameter_tree = constructor_definition.value_param_clauses[0][parameter_index];
+            let Some(template_parameter) =
+                plan.source_index.symbol_at(plan.source.id, parameter_tree)
+            else {
+                return Err(PickleError::SourceDefinition {
+                    symbol: constructor.symbol,
+                });
+            };
+            let constructor_parameter = constructor.parameter_clauses[0][parameter_index];
+            let derived_parameter = plan.source_index.derived_symbol_at(
+                constructor.symbol,
+                plan.source.id,
+                parameter_tree,
+            );
+            let source_definition = plan.source_index.definition_of(template_parameter);
             let parameter_type = self.completed(constructor_parameter)?;
             let Some(Type::TypeRef {
                 target: TypeRefTarget::Symbol(parameter_class),

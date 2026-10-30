@@ -165,9 +165,10 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_FACTORY_RESULT_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_LOCAL_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_SIGNATURE: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_ALIAS: '1'
           DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
           DOTTY_TASTY_PICKLER_ORACLE_TMP: ${{ github.workspace }}/target/scala-reader-oracle
-          TMPDIR: ${{ github.workspace }}/target/issue-1876-tmp
+          TMPDIR: ${{ github.workspace }}/target/issue-1877-tmp
         run: |
           mkdir -p "$TMPDIR"
           mkdir -p "$DOTTY_TASTY_PICKLER_ORACLE_TMP"

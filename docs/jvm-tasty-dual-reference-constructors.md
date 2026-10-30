@@ -213,4 +213,66 @@ SCALA39_ROOT="$SCALA39_ROOT" JAVA_HOME="$JAVA_HOME" \
     --locked -- --nocapture
 ```
 
-The audit also ran the JVM-only reference graph test with `DOTTY_CLASSFILE_REQUIRE_JDK=1`. No producer implementation or enablement is included in this audit.
+The audit also ran the JVM-only reference graph test with `DOTTY_CLASSFILE_REQUIRE_JDK=1`.
+
+## Issue #1877: ordered two-field alias producer
+
+Starting from merged main `811780450ade51633a5f272195aaafd3a77dec0e`, the
+class-state validator now admits the exact full `Pair.scala` shape after it
+authenticates two source-ordered field receipts. Each field keeps its exact
+source and typed initializer, canonical same-batch `Counter` TypeRef, owner,
+source position, and typed constructor-owned `TermRef`. The validator resolves
+that formal through the constructor's ordered source parameter trees, then
+retains the corresponding class-owned template parameter used by Scala's
+TASTy field initializer. It requires the original field order to map to
+`left ← first` and `right ← second`, with distinct aliases, exactly two such
+fields, followed by exactly two parameterless readers in source order. Each
+reader's source and typed roots must be the exact empty-argument call shape
+`field.get()`: its typed receiver must target the corresponding field symbol,
+and the selected method must be the canonical same-batch `Counter.get` symbol
+with its zero-argument `Int` signature. The proof uses typed identities to
+associate each reader with its field. The existing serializer consumes each
+field's receipt independently and keeps both read bodies bound to their
+original field and `Counter.get` symbols.
+
+The Rust decoder regression checks the four distinct template/constructor
+`PARAM`s, two `VALDEF`s in source order, `PRIVATE` and `LOCAL` modifiers,
+`Counter` type trees, and the two distinct `TERMREFsymbol` targets. It also
+walks each read method's emitted tree and confirms that `leftValue` selects
+`left` before signed `get`, while `rightValue` selects `right` before `get`.
+No classfile or combined Scala ABI claim is made by this producer test.
+
+The strict producer test generated both sidecars from the original single
+Rust frontend session, then the pinned Scala 3.9.0 compiler successfully ran
+`-decompile` on Rust `Pair.tasty` and `-from-tasty` on Rust `Counter.tasty` and
+`Pair.tasty`. `javap` on the rebuilt Pair confirmed the two private final
+Counter fields and constructor descriptor
+`(Lexample/Counter;Lexample/Counter;)V`. Inputs were Scala revision
+`777528f19a58e794c9954a42f433373472ec57f8`, compiler
+`3.9.0-bin-SNAPSHOT-git-777528f`, Temurin JDK `21.0.13+9-LTS`, TASTy 28.9.0,
+and Rust 1.98.1. The separate Java runtime/client check remains outside this
+issue.
+
+Negative paired-plan first failures are asserted at their actual gates:
+
+| Input | First observed rejection |
+| --- | --- |
+| `left ← second`, `right ← first` | TASTy plan validation: `UnsafeFieldInitializer` (class-level ordered alias mismatch) |
+| both fields reuse `first` | TASTy plan validation: `UnsafeFieldInitializer` (duplicate alias does not satisfy the ordered pair) |
+| source fields reordered without changing their RHSs | TASTy plan validation: `UnsafeFieldInitializer` (receipt order differs from formal order) |
+| third reference alias field | TASTy plan validation: `ClassMembers` (outside exact two-field shape) |
+| constant or arithmetic reader body | TASTy plan validation: `ClassMembers` (not the exact field `get()` call) |
+| reader targets the other field | TASTy plan validation: `ClassMembers` (typed receiver identity mismatch) |
+| reader calls another zero-argument `Int` method on `Counter` | TASTy plan validation: `ClassMembers` (target is not canonical `Counter.get`) |
+| reader interleaved between fields | TASTy plan validation: `ClassMembers` (members must be fields, then readers) |
+| mutable alias with reads | method body typing: `UnstableSelectionPrefix` |
+| public alias field | member planning: only private fields are supported |
+| stale right-field typed initializer plan binding | direct class-state validation: `FieldInitializerBinding` |
+| right field declared as `Int` while source says `Counter` | direct class-state validation: `FieldType` |
+
+The signature-only dual-reference fixture still follows the #1876 path and
+preserves its previous output. Existing one-reference alias and primitive
+field byte snapshots are covered by the unchanged focused class-state tests.
+The strict Scala regression is part of
+`.github/workflows/jvm-tasty-factory-scala-consumer.yml` under
+`DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_ALIAS=1`.
