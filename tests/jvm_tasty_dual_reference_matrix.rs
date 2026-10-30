@@ -4,6 +4,48 @@ use dotty_core::SourceId;
 const SOURCE: &str = include_str!("fixtures/jvm_tasty_dual_reference_constructors/Pair.scala");
 
 #[test]
+fn signature_only_renamed_pair_passes_ordered_proof_before_unchanged_tasty_gate() {
+    // Envelope is intentionally first: the batch planner completes both classes,
+    // validates the ordered two-reference JVM proof, then reaches the existing
+    // PrimaryConstructorInput rejection while validating Pair's TASTy plan.
+    let source = "package renamed.example\n\nclass Envelope(left: Token, right: Token)\n\nclass Token(start: Int)\n";
+    let error = with_paired_jvm_tasty_batch_plan(
+        source,
+        "SignatureOnly.scala",
+        SourceId::from_index(1875),
+        |_| (),
+    )
+    .expect_err("the signature-only source still reaches the bounded TASTy guard");
+    let observed = format!("{error:?}");
+    assert!(
+        observed.contains("phase: \"TASTy plan validation\""),
+        "{observed}"
+    );
+    assert!(observed.contains("PrimaryConstructorInput"), "{observed}");
+}
+
+#[test]
+fn two_reference_formals_to_different_batch_classes_fail_at_ordered_proof() {
+    let source = "package example\n\nclass Pair(first: Counter, second: Other)\n\nclass Counter(start: Int)\n\nclass Other(start: Int)\n";
+    let error = with_paired_jvm_tasty_batch_plan(
+        source,
+        "DifferentReferenceFormals.scala",
+        SourceId::from_index(1875),
+        |_| (),
+    )
+    .expect_err("distinct same-batch target classes must not share one formal proof");
+    let observed = format!("{error:?}");
+    assert!(
+        observed.contains("phase: \"ordered constructor formal proof\""),
+        "{observed}"
+    );
+    assert!(
+        observed.contains("OrderedReferenceFormalIdentity"),
+        "{observed}"
+    );
+}
+
+#[test]
 fn paired_batch_matrix_records_source_errors_and_unreached_later_stages() {
     struct Case {
         name: &'static str,

@@ -1348,8 +1348,8 @@ class CounterOwner(counter: foreign.Counter):
             | PairedPlanError::BatchUnit { phase, reason } => {
                 assert_eq!(
                     phase, case.phase,
-                    "{} rejected at the wrong stage",
-                    case.name
+                    "{} rejected at the wrong stage: {reason}",
+                    case.name,
                 );
                 assert!(
                     reason.starts_with(case.reason_prefix),
