@@ -150,5 +150,84 @@
       "bytes": 2773,
       "sha256": "45c218a47a4c99c1c16f294c2675f12909b89773fe59c7630cde7fa0f38f68fd"
     }
-  ]
+  ],
+  "rust_session": {
+    "source_id": 1874,
+    "source": "Pair.scala",
+    "pipeline": [
+      "Lexer",
+      "Parser",
+      "Namer",
+      "SourceTyper"
+    ],
+    "identity_observations": {
+      "Counter": 40,
+      "Pair": 41,
+      "Pair_constructor": 51,
+      "template_parameters": [
+        49,
+        50
+      ],
+      "constructor_formals": [
+        52,
+        53
+      ],
+      "fields": [
+        54,
+        55
+      ],
+      "read_methods": [
+        56,
+        57
+      ],
+      "Counter_get": 46,
+      "field_typed_alias_targets": [
+        52,
+        53
+      ],
+      "source_to_typed_rhs_roots": [
+        {
+          "member_tree": 8,
+          "source_rhs": 7,
+          "typed_rhs": 0
+        },
+        {
+          "member_tree": 26,
+          "source_rhs": 25,
+          "typed_rhs": 1
+        },
+        {
+          "member_tree": 29,
+          "source_rhs": 28,
+          "typed_rhs": 2
+        },
+        {
+          "member_tree": 34,
+          "source_rhs": 33,
+          "typed_rhs": 5
+        },
+        {
+          "member_tree": 39,
+          "source_rhs": 38,
+          "typed_rhs": 8
+        }
+      ]
+    },
+    "paired_batch_first_rejection": {
+      "class_index": 1,
+      "declaration_index": 43,
+      "phase": "TASTy plan validation",
+      "reason": "Unsupported { feature: PrimaryConstructorInput, symbol: Some(SymbolId(52)) }",
+      "emitted_artifacts": 0
+    },
+    "boundary": "field-alias-specific pickler validation and TASTy lowering were not reached"
+  },
+  "unreached_negative_controls": {
+    "reason": "the first PrimaryConstructorInput rejection occurs before alias relationship validation",
+    "variants": [
+      "reordered-parameter-names",
+      "changed-field-alias",
+      "reversed-class-order"
+    ]
+  }
 }
