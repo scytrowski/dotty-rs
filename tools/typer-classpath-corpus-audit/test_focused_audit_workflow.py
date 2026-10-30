@@ -1,8 +1,45 @@
+import re
 import unittest
 from pathlib import Path
 
 
 class FocusedAuditWorkflowTests(unittest.TestCase):
+    def test_recursive_acceptance_evidence_paths_trigger_the_workflow(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        workflow = (repo / ".github/workflows/typer-focused-audit.yml").read_text(encoding="utf-8")
+        pull_request = workflow.split("  pull_request:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
+        paths_section = pull_request.split("    paths:\n", 1)[1]
+        patterns = re.findall(r"^      - ['\"]?([^'\"\n]+)['\"]?\s*$", paths_section, re.MULTILINE)
+
+        def github_path_matches(pattern: str, path: str) -> bool:
+            expression = ""
+            index = 0
+            while index < len(pattern):
+                if pattern.startswith("**", index):
+                    expression += ".*"
+                    index += 2
+                elif pattern[index] == "*":
+                    expression += "[^/]*"
+                    index += 1
+                elif pattern[index] == "?":
+                    expression += "[^/]"
+                    index += 1
+                else:
+                    expression += re.escape(pattern[index])
+                    index += 1
+            return re.fullmatch(expression, path) is not None
+
+        evidence_files = (
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv",
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv",
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/positive-roots.tsv",
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/negative-rollback.tsv",
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/stdlib-cohorts.tsv",
+        )
+        for path in evidence_files:
+            with self.subTest(path=path):
+                self.assertTrue(any(github_path_matches(pattern, path) for pattern in patterns))
+
     def test_ordinary_member_mode_is_separate_from_frozen_local_cohorts(self) -> None:
         repo = Path(__file__).resolve().parents[2]
         runner = (repo / "tools/typer-classpath-corpus-audit/run").read_text(encoding="utf-8")

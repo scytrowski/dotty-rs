@@ -28,8 +28,10 @@ cohort and writes a separate FOCUSED / PARTIAL report.
 contains exact Scala-root-relative path#tree identities and is validated before
 the typer test runs. It does not use or change the historical local audit.
 When --require-typed-cohort is supplied, every manifest identity must also
-appear exactly once in the ordinary report, and required roots retain their
-complete result shapes.
+appear exactly once as a typed or blocked attempt with a valid source-tree
+mapping. Excluded, unattempted, malformed, or counter-inconsistent reports
+fail the gate; required_typed roots must still retain their complete result
+shapes.
 Set DOTTY_AUDIT_TYPE_METHOD_DEFINITION=1 to run selected method definitions
 through SourceTyper::type_method_definition instead of typing only each RHS.
 --compare-legacy-profile runs the legacy file-only profile once on the same

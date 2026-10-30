@@ -18,6 +18,7 @@ on:
       - 'tools/typer-classpath-corpus-audit/**'
       - 'docs/typer-*.md'
       - 'docs/typer-*.tsv'
+      - 'docs/typer-lexical-closure-acceptance-recovery-3.9.0/**'
       - 'docs/typer-focused-smoke-baseline-3.9.0.txt'
   workflow_dispatch:
 
