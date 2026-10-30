@@ -431,6 +431,31 @@ fn dual_reference_alias_validation_rejects_swaps_reuse_order_and_extra_fields() 
         "  def leftValue(): Int = left.get()",
         "  private val extra: Counter = first\n  def leftValue(): Int = left.get()",
     );
+    let constant_reader = PAIR_SOURCE.replace(
+        "def rightValue(): Int = right.get()",
+        "def rightValue(): Int = 42",
+    );
+    let unrelated_reader = PAIR_SOURCE.replace(
+        "def rightValue(): Int = right.get()",
+        "def rightValue(): Int = right.get() + 1",
+    );
+    let duplicate_read = PAIR_SOURCE.replace(
+        "def rightValue(): Int = right.get()",
+        "def rightValue(): Int = left.get()",
+    );
+    let alternate_getter = PAIR_SOURCE
+        .replace(
+            "  def set(value: Int): Unit = current = value",
+            "  def count(): Int = current\n  def set(value: Int): Unit = current = value",
+        )
+        .replace(
+            "def rightValue(): Int = right.get()",
+            "def rightValue(): Int = right.count()",
+        );
+    let interleaved_members = PAIR_SOURCE.replace(
+        "  private val left: Counter = first\n  private val right: Counter = second\n  def leftValue(): Int = left.get()\n  def rightValue(): Int = right.get()",
+        "  private val left: Counter = first\n  def leftValue(): Int = left.get()\n  private val right: Counter = second\n  def rightValue(): Int = right.get()",
+    );
     for (label, source, expected_reason) in [
         ("swapped", swapped, "UnsafeFieldInitializer"),
         ("reused", reused, "UnsafeFieldInitializer"),
@@ -440,6 +465,15 @@ fn dual_reference_alias_validation_rejects_swaps_reuse_order_and_extra_fields() 
             "UnsafeFieldInitializer",
         ),
         ("third alias", third_field, "ClassMembers"),
+        ("constant reader", constant_reader, "ClassMembers"),
+        ("unrelated reader", unrelated_reader, "ClassMembers"),
+        ("duplicate field read", duplicate_read, "ClassMembers"),
+        (
+            "noncanonical counter reader",
+            alternate_getter,
+            "ClassMembers",
+        ),
+        ("interleaved members", interleaved_members, "ClassMembers"),
     ] {
         let error = with_paired_jvm_tasty_batch_plan(
             &source,

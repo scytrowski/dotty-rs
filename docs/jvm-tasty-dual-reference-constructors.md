@@ -226,9 +226,14 @@ that formal through the constructor's ordered source parameter trees, then
 retains the corresponding class-owned template parameter used by Scala's
 TASTy field initializer. It requires the original field order to map to
 `left ← first` and `right ← second`, with distinct aliases, exactly two such
-fields, and exactly two methods. The existing serializer consumes each field's
-receipt independently and keeps the two read bodies bound to their original
-field and `Counter.get` symbols.
+fields, followed by exactly two parameterless readers in source order. Each
+reader's source and typed roots must be the exact empty-argument call shape
+`field.get()`: its typed receiver must target the corresponding field symbol,
+and the selected method must be the canonical same-batch `Counter.get` symbol
+with its zero-argument `Int` signature. The proof uses typed identities to
+associate each reader with its field. The existing serializer consumes each
+field's receipt independently and keeps both read bodies bound to their
+original field and `Counter.get` symbols.
 
 The Rust decoder regression checks the four distinct template/constructor
 `PARAM`s, two `VALDEF`s in source order, `PRIVATE` and `LOCAL` modifiers,
@@ -256,6 +261,10 @@ Negative paired-plan first failures are asserted at their actual gates:
 | both fields reuse `first` | TASTy plan validation: `UnsafeFieldInitializer` (duplicate alias does not satisfy the ordered pair) |
 | source fields reordered without changing their RHSs | TASTy plan validation: `UnsafeFieldInitializer` (receipt order differs from formal order) |
 | third reference alias field | TASTy plan validation: `ClassMembers` (outside exact two-field shape) |
+| constant or arithmetic reader body | TASTy plan validation: `ClassMembers` (not the exact field `get()` call) |
+| reader targets the other field | TASTy plan validation: `ClassMembers` (typed receiver identity mismatch) |
+| reader calls another zero-argument `Int` method on `Counter` | TASTy plan validation: `ClassMembers` (target is not canonical `Counter.get`) |
+| reader interleaved between fields | TASTy plan validation: `ClassMembers` (members must be fields, then readers) |
 | mutable alias with reads | method body typing: `UnstableSelectionPrefix` |
 | public alias field | member planning: only private fields are supported |
 | stale right-field typed initializer plan binding | direct class-state validation: `FieldInitializerBinding` |
