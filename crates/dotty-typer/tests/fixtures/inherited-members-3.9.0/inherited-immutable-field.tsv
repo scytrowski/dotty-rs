@@ -1,0 +1,11 @@
+case	Scala 3.9.0	Rust before #1905	Rust #1905 selected declaration	receiver	value/result type
+Child.withBias unqualified	valid	fully_typed	Parent.bias (source Field, immutable)	Child.this	Int
+Child.withBias explicit this.bias	valid	fully_typed	Parent.bias (source Field, immutable)	Child.this	Int
+local bias shadows Parent.bias	valid	not asserted	method-local Local	lexical local	Int
+Child.bias shadows Parent.bias	valid	not asserted	Child.bias (source Field)	Child.this	Int
+local import shadows Parent.bias	valid	not asserted	Imported.bias (source Field)	Imported module class	Int
+Parent.var bias read	valid	not asserted	Parent.bias (source Field, MUTABLE preserved)	Child.this	Int
+missing/private/unrelated field	invalid	not asserted	TermNameNotFound / no typed root	-	-
+Boolean bias used as Int	invalid	not asserted	type error / no typed root	Child.this	Boolean
+injected invalid Parent ClassInfo	not applicable	not asserted	MemberLookup / no typed root	-	-
+missing lookup then valid retry	first invalid, retry valid	not asserted	failure rolls back; Parent.bias succeeds	Child.this	Int
