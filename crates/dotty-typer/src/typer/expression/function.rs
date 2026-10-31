@@ -192,13 +192,16 @@ impl FunctionLiteralIndex {
             return None;
         }
         let member = store.symbols.get(symbol);
-        if member.flags.contains(SymbolFlags::STATIC) || member.visibility != Visibility::Public {
+        if member.flags.contains(SymbolFlags::STATIC) {
             return None;
         }
         let declaring_owner = member.owner?;
         let inherited_from_direct_parent = if declaring_owner == owner {
             false
         } else {
+            if member.visibility != Visibility::Public {
+                return None;
+            }
             let SymbolInfo::Complete(class_info_type) = *store.symbols.info(owner) else {
                 return None;
             };

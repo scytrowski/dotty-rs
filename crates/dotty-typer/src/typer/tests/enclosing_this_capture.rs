@@ -18,6 +18,85 @@ fn method_tree(
 }
 
 #[test]
+fn ordinary_function1_still_captures_private_same_owner_method_and_field() {
+    let source_text = concat!(
+        "class Calculator { ",
+        "private val bias: Int = 2; ",
+        "private def add(x: Int): Int = x + 1; ",
+        "def lifted: Int => Int = x => add(x); ",
+        "def mapped: Int => Int = x => x + bias ",
+        "}",
+    );
+    let (parsed, mut store, mut packages, definitions, index, source) = parse_and_name(source_text);
+    enter_scala_function_classes(&mut store, &mut packages, [1]);
+    let calculator = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::TypeDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "Calculator")
+                .then(|| index.symbol_at(source, tree).unwrap())
+        })
+        .unwrap();
+    let member_symbol = |wanted: &str| {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let name = match &node.kind {
+                    TreeKind::DefDef(definition) => definition.name.as_name(),
+                    TreeKind::ValDef(definition) => definition.name.as_name(),
+                    _ => return None,
+                };
+                (store.names.resolve(name.text()) == wanted)
+                    .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .unwrap()
+    };
+    let add = member_symbol("add");
+    let bias = member_symbol("bias");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    for (method_name, member) in [("lifted", add), ("mapped", bias)] {
+        let (method, rhs) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, method_name);
+        assert_eq!(typer.store().symbols.get(member).owner, Some(calculator));
+        let typed_method = typer
+            .type_method_definition(method_tree(&parsed, &index, source, method))
+            .unwrap_or_else(|error| panic!("private same-owner capture failed: {error:?}"));
+        assert!(matches!(
+            &typer.typed_ast().get(typed_method).kind,
+            TreeKind::DefDef(definition) if definition.rhs.is_some()
+        ));
+        let typed_rhs = typer.source_typed_index().get(source, rhs).unwrap();
+        let TreeKind::Closure(closure) = &typer.typed_ast().get(typed_rhs).kind else {
+            panic!("{method_name} should remain a closure");
+        };
+        assert_eq!(closure.env.len(), 1);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(closure.env[0]).ty),
+            Type::ThisType { class } if *class == calculator
+        ));
+        assert!(
+            typer.typed_ast().iter().any(|(_, node)| matches!(
+                typer.store().types.get(node.ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == member
+            )),
+            "{method_name} should retain its same-owner member identity"
+        );
+    }
+}
+
+#[test]
 fn combined_enclosing_this_and_method_parameter_capture_types_whole_method() {
     let source_text =
         include_str!("../../../tests/fixtures/lexical-closure-contract/CombinedCaptures.scala");
