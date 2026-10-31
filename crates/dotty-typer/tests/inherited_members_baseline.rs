@@ -294,7 +294,7 @@ fn local_and_child_fields_keep_precedence_over_an_inherited_parent_val() {
             "local",
         ),
         (
-            "package shadowfield\nclass Parent:\n  val bias: Int = 2\nclass Child extends Parent:\n  val bias: Int = 3\n  def own(x: Int): Int = x + bias\n",
+            "package shadowfield\nclass Parent:\n  val bias: Int = 2\nclass Child extends Parent:\n  override val bias: Int = 3\n  def own(x: Int): Int = x + bias\n",
             "own",
             "Child",
         ),
@@ -302,11 +302,6 @@ fn local_and_child_fields_keep_precedence_over_an_inherited_parent_val() {
             "package shadowfield\nclass Parent:\n  var bias: Int = 2\nclass Child extends Parent:\n  def inheritedVar(x: Int): Int = x + bias\n",
             "inheritedVar",
             "ParentMutable",
-        ),
-        (
-            "package shadowfield\nobject Imported:\n  val bias: Int = 4\nclass Parent:\n  val bias: Int = 2\nclass Child extends Parent:\n  def imported(x: Int): Int =\n    import Imported.bias\n    x + bias\n",
-            "imported",
-            "Imported",
         ),
     ];
     for (index, (source_text, method_name, expected_owner)) in cases.into_iter().enumerate() {
@@ -498,6 +493,18 @@ fn local_and_child_fields_keep_precedence_over_an_inherited_parent_val() {
             );
         }
     }
+}
+
+#[test]
+fn imported_name_ambiguous_with_inherited_immutable_field_rejects_root() {
+    let source = include_str!(
+        "fixtures/inherited-members-3.9.0/NegativeAmbiguousInheritedFieldImport.scala"
+    );
+    let error = rejected_method_root(source, "imported", 1974);
+    assert!(
+        matches!(error, Some(TyperError::AmbiguousTermReference { .. })),
+        "the imported term and proven inherited field must remain ambiguous: {error:?}"
+    );
 }
 
 #[test]

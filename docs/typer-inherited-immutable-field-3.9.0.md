@@ -16,8 +16,8 @@ snapshot confirms that `Parent.bias` is a source field owned by `Parent`,
 `Child` has the direct `Parent` edge, and both `bias` and `this.bias` are valid
 references in a method body returning `Int`. The corresponding Rust baseline
 already completed `Child.withBias` before this issue; #1904's inherited-method
-change did not alter that result. Since the assigned positive was already
-green, this increment adds no production resolver change.
+change did not alter that result. This review fix preserves that positive and
+adds only the proven local-import ambiguity with a direct source parent field.
 
 The focused regression now inspects the mapped `DefDef`, its source body and
 the original field reference. It asserts that unqualified `bias` and the
@@ -30,12 +30,19 @@ two fresh sessions, so the canonical identity assertions run against distinct
 semantic stores.
 
 Negative and precedence controls cover missing, private, unrelated, and
-wrong-typed fields, invalid Parent `ClassInfo`, local and Child-owned
-shadowing, a local import that shadows the inherited field, a mutable `var`
-whose `MUTABLE` flag remains intact, and failure rollback followed by a valid
-same-session retry. The mutable control tests a read only; inherited writes
-remain outside this issue. These Rust results and
-the frozen target classifications plus Rust-only controls are summarized in
+wrong-typed fields, invalid Parent `ClassInfo`, local shadowing, a valid
+`override val` owned by Child, a mutable `var` whose `MUTABLE` flag remains
+intact, and failure rollback followed by a valid same-session retry. The
+`ChildFieldOverride.scala` positive was compiled with the pinned Scala 3.9.0
+oracle. The local import of `Imported.bias` is not a shadowing positive:
+Scala 3.9.0 rejects `x + bias` with E049 because the imported name is
+ambiguous with inherited `Parent.bias`. The Rust regression now returns typed
+`AmbiguousTermReference` and publishes no method root. The pinned negative
+source and diagnostic are `NegativeAmbiguousInheritedFieldImport.scala` and
+`NegativeAmbiguousInheritedFieldImport.scala39-diagnostics.txt`. The mutable
+control tests a read only; inherited writes remain outside this issue. These
+Rust results and the frozen target classifications plus Rust-only controls
+are summarized in
 [`inherited-immutable-field.tsv`](../crates/dotty-typer/tests/fixtures/inherited-members-3.9.0/inherited-immutable-field.tsv).
 
 Focused validation:

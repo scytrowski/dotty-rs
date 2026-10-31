@@ -110,12 +110,14 @@ expect_failure() {
 compile_snapshot InheritedMembers.scala InheritedMembers.scala39-typed-tree.txt
 compile_snapshot ExplicitSelection.scala ExplicitSelection.scala39-typed-tree.txt
 compile_accepts ShadowedNames.scala
+compile_accepts ChildFieldOverride.scala
 compile_accepts UnrelatedSameSpelling.scala
 expect_failure NegativeMissingMember.scala NegativeMissingMember.scala39-diagnostics.txt
 expect_failure NegativeWrongArgument.scala NegativeWrongArgument.scala39-diagnostics.txt
 expect_failure NegativePrivateAccess.scala NegativePrivateAccess.scala39-diagnostics.txt
+expect_failure NegativeAmbiguousInheritedFieldImport.scala NegativeAmbiguousInheritedFieldImport.scala39-diagnostics.txt
 
 printf 'Scala source revision: %s\nJDK: %s\n' "$actual_revision" "$jdk_release"
 printf '%s\n' 'Frozen inherited-member source and explicit-selection controls match Scala 3.9.0 typer snapshots.'
-printf '%s\n' 'Missing-member, wrong-argument, and private-parent method/field controls remain rejected.'
-printf '%s\n' 'Shadowed same-name members/locals and unrelated same-spelled classes are accepted.'
+printf '%s\n' 'Missing-member, wrong-argument, private-parent, and ambiguous inherited-field import controls remain rejected.'
+printf '%s\n' 'Valid overriding fields, shadowed same-name members/locals, and unrelated same-spelled classes are accepted.'
