@@ -687,10 +687,16 @@ SHA-256 for this run was
 `b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f`. This
 compiler build output hash is recorded for provenance, not used as a fixed
 build-output expectation.
-The consumer's compiler classpath used the official published
-`scala3-compiler_3-3.9.0.jar`, SHA-256
-`3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a`; this is
-the compiler JAR consumed by the independent Scala compilation.
+The independent compile invoked the source-staged checkout launcher at
+`$SCALA39_ROOT/dist/target/universal/stage/bin/scalac`. Its manifest resolves
+`lib/scala.jar` to the staged snapshot compiler
+`scala3-compiler_3-3.9.0-bin-SNAPSHOT.jar`, SHA-256
+`b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f`. This is
+the compiler artifact actually used by the consumer compilation. The published
+`scala3-compiler_3-3.9.0.jar` with SHA-256
+`3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a` was
+present in the dependency cache, but the test neither invokes it nor places it
+on the explicit consumer classpath; it is recorded as a separate cached input.
 
 The independent consumer runtime classpath used approved published Scala
 libraries: `scala3-library_3-3.9.0.jar`
