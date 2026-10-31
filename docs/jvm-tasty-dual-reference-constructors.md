@@ -530,9 +530,14 @@ that the aliases remain distinct and positional.
 Each classfile declaration is hidden independently in a structurally valid
 copy while retaining its genuine sidecar: `Counter.get`, `Counter.set`,
 `Pair.leftValue`, `Pair.rightValue`, and `Pair.<init>(Counter, Counter)` all
-remain available to separately compiled Scala source. Matched copies without
-the sidecar fail. This establishes actual source lookup from Rust-produced
-TASTy instead of classfile-only Java linkage.
+remain available to separately compiled Scala source. For those lookup probes,
+the matched classfile-only copies have the TASTY marker stripped along with the
+sidecar; they fail with missing-member diagnostics. Separate missing/misplaced
+sidecar controls retain the TASTY marker and hide the matching classfile method,
+so their first failure is the Scala binary loader rejecting the missing sidecar.
+This establishes actual source lookup from Rust-produced TASTy instead of
+classfile-only Java linkage, and records loader failures separately from
+classfile lookup failures.
 
 ### Negative controls and first failures
 
@@ -541,7 +546,8 @@ from the strict run were:
 
 | Isolated control | First observed failure |
 | --- | --- |
-| Pair or Counter sidecar missing/misplaced while the matching classfile declaration is also hidden and its TASTY marker is stripped | `[E008] Not Found Error` for the missing member or constructor |
+| Pair or Counter sidecar missing/misplaced while the matching classfile method is hidden and its TASTY marker is retained | “Loading Scala 3 binary ... It should have been loaded from .tasty file. This .tasty file is missing.” appears first in stderr; later member errors are secondary |
+| Marker-free classfile-only lookup copy with its classfile declaration hidden and sidecar removed | `[E008] Not Found Error` for the missing method; the constructor lookup reports `[E173] Reference Error` |
 | Corrupt Pair or Counter sidecar | `dotty.tools.tasty.UnpickleException: not a TASTy file` |
 | Alias `TERMREFsymbol` changed from its first template PARAM target to an unused AST address | Scala TASTy unpickler first fails with `TreeWithoutOwner` |
 | Constructor PARAM `SHAREDtype` changed to an unused AST address | Scala 3.9 compilation fails while reading the malformed declaration (`-- Error:` at the client source) |

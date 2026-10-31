@@ -272,6 +272,14 @@ fn without_tasty_marker(bytes: &[u8]) -> Vec<u8> {
         .expect("encode class without its TASTY marker")
 }
 
+fn has_tasty_marker(bytes: &[u8]) -> bool {
+    let class = decode_class(bytes);
+    class.attributes.iter().any(|attribute| match attribute {
+        Attribute::Other(raw) => class.constant_pool.utf8(raw.name_index).unwrap() == "TASTY",
+        _ => false,
+    })
+}
+
 fn wrong_pair_constructor_descriptor(bytes: &[u8]) -> Vec<u8> {
     let mut class = decode_class(bytes);
     let no_argument_void = (1..=u16::MAX)
@@ -673,16 +681,17 @@ fn compile_and_run_variant(
 fn first_error(output: &Output) -> String {
     let text = strip_ansi(&String::from_utf8_lossy(&output.stderr));
     text.lines()
-        .find(|line| {
-            (line.contains("[E") || line.contains("Error:"))
-                && !line.contains("Picked up JAVA_TOOL_OPTIONS")
-        })
-        .unwrap_or_else(|| {
-            text.lines()
-                .find(|line| !line.contains("Picked up JAVA_TOOL_OPTIONS"))
-                .unwrap_or("no diagnostic")
-        })
+        .find(|line| !line.trim().is_empty() && !is_jvm_launcher_noise(line))
+        .unwrap_or("no diagnostic")
         .to_owned()
+}
+
+fn is_jvm_launcher_noise(line: &str) -> bool {
+    line.starts_with("Picked up JAVA_TOOL_OPTIONS:")
+        || line.starts_with("Picked up _JAVA_OPTIONS:")
+        || line.starts_with("Picked up JDK_JAVA_OPTIONS:")
+        || line.contains("OpenJDK 64-Bit Server VM warning:")
+        || line.contains("Insufficient space for shared memory file:")
 }
 
 fn reject_with_first_error(output: &Output, label: &str) -> String {
@@ -691,15 +700,21 @@ fn reject_with_first_error(output: &Output, label: &str) -> String {
         "negative probe {label} unexpectedly succeeded"
     );
     let first = first_error(output);
-    assert!(
-        !first.contains("OpenJDK") && !first.contains("shared memory file"),
-        "negative probe {label} failed before reaching Scala diagnostics: {first}"
-    );
     assert_ne!(
         first, "no diagnostic",
         "negative probe {label} emitted no diagnostics"
     );
     eprintln!("NEGATIVE_FIRST_ERROR {label}: {first}");
+    first
+}
+
+fn reject_with_sidecar_loader_first(output: &Output, label: &str) -> String {
+    let first = reject_with_first_error(output, label);
+    assert!(
+        first.contains("Loading Scala 3 binary")
+            && first.contains("It should have been loaded from `.tasty` file"),
+        "negative probe {label} should first fail while loading the missing sidecar: {first}"
+    );
     first
 }
 
@@ -1008,6 +1023,10 @@ fn pinned_scala39_rejects_corrupt_or_inconsistent_dual_reference_inputs() {
     .unwrap();
     let mut hidden_left = batch.classes()[1].classfile_bytes().to_vec();
     hidden_left = without_method(&hidden_left, "leftValue", "()I");
+    assert!(
+        has_tasty_marker(&hidden_left),
+        "loader-rejection controls retain the class-level TASTY marker"
+    );
 
     let missing = temporary.join("missing-sidecar");
     fs::create_dir_all(&missing).unwrap();
@@ -1018,7 +1037,7 @@ fn pinned_scala39_rejects_corrupt_or_inconsistent_dual_reference_inputs() {
     fs::create_dir_all(&missing_out).unwrap();
     let missing_input =
         scala.compile_result(&scala.classpath(&missing), &missing_out, &simple_client);
-    reject_with_first_error(
+    reject_with_sidecar_loader_first(
         &missing_input,
         "missing Pair.tasty with Pair.leftValue hidden",
     );
@@ -1036,7 +1055,7 @@ fn pinned_scala39_rejects_corrupt_or_inconsistent_dual_reference_inputs() {
     fs::create_dir_all(&misplaced_out).unwrap();
     let misplaced_input =
         scala.compile_result(&scala.classpath(&misplaced), &misplaced_out, &simple_client);
-    reject_with_first_error(
+    reject_with_sidecar_loader_first(
         &misplaced_input,
         "misplaced Pair.tasty with Pair.leftValue hidden",
     );
@@ -1048,6 +1067,10 @@ fn pinned_scala39_rejects_corrupt_or_inconsistent_dual_reference_inputs() {
     )
     .unwrap();
     let hidden_get = without_method(batch.classes()[0].classfile_bytes(), "get", "()I");
+    assert!(
+        has_tasty_marker(&hidden_get),
+        "loader-rejection controls retain the class-level TASTY marker"
+    );
     let missing_counter_sidecar = temporary.join("missing-counter-sidecar");
     fs::create_dir_all(&missing_counter_sidecar).unwrap();
     write_batch(&missing_counter_sidecar, &batch);
@@ -1064,7 +1087,7 @@ fn pinned_scala39_rejects_corrupt_or_inconsistent_dual_reference_inputs() {
         &missing_counter_out,
         &counter_client,
     );
-    reject_with_first_error(
+    reject_with_sidecar_loader_first(
         &missing_counter_result,
         "missing Counter.tasty with Counter.get hidden",
     );
@@ -1089,7 +1112,7 @@ fn pinned_scala39_rejects_corrupt_or_inconsistent_dual_reference_inputs() {
         &misplaced_counter_out,
         &counter_client,
     );
-    reject_with_first_error(
+    reject_with_sidecar_loader_first(
         &misplaced_counter_result,
         "misplaced Counter.tasty with Counter.get hidden",
     );
