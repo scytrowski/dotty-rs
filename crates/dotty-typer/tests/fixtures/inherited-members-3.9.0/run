@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fixture_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+repo_root="$(CDPATH= cd -- "$fixture_dir/../../../../.." && pwd)"
+scala_root="${SCALA39_ROOT:?set SCALA39_ROOT to the pinned Scala checkout}"
+java_home="${JAVA_HOME:?set JAVA_HOME to Temurin JDK 21.0.8+9}"
+jdk_release="${SCALA39_JDK_RELEASE:?set SCALA39_JDK_RELEASE to 21}"
+maven_root="${COURSIER_MAVEN_ROOT:-${HOME}/.cache/coursier/v1/https/repo1.maven.org/maven2}"
+expected_revision="777528f19a58e794c9954a42f433373472ec57f8"
+cd "$fixture_dir"
+
+actual_revision="$(git -C "$scala_root" rev-parse HEAD)"
+if [[ "$actual_revision" != "$expected_revision" ]]; then
+    printf 'Scala checkout is %s; expected %s\n' "$actual_revision" "$expected_revision" >&2
+    exit 1
+fi
+if [[ ! -f "$java_home/release" || ! -d "$java_home/jmods" ]]; then
+    printf 'JAVA_HOME must contain release and jmods: %s\n' "$java_home" >&2
+    exit 1
+fi
+if [[ "$jdk_release" != 21 ]] \
+    || ! grep -Fq 'JAVA_VERSION="21.0.8"' "$java_home/release" \
+    || ! grep -Fq 'IMPLEMENTOR_VERSION="Temurin-21.0.8+9"' "$java_home/release"; then
+    printf 'JAVA_HOME must be Eclipse Temurin 21.0.8+9: %s\n' "$java_home" >&2
+    exit 1
+fi
+
+python3 - "$maven_root" "$fixture_dir/scala-artifacts.sha256.tsv" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+root, manifest = Path(sys.argv[1]), Path(sys.argv[2])
+errors = []
+for line in manifest.read_text(encoding="utf-8").splitlines():
+    expected, relative = line.split("\t", 1)
+    path = root / relative
+    if not path.is_file():
+        errors.append(f"missing pinned artifact: {relative}")
+    elif hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        errors.append(f"checksum mismatch: {relative}")
+if errors:
+    print("\n".join(errors), file=sys.stderr)
+    raise SystemExit(1)
+print("verified 8 pinned Scala 3.9.0 artifacts")
+PY
+
+jar_paths=(
+    "$maven_root/org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar"
+    "$maven_root/org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar"
+    "$maven_root/org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar"
+    "$maven_root/org/scala-lang/tasty-core_3/3.9.0/tasty-core_3-3.9.0.jar"
+    "$maven_root/org/scala-lang/scala3-interfaces/3.9.0/scala3-interfaces-3.9.0.jar"
+    "$maven_root/org/scala-lang/modules/scala-asm/9.9.0-scala-1/scala-asm-9.9.0-scala-1.jar"
+    "$maven_root/org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar"
+    "$maven_root/org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar"
+)
+classpath="$(IFS=:; printf '%s' "${jar_paths[*]}")"
+scratch="$repo_root/target/inherited-members-oracle"
+mkdir -p "$scratch/tmp" "$scratch/classes"
+
+compile_snapshot() {
+    local source="$1" snapshot="$2"
+    "$java_home/bin/java" -XX:-UsePerfData -Xshare:off -Djava.io.tmpdir="$scratch/tmp" -cp "$classpath" \
+        dotty.tools.dotc.Main -classpath "$classpath" -d "$scratch/classes" \
+        -Vprint:typer -Xprint-types -Yprint-debug -Yprint-debug-owners \
+        -color:never "$source" >"$scratch/current.txt" 2>"$scratch/compiler-stderr.txt"
+    python3 -c 'from pathlib import Path; import sys; p=Path(sys.argv[1]); p.write_text(p.read_text(encoding="utf-8").rstrip()+"\n", encoding="utf-8")' "$scratch/current.txt"
+    diff -u "$snapshot" "$scratch/current.txt"
+}
+
+compile_accepts() {
+    local source="$1"
+    "$java_home/bin/java" -XX:-UsePerfData -Xshare:off -Djava.io.tmpdir="$scratch/tmp" -cp "$classpath" \
+        dotty.tools.dotc.Main -classpath "$classpath" -d "$scratch/classes" \
+        -color:never "$source"
+}
+
+expect_failure() {
+    local source="$1" snapshot="$2"
+    if "$java_home/bin/java" -XX:-UsePerfData -Xshare:off -Djava.io.tmpdir="$scratch/tmp" -cp "$classpath" \
+        dotty.tools.dotc.Main -classpath "$classpath" -d "$scratch/classes" \
+        -color:never "$source" >"$scratch/negative.txt" 2>&1; then
+        printf 'Scala compiler unexpectedly accepted %s\n' "$source" >&2
+        exit 1
+    fi
+    python3 -c 'from pathlib import Path; import sys; p=Path(sys.argv[1]); p.write_text(p.read_text(encoding="utf-8").rstrip()+"\n", encoding="utf-8")' "$scratch/negative.txt"
+    diff -u "$snapshot" "$scratch/negative.txt"
+}
+
+compile_snapshot InheritedMembers.scala InheritedMembers.scala39-typed-tree.txt
+compile_snapshot ExplicitSelection.scala ExplicitSelection.scala39-typed-tree.txt
+compile_accepts ShadowedNames.scala
+compile_accepts UnrelatedSameSpelling.scala
+expect_failure NegativeMissingMember.scala NegativeMissingMember.scala39-diagnostics.txt
+expect_failure NegativeWrongArgument.scala NegativeWrongArgument.scala39-diagnostics.txt
+expect_failure NegativePrivateAccess.scala NegativePrivateAccess.scala39-diagnostics.txt
+
+printf 'Scala source revision: %s\nJDK: %s\n' "$actual_revision" "$jdk_release"
+printf '%s\n' 'Frozen inherited-member source and explicit-selection controls match Scala 3.9.0 typer snapshots.'
+printf '%s\n' 'Missing-member, wrong-argument, and private-parent method/field controls remain rejected.'
+printf '%s\n' 'Shadowed same-name members/locals and unrelated same-spelled classes are accepted.'

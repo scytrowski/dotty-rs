@@ -1,0 +1,7 @@
+-- [E006] Not Found Error: NegativeMissingMember.scala:5:29 --------------------
+5 |  def missing(x: Int): Int = absent(x)
+  |                             ^^^^^^
+  |                             Not found: absent - did you mean assert?
+  |
+  | longer explanation available when compiling with `-explain`
+1 error found
