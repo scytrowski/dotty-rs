@@ -26170,6 +26170,230 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_function1_owner_resolves_inherited_method_and_field_before_capture() {
+        let source_text = concat!(
+            "class Parent { val bias: Int = 2; def add(x: Int): Int = x + 1 }; ",
+            "class Child extends Parent { ",
+            "def lifted: Int => Int = x => add(x); ",
+            "def mapped: Int => Int = x => x + bias; ",
+            "def local: Int => Int = x => { val bias: Int = 3; x + bias }; ",
+            "def lookupContext: Int => Int = x => x",
+            " }",
+        );
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name(source_text);
+        enter_scala_function_classes(&mut store, &mut packages, [1]);
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let source_method = method_symbol(&parsed, &store, &index, source, "lookupContext");
+        let (_, lambda_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "lookupContext");
+        let references = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| {
+                let TreeKind::Ident(ident) = &node.kind else {
+                    return None;
+                };
+                let spelling = store.names.resolve(ident.name.text());
+                matches!(spelling, "add" | "bias").then_some((tree, ident.name, node.position))
+            })
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(references.len(), 2);
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        typer.complete_symbol(child).unwrap();
+
+        let source_method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| {
+                (index.symbol_at(source, tree) == Some(source_method)).then_some(tree)
+            })
+            .unwrap();
+        typer.type_method_definition(source_method_tree).unwrap();
+        let lambda_method = typer
+            .function_literal_method_at(source, lambda_tree)
+            .expect("the context lambda should have a synthetic method");
+        assert_eq!(
+            typer.store.symbols.get(lambda_method).owner,
+            Some(source_method)
+        );
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(source_method).unwrap(),
+            owner: lambda_method,
+            local_scopes: None,
+        };
+
+        let mut resolved = Vec::new();
+        for (tree, name, position) in references {
+            let mut info_journal = Vec::new();
+            let symbol = typer
+                .resolve_expression_term_with_inherited(
+                    name,
+                    context,
+                    tree.index(),
+                    position,
+                    &mut info_journal,
+                )
+                .unwrap();
+            assert_eq!(typer.store.symbols.get(symbol).owner, Some(parent));
+            let reference_type = typer
+                .expression_type_of_symbol(symbol, context.owner, tree.index(), &mut info_journal)
+                .unwrap();
+            assert!(matches!(
+                typer.store.types.get(reference_type),
+                Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(target),
+                } if *target == symbol
+                    && matches!(typer.store.types.get(*prefix), Type::ThisType { class } if *class == child)
+            ));
+            resolved.push((typer.store.names.resolve(name.text()).to_owned(), symbol));
+        }
+        let inherited_method = resolved
+            .iter()
+            .find_map(|(name, symbol)| (name == "add").then_some(*symbol))
+            .unwrap();
+        let inherited_field = resolved
+            .iter()
+            .find_map(|(name, symbol)| (name == "bias").then_some(*symbol))
+            .unwrap();
+        assert_eq!(
+            typer.store.symbols.get(inherited_method).owner,
+            Some(parent)
+        );
+        assert_eq!(typer.store.symbols.get(inherited_field).owner, Some(parent));
+        assert!(matches!(
+            typer.store.symbols.get(inherited_method).info,
+            SymbolInfo::Complete(method_type)
+                if matches!(typer.store.types.get(method_type), Type::Method(method)
+                    if method.params.len() == 1 && method.result == typer.definitions.int)
+        ));
+        assert!(matches!(
+            typer.store.symbols.get(inherited_field).info,
+            SymbolInfo::Complete(field_type) if field_type == typer.definitions.int
+        ));
+
+        for method_name in ["lifted", "mapped"] {
+            let method = method_symbol(&parsed, typer.store(), &index, source, method_name);
+            let tree = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, _)| {
+                    (index.symbol_at(source, tree) == Some(method)).then_some(tree)
+                })
+                .unwrap();
+            assert!(matches!(
+                typer.type_method_definition(tree),
+                Err(TyperError::FunctionLiteralCaptureUnsupported { .. })
+            ));
+            assert!(typer.source_typed_index().get(source, tree).is_none());
+        }
+
+        let local_method = method_symbol(&parsed, typer.store(), &index, source, "local");
+        let local_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| {
+                (index.symbol_at(source, tree) == Some(local_method)).then_some(tree)
+            })
+            .unwrap();
+        typer.type_method_definition(local_tree).unwrap();
+        let (_, local_lambda_tree) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "local");
+        let local_lambda_method = typer
+            .function_literal_method_at(source, local_lambda_tree)
+            .expect("the local closure should retain its synthetic method");
+        let local_bias = typer
+            .typed_ast()
+            .iter()
+            .find_map(|(_, node)| {
+                let TreeKind::Ident(ident) = &node.kind else {
+                    return None;
+                };
+                if typer.store.names.resolve(ident.name.text()) != "bias" {
+                    return None;
+                }
+                match typer.store.types.get(node.ty) {
+                    Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    } => Some(*symbol),
+                    _ => None,
+                }
+            })
+            .expect("the successful local closure should contain its bias reference");
+        assert_eq!(typer.store.symbols.get(local_bias).kind, SymbolKind::Local);
+        assert_eq!(
+            typer.store.symbols.get(local_bias).owner,
+            Some(local_lambda_method)
+        );
+    }
+
+    #[test]
+    fn ordinary_function1_import_conflicting_with_inherited_field_stays_ambiguous() {
+        let source_text = concat!(
+            "object Imported { val bias: Int = 3 }; ",
+            "class Parent { val bias: Int = 2; def add(x: Int): Int = x + 1 }; ",
+            "class Child extends Parent { ",
+            "def conflict: Int => Int = x => { import Imported.bias; x + bias }; ",
+            "def nested: Int => (Int => Int) = x => (y: Int) => add(y)",
+            " }",
+        );
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name(source_text);
+        enter_scala_function_classes(&mut store, &mut packages, [1]);
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let method = method_symbol(&parsed, &store, &index, source, "conflict");
+        let tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| (index.symbol_at(source, tree) == Some(method)).then_some(tree))
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        typer.complete_symbol(child).unwrap();
+
+        assert!(matches!(
+            typer.type_method_definition(tree),
+            Err(TyperError::AmbiguousTermReference { .. })
+        ));
+        assert!(typer.source_typed_index().get(source, tree).is_none());
+
+        let nested = method_symbol(&parsed, typer.store(), &index, source, "nested");
+        let nested_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| (index.symbol_at(source, tree) == Some(nested)).then_some(tree))
+            .unwrap();
+        assert!(matches!(
+            typer.type_method_definition(nested_tree),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, nested_tree)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn inherited_field_completion_rolls_back_with_failed_expression() {
         let source_text = "class Parent { val value: Int }; class Child extends Parent { def use: Int = { value; missing } }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);

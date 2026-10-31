@@ -90,13 +90,43 @@ impl SourceTyper<'_> {
             .then(|| self.store.symbols.get(context.owner))
             .and_then(|owner| match owner.kind {
                 SymbolKind::Class | SymbolKind::Trait => Some(context.owner),
-                _ => owner.owner.filter(|symbol| {
-                    self.store.symbols.contains(*symbol)
+                _ => {
+                    let immediate_owner = owner.owner?;
+                    if self.store.symbols.contains(immediate_owner)
                         && matches!(
-                            self.store.symbols.get(*symbol).kind,
+                            self.store.symbols.get(immediate_owner).kind,
                             SymbolKind::Class | SymbolKind::Trait
                         )
-                }),
+                    {
+                        return Some(immediate_owner);
+                    }
+
+                    // A one-parameter ordinary function literal is owned by
+                    // its source method. Follow that single edge only when
+                    // the owner is registered as a function literal and the
+                    // immediate source method is not itself another lambda.
+                    if owner.kind != SymbolKind::Method
+                        || !self.function_literals.is_method(context.owner)
+                        || !self.store.symbols.contains(immediate_owner)
+                        || self.function_literals.is_method(immediate_owner)
+                        || !self.is_current_source_symbol(immediate_owner)
+                        || self.store.symbols.get(immediate_owner).kind != SymbolKind::Method
+                    {
+                        return None;
+                    }
+                    let class = self.store.symbols.get(immediate_owner).owner?;
+                    (self.store.symbols.contains(class)
+                        && matches!(
+                            self.store.symbols.get(class).kind,
+                            SymbolKind::Class | SymbolKind::Trait
+                        )
+                        && self.function_literals.can_capture_enclosing_this(
+                            self.store,
+                            context.owner,
+                            class,
+                        ))
+                    .then_some(class)
+                }
             });
         let mut local_scope = context.local_scopes;
         while let Some(stack) = local_scope {
