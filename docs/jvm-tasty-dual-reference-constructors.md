@@ -490,9 +490,9 @@ Tool versions and inputs:
 | Rust producer source `Pair.scala` | `06266874ed9a7acdfc4d6a1c27bea3967055e474bca5a2f666af5ebfc8669c28` |
 | Scala client `RustArtifactConsumer.scala` | `771c663dd34c2fc9ab0fbec9bb575dcae39a4ae9da5bbf5137ca9088f5124eb5` |
 | Scala source checkout | `777528f19a58e794c9954a42f433373472ec57f8` (3.9.0) |
-| Staged Scala compiler JAR | `b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f` |
-| Scala 3 library JAR | `8c605e1945ae5a3c57d618d02241f7190ecbed744367473c7c3a9b61940c920c` |
-| Scala 2 library JAR | `bc87575e0099514b17f7e84384b4a9a51d7a376720af8974e04a41a202909434` |
+| Scala source compiler | `scalac 3.9.0-bin-SNAPSHOT-git-777528f` from the pinned source checkout |
+| Scala 3.9 published runtime `scala3-library_3-3.9.0.jar` | `9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba` |
+| Scala 3.9 published runtime `scala-library-3.9.0.jar` | `b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd` |
 | JDK | Eclipse Temurin `21.0.13+9-LTS`; `java` SHA-256 `9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155` |
 | Rust toolchain | `1.98.1` |
 
@@ -509,6 +509,24 @@ The positive runtime classpath order is `scala-client:rust-producer:scala3-libra
 It contains no Scala-produced replacement for `Counter` or `Pair`. The test
 records this classpath and rechecks the original four hashes after the client
 compile and Java execution.
+
+The source compiler is built from the pinned checkout, while its runtime
+classpath uses the published Scala 3.9.0 library artifacts downloaded by the
+workflow and checked against the Maven release SHA-256 values above. The
+source-staged `*-3.9.0-bin-SNAPSHOT.jar` files are generated build outputs,
+not the approved runtime artifacts for this consumer. Their hashes are not
+stable identifiers for the source revision: the earlier recorded build had
+`scala-library` hash `bc87575e0099514b17f7e84384b4a9a51d7a376720af8974e04a41a202909434`
+and compiler hash `b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f`,
+while a fresh isolated `sbt dist/universal:stage` at the same Scala revision
+and JDK produced `scala-library` hash
+`7119ca8de0f019a5dfce8e9a2877567d73541d6ee9d7b4c187fa4fefd85d0ed0` and
+compiler hash `83c8ed13085fafc444cd9e096a861f48473cc6349a65531a639c88633ee3d8a6`.
+The failing CI cache-hit run staged a third `scala-library` hash
+(`d6976e45506eab3df2ec7ed2c44b177ab90b590cb33d015837da60a7b451d502`). The
+gate therefore verifies the source checkout and compiler version, and hashes
+the published runtime JARs it actually consumes; it does not compare staged
+build outputs to hashes from a different build.
 
 ### Scala reader identity evidence
 
@@ -602,6 +620,7 @@ TMPDIR="$PWD/target/issue-1881-tmp" \
 CARGO_TARGET_DIR="$PWD/target/issue-1881/cargo" \
 DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_CONSUMER=1 \
 SCALA39_ROOT="$SCALA39_ROOT" JAVA_HOME="$JAVA_HOME" \
+COURSIER_MAVEN_ROOT="$COURSIER_MAVEN_ROOT" \
 cargo +1.98.1 test -p dotty --test jvm_tasty_dual_reference_rust_consumer \
   --locked -- --nocapture --test-threads=1
 ```
