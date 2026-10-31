@@ -1,0 +1,109 @@
+[[syntax trees at end of                     typer]] // InheritedCaptures.scala
+<package <<root>.this.inheritedcaptureoracle:<root>.this.inheritedcaptureoracle>
+   {
+  class Parent() extends <<<new Object:Object>.<init>:((): Object)>():Object> {
+    [owner = class Parent]val bias: <root>.this.scala.Int =
+      <2:(2 : scala.this.Int)>
+    [owner = class Parent]def add([owner = method add]x: <root>.this.scala.Int)
+      : <root>.this.scala.Int =
+      <<x:<root>.this.scala.Int> + <1:(1 : scala.this.Int)>:
+        <root>.this.scala.Int>
+  }
+  class Child() extends <
+    <<new inheritedcaptureoracle.this.Parent:inheritedcaptureoracle.this.Parent>
+      .<init>:((): inheritedcaptureoracle.this.Parent)>
+  ():inheritedcaptureoracle.this.Parent> {
+    [owner = class Child]def lifted:
+      <root>.this.scala.Int => <root>.this.scala.Int =
+      <
+        {
+          [owner = method lifted]def $anonfun(
+            [owner = method $anonfun]x: <root>.this.scala.Int):
+            <root>.this.scala.Int =
+            <
+              <<this:(Child.this : inheritedcaptureoracle.this.Child)>.add:
+                ((x: <root>.this.scala.Int): <root>.this.scala.Int)>
+            (<x:<root>.this.scala.Int>):<root>.this.scala.Int>
+          <closure(<$anonfun:(x: <root>.this.scala.Int): <root>.this.scala.Int>)
+            :<root>.this.scala.Int => <root>.this.scala.Int>
+        }
+      :<root>.this.scala.Int => <root>.this.scala.Int>
+    [owner = class Child]def mapped:
+      <root>.this.scala.Int => <root>.this.scala.Int =
+      <
+        {
+          [owner = method mapped]def $anonfun(
+            [owner = method $anonfun]x: <root>.this.scala.Int):
+            <root>.this.scala.Int =
+            <<x:<root>.this.scala.Int> +
+              <<this:(Child.this : inheritedcaptureoracle.this.Child)>.bias:
+                <root>.this.scala.Int>
+            :<root>.this.scala.Int>
+          <closure(<$anonfun:(x: <root>.this.scala.Int): <root>.this.scala.Int>)
+            :<root>.this.scala.Int => <root>.this.scala.Int>
+        }
+      :<root>.this.scala.Int => <root>.this.scala.Int>
+    [owner = class Child]def explicitMethod:
+      <root>.this.scala.Int => <root>.this.scala.Int =
+      <
+        {
+          [owner = method explicitMethod]def $anonfun(
+            [owner = method $anonfun]x: <root>.this.scala.Int):
+            <root>.this.scala.Int =
+            <
+              <<this:(Child.this : inheritedcaptureoracle.this.Child)>.add:
+                ((x: <root>.this.scala.Int): <root>.this.scala.Int)>
+            (<x:<root>.this.scala.Int>):<root>.this.scala.Int>
+          <closure(<$anonfun:(x: <root>.this.scala.Int): <root>.this.scala.Int>)
+            :<root>.this.scala.Int => <root>.this.scala.Int>
+        }
+      :<root>.this.scala.Int => <root>.this.scala.Int>
+    [owner = class Child]def explicitField:
+      <root>.this.scala.Int => <root>.this.scala.Int =
+      <
+        {
+          [owner = method explicitField]def $anonfun(
+            [owner = method $anonfun]x: <root>.this.scala.Int):
+            <root>.this.scala.Int =
+            <<x:<root>.this.scala.Int> +
+              <<this:(Child.this : inheritedcaptureoracle.this.Child)>.bias:
+                <root>.this.scala.Int>
+            :<root>.this.scala.Int>
+          <closure(<$anonfun:(x: <root>.this.scala.Int): <root>.this.scala.Int>)
+            :<root>.this.scala.Int => <root>.this.scala.Int>
+        }
+      :<root>.this.scala.Int => <root>.this.scala.Int>
+    [owner = class Child]def repeated:
+      <root>.this.scala.Int => <root>.this.scala.Int =
+      <
+        {
+          [owner = method repeated]def $anonfun(
+            [owner = method $anonfun]x: <root>.this.scala.Int):
+            <root>.this.scala.Int =
+            <
+              <
+                <
+                  <
+                    <<this:(Child.this : inheritedcaptureoracle.this.Child)>.add
+                      :((x: <root>.this.scala.Int): <root>.this.scala.Int)>
+                  (<x:<root>.this.scala.Int>):<root>.this.scala.Int>
+                 +
+                  <<this:(Child.this : inheritedcaptureoracle.this.Child)>.bias:
+                    <root>.this.scala.Int>
+                :<root>.this.scala.Int>
+               +
+                <
+                  <<this:(Child.this : inheritedcaptureoracle.this.Child)>.add:
+                    ((x: <root>.this.scala.Int): <root>.this.scala.Int)>
+                (<x:<root>.this.scala.Int>):<root>.this.scala.Int>
+              :<root>.this.scala.Int>
+             +
+              <<this:(Child.this : inheritedcaptureoracle.this.Child)>.bias:
+                <root>.this.scala.Int>
+            :<root>.this.scala.Int>
+          <closure(<$anonfun:(x: <root>.this.scala.Int): <root>.this.scala.Int>)
+            :<root>.this.scala.Int => <root>.this.scala.Int>
+        }
+      :<root>.this.scala.Int => <root>.this.scala.Int>
+  }
+}:<root>.this.inheritedcaptureoracle.type>

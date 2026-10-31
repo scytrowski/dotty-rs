@@ -108,6 +108,7 @@ expect_failure() {
 }
 
 compile_snapshot InheritedMembers.scala InheritedMembers.scala39-typed-tree.txt
+compile_snapshot InheritedCaptures.scala InheritedCaptures.scala39-typed-tree.txt
 compile_snapshot ExplicitSelection.scala ExplicitSelection.scala39-typed-tree.txt
 compile_accepts ShadowedNames.scala
 compile_accepts ChildFieldOverride.scala
