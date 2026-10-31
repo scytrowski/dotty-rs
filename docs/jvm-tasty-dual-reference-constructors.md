@@ -745,3 +745,59 @@ The publisher tests inject handled errors after each of the four staged
 writes, before promotion, and after promotion. They confirm no accepted
 partial tree, best-effort staging cleanup, and no overwrite of an existing
 sentinel destination. No crash-atomic multi-file durability is claimed.
+
+## Issue #1882 checkpoint 3: closeout and bounded support
+
+### Integrated-main validation
+
+All checks below ran on
+`238034fa1b8f2832ac2babbf38b5340e1e107a89` with Rust `1.98.1`. Build and
+scratch data stayed under the issue worktree's `target/issue-1882-cargo` and
+`target/issue-1882-tmp`; shared `/tmp` was full and was not used. Cargo build
+concurrency was capped at two; Scala integration tests ran serially.
+
+The strict Scala workflow step `Run strict linked Scala and TASTy oracle
+release gates` from `.github/workflows/jvm-tasty-factory-scala-consumer.yml`
+completed with exit status 0. It enabled all ten inherited consumer flags,
+the dual-reference signature/alias/batch/consumer flags, and
+`DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`. The strict Rust-artifact consumer,
+lookup/reconstruction, renamed/reordered, corruption, publisher, linked
+artifact, deterministic-source, and pickler tests passed. Pinned Scala was at
+revision `777528f19a58e794c9954a42f433373472ec57f8`, Temurin was
+`21.0.13+9-LTS`, and the actual published runtime library hashes are recorded
+in checkpoint 2.
+
+The strict JDK run used `DOTTY_CLASSFILE_REQUIRE_JDK=1` and passed:
+
+```sh
+cargo +1.98.1 test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  --test jvm_stateful_class_contract \
+  --test jvm_tasty_artifacts \
+  --test jvm_tasty_dual_reference_identity \
+  --test jvm_tasty_dual_reference_session \
+  --test jvm_tasty_dual_reference_matrix \
+  --locked -- --nocapture --test-threads=2
+```
+
+The repository quality checks and complete workspace suite all passed:
+
+```sh
+cargo +1.98.1 fmt --all -- --check
+python3 tools/check-frontend-boundaries.py
+cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo +1.98.1 doc --workspace --no-deps --locked
+cargo +1.98.1 test --workspace --all-targets --locked -- --test-threads=2
+git diff --check
+```
+
+No Scala full-corpus run was performed; this issue explicitly excludes a
+hosted full-corpus run. No producer change or new test mechanism was needed:
+the integrated baseline already contained the source, typed, artifact,
+publisher, JDK and Scala reader controls required by the matrix. Rust-source
+two-argument Pair construction and nested Pair factories, generic/overloaded/
+contextual/default/secondary/accessor constructors, external or multi-unit
+ABI, public compiler/session API or CLI, arbitrary Scala ABI, and crash-atomic
+filesystem durability remain outside this gate.
