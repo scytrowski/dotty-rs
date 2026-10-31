@@ -1,8 +1,45 @@
+import re
 import unittest
 from pathlib import Path
 
 
 class FocusedAuditWorkflowTests(unittest.TestCase):
+    def test_recursive_acceptance_evidence_paths_trigger_the_workflow(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        workflow = (repo / ".github/workflows/typer-focused-audit.yml").read_text(encoding="utf-8")
+        pull_request = workflow.split("  pull_request:\n", 1)[1].split("  workflow_dispatch:", 1)[0]
+        paths_section = pull_request.split("    paths:\n", 1)[1]
+        patterns = re.findall(r"^      - ['\"]?([^'\"\n]+)['\"]?\s*$", paths_section, re.MULTILINE)
+
+        def github_path_matches(pattern: str, path: str) -> bool:
+            expression = ""
+            index = 0
+            while index < len(pattern):
+                if pattern.startswith("**", index):
+                    expression += ".*"
+                    index += 2
+                elif pattern[index] == "*":
+                    expression += "[^/]*"
+                    index += 1
+                elif pattern[index] == "?":
+                    expression += "[^/]"
+                    index += 1
+                else:
+                    expression += re.escape(pattern[index])
+                    index += 1
+            return re.fullmatch(expression, path) is not None
+
+        evidence_files = (
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv",
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv",
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/positive-roots.tsv",
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/negative-rollback.tsv",
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/stdlib-cohorts.tsv",
+        )
+        for path in evidence_files:
+            with self.subTest(path=path):
+                self.assertTrue(any(github_path_matches(pattern, path) for pattern in patterns))
+
     def test_ordinary_member_mode_is_separate_from_frozen_local_cohorts(self) -> None:
         repo = Path(__file__).resolve().parents[2]
         runner = (repo / "tools/typer-classpath-corpus-audit/run").read_text(encoding="utf-8")
@@ -19,17 +56,19 @@ class FocusedAuditWorkflowTests(unittest.TestCase):
         )[0]
         self.assertNotIn("DOTTY_AUDIT_FOCUSED_METHODS", ordinary_mode)
 
-    def test_runner_temp_is_scoped_to_steps_not_job_environment(self) -> None:
+    def test_target_and_scratch_are_scoped_to_the_workspace(self) -> None:
         repo = Path(__file__).resolve().parents[2]
         workflow = (repo / ".github/workflows/typer-focused-audit.yml").read_text(encoding="utf-8")
         job_config = workflow.split("\njobs:\n", 1)[1].split("\n    steps:\n", 1)[0]
-        audit_step = workflow.split("- name: Run deterministic focused audit and compare baseline\n", 1)[1]
+        audit_step = workflow.split("- name: Run deterministic 25 plus 25 ordinary-method cohorts\n", 1)[1]
         audit_step = audit_step.split("\n      - name:", 1)[0]
 
-        self.assertNotIn("${{ runner.temp }}", job_config)
-        self.assertIn("COURSIER_MAVEN_ROOT: ${{ runner.temp }}", audit_step)
-        self.assertIn("DOTTY_AUDIT_TMP_ROOT: ${{ runner.temp }}", audit_step)
-        self.assertIn("DOTTY_AUDIT_REPORT_DIR: ${{ runner.temp }}", audit_step)
+        self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target", job_config)
+        self.assertIn("TMPDIR: ${{ github.workspace }}/target/tmp", job_config)
+        self.assertNotIn("${{ runner.temp }}", workflow)
+        self.assertIn("COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier", audit_step)
+        self.assertIn("DOTTY_AUDIT_TMP_ROOT: ${{ github.workspace }}/target/typer-focused-intermediates", audit_step)
+        self.assertIn("DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report", audit_step)
 
     def test_pr_gate_is_pinned_bounded_and_never_runs_full_corpus(self) -> None:
         repo = Path(__file__).resolve().parents[2]
@@ -43,7 +82,13 @@ class FocusedAuditWorkflowTests(unittest.TestCase):
         self.assertIn("--verify-determinism", workflow)
         self.assertIn("verify_focused_gate.py", workflow)
         self.assertIn("actions/upload-artifact@v4", workflow)
-        self.assertNotIn("tools/typer-classpath-corpus-audit/run --verify-determinism", workflow)
+        self.assertIn("verify_lexical_closure_acceptance.py inputs", workflow)
+        self.assertIn("--method-manifest docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv", workflow)
+        self.assertIn("--method-manifest docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv", workflow)
+        self.assertIn("--require-typed-cohort docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv", workflow)
+        self.assertIn("--require-typed-cohort docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv", workflow)
+        self.assertIn("if-no-files-found: error", workflow)
+        self.assertIn("--verify-determinism", workflow)
 
 
 if __name__ == "__main__":

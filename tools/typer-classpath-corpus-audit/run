@@ -27,6 +27,11 @@ cohort and writes a separate FOCUSED / PARTIAL report.
 --method-kind ordinary enables the separate complete-member audit. Its manifest
 contains exact Scala-root-relative path#tree identities and is validated before
 the typer test runs. It does not use or change the historical local audit.
+When --require-typed-cohort is supplied, every manifest identity must also
+appear exactly once as a typed or blocked attempt with a valid source-tree
+mapping. Excluded, unattempted, malformed, or counter-inconsistent reports
+fail the gate; required_typed roots must still retain their complete result
+shapes.
 Set DOTTY_AUDIT_TYPE_METHOD_DEFINITION=1 to run selected method definitions
 through SourceTyper::type_method_definition instead of typing only each RHS.
 --compare-legacy-profile runs the legacy file-only profile once on the same
@@ -304,7 +309,7 @@ if [[ "$method_kind" == ordinary ]]; then
     printf 'ordinary method report written to %s\n' "$output_path"
     if [[ -n "$required_typed_cohort" ]]; then
         PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/verify_ordinary_cohort.py" \
-            "$required_typed_cohort" "$output_path"
+            "$required_typed_cohort" "$output_path" --manifest "$method_manifest"
     fi
     exit 0
 fi
