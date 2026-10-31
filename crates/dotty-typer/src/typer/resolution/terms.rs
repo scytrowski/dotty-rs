@@ -302,48 +302,79 @@ impl SourceTyper<'_> {
                 // narrow: only a canonical method declared directly on
                 // the single source parent is admitted. The shared member
                 // lookup remains responsible for hierarchy discovery and
-                // receiver adaptation.
+                // receiver adaptation. Once an inherited public method name
+                // bucket exists, an unsupported bucket must not fall through
+                // to an unrelated outer lexical declaration.
                 let parent =
                     self.single_direct_source_parent(source_context.owner, info_journal)?;
                 if let Some(parent) = parent {
                     let raw = self
                         .lookup_members_journaled(this_type, name, info_journal)
                         .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
-                    let mut methods = Vec::new();
-                    for candidate in raw {
+                    let methods = raw
+                        .into_iter()
+                        .filter(|candidate| candidate.inheritance_depth > 0)
+                        .filter(|candidate| self.store.symbols.contains(candidate.symbol))
+                        .filter(|candidate| {
+                            let symbol = self.store.symbols.get(candidate.symbol);
+                            symbol.kind == SymbolKind::Method
+                                && symbol.visibility == dotty_core::symbols::Visibility::Public
+                        })
+                        .collect::<Vec<_>>();
+                    if !methods.is_empty() {
+                        if methods.len() != 1 {
+                            return Err(TyperError::OverloadedSelectionDeferred {
+                                source: self.source,
+                                tree_index,
+                                name,
+                            });
+                        }
+                        let candidate = methods[0];
+                        let symbol = self.store.symbols.get(candidate.symbol);
                         if candidate.inheritance_depth != 1
                             || candidate.declaring_class != parent
-                            || !self.store.symbols.contains(candidate.symbol)
-                        {
-                            continue;
-                        }
-                        let symbol = self.store.symbols.get(candidate.symbol);
-                        if symbol.kind != SymbolKind::Method
                             || symbol.owner != Some(parent)
-                            || symbol.visibility != dotty_core::symbols::Visibility::Public
                             || symbol.flags.contains(SymbolFlags::STATIC)
                             || symbol.flags.contains(SymbolFlags::ABSTRACT)
                             || !self.is_current_source_symbol(candidate.symbol)
                         {
-                            continue;
+                            return Err(TyperError::OverloadedSelectionDeferred {
+                                source: self.source,
+                                tree_index,
+                                name,
+                            });
                         }
                         let info =
                             self.completed_expression_symbol_info(candidate.symbol, info_journal)?;
-                        if let Some(Type::Method(method)) = self.store.types.try_get(info)
-                            && method.kind == dotty_core::types::MethodKind::Plain
-                            && method.params.len() == 1
-                            && !method.params[0].erased
-                            && !method.params[0].varargs
-                            && !matches!(
-                                self.store.types.try_get(method.params[0].ty),
-                                Some(Type::ByName { .. })
+                        let Some(Type::Method(method)) = self.store.types.try_get(info) else {
+                            return Err(TyperError::OverloadedSelectionDeferred {
+                                source: self.source,
+                                tree_index,
+                                name,
+                            });
+                        };
+                        let ordinary_clause = method.kind == dotty_core::types::MethodKind::Plain
+                            && method.params.iter().all(|parameter| {
+                                !parameter.erased
+                                    && !parameter.varargs
+                                    && !matches!(
+                                        self.store.types.try_get(parameter.ty),
+                                        Some(Type::ByName { .. })
+                                    )
+                            });
+                        if !ordinary_clause
+                            || matches!(
+                                self.store.types.try_get(method.result),
+                                Some(Type::Method(_) | Type::Poly(_))
                             )
                         {
-                            methods.push(candidate.symbol);
+                            return Err(TyperError::OverloadedSelectionDeferred {
+                                source: self.source,
+                                tree_index,
+                                name,
+                            });
                         }
-                    }
-                    if methods.len() == 1 {
-                        return Ok(methods);
+                        return Ok(vec![candidate.symbol]);
                     }
                 }
             }

@@ -91,26 +91,40 @@ receiver view remains `Child.this`, while the selected declaration retains its
 `Parent` owner and exact one-argument method type. Local declarations and
 imports are considered before this inherited fallback. The new route admits
 only a unique public, concrete, non-static, non-generic ordinary method with
-one ordinary argument in a direct source class parent.
+one ordinary argument clause in a direct source class parent. The clause can
+contain multiple ordinary parameters; the existing application checker
+validates their arity and types. Curried and nonordinary clauses are deferred.
 
 The Rust test asserts the complete `Child.direct` typed definition and its
 source-to-typed mapping, checks that the canonical `Parent.add` identity occurs
 in the typed tree, verifies `this.add` and inherited field controls, and
 repeats the baseline in two fresh semantic stores. Rust negative regressions
 also reject missing names, wrong argument types, wrong arity, private parent
-methods, and an overloaded inherited name; each rejected method root is
-checked for absence from `SourceTypedIndex`. `four-root-baseline.tsv` records
-the before/after receipts. Validation run:
+methods, curried methods, and overloaded inherited names. Overloaded buckets
+are rejected before signature filtering and cannot fall through to an outer
+same-spelled method. Each rejected method root is checked for absence from
+`SourceTypedIndex`; missing and malformed parent `ClassInfo` are also rejected
+without outer-scope fallback, and a same-session valid retry is checked.
+Separate controls cover a multiple-parameter single clause, a same-owner
+override, a renamed/reordered direct parent declaration, and an unrelated
+class with the same method name. The `direct` receipt is derived from its mapped typed
+`Apply` and callee: it asserts the original parent `SymbolId`, the `Child.this`
+prefix, source mappings for the root/callee/argument/application, and absence
+of a synthetic child declaration. `four-root-baseline.tsv` records the
+before/after receipts. Validation run:
 
 ```sh
 cargo test -p dotty-typer --test inherited_members_baseline --locked
+cargo test -p dotty-typer --all-targets --locked
+cargo clippy -p dotty-typer --all-targets --locked -- -D warnings
+python3 tools/check-frontend-boundaries.py
 ```
 
 The pinned Scala oracle was run for #1903 and confirms `direct` is valid with
 result `Int`; its source snapshot, compiler diagnostics, Scala artifact hashes,
-and Scala revision remain pinned in the fixture directory. The local Scala
-checkout and artifact cache are required to rerun
-`fixtures/inherited-members-3.9.0/run`.
+and Scala revision remain pinned in the fixture directory. The required JDK
+gate passed with OpenJDK `21.0.12`. The local Scala checkout and artifact
+cache are required to rerun `fixtures/inherited-members-3.9.0/run`.
 
 ## Separate diagnostic controls
 
