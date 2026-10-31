@@ -1,0 +1,9 @@
+-- [E049] Reference Error: NegativeAmbiguousInheritedFieldImport.scala:9:8 -----
+9 |    x + bias
+  |        ^^^^
+  |     Reference to bias is ambiguous.
+  |     It is both defined in class Child
+  |     and imported by name subsequently by import shadowfield.Imported.bias
+  |
+  | longer explanation available when compiling with `-explain`
+1 error found

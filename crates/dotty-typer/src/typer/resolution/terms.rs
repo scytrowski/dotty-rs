@@ -83,6 +83,21 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<SymbolId>, TyperError> {
         self.validate_expression_scope_stack(context.local_scopes)?;
+        let enclosing_class = self
+            .store
+            .symbols
+            .contains(context.owner)
+            .then(|| self.store.symbols.get(context.owner))
+            .and_then(|owner| match owner.kind {
+                SymbolKind::Class | SymbolKind::Trait => Some(context.owner),
+                _ => owner.owner.filter(|symbol| {
+                    self.store.symbols.contains(*symbol)
+                        && matches!(
+                            self.store.symbols.get(*symbol).kind,
+                            SymbolKind::Class | SymbolKind::Trait
+                        )
+                }),
+            });
         let mut local_scope = context.local_scopes;
         while let Some(stack) = local_scope {
             let frame = self
@@ -147,6 +162,13 @@ impl SourceTyper<'_> {
                     )? {
                         combined.extend(outer_candidates);
                     }
+                    if include_inherited_members && let Some(child) = enclosing_class {
+                        combined.extend(self.direct_source_inherited_immutable_fields(
+                            child,
+                            name,
+                            info_journal,
+                        )?);
+                    }
                     combined.sort_by_key(|symbol| symbol.index());
                     combined.dedup();
                     return Ok(combined);
@@ -156,21 +178,6 @@ impl SourceTyper<'_> {
         }
 
         let contexts = self.source_context_chain(context.lexical, tree_index)?;
-        let enclosing_class = self
-            .store
-            .symbols
-            .contains(context.owner)
-            .then(|| self.store.symbols.get(context.owner))
-            .and_then(|owner| match owner.kind {
-                SymbolKind::Class | SymbolKind::Trait => Some(context.owner),
-                _ => owner.owner.filter(|symbol| {
-                    self.store.symbols.contains(*symbol)
-                        && matches!(
-                            self.store.symbols.get(*symbol).kind,
-                            SymbolKind::Class | SymbolKind::Trait
-                        )
-                }),
-            });
         let fallback_scope = self
             .store
             .symbols
@@ -435,6 +442,39 @@ impl SourceTyper<'_> {
             && self.store.symbols.contains(*parent)
             && self.store.symbols.get(*parent).kind == SymbolKind::Class)
             .then_some(*parent))
+    }
+
+    fn direct_source_inherited_immutable_fields(
+        &mut self,
+        child: SymbolId,
+        name: dotty_core::Name,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<SymbolId>, TyperError> {
+        let Some(parent) = self.single_direct_source_parent(child, info_journal)? else {
+            return Ok(Vec::new());
+        };
+        let receiver = self.store.types.alloc(Type::ThisType { class: child });
+        let members = self
+            .lookup_members_journaled(receiver, name, info_journal)
+            .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+        Ok(members
+            .into_iter()
+            .filter(|candidate| {
+                candidate.inheritance_depth == 1
+                    && candidate.declaring_class == parent
+                    && self.store.symbols.contains(candidate.symbol)
+                    && self.is_current_source_symbol(candidate.symbol)
+            })
+            .filter(|candidate| {
+                let field = self.store.symbols.get(candidate.symbol);
+                field.kind == SymbolKind::Field
+                    && field.owner == Some(parent)
+                    && field.visibility == dotty_core::symbols::Visibility::Public
+                    && !field.flags.contains(SymbolFlags::MUTABLE)
+                    && !field.flags.contains(SymbolFlags::STATIC)
+            })
+            .map(|candidate| candidate.symbol)
+            .collect())
     }
 
     fn lookup_default_term_import(

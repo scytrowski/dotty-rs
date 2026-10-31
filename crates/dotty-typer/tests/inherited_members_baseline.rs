@@ -149,6 +149,21 @@ fn explicit_member_selection_controls_are_separate_from_the_four_root_denominato
                         "{name} must select its canonical Parent member"
                     );
                 }
+                if name == "withBias" || name == "explicitField" {
+                    assert_inherited_field_root_identity(
+                        &typer,
+                        FieldRootReceipt {
+                            source_ast: &parsed.ast,
+                            source,
+                            source_root: tree,
+                            typed_root: typed,
+                            child,
+                            parent,
+                            parent_bias: inherited_field,
+                            explicit_this: name == "explicitField",
+                        },
+                    );
+                }
                 Ok(typed)
             }
             Err(error) => Err(error),
@@ -226,6 +241,365 @@ fn inherited_method_rejections_do_not_create_typed_roots() {
             );
         }
     }
+}
+
+#[test]
+fn inherited_field_rejections_and_mutability_controls_keep_the_root_atomic() {
+    let cases = [
+        (
+            "package negative\nclass Parent\nclass Child extends Parent:\n  def withBias(x: Int): Int = x + bias\n",
+            "withBias",
+            true,
+        ),
+        (
+            "package negative\nclass Parent:\n  private val bias: Int = 2\nclass Child extends Parent:\n  def withBias(x: Int): Int = x + bias\n",
+            "withBias",
+            true,
+        ),
+        (
+            "package negative\nclass Parent\nclass Unrelated:\n  val bias: Int = 2\nclass Child extends Parent:\n  def withBias(x: Int): Int = x + bias\n",
+            "withBias",
+            true,
+        ),
+        (
+            "package negative\nclass Parent:\n  val bias: Boolean = true\nclass Child extends Parent:\n  def withBias(x: Int): Int = x + bias\n",
+            "withBias",
+            false,
+        ),
+    ];
+    for (index, (source, method, expected_missing)) in cases.into_iter().enumerate() {
+        let error = rejected_method_root(source, method, index as u32 + 1950);
+        assert!(error.is_some(), "invalid field case unexpectedly typed");
+        if expected_missing {
+            assert!(
+                matches!(error, Some(TyperError::TermNameNotFound { .. })),
+                "missing, private, and unrelated fields must remain unresolved: {error:?}"
+            );
+        }
+    }
+
+    let mutable_source = "package mutablefield\nclass Parent:\n  var bias: Int = 2\nclass Child extends Parent:\n  def withBias(x: Int): Int = x + bias\n";
+    assert!(
+        rejected_method_root(mutable_source, "withBias", 1960).is_none(),
+        "Scala field reads may remain supported for vars"
+    );
+}
+
+#[test]
+fn local_and_child_fields_keep_precedence_over_an_inherited_parent_val() {
+    let cases = [
+        (
+            "package shadowfield\nclass Parent:\n  val bias: Int = 2\nclass Child extends Parent:\n  def local(x: Int): Int =\n    val bias: Int = 3\n    x + bias\n",
+            "local",
+            "local",
+        ),
+        (
+            "package shadowfield\nclass Parent:\n  val bias: Int = 2\nclass Child extends Parent:\n  override val bias: Int = 3\n  def own(x: Int): Int = x + bias\n",
+            "own",
+            "Child",
+        ),
+        (
+            "package shadowfield\nclass Parent:\n  var bias: Int = 2\nclass Child extends Parent:\n  def inheritedVar(x: Int): Int = x + bias\n",
+            "inheritedVar",
+            "ParentMutable",
+        ),
+    ];
+    for (index, (source_text, method_name, expected_owner)) in cases.into_iter().enumerate() {
+        let source = SourceId::from_index(1970 + index as u32);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let scanner = ContextualScanner::new(source_text).unwrap();
+        let parsed = dotty_parser::parse_compilation_unit(
+            SourceText::new(source_text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let mut packages = Packages::new();
+        let index = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "ShadowedField.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap();
+        let child = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Child" =>
+                {
+                    Some(index.symbol_at(source, tree).unwrap())
+                }
+                _ => None,
+            })
+            .unwrap();
+        let parent = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Parent" =>
+                {
+                    Some(index.symbol_at(source, tree).unwrap())
+                }
+                _ => None,
+            })
+            .unwrap();
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == method_name =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let method = index.symbol_at(source, method_tree).unwrap();
+        let expected = if expected_owner == "local" || expected_owner == "Imported" {
+            None
+        } else {
+            Some(
+                parsed
+                    .ast
+                    .iter()
+                    .find_map(|(tree, node)| match &node.kind {
+                        TreeKind::ValDef(definition)
+                            if store.names.resolve(definition.name.as_name().text()) == "bias"
+                                && index.symbol_at(source, tree).is_some_and(|symbol| {
+                                    let Some(owner) = store.symbols.get(symbol).owner else {
+                                        return false;
+                                    };
+                                    if expected_owner == "Imported" {
+                                        store.symbols.get(owner).kind == SymbolKind::ModuleClass
+                                            && store.symbols.get(owner).owner.is_some_and(
+                                                |object| {
+                                                    store.names.resolve(
+                                                        store.symbols.get(object).name.text(),
+                                                    ) == "Imported"
+                                                },
+                                            )
+                                    } else {
+                                        owner
+                                            == if expected_owner == "Child" {
+                                                child
+                                            } else {
+                                                parent
+                                            }
+                                    }
+                                }) =>
+                        {
+                            Some(index.symbol_at(source, tree).unwrap())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("{expected_owner} field must have source identity")),
+            )
+        };
+        let TreeKind::DefDef(source_definition) = &parsed.ast.get(method_tree).kind else {
+            unreachable!()
+        };
+        let source_rhs = source_definition.rhs.unwrap();
+        let rhs_span = parsed.ast.get(source_rhs).position.unwrap().span().range();
+        let source_ident = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::Ident(ident) = &node.kind else {
+                    return None;
+                };
+                let position = node.position?.span().range();
+                (store.names.resolve(ident.name.text()) == "bias"
+                    && rhs_span.start() <= position.start()
+                    && position.end() <= rhs_span.end())
+                .then_some(tree)
+            })
+            .expect("method body must contain its bias reference");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        typer.complete_symbol(child).unwrap();
+        let typed_root = typer.type_method_definition(method_tree).unwrap();
+        assert_eq!(
+            typer.source_typed_index().get(source, method_tree),
+            Some(typed_root)
+        );
+        let typed_ident = typer
+            .source_typed_index()
+            .get(source, source_ident)
+            .expect("shadowing reference must map into typed tree");
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(actual),
+            ..
+        } = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(typed_ident).ty)
+        else {
+            panic!("shadowing reference must retain symbol identity")
+        };
+        if expected_owner == "Imported" {
+            let target = typer.store().symbols.get(*actual);
+            assert_eq!(typer.store().names.resolve(target.name.text()), "bias");
+            let owner = target.owner.unwrap();
+            assert_eq!(
+                typer.store().symbols.get(owner).kind,
+                SymbolKind::ModuleClass
+            );
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(owner).name.text()),
+                "Imported$"
+            );
+        } else if let Some(expected) = expected {
+            assert_eq!(*actual, expected, "canonical shadowing field must win");
+            assert_eq!(typer.store().symbols.get(*actual).kind, SymbolKind::Field);
+            assert_eq!(
+                typer
+                    .store()
+                    .symbols
+                    .get(*actual)
+                    .flags
+                    .contains(SymbolFlags::MUTABLE),
+                expected_owner == "ParentMutable",
+                "mutable parent fields must retain their distinct declaration flag"
+            );
+        } else {
+            assert_eq!(typer.store().symbols.get(*actual).owner, Some(method));
+            assert!(matches!(
+                typer.store().symbols.get(*actual).kind,
+                SymbolKind::Local | SymbolKind::Value
+            ));
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(*actual).name.text()),
+                "bias"
+            );
+        }
+    }
+}
+
+#[test]
+fn imported_name_ambiguous_with_inherited_immutable_field_rejects_root() {
+    let source = include_str!(
+        "fixtures/inherited-members-3.9.0/NegativeAmbiguousInheritedFieldImport.scala"
+    );
+    let error = rejected_method_root(source, "imported", 1974);
+    assert!(
+        matches!(error, Some(TyperError::AmbiguousTermReference { .. })),
+        "the imported term and proven inherited field must remain ambiguous: {error:?}"
+    );
+}
+
+#[test]
+fn failed_field_lookup_rolls_back_before_a_valid_same_session_retry() {
+    let source_text = "package fieldretry\nclass Parent:\n  val bias: Int = 2\nclass Child extends Parent:\n  def missing(x: Int): Int = x + absent\n  def withBias(x: Int): Int = x + bias\n";
+    let source = SourceId::from_index(1980);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "InheritedFieldRetry.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let symbol_named = |name: &str, kind: SymbolKind| {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let matches = match &node.kind {
+                    TreeKind::TypeDef(definition) => {
+                        store.names.resolve(definition.name.as_name().text()) == name
+                    }
+                    TreeKind::ValDef(definition) => {
+                        store.names.resolve(definition.name.as_name().text()) == name
+                    }
+                    TreeKind::DefDef(definition) => {
+                        store.names.resolve(definition.name.as_name().text()) == name
+                    }
+                    _ => false,
+                };
+                let symbol = index.symbol_at(source, tree)?;
+                (matches && store.symbols.get(symbol).kind == kind).then_some((tree, symbol))
+            })
+            .unwrap_or_else(|| panic!("missing {kind:?} {name}"))
+    };
+    let (parent_tree, parent) = symbol_named("Parent", SymbolKind::Class);
+    let (child_tree, child) = symbol_named("Child", SymbolKind::Class);
+    let (field_tree, parent_bias) = symbol_named("bias", SymbolKind::Field);
+    let (missing_root, _) = symbol_named("missing", SymbolKind::Method);
+    let (field_root, _) = symbol_named("withBias", SymbolKind::Method);
+    assert_eq!(store.symbols.get(parent_bias).owner, Some(parent));
+    let _ = (parent_tree, child_tree, field_tree);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer.complete_symbol(child).unwrap();
+    assert!(matches!(
+        typer.type_method_definition(missing_root),
+        Err(TyperError::TermNameNotFound { .. })
+    ));
+    assert!(
+        typer
+            .source_typed_index()
+            .get(source, missing_root)
+            .is_none()
+    );
+    let typed_root = typer.type_method_definition(field_root).unwrap();
+    assert_eq!(
+        typer.source_typed_index().get(source, field_root),
+        Some(typed_root)
+    );
+    assert_eq!(
+        assert_inherited_field_root_identity(
+            &typer,
+            FieldRootReceipt {
+                source_ast: &parsed.ast,
+                source,
+                source_root: field_root,
+                typed_root,
+                child,
+                parent,
+                parent_bias,
+                explicit_this: false,
+            },
+        ),
+        "Parent.bias"
+    );
 }
 
 #[test]
@@ -455,7 +829,7 @@ fn rejected_lookup_rolls_back_before_a_valid_same_session_retry() {
 #[test]
 fn invalid_parent_class_info_does_not_fall_through_or_publish_a_root() {
     for (source_index, invalid_class_info) in [(1933, false), (1934, true)] {
-        let source_text = "package invalidparent\nclass Outer:\n  def add(x: Int): Int = x\n  class Parent:\n    def add(x: Int): Int = x\n  class Child extends Parent:\n    def run(x: Int): Int = add(x)\n";
+        let source_text = "package invalidparent\nclass Outer:\n  val bias: Int = 1\n  class Parent:\n    val bias: Int = 2\n  class Child extends Parent:\n    def withBias(x: Int): Int = x + bias\n";
         let source = SourceId::from_index(source_index);
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
@@ -497,7 +871,7 @@ fn invalid_parent_class_info_does_not_fall_through_or_publish_a_root() {
             .iter()
             .find_map(|(tree, node)| match &node.kind {
                 TreeKind::DefDef(definition)
-                    if store.names.resolve(definition.name.as_name().text()) == "run" =>
+                    if store.names.resolve(definition.name.as_name().text()) == "withBias" =>
                 {
                     Some(tree)
                 }
@@ -913,7 +1287,19 @@ fn analyze_candidate_session() -> Vec<String> {
                         },
                     )
                 } else if name == "withBias" {
-                    "Parent.bias".to_owned()
+                    assert_inherited_field_root_identity(
+                        &typer,
+                        FieldRootReceipt {
+                            source_ast: &parsed.ast,
+                            source,
+                            source_root: tree,
+                            typed_root: typed,
+                            child,
+                            parent,
+                            parent_bias,
+                            explicit_this: false,
+                        },
+                    )
                 } else {
                     "none".to_owned()
                 };
@@ -954,6 +1340,148 @@ fn source_signature(name: &str) -> &'static str {
         "lifted" | "mapped" => "():Function1[Int,Int]",
         _ => panic!("unexpected frozen Child method {name}"),
     }
+}
+
+struct FieldRootReceipt<'a> {
+    source_ast: &'a AstArena<Untyped>,
+    source: SourceId,
+    source_root: TreeId<Untyped>,
+    typed_root: TreeId<Typed>,
+    child: dotty_core::SymbolId,
+    parent: dotty_core::SymbolId,
+    parent_bias: dotty_core::SymbolId,
+    explicit_this: bool,
+}
+
+fn assert_inherited_field_root_identity(
+    typer: &SourceTyper<'_>,
+    receipt: FieldRootReceipt<'_>,
+) -> String {
+    let FieldRootReceipt {
+        source_ast,
+        source,
+        source_root,
+        typed_root,
+        child,
+        parent,
+        parent_bias,
+        explicit_this,
+    } = receipt;
+    let TreeKind::DefDef(source_definition) = &source_ast.get(source_root).kind else {
+        panic!("field-read source root must be a DefDef")
+    };
+    let source_rhs = source_definition.rhs.expect("field-read source body");
+    let rhs_span = source_ast
+        .get(source_rhs)
+        .position
+        .expect("field-read body span")
+        .span()
+        .range();
+    let field_name = typer.store().symbols.get(parent_bias).name;
+    let source_reference = source_ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let position = node.position?.span().range();
+            let matches = match &node.kind {
+                TreeKind::Ident(ident) => !explicit_this && ident.name == field_name,
+                TreeKind::Select(selection) => explicit_this && selection.name == field_name,
+                _ => false,
+            };
+            (matches && rhs_span.start() <= position.start() && position.end() <= rhs_span.end())
+                .then_some((tree, node.position.unwrap()))
+        })
+        .expect("the target body must contain the selected Parent.bias reference");
+    assert_eq!(
+        typer.source_typed_index().get(source, source_root),
+        Some(typed_root)
+    );
+    let TreeKind::DefDef(typed_definition) = &typer.typed_ast().get(typed_root).kind else {
+        panic!("successful field-read root must remain a typed DefDef")
+    };
+    assert_eq!(
+        source_definition.value_param_clauses.len(),
+        typed_definition.value_param_clauses.len(),
+        "all source parameter clauses must survive whole-method typing"
+    );
+    for (source_clause, typed_clause) in source_definition
+        .value_param_clauses
+        .iter()
+        .zip(&typed_definition.value_param_clauses)
+    {
+        assert_eq!(source_clause.len(), typed_clause.len());
+        for (source_parameter, typed_parameter) in source_clause.iter().zip(typed_clause) {
+            assert_eq!(
+                typer.source_typed_index().get(source, *source_parameter),
+                Some(*typed_parameter),
+                "source parameters must keep their typed mappings"
+            );
+        }
+    }
+    let typed_rhs = typed_definition.rhs.expect("complete typed method body");
+    assert_eq!(
+        typer.source_typed_index().get(source, source_rhs),
+        Some(typed_rhs),
+        "the original DefDef body must retain its typed mapping"
+    );
+    let (source_reference, source_position) = source_reference;
+    let typed_reference = typer
+        .source_typed_index()
+        .get(source, source_reference)
+        .expect("the field reference must retain its source mapping");
+    let typed_node = typer.typed_ast().get(typed_reference);
+    assert_eq!(typed_node.position, Some(source_position));
+    if explicit_this {
+        assert!(matches!(typed_node.kind, TreeKind::Select(_)));
+    } else {
+        assert!(matches!(typed_node.kind, TreeKind::Ident(_)));
+    }
+    let Type::TermRef { prefix, target } = typer.store().types.get(typed_node.ty) else {
+        panic!("inherited field reference must retain a symbol term reference")
+    };
+    assert_eq!(*target, TermRefTarget::Symbol(parent_bias));
+    assert!(matches!(
+        typer.store().types.get(*prefix),
+        Type::ThisType { class } if *class == child
+    ));
+    let field = typer.store().symbols.get(parent_bias);
+    assert_eq!(field.owner, Some(parent));
+    assert_eq!(field.kind, SymbolKind::Field);
+    assert_eq!(field.visibility, Visibility::Public);
+    assert!(!field.flags.contains(SymbolFlags::MUTABLE));
+    assert_eq!(field.origin, SymbolOrigin::Source(source));
+    let SymbolInfo::Complete(field_type) = typer.store().symbols.info(parent_bias) else {
+        panic!("Parent.bias must have its source-completed type")
+    };
+    assert_eq!(
+        typer.typed_ast().get(typed_rhs).ty,
+        *field_type,
+        "the method result must retain the exact inherited field type"
+    );
+    assert_eq!(type_shape(typer.store(), *field_type), "Int");
+    let SymbolInfo::Complete(child_info) = typer.store().symbols.info(child) else {
+        panic!("Child class info must be complete")
+    };
+    let Type::ClassInfo(child_info) = typer.store().types.get(*child_info) else {
+        panic!("Child must retain its ClassInfo")
+    };
+    assert!(
+        typer
+            .store()
+            .scopes
+            .get(child_info.declarations)
+            .lookup_all(&field.name)
+            .is_empty(),
+        "the inherited field must not be duplicated under Child"
+    );
+    let owner = field.owner.unwrap();
+    format!(
+        "{}.{}",
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(owner).name.text()),
+        typer.store().names.resolve(field.name.text())
+    )
 }
 
 fn enter_scala_function1(store: &mut SemanticStore, packages: &mut Packages) {

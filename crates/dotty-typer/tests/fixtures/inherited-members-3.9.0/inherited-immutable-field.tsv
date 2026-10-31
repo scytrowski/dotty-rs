@@ -1,0 +1,12 @@
+case	Scala 3.9.0 oracle	Rust before #1905	Rust #1905 selected declaration	receiver	value/result type
+Child.withBias unqualified	valid	fully_typed	Parent.bias (source Field, immutable)	Child.this	Int
+Child.withBias explicit this.bias	valid	fully_typed	Parent.bias (source Field, immutable)	Child.this	Int
+local bias shadows Parent.bias	valid (existing #1903 fixture)	not asserted	method-local Local	lexical local	Int
+Child.override val bias shadows Parent.bias	valid (pinned compiler accepts ChildFieldOverride.scala)	fully_typed	Child.bias (source Field; exact Child SymbolId asserted)	Child.this	Int
+local import conflicts with inherited Parent.bias	invalid (pinned compiler E049; NegativeAmbiguousInheritedFieldImport.scala)	AmbiguousTermReference / no typed root	-	-	-
+Parent.var bias read	not in frozen fixture	not asserted	Parent.bias (source Field, MUTABLE preserved)	Child.this	Int
+missing/private field	invalid (existing #1903 controls)	not asserted	TermNameNotFound / no typed root	-	-
+unrelated same-spelled field	not in frozen fixture	not asserted	TermNameNotFound / no typed root	-	-
+Boolean bias used as Int	not in frozen fixture	not asserted	type error / no typed root	Child.this	Boolean
+injected invalid Parent ClassInfo	not applicable	not asserted	MemberLookup / no typed root	-	-
+missing lookup then valid retry	first invalid, retry valid	not asserted	failure rolls back; Parent.bias succeeds	Child.this	Int
