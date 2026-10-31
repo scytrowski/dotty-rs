@@ -1,0 +1,46 @@
+[[syntax trees at end of                     typer]] // ExplicitSelection.scala
+<package <<root>.this.inheritancetyper:<root>.this.inheritancetyper> {
+  class ExplicitParent() extends <<<new Object:Object>.<init>:((): Object)>():
+    Object> {
+    [owner = class ExplicitParent]val bias: <root>.this.scala.Int =
+      <2:(2 : scala.this.Int)>
+    [owner = class ExplicitParent]def add(
+      [owner = method add]x: <root>.this.scala.Int): <root>.this.scala.Int =
+      <<x:<root>.this.scala.Int> + <1:(1 : scala.this.Int)>:
+        <root>.this.scala.Int>
+  }
+  class ExplicitChild() extends <
+    <
+      <new inheritancetyper.this.ExplicitParent:
+        inheritancetyper.this.ExplicitParent>
+    .<init>:((): inheritancetyper.this.ExplicitParent)>
+  ():inheritancetyper.this.ExplicitParent> {
+    [owner = class ExplicitChild]def direct(
+      [owner = method direct]x: <root>.this.scala.Int): <root>.this.scala.Int =
+      <
+        <<this:(ExplicitChild.this : inheritancetyper.this.ExplicitChild)>.add:
+          ((x: <root>.this.scala.Int): <root>.this.scala.Int)>
+      (<x:<root>.this.scala.Int>):<root>.this.scala.Int>
+    [owner = class ExplicitChild]def explicitMethod(
+      [owner = method explicitMethod]x: <root>.this.scala.Int):
+      <root>.this.scala.Int =
+      <
+        <<this:(ExplicitChild.this : inheritancetyper.this.ExplicitChild)>.add:
+          ((x: <root>.this.scala.Int): <root>.this.scala.Int)>
+      (<x:<root>.this.scala.Int>):<root>.this.scala.Int>
+    [owner = class ExplicitChild]def withBias(
+      [owner = method withBias]x: <root>.this.scala.Int): <root>.this.scala.Int
+       =
+      <<x:<root>.this.scala.Int> +
+        <<this:(ExplicitChild.this : inheritancetyper.this.ExplicitChild)>.bias:
+          <root>.this.scala.Int>
+      :<root>.this.scala.Int>
+    [owner = class ExplicitChild]def explicitField(
+      [owner = method explicitField]x: <root>.this.scala.Int):
+      <root>.this.scala.Int =
+      <<x:<root>.this.scala.Int> +
+        <<this:(ExplicitChild.this : inheritancetyper.this.ExplicitChild)>.bias:
+          <root>.this.scala.Int>
+      :<root>.this.scala.Int>
+  }
+}:<root>.this.inheritancetyper.type>

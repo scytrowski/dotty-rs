@@ -1,0 +1,59 @@
+[[syntax trees at end of                     typer]] // InheritedMembers.scala
+<package <<root>.this.inheritancetyper:<root>.this.inheritancetyper> {
+  class Parent() extends <<<new Object:Object>.<init>:((): Object)>():Object> {
+    [owner = class Parent]val bias: <root>.this.scala.Int =
+      <2:(2 : scala.this.Int)>
+    [owner = class Parent]def add([owner = method add]x: <root>.this.scala.Int)
+      : <root>.this.scala.Int =
+      <<x:<root>.this.scala.Int> + <1:(1 : scala.this.Int)>:
+        <root>.this.scala.Int>
+  }
+  class Child() extends <
+    <<new inheritancetyper.this.Parent:inheritancetyper.this.Parent>.<init>:
+      ((): inheritancetyper.this.Parent)>
+  ():inheritancetyper.this.Parent> {
+    [owner = class Child]def direct(
+      [owner = method direct]x: <root>.this.scala.Int): <root>.this.scala.Int =
+      <
+        <<this:(Child.this : inheritancetyper.this.Child)>.add:
+          ((x: <root>.this.scala.Int): <root>.this.scala.Int)>
+      (<x:<root>.this.scala.Int>):<root>.this.scala.Int>
+    [owner = class Child]def withBias(
+      [owner = method withBias]x: <root>.this.scala.Int): <root>.this.scala.Int
+       =
+      <<x:<root>.this.scala.Int> +
+        <<this:(Child.this : inheritancetyper.this.Child)>.bias:
+          <root>.this.scala.Int>
+      :<root>.this.scala.Int>
+    [owner = class Child]def lifted:
+      <root>.this.scala.Int => <root>.this.scala.Int =
+      <
+        {
+          [owner = method lifted]def $anonfun(
+            [owner = method $anonfun]x: <root>.this.scala.Int):
+            <root>.this.scala.Int =
+            <
+              <<this:(Child.this : inheritancetyper.this.Child)>.add:
+                ((x: <root>.this.scala.Int): <root>.this.scala.Int)>
+            (<x:<root>.this.scala.Int>):<root>.this.scala.Int>
+          <closure(<$anonfun:(x: <root>.this.scala.Int): <root>.this.scala.Int>)
+            :<root>.this.scala.Int => <root>.this.scala.Int>
+        }
+      :<root>.this.scala.Int => <root>.this.scala.Int>
+    [owner = class Child]def mapped:
+      <root>.this.scala.Int => <root>.this.scala.Int =
+      <
+        {
+          [owner = method mapped]def $anonfun(
+            [owner = method $anonfun]x: <root>.this.scala.Int):
+            <root>.this.scala.Int =
+            <<x:<root>.this.scala.Int> +
+              <<this:(Child.this : inheritancetyper.this.Child)>.bias:
+                <root>.this.scala.Int>
+            :<root>.this.scala.Int>
+          <closure(<$anonfun:(x: <root>.this.scala.Int): <root>.this.scala.Int>)
+            :<root>.this.scala.Int => <root>.this.scala.Int>
+        }
+      :<root>.this.scala.Int => <root>.this.scala.Int>
+  }
+}:<root>.this.inheritancetyper.type>

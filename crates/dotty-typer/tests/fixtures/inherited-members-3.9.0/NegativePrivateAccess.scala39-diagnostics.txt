@@ -1,0 +1,13 @@
+-- [E006] Not Found Error: NegativePrivateAccess.scala:7:19 --------------------
+7 |  def field: Int = secretField
+  |                   ^^^^^^^^^^^
+  |                   Not found: secretField
+  |
+  | longer explanation available when compiling with `-explain`
+-- [E006] Not Found Error: NegativePrivateAccess.scala:8:28 --------------------
+8 |  def method(x: Int): Int = secretMethod(x)
+  |                            ^^^^^^^^^^^^
+  |                            Not found: secretMethod
+  |
+  | longer explanation available when compiling with `-explain`
+2 errors found
