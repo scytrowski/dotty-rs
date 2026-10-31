@@ -10,8 +10,8 @@ af236a0599d4375a9474624f0ffc3a69df0ff349726a5a895be2a84c60d3ff5a	NegativePrivate
 de5df6ef62afd8cf6811da64db44708cdc06110dd52fa1c0439e15f9b6fbc018	NegativePrivateAccess.scala39-diagnostics.txt
 aa8f6bcf2b465b7dfb42853ca99d1eff384509b8c5a8e21d6577e7c32b278943	ShadowedNames.scala
 8197a85aca2ba34833855a0e02b2396e6eda5cdb50b051bfed4aa9e5614d4204	UnrelatedSameSpelling.scala
-92f59b42f8d522294bf02389bdfe9c733193421d438e606076efc92200ce25d1	four-root-baseline.tsv
+0086fcda30716fd275c090ef964de32085cc3cd90970ad0c18de118d6be133f0	four-root-baseline.tsv
 0b69527d4b2d2bb9d6cebba92b481f0a0f2d9aed7b2a8a2b15dbda3233128573	scala-artifacts.sha256.tsv
 60d78c804dd885cf03ed162114e1538e189169a10d59b5386945febe78985740	run
-a8a8103207ec455134f14090081a83f1bbeb7b6dd995e6fec804b95f1c099f02	../../inherited_members_baseline.rs
-5cb2b06f97dbf42edb0e1aa4a22143e099a49dc2ff673fa8ee165609fea41cdc	../../../../../docs/typer-inherited-members-baseline-3.9.0.md
+fc03d29af36d81edcb21b3fd02b8d4e1b20a173fb3fa556f04d1a7a42b77d493	../../inherited_members_baseline.rs
+47059e1fa633f995c690450e497c67df4261598ca2a6b32b69d13439664e6441	../../../../../docs/typer-inherited-members-baseline-3.9.0.md

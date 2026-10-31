@@ -1,15 +1,14 @@
 # Inherited source member baseline (Scala 3.9.0)
 
-This report freezes issue #1903's exact source candidate and records current
-whole-`DefDef` behavior. It is an oracle and test baseline; no production Typer,
-resolver, or JVM semantics changed. The denominator is the four source-owned
-methods in `Child` only.
+This report freezes issue #1903's exact source candidate and records the
+whole-`DefDef` behavior before and after issue #1904. The denominator is the
+four source-owned methods in `Child` only.
 
 ## Frozen inputs and reproduction
 
 | Input | Value |
 | --- | --- |
-| `dotty-rs` main | `d455b65981be5f3eafe90ea1e0c4f89156a275e7` |
+| `dotty-rs` baseline for #1903 | `d455b65981be5f3eafe90ea1e0c4f89156a275e7` |
 | Rust | `rustc 1.98.1 (48a229cea 2026-09-01)` |
 | Scala compiler/library | `3.9.0`, source revision `777528f19a58e794c9954a42f433373472ec57f8` |
 | JDK | Eclipse Temurin `21.0.8+9` (`JAVA_VERSION=21.0.8`, `IMPLEMENTOR_VERSION=Temurin-21.0.8+9`) |
@@ -70,12 +69,12 @@ is synthesized. Two freshly allocated sessions produce identical normalized
 receipts. Successful roots assert the complete `DefDef` and source-to-typed
 mapping; blocked roots assert that no root mapping was committed.
 
-| Method | Scala source signature | Scala-valid | Rust whole root | Selected inherited target / first blocker |
+| Method | Scala source signature | Scala-valid | #1903 Rust baseline | #1904 Rust result |
 | --- | --- | --- | --- | --- |
-| `direct` | `(Int): Int` | yes | blocked | `TermNameNotFound(add)` at tree 19, span `148..151` |
-| `withBias` | `(Int): Int` | yes | fully typed, result `Int` | `Parent.bias` |
-| `lifted` | `(): Int => Int` | yes | blocked | `TermNameNotFound(add)` at tree 35, span `226..229` |
-| `mapped` | `(): Int => Int` | yes | blocked | `TermNameNotFound(bias)` at tree 46, span `269..273` |
+| `direct` | `(Int): Int` | yes | blocked: `TermNameNotFound(add)` at tree 19, span `148..151` | fully typed, result `Int`, selects canonical `Parent.add` |
+| `withBias` | `(Int): Int` | yes | fully typed, result `Int`, selects `Parent.bias` | fully typed, result `Int`, selects `Parent.bias` |
+| `lifted` | `(): Int => Int` | yes | blocked: `TermNameNotFound(add)` at tree 35, span `226..229` | unchanged; lambda capture remains outside this increment |
+| `mapped` | `(): Int => Int` | yes | blocked: `TermNameNotFound(bias)` at tree 46, span `269..273` | unchanged; lambda capture remains outside this increment |
 
 All three blocked errors are leaf `TermNameNotFound` errors, so their nested
 first-error chain is one item; the TSV keeps the exact missing name, source
@@ -83,14 +82,57 @@ tree, and span. In the two closure roots the failure occurs in the lambda body
 before closure capture is reached. These rows therefore establish an inherited
 lexical lookup blocker inside closures, not a separate capture failure.
 
+## Issue #1904 implementation and validation
+
+`direct` now resolves through the child's canonical one-edge `ClassInfo.parents`
+entry and the existing nominal member lookup. The selected symbol is the
+source-owned `Parent.add`; no synthetic child declaration is created. The
+receiver view remains `Child.this`, while the selected declaration retains its
+`Parent` owner and exact one-argument method type. Local declarations and
+imports are considered before this inherited fallback. The new route admits
+only a unique public, concrete, non-static, non-generic ordinary method with
+one ordinary argument clause in a direct source class parent. The clause can
+contain multiple ordinary parameters; the existing application checker
+validates their arity and types. Curried and nonordinary clauses are deferred.
+
+The Rust test asserts the complete `Child.direct` typed definition and its
+source-to-typed mapping, checks that the canonical `Parent.add` identity occurs
+in the typed tree, verifies `this.add` and inherited field controls, and
+repeats the baseline in two fresh semantic stores. Rust negative regressions
+also reject missing names, wrong argument types, wrong arity, private parent
+methods, curried methods, and overloaded inherited names. Overloaded buckets
+are rejected before signature filtering and cannot fall through to an outer
+same-spelled method. Each rejected method root is checked for absence from
+`SourceTypedIndex`; missing and malformed parent `ClassInfo` are also rejected
+without outer-scope fallback, and a same-session valid retry is checked.
+Separate controls cover a multiple-parameter single clause, a same-owner
+override, a renamed/reordered direct parent declaration, and an unrelated
+class with the same method name. The `direct` receipt is derived from its mapped typed
+`Apply` and callee: it asserts the original parent `SymbolId`, the `Child.this`
+prefix, source mappings for the root/callee/argument/application, and absence
+of a synthetic child declaration. `four-root-baseline.tsv` records the
+before/after receipts. Validation run:
+
+```sh
+cargo test -p dotty-typer --test inherited_members_baseline --locked
+cargo test -p dotty-typer --all-targets --locked
+cargo clippy -p dotty-typer --all-targets --locked -- -D warnings
+python3 tools/check-frontend-boundaries.py
+```
+
+The pinned Scala oracle was run for #1903 and confirms `direct` is valid with
+result `Int`; its source snapshot, compiler diagnostics, Scala artifact hashes,
+and Scala revision remain pinned in the fixture directory. The required JDK
+gate passed with OpenJDK `21.0.12`. The local Scala checkout and artifact
+cache are required to rerun `fixtures/inherited-members-3.9.0/run`.
+
 ## Separate diagnostic controls
 
 The Rust control source keeps these checks outside the fixed four-method
-denominator. Unqualified `direct` fails while `this.add(x)` completes and
-selects the exact source `Parent.add` symbol. Both the implicit and explicit
-field controls complete and select `Parent.bias`. Scala's normalized snapshot
-agrees that the explicit forms have the same result types as their implicit
-counterparts.
+denominator. Unqualified `direct` and `this.add(x)` now both complete and
+select the exact source `Parent.add` symbol. Both implicit and explicit field
+controls complete and select `Parent.bias`. Scala's normalized snapshot agrees
+that these forms have the same result types.
 
 Scala 3.9.0 also compiled the positive shadowing controls: a child override
 shadows an inherited same-name method, a local `bias` shadows an inherited

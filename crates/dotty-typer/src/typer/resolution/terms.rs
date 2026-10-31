@@ -55,13 +55,31 @@ impl SourceTyper<'_> {
         )
     }
 
+    pub(in crate::typer) fn expression_term_candidates_with_inherited(
+        &mut self,
+        name: dotty_core::Name,
+        context: ExpressionContext,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<SymbolId>, TyperError> {
+        self.expression_term_candidates_inner(
+            name,
+            context,
+            tree_index,
+            position,
+            true,
+            info_journal,
+        )
+    }
+
     fn expression_term_candidates_inner(
         &mut self,
         name: dotty_core::Name,
         context: ExpressionContext,
         tree_index: u32,
         position: Option<SourceSpan>,
-        include_inherited_fields: bool,
+        include_inherited_members: bool,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<SymbolId>, TyperError> {
         self.validate_expression_scope_stack(context.local_scopes)?;
@@ -212,7 +230,7 @@ impl SourceTyper<'_> {
                     return Ok(candidates);
                 }
             }
-            if include_inherited_fields && enclosing_class == Some(source_context.owner) {
+            if include_inherited_members && enclosing_class == Some(source_context.owner) {
                 let this_type = self.store.types.alloc(Type::ThisType {
                     class: source_context.owner,
                 });
@@ -279,6 +297,86 @@ impl SourceTyper<'_> {
                 if !inherited.is_empty() {
                     return Ok(inherited);
                 }
+
+                // Keep this first source-method increment deliberately
+                // narrow: only a canonical method declared directly on
+                // the single source parent is admitted. The shared member
+                // lookup remains responsible for hierarchy discovery and
+                // receiver adaptation. Once an inherited public method name
+                // bucket exists, an unsupported bucket must not fall through
+                // to an unrelated outer lexical declaration.
+                let parent =
+                    self.single_direct_source_parent(source_context.owner, info_journal)?;
+                if let Some(parent) = parent {
+                    let raw = self
+                        .lookup_members_journaled(this_type, name, info_journal)
+                        .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+                    let methods = raw
+                        .into_iter()
+                        .filter(|candidate| candidate.inheritance_depth > 0)
+                        .filter(|candidate| self.store.symbols.contains(candidate.symbol))
+                        .filter(|candidate| {
+                            let symbol = self.store.symbols.get(candidate.symbol);
+                            symbol.kind == SymbolKind::Method
+                                && symbol.visibility == dotty_core::symbols::Visibility::Public
+                        })
+                        .collect::<Vec<_>>();
+                    if !methods.is_empty() {
+                        if methods.len() != 1 {
+                            return Err(TyperError::OverloadedSelectionDeferred {
+                                source: self.source,
+                                tree_index,
+                                name,
+                            });
+                        }
+                        let candidate = methods[0];
+                        let symbol = self.store.symbols.get(candidate.symbol);
+                        if candidate.inheritance_depth != 1
+                            || candidate.declaring_class != parent
+                            || symbol.owner != Some(parent)
+                            || symbol.flags.contains(SymbolFlags::STATIC)
+                            || symbol.flags.contains(SymbolFlags::ABSTRACT)
+                            || !self.is_current_source_symbol(candidate.symbol)
+                        {
+                            return Err(TyperError::OverloadedSelectionDeferred {
+                                source: self.source,
+                                tree_index,
+                                name,
+                            });
+                        }
+                        let info =
+                            self.completed_expression_symbol_info(candidate.symbol, info_journal)?;
+                        let Some(Type::Method(method)) = self.store.types.try_get(info) else {
+                            return Err(TyperError::OverloadedSelectionDeferred {
+                                source: self.source,
+                                tree_index,
+                                name,
+                            });
+                        };
+                        let ordinary_clause = method.kind == dotty_core::types::MethodKind::Plain
+                            && method.params.iter().all(|parameter| {
+                                !parameter.erased
+                                    && !parameter.varargs
+                                    && !matches!(
+                                        self.store.types.try_get(parameter.ty),
+                                        Some(Type::ByName { .. })
+                                    )
+                            });
+                        if !ordinary_clause
+                            || matches!(
+                                self.store.types.try_get(method.result),
+                                Some(Type::Method(_) | Type::Poly(_))
+                            )
+                        {
+                            return Err(TyperError::OverloadedSelectionDeferred {
+                                source: self.source,
+                                tree_index,
+                                name,
+                            });
+                        }
+                        return Ok(vec![candidate.symbol]);
+                    }
+                }
             }
         }
         if let Some(deferred_error) = deferred_parent_error {
@@ -303,6 +401,40 @@ impl SourceTyper<'_> {
             name,
             position,
         })
+    }
+
+    fn single_direct_source_parent(
+        &mut self,
+        child: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        if !self.is_current_source_symbol(child)
+            || !self.store.symbols.contains(child)
+            || !matches!(
+                self.store.symbols.get(child).kind,
+                SymbolKind::Class | SymbolKind::Trait
+            )
+        {
+            return Ok(None);
+        }
+        let info = self
+            .class_info(child, info_journal)
+            .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+        if info.parents.len() != 1 {
+            return Ok(None);
+        }
+        let parent_type = info.parents[0];
+        let Type::TypeRef {
+            target: dotty_core::types::TypeRefTarget::Symbol(parent),
+            ..
+        } = self.store.types.get(parent_type)
+        else {
+            return Ok(None);
+        };
+        Ok((self.is_current_source_symbol(*parent)
+            && self.store.symbols.contains(*parent)
+            && self.store.symbols.get(*parent).kind == SymbolKind::Class)
+            .then_some(*parent))
     }
 
     fn lookup_default_term_import(

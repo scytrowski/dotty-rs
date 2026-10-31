@@ -518,11 +518,12 @@ impl SourceTyper<'_> {
         };
         let (mut candidates, function_shape) = match function_node.kind {
             TreeKind::Ident(ident) => {
-                let candidates = self.expression_term_candidates(
+                let candidates = self.expression_term_candidates_with_inherited(
                     ident.name,
                     context,
                     function_tree.index(),
                     function_node.position,
+                    info_journal,
                 )?;
                 if candidates
                     .iter()
