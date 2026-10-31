@@ -672,3 +672,76 @@ baseline reproduced the four hashes in the Issue #1880 receipt; its
 separate Scala-consumer run emits a different `Pair.tasty` hash because it is
 a separate producer invocation. The receipts describe distinct run
 inventories; the consumer inventory is not substituted into the #1898 receipt.
+
+## Issue #1882 checkpoint 2: integrated release-gate verification
+
+### Exact Scala-consumer producer and artifact receipt
+
+The strict Rust-artifact Scala consumer run used original source SHA-256
+`06266874ed9a7acdfc4d6a1c27bea3967055e474bca5a2f666af5ebfc8669c28`,
+producer source identity `SourceId(18811)`, and independent client SHA-256
+`771c663dd34c2fc9ab0fbec9bb575dcae39a4ae9da5bbf5137ca9088f5124eb5`.
+Scala source revision was `777528f19a58e794c9954a42f433373472ec57f8`; `scalac`
+reported `3.9.0-bin-SNAPSHOT-git-777528f`. Its source-staged compiler JAR
+SHA-256 for this run was
+`b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f`. This
+compiler build output hash is recorded for provenance, not used as a fixed
+build-output expectation.
+
+The independent consumer runtime classpath used approved published Scala
+libraries: `scala3-library_3-3.9.0.jar`
+(`9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba`) and
+`scala-library-3.9.0.jar`
+(`b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd`).
+Temurin JDK `21.0.13+9-LTS` tool hashes were `java`
+`9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`,
+`javac`
+`2cc288a26beebc50ca7cd924847dffbfb38ef3314e105bba6d4ebce03a0bcb6b`, and
+`javap`
+`b2146e8dcfe5662c04d14f3fad68756a1a597d01461ca475a2cdbeb44c84a678`.
+
+| Rust producer artifact | SHA-256 | TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `8b9eed685bede05320ee1e4fbb8da7f87c80eb722ffbeb3841bf3eb549eae922` | `000762f2-4ff0-f4ac-0000-000000008193` |
+| `example/Counter.tasty` | `dc631b73b42cb6f92b510a554e0cb8694ed1012d0f492d7bd482a427bb4cb3e2` | `000762f2-4ff0-f4ac-0000-000000008193` |
+| `example/Pair.class` | `19f26c87b03ccb20ce6af926246e0e34a7b02317120901a44849c39b84a8593c` | `00afb8c1-8401-15f0-0000-000000008198` |
+| `example/Pair.tasty` | `de0823eac349adf66ed9de5a700d6434a043135354bed107c6a6f75b8d4fd6a0` | `00afb8c1-8401-15f0-0000-000000008198` |
+
+The Scala client printed `scala39-rust-dual-reference-consumer=ok`. It checked
+these four Rust hashes before compilation, after compilation, and after
+`java -Xverify:all -ea`; they remained unchanged. It passed TASTy-only
+method/constructor lookup, `-decompile`, `-print-tasty`, `-from-tasty`,
+renamed/reordered variants, and corrupt/inconsistent input controls. The
+runtime classpath uses original Rust classes and the approved libraries only;
+Scala reconstructed classes are inspection-only.
+
+### Strict JDK identity and first-failure coverage
+
+The mandatory JDK gate ran with `DOTTY_CLASSFILE_REQUIRE_JDK=1` and Temurin
+`21.0.13`. The identity regression verified the unchanged Rust producer
+classes using `java -Xverify:all -ea`. It asserted independent reference
+behavior `7,3`, then `42,3`, then `42,-9`; reversed `Pair(b,a)` and shared
+`Pair(a,a)` were checked as positional and intentional-alias controls. Pair
+constructor bytecode has major version 65, `max_stack=2`, `max_locals=3`,
+slot stores at PCs `[6, 11]`, Object constructor Methodref `#15`, and ordered
+Pair Fieldrefs `#17/#19`. Original output hashes stayed unchanged across
+javac and Java execution.
+
+The strict Scala negative controls identify first failures at their actual
+layers: missing/misplaced sidecar at the Scala binary loader; corrupt sidecar
+at the TASTy unpickler; malformed alias PARAM target at `TreeWithoutOwner`;
+malformed PARAM type or VALDEF type name at compiler/TASTy read; stale class
+UUID at Scala's class/TASTy consistency check; wrong constructor or method
+signature in classfile-only fallback at Scala source typing; missing class at
+Scala name resolution. TASTy-only lookups succeeding with classfiles absent
+are compile-only controls. They are not treated as runnable output. Separate
+Rust checks reject wrong constructor proof/owner/order, type and alias
+relationships, second slot, swapped field references, wrong read Fieldref or
+Methodref, missing/corrupt paired artifacts, stale UUID, unsafe paths and
+publisher faults. The JVM-valid semantic alias swap is rejected by the alias
+contract/runtime identity checks rather than called a verifier failure.
+
+The publisher tests inject handled errors after each of the four staged
+writes, before promotion, and after promotion. They confirm no accepted
+partial tree, best-effort staging cleanup, and no overwrite of an existing
+sentinel destination. No crash-atomic multi-file durability is claimed.
