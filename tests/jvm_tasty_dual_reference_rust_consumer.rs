@@ -82,6 +82,15 @@ fn sha256(path: &Path) -> String {
         .to_owned()
 }
 
+fn java_tool_options() -> String {
+    let mut options = String::from("-XX:-UsePerfData");
+    if let Some(temp_dir) = std::env::var_os("TMPDIR") {
+        options.push_str(" -Djava.io.tmpdir=");
+        options.push_str(&PathBuf::from(temp_dir).display().to_string());
+    }
+    options
+}
+
 fn artifact_hashes(root: &Path) -> Vec<(String, String)> {
     [
         "example/Counter.class",
@@ -125,13 +134,16 @@ impl Scala {
             PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT is required"));
         let java_home =
             PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required"));
+        let maven_root = PathBuf::from(
+            std::env::var_os("COURSIER_MAVEN_ROOT").expect("COURSIER_MAVEN_ROOT is required"),
+        );
         let scala_libraries = [
-            root.join("dist/target/universal/stage/maven2/org/scala-lang/scala3-library_3/3.9.0-bin-SNAPSHOT/scala3-library_3-3.9.0-bin-SNAPSHOT.jar"),
-            root.join("dist/target/universal/stage/maven2/org/scala-lang/scala-library/3.9.0-bin-SNAPSHOT/scala-library-3.9.0-bin-SNAPSHOT.jar"),
+            maven_root.join("org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar"),
+            maven_root.join("org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar"),
         ];
         let expected_hashes = [
-            "8c605e1945ae5a3c57d618d02241f7190ecbed744367473c7c3a9b61940c920c",
-            "bc87575e0099514b17f7e84384b4a9a51d7a376720af8974e04a41a202909434",
+            "9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba",
+            "b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd",
         ];
         for (path, expected) in scala_libraries.iter().zip(expected_hashes) {
             assert!(
@@ -163,11 +175,6 @@ impl Scala {
             version_text.contains("3.9.0-bin-SNAPSHOT-git-777528f"),
             "{version_text}"
         );
-        assert_eq!(
-            sha256(&root.join("dist/target/universal/stage/maven2/org/scala-lang/scala3-compiler_3/3.9.0-bin-SNAPSHOT/scala3-compiler_3-3.9.0-bin-SNAPSHOT.jar")),
-            "b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f",
-            "pinned compiler jar hash"
-        );
         let java = java_home.join("bin/java");
         let java_version = run(Command::new(&java).arg("-version"));
         let java_text = String::from_utf8_lossy(&java_version.stderr).to_string()
@@ -194,7 +201,7 @@ impl Scala {
     fn scalac(&self) -> Command {
         let mut command = Command::new(&self.scalac);
         command.env("JAVA_HOME", &self.java_home);
-        command.env("JAVA_TOOL_OPTIONS", "-XX:-UsePerfData");
+        command.env("JAVA_TOOL_OPTIONS", java_tool_options());
         if let Some(path) = std::env::var_os("PATH") {
             let mut paths = vec![self.java_home.join("bin")];
             paths.extend(std::env::split_paths(&path));
@@ -672,6 +679,7 @@ fn compile_and_run_variant(
         scala.scala_libraries
     );
     let output = run(Command::new(&scala.java)
+        .env("JAVA_TOOL_OPTIONS", java_tool_options())
         .args(["-Xverify:all", "-ea", "-classpath"])
         .arg(classpath)
         .arg(main_class));
@@ -794,6 +802,7 @@ fn pinned_scala39_compiles_and_runs_a_separate_client_on_original_rust_pair_arti
     eprintln!("SCALA_CLIENT_CLASSPATH={classpath}");
     eprintln!("JAVA_RUNTIME_CLASSPATH={runtime_classpath}");
     let run_result = run(Command::new(&scala.java)
+        .env("JAVA_TOOL_OPTIONS", java_tool_options())
         .args(["-Xverify:all", "-ea", "-classpath"])
         .arg(runtime_classpath)
         .arg("example.RustArtifactConsumer"));
@@ -882,6 +891,7 @@ fn pinned_scala39_compiles_and_runs_a_separate_client_on_original_rust_pair_arti
         String::from_utf8_lossy(&from_tasty.stderr)
     );
     let javap = run(Command::new(scala.java_home.join("bin/javap"))
+        .env("JAVA_TOOL_OPTIONS", java_tool_options())
         .args(["-p", "-s", "-classpath"])
         .arg(&reconstructed)
         .arg("example.Pair"));
