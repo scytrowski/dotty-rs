@@ -624,3 +624,51 @@ COURSIER_MAVEN_ROOT="$COURSIER_MAVEN_ROOT" \
 cargo +1.98.1 test -p dotty --test jvm_tasty_dual_reference_rust_consumer \
   --locked -- --nocapture --test-threads=1
 ```
+
+## Issue #1882 checkpoint 1: integrated baseline and coverage reconciliation
+
+The assessed integrated main is
+`238034fa1b8f2832ac2babbf38b5340e1e107a89` (PR #1908's merge commit). This
+checkpoint reconciles historical evidence with the acceptance requirements;
+receipts below retain the exact reviewed PR head and merge commit.
+
+| Issue / PR | Reviewed PR head | Merge commit |
+| --- | --- | --- |
+| #1874 / #1883 | `e12bc017a3f1b8e693cd1f3529727e211abc736b` | `55201601e6bc1fae5cd85121781abebffab61d0f` |
+| #1875 / #1885 | `51bba9be08f0dd1bebf521dab24acb8b93fef891` | `52fe12a351dc3baa2f936358ed5b8f17dc1df05e` |
+| #1876 / #1887 | `420d78e1ad4a0798e0863a2b7905f388b035eb57` | `811780450ade51633a5f272195aaafd3a77dec0e` |
+| #1877 / #1894 | `235a6a575e1ad5933f57d2a252e40cb0bc0388d1` | `9dc0fef63dd4245c0b23a4fb438eb19bbb2fd343` |
+| #1879 / #1896 | `98e983bf455b5d5db7a533fe8be1498e389bedd7` | `b90a5e8f2a5a5007818235e2a1621df9c8a57e5d` |
+| #1880 / #1898 | `79990db43842004a4279724ba5cb667bc87d9a71` | `9042c15be3ad708d80f0ad5d637055f1ac6160b6` |
+| #1881 / #1902 | `b8629eb3e2f128dc76253869f0e117c3bc2b444b` | `d455b65981be5f3eafe90ea1e0c4f89156a275e7` |
+| #1908 correction | `f8f865cadc94372b39057fa8526a516f70a834db` | `238034fa1b8f2832ac2babbf38b5340e1e107a89` |
+
+The seven prerequisite PRs and #1908 have published `READY_FOR_MERGE`
+reviews. PR #1908's Rust, mandatory JVM, and strict Scala workflows passed on
+correction head `f8f865cadc94372b39057fa8526a516f70a834db` in runs
+[41189838344](https://github.com/scytrowski/dotty-rs/actions/runs/41189838344)
+and [41189838366](https://github.com/scytrowski/dotty-rs/actions/runs/41189838366).
+Those runs have no rows for merge commit `238034fa`; they are attributed only
+to `f8f865c`. Current-main checks are recorded in checkpoint 3.
+
+| Acceptance criterion | Existing evidence on `238034fa` |
+| --- | --- |
+| AC-1: provenance and pins | Receipts above; Rust `1.98.1`; Scala 3.9.0 source revision `777528f19a58e794c9954a42f433373472ec57f8`; Temurin `21.0.13+9-LTS`; exact run inputs and hashes in checkpoint 2. |
+| AC-2: one genuine Rust frontend session | `tests/jvm_tasty_dual_reference_session.rs::rust_frontend_session_keeps_two_parameter_and_field_alias_identities` checks one store, original source/session/index roots, distinct template and constructor-owned formals in order, both `Counter` types, and exact `left ← first` / `right ← second` typed field initializers and reads. |
+| AC-3: TASTy semantics | `tests/jvm_tasty_dual_reference_artifacts.rs::dual_reference_pair_emits_four_linked_artifacts_with_ordered_bytecode_and_deterministic_bytes` checks distinct template/constructor PARAMs, private final VALDEF aliases, alias targets, read selections, TASTy 28.9 and UUID links. Strict Scala consumer tests run `-decompile`, `-print-tasty` and `-from-tasty` on Rust sidecars. |
+| AC-4: complete artifacts | The artifact test checks four exact paths, classfile major 65, descriptor, fields, slot loads and member references; fresh sessions compare paths, bytes and UUIDs. `renamed_reordered_dual_reference_batch_is_deterministic_per_source_variant` checks renamed and reordered inputs independently. |
+| AC-5: Java runtime and identity | `tests/jvm_tasty_dual_reference_identity.rs::dual_reference_pair_preserves_original_argument_identity_on_strict_jdk21` checks only original Rust classes under `java -Xverify:all -ea`, independent mutation, reversed positions, shared-reference aliasing and reflective field identity. It checks max stack/locals, store PCs, Object constructor and ordered Pair field references. |
+| AC-6: official Scala consumer | Four strict tests in `tests/jvm_tasty_dual_reference_rust_consumer.rs` cover original Rust-only runtime, TASTy lookup/signature, renamed/reordered batches, and corruption controls. Reconstructed classes are inspection-only. |
+| AC-7: first-failure matrix | `jvm_tasty_dual_reference_matrix.rs`, `jvm_tasty_dual_reference_artifacts.rs`, `jvm_tasty_dual_reference_identity.rs`, and the Scala consumer tests cover source/proof/pickler failures, wrong aliases/slots/Fieldrefs/method targets, malformed/missing files, UUID mismatches, Scala lookup, JVM verification/linking and identity. A semantic swap fails alias/identity assertions, not a claimed verifier error. |
+| AC-8: publisher fault containment | `dual_reference_four_artifact_publication_cleans_every_staged_write_failure` injects handled errors after each staged write and before/after promotion; it checks no accepted partial output, staging cleanup, and an unchanged destination sentinel. This does not claim crash-atomic durability. |
+| AC-9: strict and workspace regressions | Strict inherited Scala workflow, dual-reference flags, pickler Scala oracle, JDK gate, formatting, boundary guard, Clippy, rustdoc, workspace tests, and diff check are recorded in checkpoint 3. |
+| AC-10: closeout and boundary | Checkpoints 1–3 provide receipts, exact run hashes, validation, and limitations. Rust two-argument Pair construction, Pair factories, broader constructor forms, external/multi-unit ABI, public compiler CLI and arbitrary Scala ABI remain deferred. |
+
+The #1898 review thread called out the historical `Pair.tasty` digest in the
+JDK identity receipt. Re-running that strict identity test at the assessed
+baseline reproduced the four hashes in the Issue #1880 receipt; its
+`example/Pair.tasty` hash is
+`2cdb802044f46d08fbe8aada64af62bd5669b2c8c6406e69213f1d4394520af4`. The
+separate Scala-consumer run emits a different `Pair.tasty` hash because it is
+a separate producer invocation. The receipts describe distinct run
+inventories; the consumer inventory is not substituted into the #1898 receipt.
