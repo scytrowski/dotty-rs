@@ -471,3 +471,137 @@ DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test -p dotty \
 The existing strict one-reference identity regression remains
 `constructor_injected_reference_alias_executes_on_verified_jdk21` in
 `tests/jvm_tasty_artifacts.rs`.
+## Issue #1881: official Scala consumer of unchanged Rust artifacts
+
+The strict consumer test adds a separately authored Scala program at
+[`RustArtifactConsumer.scala`](../tests/fixtures/jvm_tasty_dual_reference_constructors/RustArtifactConsumer.scala).
+It compiles only that client against the exact four files from one Rust
+`Lexer → Parser → Namer → SourceTyper` session. The compiler output directory
+is separate from the producer directory. Runtime uses the original Rust
+classes plus the Scala client and SHA-verified Scala libraries; the Scala
+`-from-tasty` output is used only for inspection. `java -Xverify:all -ea`
+prints `scala39-rust-dual-reference-consumer=ok`. All four original hashes
+match before compilation, after compilation and after execution.
+
+Tool versions and inputs:
+
+| Input | Version / SHA-256 |
+| --- | --- |
+| Rust producer source `Pair.scala` | `06266874ed9a7acdfc4d6a1c27bea3967055e474bca5a2f666af5ebfc8669c28` |
+| Scala client `RustArtifactConsumer.scala` | `771c663dd34c2fc9ab0fbec9bb575dcae39a4ae9da5bbf5137ca9088f5124eb5` |
+| Scala source checkout | `777528f19a58e794c9954a42f433373472ec57f8` (3.9.0) |
+| Staged Scala compiler JAR | `b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f` |
+| Scala 3 library JAR | `8c605e1945ae5a3c57d618d02241f7190ecbed744367473c7c3a9b61940c920c` |
+| Scala 2 library JAR | `bc87575e0099514b17f7e84384b4a9a51d7a376720af8974e04a41a202909434` |
+| JDK | Eclipse Temurin `21.0.13+9-LTS`; `java` SHA-256 `9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155` |
+| Rust toolchain | `1.98.1` |
+
+The original Rust producer artifact inventory is:
+
+| Artifact | SHA-256 | TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `8b9eed685bede05320ee1e4fbb8da7f87c80eb722ffbeb3841bf3eb549eae922` | `000762f2-4ff0-f4ac-0000-000000008193` |
+| `example/Counter.tasty` | `dc631b73b42cb6f92b510a554e0cb8694ed1012d0f492d7bd482a427bb4cb3e2` | `000762f2-4ff0-f4ac-0000-000000008193` |
+| `example/Pair.class` | `19f26c87b03ccb20ce6af926246e0e34a7b02317120901a44849c39b84a8593c` | `00afb8c1-8401-15f0-0000-000000008198` |
+| `example/Pair.tasty` | `de0823eac349adf66ed9de5a700d6434a043135354bed107c6a6f75b8d4fd6a0` | `00afb8c1-8401-15f0-0000-000000008198` |
+
+The positive runtime classpath order is `scala-client:rust-producer:scala3-library:scala-library`.
+It contains no Scala-produced replacement for `Counter` or `Pair`. The test
+records this classpath and rechecks the original four hashes after the client
+compile and Java execution.
+
+### Scala reader identity evidence
+
+The pinned Scala `-decompile`, `-print-tasty` and `-from-tasty` commands all
+consume the original Rust sidecars. `-from-tasty` reconstruction remains in a
+different directory and is never used by the runtime check. `javap -p -s` on
+that reconstruction reports both private immutable aliases, both read
+methods, and `(Lexample/Counter;Lexample/Counter;)V`.
+
+The `-print-tasty` output is checked at the exact local address relationships
+for this deterministic source: template `PARAM first` and `PARAM second` are
+at addresses 12 and 23; separate constructor `PARAM first` and `PARAM second`
+are at 49 and 56. `VALDEF left` at 68 contains `TERMREFsymbol 12`, and
+`VALDEF right` at 86 contains `TERMREFsymbol 23`. `leftValue` at 104 selects
+the `left` symbol at 13; `rightValue` at 130 selects `right` at 14. The
+addresses are local to this TASTy encoding; the checked relationships show
+that the aliases remain distinct and positional.
+
+Each classfile declaration is hidden independently in a structurally valid
+copy while retaining its genuine sidecar: `Counter.get`, `Counter.set`,
+`Pair.leftValue`, `Pair.rightValue`, and `Pair.<init>(Counter, Counter)` all
+remain available to separately compiled Scala source. For those lookup probes,
+the matched classfile-only copies have the TASTY marker stripped along with the
+sidecar; they fail with missing-member diagnostics. Separate missing/misplaced
+sidecar controls retain the TASTY marker and hide the matching classfile method,
+so their first failure is the Scala binary loader rejecting the missing sidecar.
+This establishes actual source lookup from Rust-produced TASTy instead of
+classfile-only Java linkage, and records loader failures separately from
+classfile lookup failures.
+
+### Negative controls and first failures
+
+All compile probes use `-Werror`. Representative first Scala 3.9 diagnostics
+from the strict run were:
+
+| Isolated control | First observed failure |
+| --- | --- |
+| Pair or Counter sidecar missing/misplaced while the matching classfile method is hidden and its TASTY marker is retained | “Loading Scala 3 binary ... It should have been loaded from .tasty file. This .tasty file is missing.” appears first in stderr; later member errors are secondary |
+| Marker-free classfile-only lookup copy with its classfile declaration hidden and sidecar removed | `[E008] Not Found Error` for the missing method; the constructor lookup reports `[E173] Reference Error` |
+| Corrupt Pair or Counter sidecar | `dotty.tools.tasty.UnpickleException: not a TASTy file` |
+| Alias `TERMREFsymbol` changed from its first template PARAM target to an unused AST address | Scala TASTy unpickler first fails with `TreeWithoutOwner` |
+| Constructor PARAM `SHAREDtype` changed to an unused AST address | Scala 3.9 compilation fails while reading the malformed declaration (`-- Error:` at the client source) |
+| Alias VALDEF type `NameRef` changed to an unused name-table address | Scala `-decompile` fails in the TASTy reader with `IndexOutOfBoundsException` for the missing name entry |
+| Pair classfile TASTY UUID differs from the sidecar header | `class is out of sync with its TASTy file` after the TASTy file is loaded |
+| Wrong-arity Pair constructor descriptor in matched classfile-only fallback, with the original two-argument constructor accepted under the same setup | “too many arguments for constructor Pair” with signature `(): example.Pair`; no sidecar-loader failure occurs |
+| Missing Counter classfile and sidecar | `[E006] Not Found Error` for `Counter` |
+| Wrong second argument type or same-spelled `foreign.Counter` | `[E007] Type Mismatch Error` at the second argument |
+
+The compiler accepts client compilation with `Counter.class` absent when its
+authentic `Counter.tasty` remains. It also accepts a private field missing
+from a compile-only Pair classfile when authentic TASTy remains. These are
+recorded as TASTy-only compile controls, not failures: compilation can use
+semantic TASTy declarations without executing the incomplete classfile.
+Private fields are not client-visible member-lookup probes. The runtime gate
+uses only the complete, unchanged original batch.
+
+With an altered classfile constructor descriptor or method descriptor, Scala
+compilation still succeeds if the original TASTy sidecar remains and uses its
+source signature. Both classfile-only fallbacks have matching original
+descriptor controls, with the TASTY marker and sidecar removed in each case.
+The original two-argument Pair constructor compiles; changing its descriptor to
+`()V` fails at the call with “too many arguments for constructor Pair” and
+signature `(): example.Pair`, without a sidecar-loader error. The original
+`leftValue()I` method also compiles; changing its descriptor to `()V` fails
+with `[E007] Type Mismatch Error` (`Found: Unit`, `Required: Int`). These
+controls show each failure comes from its changed classfile signature rather
+than unrelated loading behavior. No altered classfile is run. This
+distinguishes TASTy-based Scala source lookup from the bytecode ABI used at
+runtime.
+
+The source variants rename the package and both classes, and reverse the
+original class declaration order. Each variant is emitted from independent
+fresh Rust sessions, compares all four artifacts byte-for-byte only within
+the identical source variant, and compiles/runs a matching separate Scala
+client. Determinism is checked across identical source sessions, not across
+different source text.
+
+| Variant | Producer / client source SHA-256 | Artifact SHA-256s and TASTy UUIDs |
+| --- | --- | --- |
+| Reordered declarations (`example.Pair`, then `example.Counter`) | producer `9e4235bb9f4965be7480823282d891913877d5a2e000b1b052c17f171863fd51`; client `c7a05c571f0d2fd14b135865830d05ad89797440c8eac670672b0c785997ccf4` | `Counter.class` `3493023228e4f6234fa4d0eb897e61f22e183d4a6ab86106539af6ca9c0341c3`; `Counter.tasty` `b930f6d2ddde11780265e13c5352ff945f7c516debaedda86a811b19d35ec620`, UUID `00376aea-4ce2-f3ac-0000-000000008193`; `Pair.class` `e0df5dcd5b881d8d8dc080451f1c999a4fbfd1282b50ffe465405d2fd7e40fd5`; `Pair.tasty` `6369e4413aa7dd31a7faa92957b2d4e58d3e39c72da7fc27b9ccf898b2a82d3f`, UUID `009fb0d9-8713-12f0-0000-000000008198` |
+| Renamed to `renamed.Token` and `renamed.Duo` | producer `c56230949c724bc99a48f90a620addd1eee596caba839c59e64809c00c625f6a`; client `fe37d4f89f3bff00da3d80faae1b877d7b1cec5010036af731e2c7e5a794aeb` | `Token.class` `eb0d406e4385da2087c6d0d0ef16b5b2cb83b58ffd18210b506a05ba8d789da5`; `Token.tasty` `425518f03857fabfeb6ee29c51ec4667ec901c037b2de2f7f9faacd7167704ed`, UUID `000b2fab-eda1-77ac-0000-000000008193`; `Duo.class` `399d772779e4b174ca7a98f750434441bf5fa70a9405fe36fb3a3ab94d89a11e`; `Duo.tasty` `87df95febc3d85c4042ba17b38b951d78985e2cb8b78ded60f4e5292e93c2948`, UUID `00f3c003-439f-b1f0-0000-000000008198` |
+
+The strict gate is wired through
+`DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_CONSUMER=1` in
+`.github/workflows/jvm-tasty-factory-scala-consumer.yml`, alongside the
+inherited strict Scala reader tests and required JDK 21 regression command.
+Reproduce the new Scala consumer locally with:
+
+```sh
+TMPDIR="$PWD/target/issue-1881-tmp" \
+CARGO_TARGET_DIR="$PWD/target/issue-1881/cargo" \
+DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_CONSUMER=1 \
+SCALA39_ROOT="$SCALA39_ROOT" JAVA_HOME="$JAVA_HOME" \
+cargo +1.98.1 test -p dotty --test jvm_tasty_dual_reference_rust_consumer \
+  --locked -- --nocapture --test-threads=1
+```
