@@ -45,6 +45,25 @@ if errors:
 print("verified 8 pinned Scala 3.9.0 artifacts")
 PY
 
+python3 - "$fixture_dir" "$fixture_dir/evidence.sha256.tsv" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+root, manifest = Path(sys.argv[1]), Path(sys.argv[2])
+errors = []
+for line in manifest.read_text(encoding="utf-8").splitlines():
+    expected, relative = line.split("\t", 1)
+    path = root / relative
+    if not path.is_file():
+        errors.append(f"missing evidence file: {relative}")
+    elif hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        errors.append(f"evidence checksum mismatch: {relative}")
+if errors:
+    print("\n".join(errors), file=sys.stderr)
+    raise SystemExit(1)
+print("verified checked-in source, snapshots, diagnostics, baseline, report, and runner hashes")
+PY
+
 jar_paths=(
     "$maven_root/org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar"
     "$maven_root/org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar"
