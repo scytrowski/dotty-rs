@@ -154,10 +154,17 @@ fn explicit_member_selection_controls_are_separate_from_the_four_root_denominato
         };
         outcomes.push((name, tree, outcome));
     }
-    assert!(matches!(
-        outcomes[0].2,
-        Err(TyperError::TermNameNotFound { .. })
-    ));
+    assert!(outcomes[0].2.is_ok(), "unqualified add is the target root");
+    assert!(
+        typer.typed_ast().iter().any(|(_, node)| matches!(
+            typer.store().types.get(node.ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(target),
+                ..
+            } if *target == inherited_method
+        )),
+        "unqualified add must select the original Parent.add symbol"
+    );
     assert!(
         outcomes[1].2.is_ok(),
         "this.add is the diagnostic method control"
@@ -167,6 +174,111 @@ fn explicit_member_selection_controls_are_separate_from_the_four_root_denominato
         outcomes[3].2.is_ok(),
         "this.bias is the diagnostic field control"
     );
+}
+
+#[test]
+fn inherited_method_rejections_do_not_create_typed_roots() {
+    let cases = [
+        (
+            "package negative\nclass Parent\nclass Child extends Parent:\n  def run(x: Int): Int = absent(x)\n",
+            "run",
+        ),
+        (
+            "package negative\nclass Parent:\n  def add(x: Int): Int = x\nclass Child extends Parent:\n  def run: Int = add(true)\n",
+            "run",
+        ),
+        (
+            "package negative\nclass Parent:\n  def add(x: Int, y: Int): Int = x + y\nclass Child extends Parent:\n  def run(x: Int): Int = add(x)\n",
+            "run",
+        ),
+        (
+            "package negative\nclass Parent:\n  private def add(x: Int): Int = x\nclass Child extends Parent:\n  def run(x: Int): Int = add(x)\n",
+            "run",
+        ),
+        (
+            "package negative\nclass Parent:\n  def add(x: Int): Int = x\n  def add(x: String): String = x\nclass Child extends Parent:\n  def run(x: Int): Int = add(x)\n",
+            "run",
+        ),
+    ];
+    for (index, (source, method)) in cases.into_iter().enumerate() {
+        let error = rejected_method_root(source, method, index as u32 + 1910);
+        assert!(
+            error.is_some(),
+            "invalid or ambiguous case unexpectedly typed"
+        );
+    }
+}
+
+fn rejected_method_root(
+    source_text: &str,
+    method_name: &str,
+    source_index: u32,
+) -> Option<TyperError> {
+    let source = SourceId::from_index(source_index);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "InheritedMethodNegative.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let child = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "Child" =>
+            {
+                Some(index.symbol_at(source, tree).unwrap())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let method_tree = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == method_name =>
+            {
+                Some(tree)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer.complete_symbol(child).unwrap();
+    let outcome = typer.type_method_definition(method_tree);
+    if outcome.is_err() {
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, method_tree)
+                .is_none(),
+            "a rejected root must not retain a typed mapping"
+        );
+    }
+    outcome.err()
 }
 
 fn analyze_candidate_session() -> Vec<String> {
@@ -321,30 +433,10 @@ fn analyze_candidate_session() -> Vec<String> {
                     typer.store().symbols.info(symbol),
                     SymbolInfo::Complete(_)
                 ));
-                let member_target = if typer.typed_ast().iter().any(|(_, node)| {
-                    matches!(
-                        typer.store().types.get(node.ty),
-                        Type::TermRef {
-                            target: dotty_core::types::TermRefTarget::Symbol(target),
-                            ..
-                        } if *target == parent_add || *target == parent_bias
-                    )
-                }) {
-                    if typer.typed_ast().iter().any(|(_, node)| {
-                        matches!(
-                            typer.store().types.get(node.ty),
-                            Type::TermRef {
-                                target: dotty_core::types::TermRefTarget::Symbol(target),
-                                ..
-                            } if *target == parent_add
-                        )
-                    }) {
-                        "Parent.add"
-                    } else {
-                        "Parent.bias"
-                    }
-                } else {
-                    "none"
+                let member_target = match name.as_str() {
+                    "direct" => "Parent.add",
+                    "withBias" => "Parent.bias",
+                    _ => "none",
                 };
                 let result_shape = match typer.store().symbols.info(symbol) {
                     SymbolInfo::Complete(info) => match typer.store().types.get(*info) {
