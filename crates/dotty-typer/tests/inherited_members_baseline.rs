@@ -1301,12 +1301,40 @@ fn analyze_candidate_session() -> Vec<String> {
                         },
                     )
                 } else {
-                    "none".to_owned()
+                    let target = if name == "lifted" {
+                        parent_add
+                    } else {
+                        parent_bias
+                    };
+                    assert!(
+                        typer.typed_ast().iter().any(|(_, node)| matches!(
+                            typer.store().types.get(node.ty),
+                            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                                if *symbol == target
+                        )),
+                        "{name} must preserve its canonical Parent member reference"
+                    );
+                    let lambda_tree = source_rhs;
+                    let lambda = typer.source_typed_index().get(source, lambda_tree).unwrap();
+                    let TreeKind::Closure(closure) = &typer.typed_ast().get(lambda).kind else {
+                        panic!("{name} should map to a typed closure");
+                    };
+                    assert_eq!(closure.env.len(), 1);
+                    assert!(matches!(
+                        typer.store().types.get(typer.typed_ast().get(closure.env[0]).ty),
+                        Type::ThisType { class } if *class == child
+                    ));
+                    if name == "lifted" {
+                        "Parent.add"
+                    } else {
+                        "Parent.bias"
+                    }
+                    .to_owned()
                 };
                 let result_shape = match typer.store().symbols.info(symbol) {
                     SymbolInfo::Complete(info) => match typer.store().types.get(*info) {
                         Type::Method(method) => type_shape(typer.store(), method.result),
-                        other => format!("non-method:{other:?}"),
+                        _ => type_shape(typer.store(), *info),
                     },
                     _ => "signature-unavailable".to_owned(),
                 };

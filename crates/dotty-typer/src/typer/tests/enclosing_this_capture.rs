@@ -679,11 +679,12 @@ fn overloaded_same_owner_calls_capture_the_canonical_receiver_for_both_syntaxes(
 #[test]
 fn same_owner_member_capture_fails_closed_and_rolls_back_rejected_lambdas() {
     let source_text = concat!(
-        "class Base { def inherited(x: Int): Int = x }; ",
+        "class Base { val bias: Int = 2; def inherited(x: Int): Int = x }; ",
         "class Calculator extends Base { ",
         "var state: Int = 0; ",
         "def adjust(x: Int): Int = x; ",
         "def inheritedUse: Int => Int = x => inherited(x); ",
+        "def inheritedField: Int => Int = x => x + bias; ",
         "def wrongArgument: Int => Int = x => adjust(true); ",
         "def update: Int => Int = x => { state = x; x } ",
         "}",
@@ -699,27 +700,35 @@ fn same_owner_member_capture_fails_closed_and_rolls_back_rejected_lambdas() {
         &packages,
     );
 
-    for name in ["inheritedUse", "wrongArgument", "update"] {
+    for name in ["inheritedUse", "inheritedField", "wrongArgument", "update"] {
         let (method, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
         let result = typer.type_method_definition(method_tree(&parsed, &index, source, method));
+        if matches!(name, "inheritedUse" | "inheritedField") {
+            let typed_method = result.unwrap_or_else(|error| {
+                panic!("{name} should capture the lexical Child.this receiver: {error:?}")
+            });
+            let TreeKind::DefDef(definition) = &typer.typed_ast().get(typed_method).kind else {
+                panic!("{name} must remain a complete typed source method");
+            };
+            let closure = typer.source_typed_index().get(source, rhs).unwrap();
+            let TreeKind::Closure(closure) = &typer.typed_ast().get(closure).kind else {
+                panic!("{name} RHS must remain a closure");
+            };
+            assert_eq!(closure.env.len(), 1, "{name} captures one receiver");
+            assert!(definition.rhs.is_some());
+            assert!(matches!(
+                typer.store().types.get(typer.typed_ast().get(closure.env[0]).ty),
+                Type::ThisType { class } if *class == typer.store().symbols.get(method).owner.unwrap()
+            ));
+            continue;
+        }
         assert!(
             result.is_err(),
             "{name} must be rejected by the bounded capture path"
         );
         assert_eq!(typer.source_typed_index().get(source, rhs), None);
         assert_eq!(typer.function_literal_method_at(source, rhs), None);
-        if name == "inheritedUse" {
-            assert!(
-                matches!(
-                    result,
-                    Err(TyperError::FunctionLiteralCaptureUnsupported {
-                        symbol: Some(_),
-                        ..
-                    })
-                ),
-                "inherited lookup should reach the explicitly unsupported capture path, got {result:?}"
-            );
-        } else if name == "wrongArgument" {
+        if name == "wrongArgument" {
             assert!(matches!(
                 result,
                 Err(TyperError::ApplicationArgumentTypeMismatch { .. })

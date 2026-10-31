@@ -26292,11 +26292,24 @@ mod tests {
                     (index.symbol_at(source, tree) == Some(method)).then_some(tree)
                 })
                 .unwrap();
+            let typed_method = typer.type_method_definition(tree).unwrap_or_else(|error| {
+                panic!("{method_name} should capture the lexical Child.this receiver: {error:?}")
+            });
             assert!(matches!(
-                typer.type_method_definition(tree),
-                Err(TyperError::FunctionLiteralCaptureUnsupported { .. })
+                &typer.typed_ast().get(typed_method).kind,
+                TreeKind::DefDef(definition) if definition.rhs.is_some()
             ));
-            assert!(typer.source_typed_index().get(source, tree).is_none());
+            let (_, lambda_tree) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, method_name);
+            let lambda_typed = typer.source_typed_index().get(source, lambda_tree).unwrap();
+            let TreeKind::Closure(closure) = &typer.typed_ast().get(lambda_typed).kind else {
+                panic!("{method_name} should produce a typed closure");
+            };
+            assert_eq!(closure.env.len(), 1);
+            assert!(matches!(
+                typer.store().types.get(typer.typed_ast().get(closure.env[0]).ty),
+                Type::ThisType { class } if *class == child
+            ));
         }
 
         let local_method = method_symbol(&parsed, typer.store(), &index, source, "local");
@@ -26327,7 +26340,9 @@ mod tests {
                     Type::TermRef {
                         target: TermRefTarget::Symbol(symbol),
                         ..
-                    } => Some(*symbol),
+                    } if typer.store.symbols.get(*symbol).owner == Some(local_lambda_method) => {
+                        Some(*symbol)
+                    }
                     _ => None,
                 }
             })
