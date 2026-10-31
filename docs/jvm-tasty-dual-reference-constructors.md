@@ -370,7 +370,7 @@ The baseline is merged main commit
 `b90a5e8f2a5a5007818235e2a1621df9c8a57e5d` (#1896, including #1879). From one
 source session, the strict test writes these original outputs:
 
-| Artifact | SHA-256 |
+| Artifact | SHA-256 from retained JDK identity log |
 | --- | --- |
 | `example/Counter.class` | `56d46ed31c7406d47c2a8f18798518d08aae10dadf22b43817d28d9b202e4b00` |
 | `example/Counter.tasty` | `6282bf0b2d8b9130b1956bd9fb339c6eab4534cc2fb841de427032785392f050` |
@@ -665,9 +665,8 @@ to `f8f865c`. Current-main checks are recorded in checkpoint 3.
 | AC-10: closeout and boundary | Checkpoints 1–3 provide receipts, exact run hashes, validation, and limitations. Rust two-argument Pair construction, Pair factories, broader constructor forms, external/multi-unit ABI, public compiler CLI and arbitrary Scala ABI remain deferred. |
 
 The #1898 review thread called out the historical `Pair.tasty` digest in the
-JDK identity receipt. Re-running that strict identity test at the assessed
-baseline reproduced the four hashes in the Issue #1880 receipt; its
-`example/Pair.tasty` hash is
+JDK identity receipt. The retained identity log and Issue #1880 receipt both
+record the exact `example/Pair.tasty` SHA-256
 `2cdb802044f46d08fbe8aada64af62bd5669b2c8c6406e69213f1d4394520af4`. The
 separate Scala-consumer run emits a different `Pair.tasty` hash because it is
 a separate producer invocation. The receipts describe distinct run
