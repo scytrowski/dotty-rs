@@ -710,8 +710,14 @@ fn same_owner_member_capture_fails_closed_and_rolls_back_rejected_lambdas() {
         assert_eq!(typer.function_literal_method_at(source, rhs), None);
         if name == "inheritedUse" {
             assert!(
-                matches!(result, Err(TyperError::TermNameNotFound { .. })),
-                "inherited access should remain outside lookup scope, got {result:?}"
+                matches!(
+                    result,
+                    Err(TyperError::FunctionLiteralCaptureUnsupported {
+                        symbol: Some(_),
+                        ..
+                    })
+                ),
+                "inherited lookup should reach the explicitly unsupported capture path, got {result:?}"
             );
         } else if name == "wrongArgument" {
             assert!(matches!(
