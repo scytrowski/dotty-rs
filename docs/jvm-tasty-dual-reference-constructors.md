@@ -375,7 +375,7 @@ source session, the strict test writes these original outputs:
 | `example/Counter.class` | `56d46ed31c7406d47c2a8f18798518d08aae10dadf22b43817d28d9b202e4b00` |
 | `example/Counter.tasty` | `6282bf0b2d8b9130b1956bd9fb339c6eab4534cc2fb841de427032785392f050` |
 | `example/Pair.class` | `add99598bf726187b887e569833479c0f5fe7371868b861177a4d7ec29bd0828` |
-| `example/Pair.tasty` | `2cdb802044f46d08fbe8aada64af62bd5669b2c8c6406e69213f1d4394520af4` |
+| `example/Pair.tasty` | `2cdb802044f46d08fbe8aada64af62bd5669b2c8c6406e69213d1f4394520af4` |
 
 The follow-up strict JDK run reproduced the `Pair.tasty` digest above before
 `javac` and after both `javac` and runtime execution.
@@ -667,7 +667,7 @@ to `f8f865c`. Current-main checks are recorded in checkpoint 3.
 The #1898 review thread called out the historical `Pair.tasty` digest in the
 JDK identity receipt. The retained identity log and Issue #1880 receipt both
 record the exact `example/Pair.tasty` SHA-256
-`2cdb802044f46d08fbe8aada64af62bd5669b2c8c6406e69213f1d4394520af4`. The
+`2cdb802044f46d08fbe8aada64af62bd5669b2c8c6406e69213d1f4394520af4`. The
 separate Scala-consumer run emits a different `Pair.tasty` hash because it is
 a separate producer invocation. The receipts describe distinct run
 inventories; the consumer inventory is not substituted into the #1898 receipt.
