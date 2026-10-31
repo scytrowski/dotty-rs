@@ -35,7 +35,7 @@ shadowing, a local import that shadows the inherited field, a mutable `var`
 whose `MUTABLE` flag remains intact, and failure rollback followed by a valid
 same-session retry. The mutable control tests a read only; inherited writes
 remain outside this issue. These Rust results and
-the frozen oracle classifications are summarized in
+the frozen target classifications plus Rust-only controls are summarized in
 [`inherited-immutable-field.tsv`](../crates/dotty-typer/tests/fixtures/inherited-members-3.9.0/inherited-immutable-field.tsv).
 
 Focused validation:
@@ -44,4 +44,3 @@ Focused validation:
 TMPDIR="$PWD/tmp" CARGO_TARGET_DIR="$PWD/target" \
   cargo test -p dotty-typer --test inherited_members_baseline --locked
 ```
-
