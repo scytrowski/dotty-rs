@@ -1,0 +1,142 @@
+--------------------------------------------------------------------------------
+target/issue-1913/oracle/producer/example/PairFactory.tasty
+--------------------------------------------------------------------------------
+Header:
+  version: 28.9.0
+  tooling: Scala 3.9.0-bin-SNAPSHOT-git-777528f
+     UUID: 00d30365-3129-c6d3-00f1-d428bbe23920
+
+Names (322 bytes, starting from 60):
+     0: ASTs
+     1: example
+     2: PairFactory
+     3: <init>
+     4: java
+     5: lang
+     6: java[Qualified . lang]
+     7: Object
+     8: java[Qualified . lang][Qualified . Object]
+     9: <init>[Signed Signature(List(),java.lang.Object) @<init>]
+    10: Unit
+    11: scala
+    12: create
+    13: first
+    14: Int
+    15: second
+    16: Pair
+    17: example[Qualified . Pair]
+    18: Counter
+    19: example[Qualified . Counter]
+    20: <init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]
+    21: scala[Qualified . Int]
+    22: <init>[Signed Signature(List(scala.Int),example.Counter) @<init>]
+    23: SourceFile
+    24: annotation
+    25: scala[Qualified . annotation]
+    26: internal
+    27: scala[Qualified . annotation][Qualified . internal]
+    28: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
+    29: String
+    30: java[Qualified . lang][Qualified . String]
+    31: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
+    32: tests/fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala
+    33: Positions
+    34: Comments
+    35: Attributes
+
+Trees (115 bytes, starting from 384):
+     0: PACKAGE(113)
+     2:   TERMREFpkg 1 [example]
+     4:   TYPEDEF(109) 2 [PairFactory]
+     7:     TEMPLATE(88)
+     9:       APPLY(10)
+    11:         SELECTin(8) 9 [<init>[Signed Signature(List(),java.lang.Object) @<init>]]
+    14:           NEW
+    15:             TYPEREF 7 [Object]
+    17:               TERMREFpkg 6 [java[Qualified . lang]]
+    19:           SHAREDtype 15
+    21:       DEFDEF(7) 3 [<init>]
+    24:         EMPTYCLAUSE
+    25:         TYPEREF 10 [Unit]
+    27:           TERMREFpkg 11 [scala]
+    29:         STABLE
+    30:       DEFDEF(65) 12 [create]
+    33:         PARAM(7) 13 [first]
+    36:           IDENTtpt 14 [Int]
+    38:             TYPEREF 14 [Int]
+    40:               TERMREFpkg 11 [scala]
+    42:         PARAM(5) 15 [second]
+    45:           IDENTtpt 14 [Int]
+    47:             SHAREDtype 38
+    49:         IDENTtpt 16 [Pair]
+    51:           TYPEREF 16 [Pair]
+    53:             TERMREFpkg 1 [example]
+    55:         APPLY(40)
+    57:           SELECTin(8) 20 [<init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]]
+    60:             NEW
+    61:               IDENTtpt 16 [Pair]
+    63:                 SHAREDtype 51
+    65:             SHAREDtype 51
+    67:           APPLY(14)
+    69:             SELECTin(10) 22 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+    72:               NEW
+    73:                 IDENTtpt 18 [Counter]
+    75:                   TYPEREF 18 [Counter]
+    77:                     SHAREDtype 53
+    79:               SHAREDtype 75
+    81:             TERMREFdirect 33
+    83:           APPLY(12)
+    85:             SELECTin(8) 22 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+    88:               NEW
+    89:                 IDENTtpt 18 [Counter]
+    91:                   SHAREDtype 75
+    93:               SHAREDtype 75
+    95:             TERMREFdirect 42
+    97:     ANNOTATION(16)
+    99:       TYPEREF 23 [SourceFile]
+   101:         TERMREFpkg 27 [scala[Qualified . annotation][Qualified . internal]]
+   103:       APPLY(10)
+   105:         SELECTin(6) 31 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
+   108:           NEW
+   109:             SHAREDtype 99
+   111:           SHAREDtype 99
+   113:         STRINGconst 32 [tests/fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala]
+   115:
+
+Positions (105 bytes, starting from 501):
+  lines: 17
+  line sizes:
+     15, 0, 26, 34, 26, 45, 0, 44, 35, 37, 35, 37, 0, 18, 45, 53, 0
+  positions:
+     0: 0 .. 465
+     4: 347 .. 465
+     7: 368 .. 465
+    15: 353 .. 353
+    21: 368 .. 368
+    25: 368 .. 368
+    30: 368 .. 465
+    33: 379 .. 389
+    36: 386 .. 389
+    42: 391 .. 402
+    45: 399 .. 402
+    49: 405 .. 409
+    55: 416 .. 465
+    61: 420 .. 424
+    67: 425 .. 443
+    73: 429 .. 436
+    81: 437 .. 442
+    83: 445 .. 464
+    89: 449 .. 456
+    95: 457 .. 463
+   103: 347 .. 465
+   109: 347 .. 347
+   113: 347 .. 347
+
+  source paths:
+     0: 32 [tests/fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala]
+
+Attributes (2 bytes, starting from 610):
+  SOURCEFILEattr 32 [tests/fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala]
+
+
+--------------------------------------------------------------------------------

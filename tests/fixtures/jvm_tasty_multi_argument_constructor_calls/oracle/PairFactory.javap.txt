@@ -1,0 +1,100 @@
+Classfile /home/vdrake6/.local/state/agent-skills/worktrees/issue-1913/dotty-rs/target/issue-1913/oracle/producer/example/PairFactory.class
+  Last modified Oct 31, 2026; size 680 bytes
+  SHA-256 checksum 4c84cdbe1ff94ed7708d2c16015c28e492add3deb366755ea2d7030f352b0e8f
+  Compiled from "PairFactory.scala"
+public class example.PairFactory extends java.lang.Object
+  minor version: 0
+  major version: 65
+  flags: (0x0021) ACC_PUBLIC, ACC_SUPER
+  this_class: #2                          // example/PairFactory
+  super_class: #5                         // java/lang/Object
+  interfaces: 0, fields: 0, methods: 2, attributes: 5
+Constant pool:
+   #1 = Utf8               example/PairFactory
+   #2 = Class              #1             // example/PairFactory
+   #3 = Utf8               Ljava/lang/Object;
+   #4 = Utf8               java/lang/Object
+   #5 = Class              #4             // java/lang/Object
+   #6 = Utf8               PairFactory.scala
+   #7 = Utf8               <init>
+   #8 = Utf8               ()V
+   #9 = NameAndType        #7:#8          // "<init>":()V
+  #10 = Methodref          #5.#9          // java/lang/Object."<init>":()V
+  #11 = Utf8               this
+  #12 = Utf8               Lexample/PairFactory;
+  #13 = Utf8               create
+  #14 = Utf8               (II)Lexample/Pair;
+  #15 = Utf8               first
+  #16 = Utf8               second
+  #17 = Utf8               example/Pair
+  #18 = Class              #17            // example/Pair
+  #19 = Utf8               example/Counter
+  #20 = Class              #19            // example/Counter
+  #21 = Utf8               (I)V
+  #22 = NameAndType        #7:#21         // "<init>":(I)V
+  #23 = Methodref          #20.#22        // example/Counter."<init>":(I)V
+  #24 = Utf8               (Lexample/Counter;Lexample/Counter;)V
+  #25 = NameAndType        #7:#24         // "<init>":(Lexample/Counter;Lexample/Counter;)V
+  #26 = Methodref          #18.#25        // example/Pair."<init>":(Lexample/Counter;Lexample/Counter;)V
+  #27 = Utf8               I
+  #28 = Utf8               Code
+  #29 = Utf8               LineNumberTable
+  #30 = Utf8               LocalVariableTable
+  #31 = Utf8               MethodParameters
+  #32 = Utf8               Signature
+  #33 = Utf8               SourceFile
+  #34 = Utf8               TASTY
+  #35 = Utf8               Scala3InlineInfo
+  #36 = Utf8               Scala
+{
+  public example.PairFactory();
+    descriptor: ()V
+    flags: (0x0001) ACC_PUBLIC
+    Code:
+      stack=1, locals=1, args_size=1
+         0: aload_0
+         1: invokespecial #10                 // Method java/lang/Object."<init>":()V
+         4: return
+      LineNumberTable:
+        line 14: 0
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+            0       5     0  this   Lexample/PairFactory;
+
+  public example.Pair create(int, int);
+    descriptor: (II)Lexample/Pair;
+    flags: (0x0001) ACC_PUBLIC
+    Code:
+      stack=6, locals=3, args_size=3
+         0: new           #18                 // class example/Pair
+         3: dup
+         4: new           #20                 // class example/Counter
+         7: dup
+         8: iload_1
+         9: invokespecial #23                 // Method example/Counter."<init>":(I)V
+        12: new           #20                 // class example/Counter
+        15: dup
+        16: iload_2
+        17: invokespecial #23                 // Method example/Counter."<init>":(I)V
+        20: invokespecial #26                 // Method example/Pair."<init>":(Lexample/Counter;Lexample/Counter;)V
+        23: areturn
+      LineNumberTable:
+        line 16: 0
+      LocalVariableTable:
+        Start  Length  Slot  Name   Signature
+            0      24     0  this   Lexample/PairFactory;
+            0      24     1 first   I
+            0      24     2 second   I
+    MethodParameters:
+      Name                           Flags
+      first                          final
+      second                         final
+}
+Signature: #3                           // Ljava/lang/Object;
+SourceFile: "PairFactory.scala"
+  TASTY: length = 0x10 (unknown attribute)
+   00 D3 03 65 31 29 C6 D3 00 F1 D4 28 BB E2 39 20
+
+  Scala3InlineInfo: length = 0x4 (unknown attribute)
+   01 00 00 00
+  Scala: length = 0x0 (unknown attribute)

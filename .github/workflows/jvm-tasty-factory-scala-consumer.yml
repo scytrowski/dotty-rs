@@ -163,6 +163,7 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_CONSTRUCTOR_INJECTION_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_FACTORY_RESULT_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_LOCAL_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_SIGNATURE: '1'
@@ -184,6 +185,7 @@ jobs:
             --test jvm_tasty_constructor_injection_scala_consumer \
             --test jvm_tasty_reference_constructor_scala_consumer \
             --test jvm_tasty_nested_constructor_scala_consumer \
+            --test jvm_tasty_multi_argument_constructor_calls \
             --test jvm_tasty_factory_result_scala_consumer \
             --test jvm_tasty_reference_local_scala_consumer \
             --test jvm_tasty_dual_reference_signature \

@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "purpose": "Scala-produced audit oracle only; not Rust output or Rust/Scala interoperability evidence.",
+  "source": {
+    "path": "PairFactory.scala",
+    "sha256": "7e40de1afb6272dbcf481baab7148801a055210216a19bdeaff85fafb40ff1bf",
+    "unchanged_issue_fixture": true
+  },
+  "independent_consumer": {
+    "path": "Consumer.scala",
+    "sha256": "0269244aa5601d7276e694c9250c3c1d046862146d05136db8c12510e9f4218a",
+    "compiled_against": "Scala-produced producer directory and Scala 3.9 runtime only",
+    "runtime": "java -Xverify:all -ea example.PairFactoryConsumer",
+    "result": "passed: 7/3, reversed 3/7, distinct reflected Counter references, independent mutation"
+  },
+  "oracle": {
+    "scala_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+    "scalac_version": "Scala compiler version 3.9.0-bin-SNAPSHOT-git-777528f -- Copyright 2002-2026, LAMP/EPFL",
+    "scalac_jar_sha256": "b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f",
+    "jdk_version": "openjdk 21.0.13 2026-10-20 LTS",
+    "java_sha256": "9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155",
+    "javap_version": "21.0.13",
+    "classfile_major": 65,
+    "release": 21,
+    "tasty_version": "28.9.0",
+    "producer_source_file_count": 1,
+    "producer_artifact_counts": {
+      "class": 3,
+      "tasty": 3
+    },
+    "compile_command": "scalac -release 21 -d <empty producer dir> PairFactory.scala",
+    "consumer_command": "scalac -release 21 -classpath <producer dir>:<scala3-library>:<scala-library> -d <empty consumer dir> Consumer.scala",
+    "tasty_dump": "java -cp <pinned staged Scala 3.9 compiler classpath> dotty.tools.MainGenericCompiler -print-tasty <sidecar>",
+    "javap": "javap -v -p -c -classpath <producer dir> example.PairFactory"
+  },
+  "artifacts": [
+    {
+      "path": "scala39/example/Counter.class",
+      "size_bytes": 647,
+      "sha256": "0e4175f68b99781aab85d04a867243747d7fe6f11687dcd7a7d2f55ca0eed012",
+      "classfile_major": 65,
+      "tasty_version": null,
+      "uuid": null,
+      "linked_tasty_uuid": "00c3332122a9b8e800dd1db900712c1b"
+    },
+    {
+      "path": "scala39/example/Counter.tasty",
+      "size_bytes": 602,
+      "sha256": "f3c1adc42db4979c529c3566d88652c24fed026dd0d8550295592e16d3945a89",
+      "classfile_major": null,
+      "tasty_version": "28.9.0",
+      "uuid": "00c33321-22a9-b8e8-00dd-1db900712c1b",
+      "linked_tasty_uuid": null
+    },
+    {
+      "path": "scala39/example/Pair.class",
+      "size_bytes": 771,
+      "sha256": "83cba46ced18fbb02ef353009827479c7e68030b866e23e08122e3f3a2020ce9",
+      "classfile_major": 65,
+      "tasty_version": null,
+      "uuid": null,
+      "linked_tasty_uuid": "001186c6f79945d3001ace81c7f69d5b"
+    },
+    {
+      "path": "scala39/example/Pair.tasty",
+      "size_bytes": 702,
+      "sha256": "df8217316bd32e21b15eccf27b5e2019c736e49e514bb544f465ef7227f70c8b",
+      "classfile_major": null,
+      "tasty_version": "28.9.0",
+      "uuid": "001186c6-f799-45d3-001a-ce81c7f69d5b",
+      "linked_tasty_uuid": null
+    },
+    {
+      "path": "scala39/example/PairFactory.class",
+      "size_bytes": 680,
+      "sha256": "4c84cdbe1ff94ed7708d2c16015c28e492add3deb366755ea2d7030f352b0e8f",
+      "classfile_major": 65,
+      "tasty_version": null,
+      "uuid": null,
+      "linked_tasty_uuid": "00d303653129c6d300f1d428bbe23920"
+    },
+    {
+      "path": "scala39/example/PairFactory.tasty",
+      "size_bytes": 612,
+      "sha256": "2232b74c794b64107dc96b9535230378721f0d3274709fcc47437af89e2f1077",
+      "classfile_major": null,
+      "tasty_version": "28.9.0",
+      "uuid": "00d30365-3129-c6d3-00f1-d428bbe23920",
+      "linked_tasty_uuid": null
+    }
+  ],
+  "snapshots": {
+    "Counter.javap.txt": {
+      "sha256": "c12199ed3b32b5dc4a38089515ff42fe2d4fc71600694f2b2cdb72ccf3dc3f50"
+    },
+    "Counter.tasty.txt": {
+      "sha256": "dc07156c5385a6f2a96c78af2481d6cb7774d7b54ff7f94a3fb0a983f5e944a0"
+    },
+    "Pair.javap.txt": {
+      "sha256": "e63f600efda667258fcc66c21611dd0d97449580ff4f3fc371471b69ce82deae"
+    },
+    "Pair.tasty.txt": {
+      "sha256": "f53e46c73e218396b8ecfd937ee6fe0f1efb3d3cfcdb3c3f4406a5700c1e57fd"
+    },
+    "PairFactory.javap.txt": {
+      "sha256": "5fb8827e2460d33258adc573011e8891bbd41a8c850460ccffaeef50da66ff99"
+    },
+    "PairFactory.tasty.txt": {
+      "sha256": "1750508eb833284e982921f1bc18150ae3b5aebbe0170d8bff852a149390b8d6"
+    }
+  }
+}

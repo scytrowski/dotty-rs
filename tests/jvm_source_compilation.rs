@@ -47,6 +47,8 @@ const FACTORY_RESULT_ARGUMENT_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala");
 const REFERENCE_LOCAL_CONSTRUCTOR_FLOW_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala");
+const MULTI_ARGUMENT_FACTORY_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala");
 
 type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
@@ -13556,6 +13558,330 @@ fn real_reference_object_apis_compile_and_verify_end_to_end() {
     if require_jdk_or_skip() {
         verify_reference_object_apis_with_jdk(first_output.path());
     }
+}
+
+#[test]
+fn multi_argument_sibling_factory_records_rust_identity_and_first_proof_rejection() {
+    use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
+
+    let source_id = SourceId::from_index(1913);
+    let output = TestOutputDirectory::new("multi-argument-sibling-factory");
+    let mut observed = false;
+    let mut observed_proof = None;
+    let mut observe_source = |ast: &AstArena<Untyped>,
+                              source_root: TreeId<Untyped>,
+                              index: &SourceSemanticIndex,
+                              source_typed_index: &SourceTypedIndex,
+                              unit: &mut JvmCompilationUnit<'_>,
+                              definitions: &Definitions| {
+        observed = true;
+        let factory = audit_class_named(unit, "PairFactory");
+        assert_eq!(
+            unit.classes
+                .iter()
+                .map(|plan| unit
+                    .store
+                    .names
+                    .resolve(unit.store.symbols.get(plan.class).name.text()))
+                .collect::<Vec<_>>(),
+            ["Counter", "Pair", "PairFactory"],
+            "JVM unit retains original declaration order"
+        );
+        let member_order = unit
+            .classes
+            .iter()
+            .map(|plan| {
+                (
+                    unit.store
+                        .names
+                        .resolve(unit.store.symbols.get(plan.class).name.text())
+                        .to_owned(),
+                    plan.fields
+                        .iter()
+                        .map(|field| {
+                            unit.store
+                                .names
+                                .resolve(unit.store.symbols.get(field.field).name.text())
+                                .to_owned()
+                        })
+                        .collect::<Vec<_>>(),
+                    plan.methods
+                        .iter()
+                        .map(|method| {
+                            unit.store
+                                .names
+                                .resolve(unit.store.symbols.get(method.method).name.text())
+                                .to_owned()
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            member_order,
+            [
+                (
+                    "Counter".to_owned(),
+                    vec!["current".to_owned()],
+                    vec!["get".to_owned(), "set".to_owned()]
+                ),
+                (
+                    "Pair".to_owned(),
+                    vec!["left".to_owned(), "right".to_owned()],
+                    vec!["leftValue".to_owned(), "rightValue".to_owned()]
+                ),
+                ("PairFactory".to_owned(), vec![], vec!["create".to_owned()])
+            ]
+        );
+        let method_source = ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if unit.store.names.resolve(definition.name.as_name().text()) == "create" =>
+                {
+                    Some((tree, definition))
+                }
+                _ => None,
+            })
+            .expect("unchanged source declares PairFactory.create");
+        let method = index
+            .symbol_at(source_id, method_source.0)
+            .expect("create has its canonical source method symbol");
+        assert_eq!(unit.store.symbols.get(method).owner, Some(factory));
+        let [first_tree, second_tree] = method_source.1.value_param_clauses[0].as_slice() else {
+            panic!("the factory source has exactly two ordered formals");
+        };
+        let first = index.symbol_at(source_id, *first_tree).unwrap();
+        let second = index.symbol_at(source_id, *second_tree).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(unit.store.symbols.get(first).owner, Some(method));
+        assert_eq!(unit.store.symbols.get(second).owner, Some(method));
+        assert_eq!(
+            unit.store
+                .names
+                .resolve(unit.store.symbols.get(first).name.text()),
+            "first"
+        );
+        assert_eq!(
+            unit.store
+                .names
+                .resolve(unit.store.symbols.get(second).name.text()),
+            "second"
+        );
+        assert!(
+            matches!(index.definition_of(first), Some(SourceDefinition::Canonical { source, tree }) if source == source_id && tree == *first_tree)
+        );
+        assert!(
+            matches!(index.definition_of(second), Some(SourceDefinition::Canonical { source, tree }) if source == source_id && tree == *second_tree)
+        );
+        let first_typed = source_typed_index.get(source_id, *first_tree);
+        let second_typed = source_typed_index.get(source_id, *second_tree);
+        assert!(
+            first_typed.is_none() && second_typed.is_none(),
+            "formal declarations are represented in the completed method signature, not as typed expression roots"
+        );
+        let dotty_core::SymbolInfo::Complete(method_type) = unit.store.symbols.get(method).info
+        else {
+            panic!("factory signature is complete in the original session");
+        };
+        let Type::Method(signature) = unit.store.types.get(method_type) else {
+            panic!("factory has a method signature");
+        };
+        assert_eq!(signature.params.len(), 2);
+        assert_eq!(signature.params[0].ty, definitions.int);
+        assert_eq!(signature.params[1].ty, definitions.int);
+        assert_eq!(
+            audit_type_symbol(unit, signature.result),
+            Some(audit_class_named(unit, "Pair"))
+        );
+
+        let source_rhs = method_source.1.rhs.expect("factory has a body");
+        let TreeKind::Apply(source_outer) = &ast.get(source_rhs).kind else {
+            panic!("source factory body is the outer Pair application");
+        };
+        assert_eq!(source_outer.args.len(), 2);
+        let outer_typed = source_typed_index.get(source_id, source_rhs).unwrap();
+        let TreeKind::Apply(typed_outer) = &unit.typed_ast.get(outer_typed).kind else {
+            panic!("typed factory body retains the outer Pair application");
+        };
+        assert_eq!(typed_outer.args.len(), 2);
+        let source_outer_select = source_outer.function;
+        let TreeKind::Select(source_outer_selection) = &ast.get(source_outer_select).kind else {
+            panic!("outer constructor application has a Select");
+        };
+        let source_outer_new = source_outer_selection.qualifier;
+        assert!(matches!(ast.get(source_outer_new).kind, TreeKind::New(_)));
+        let typed_outer_select = source_typed_index
+            .get(source_id, source_outer_select)
+            .unwrap();
+        let TreeKind::Select(_typed_outer_selection) = &unit.typed_ast.get(typed_outer_select).kind
+        else {
+            panic!("typed outer constructor application has a Select");
+        };
+        let pair_constructor = term_type_target(unit, unit.typed_ast.get(typed_outer_select).ty)
+            .expect("outer Select resolves to the exact Pair constructor");
+        assert_eq!(
+            unit.store.symbols.get(pair_constructor).owner,
+            Some(audit_class_named(unit, "Pair"))
+        );
+        let typed_outer_new = source_typed_index.get(source_id, source_outer_new).unwrap();
+        assert!(matches!(
+            unit.typed_ast.get(typed_outer_new).kind,
+            TreeKind::New(_)
+        ));
+
+        let counter = audit_class_named(unit, "Counter");
+        let counter_tree = ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if unit.store.names.resolve(definition.name.as_name().text()) == "Counter" =>
+                {
+                    Some((tree, definition))
+                }
+                _ => None,
+            })
+            .expect("Counter has its source declaration");
+        let TreeKind::Template(counter_template) = &ast.get(counter_tree.1.rhs).kind else {
+            panic!("Counter has a template");
+        };
+        let counter_constructor = index
+            .symbol_at(source_id, counter_template.constructor)
+            .expect("Counter has its canonical primary constructor");
+        assert_eq!(
+            unit.store.symbols.get(counter_constructor).owner,
+            Some(counter)
+        );
+        for (ordinal, source_argument) in source_outer.args.iter().copied().enumerate() {
+            let TreeKind::Apply(source_inner) = &ast.get(source_argument).kind else {
+                panic!("each outer argument is a sibling Counter application");
+            };
+            assert_eq!(source_inner.args.len(), 1);
+            let inner_typed = source_typed_index.get(source_id, source_argument).unwrap();
+            let TreeKind::Apply(typed_inner) = &unit.typed_ast.get(inner_typed).kind else {
+                panic!("typed nested argument remains an Apply");
+            };
+            assert_eq!(typed_inner.args.len(), 1);
+            let source_inner_select = source_inner.function;
+            let TreeKind::Select(source_inner_selection) = &ast.get(source_inner_select).kind
+            else {
+                panic!("nested constructor application has a Select");
+            };
+            let source_inner_new = source_inner_selection.qualifier;
+            assert!(matches!(ast.get(source_inner_new).kind, TreeKind::New(_)));
+            let typed_inner_select = source_typed_index
+                .get(source_id, source_inner_select)
+                .unwrap();
+            let TreeKind::Select(_) = &unit.typed_ast.get(typed_inner_select).kind else {
+                panic!("typed nested constructor application has a Select");
+            };
+            assert_eq!(
+                term_type_target(unit, unit.typed_ast.get(typed_inner_select).ty),
+                Some(counter_constructor)
+            );
+            let typed_inner_new = source_typed_index.get(source_id, source_inner_new).unwrap();
+            assert!(matches!(
+                unit.typed_ast.get(typed_inner_new).kind,
+                TreeKind::New(_)
+            ));
+            let source_leaf = source_inner.args[0];
+            assert_eq!(index.symbol_at(source_id, source_leaf), None);
+            let typed_leaf = source_typed_index.get(source_id, source_leaf).unwrap();
+            let leaf_ty = unit.typed_ast.get(typed_leaf).ty;
+            assert_eq!(
+                term_type_target(unit, leaf_ty),
+                Some(if ordinal == 0 { first } else { second })
+            );
+            assert_eq!(
+                audit_type_symbol(unit, unit.typed_ast.get(inner_typed).ty),
+                Some(counter)
+            );
+        }
+        assert_eq!(
+            audit_type_symbol(unit, unit.typed_ast.get(outer_typed).ty),
+            Some(audit_class_named(unit, "Pair"))
+        );
+        for source_argument in source_outer.args.iter().copied() {
+            let TreeKind::Apply(source_inner) = &ast.get(source_argument).kind else {
+                unreachable!()
+            };
+            let source_select = source_inner.function;
+            let TreeKind::Select(source_selection) = &ast.get(source_select).kind else {
+                unreachable!()
+            };
+            let source_new = source_selection.qualifier;
+            let source_leaf = source_inner.args[0];
+            let typed_apply = source_typed_index.get(source_id, source_argument).unwrap();
+            let typed_select = source_typed_index.get(source_id, source_select).unwrap();
+            let typed_new = source_typed_index.get(source_id, source_new).unwrap();
+            let typed_leaf = source_typed_index.get(source_id, source_leaf).unwrap();
+            assert!(typed_apply.index() != typed_select.index());
+            assert!(typed_select.index() != typed_new.index());
+            assert!(typed_new.index() != typed_leaf.index());
+        }
+
+        let result =
+            validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                source_id,
+                source_root,
+                store: unit.store,
+                definitions,
+                source_ast: ast,
+                typed_ast: unit.typed_ast,
+                source_index: index,
+                source_typed_index,
+                jvm_unit: unit,
+            });
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!(
+                "the existing proof rejects this two-formal method before its two-argument body"
+            ),
+        };
+        observed_proof = Some(format!("{error:?}"));
+    };
+    let artifacts = compile_source_batch_with_source_observer(
+        MULTI_ARGUMENT_FACTORY_SOURCE,
+        "PairFactory.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe_source,
+    )
+    .expect("the same source succeeds through JVM-only source compilation");
+    assert!(
+        observed,
+        "the source-to-typed receipt came from the authentic pipeline session"
+    );
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["example/Counter", "example/Pair", "example/PairFactory"]
+    );
+    assert!(
+        observed_proof
+            .unwrap()
+            .contains("candidate method must have one plain formal clause")
+    );
+
+    let error = with_paired_jvm_tasty_batch_plan(
+        MULTI_ARGUMENT_FACTORY_SOURCE,
+        "PairFactory.scala",
+        source_id,
+        |_| (),
+    )
+    .expect_err("paired TASTy planning reaches and reports its proof's first rejection");
+    let observed = format!("{error:?}");
+    assert!(
+        observed.contains("cross-class constructor-call identity proof"),
+        "{observed}"
+    );
+    assert!(
+        observed.contains("candidate method must have one plain formal clause"),
+        "{observed}"
+    );
 }
 
 #[test]
