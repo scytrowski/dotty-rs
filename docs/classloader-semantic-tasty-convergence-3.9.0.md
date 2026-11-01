@@ -218,3 +218,54 @@ only; a type declaration already present in the canonical package scope is
 also rejected before entry even when a fresh loader session has empty name
 caches. Additional external semantic dependencies or graph expansion are not
 resolved by this adapter.
+
+## Issue #1929 fixture ledger
+
+| Role | Fixture | SHA-256 | Root | Expected semantic edge |
+|---|---|---|---|---|
+| Parent | `crates/dotty-tasty-unpickler/tests/fixtures/semantic/InfoBase.tasty` | `e4d58a733e8cc9a516b5d248dd6fb97acb2cb19d763e1e390cfcd1249bd7f5f9` | `TYPEDEF@4`, constructor `DEFDEF@28`, `InfoBase[A]`, package `me.cytrowski.tastyfixtures.semantic` | No ordinary members |
+| Child | `crates/dotty-tasty-unpickler/tests/fixtures/semantic/InfoWrapped.tasty` | `07cca416641dda27a333df99603bf7b119d0bc5660098c5d378a09064e1630fd` | `TYPEDEF@5`, constructor `DEFDEF@80`, `InfoWrapped[F[_]]`, same package | Applied parent `InfoBase[F[Int]]`; direct member `m` at `DEFDEF@115`, type `F[Int]` |
+
+The pair has one nonbootstrap cross-unit TASTy dependency. JVM `Object` and
+`Int` use existing canonical bootstrap/classpath behavior. `InfoBase` has no
+ordinary members: this fixture demonstrates the applied parent edge and the
+child's directly declared `m`; it does not demonstrate inherited-member
+traversal.
+
+The fixture source is pinned by the repository's Scala 3.9.0 semantic fixture
+policy. The root, constructor, and member addresses above are original TASTy addresses;
+tests must locate definitions through each unit's own retained semantic index.
+The address ledger was checked against both fixture indexes: `InfoBase` is
+`TYPEDEF@4` / `DEFDEF@28`, while `InfoWrapped` is `TYPEDEF@5` / `DEFDEF@80` /
+`DEFDEF@115`. The semantic loader regression pins those per-unit addresses.
+
+## Issue #1929 first-failure ledger
+
+| Boundary | Expected behavior | Regression evidence |
+|---|---|---|
+| One-class `Open` adapter | Remains available as the existing #1928 opt-in regression | Existing `loader.rs` adapter tests |
+| Two-unit opt-in integration | Enter both units before completing parent/member references, reusing canonical package and class identity | #1929 loader integration tests |
+| Ordinary loader | Keeps legacy default TASTy output and resource priority | `tasty_loading.rs` and legacy parity tests |
+| Pair resource selection | First classpath entry wins; a directory's TASTy resource wins over a competing class file | `info_pair_uses_first_tasty_resource_and_prefers_tasty_over_classfile` |
+| Declared root identity | Verify the decoded package and root name against the requested binary name before either declaration is entered | `info_pair_rejects_mismatched_root_before_entering_preexisting_package` |
+| Unit failure provenance | Keep failing binary name, selected `ClassOrigin`, `ClassFormat`, and nested typed cause/address | Base and wrapped malformed-resource tests; late child failure test |
+| Unsupported or malformed unit | Return typed error and roll back only unpublished work | `info_pair_fails_closed_for_an_unsupported_parent_reference`; malformed and late-failure controls |
+| Late second-unit failure and retry | Preserve a previously completed Object cache/origin and package/alias state; remove newly entered pair declarations and allow valid bytes to retry | `info_pair_late_child_failure_rolls_back_and_retries_with_original_bytes` |
+| Constructor and parameter projection | Normalize both classes' type parameters and constructor parameter types in both request orders | Pair graph comparison: `A`/empty constructor and `F`/`x:Int` |
+| Canonical Scala aliases during paired completion | Bind existing `Unit`, `Int`, `Any`, `Nothing`, and `Matchable` symbols; restore prior owners and package entries on failure | #1929 rollback control |
+
+The pinned pair has one directed cross-unit edge and no cycle. The unsupported
+dependency control mutates the child's parent reference to a same-length,
+unavailable name and verifies the loader fails closed with the selected child
+origin and no partial pair publication. A cyclic multi-unit fixture is outside
+this one-edge contract; no general cycle traversal is claimed.
+
+A first failure inside unpickler projection beyond the supported fixture
+contract is a prerequisite boundary. Record its original file, address, and
+error; do not broaden this loader increment into unrelated unpickler semantics.
+
+## Deferred graph shape
+
+The next graph increment is deferred. This issue covers only the two files and
+single `InfoWrapped -> InfoBase` edge above. It makes no claim about general
+classpath traversal, arbitrary dependency fan-out, or inherited-member lookup.

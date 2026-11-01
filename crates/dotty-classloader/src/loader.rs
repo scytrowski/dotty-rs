@@ -31,7 +31,9 @@ use dotty_core::{
     SemanticStore, Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolLinks,
     SymbolOrigin, TermName, Type, TypeId, TypeName, TypeParam, Visibility,
 };
-use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
+use dotty_tasty_unpickler::tasty_unpickler::{
+    TastySemanticIndex, TastySession, TastyUnpickler, UnpickleError,
+};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -49,16 +51,33 @@ pub(crate) struct CachedDecodedModule {
 pub(crate) enum SemanticTastyLoadError {
     ClassLoad(ClassLoadError),
     Resolver(dotty_core::ResolutionError),
-    Unpickle { address: u32, error: UnpickleError },
+    Unpickle {
+        address: u32,
+        error: UnpickleError,
+    },
     UnsupportedShape(&'static str),
+    PairUnitFailure {
+        binary_name: BinaryName,
+        origin: ClassOrigin,
+        format: ClassFormat,
+        cause: Box<SemanticTastyLoadError>,
+    },
+}
+
+impl SemanticTastyLoadError {
+    fn for_pair_unit(name: &BinaryName, resource: &ClassResource, cause: Self) -> Self {
+        Self::PairUnitFailure {
+            binary_name: name.clone(),
+            origin: resource.origin().clone(),
+            format: resource.format(),
+            cause: Box::new(cause),
+        }
+    }
 }
 
 struct OpenBuiltinAliasSnapshot {
-    and_symbol: Symbol,
-    or_symbol: Symbol,
+    symbols: Vec<(SymbolId, Symbol, Name, bool)>,
     scala_scope: Option<ScopeId>,
-    and_was_entered: bool,
-    or_was_entered: bool,
 }
 
 #[allow(dead_code)]
@@ -88,7 +107,9 @@ fn symbol_matches_binary_name(
     requested: &BinaryName,
 ) -> bool {
     let class = store.symbols.get(symbol);
-    if class.kind != SymbolKind::Class || class.name.namespace() != Namespace::Type {
+    if !matches!(class.kind, SymbolKind::Class | SymbolKind::Trait)
+        || class.name.namespace() != Namespace::Type
+    {
         return false;
     }
     let mut package = class.owner;
@@ -109,6 +130,16 @@ fn symbol_matches_binary_name(
     segments.reverse();
     segments.push(store.names.resolve(class.name.text()).to_owned());
     segments.join("/") == requested.as_internal()
+}
+
+fn type_ref_symbol(store: &SemanticStore, ty: TypeId) -> Option<SymbolId> {
+    match store.types.get(ty) {
+        Type::TypeRef {
+            target: dotty_core::TypeRefTarget::Symbol(symbol),
+            ..
+        } => Some(*symbol),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
@@ -876,6 +907,789 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
     }
 
+    /// Opt-in semantic projection for the pinned two-unit InfoWrapped/InfoBase
+    /// graph. Both resources are selected by the configured classpath before
+    /// either unit is entered; the request order controls entry order only.
+    /// The legacy `load_class` path is intentionally unchanged.
+    #[allow(dead_code)]
+    pub(crate) fn load_info_pair_with_tasty_unpickler(
+        &mut self,
+        requested: &BinaryName,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        const BASE: &str = "me/cytrowski/tastyfixtures/semantic/InfoBase";
+        const WRAPPED: &str = "me/cytrowski/tastyfixtures/semantic/InfoWrapped";
+        let base_name = BinaryName::from_internal(BASE);
+        let wrapped_name = BinaryName::from_internal(WRAPPED);
+        if requested != &base_name && requested != &wrapped_name {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the semantic TASTy pair supports only InfoBase and InfoWrapped",
+            ));
+        }
+        if let Some(symbol) = self.semantic_tasty_loaded.get(requested) {
+            return Ok(*symbol);
+        }
+        for name in [&base_name, &wrapped_name] {
+            if self.session.identified.contains_key(name)
+                || self.session.resolved.contains_key(name)
+                || self.repository.get(name).is_some()
+                || self.open_package_contains_type_declaration(name)
+            {
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "a pair class already has a loader identity or package declaration",
+                ));
+            }
+        }
+
+        let mut resources = HashMap::new();
+        for name in [&base_name, &wrapped_name] {
+            let resource = self
+                .class_path
+                .find_class(name)
+                .map_err(|error| {
+                    SemanticTastyLoadError::ClassLoad(ClassLoadError::Io(
+                        name.clone(),
+                        Rc::new(error),
+                    ))
+                })?
+                .ok_or_else(|| {
+                    SemanticTastyLoadError::ClassLoad(ClassLoadError::NotFound(name.clone()))
+                })?;
+            if resource.format() != ClassFormat::Tasty {
+                return Err(SemanticTastyLoadError::for_pair_unit(
+                    name,
+                    &resource,
+                    SemanticTastyLoadError::UnsupportedShape(
+                        "both selected pair resources must be TASTy",
+                    ),
+                ));
+            }
+            resources.insert(name.clone(), resource);
+        }
+        let base_resource = resources.get(&base_name).expect("selected above").clone();
+        let wrapped_resource = resources
+            .get(&wrapped_name)
+            .expect("selected above")
+            .clone();
+        let base_file =
+            tasty_symbol::parse_classloader_tasty(base_resource.bytes()).map_err(|error| {
+                SemanticTastyLoadError::for_pair_unit(
+                    &base_name,
+                    &base_resource,
+                    SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                        base_name.clone(),
+                        error,
+                    )),
+                )
+            })?;
+        Self::validate_info_pair_unit_shape(&base_file, &base_name, false).map_err(|error| {
+            SemanticTastyLoadError::for_pair_unit(&base_name, &base_resource, error)
+        })?;
+
+        let store_checkpoint = self.store.checkpoint();
+        let session_checkpoint = self.session.checkpoint();
+        let pair_package_scope_before = self.snapshot_pair_package_scope();
+        let aliases_before = self.snapshot_open_builtin_aliases();
+        let object_before = self
+            .store
+            .symbols
+            .get(self.definitions.object_class)
+            .clone();
+        let result = self.load_info_pair_semantics(
+            requested,
+            &base_name,
+            &wrapped_name,
+            &base_file,
+            &base_resource,
+            &wrapped_resource,
+        );
+        match result {
+            Ok((base, wrapped)) => {
+                for (name, symbol, resource) in [
+                    (&base_name, base, &base_resource),
+                    (&wrapped_name, wrapped, &wrapped_resource),
+                ] {
+                    self.session
+                        .record_origin(symbol, resource.origin().clone());
+                    self.session.cache_resolved(name.clone(), symbol);
+                    self.repository.mark_loaded(name.clone(), symbol);
+                    self.semantic_tasty_loaded.insert(name.clone(), symbol);
+                }
+                Ok(if requested == &base_name {
+                    base
+                } else {
+                    wrapped
+                })
+            }
+            Err(error) => {
+                self.remove_pair_package_insertions(pair_package_scope_before);
+                self.session.rollback_to(self.store, session_checkpoint);
+                if self.store.symbols.contains(self.definitions.object_class) {
+                    *self.store.symbols.get_mut(self.definitions.object_class) = object_before;
+                }
+                self.restore_open_builtin_aliases(aliases_before);
+                self.store.rollback_to(store_checkpoint);
+                self.repository.discard_rolled_back_symbols(self.store);
+                Err(error)
+            }
+        }
+    }
+
+    fn load_info_pair_semantics(
+        &mut self,
+        requested: &BinaryName,
+        base_name: &BinaryName,
+        wrapped_name: &BinaryName,
+        base_file: &dotty_tasty::tasty::TastyFile<'_>,
+        base_resource: &ClassResource,
+        wrapped_resource: &ClassResource,
+    ) -> Result<(SymbolId, SymbolId), SemanticTastyLoadError> {
+        let session = std::mem::replace(&mut self.session, LoadingSession::new());
+        let mut resolver = crate::resolver::ClasspathSymbolResolver::new(
+            BorrowedClassPath(&self.class_path),
+            self.definitions,
+            session,
+        );
+        let object = (|| {
+            let package = resolver
+                .resolve_package(self.store, &["java", "lang"])
+                .map_err(SemanticTastyLoadError::Resolver)?
+                .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                    "the configured classpath cannot resolve java.lang",
+                ))?;
+            let prefix = self
+                .store
+                .types
+                .alloc(Type::type_ref(self.definitions.no_prefix, package));
+            let name = Name::new(self.store.names.intern("Object"), Namespace::Type);
+            resolver
+                .resolve_member(
+                    self.store,
+                    &MemberRequest {
+                        prefix,
+                        name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .map_err(SemanticTastyLoadError::Resolver)?
+                .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                    "the configured classpath cannot resolve java.lang.Object",
+                ))
+        })();
+        self.session = resolver.into_session();
+        let object = object?;
+        if object != self.definitions.object_class
+            || !matches!(self.store.symbols.get(object).info, SymbolInfo::Complete(_))
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "java.lang.Object did not resolve to the canonical completed definition",
+            ));
+        }
+        self.bind_open_builtin_unit()?;
+        self.bind_open_primitive("Int", self.definitions.int)?;
+        self.bind_open_builtin_symbol("Any", self.definitions.any_class)?;
+        self.bind_open_builtin_symbol("Nothing", self.definitions.nothing_class)?;
+        self.bind_open_builtin_symbol("Matchable", self.definitions.matchable_class)?;
+
+        let packages = self.session.packages.take_packages();
+        let mut tasty_session = TastySession::with_packages(packages);
+        let order = if requested == base_name {
+            [true, false]
+        } else {
+            [false, true]
+        };
+        macro_rules! restore_tasty_and_return {
+            ($unit:expr, $error:expr, $unpickler:expr) => {{
+                let (_, session) = $unpickler.into_session_parts();
+                self.restore_tasty_pair_packages($unit, session);
+                return Err($error);
+            }};
+        }
+        let mut indexes: HashMap<BinaryName, TastySemanticIndex> = HashMap::new();
+        let mut constructor_addresses = HashMap::new();
+        let mut root_addresses = HashMap::new();
+        let mut wrapped_file = None;
+        for is_base in order {
+            if !is_base && wrapped_file.is_none() {
+                let file = match tasty_symbol::parse_classloader_tasty(wrapped_resource.bytes()) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        self.restore_tasty_pair_packages(base_file, tasty_session);
+                        return Err(SemanticTastyLoadError::for_pair_unit(
+                            wrapped_name,
+                            wrapped_resource,
+                            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                                wrapped_name.clone(),
+                                error,
+                            )),
+                        ));
+                    }
+                };
+                if let Err(error) = Self::validate_info_pair_unit_shape(&file, wrapped_name, true) {
+                    self.restore_tasty_pair_packages(base_file, tasty_session);
+                    return Err(SemanticTastyLoadError::for_pair_unit(
+                        wrapped_name,
+                        wrapped_resource,
+                        error,
+                    ));
+                }
+                wrapped_file = Some(file);
+            }
+            let (name, file) = if is_base {
+                (base_name, base_file)
+            } else {
+                (
+                    wrapped_name,
+                    wrapped_file.as_ref().expect("parsed before entry"),
+                )
+            };
+            let mut unpickler =
+                TastyUnpickler::with_session(file, self.store, self.definitions, tasty_session);
+            match unpickler.enter_symbols() {
+                Ok(_) => {}
+                Err(error) => restore_tasty_and_return!(
+                    file,
+                    SemanticTastyLoadError::for_pair_unit(
+                        name,
+                        if is_base {
+                            base_resource
+                        } else {
+                            wrapped_resource
+                        },
+                        SemanticTastyLoadError::Unpickle { address: 0, error },
+                    ),
+                    unpickler
+                ),
+            }
+            let (index, session) = unpickler.into_session_parts();
+            let root_address = file.ast_address_index().ok().and_then(|nodes| {
+                nodes
+                    .iter_nodes()
+                    .filter_map(|node| u32::try_from(node.offset).ok())
+                    .find(|address| {
+                        index.symbol_at(*address).is_some_and(|symbol| {
+                            let symbol = self.store.symbols.get(symbol);
+                            matches!(symbol.kind, SymbolKind::Class | SymbolKind::Trait)
+                                && self.store.names.resolve(symbol.name.text())
+                                    == name.simple_name()
+                        })
+                    })
+            });
+            let Some(root_address) = root_address else {
+                self.restore_tasty_pair_packages(file, session);
+                return Err(SemanticTastyLoadError::for_pair_unit(
+                    name,
+                    if is_base {
+                        base_resource
+                    } else {
+                        wrapped_resource
+                    },
+                    SemanticTastyLoadError::UnsupportedShape(
+                        "the entered unit has no top-level identity matching its requested binary name",
+                    ),
+                ));
+            };
+            let (expected_root, expected_constructor) = if is_base { (4, 28) } else { (5, 80) };
+            if root_address != expected_root {
+                self.restore_tasty_pair_packages(file, session);
+                return Err(SemanticTastyLoadError::for_pair_unit(
+                    name,
+                    if is_base {
+                        base_resource
+                    } else {
+                        wrapped_resource
+                    },
+                    SemanticTastyLoadError::UnsupportedShape(
+                        "a pair root address differs from its pinned retained-index ledger",
+                    ),
+                ));
+            }
+            root_addresses.insert(name.clone(), root_address);
+            let constructors = file
+                .ast_address_index()
+                .map(|nodes| {
+                    nodes
+                        .iter_nodes()
+                        .filter_map(|node| u32::try_from(node.offset).ok())
+                        .filter(|address| {
+                            index.symbol_at(*address).is_some_and(|symbol| {
+                                self.store.symbols.get(symbol).kind == SymbolKind::Constructor
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if constructors.len() != 1 || constructors[0] != expected_constructor {
+                self.restore_tasty_pair_packages(file, session);
+                return Err(SemanticTastyLoadError::for_pair_unit(
+                    name,
+                    if is_base {
+                        base_resource
+                    } else {
+                        wrapped_resource
+                    },
+                    SemanticTastyLoadError::UnsupportedShape(
+                        "each pair unit must have exactly one constructor definition",
+                    ),
+                ));
+            }
+            constructor_addresses.insert(name.clone(), constructors[0]);
+            tasty_session = session;
+            indexes.insert(name.clone(), index);
+        }
+
+        let wrapped_file = wrapped_file.expect("both units entered");
+        let mut identities = HashMap::new();
+        for is_base in order {
+            let (name, file) = if is_base {
+                (base_name, base_file)
+            } else {
+                (wrapped_name, &wrapped_file)
+            };
+            let index = indexes.remove(name).expect("both units entered");
+            let root = root_addresses[name];
+            let constructor_address = constructor_addresses[name];
+            let resource = if is_base {
+                base_resource
+            } else {
+                wrapped_resource
+            };
+            let mut unpickler = TastyUnpickler::with_session_and_index(
+                file,
+                self.store,
+                self.definitions,
+                tasty_session,
+                index,
+            );
+            let Some(class) = unpickler.index().symbol_at(root) else {
+                restore_tasty_and_return!(
+                    file,
+                    SemanticTastyLoadError::for_pair_unit(
+                        name,
+                        resource,
+                        SemanticTastyLoadError::UnsupportedShape("pair root index is missing"),
+                    ),
+                    unpickler
+                );
+            };
+            if let Err(error) = unpickler.complete_symbol(root) {
+                restore_tasty_and_return!(
+                    file,
+                    SemanticTastyLoadError::for_pair_unit(
+                        name,
+                        resource,
+                        SemanticTastyLoadError::Unpickle {
+                            address: root,
+                            error
+                        },
+                    ),
+                    unpickler
+                );
+            }
+            let Some(constructor) = unpickler.index().symbol_at(constructor_address) else {
+                restore_tasty_and_return!(
+                    file,
+                    SemanticTastyLoadError::for_pair_unit(
+                        name,
+                        resource,
+                        SemanticTastyLoadError::UnsupportedShape(
+                            "pair constructor address is absent from its retained index",
+                        ),
+                    ),
+                    unpickler
+                );
+            };
+            if let Err(error) = unpickler.complete_symbol(constructor_address) {
+                restore_tasty_and_return!(
+                    file,
+                    SemanticTastyLoadError::for_pair_unit(
+                        name,
+                        resource,
+                        SemanticTastyLoadError::Unpickle {
+                            address: constructor_address,
+                            error,
+                        },
+                    ),
+                    unpickler
+                );
+            }
+            let method = if is_base {
+                None
+            } else {
+                let Some(method) = unpickler.index().symbol_at(115) else {
+                    restore_tasty_and_return!(
+                        file,
+                        SemanticTastyLoadError::for_pair_unit(
+                            name,
+                            resource,
+                            SemanticTastyLoadError::UnsupportedShape(
+                                "InfoWrapped has no direct member at DEFDEF@115",
+                            ),
+                        ),
+                        unpickler
+                    );
+                };
+                if let Err(error) = unpickler.complete_symbol(115) {
+                    restore_tasty_and_return!(
+                        file,
+                        SemanticTastyLoadError::for_pair_unit(
+                            name,
+                            resource,
+                            SemanticTastyLoadError::Unpickle {
+                                address: 115,
+                                error
+                            },
+                        ),
+                        unpickler
+                    );
+                }
+                Some(method)
+            };
+            let (_, session) = unpickler.into_session_parts();
+            tasty_session = session;
+            identities.insert(name.clone(), (class, constructor, method));
+        }
+        let (_, mut packages) = TastyUnpickler::with_session(
+            &wrapped_file,
+            self.store,
+            self.definitions,
+            tasty_session,
+        )
+        .into_parts();
+        self.session.packages.swap_packages(&mut packages);
+        for name in [base_name, wrapped_name] {
+            let (class, constructor, method) = identities[name];
+            if self.store.symbols.get(constructor).owner != Some(class)
+                || !matches!(self.store.symbols.get(class).info, SymbolInfo::Complete(_))
+                || !matches!(
+                    self.store.symbols.get(constructor).info,
+                    SymbolInfo::Complete(_)
+                )
+                || !symbol_matches_binary_name(self.store, class, name)
+                || method.is_some_and(|member| {
+                    self.store.symbols.get(member).owner != Some(class)
+                        || !matches!(self.store.symbols.get(member).info, SymbolInfo::Complete(_))
+                })
+            {
+                let resource = if name == base_name {
+                    base_resource
+                } else {
+                    wrapped_resource
+                };
+                return Err(SemanticTastyLoadError::for_pair_unit(
+                    name,
+                    resource,
+                    SemanticTastyLoadError::UnsupportedShape(
+                        "a pair root, constructor, or member has unexpected identity or incomplete info",
+                    ),
+                ));
+            }
+        }
+        let base = identities[base_name].0;
+        let wrapped = identities[wrapped_name].0;
+        let class_info_type = match self.store.symbols.get(wrapped).info {
+            SymbolInfo::Complete(info) => info,
+            SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => {
+                return Err(SemanticTastyLoadError::for_pair_unit(
+                    wrapped_name,
+                    wrapped_resource,
+                    SemanticTastyLoadError::UnsupportedShape(
+                        "InfoWrapped has no completed ClassInfo",
+                    ),
+                ));
+            }
+        };
+        let class_info = match self.store.types.get(class_info_type) {
+            Type::ClassInfo(info) => info.clone(),
+            _ => {
+                return Err(SemanticTastyLoadError::for_pair_unit(
+                    wrapped_name,
+                    wrapped_resource,
+                    SemanticTastyLoadError::UnsupportedShape(
+                        "InfoWrapped completion is not ClassInfo",
+                    ),
+                ));
+            }
+        };
+        let f_parameter = self
+            .store
+            .scopes
+            .get(class_info.declarations)
+            .entered_symbols()
+            .find(|symbol| {
+                let symbol = self.store.symbols.get(*symbol);
+                symbol.kind == SymbolKind::TypeParameter
+                    && self.store.names.resolve(symbol.name.text()) == "F"
+            });
+        let has_applied_base_edge = f_parameter.is_some()
+            && class_info.parents.iter().any(|parent| {
+                let Type::Applied { tycon, args } = self.store.types.get(*parent) else {
+                    return false;
+                };
+                if type_ref_symbol(self.store, *tycon) != Some(base) || args.len() != 1 {
+                    return false;
+                }
+                let Type::Applied {
+                    tycon: _,
+                    args: applied_args,
+                } = self.store.types.get(args[0])
+                else {
+                    return false;
+                };
+                applied_args.len() == 1
+                    && type_ref_symbol(self.store, applied_args[0])
+                        == type_ref_symbol(self.store, self.definitions.int)
+            });
+        let method = identities[wrapped_name].2;
+        let expected_applied_f = class_info.parents.iter().find_map(|parent| {
+            let Type::Applied { tycon, args } = self.store.types.get(*parent) else {
+                return None;
+            };
+            (type_ref_symbol(self.store, *tycon) == Some(base) && args.len() == 1)
+                .then_some(args[0])
+        });
+        let direct_member_type_matches = method.is_some_and(|method| {
+            if self
+                .store
+                .names
+                .resolve(self.store.symbols.get(method).name.text())
+                != "m"
+                || self.store.symbols.get(method).name.namespace() != Namespace::Term
+            {
+                return false;
+            }
+            let SymbolInfo::Complete(info) = self.store.symbols.get(method).info else {
+                return false;
+            };
+            let result = match self.store.types.get(info) {
+                Type::Method(method_type) => method_type.result,
+                _ => info,
+            };
+            let result = match self.store.types.get(result) {
+                Type::ByName { result } => *result,
+                _ => result,
+            };
+            let (Type::Applied { tycon, args }, Some(expected)) =
+                (self.store.types.get(result), expected_applied_f)
+            else {
+                return false;
+            };
+            let Type::Applied {
+                tycon: expected_tycon,
+                args: expected_args,
+            } = self.store.types.get(expected)
+            else {
+                return false;
+            };
+            tycon == expected_tycon
+                && args.len() == 1
+                && args.as_slice() == expected_args.as_slice()
+                && type_ref_symbol(self.store, args[0])
+                    == type_ref_symbol(self.store, self.definitions.int)
+        });
+        if !has_applied_base_edge || !direct_member_type_matches {
+            return Err(SemanticTastyLoadError::for_pair_unit(
+                wrapped_name,
+                wrapped_resource,
+                SemanticTastyLoadError::UnsupportedShape(
+                    "InfoWrapped did not preserve the applied InfoBase edge and direct m: F[Int]",
+                ),
+            ));
+        }
+        Ok((base, wrapped))
+    }
+
+    fn validate_info_pair_unit_shape(
+        file: &dotty_tasty::tasty::TastyFile<'_>,
+        name: &BinaryName,
+        has_direct_member: bool,
+    ) -> Result<(), SemanticTastyLoadError> {
+        let asts = file.asts().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Parse(error),
+            ))
+        })?;
+        let package = asts
+            .get(0)
+            .filter(|node| node.tag == dotty_tasty::tasty::PACKAGE_TAG)
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "a pair unit must have one package tree",
+            ))?
+            .decode_package()
+            .map_err(|error| {
+                SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                    name.clone(),
+                    tasty_symbol::TastyDecodeError::Ast(error),
+                ))
+            })?;
+        let declared_package = package
+            .path_name()
+            .and_then(|reference| file.render_name(reference).ok());
+        let package_dotted = name.package_path().replace('/', ".");
+        let declared_class = package
+            .stats
+            .get(0)
+            .and_then(|definition| definition.decode_definition().ok())
+            .and_then(|definition| file.render_name(definition.name()).ok());
+        if declared_package.as_deref() != Some(package_dotted.as_str())
+            || declared_class.as_deref() != Some(name.simple_name())
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "a pair unit's declared package and root name must match its requested binary name",
+            ));
+        }
+        if asts.len() != 1
+            || package.stats.len() != 1
+            || package
+                .stats
+                .get(0)
+                .is_none_or(|definition| definition.tag != dotty_tasty::tasty::TYPEDEF_TAG)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "a pair unit must contain exactly one top-level class in one package",
+            ));
+        }
+        let root = package.stats.get(0).expect("shape checked above");
+        let (type_or_template, tail) = match root.decode_definition_body() {
+            Ok(dotty_tasty::tasty::DefinitionBody::TypeDef {
+                type_or_template,
+                tail,
+                ..
+            }) => (type_or_template, tail),
+            _ => {
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "a pair root must be a class-like type definition",
+                ));
+            }
+        };
+        let is_template = matches!(
+            type_or_template,
+            dotty_tasty::tasty::RawTree::LengthNode(ref template)
+                if template.tag == dotty_tasty::tasty::TEMPLATE_TAG
+        );
+        let has_object_modifier = tail.iter().any(|modifier| {
+            matches!(
+                modifier,
+                dotty_tasty::tasty::DefinitionTail::Modifier(dotty_tasty::tasty::OBJECT_TAG)
+            )
+        });
+        let has_trait_modifier = tail.iter().any(|modifier| {
+            matches!(
+                modifier,
+                dotty_tasty::tasty::DefinitionTail::Modifier(dotty_tasty::tasty::TRAIT_TAG)
+            )
+        });
+        let expected_kind = if has_direct_member {
+            is_template && !has_object_modifier && !has_trait_modifier
+        } else {
+            is_template && has_trait_modifier && !has_object_modifier
+        };
+        if !expected_kind {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "InfoBase must be a trait and InfoWrapped must be a class",
+            ));
+        }
+        let index = file.ast_address_index().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Parse(error),
+            ))
+        })?;
+        if has_direct_member
+            && index
+                .get(115)
+                .is_none_or(|member| member.tag != dotty_tasty::tasty::DEFDEF_TAG)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "InfoWrapped is missing its pinned DEFDEF@115 member",
+            ));
+        }
+        Ok(())
+    }
+
+    fn restore_tasty_pair_packages(
+        &mut self,
+        file: &dotty_tasty::tasty::TastyFile<'_>,
+        session: TastySession,
+    ) {
+        let (_, mut packages) =
+            TastyUnpickler::with_session(file, self.store, self.definitions, session).into_parts();
+        self.session.packages.swap_packages(&mut packages);
+    }
+
+    fn bind_open_primitive(
+        &mut self,
+        spelling: &str,
+        ty: TypeId,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        let Some(symbol) = self.store.types.get(ty).reference_symbol() else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "canonical primitive is not a symbol reference",
+            ));
+        };
+        self.bind_open_builtin_symbol(spelling, symbol)
+    }
+
+    fn bind_open_builtin_symbol(
+        &mut self,
+        spelling: &str,
+        symbol: SymbolId,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        let scala = self.session.packages.resolve_package(self.store, "scala");
+        let scope = self.session.packages.scope_of(scala).ok_or(
+            SemanticTastyLoadError::UnsupportedShape("scala package has no registered scope"),
+        )?;
+        let name = Name::new(self.store.names.intern(spelling), Namespace::Type);
+        match (
+            self.store.symbols.get(symbol).owner,
+            self.store.scopes.get(scope).lookup_all(&name),
+        ) {
+            (None, []) => {
+                self.session.record_symbol_update(self.store, symbol);
+                self.store.symbols.get_mut(symbol).owner = Some(scala);
+                self.session
+                    .packages
+                    .enter_class(self.store, scala, name, symbol);
+                Ok(symbol)
+            }
+            (Some(owner), [only]) if owner == scala && *only == symbol => Ok(symbol),
+            _ => Err(SemanticTastyLoadError::UnsupportedShape(
+                "scala has a conflicting canonical primitive binding",
+            )),
+        }
+    }
+
+    fn snapshot_pair_package_scope(&self) -> Option<(ScopeId, HashSet<SymbolId>)> {
+        let package_path = "me/cytrowski/tastyfixtures/semantic";
+        let package_segments = package_path.split('/').collect::<Vec<_>>();
+        let package = self.session.packages.get(&package_segments)?;
+        let scope = self.session.packages.scope_of(package)?;
+        Some((
+            scope,
+            self.store.scopes.get(scope).entered_symbols().collect(),
+        ))
+    }
+
+    fn remove_pair_package_insertions(&mut self, before: Option<(ScopeId, HashSet<SymbolId>)>) {
+        let Some((scope, before)) = before else {
+            return;
+        };
+        if !self.store.scopes.contains(scope) {
+            return;
+        }
+        let inserted = self
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .filter(|symbol| !before.contains(symbol))
+            .collect::<HashSet<_>>();
+        for symbol in inserted {
+            self.store.scopes.get_mut(scope).remove(symbol);
+        }
+    }
+
     /// A package registry can be handed back from another adapter with its
     /// declarations intact and the loader's per-name caches empty. Refuse a
     /// second class identity before `enter_symbols` mutates that canonical
@@ -965,28 +1779,48 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .packages
             .get(&["scala"])
             .and_then(|scala| self.session.packages.scope_of(scala));
-        let and_name = Name::new(self.store.names.intern("&"), Namespace::Type);
-        let or_name = Name::new(self.store.names.intern("|"), Namespace::Type);
-        let and_was_entered = scala_scope.is_some_and(|scope| {
-            self.store
-                .scopes
-                .get(scope)
-                .lookup_all(&and_name)
-                .contains(&self.definitions.and_type)
-        });
-        let or_was_entered = scala_scope.is_some_and(|scope| {
-            self.store
-                .scopes
-                .get(scope)
-                .lookup_all(&or_name)
-                .contains(&self.definitions.or_type)
-        });
+        let mut symbols = Vec::new();
+        for (symbol, spelling) in [
+            (self.definitions.and_type, "&"),
+            (self.definitions.or_type, "|"),
+            (
+                self.store
+                    .types
+                    .get(self.definitions.unit)
+                    .reference_symbol()
+                    .unwrap(),
+                "Unit",
+            ),
+            (
+                self.store
+                    .types
+                    .get(self.definitions.int)
+                    .reference_symbol()
+                    .unwrap(),
+                "Int",
+            ),
+            (self.definitions.any_class, "Any"),
+            (self.definitions.nothing_class, "Nothing"),
+            (self.definitions.matchable_class, "Matchable"),
+        ] {
+            let name = Name::new(self.store.names.intern(spelling), Namespace::Type);
+            let was_entered = scala_scope.is_some_and(|scope| {
+                self.store
+                    .scopes
+                    .get(scope)
+                    .lookup_all(&name)
+                    .contains(&symbol)
+            });
+            symbols.push((
+                symbol,
+                self.store.symbols.get(symbol).clone(),
+                name,
+                was_entered,
+            ));
+        }
         OpenBuiltinAliasSnapshot {
-            and_symbol: self.store.symbols.get(self.definitions.and_type).clone(),
-            or_symbol: self.store.symbols.get(self.definitions.or_type).clone(),
+            symbols,
             scala_scope,
-            and_was_entered,
-            or_was_entered,
         }
     }
 
@@ -994,24 +1828,16 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         if let Some(scope) = snapshot.scala_scope
             && self.store.scopes.contains(scope)
         {
-            if !snapshot.and_was_entered {
-                self.store
-                    .scopes
-                    .get_mut(scope)
-                    .remove(self.definitions.and_type);
-            }
-            if !snapshot.or_was_entered {
-                self.store
-                    .scopes
-                    .get_mut(scope)
-                    .remove(self.definitions.or_type);
+            for (symbol, _, _, was_entered) in &snapshot.symbols {
+                if !was_entered {
+                    self.store.scopes.get_mut(scope).remove(*symbol);
+                }
             }
         }
-        if self.store.symbols.contains(self.definitions.and_type) {
-            *self.store.symbols.get_mut(self.definitions.and_type) = snapshot.and_symbol;
-        }
-        if self.store.symbols.contains(self.definitions.or_type) {
-            *self.store.symbols.get_mut(self.definitions.or_type) = snapshot.or_symbol;
+        for (symbol, prior, _, _) in snapshot.symbols {
+            if self.store.symbols.contains(symbol) {
+                *self.store.symbols.get_mut(symbol) = prior;
+            }
         }
     }
 
@@ -5596,6 +6422,21 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct SharedTastyClassPath(Arc<std::sync::Mutex<HashMap<BinaryName, Vec<u8>>>>);
+
+    impl ClassPathEntry for SharedTastyClassPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            Ok(self.0.lock().unwrap().get(name).map(|bytes| {
+                ClassResource::new(
+                    bytes.clone(),
+                    ClassFormat::Tasty,
+                    ClassOrigin::Directory(PathBuf::from("/pair-fixtures")),
+                )
+            }))
+        }
+    }
+
     struct AlwaysErrors;
 
     impl ClassPathEntry for AlwaysErrors {
@@ -5654,6 +6495,788 @@ mod tests {
             Box::new(crate::class_path::DirectoryClassPath::new(fixture_root)),
             Box::new(jdk),
         ])
+    }
+
+    fn semantic_info_pair_class_path() -> CompositeClassPath {
+        semantic_info_pair_class_path_with(
+            semantic_unpickler_fixture_bytes("InfoBase.tasty"),
+            semantic_unpickler_fixture_bytes("InfoWrapped.tasty"),
+        )
+    }
+
+    fn semantic_info_pair_class_path_with(
+        base_bytes: Vec<u8>,
+        wrapped_bytes: Vec<u8>,
+    ) -> CompositeClassPath {
+        let base = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let mut fixture_resources = HashMap::new();
+        if !base_bytes.is_empty() {
+            fixture_resources.insert(base, base_bytes);
+        }
+        if !wrapped_bytes.is_empty() {
+            fixture_resources.insert(wrapped, wrapped_bytes);
+        }
+        let fixtures = InMemoryTastyClassPath(fixture_resources);
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for real Object fixture");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK classpath");
+        CompositeClassPath::new(vec![Box::new(fixtures), Box::new(jdk)])
+    }
+
+    fn replace_fixture_text(bytes: &mut [u8], from: &[u8], to: &[u8]) {
+        assert_eq!(from.len(), to.len(), "fixture mutation must preserve size");
+        let start = bytes
+            .windows(from.len())
+            .position(|window| window == from)
+            .expect("mutation target exists in the pinned fixture");
+        bytes[start..start + to.len()].copy_from_slice(to);
+    }
+
+    fn info_pair_graph(
+        store: &SemanticStore,
+        base: SymbolId,
+        wrapped: SymbolId,
+    ) -> (usize, bool, bool, bool, bool) {
+        let info_type = match store.symbols.get(wrapped).info {
+            SymbolInfo::Complete(info) => info,
+            other => panic!("InfoWrapped is not complete: {other:?}"),
+        };
+        let Type::ClassInfo(info) = store.types.get(info_type) else {
+            panic!("InfoWrapped info is not ClassInfo")
+        };
+        let base_parent = info.parents.iter().find_map(|parent| {
+            let Type::Applied { tycon, args } = store.types.get(*parent) else {
+                return None;
+            };
+            (type_ref_symbol(store, *tycon) == Some(base) && args.len() == 1).then_some(args[0])
+        });
+        let parent_count = info
+            .parents
+            .iter()
+            .filter(|parent| {
+                matches!(store.types.get(**parent), Type::Applied { tycon, .. } if type_ref_symbol(store, *tycon) == Some(base))
+            })
+            .count();
+        let applied_parent_is_f_int = base_parent.is_some_and(|parent| {
+            let Type::Applied { args, .. } = store.types.get(parent) else {
+                return false;
+            };
+            args.len() == 1
+                && type_ref_symbol(store, args[0]).is_some_and(|symbol| {
+                    store.names.resolve(store.symbols.get(symbol).name.text()) == "Int"
+                })
+        });
+        let method = store
+            .scopes
+            .get(info.declarations)
+            .entered_symbols()
+            .find(|symbol| {
+                let symbol = store.symbols.get(*symbol);
+                symbol.kind == SymbolKind::Method && store.names.resolve(symbol.name.text()) == "m"
+            })
+            .expect("InfoWrapped directly declares m");
+        let method_complete = matches!(store.symbols.get(method).info, SymbolInfo::Complete(_));
+        let method_owner = store.symbols.get(method).owner == Some(wrapped);
+        let method_matches_parent_application = base_parent.is_some_and(|parent| {
+            let SymbolInfo::Complete(method_info) = store.symbols.get(method).info else {
+                return false;
+            };
+            let result = match store.types.get(method_info) {
+                Type::Method(method) => method.result,
+                _ => method_info,
+            };
+            let result = match store.types.get(result) {
+                Type::ByName { result } => *result,
+                _ => result,
+            };
+            store.types.get(result) == store.types.get(parent)
+        });
+        (
+            parent_count,
+            method_complete,
+            method_owner,
+            applied_parent_is_f_int,
+            method_matches_parent_application,
+        )
+    }
+
+    fn info_pair_declarations(store: &SemanticStore, class: SymbolId) -> String {
+        let SymbolInfo::Complete(info) = store.symbols.get(class).info else {
+            panic!("pair declaration owner is incomplete")
+        };
+        let Type::ClassInfo(info) = store.types.get(info) else {
+            panic!("pair declaration owner has no ClassInfo")
+        };
+        let declarations = store
+            .scopes
+            .get(info.declarations)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        let mut type_parameters = declarations
+            .iter()
+            .copied()
+            .filter(|symbol| store.symbols.get(*symbol).kind == SymbolKind::TypeParameter)
+            .map(|symbol| {
+                store
+                    .names
+                    .resolve(store.symbols.get(symbol).name.text())
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        type_parameters.sort();
+        let constructors = declarations
+            .iter()
+            .copied()
+            .filter(|symbol| store.symbols.get(*symbol).kind == SymbolKind::Constructor)
+            .collect::<Vec<_>>();
+        assert_eq!(constructors.len(), 1, "fixture class has one constructor");
+        let constructor = constructors[0];
+        assert_eq!(store.symbols.get(constructor).owner, Some(class));
+        let SymbolInfo::Complete(mut method_type) = store.symbols.get(constructor).info else {
+            panic!("fixture constructor was not completed")
+        };
+        let params = loop {
+            match store.types.get(method_type) {
+                Type::Poly(poly) => method_type = poly.result,
+                Type::Method(method) => {
+                    break method
+                        .params
+                        .iter()
+                        .map(|parameter| {
+                            let name = store.names.resolve(parameter.name.as_name().text());
+                            let parameter_type = type_ref_symbol(store, parameter.ty)
+                                .map(|symbol| {
+                                    store.names.resolve(store.symbols.get(symbol).name.text())
+                                })
+                                .unwrap_or_else(|| match store.types.get(parameter.ty) {
+                                    Type::ByName { result } => type_ref_symbol(store, *result)
+                                        .map(|symbol| {
+                                            store
+                                                .names
+                                                .resolve(store.symbols.get(symbol).name.text())
+                                        })
+                                        .unwrap_or("<non-reference>"),
+                                    _ => "<non-reference>",
+                                });
+                            format!("{name}:{parameter_type}")
+                        })
+                        .collect::<Vec<_>>();
+                }
+                other => panic!("constructor info is not a method type: {other:?}"),
+            }
+        };
+        format!("type_params={type_parameters:?};constructor_params={params:?}")
+    }
+
+    #[test]
+    fn info_pair_semantic_adapter_enters_before_completion_and_reuses_identity_in_both_orders() {
+        fn run(first: &str) -> (String, bool, bool, bool) {
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(semantic_info_pair_class_path(), &mut store);
+            let base_name =
+                BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+            let wrapped_name =
+                BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+            let first_name = if first == "InfoBase" {
+                &base_name
+            } else {
+                &wrapped_name
+            };
+            let first_symbol = loader
+                .load_info_pair_with_tasty_unpickler(first_name)
+                .expect("the frozen real pair completes through the loader adapter");
+            let base = loader.semantic_tasty_loaded[&base_name];
+            let wrapped = loader.semantic_tasty_loaded[&wrapped_name];
+            assert_eq!(
+                first_symbol,
+                if first == "InfoBase" { base } else { wrapped }
+            );
+            assert_eq!(
+                loader
+                    .load_info_pair_with_tasty_unpickler(&base_name)
+                    .expect("repeat parent request"),
+                base
+            );
+            assert_eq!(
+                loader
+                    .load_info_pair_with_tasty_unpickler(&wrapped_name)
+                    .expect("repeat child request"),
+                wrapped
+            );
+            let (
+                base_edges,
+                method_complete,
+                method_owner,
+                applied_parent_is_f_int,
+                method_matches_parent_application,
+            ) = info_pair_graph(loader.store, base, wrapped);
+            let package = loader
+                .session
+                .packages
+                .get(&["me", "cytrowski", "tastyfixtures", "semantic"])
+                .expect("one canonical fixture package");
+            let package_scope = loader.session.packages.scope_of(package).unwrap();
+            let base_type = Name::new(loader.store.names.intern("InfoBase"), Namespace::Type);
+            let wrapped_type = Name::new(loader.store.names.intern("InfoWrapped"), Namespace::Type);
+            let exact_package_entries = loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&base_type)
+                == [base]
+                && loader
+                    .store
+                    .scopes
+                    .get(package_scope)
+                    .lookup_all(&wrapped_type)
+                    == [wrapped];
+            let normalized = format!(
+                "parents={base_edges};applied=F[Int]:{applied_parent_is_f_int};m={method_complete};m_type=F[Int]:{method_matches_parent_application};owner={method_owner};base_decl={};wrapped_decl={}",
+                info_pair_declarations(loader.store, base),
+                info_pair_declarations(loader.store, wrapped),
+            );
+            (
+                normalized,
+                exact_package_entries,
+                method_complete,
+                method_owner,
+            )
+        }
+        let parent_first = run("InfoBase");
+        let child_first = run("InfoWrapped");
+        assert_eq!(parent_first, child_first);
+        assert_eq!(
+            parent_first.0,
+            "parents=1;applied=F[Int]:true;m=true;m_type=F[Int]:true;owner=true;base_decl=type_params=[\"A\"];constructor_params=[];wrapped_decl=type_params=[\"F\"];constructor_params=[\"x:Int\"]"
+        );
+        assert!(parent_first.1);
+        assert!(parent_first.2);
+        assert!(parent_first.3);
+        assert!(parent_first.0.contains("parents=1"));
+    }
+
+    #[test]
+    fn info_pair_uses_first_tasty_resource_and_prefers_tasty_over_classfile() {
+        let temp =
+            std::env::temp_dir().join(format!("dotty-info-pair-priority-{}", std::process::id()));
+        let directory = temp.join("me/cytrowski/tastyfixtures/semantic");
+        fs::create_dir_all(&directory).expect("temporary fixture package");
+        for (name, fixture) in [
+            ("InfoBase", "InfoBase.tasty"),
+            ("InfoWrapped", "InfoWrapped.tasty"),
+        ] {
+            fs::write(
+                directory.join(format!("{name}.tasty")),
+                semantic_unpickler_fixture_bytes(fixture),
+            )
+            .expect("write first-match TASTy resource");
+            fs::write(directory.join(format!("{name}.class")), b"not-a-classfile")
+                .expect("write competing classfile resource");
+        }
+        let base = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let later = InMemoryTastyClassPath(HashMap::from([
+            (
+                base.clone(),
+                semantic_unpickler_fixture_bytes("InfoBase.tasty"),
+            ),
+            (
+                wrapped.clone(),
+                semantic_unpickler_fixture_bytes("InfoWrapped.tasty"),
+            ),
+        ]));
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for real Object fixture");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK classpath");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(crate::class_path::DirectoryClassPath::new(temp.clone())),
+            Box::new(later),
+            Box::new(jdk),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        loader
+            .load_info_pair_with_tasty_unpickler(&wrapped)
+            .expect("the first directory TASTy resources win");
+        for name in [&base, &wrapped] {
+            let symbol = loader.semantic_tasty_loaded[name];
+            assert_eq!(
+                loader.origin(symbol),
+                Some(&ClassOrigin::Directory(temp.clone())),
+                "the first classpath entry's TASTy must beat its .class and later entries"
+            );
+        }
+        drop(loader);
+        fs::remove_dir_all(temp).expect("remove temporary priority fixture");
+    }
+
+    #[test]
+    fn info_pair_fails_closed_for_an_unsupported_parent_reference() {
+        let base = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let mut wrapped_bytes = semantic_unpickler_fixture_bytes("InfoWrapped.tasty");
+        replace_fixture_text(&mut wrapped_bytes, b"InfoBase", b"InfoBaze");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            semantic_info_pair_class_path_with(
+                semantic_unpickler_fixture_bytes("InfoBase.tasty"),
+                wrapped_bytes,
+            ),
+            &mut store,
+        );
+        let error = loader
+            .load_info_pair_with_tasty_unpickler(&wrapped)
+            .expect_err("an unresolved nonbootstrap parent reference must fail closed");
+        assert!(matches!(
+            error,
+            SemanticTastyLoadError::PairUnitFailure {
+                binary_name,
+                origin: ClassOrigin::Directory(ref origin),
+                format: ClassFormat::Tasty,
+                ..
+            } if binary_name == wrapped && origin == &PathBuf::from("<memory>")
+        ));
+        assert!(loader.semantic_tasty_loaded.is_empty());
+        assert!(!loader.session.resolved.contains_key(&base));
+        assert!(!loader.session.resolved.contains_key(&wrapped));
+        assert!(loader.repository.get(&base).is_none());
+        assert!(loader.repository.get(&wrapped).is_none());
+    }
+
+    #[test]
+    fn info_pair_rejects_malformed_second_unit_without_publishing_partial_state() {
+        let base_bytes = semantic_unpickler_fixture_bytes("InfoBase.tasty");
+        let class_path = semantic_info_pair_class_path_with(base_bytes, vec![0, 1, 2, 3]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        let base_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+
+        for _ in 0..2 {
+            let error = loader
+                .load_info_pair_with_tasty_unpickler(&base_name)
+                .expect_err("malformed wrapped bytes must fail");
+            assert!(matches!(
+                error,
+                SemanticTastyLoadError::PairUnitFailure {
+                    binary_name,
+                    origin: ClassOrigin::Directory(ref origin),
+                    format: ClassFormat::Tasty,
+                    cause,
+                } if binary_name == wrapped_name
+                    && origin == &PathBuf::from("<memory>")
+                    && matches!(*cause, SemanticTastyLoadError::ClassLoad(
+                        ClassLoadError::InvalidTastyFile(ref name, _)
+                    ) if name == &wrapped_name)
+            ));
+            assert!(loader.semantic_tasty_loaded.is_empty());
+            assert!(!loader.session.resolved.contains_key(&base_name));
+            assert!(!loader.session.resolved.contains_key(&wrapped_name));
+            assert!(loader.repository.get(&base_name).is_none());
+            assert!(loader.repository.get(&wrapped_name).is_none());
+            assert!(
+                loader
+                    .session
+                    .packages
+                    .get(&["me", "cytrowski", "tastyfixtures", "semantic"])
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn info_pair_malformed_base_error_preserves_selected_resource_context() {
+        let base = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            semantic_info_pair_class_path_with(
+                vec![0, 1, 2, 3],
+                semantic_unpickler_fixture_bytes("InfoWrapped.tasty"),
+            ),
+            &mut store,
+        );
+        let error = loader
+            .load_info_pair_with_tasty_unpickler(&wrapped)
+            .expect_err("malformed selected parent resource must fail");
+        assert!(matches!(
+            error,
+            SemanticTastyLoadError::PairUnitFailure {
+                binary_name,
+                origin: ClassOrigin::Directory(ref origin),
+                format: ClassFormat::Tasty,
+                cause,
+            } if binary_name == base
+                && origin == &PathBuf::from("<memory>")
+                && matches!(*cause, SemanticTastyLoadError::ClassLoad(
+                    ClassLoadError::InvalidTastyFile(ref name, _)
+                ) if name == &base)
+        ));
+        assert!(loader.semantic_tasty_loaded.is_empty());
+        assert!(loader.repository.get(&base).is_none());
+        assert!(loader.repository.get(&wrapped).is_none());
+    }
+
+    #[test]
+    fn info_pair_rejects_mismatched_root_before_entering_preexisting_package() {
+        let base = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        for (needle, replacement) in [
+            (&b"InfoWrapped"[..], &b"InfoWropped"[..]),
+            (&b"semantic"[..], &b"semantix"[..]),
+        ] {
+            let mut wrapped_bytes = semantic_unpickler_fixture_bytes("InfoWrapped.tasty");
+            replace_fixture_text(&mut wrapped_bytes, needle, replacement);
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(
+                semantic_info_pair_class_path_with(
+                    semantic_unpickler_fixture_bytes("InfoBase.tasty"),
+                    wrapped_bytes,
+                ),
+                &mut store,
+            );
+            let package_path = ["me", "cytrowski", "tastyfixtures", "semantic"];
+            let package = loader
+                .session
+                .packages
+                .resolve_package(loader.store, &package_path.join("/"));
+            let scope = loader.session.packages.scope_of(package).expect("scope");
+            let names_before = loader.store.scopes.get(scope).entered_symbols().count();
+
+            let error = loader
+                .load_info_pair_with_tasty_unpickler(&base)
+                .expect_err("foreign declared identity must fail before entry");
+            assert!(matches!(
+                error,
+                SemanticTastyLoadError::PairUnitFailure {
+                    binary_name,
+                    format: ClassFormat::Tasty,
+                    cause,
+                    ..
+                } if binary_name == wrapped
+                    && matches!(*cause, SemanticTastyLoadError::UnsupportedShape(_))
+            ));
+            assert_eq!(
+                loader.store.scopes.get(scope).entered_symbols().count(),
+                names_before,
+                "preexisting package scope must not retain an uncommitted declaration"
+            );
+            assert!(loader.semantic_tasty_loaded.is_empty());
+            assert!(!loader.session.resolved.contains_key(&base));
+            assert!(!loader.session.resolved.contains_key(&wrapped));
+            assert!(loader.repository.get(&base).is_none());
+            assert!(loader.repository.get(&wrapped).is_none());
+        }
+    }
+
+    #[test]
+    fn info_pair_rejects_object_mutated_base_before_entering_preexisting_package() {
+        let base = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let mut base_bytes = semantic_unpickler_fixture_bytes("InfoBase.tasty");
+        assert_eq!(base_bytes.get(329), Some(&dotty_tasty::tasty::TRAIT_TAG));
+        base_bytes[329] = dotty_tasty::tasty::OBJECT_TAG;
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            semantic_info_pair_class_path_with(
+                base_bytes,
+                semantic_unpickler_fixture_bytes("InfoWrapped.tasty"),
+            ),
+            &mut store,
+        );
+        let package_path = ["me", "cytrowski", "tastyfixtures", "semantic"];
+        let package = loader
+            .session
+            .packages
+            .resolve_package(loader.store, &package_path.join("/"));
+        let scope = loader.session.packages.scope_of(package).expect("scope");
+        let entries_before = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+
+        let error = loader
+            .load_info_pair_with_tasty_unpickler(&base)
+            .expect_err("the object-mutated base must fail its root-kind guard");
+        assert!(matches!(
+            error,
+            SemanticTastyLoadError::PairUnitFailure {
+                binary_name,
+                format: ClassFormat::Tasty,
+                cause,
+                ..
+            } if binary_name == base
+                && matches!(*cause, SemanticTastyLoadError::UnsupportedShape(_))
+        ));
+        let entries_after = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        assert_eq!(entries_after, entries_before);
+        assert!(
+            entries_after
+                .iter()
+                .all(|symbol| loader.store.symbols.contains(*symbol))
+        );
+        assert!(loader.semantic_tasty_loaded.is_empty());
+        assert!(!loader.session.resolved.contains_key(&base));
+        assert!(!loader.session.resolved.contains_key(&wrapped));
+        assert!(loader.repository.get(&base).is_none());
+        assert!(loader.repository.get(&wrapped).is_none());
+    }
+
+    #[test]
+    fn info_pair_rollback_removes_new_scope_entries_without_matching_name_or_kind() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let package = loader
+            .session
+            .packages
+            .resolve_package(loader.store, "me/cytrowski/tastyfixtures/semantic");
+        let scope = loader.session.packages.scope_of(package).expect("scope");
+        let before = loader
+            .snapshot_pair_package_scope()
+            .expect("pre-existing scope");
+        let unrelated_name = Name::new(loader.store.names.intern("WrongName"), Namespace::Type);
+        let inserted = loader.store.symbols.alloc(Symbol {
+            name: unrelated_name,
+            owner: Some(package),
+            kind: SymbolKind::ModuleClass,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        loader
+            .store
+            .scopes
+            .get_mut(scope)
+            .enter(unrelated_name, inserted);
+
+        loader.remove_pair_package_insertions(Some(before));
+
+        assert!(
+            !loader
+                .store
+                .scopes
+                .get(scope)
+                .entered_symbols()
+                .any(|symbol| symbol == inserted)
+        );
+        assert!(loader.store.symbols.contains(inserted));
+    }
+
+    #[test]
+    fn info_pair_late_child_failure_rolls_back_and_retries_with_original_bytes() {
+        let base = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let base_bytes = semantic_unpickler_fixture_bytes("InfoBase.tasty");
+        let valid_wrapped = semantic_unpickler_fixture_bytes("InfoWrapped.tasty");
+        let mut invalid_wrapped = valid_wrapped.clone();
+        replace_fixture_text(&mut invalid_wrapped, b"Int", b"Foo");
+        let resources = Arc::new(std::sync::Mutex::new(HashMap::from([
+            (base.clone(), base_bytes),
+            (wrapped.clone(), invalid_wrapped),
+        ])));
+        let fixture_path = SharedTastyClassPath(resources.clone());
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for real Object fixture");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK classpath");
+        let class_path = CompositeClassPath::new(vec![Box::new(fixture_path), Box::new(jdk)]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+
+        let object_name = BinaryName::from_internal("java/lang/Object");
+        let object = loader
+            .load_class(&object_name)
+            .expect("establish preexisting semantic/cache/origin state");
+        let object_origin = loader.origin(object).cloned().expect("Object origin");
+        let object_repository = loader
+            .repository
+            .get(&object_name)
+            .and_then(ClassEntry::symbol);
+        let object_resolved = loader.session.resolved.get(&object_name).copied();
+        assert_eq!(object_resolved, Some(object));
+        assert!(object_repository.is_some());
+
+        let package = loader
+            .session
+            .packages
+            .resolve_package(loader.store, "me/cytrowski/tastyfixtures/semantic");
+        let package_scope = loader.session.packages.scope_of(package).unwrap();
+        let package_entries_before = loader
+            .store
+            .scopes
+            .get(package_scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        let aliases_before = loader.snapshot_open_builtin_aliases();
+        let error = loader
+            .load_info_pair_with_tasty_unpickler(&base)
+            .expect_err("the mutated child member type must fail the pair contract");
+        assert!(matches!(
+            error,
+            SemanticTastyLoadError::PairUnitFailure {
+                binary_name,
+                origin: ClassOrigin::Directory(ref origin),
+                format: ClassFormat::Tasty,
+                cause,
+            } if binary_name == wrapped && origin == &PathBuf::from("/pair-fixtures")
+                && matches!(*cause, SemanticTastyLoadError::Unpickle {
+                    address: 5,
+                    error: UnpickleError::UnresolvedMember { address: 39, .. },
+                })
+        ));
+        assert_eq!(loader.origin(object), Some(&object_origin));
+        assert_eq!(
+            loader
+                .repository
+                .get(&object_name)
+                .and_then(ClassEntry::symbol),
+            object_repository
+        );
+        assert_eq!(
+            loader.session.resolved.get(&object_name).copied(),
+            object_resolved
+        );
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .entered_symbols()
+                .collect::<Vec<_>>(),
+            package_entries_before
+        );
+        assert!(loader.semantic_tasty_loaded.is_empty());
+        assert!(!loader.session.resolved.contains_key(&base));
+        assert!(!loader.session.resolved.contains_key(&wrapped));
+        assert!(loader.repository.get(&base).is_none());
+        assert!(loader.repository.get(&wrapped).is_none());
+        for (symbol, before, name, _) in aliases_before.symbols {
+            assert!(loader.store.symbols.contains(symbol));
+            assert_eq!(loader.store.symbols.get(symbol).owner, before.owner);
+            assert_eq!(loader.store.symbols.get(symbol).name, name);
+        }
+
+        resources
+            .lock()
+            .unwrap()
+            .insert(wrapped.clone(), valid_wrapped);
+        loader
+            .load_info_pair_with_tasty_unpickler(&base)
+            .expect("valid fixture bytes must retry after rollback");
+        let base_symbol = loader.semantic_tasty_loaded[&base];
+        let wrapped_symbol = loader.semantic_tasty_loaded[&wrapped];
+        assert_eq!(loader.origin(object), Some(&object_origin));
+        assert_eq!(
+            loader.session.resolved.get(&object_name).copied(),
+            Some(object)
+        );
+        assert!(matches!(
+            loader.store.symbols.get(base_symbol).info,
+            SymbolInfo::Complete(_)
+        ));
+        assert!(matches!(
+            loader.store.symbols.get(wrapped_symbol).info,
+            SymbolInfo::Complete(_)
+        ));
+    }
+
+    #[test]
+    fn info_pair_rejects_missing_parent_and_foreign_same_name_without_mutation() {
+        let class_path = semantic_info_pair_class_path_with(
+            semantic_unpickler_fixture_bytes("InfoBase.tasty"),
+            semantic_unpickler_fixture_bytes("InfoWrapped.tasty"),
+        );
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        let missing = BinaryName::from_internal("other/package/InfoBase");
+        assert!(matches!(
+            loader.load_info_pair_with_tasty_unpickler(&missing),
+            Err(SemanticTastyLoadError::UnsupportedShape(_))
+        ));
+        assert!(loader.semantic_tasty_loaded.is_empty());
+        assert!(loader.session.resolved.is_empty());
+
+        let mut absent_parent = ClassLoader::new(
+            semantic_info_pair_class_path_with(
+                Vec::new(),
+                semantic_unpickler_fixture_bytes("InfoWrapped.tasty"),
+            ),
+            loader.store,
+        );
+        assert!(matches!(
+            absent_parent.load_info_pair_with_tasty_unpickler(&BinaryName::from_internal(
+                "me/cytrowski/tastyfixtures/semantic/InfoWrapped"
+            )),
+            Err(SemanticTastyLoadError::ClassLoad(ClassLoadError::NotFound(name)))
+                if name == BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase")
+        ));
+        assert!(absent_parent.semantic_tasty_loaded.is_empty());
+        assert!(absent_parent.session.resolved.is_empty());
+    }
+
+    #[test]
+    fn info_pair_rejects_wrong_unit_identity_before_entering_second_unit() {
+        let base_bytes = semantic_unpickler_fixture_bytes("InfoBase.tasty");
+        let class_path = semantic_info_pair_class_path_with(base_bytes.clone(), base_bytes);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        let base = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        assert!(matches!(
+            loader.load_info_pair_with_tasty_unpickler(&base),
+            Err(SemanticTastyLoadError::PairUnitFailure {
+                binary_name,
+                origin: ClassOrigin::Directory(ref origin),
+                format: ClassFormat::Tasty,
+                cause,
+            }) if binary_name == BinaryName::from_internal(
+                "me/cytrowski/tastyfixtures/semantic/InfoWrapped"
+            ) && origin == &PathBuf::from("<memory>")
+                && matches!(*cause, SemanticTastyLoadError::UnsupportedShape(_))
+        ));
+        assert!(loader.semantic_tasty_loaded.is_empty());
+        assert!(loader.session.resolved.is_empty());
+        assert!(
+            loader
+                .session
+                .packages
+                .get(&["me", "cytrowski", "tastyfixtures", "semantic"])
+                .is_none()
+        );
+        assert!(loader.session.packages.get(&["scala"]).is_none());
+        for symbol in [
+            loader.definitions.and_type,
+            loader.definitions.or_type,
+            loader
+                .store
+                .types
+                .get(loader.definitions.unit)
+                .reference_symbol()
+                .unwrap(),
+            loader
+                .store
+                .types
+                .get(loader.definitions.int)
+                .reference_symbol()
+                .unwrap(),
+            loader.definitions.any_class,
+            loader.definitions.nothing_class,
+            loader.definitions.matchable_class,
+        ] {
+            assert_eq!(loader.store.symbols.get(symbol).owner, None);
+        }
     }
 
     fn open_alias_test_class_path(alias: BinaryName) -> CompositeClassPath {
