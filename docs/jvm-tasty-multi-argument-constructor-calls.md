@@ -57,22 +57,30 @@ The formal identity comes from each typed argument's exact `TermRef` target,
 which must be one of the two canonical method parameter symbols. The verifier
 then checks its canonical source declaration, method ownership, source origin,
 completed canonical same-package `Counter` type, and exact source-to-typed
-argument edge. The source identifier spelling must also agree with that unique
-declaration. Each ordered argument keeps its own source and typed roots, so a
-valid reversal or repeated use of `first` is preserved without inferring
-identity from position or name alone. The method and Pair constructor retain
-their distinct canonical parameter identities, owners, order, and JVM metadata.
+argument edge. It also authenticates the registered method scope, verifies
+that the scope is owned by that method, and requires its exact two canonical
+formal entries. The source identifier spelling must also agree with that
+unique declaration. The outer RHS, constructor Select, New, and New type tree
+must each retain matching source and typed positions. Each ordered argument
+keeps its own source and typed roots, so a valid reversal or repeated use of
+`first` is preserved without inferring identity from position or name alone.
+The method and Pair constructor retain their distinct canonical parameter
+identities, owners, order, and JVM metadata.
 
 Positive proof coverage uses the genuine one-session frontend and JVM unit for
 the original source, renamed package/classes/method/formals, reordered class
 and formal declarations, reversed argument order, and repeated `first` alias.
 Negative coverage rejects a duplicate typed root, swapped or stale source to
 typed argument edges, stale source/typed roots, a foreign source identity,
+foreign or mismatched source/typed positions for each outer RHS/Select/New/type
+tree, a wrong method-scope owner, a missing second method-scope entry,
 method-local and class-field values, a branch expression, a `new` expression,
 mixed direct/nested origins, overloads, and source-typing failures for wrong
 arity, type, duplicate formal names, defaulted formals, generic/unsupported
-forms, and foreign owners. The paired planner does not invoke its callback for
-these rejected plans.
+forms, and foreign owners. These identity corruption regressions assert their
+exact first errors and produce no proof receipt. The repeated-formal `first,
+first` control remains valid. The paired planner does not invoke its callback
+for rejected plans.
 
 For the valid source the direct-formal proof succeeds with one receipt. The
 paired planner then reaches the subsequent `JVM/TASTy cross-contract
@@ -92,17 +100,18 @@ cargo test -p dotty --test jvm_tasty_constructor_call_proofs --locked
 cargo test -p dotty --test jvm_tasty_dual_reference_forwarding --locked
 cargo test -p dotty --test jvm_source_compilation dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proof_error --locked -- --nocapture
 cargo test -p dotty --test jvm_source_compilation direct_formal_pair_proof_preserves_names_order_reversal_and_aliasing --locked -- --nocapture
+cargo test -p dotty --test jvm_source_compilation direct_formal_pair_rejects_disconnected_method_scope_provenance --locked -- --nocapture
 ```
 
-The checked-in Scala artifact regression ran without its strict external
-compiler environment, so this checkpoint does not claim a Scala rebuild or
-consumer run. Repository format, frontend-boundary, Clippy, rustdoc, and
-workspace-test checks passed; the workspace suite was rerun with two test
+The initial checkpoint run lacked its strict external compiler environment.
+During the PR review follow-up, the pinned Scala checkout at revision
+`777528f19a58e794c9954a42f433373472ec57f8` was located and the strict
+dual-reference producer/consumer rebuild passed without skips. The mandatory
+JDK 21 suite also passed with `DOTTY_CLASSFILE_REQUIRE_JDK=1`. After the
+provenance fixes, format, frontend-boundary, Clippy, rustdoc, focused tests,
+and the full workspace suite passed. The workspace suite used two test
 threads after the host's file-descriptor limit caused nine unrelated
-classloader tests to fail during the initial parallel run. The mandatory JDK
-21 suite passed with `DOTTY_CLASSFILE_REQUIRE_JDK=1`. The pinned Scala rebuild
-and consumer gate remains unrun because `SCALA39_ROOT` is unavailable in this
-environment.
+classloader failures at default parallelism.
 
 ## Pinned source and oracle
 

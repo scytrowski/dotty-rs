@@ -13,8 +13,8 @@ use dotty_classfile::reader::Reader;
 use dotty_core::ast::{AstArena, DefDef, Template, TreeKind, Typed, Untyped};
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
-    Definitions, Packages, SemanticStore, SourceId, SourceText, SourceTypedIndex, SymbolFlags,
-    SymbolId, SymbolInfo, SymbolKind, TreeId, Visibility,
+    Definitions, Packages, SemanticStore, SourceId, SourceSpan, SourceText, SourceTypedIndex, Span,
+    SymbolFlags, SymbolId, SymbolInfo, SymbolKind, TextRange, TreeId, Visibility,
 };
 use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
@@ -60,6 +60,8 @@ type SourceSemanticObserver<'observer> = dyn for<'a> FnMut(
         &mut JvmCompilationUnit<'a>,
         &Definitions,
     ) + 'observer;
+type SourceStoreMutator<'observer> =
+    dyn FnMut(&AstArena<Untyped>, SourceId, &SourceSemanticIndex, &mut SemanticStore) + 'observer;
 type SourceTyperObserver<'observer> = dyn for<'a> FnMut(
         &AstArena<Untyped>,
         TreeId<Untyped>,
@@ -76,6 +78,7 @@ struct SourceBatchObservers<'observer> {
     batch: Option<&'observer mut SourceBatchObserver<'observer>>,
     typer_failure: Option<&'observer mut TyperFailureObserver<'observer>>,
     source: Option<&'observer mut SourceSemanticObserver<'observer>>,
+    source_store_mutator: Option<&'observer mut SourceStoreMutator<'observer>>,
     typer: Option<&'observer mut SourceTyperObserver<'observer>>,
 }
 
@@ -311,6 +314,29 @@ fn compile_source_batch_with_source_observer<'observer>(
     )
 }
 
+fn compile_source_batch_with_store_mutator_and_source_observer<'observer>(
+    source_text: &str,
+    source_file_name: &str,
+    output_directory: &Path,
+    source_id: SourceId,
+    cardinality: SourceUnitCardinality,
+    mutate_store: &'observer mut SourceStoreMutator<'observer>,
+    observe_source: &'observer mut SourceSemanticObserver<'observer>,
+) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
+    compile_source_batch_with_typer_failure_observer(
+        source_text,
+        source_file_name,
+        output_directory,
+        source_id,
+        cardinality,
+        SourceBatchObservers {
+            source: Some(observe_source),
+            source_store_mutator: Some(mutate_store),
+            ..SourceBatchObservers::default()
+        },
+    )
+}
+
 fn compile_source_batch_with_typer_and_source_observer<'observer>(
     source_text: &str,
     source_file_name: &str,
@@ -346,6 +372,7 @@ fn compile_source_batch_with_typer_failure_observer(
         batch: mut observe,
         typer_failure: mut observe_typer_failure,
         source: mut observe_source,
+        source_store_mutator: mut mutate_source_store,
         typer: mut observe_typer,
     } = observers;
     let source = SourceText::new(source_text)
@@ -737,30 +764,50 @@ fn compile_source_batch_with_typer_failure_observer(
     if let Some(observer) = observe_typer.as_mut() {
         observer(&parsed.ast, parsed.root, &index, &mut typer, &definitions);
     }
-    let mut unit = JvmCompilationUnit {
-        store: typer.store(),
-        typed_ast: typer.typed_ast(),
-        classes: plans,
-    };
-    if let Some(observe) = observe_source.as_mut() {
-        observe(
-            &parsed.ast,
-            parsed.root,
-            &index,
-            typer.source_typed_index(),
-            &mut unit,
-            &definitions,
-        );
+    macro_rules! finish_unit {
+        ($unit:ident, $source_typed_index:expr) => {{
+            if let Some(observe) = observe_source.as_mut() {
+                observe(
+                    &parsed.ast,
+                    parsed.root,
+                    &index,
+                    $source_typed_index,
+                    &mut $unit,
+                    &definitions,
+                );
+            }
+            if let Some(observe) = observe.as_mut() {
+                observe(&mut $unit, &definitions);
+            }
+            let mut generated = Vec::with_capacity($unit.classes.len());
+            for plan in &$unit.classes {
+                generated.push(
+                    emit_class(&$unit, plan.class, &definitions)
+                        .map_err(PipelineFailure::Codegen)?,
+                );
+            }
+            publish_class_batch(output_directory, generated)
+        }};
     }
-    if let Some(observe) = observe.as_mut() {
-        observe(&mut unit, &definitions);
+    if let Some(mutator) = mutate_source_store.as_mut() {
+        let typed_ast = copy_ast(typer.typed_ast());
+        let source_typed_index = typer.source_typed_index().clone();
+        drop(typer);
+        mutator(&parsed.ast, source_id, &index, &mut store);
+        let mut unit = JvmCompilationUnit {
+            store: &store,
+            typed_ast: &typed_ast,
+            classes: plans,
+        };
+        finish_unit!(unit, &source_typed_index)
+    } else {
+        let mut unit = JvmCompilationUnit {
+            store: typer.store(),
+            typed_ast: typer.typed_ast(),
+            classes: plans,
+        };
+        finish_unit!(unit, typer.source_typed_index())
     }
-    let mut generated = Vec::with_capacity(unit.classes.len());
-    for plan in &unit.classes {
-        generated
-            .push(emit_class(&unit, plan.class, &definitions).map_err(PipelineFailure::Codegen)?);
-    }
-    publish_class_batch(output_directory, generated)
 }
 
 fn term_type_target(unit: &JvmCompilationUnit<'_>, ty: dotty_core::TypeId) -> Option<SymbolId> {
@@ -790,6 +837,14 @@ fn source_with_only_runner_method(source: &str, method_name: &str) -> String {
         "{shared_definitions}class Runner:\n{}",
         method[..end].trim_end()
     )
+}
+
+fn copy_ast<P: dotty_core::AstPhase + Clone>(ast: &AstArena<P>) -> AstArena<P> {
+    let mut copied = AstArena::new();
+    for (_, tree) in ast.iter() {
+        copied.alloc(tree.clone());
+    }
+    copied
 }
 
 fn audit_type_symbol(unit: &JvmCompilationUnit<'_>, ty: dotty_core::TypeId) -> Option<SymbolId> {
@@ -25882,6 +25937,66 @@ fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proo
             }
             Err(error) => format!("Err({error:?})"),
         });
+        let TreeKind::New(source_new_node) = &ast.get(source_new).kind else {
+            panic!("outer Pair receiver remains the original New")
+        };
+        let source_new_tpt = source_new_node.tpt;
+        let typed_new_tpt = source_typed_index.get(source_id, source_new_tpt).unwrap();
+        let outer_position_pairs = [
+            (source_rhs, typed_rhs, "factory body"),
+            (source_select, typed_select, "outer Pair Select"),
+            (source_new, typed_new, "outer Pair New"),
+            (source_new_tpt, typed_new_tpt, "outer Pair type tree"),
+        ];
+        let first_error_for = |source_ast: &AstArena<Untyped>,
+                               typed_ast: &AstArena<Typed>,
+                               proof_unit: &JvmCompilationUnit<'_>| {
+            match validate_cross_class_constructor_call_proofs(
+                CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root,
+                    store: proof_unit.store,
+                    definitions,
+                    source_ast,
+                    typed_ast,
+                    source_index: index,
+                    source_typed_index,
+                    jvm_unit: proof_unit,
+                },
+            ) {
+                Ok(proofs) => format!("Ok({} proofs)", proofs.len()),
+                Err(error) => format!("Err({error:?})"),
+            }
+        };
+        for (source_tree, typed_tree, description) in outer_position_pairs {
+            let mut foreign_source_position_ast = copy_ast(ast);
+            let original_source_position = ast.get(source_tree).position.unwrap();
+            foreign_source_position_ast.get_mut(source_tree).position = Some(SourceSpan::new(
+                SourceId::from_index(19699),
+                original_source_position.span(),
+            ));
+            assert_eq!(
+                first_error_for(&foreign_source_position_ast, unit.typed_ast, unit),
+                format!("Err(SourceIdentity(\"{description}\"))"),
+                "foreign source position on {description} must reject before producing a receipt"
+            );
+
+            let mut mismatched_typed_position_ast = copy_ast(unit.typed_ast);
+            mismatched_typed_position_ast.get_mut(typed_tree).position = Some(SourceSpan::new(
+                source_id,
+                Span::without_point(TextRange::new(0, 1).unwrap()),
+            ));
+            let mismatched_typed_unit = JvmCompilationUnit {
+                store: unit.store,
+                typed_ast: &mismatched_typed_position_ast,
+                classes: unit.classes.clone(),
+            };
+            assert_eq!(
+                first_error_for(ast, &mismatched_typed_position_ast, &mismatched_typed_unit),
+                "Err(TypedBinding(\"source and typed trees do not retain the exact same source position and owner\"))",
+                "mismatched typed position on {description} must reject before producing a receipt"
+            );
+        }
         let mut stale_source_typed_index = source_typed_index.clone();
         let second_argument = source_outer.args[1];
         let first_typed_argument = source_typed_index
@@ -26083,10 +26198,22 @@ fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proo
         stale_error,
         "Err(TypedBinding(\"sibling outer arguments must retain distinct source and typed roots\"))"
     );
-    assert!(swapped_error.contains("TypedBinding"));
-    assert!(stale_typed_root_error.contains("TypedBinding"));
-    assert!(stale_source_root_error.contains("SourceShape"));
-    assert!(foreign_source_error.contains("SourceIdentity"));
+    assert_eq!(
+        swapped_error,
+        "Err(TypedBinding(\"typed outer Apply must preserve exact ordered source mappings\"))"
+    );
+    assert_eq!(
+        stale_typed_root_error,
+        "Err(TypedBinding(\"typed outer Apply must preserve exact ordered source mappings\"))"
+    );
+    assert_eq!(
+        stale_source_root_error,
+        "Err(SourceShape(\"package root is stale\"))"
+    );
+    assert_eq!(
+        foreign_source_error,
+        "Err(SourceIdentity(\"package root is not bound to the supplied source identity\"))"
+    );
     assert_eq!(
         pickler_error,
         "Err(Unsupported { feature: ClassMembers, symbol: Some(SymbolId(60)) })"
@@ -26222,6 +26349,92 @@ fn assert_direct_formal_pair_variant(
     assert!(
         observed,
         "the original one-session source reached the proof scan"
+    );
+}
+
+#[test]
+fn direct_formal_pair_rejects_disconnected_method_scope_provenance() {
+    const SOURCE: &str =
+        include_str!("fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala");
+
+    fn assert_scope_corruption(
+        source_id: SourceId,
+        remove_second_formal: bool,
+        expected_error: &'static str,
+    ) {
+        let output = TestOutputDirectory::new(&format!("direct-formal-scope-{source_id:?}"));
+        let mut proof_result = None;
+        let mut mutate_scope = move |ast: &AstArena<Untyped>,
+                                     source: SourceId,
+                                     index: &SourceSemanticIndex,
+                                     store: &mut SemanticStore| {
+            let (method_tree, method_definition) = ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == "wrap" =>
+                    {
+                        Some((tree, definition))
+                    }
+                    _ => None,
+                })
+                .expect("fixture declares wrap");
+            let method = index.symbol_at(source, method_tree).unwrap();
+            let method_scope = index.scope_of(method).unwrap();
+            if remove_second_formal {
+                let second_tree = method_definition.value_param_clauses[0][1];
+                let second = index.symbol_at(source, second_tree).unwrap();
+                store.scopes.get_mut(method_scope).remove(second);
+            } else {
+                let class_owner = store.symbols.get(method).owner.unwrap();
+                store.scopes.get_mut(method_scope).owner = Some(class_owner);
+            }
+        };
+        let mut observe_proof = |ast: &AstArena<Untyped>,
+                                 source_root: TreeId<Untyped>,
+                                 index: &SourceSemanticIndex,
+                                 source_typed_index: &SourceTypedIndex,
+                                 unit: &mut JvmCompilationUnit<'_>,
+                                 definitions: &Definitions| {
+            let result =
+                validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root,
+                    store: unit.store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: unit.typed_ast,
+                    source_index: index,
+                    source_typed_index,
+                    jvm_unit: unit,
+                });
+            proof_result = Some(match result {
+                Ok(proofs) => format!("unexpected receipt count: {}", proofs.len()),
+                Err(error) => format!("{error:?}"),
+            });
+        };
+        compile_source_batch_with_store_mutator_and_source_observer(
+            SOURCE,
+            "PairFactory.scala",
+            output.path(),
+            source_id,
+            SourceUnitCardinality::AtLeastTwo,
+            &mut mutate_scope,
+            &mut observe_proof,
+        )
+        .expect("a test-only scope mutation leaves the already typed JVM output valid");
+        assert_eq!(proof_result.as_deref(), Some(expected_error));
+    }
+
+    assert_scope_corruption(
+        SourceId::from_index(19616),
+        false,
+        "SourceIdentity(\"factory method source scope has a noncanonical owner\")",
+    );
+    assert_scope_corruption(
+        SourceId::from_index(19617),
+        true,
+        "SourceIdentity(\"factory method scope must contain the exact canonical formal entries\")",
     );
 }
 

@@ -1171,6 +1171,28 @@ fn validate_two_argument_constructor_call_candidate<'session>(
             "both factory formals must retain the same canonical reference class",
         ));
     }
+    let method_scope_id = source_index
+        .scope_of(method)
+        .ok_or_else(|| identity_error("factory method has no registered source scope"))?;
+    if !store.scopes.contains(method_scope_id) {
+        return Err(identity_error("factory method source scope is stale"));
+    }
+    let method_scope = store.scopes.get(method_scope_id);
+    if method_scope.owner != Some(method) {
+        return Err(identity_error(
+            "factory method source scope has a noncanonical owner",
+        ));
+    }
+    if method_scope.entered_symbols().count() != method_formals.len()
+        || method_formals.iter().any(|formal| {
+            let name = &store.symbols.get(*formal).name;
+            method_scope.lookup_all(name) != [*formal]
+        })
+    {
+        return Err(identity_error(
+            "factory method scope must contain the exact canonical formal entries",
+        ));
+    }
     let SymbolInfo::Complete(method_type) = store.symbols.get(method).info else {
         return Err(semantic_error("factory method signature is incomplete"));
     };
@@ -1372,6 +1394,21 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         }
     };
     let _ = typed_new_node;
+    for (source_tree, typed_tree, description) in [
+        (source_rhs, typed_rhs, "factory body"),
+        (source_select, typed_select, "outer Pair Select"),
+        (source_new, typed_new, "outer Pair New"),
+        (source_new_node.tpt, typed_new_tpt, "outer Pair type tree"),
+    ] {
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_tree,
+            typed_tree,
+            description,
+        )?;
+    }
     let target_type = typed_ast
         .try_get(typed_new_tpt)
         .ok_or_else(|| typed_error("outer typed New type tree is stale"))?
@@ -2162,38 +2199,6 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                     description,
                 )?;
             }
-            require_matching_source_typed_positions(
-                source_ast,
-                typed_ast,
-                source_id,
-                source_rhs,
-                typed_rhs,
-                "factory body",
-            )?;
-            require_matching_source_typed_positions(
-                source_ast,
-                typed_ast,
-                source_id,
-                source_select,
-                typed_select,
-                "outer Pair Select",
-            )?;
-            require_matching_source_typed_positions(
-                source_ast,
-                typed_ast,
-                source_id,
-                source_new,
-                typed_new,
-                "outer Pair New",
-            )?;
-            require_matching_source_typed_positions(
-                source_ast,
-                typed_ast,
-                source_id,
-                source_new_node.tpt,
-                typed_new_tpt,
-                "outer Pair type tree",
-            )?;
             require_matching_source_typed_positions(
                 source_ast,
                 typed_ast,
