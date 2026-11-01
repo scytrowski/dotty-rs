@@ -1,0 +1,7 @@
+-- [E107] Syntax Error: WrongArityOne.scala:5:16 -------------------------------
+5 |    case Flagged(value) => value
+  |         ^^^^^^^^^^^^^^
+  |Wrong number of argument patterns for matching.Flagged; expected: (Int, Boolean)
+  |
+  | longer explanation available when compiling with `-explain`
+1 error found

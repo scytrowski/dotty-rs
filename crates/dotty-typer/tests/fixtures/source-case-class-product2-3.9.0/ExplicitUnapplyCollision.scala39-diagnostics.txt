@@ -1,0 +1,9 @@
+-- [E029] Pattern Match Exhaustivity Warning: ExplicitUnapplyCollision.scala:6:35
+6 |  def select(item: Flagged): Int = item match
+  |                                   ^^^^
+  |                        match may not be exhaustive.
+  |
+  |                        It would fail on pattern case: _: matching.Flagged
+  |
+  | longer explanation available when compiling with `-explain`
+1 warning found
