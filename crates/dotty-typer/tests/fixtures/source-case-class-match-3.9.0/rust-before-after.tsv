@@ -1,0 +1,3 @@
+root	source_root	source_bytes	fixture_sha256	scala_source_revision	before_after_product	issue_1937_after
+unwrap	Positive.scala#tree18	64:136	df57333192eb934169f06a07873c2e1ba88c9159404f60e5bfe33b3d016e215c	777528f19a58e794c9954a42f433373472ec57f8	TypeNameNotFound(Product);typed_root=absent	DefDef>Match>CaseDef>UnApply(actual_generated_Box.unapply);binder=value:Int;match_result=Int
+classify	Positive.scala#tree36	140:237	df57333192eb934169f06a07873c2e1ba88c9159404f60e5bfe33b3d016e215c	777528f19a58e794c9954a42f433373472ec57f8	TypeNameNotFound(Product);typed_root=absent	DefDef>Match>CaseDef[Box(0)]>CaseDef[Box(value)];literal=0:Int;binder=value:Int;match_result=Int
