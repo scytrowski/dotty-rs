@@ -8,7 +8,8 @@
 //! in isolation.
 
 use dotty_classloader::classloader::{
-    BinaryName, ClassLoader, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath,
+    BinaryName, ClassFormat, ClassLoader, ClassOrigin, ClassPathEntry, ClassPathError,
+    ClassResource, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, JdkClassPath,
     LoadingSession,
 };
 use dotty_core::{
@@ -20,10 +21,11 @@ use dotty_tasty::tasty::{StructuredNode, TastyFile};
 use dotty_tasty_unpickler::tasty_unpickler::{
     TastySession, TastySessionError, TastyUnpickler, UnpickleError,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 #[path = "support/cross_adapter_annotations.rs"]
 mod cross_adapter_annotations;
@@ -107,6 +109,450 @@ fn unpickler_and_classpath_resolver_converge_on_the_real_open_package() {
                 .unwrap()
         )
     );
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OpenObjectRequestEvidence {
+    name: String,
+    selector: dotty_core::MemberSelector,
+    space: dotty_core::MemberSpace,
+    prefix_is_package_term_ref: bool,
+    classifier_branch_called: bool,
+    prefix_is_canonical_java_lang: bool,
+    prefix_symbol_kind: Option<SymbolKind>,
+    prefix_namespace: Option<Namespace>,
+    prefix_package_identity: Option<SymbolId>,
+    canonical_java_lang: Option<SymbolId>,
+    type_ref_member_identity: Option<SymbolId>,
+}
+
+struct CapturingResolver<E: dotty_classloader::classloader::ClassPathEntry> {
+    inner: ClasspathSymbolResolver<E>,
+    requests: Rc<RefCell<Vec<OpenObjectRequestEvidence>>>,
+    no_prefix: TypeId,
+    object_class: SymbolId,
+    rollback_restored: Option<Rc<Cell<bool>>>,
+    fail_after_object: Option<Rc<Cell<bool>>>,
+}
+
+#[derive(Clone, Copy)]
+enum ObjectResourceControl {
+    Missing,
+    Malformed,
+}
+
+struct ObjectControlledClassPath {
+    inner: CompositeClassPath,
+    control: ObjectResourceControl,
+}
+
+struct RecordingClassPath {
+    inner: CompositeClassPath,
+    object_origins: Arc<Mutex<Vec<ClassOrigin>>>,
+}
+
+impl ClassPathEntry for RecordingClassPath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        let resource = self.inner.find_class(name)?;
+        if name.as_internal() == "java/lang/Object"
+            && let Some(resource) = &resource
+        {
+            self.object_origins
+                .lock()
+                .expect("resource origin recorder lock")
+                .push(resource.origin().clone());
+        }
+        Ok(resource)
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package(package)
+    }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package_prefix(package)
+    }
+}
+
+impl ClassPathEntry for ObjectControlledClassPath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        if name.as_internal() == "java/lang/Object" {
+            return Ok(match self.control {
+                ObjectResourceControl::Missing => None,
+                ObjectResourceControl::Malformed => Some(ClassResource::new(
+                    vec![0xca, 0xfe, 0xba, 0xbe],
+                    ClassFormat::Class,
+                    ClassOrigin::Directory(PathBuf::from("<malformed-java-lang-object>")),
+                )),
+            });
+        }
+        self.inner.find_class(name)
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package(package)
+    }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package_prefix(package)
+    }
+}
+
+impl<E: dotty_classloader::classloader::ClassPathEntry> SymbolResolver for CapturingResolver<E> {
+    fn has_package_root(&self) -> bool {
+        self.inner.has_package_root()
+    }
+
+    fn take_packages(&mut self) -> Option<Packages> {
+        self.inner.take_packages()
+    }
+
+    fn checkpoint_with_packages(&self, packages: &Packages) -> ResolverCheckpoint {
+        self.inner.checkpoint_with_packages(packages)
+    }
+
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        self.inner.checkpoint()
+    }
+
+    fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
+        self.inner.rollback_to(store, checkpoint);
+    }
+
+    fn rollback_to_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        checkpoint: ResolverCheckpoint,
+        packages: &mut Packages,
+    ) {
+        self.inner
+            .rollback_to_with_packages(store, checkpoint, packages);
+        if let Some(rollback_restored) = &self.rollback_restored {
+            rollback_restored.set(
+                packages.symbol(&["java", "lang"]).is_none()
+                    && store.symbols.get(self.object_class).info == SymbolInfo::Missing
+                    && store.symbols.get(self.object_class).origin
+                        == dotty_core::SymbolOrigin::Builtin,
+            );
+        }
+    }
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner.resolve_member(store, request)
+    }
+
+    fn resolve_member_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        let prefix_package = match store.types.get(request.prefix) {
+            Type::TermRef {
+                target: dotty_core::TermRefTarget::Symbol(symbol),
+                ..
+            } if store.symbols.contains(*symbol)
+                && store.symbols.get(*symbol).kind == SymbolKind::Package =>
+            {
+                Some(*symbol)
+            }
+            _ => None,
+        };
+        let result = self
+            .inner
+            .resolve_member_with_packages(store, packages, request);
+        let type_ref_member_identity = if result.as_ref().is_ok_and(Option::is_some)
+            && request.name.text() == store.names.intern("Object")
+        {
+            let package = prefix_package.expect("captured Object request has package prefix");
+            let prefix = store.types.alloc(Type::type_ref(self.no_prefix, package));
+            self.inner.resolve_member_with_packages(
+                store,
+                packages,
+                &MemberRequest {
+                    prefix,
+                    name: request.name,
+                    selector: request.selector.clone(),
+                    space: dotty_core::MemberSpace::Prefix,
+                },
+            )?
+        } else {
+            None
+        };
+        let profile = self.inner.take_resolver_profile();
+        let canonical_java_lang = packages.symbol(&["java", "lang"]);
+        let prefix_symbol_kind = prefix_package.map(|symbol| store.symbols.get(symbol).kind);
+        let prefix_namespace =
+            prefix_package.map(|symbol| store.symbols.get(symbol).name.namespace());
+        self.requests.borrow_mut().push(OpenObjectRequestEvidence {
+            name: store.names.resolve(request.name.text()).to_owned(),
+            selector: request.selector.clone(),
+            space: request.space.clone(),
+            prefix_is_package_term_ref: prefix_package.is_some(),
+            classifier_branch_called: profile.prefix_classification.calls > 0,
+            prefix_is_canonical_java_lang: prefix_package == canonical_java_lang,
+            prefix_symbol_kind,
+            prefix_namespace,
+            prefix_package_identity: prefix_package,
+            canonical_java_lang,
+            type_ref_member_identity,
+        });
+        if request.name.namespace() == Namespace::Type
+            && request.name.text() == store.names.intern("Object")
+            && self
+                .fail_after_object
+                .as_ref()
+                .is_some_and(|fail| fail.replace(false))
+        {
+            return Err(ResolutionError::Malformed {
+                reason: "injected failure after Object materialization".to_owned(),
+            });
+        }
+        result
+    }
+
+    fn resolve_package(
+        &mut self,
+        store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner.resolve_package(store, path)
+    }
+
+    fn resolve_package_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner
+            .resolve_package_with_packages(store, packages, path)
+    }
+}
+
+/// Pins the unchanged address-15 reference in Open.tasty through the actual
+/// unpickler callback and verifies it selects a real JDK-backed Object.
+#[test]
+fn open_address_15_reaches_classpath_member_resolution_as_package_term_ref() {
+    let path = tasty_visibility_dir();
+    let bytes = fs::read(path.join("me/cytrowski/tastyfixtures/visibility/Open.tasty"))
+        .expect("real Open.tasty fixture");
+    let file = TastyFile::parse_scala_3_9(&bytes).expect("Open.tasty should parse");
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let object_origins = Arc::new(Mutex::new(Vec::new()));
+    let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+    let java_base_jmod = java_home.join("jmods/java.base.jmod");
+    let resolver = CapturingResolver {
+        inner: ClasspathSymbolResolver::new(
+            RecordingClassPath {
+                inner: CompositeClassPath::new(vec![
+                    Box::new(DirectoryClassPath::new(path)),
+                    Box::new(
+                        JdkClassPath::new(java_home.join("jmods")).expect("genuine JDK jmods"),
+                    ),
+                ]),
+                object_origins: Arc::clone(&object_origins),
+            },
+            definitions,
+            LoadingSession::new(),
+        )
+        .with_resolver_profile_collection(),
+        requests: Rc::clone(&requests),
+        no_prefix: definitions.no_prefix,
+        object_class: definitions.object_class,
+        rollback_restored: None,
+        fail_after_object: None,
+    };
+    let session = TastySession::new()
+        .with_resolver(Box::new(resolver))
+        .expect("resolver joins the active unpickler session");
+    let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    unpickler.enter_symbols().expect("Open symbols enter");
+
+    let object_type = unpickler
+        .unpickle_type(15)
+        .expect("package TermRef prefix resolves java.lang.Object");
+    let object = store
+        .types
+        .get(object_type)
+        .reference_symbol()
+        .expect("Open address 15 is an Object type reference");
+    assert_eq!(object, definitions.object_class);
+    assert!(matches!(
+        store.symbols.get(object).info,
+        SymbolInfo::Complete(info) if matches!(store.types.get(info), Type::ClassInfo(_))
+    ));
+    assert!(matches!(
+        store.symbols.get(object).origin,
+        dotty_core::SymbolOrigin::Classfile(_)
+    ));
+
+    let requests = requests.borrow();
+    assert_eq!(requests.len(), 1, "address 15 makes one member request");
+    let evidence = &requests[0];
+    assert_eq!(evidence.name, "Object");
+    assert_eq!(evidence.selector, dotty_core::MemberSelector::Unique);
+    assert!(matches!(evidence.space, dotty_core::MemberSpace::Prefix));
+    assert!(evidence.prefix_is_package_term_ref);
+    assert!(evidence.classifier_branch_called);
+    assert!(evidence.prefix_is_canonical_java_lang);
+    assert_eq!(evidence.prefix_symbol_kind, Some(SymbolKind::Package));
+    assert_eq!(evidence.prefix_namespace, Some(Namespace::Term));
+    assert_eq!(
+        evidence.prefix_package_identity,
+        evidence.canonical_java_lang
+    );
+    assert_eq!(evidence.type_ref_member_identity, Some(object));
+    assert_eq!(
+        store.symbols.get(object).owner,
+        evidence.prefix_package_identity
+    );
+    assert!(
+        object_origins
+            .lock()
+            .expect("resource origin recorder lock")
+            .contains(&ClassOrigin::Jmod(java_base_jmod))
+    );
+}
+
+#[test]
+fn open_object_materialization_rolls_back_and_retries_in_the_same_session() {
+    let path = tasty_visibility_dir();
+    let bytes = fs::read(path.join("me/cytrowski/tastyfixtures/visibility/Open.tasty"))
+        .expect("real Open.tasty fixture");
+    let file = TastyFile::parse_scala_3_9(&bytes).expect("Open.tasty should parse");
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let fail_after_object = Rc::new(Cell::new(true));
+    let rollback_restored = Rc::new(Cell::new(false));
+    let class_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(path)),
+        Box::new(
+            JdkClassPath::new(
+                PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME")).join("jmods"),
+            )
+            .expect("genuine JDK jmods"),
+        ),
+    ]);
+    let resolver = CapturingResolver {
+        inner: ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new())
+            .with_resolver_profile_collection(),
+        requests: Rc::clone(&requests),
+        no_prefix: definitions.no_prefix,
+        object_class: definitions.object_class,
+        rollback_restored: Some(Rc::clone(&rollback_restored)),
+        fail_after_object: Some(Rc::clone(&fail_after_object)),
+    };
+    let session = TastySession::new()
+        .with_resolver(Box::new(resolver))
+        .expect("resolver joins the active unpickler session");
+    let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    unpickler.enter_symbols().expect("Open symbols enter");
+
+    let failure = unpickler
+        .unpickle_type(15)
+        .expect_err("injected late failure follows real Object loading");
+    assert!(matches!(
+        failure,
+        UnpickleError::ResolverFailure {
+            error: ResolutionError::Malformed { ref reason },
+            ..
+        } if reason == "injected failure after Object materialization"
+    ));
+    assert!(!fail_after_object.get());
+    assert!(rollback_restored.get());
+
+    let object_type = unpickler
+        .unpickle_type(15)
+        .expect("same-session retry materializes java.lang.Object");
+    assert_eq!(unpickler.unpickle_type(15), Ok(object_type));
+    let (_, session) = unpickler.into_session_parts();
+    let object = store
+        .types
+        .get(object_type)
+        .reference_symbol()
+        .expect("Open address 15 resolves a class reference");
+    assert_eq!(object, definitions.object_class);
+    let java_lang = session
+        .packages()
+        .symbol(&["java", "lang"])
+        .expect("retry commits the canonical java.lang package");
+    assert_eq!(store.symbols.get(object).owner, Some(java_lang));
+    assert!(matches!(
+        store.symbols.get(object).info,
+        SymbolInfo::Complete(info) if matches!(store.types.get(info), Type::ClassInfo(_))
+    ));
+    assert!(matches!(
+        store.symbols.get(object).origin,
+        dotty_core::SymbolOrigin::Classfile(_)
+    ));
+    let requests = requests.borrow();
+    let retry = requests.last().expect("retry member request");
+    assert!(retry.prefix_is_canonical_java_lang);
+    assert_eq!(retry.type_ref_member_identity, Some(object));
+}
+
+#[test]
+fn package_term_ref_fails_closed_for_missing_or_malformed_object_resources() {
+    for control in [
+        ObjectResourceControl::Missing,
+        ObjectResourceControl::Malformed,
+    ] {
+        let jdk_jmods =
+            PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME")).join("jmods");
+        let class_path = ObjectControlledClassPath {
+            inner: CompositeClassPath::new(vec![
+                Box::new(DirectoryClassPath::new(tasty_visibility_dir())),
+                Box::new(JdkClassPath::new(jdk_jmods).expect("genuine JDK jmods")),
+            ]),
+            control,
+        };
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(&mut store, &["java", "lang"])
+            .expect("JDK package lookup is valid")
+            .expect("the real JDK contains java.lang");
+        let prefix = store.types.alloc(Type::TermRef {
+            prefix: definitions.no_prefix,
+            target: dotty_core::TermRefTarget::Symbol(package),
+        });
+        let request = MemberRequest {
+            prefix,
+            name: Name::new(store.names.intern("Object"), Namespace::Type),
+            selector: dotty_core::MemberSelector::Unique,
+            space: dotty_core::MemberSpace::Prefix,
+        };
+        let checkpoint = store.checkpoint();
+
+        let result = resolver.resolve_member(&mut store, &request);
+        match control {
+            ObjectResourceControl::Missing => assert_eq!(result, Ok(None)),
+            ObjectResourceControl::Malformed => assert!(matches!(
+                result,
+                Err(ResolutionError::Malformed { ref reason })
+                    if reason.contains("java/lang/Object")
+            )),
+        }
+        assert_eq!(store.checkpoint(), checkpoint);
+        assert_eq!(
+            store.symbols.get(definitions.object_class).info,
+            SymbolInfo::Missing
+        );
+        assert_eq!(
+            store.symbols.get(definitions.object_class).origin,
+            dotty_core::SymbolOrigin::Builtin
+        );
+    }
 }
 
 #[test]
@@ -595,10 +1041,14 @@ fn late_failure_after_real_package_materialization_rolls_back_and_same_session_r
     resumed
         .enter_symbols()
         .expect("a second real unit should enter in the same session");
+    let cross_address = definition_address(&distinct, "cross");
+    resumed
+        .complete_symbol(cross_address)
+        .expect("package TermRef dependencies resolve in the resumed session");
+    let cross_state = resumed.symbol_state_at(cross_address);
     assert!(
-        resumed
-            .complete_symbol(definition_address(&distinct, "cross"))
-            .is_err()
+        matches!(cross_state, Some((_, SymbolInfo::Complete(_)))),
+        "cross completion state: {cross_state:?}"
     );
     assert!(
         member_callback.get(),

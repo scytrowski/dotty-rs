@@ -1121,6 +1121,14 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     .expect("validated object has a module identity");
                 Ok(Some(PrefixTarget::Class(identity.module_class)))
             }
+            Type::TermRef {
+                target: dotty_core::TermRefTarget::Symbol(package),
+                ..
+            } if store.symbols.contains(*package)
+                && store.symbols.get(*package).kind == SymbolKind::Package =>
+            {
+                self.symbol_target(store, *package)
+            }
             Type::TypeRef {
                 target: TypeRefTarget::Symbol(symbol),
                 ..
@@ -2226,7 +2234,7 @@ mod tests {
     use crate::jdk_class_path::JdkClassPath;
     use crate::jmod_class_path::JmodClassPath;
     use dotty_core::{
-        ClassInfo, MemberSelector, Name, Namespace, Packages, Scope, SourceId, SymbolFlags,
+        ClassInfo, MemberSelector, Name, Namespace, Packages, Scope, SourceId, Symbol, SymbolFlags,
         SymbolOrigin, Visibility,
     };
     use std::cell::RefCell;
@@ -2238,6 +2246,77 @@ mod tests {
 
     fn fixture_path(relative: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
+    }
+
+    #[test]
+    fn package_term_prefix_matches_type_prefix_and_rejects_wrong_or_unknown_symbols() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let package = packages
+            .enter(&mut store, SymbolOrigin::Synthetic, &["java", "lang"])
+            .last()
+            .expect("java.lang package")
+            .symbol;
+        let resolver = ClasspathSymbolResolver::new(
+            DirectoryClassPath::new(fixture_path("tests/fixtures/tasty_visibility")),
+            definitions,
+            LoadingSession::new(),
+        );
+        let type_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let term_prefix = store.types.alloc(Type::TermRef {
+            prefix: definitions.no_prefix,
+            target: dotty_core::TermRefTarget::Symbol(package),
+        });
+
+        assert!(matches!(
+            resolver.prefix_target(&store, type_prefix),
+            Ok(Some(PrefixTarget::Package(target))) if target == package
+        ));
+        assert!(matches!(
+            resolver.prefix_target(&store, term_prefix),
+            Ok(Some(PrefixTarget::Package(target))) if target == package
+        ));
+
+        let wrong_kind = store.symbols.alloc(Symbol {
+            name: Name::new(store.names.intern("NotPackage"), Namespace::Type),
+            owner: None,
+            kind: dotty_core::SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        let wrong_kind_prefix = store.types.alloc(Type::TermRef {
+            prefix: definitions.no_prefix,
+            target: dotty_core::TermRefTarget::Symbol(wrong_kind),
+        });
+        assert!(matches!(
+            resolver.prefix_target(&store, wrong_kind_prefix),
+            Ok(None)
+        ));
+
+        let checkpoint = store.checkpoint();
+        let mut temporary_packages = Packages::new();
+        let unknown = temporary_packages
+            .enter(&mut store, SymbolOrigin::Synthetic, &["unknown"])
+            .last()
+            .expect("temporary unknown package")
+            .symbol;
+        store.rollback_to(checkpoint);
+        let unknown_prefix = store.types.alloc(Type::TermRef {
+            prefix: definitions.no_prefix,
+            target: dotty_core::TermRefTarget::Symbol(unknown),
+        });
+        assert!(matches!(
+            resolver.prefix_target(&store, unknown_prefix),
+            Err(ResolutionError::Malformed { reason }) if reason.contains("unknown symbol")
+        ));
     }
 
     #[derive(Clone)]
