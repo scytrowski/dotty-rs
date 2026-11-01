@@ -15,7 +15,7 @@ const EXPLICIT_SELECTION: &str =
 const ROOTS: [&str; 4] = ["direct", "withBias", "lifted", "mapped"];
 
 #[test]
-fn inherited_member_baseline_types_the_four_real_child_method_roots() {
+fn inherited_member_baseline_types_four_roots_in_two_independent_sessions() {
     let first = analyze_candidate_session();
     let second = analyze_candidate_session();
     assert_eq!(first, second, "fresh sessions normalize identically");
@@ -224,6 +224,10 @@ fn inherited_method_rejections_do_not_create_typed_roots() {
             "run",
         ),
         (
+            "package negative\nclass Parent:\n  def add[A](x: A): Int = 0\nclass Child extends Parent:\n  def run(x: Int): Int = add(x)\n",
+            "run",
+        ),
+        (
             "package negative\nclass Parent:\n  def add(x: Int)(y: Int): Int = x + y\nclass Child extends Parent:\n  def run(x: Int): Int = add(x)(1)\n",
             "run",
         ),
@@ -241,6 +245,16 @@ fn inherited_method_rejections_do_not_create_typed_roots() {
             );
         }
     }
+}
+
+#[test]
+fn wrong_inherited_method_result_does_not_publish_a_typed_root() {
+    let source = "package negative\nclass Parent:\n  def add(x: Int): Int = x\nclass Child extends Parent:\n  def run(x: Int): String = add(x)\n";
+    let error = rejected_method_root(source, "run", 1990);
+    assert!(
+        error.is_some(),
+        "an inherited Int result must not conform to String"
+    );
 }
 
 #[test]

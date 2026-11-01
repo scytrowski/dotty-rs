@@ -1,0 +1,5 @@
+source_sha256	method	source_root	source_span	declaring_parent	canonical_member	source_signature	typed_result	closure_env	sessions	normalized_sessions_equal
+f93da74272996204a4c29d07385d3988c811c8084e7fb3352fdb2be00eee26be	direct	InheritedMembers.scala#22	122..154	Parent	Parent.add	(Int):Int	Int	-	2	true
+f93da74272996204a4c29d07385d3988c811c8084e7fb3352fdb2be00eee26be	withBias	InheritedMembers.scala#29	157..193	Parent	Parent.bias	(Int):Int	Int	-	2	true
+f93da74272996204a4c29d07385d3988c811c8084e7fb3352fdb2be00eee26be	lifted	InheritedMembers.scala#39	196..232	Parent	Parent.add	():Function1[Int,Int]	Function1[Int,Int]	[Child.this]	2	true
+f93da74272996204a4c29d07385d3988c811c8084e7fb3352fdb2be00eee26be	mapped	InheritedMembers.scala#49	235..273	Parent	Parent.bias	():Function1[Int,Int]	Function1[Int,Int]	[Child.this]	2	true

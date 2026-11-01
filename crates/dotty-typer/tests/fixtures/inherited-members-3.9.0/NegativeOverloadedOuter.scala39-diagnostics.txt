@@ -1,0 +1,9 @@
+-- [E049] Reference Error: NegativeOverloadedOuter.scala:9:27 ------------------
+9 |    def run(x: Int): Int = add(x)
+  |                           ^^^
+  |                           Reference to add is ambiguous.
+  |                           It is both defined in class Outer
+  |                           and inherited subsequently in class Child
+  |
+  | longer explanation available when compiling with `-explain`
+1 error found
