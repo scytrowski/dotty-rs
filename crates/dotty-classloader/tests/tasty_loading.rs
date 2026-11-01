@@ -9,7 +9,7 @@
 
 use dotty_classloader::classloader::{
     BinaryName, ClassLoader, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath,
-    LoadingSession,
+    JdkClassPath, LoadingSession,
 };
 use dotty_core::{
     ClassInfo, Definitions, MemberRequest, Name, Namespace, Packages, ResolutionError,
@@ -21,6 +21,7 @@ use dotty_tasty_unpickler::tasty_unpickler::{
     TastySession, TastySessionError, TastyUnpickler, UnpickleError,
 };
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -107,6 +108,183 @@ fn unpickler_and_classpath_resolver_converge_on_the_real_open_package() {
                 .unwrap()
         )
     );
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OpenObjectRequestEvidence {
+    name: String,
+    selector: dotty_core::MemberSelector,
+    space: dotty_core::MemberSpace,
+    prefix_is_package_term_ref: bool,
+    classifier_branch_called: bool,
+    prefix_is_canonical_java_lang: bool,
+    prefix_symbol_kind: Option<SymbolKind>,
+    prefix_namespace: Option<Namespace>,
+}
+
+struct CapturingResolver<E: dotty_classloader::classloader::ClassPathEntry> {
+    inner: ClasspathSymbolResolver<E>,
+    requests: Rc<RefCell<Vec<OpenObjectRequestEvidence>>>,
+}
+
+impl<E: dotty_classloader::classloader::ClassPathEntry> SymbolResolver for CapturingResolver<E> {
+    fn has_package_root(&self) -> bool {
+        self.inner.has_package_root()
+    }
+
+    fn take_packages(&mut self) -> Option<Packages> {
+        self.inner.take_packages()
+    }
+
+    fn checkpoint_with_packages(&self, packages: &Packages) -> ResolverCheckpoint {
+        self.inner.checkpoint_with_packages(packages)
+    }
+
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        self.inner.checkpoint()
+    }
+
+    fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
+        self.inner.rollback_to(store, checkpoint);
+    }
+
+    fn rollback_to_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        checkpoint: ResolverCheckpoint,
+        packages: &mut Packages,
+    ) {
+        self.inner
+            .rollback_to_with_packages(store, checkpoint, packages);
+    }
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner.resolve_member(store, request)
+    }
+
+    fn resolve_member_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        let prefix_package = match store.types.get(request.prefix) {
+            Type::TermRef {
+                target: dotty_core::TermRefTarget::Symbol(symbol),
+                ..
+            } if store.symbols.contains(*symbol)
+                && store.symbols.get(*symbol).kind == SymbolKind::Package =>
+            {
+                Some(*symbol)
+            }
+            _ => None,
+        };
+        let result = self
+            .inner
+            .resolve_member_with_packages(store, packages, request);
+        let profile = self.inner.take_resolver_profile();
+        let canonical_java_lang = packages.symbol(&["java", "lang"]);
+        let prefix_symbol_kind = prefix_package.map(|symbol| store.symbols.get(symbol).kind);
+        let prefix_namespace =
+            prefix_package.map(|symbol| store.symbols.get(symbol).name.namespace());
+        self.requests.borrow_mut().push(OpenObjectRequestEvidence {
+            name: store.names.resolve(request.name.text()).to_owned(),
+            selector: request.selector.clone(),
+            space: request.space.clone(),
+            prefix_is_package_term_ref: prefix_package.is_some(),
+            classifier_branch_called: profile.prefix_classification.calls > 0,
+            prefix_is_canonical_java_lang: prefix_package == canonical_java_lang,
+            prefix_symbol_kind,
+            prefix_namespace,
+        });
+        result
+    }
+
+    fn resolve_package(
+        &mut self,
+        store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner.resolve_package(store, path)
+    }
+
+    fn resolve_package_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner
+            .resolve_package_with_packages(store, packages, path)
+    }
+}
+
+/// Pins the unchanged address-15 reference in Open.tasty through the actual
+/// unpickler callback before the classloader package-TermRef branch changes.
+#[test]
+fn open_address_15_reaches_classpath_member_resolution_as_package_term_ref() {
+    let path = tasty_visibility_dir();
+    let bytes = fs::read(path.join("me/cytrowski/tastyfixtures/visibility/Open.tasty"))
+        .expect("real Open.tasty fixture");
+    let file = TastyFile::parse_scala_3_9(&bytes).expect("Open.tasty should parse");
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let resolver = CapturingResolver {
+        inner: ClasspathSymbolResolver::new(
+            CompositeClassPath::new(vec![
+                Box::new(DirectoryClassPath::new(path)),
+                Box::new(
+                    JdkClassPath::new(
+                        PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"))
+                            .join("jmods"),
+                    )
+                    .expect("genuine JDK jmods"),
+                ),
+            ]),
+            definitions,
+            LoadingSession::new(),
+        )
+        .with_resolver_profile_collection(),
+        requests: Rc::clone(&requests),
+    };
+    let session = TastySession::new()
+        .with_resolver(Box::new(resolver))
+        .expect("resolver joins the active unpickler session");
+    let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    unpickler.enter_symbols().expect("Open symbols enter");
+
+    let failure = unpickler
+        .unpickle_type(15)
+        .expect_err("package-TermRef classification is not implemented yet");
+    assert!(
+        matches!(
+            failure,
+            UnpickleError::UnresolvedMember {
+                address: 15,
+                ref name,
+                namespace: Namespace::Type,
+                ..
+            } if name == "Object"
+        ),
+        "the frozen reference should fail at resolver-backed lookup: {failure:?}"
+    );
+
+    let requests = requests.borrow();
+    assert_eq!(requests.len(), 1, "address 15 makes one member request");
+    let evidence = &requests[0];
+    assert_eq!(evidence.name, "Object");
+    assert_eq!(evidence.selector, dotty_core::MemberSelector::Unique);
+    assert!(matches!(evidence.space, dotty_core::MemberSpace::Prefix));
+    assert!(evidence.prefix_is_package_term_ref);
+    assert!(evidence.classifier_branch_called);
+    assert!(evidence.prefix_is_canonical_java_lang);
+    assert_eq!(evidence.prefix_symbol_kind, Some(SymbolKind::Package));
+    assert_eq!(evidence.prefix_namespace, Some(Namespace::Term));
 }
 
 #[test]
