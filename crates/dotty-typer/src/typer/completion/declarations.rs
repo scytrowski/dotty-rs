@@ -232,9 +232,37 @@ impl SourceTyper<'_> {
             self.complete_signature_parameter(parameter, info_journal)?;
         }
 
-        let mut parents = Vec::with_capacity(template.parents.len().max(1));
+        let mut parents = Vec::with_capacity(template.parents.len().max(2));
         for parent in &template.parents {
             parents.push(self.project_parent_type(*parent, type_context, 0, info_journal)?);
+        }
+        let product_selector =
+            self.source_case_class_product_selector(symbol, kind, &template, constructor);
+        let mut product_type_to_add = None;
+        if let Some((parameter_tree, selector)) = product_selector {
+            let Some(TreeKind::ValDef(parameter)) =
+                self.arena.try_get(parameter_tree).map(|node| &node.kind)
+            else {
+                return Err(TyperError::MalformedSourceAst {
+                    source: self.source,
+                    tree_index: parameter_tree.index(),
+                    symbol,
+                    kind,
+                });
+            };
+            let result =
+                self.type_of_tpt_inner_journaled(parameter.tpt, type_context, info_journal)?;
+            let method_info = self.store.types.alloc(Type::Method(MethodType {
+                params: Vec::new(),
+                result,
+                kind: MethodKind::Plain,
+            }));
+            let previous = *self.store.symbols.info(selector);
+            info_journal.push((selector, previous));
+            self.store
+                .symbols
+                .set_info(selector, SymbolInfo::Complete(method_info));
+            product_type_to_add = self.canonical_scala_product_type(source_tree.index())?;
         }
         let first_parent_is_trait = match (parents.first(), template.parents.first()) {
             (Some(parent_type), Some(parent_tree)) => {
@@ -244,6 +272,13 @@ impl SourceTyper<'_> {
         };
         if parents.is_empty() || first_parent_is_trait {
             parents.insert(0, self.definitions.object_type);
+        }
+        if let Some(product) = product_type_to_add
+            && !parents
+                .iter()
+                .any(|parent| self.same_class_type(*parent, product))
+        {
+            parents.push(product);
         }
 
         let self_type = match template.self_val {
@@ -318,6 +353,246 @@ impl SourceTyper<'_> {
             }
         }
         Ok(info)
+    }
+
+    pub(in crate::typer) fn source_case_class_product_selector(
+        &mut self,
+        class: SymbolId,
+        kind: SymbolKind,
+        template: &dotty_core::ast::Template<Untyped>,
+        constructor: &dotty_core::ast::DefDef<Untyped>,
+    ) -> Option<(TreeId<Untyped>, SymbolId)> {
+        let class_symbol = self.store.symbols.get(class);
+        if kind != SymbolKind::Class
+            || class_symbol.kind != SymbolKind::Class
+            || class_symbol.origin != SymbolOrigin::Source(self.source)
+            || !matches!(
+                self.index.definition_of(class),
+                Some(SourceDefinition::Canonical { source, tree })
+                    if source == self.source && self.index.symbol_at(source, tree) == Some(class)
+            )
+            || !class_symbol.flags.contains(SymbolFlags::CASE)
+            || !self.source_class_type_parameters(class).ok()?.is_empty()
+            || !template.parents.is_empty()
+            || constructor.value_param_clauses.len() != 1
+            || constructor.value_param_clauses[0].len() != 1
+        {
+            return None;
+        }
+        let parameter_tree = constructor.value_param_clauses[0][0];
+        let TreeKind::ValDef(parameter) = &self.arena.try_get(parameter_tree)?.kind else {
+            return None;
+        };
+        let source_field = self.index.symbol_at(self.source, parameter_tree)?;
+        if !self.store.symbols.contains(source_field)
+            || self.store.symbols.get(source_field).kind != SymbolKind::Field
+            || self.store.symbols.get(source_field).owner != Some(class)
+            || self.store.symbols.get(source_field).origin != SymbolOrigin::Source(self.source)
+            || self.index.definition_of(source_field)
+                != Some(SourceDefinition::Canonical {
+                    source: self.source,
+                    tree: parameter_tree,
+                })
+        {
+            return None;
+        }
+        let repeated_parameter = self.arena.try_get(parameter.tpt).is_some_and(|node| {
+            matches!(
+                &node.kind,
+                TreeKind::PhaseSpecific(UntypedNode::PostfixOp(operator))
+                    if self.store.names.resolve(operator.op.text()) == "*"
+            )
+        });
+        if repeated_parameter
+            || parameter.metadata.modifiers.iter().any(|modifier| {
+                matches!(
+                    modifier,
+                    dotty_core::ast::Modifier::Implicit
+                        | dotty_core::ast::Modifier::Given
+                        | dotty_core::ast::Modifier::Erased
+                        | dotty_core::ast::Modifier::Inline
+                        | dotty_core::ast::Modifier::Override
+                )
+            })
+        {
+            return None;
+        }
+        let selector_name = Name::new(self.store.names.intern("_1"), dotty_core::Namespace::Term);
+        let [selector] = self
+            .index
+            .scope_of(class)
+            .map(|scope| self.store.scopes.get(scope).lookup_all(&selector_name))?
+        else {
+            return None;
+        };
+        let selector = *selector;
+        let selector_symbol = self.store.symbols.get(selector);
+        if selector_symbol.kind != SymbolKind::Method
+            || selector_symbol.owner != Some(class)
+            || selector_symbol.origin != SymbolOrigin::Source(self.source)
+            || self
+                .index
+                .derived_symbol_at(class, self.source, parameter_tree)
+                != Some(selector)
+        {
+            return None;
+        }
+        Some((parameter_tree, selector))
+    }
+
+    pub(in crate::typer) fn source_case_class_product_selector_owner(
+        &mut self,
+        selector: SymbolId,
+    ) -> Option<SymbolId> {
+        if !self.store.symbols.contains(selector) {
+            return None;
+        }
+        let selector_symbol = self.store.symbols.get(selector);
+        let owner = selector_symbol.owner?;
+        if !self.store.symbols.contains(owner) {
+            return None;
+        }
+        let (source, parameter_tree) = match self.index.definition_of(selector)? {
+            SourceDefinition::Derived { source, tree }
+                if source == self.source
+                    && self.index.derived_symbol_at(owner, source, tree) == Some(selector) =>
+            {
+                (source, tree)
+            }
+            _ => return None,
+        };
+        if selector_symbol.kind != SymbolKind::Method
+            || selector_symbol.origin != SymbolOrigin::Source(source)
+            || self.store.names.resolve(selector_symbol.name.text()) != "_1"
+            || self.store.symbols.get(owner).kind != SymbolKind::Class
+        {
+            return None;
+        }
+        let (class_source, class_tree) = match self.index.definition_of(owner)? {
+            SourceDefinition::Canonical { source, tree }
+                if source == self.source && self.index.symbol_at(source, tree) == Some(owner) =>
+            {
+                (source, tree)
+            }
+            _ => return None,
+        };
+        let TreeKind::TypeDef(class_definition) = &self.arena.try_get(class_tree)?.kind else {
+            return None;
+        };
+        let TreeKind::Template(template) = &self.arena.try_get(class_definition.rhs)?.kind else {
+            return None;
+        };
+        let TreeKind::DefDef(constructor) = &self.arena.try_get(template.constructor)?.kind else {
+            return None;
+        };
+        if class_source != source {
+            return None;
+        }
+        self.source_case_class_product_selector(owner, SymbolKind::Class, template, constructor)
+            .filter(|(tree, symbol)| *tree == parameter_tree && *symbol == selector)
+            .map(|_| owner)
+    }
+
+    pub(in crate::typer) fn canonical_scala_product_type(
+        &mut self,
+        tree_index: u32,
+    ) -> Result<Option<TypeId>, TyperError> {
+        let name = Name::new(
+            self.store.names.intern("Product"),
+            dotty_core::Namespace::Type,
+        );
+        let scala = match self.packages.symbol(&["scala"]) {
+            Some(scala) => Some(scala),
+            None => self.resolve_external_package(&["scala".to_owned()], tree_index)?,
+        };
+        let Some(scala) = scala else {
+            return Err(TyperError::TypeNameNotFound {
+                source: self.source,
+                tree_index,
+                name,
+                position: None,
+            });
+        };
+        if self.package_path(scala) != ["scala"] {
+            return Err(TyperError::SymbolResolution {
+                source: self.source,
+                tree_index,
+                error: dotty_core::ResolutionError::Malformed {
+                    reason: "scala package resolution returned a non-canonical package".to_owned(),
+                },
+            });
+        }
+        let scoped = match self.packages.scope_of(scala) {
+            Some(scope) => match self.store.scopes.get(scope).lookup_all(&name) {
+                [product] => Some(*product),
+                [] => None,
+                _ => {
+                    return Err(TyperError::SymbolResolution {
+                        source: self.source,
+                        tree_index,
+                        error: dotty_core::ResolutionError::Ambiguous {
+                            candidates: self.store.scopes.get(scope).lookup_all(&name).len(),
+                        },
+                    });
+                }
+            },
+            None => None,
+        };
+        let product = match scoped {
+            Some(product) => Some(product),
+            None => {
+                let prefix = self.package_type_prefix(scala);
+                let request = dotty_core::MemberRequest {
+                    prefix,
+                    name,
+                    selector: dotty_core::MemberSelector::Unique,
+                    space: dotty_core::MemberSpace::Prefix,
+                };
+                self.resolver
+                    .resolve_member(self.store, &request)
+                    .map_err(|error| TyperError::SymbolResolution {
+                        source: self.source,
+                        tree_index,
+                        error,
+                    })?
+            }
+        };
+        let Some(product) = product else {
+            return Err(TyperError::TypeNameNotFound {
+                source: self.source,
+                tree_index,
+                name,
+                position: None,
+            });
+        };
+        if !self.store.symbols.contains(product)
+            || self.store.symbols.get(product).kind != SymbolKind::Trait
+            || self.store.symbols.get(product).owner != Some(scala)
+            || self.store.symbols.get(product).name != name
+        {
+            return Err(TyperError::SymbolResolution {
+                source: self.source,
+                tree_index,
+                error: dotty_core::ResolutionError::Malformed {
+                    reason: "scala.Product resolution returned a non-canonical trait".to_owned(),
+                },
+            });
+        }
+        let prefix = self.type_symbol_prefix(product);
+        Ok(Some(
+            self.store.types.alloc(Type::type_ref(prefix, product)),
+        ))
+    }
+
+    fn same_class_type(&self, left: TypeId, right: TypeId) -> bool {
+        let class_symbol = |ty| match self.store.types.try_get(ty) {
+            Some(Type::Applied { tycon, .. }) => *tycon,
+            _ => ty,
+        };
+        matches!(
+            (self.store.types.try_get(class_symbol(left)), self.store.types.try_get(class_symbol(right))),
+            (Some(Type::TypeRef { target: TypeRefTarget::Symbol(left), .. }), Some(Type::TypeRef { target: TypeRefTarget::Symbol(right), .. })) if left == right
+        )
     }
 
     fn type_parent_constructor_application(

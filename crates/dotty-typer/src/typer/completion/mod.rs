@@ -47,6 +47,13 @@ impl SourceTyper<'_> {
         symbol: SymbolId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        if let Some(owner) = self.source_case_class_product_selector_owner(symbol) {
+            self.complete_symbol_inner(owner, info_journal)?;
+            if let SymbolInfo::Complete(info) = *self.store.symbols.info(symbol) {
+                return Ok(info);
+            }
+            return Err(TyperError::DeclarationContextMissing { symbol });
+        }
         let inferred_field = if self.store.symbols.contains(symbol) {
             let field = self.store.symbols.get(symbol);
             let eligible_owner = field.owner.is_some_and(|owner| {
