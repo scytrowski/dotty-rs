@@ -166,3 +166,55 @@ Animal/Dog member signatures unresolved on `scala/Predef/String`. Resolving
 this one Object reference does not establish semantic completion or candidate
 qualification for the full `Open` / Animal / Dog cohort; the #1928 gate remains
 separate.
+
+## Private classloader adapter proof (#1928)
+
+The opt-in, crate-private `ClassLoader::load_open_with_tasty_unpickler` path
+uses the unchanged Scala 3.9.0 `Open.tasty` fixture
+(`crates/dotty-classloader/tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty`,
+SHA-256 `49286e74a3d3693b08d2a29575f23089f6be5c486231390059f43c19a8929894`).
+It resolves canonical `java.lang.Object` through the loader's configured
+classpath and existing `ClasspathSymbolResolver`, carries that resolver's
+`LoadingSession` back with `into_session`, then lends only the session's
+`Packages` to `TastyUnpickler::with_packages`. The unpickler receives no
+attached resolver. It enters the class at `TYPEDEF@4`, validates/completes its
+class info, and completes the constructor at `DEFDEF@21`.
+
+The serialized constructor result tree references `scala.Unit` at TASTy
+address 25. Before completing the constructor, the adapter binds the existing
+`Definitions::unit` symbol into the canonical `scala` type scope. The symbol
+retains its bootstrap identity, `Class` kind, `Builtin` origin, and missing
+class info; its owner is explicitly set to the `scala` package. The session's
+symbol-update journal and package-scope undo journal make this binding part of
+the same transaction as TASTy projection. An already committed canonical
+binding is reused without adding another undo entry. The serialized address-25
+reference resolves to that canonical Unit symbol. Constructor completion
+validates the serialized result tree, then publishes the effective constructor
+result as the owning `Open` class reference.
+
+For this fixture the semantic adapter yields one public `Open` class owned by
+`me.cytrowski.tastyfixtures.visibility`, one `java.lang.Object` parent, no
+class type parameters, no companion or annotations, and one public zero-arg
+constructor owned by `Open`. These fields match the legacy row in
+[`comparison-1948.tsv`](classloader-semantic-tasty-convergence/comparison-1948.tsv):
+its legacy constructor is `()Plain:Unit`. The adapter's constructor semantic
+result is `Open`, as specified by constructor completion; its separately
+validated serialized return tree is `Unit`. The default `load_class` path and
+TASTy-first resource preference remain unchanged.
+
+The adapter preflights the pinned unit shape before entering symbols: exactly
+one package with one top-level class, rooted at `TYPEDEF@4`, with its
+constructor at `DEFDEF@21`. A one-class unit rooted elsewhere, such as
+`SymbolAnnotated.tasty` at `TYPEDEF@5`, is rejected with a typed
+`UnsupportedShape` before any package-scope mutation. This prevents a
+noncanonical root from being entered and then lost during store rollback.
+After projection, a root that does not match the requested full binary name
+(including package) is also rejected with a typed `UnsupportedShape` and rolls
+back class/package entries, Object state, caches, origins, and the new Unit
+binding. Missing resources, malformed TASTy, class-file resources, duplicate
+legacy identities, and multi-declaration units are likewise rejected. The
+supported boundary remains one self-contained class, its root and constructor
+only; a type declaration already present in the canonical package scope is
+also rejected before entry even when a fresh loader session has empty name
+caches. Additional external semantic dependencies or graph expansion are not
+resolved by this adapter.

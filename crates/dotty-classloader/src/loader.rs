@@ -24,12 +24,14 @@ use dotty_classfile::signature::{
     ClassSignature, ClassTypeSignature, FieldSignature, MethodSignature, ReferenceTypeSignature,
     SignatureError, TypeArgument, TypeSignature,
 };
+use dotty_core::resolution::SymbolResolver;
 use dotty_core::{
-    Annotation as CoreAnnotation, ClassInfo, Definitions, ErrorType, MethodKind, MethodParam,
-    MethodType, Name, Namespace, PolyType, Scope, ScopeId, SemanticStore, Symbol, SymbolFlags,
-    SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TermName, Type, TypeId, TypeName,
-    TypeParam, Visibility,
+    Annotation as CoreAnnotation, ClassInfo, Definitions, ErrorType, MemberRequest, MemberSelector,
+    MemberSpace, MethodKind, MethodParam, MethodType, Name, Namespace, PolyType, Scope, ScopeId,
+    SemanticStore, Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolLinks,
+    SymbolOrigin, TermName, Type, TypeId, TypeName, TypeParam, Visibility,
 };
+use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -40,6 +42,73 @@ const MAX_INHERITANCE_DEPTH: usize = 256;
 pub(crate) struct CachedDecodedModule {
     pub(crate) resource: ClassResource,
     pub(crate) decoded: tasty_symbol::DecodedTastyClass,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) enum SemanticTastyLoadError {
+    ClassLoad(ClassLoadError),
+    Resolver(dotty_core::ResolutionError),
+    Unpickle { address: u32, error: UnpickleError },
+    UnsupportedShape(&'static str),
+}
+
+struct OpenBuiltinAliasSnapshot {
+    and_symbol: Symbol,
+    or_symbol: Symbol,
+    scala_scope: Option<ScopeId>,
+    and_was_entered: bool,
+    or_was_entered: bool,
+}
+
+#[allow(dead_code)]
+struct BorrowedClassPath<'a, E>(&'a E);
+
+impl<E: ClassPathEntry> ClassPathEntry for BorrowedClassPath<'_, E> {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        self.0.find_class(name)
+    }
+
+    fn resource_profile(&self) -> crate::class_path::ClassPathResourceProfile {
+        self.0.resource_profile()
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.0.contains_package(package)
+    }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.0.contains_package_prefix(package)
+    }
+}
+
+fn symbol_matches_binary_name(
+    store: &SemanticStore,
+    symbol: SymbolId,
+    requested: &BinaryName,
+) -> bool {
+    let class = store.symbols.get(symbol);
+    if class.kind != SymbolKind::Class || class.name.namespace() != Namespace::Type {
+        return false;
+    }
+    let mut package = class.owner;
+    let mut segments = Vec::new();
+    while let Some(owner) = package {
+        let package_symbol = store.symbols.get(owner);
+        if package_symbol.kind != SymbolKind::Package
+            || package_symbol.name.namespace() != Namespace::Term
+        {
+            return false;
+        }
+        let segment = store.names.resolve(package_symbol.name.text());
+        if !segment.is_empty() {
+            segments.push(segment.to_owned());
+        }
+        package = package_symbol.owner;
+    }
+    segments.reverse();
+    segments.push(store.names.resolve(class.name.text()).to_owned());
+    segments.join("/") == requested.as_internal()
 }
 
 #[derive(Debug)]
@@ -425,6 +494,8 @@ pub struct ClassLoader<'store, E> {
     /// there is no separate loader-owned copy, so every `ClassLoader`
     /// sharing one `Definitions` also agrees on prefix identity.
     definitions: Definitions,
+    #[allow(dead_code)]
+    semantic_tasty_loaded: HashMap<BinaryName, SymbolId>,
 }
 
 /// Canonical term/type identities for a top-level Scala object.
@@ -696,6 +767,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             load_profiles: Vec::new(),
             collect_load_profiles: false,
             definitions,
+            semantic_tasty_loaded: HashMap::new(),
         }
     }
 
@@ -733,6 +805,407 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
     pub(crate) fn set_load_profile_collection(&mut self, enabled: bool) {
         self.collect_load_profiles = enabled;
+    }
+
+    /// Opt-in semantic projection for the single pinned `Open.tasty` adapter
+    /// proof. The ordinary `load_class` path continues to use the legacy
+    /// classloader decoder. This path first materializes the canonical JDK
+    /// `Object` through the classpath resolver, then lets the unpickler resolve
+    /// only from the package/member identities already entered in this store.
+    #[allow(dead_code)]
+    pub(crate) fn load_open_with_tasty_unpickler(
+        &mut self,
+        name: &BinaryName,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        if let Some(&symbol) = self.semantic_tasty_loaded.get(name) {
+            return Ok(symbol);
+        }
+        if self.session.identified.contains_key(name)
+            || self.session.resolved.contains_key(name)
+            || self.repository.get(name).is_some()
+            || self.open_package_contains_type_declaration(name)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the requested class already has a loader identity or package type declaration",
+            ));
+        }
+
+        let lookup = self.class_path.find_class(name).map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::Io(name.clone(), Rc::new(error)))
+        })?;
+        let resource = lookup.ok_or_else(|| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::NotFound(name.clone()))
+        })?;
+        if resource.format() != ClassFormat::Tasty {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected classpath resource is not TASTy",
+            ));
+        }
+        let file = tasty_symbol::parse_classloader_tasty(resource.bytes()).map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(name.clone(), error))
+        })?;
+        Self::validate_open_unit_shape(&file, name)?;
+
+        let aliases_before = self.snapshot_open_builtin_aliases();
+        let store_checkpoint = self.store.checkpoint();
+        let session_checkpoint = self.session.checkpoint();
+        let object_before = self
+            .store
+            .symbols
+            .get(self.definitions.object_class)
+            .clone();
+        let result = self.load_open_semantics(&file, name);
+        match result {
+            Ok(class) => {
+                self.session.record_origin(class, resource.origin().clone());
+                self.session.cache_resolved(name.clone(), class);
+                self.repository.mark_loaded(name.clone(), class);
+                self.semantic_tasty_loaded.insert(name.clone(), class);
+                Ok(class)
+            }
+            Err(error) => {
+                self.session.rollback_to(self.store, session_checkpoint);
+                if self.store.symbols.contains(self.definitions.object_class) {
+                    *self.store.symbols.get_mut(self.definitions.object_class) = object_before;
+                }
+                self.restore_open_builtin_aliases(aliases_before);
+                self.store.rollback_to(store_checkpoint);
+                self.repository.discard_rolled_back_symbols(self.store);
+                Err(error)
+            }
+        }
+    }
+
+    /// A package registry can be handed back from another adapter with its
+    /// declarations intact and the loader's per-name caches empty. Refuse a
+    /// second class identity before `enter_symbols` mutates that canonical
+    /// package scope.
+    fn open_package_contains_type_declaration(&mut self, name: &BinaryName) -> bool {
+        let package_path = name.package_path();
+        let package_segments = if package_path.is_empty() {
+            Vec::new()
+        } else {
+            package_path.split('/').collect::<Vec<_>>()
+        };
+        let Some(package) = self.session.packages.get(&package_segments) else {
+            return false;
+        };
+        let Some(scope) = self.session.packages.scope_of(package) else {
+            return false;
+        };
+        let name = Name::new(self.store.names.intern(name.simple_name()), Namespace::Type);
+        !self.store.scopes.get(scope).lookup_all(&name).is_empty()
+    }
+
+    /// The opt-in path accepts only the frozen one-class fixture shape. This
+    /// check happens before the unpickler enters package scopes, so a
+    /// multi-declaration unit cannot publish partially supported siblings.
+    fn validate_open_unit_shape(
+        file: &dotty_tasty::tasty::TastyFile<'_>,
+        name: &BinaryName,
+    ) -> Result<(), SemanticTastyLoadError> {
+        let asts = file.asts().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Parse(error),
+            ))
+        })?;
+        if asts.len() != 1
+            || asts
+                .get(0)
+                .is_none_or(|node| node.tag != dotty_tasty::tasty::PACKAGE_TAG)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the TASTy unit must contain one package tree",
+            ));
+        }
+        let package = asts
+            .get(0)
+            .expect("the package count was checked")
+            .decode_package()
+            .map_err(|error| {
+                SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                    name.clone(),
+                    tasty_symbol::TastyDecodeError::Ast(error),
+                ))
+            })?;
+        if package.stats.len() != 1
+            || package
+                .stats
+                .get(0)
+                .is_none_or(|definition| definition.tag != dotty_tasty::tasty::TYPEDEF_TAG)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the TASTy unit must contain exactly one top-level class declaration",
+            ));
+        }
+        let address_index = file.ast_address_index().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Parse(error),
+            ))
+        })?;
+        if address_index
+            .get(4)
+            .is_none_or(|definition| definition.tag != dotty_tasty::tasty::TYPEDEF_TAG)
+            || address_index
+                .get(21)
+                .is_none_or(|constructor| constructor.tag != dotty_tasty::tasty::DEFDEF_TAG)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the TASTy unit must have its class at TYPEDEF@4 and constructor at DEFDEF@21",
+            ));
+        }
+        Ok(())
+    }
+
+    fn snapshot_open_builtin_aliases(&mut self) -> OpenBuiltinAliasSnapshot {
+        let scala_scope = self
+            .session
+            .packages
+            .get(&["scala"])
+            .and_then(|scala| self.session.packages.scope_of(scala));
+        let and_name = Name::new(self.store.names.intern("&"), Namespace::Type);
+        let or_name = Name::new(self.store.names.intern("|"), Namespace::Type);
+        let and_was_entered = scala_scope.is_some_and(|scope| {
+            self.store
+                .scopes
+                .get(scope)
+                .lookup_all(&and_name)
+                .contains(&self.definitions.and_type)
+        });
+        let or_was_entered = scala_scope.is_some_and(|scope| {
+            self.store
+                .scopes
+                .get(scope)
+                .lookup_all(&or_name)
+                .contains(&self.definitions.or_type)
+        });
+        OpenBuiltinAliasSnapshot {
+            and_symbol: self.store.symbols.get(self.definitions.and_type).clone(),
+            or_symbol: self.store.symbols.get(self.definitions.or_type).clone(),
+            scala_scope,
+            and_was_entered,
+            or_was_entered,
+        }
+    }
+
+    fn restore_open_builtin_aliases(&mut self, snapshot: OpenBuiltinAliasSnapshot) {
+        if let Some(scope) = snapshot.scala_scope
+            && self.store.scopes.contains(scope)
+        {
+            if !snapshot.and_was_entered {
+                self.store
+                    .scopes
+                    .get_mut(scope)
+                    .remove(self.definitions.and_type);
+            }
+            if !snapshot.or_was_entered {
+                self.store
+                    .scopes
+                    .get_mut(scope)
+                    .remove(self.definitions.or_type);
+            }
+        }
+        if self.store.symbols.contains(self.definitions.and_type) {
+            *self.store.symbols.get_mut(self.definitions.and_type) = snapshot.and_symbol;
+        }
+        if self.store.symbols.contains(self.definitions.or_type) {
+            *self.store.symbols.get_mut(self.definitions.or_type) = snapshot.or_symbol;
+        }
+    }
+
+    /// Binds the existing canonical `Definitions::unit` identity into
+    /// scala's type scope for this one TASTy adapter. This mirrors the
+    /// canonical alias binding convention without creating a second Unit.
+    fn bind_open_builtin_unit(&mut self) -> Result<SymbolId, SemanticTastyLoadError> {
+        let Some(unit) = self
+            .store
+            .types
+            .get(self.definitions.unit)
+            .reference_symbol()
+        else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "Definitions::unit is not a canonical symbol reference",
+            ));
+        };
+        let symbol = self.store.symbols.get(unit);
+        if symbol.name.namespace() != Namespace::Type
+            || self.store.names.resolve(symbol.name.text()) != "Unit"
+            || symbol.kind != SymbolKind::Class
+            || symbol.flags != SymbolFlags::EMPTY
+            || symbol.origin != SymbolOrigin::Builtin
+            || symbol.visibility != Visibility::Public
+            || symbol.info != SymbolInfo::Missing
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "Definitions::unit has an invalid prior state",
+            ));
+        }
+
+        let scala = self.session.packages.resolve_package(self.store, "scala");
+        let scope = self.session.packages.scope_of(scala).ok_or(
+            SemanticTastyLoadError::UnsupportedShape("scala package has no registered scope"),
+        )?;
+        let name = Name::new(self.store.names.intern("Unit"), Namespace::Type);
+        match (
+            self.store.symbols.get(unit).owner,
+            self.store.scopes.get(scope).lookup_all(&name),
+        ) {
+            (None, []) => {
+                self.session.record_symbol_update(self.store, unit);
+                self.store.symbols.get_mut(unit).owner = Some(scala);
+                self.session
+                    .packages
+                    .enter_class(self.store, scala, name, unit);
+                Ok(unit)
+            }
+            (Some(owner), [only]) if owner == scala && *only == unit => Ok(unit),
+            _ => Err(SemanticTastyLoadError::UnsupportedShape(
+                "scala has a conflicting Unit type binding or owner",
+            )),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn load_open_semantics(
+        &mut self,
+        file: &dotty_tasty::tasty::TastyFile<'_>,
+        name: &BinaryName,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        // Materialize the one external class the frozen fixture requires. The
+        // borrowed classpath keeps resource precedence identical to the
+        // loader's configured path, while `into_session` returns the exact
+        // positive cache, origin and rollback journals to this loader.
+        let session = std::mem::replace(&mut self.session, LoadingSession::new());
+        let mut resolver = crate::resolver::ClasspathSymbolResolver::new(
+            BorrowedClassPath(&self.class_path),
+            self.definitions,
+            session,
+        );
+        let object_result = (|| {
+            let package = resolver
+                .resolve_package(self.store, &["java", "lang"])
+                .map_err(SemanticTastyLoadError::Resolver)?
+                .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                    "the configured classpath cannot resolve java.lang",
+                ))?;
+            let prefix = self
+                .store
+                .types
+                .alloc(Type::type_ref(self.definitions.no_prefix, package));
+            let name = Name::new(self.store.names.intern("Object"), Namespace::Type);
+            resolver
+                .resolve_member(
+                    self.store,
+                    &MemberRequest {
+                        prefix,
+                        name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .map_err(SemanticTastyLoadError::Resolver)?
+                .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                    "the configured classpath cannot resolve java.lang.Object",
+                ))
+        })();
+        self.session = resolver.into_session();
+        let object = object_result?;
+        if object != self.definitions.object_class
+            || !matches!(self.store.symbols.get(object).info, SymbolInfo::Complete(_))
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "java.lang.Object did not resolve to the canonical completed definition",
+            ));
+        }
+
+        // Bind only the canonical Unit needed by Open's serialized result
+        // tree. The session checkpoint owns both the symbol update and the
+        // package-scope entry, so a later failure rolls them back together.
+        self.bind_open_builtin_unit()?;
+
+        let packages = self.session.packages.take_packages();
+        let mut unpickler =
+            TastyUnpickler::with_packages(file, self.store, self.definitions, packages);
+        let result = (|| {
+            unpickler
+                .enter_symbols()
+                .map_err(|error| SemanticTastyLoadError::Unpickle { address: 4, error })?;
+            // Open.tasty's frozen root and constructor addresses are the
+            // identity anchors; names are checked only after index lookup.
+            let root_address = 4;
+            let constructor_address = 21;
+            let class = unpickler.index().symbol_at(root_address).ok_or(
+                SemanticTastyLoadError::UnsupportedShape(
+                    "Open.tasty has no class definition at TYPEDEF@4",
+                ),
+            )?;
+            unpickler.complete_symbol(root_address).map_err(|error| {
+                SemanticTastyLoadError::Unpickle {
+                    address: root_address,
+                    error,
+                }
+            })?;
+            let constructor = unpickler.index().symbol_at(constructor_address).ok_or(
+                SemanticTastyLoadError::UnsupportedShape(
+                    "Open.tasty has no constructor definition at DEFDEF@21",
+                ),
+            )?;
+            unpickler
+                .complete_symbol(constructor_address)
+                .map_err(|error| SemanticTastyLoadError::Unpickle {
+                    address: constructor_address,
+                    error,
+                })?;
+            Ok((class, constructor))
+        })();
+        let (index, mut packages) = unpickler.into_parts();
+        self.session.packages.swap_packages(&mut packages);
+        let (class, constructor) = match result {
+            Ok(identities) => identities,
+            Err(error) => {
+                if let Some(class) = index.symbol_at(4) {
+                    self.remove_open_root_from_package_scope(class);
+                }
+                return Err(error);
+            }
+        };
+        if index.symbol_at(4) != Some(class)
+            || index.symbol_at(21) != Some(constructor)
+            || self.store.symbols.get(class).kind != SymbolKind::Class
+            || !symbol_matches_binary_name(self.store, class, name)
+            || self.store.symbols.get(constructor).kind != SymbolKind::Constructor
+            || self.store.symbols.get(constructor).owner != Some(class)
+            || !matches!(self.store.symbols.get(class).info, SymbolInfo::Complete(_))
+            || !matches!(
+                self.store.symbols.get(constructor).info,
+                SymbolInfo::Complete(_)
+            )
+        {
+            self.remove_open_root_from_package_scope(class);
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the indexed root or constructor has an unexpected identity or incomplete info",
+            ));
+        }
+        Ok(class)
+    }
+
+    /// `TastyUnpickler::into_parts` deliberately drops its successful-entry
+    /// scope journal. The adapter only supports this top-level class, whose
+    /// package scope may predate the operation and therefore survive the
+    /// store rollback. Remove that one published root before the caller
+    /// truncates its symbol arena on a later projection/validation failure.
+    fn remove_open_root_from_package_scope(&mut self, class: SymbolId) {
+        if !self.store.symbols.contains(class) {
+            return;
+        }
+        let Some(owner) = self.store.symbols.get(class).owner else {
+            return;
+        };
+        if let Some(scope) = self.session.packages.scope_of(owner) {
+            self.store.scopes.get_mut(scope).remove(class);
+        }
     }
 
     fn begin_direct_load_profile(&mut self, name: &BinaryName) -> bool {
@@ -5169,6 +5642,1335 @@ mod tests {
                 .join(relative_path),
         )
         .expect("semantic unpickler fixture should exist")
+    }
+
+    fn open_test_class_path() -> CompositeClassPath {
+        let fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for real Object fixture");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK classpath");
+        CompositeClassPath::new(vec![
+            Box::new(crate::class_path::DirectoryClassPath::new(fixture_root)),
+            Box::new(jdk),
+        ])
+    }
+
+    fn open_alias_test_class_path(alias: BinaryName) -> CompositeClassPath {
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty",
+        );
+        let bytes = fs::read(fixture_path).expect("pinned Open fixture");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for Object");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK classpath");
+        let fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility");
+        CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(HashMap::from([(alias, bytes)]))),
+            Box::new(crate::class_path::DirectoryClassPath::new(fixture_root)),
+            Box::new(jdk),
+        ])
+    }
+
+    fn open_binary_name() -> BinaryName {
+        BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open")
+    }
+
+    #[test]
+    fn open_semantic_adapter_completes_root_constructor_and_repeat_identity() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let definitions = loader.definitions();
+        let open = loader
+            .load_open_with_tasty_unpickler(&open_binary_name())
+            .expect("pinned Open should complete through the classloader-owned adapter");
+        let repeated = loader
+            .load_open_with_tasty_unpickler(&open_binary_name())
+            .expect("same-loader repeat should reuse the semantic symbol");
+        let class = class_info(loader.store, open).clone();
+        assert_eq!(symbol_name(loader.store, open), "Open");
+        assert_eq!(loader.store.symbols.get(open).kind, SymbolKind::Class);
+        assert_eq!(
+            loader.store.symbols.get(open).visibility,
+            Visibility::Public
+        );
+        assert!(matches!(
+            loader.store.symbols.get(open).origin,
+            SymbolOrigin::Tasty(_)
+        ));
+        assert_eq!(class.parents.len(), 1);
+        assert_eq!(
+            parent_symbol(loader.store, class.parents[0]),
+            definitions.object_class
+        );
+        let package = loader
+            .store
+            .symbols
+            .get(open)
+            .owner
+            .expect("Open package owner");
+        assert_eq!(loader.store.symbols.get(package).kind, SymbolKind::Package);
+        assert_eq!(symbol_name(loader.store, package), "visibility");
+        assert_eq!(
+            loader.origin(open),
+            Some(&ClassOrigin::Directory(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility")
+            ))
+        );
+        let constructor_name = Name::new(loader.store.names.intern("<init>"), Namespace::Term);
+        let constructor = loader
+            .store
+            .scopes
+            .get(class.declarations)
+            .lookup(&constructor_name)
+            .unwrap();
+        let Type::Method(method) =
+            loader
+                .store
+                .types
+                .get(match loader.store.symbols.get(constructor).info {
+                    SymbolInfo::Complete(ty) => ty,
+                    _ => panic!("constructor should be complete"),
+                })
+        else {
+            panic!("constructor should have a method type");
+        };
+        assert_eq!(
+            loader.store.symbols.get(constructor).kind,
+            SymbolKind::Constructor
+        );
+        assert_eq!(loader.store.symbols.get(constructor).owner, Some(open));
+        assert!(method.params.is_empty());
+        assert_eq!(
+            unit_type_ref_target(loader.store, method.result),
+            Some(open)
+        );
+        assert_eq!(repeated, open);
+
+        let unit = unit_type_ref_target(loader.store, definitions.unit).unwrap();
+        let scala = loader.session.packages.get(&["scala"]).unwrap();
+        assert_eq!(loader.store.symbols.get(unit).owner, Some(scala));
+        let scala_scope = loader.session.packages.scope_of(scala).unwrap();
+        assert_eq!(
+            loader.store.scopes.get(scala_scope).lookup_all(&Name::new(
+                loader.store.names.intern("Unit"),
+                Namespace::Type
+            )),
+            &[unit]
+        );
+    }
+
+    #[test]
+    fn open_unit_binding_rolls_back_with_new_scala_package_and_can_retry() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let unit = unit_type_ref_target(loader.store, loader.definitions.unit).unwrap();
+        let initial_store = loader.store.checkpoint();
+        let initial_session = loader.session.checkpoint();
+        assert!(loader.session.packages.get(&["scala"]).is_none());
+
+        let bound = loader
+            .bind_open_builtin_unit()
+            .expect("canonical Unit binding");
+        assert_eq!(bound, unit);
+        let scala = loader.session.packages.get(&["scala"]).unwrap();
+        let scope = loader.session.packages.scope_of(scala).unwrap();
+        assert_eq!(loader.store.symbols.get(unit).owner, Some(scala));
+        assert_eq!(
+            loader.store.scopes.get(scope).lookup_all(&Name::new(
+                loader.store.names.intern("Unit"),
+                Namespace::Type
+            )),
+            &[unit]
+        );
+
+        loader.session.rollback_to(loader.store, initial_session);
+        loader.store.rollback_to(initial_store);
+        assert!(loader.session.packages.get(&["scala"]).is_none());
+        assert_eq!(loader.store.symbols.get(unit).owner, None);
+        assert_eq!(loader.store.checkpoint(), initial_store);
+
+        let retry = loader.bind_open_builtin_unit().expect("binding retry");
+        assert_eq!(retry, unit);
+        assert!(loader.session.packages.get(&["scala"]).is_some());
+    }
+
+    #[test]
+    fn open_unit_binding_rolls_back_in_existing_scala_package() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let scala = loader
+            .session
+            .packages
+            .resolve_package(loader.store, "scala");
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+        let unit = unit_type_ref_target(loader.store, loader.definitions.unit).unwrap();
+        let bound = loader
+            .bind_open_builtin_unit()
+            .expect("canonical Unit binding");
+        assert_eq!(bound, unit);
+        assert_eq!(loader.store.symbols.get(unit).owner, Some(scala));
+
+        loader.session.rollback_to(loader.store, session_mark);
+        loader.store.rollback_to(store_mark);
+        assert_eq!(loader.session.packages.get(&["scala"]), Some(scala));
+        assert_eq!(loader.store.symbols.get(unit).owner, None);
+        let scope = loader.session.packages.scope_of(scala).unwrap();
+        assert!(
+            loader
+                .store
+                .scopes
+                .get(scope)
+                .lookup_all(&Name::new(
+                    loader.store.names.intern("Unit"),
+                    Namespace::Type
+                ))
+                .is_empty()
+        );
+        let retry = loader.bind_open_builtin_unit().expect("binding retry");
+        assert_eq!(retry, unit);
+    }
+
+    #[test]
+    fn open_unit_binding_survives_rollback_when_already_committed() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let unit = loader
+            .bind_open_builtin_unit()
+            .expect("canonical Unit binding");
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+        assert_eq!(loader.bind_open_builtin_unit().unwrap(), unit);
+
+        loader.session.rollback_to(loader.store, session_mark);
+        loader.store.rollback_to(store_mark);
+        let scala = loader.session.packages.get(&["scala"]).unwrap();
+        assert_eq!(loader.store.symbols.get(unit).owner, Some(scala));
+        let scope = loader.session.packages.scope_of(scala).unwrap();
+        assert_eq!(
+            loader.store.scopes.get(scope).lookup_all(&Name::new(
+                loader.store.names.intern("Unit"),
+                Namespace::Type
+            )),
+            &[unit]
+        );
+    }
+
+    #[test]
+    fn legacy_open_load_keeps_exact_supported_class_and_constructor_contract() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let definitions = loader.definitions();
+        let open = loader
+            .load_class(&open_binary_name())
+            .expect("legacy Open load");
+        let class = class_info(loader.store, open).clone();
+        assert_eq!(symbol_name(loader.store, open), "Open");
+        assert_eq!(loader.store.symbols.get(open).kind, SymbolKind::Class);
+        assert_eq!(
+            loader.store.symbols.get(open).visibility,
+            Visibility::Public
+        );
+        assert_eq!(class.parents.len(), 1);
+        assert_eq!(
+            parent_symbol(loader.store, class.parents[0]),
+            definitions.object_class
+        );
+        let constructor_name = Name::new(loader.store.names.intern("<init>"), Namespace::Term);
+        let constructor = loader
+            .store
+            .scopes
+            .get(class.declarations)
+            .lookup(&constructor_name)
+            .unwrap();
+        assert_eq!(
+            loader.store.symbols.get(constructor).kind,
+            SymbolKind::Constructor
+        );
+        assert_eq!(loader.store.symbols.get(constructor).owner, Some(open));
+        let Type::Method(method) =
+            loader
+                .store
+                .types
+                .get(match loader.store.symbols.get(constructor).info {
+                    SymbolInfo::Complete(ty) => ty,
+                    _ => panic!("legacy constructor should be complete"),
+                })
+        else {
+            panic!("legacy constructor should have a method type");
+        };
+        assert!(method.params.is_empty());
+        assert_eq!(
+            symbol_name(
+                loader.store,
+                unit_type_ref_target(loader.store, method.result).expect("legacy Unit result")
+            ),
+            "Unit"
+        );
+        assert!(matches!(
+            loader.store.symbols.get(open).origin,
+            SymbolOrigin::Tasty(_)
+        ));
+    }
+
+    fn unit_type_ref_target(store: &SemanticStore, ty: TypeId) -> Option<SymbolId> {
+        store.types.get(ty).reference_symbol()
+    }
+
+    #[test]
+    fn adapter_late_identity_failure_rolls_back_new_unit_binding_and_retries_open() {
+        let open = open_binary_name();
+        let alias = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Alias");
+        let class_path = open_alias_test_class_path(alias.clone());
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        let unit = unit_type_ref_target(loader.store, loader.definitions.unit).unwrap();
+        let definitions = loader.definitions();
+        let and_before = loader.store.symbols.get(definitions.and_type).clone();
+        let or_before = loader.store.symbols.get(definitions.or_type).clone();
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+        let object_before = loader
+            .store
+            .symbols
+            .get(loader.definitions.object_class)
+            .clone();
+
+        let error = loader
+            .load_open_with_tasty_unpickler(&alias)
+            .expect_err("the indexed Open shape must reject the alias after completion");
+        assert!(matches!(error, SemanticTastyLoadError::UnsupportedShape(_)));
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert!(loader.session.packages.get(&["scala"]).is_none());
+        assert_eq!(loader.store.symbols.get(unit).owner, None);
+        assert_eq!(loader.store.symbols.get(definitions.and_type), &and_before);
+        assert_eq!(loader.store.symbols.get(definitions.or_type), &or_before);
+        assert_eq!(
+            loader.store.symbols.get(loader.definitions.object_class),
+            &object_before
+        );
+        assert!(!loader.session.resolved.contains_key(&alias));
+        assert!(loader.repository.get(&alias).is_none());
+        assert!(!loader.semantic_tasty_loaded.contains_key(&alias));
+
+        let loaded = loader
+            .load_open_with_tasty_unpickler(&open)
+            .expect("valid Open should succeed after late rollback");
+        assert_eq!(symbol_name(loader.store, loaded), "Open");
+        let scala = loader.session.packages.get(&["scala"]).unwrap();
+        let scala_scope = loader.session.packages.scope_of(scala).unwrap();
+        assert_eq!(
+            loader.store.symbols.get(definitions.and_type).owner,
+            Some(scala)
+        );
+        assert_eq!(
+            loader.store.symbols.get(definitions.or_type).owner,
+            Some(scala)
+        );
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(scala_scope)
+                .lookup_all(&Name::new(loader.store.names.intern("&"), Namespace::Type)),
+            &[definitions.and_type]
+        );
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(scala_scope)
+                .lookup_all(&Name::new(loader.store.names.intern("|"), Namespace::Type)),
+            &[definitions.or_type]
+        );
+        assert_eq!(loader.store.symbols.get(unit).owner, Some(scala));
+    }
+
+    #[test]
+    fn alias_failure_restores_existing_scala_package_and_retry_registers_aliases() {
+        let open = open_binary_name();
+        let alias = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Alias");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_alias_test_class_path(alias.clone()), &mut store);
+        let definitions = loader.definitions();
+        let scala = loader
+            .session
+            .packages
+            .resolve_package(loader.store, "scala");
+        let scala_scope = loader.session.packages.scope_of(scala).unwrap();
+        let and_name = Name::new(loader.store.names.intern("&"), Namespace::Type);
+        let or_name = Name::new(loader.store.names.intern("|"), Namespace::Type);
+        let prior_entries = loader
+            .store
+            .scopes
+            .get(scala_scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        let mut prior_entries = prior_entries;
+        prior_entries.sort_by_key(|symbol| symbol.index());
+        let and_before = loader.store.symbols.get(definitions.and_type).clone();
+        let or_before = loader.store.symbols.get(definitions.or_type).clone();
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+
+        let error = loader
+            .load_open_with_tasty_unpickler(&alias)
+            .expect_err("the alias request rejects after real Open completion");
+        assert!(matches!(error, SemanticTastyLoadError::UnsupportedShape(_)));
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert_eq!(loader.session.packages.get(&["scala"]), Some(scala));
+        assert_eq!(loader.store.symbols.get(definitions.and_type), &and_before);
+        assert_eq!(loader.store.symbols.get(definitions.or_type), &or_before);
+        assert!(
+            loader
+                .store
+                .scopes
+                .get(scala_scope)
+                .lookup_all(&and_name)
+                .is_empty()
+        );
+        assert!(
+            loader
+                .store
+                .scopes
+                .get(scala_scope)
+                .lookup_all(&or_name)
+                .is_empty()
+        );
+        let mut after_entries = loader
+            .store
+            .scopes
+            .get(scala_scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        after_entries.sort_by_key(|symbol| symbol.index());
+        assert_eq!(after_entries, prior_entries);
+
+        let loaded = loader
+            .load_open_with_tasty_unpickler(&open)
+            .expect("Open retry on the surviving scala package");
+        assert_eq!(symbol_name(loader.store, loaded), "Open");
+        assert_eq!(
+            loader.store.symbols.get(definitions.and_type).owner,
+            Some(scala)
+        );
+        assert_eq!(
+            loader.store.symbols.get(definitions.or_type).owner,
+            Some(scala)
+        );
+        assert_eq!(
+            loader.store.scopes.get(scala_scope).lookup_all(&and_name),
+            &[definitions.and_type]
+        );
+        assert_eq!(
+            loader.store.scopes.get(scala_scope).lookup_all(&or_name),
+            &[definitions.or_type]
+        );
+    }
+
+    #[test]
+    fn alias_failure_preserves_previously_committed_scala_bindings() {
+        let open = open_binary_name();
+        let alias = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Alias");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_alias_test_class_path(alias.clone()), &mut store);
+        let definitions = loader.definitions();
+        let unit = loader
+            .bind_open_builtin_unit()
+            .expect("commit canonical Unit binding first");
+        let mut packages = loader.session.packages.take_packages();
+        definitions.declare_special_aliases(loader.store, &mut packages);
+        loader.session.packages.swap_packages(&mut packages);
+        let scala = loader.session.packages.get(&["scala"]).unwrap();
+        let scala_scope = loader.session.packages.scope_of(scala).unwrap();
+        let and_name = Name::new(loader.store.names.intern("&"), Namespace::Type);
+        let or_name = Name::new(loader.store.names.intern("|"), Namespace::Type);
+        let prior_entries = loader
+            .store
+            .scopes
+            .get(scala_scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        let mut prior_entries = prior_entries;
+        prior_entries.sort_by_key(|symbol| symbol.index());
+        let and_before = loader.store.symbols.get(definitions.and_type).clone();
+        let or_before = loader.store.symbols.get(definitions.or_type).clone();
+        let unit_owner = loader.store.symbols.get(unit).owner;
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+
+        let error = loader
+            .load_open_with_tasty_unpickler(&alias)
+            .expect_err("the alias request rejects after real Open completion");
+        assert!(matches!(error, SemanticTastyLoadError::UnsupportedShape(_)));
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert_eq!(loader.store.symbols.get(definitions.and_type), &and_before);
+        assert_eq!(loader.store.symbols.get(definitions.or_type), &or_before);
+        assert_eq!(loader.store.symbols.get(unit).owner, unit_owner);
+        assert_eq!(
+            loader.store.scopes.get(scala_scope).lookup_all(&and_name),
+            &[definitions.and_type]
+        );
+        assert_eq!(
+            loader.store.scopes.get(scala_scope).lookup_all(&or_name),
+            &[definitions.or_type]
+        );
+        let mut after_entries = loader
+            .store
+            .scopes
+            .get(scala_scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        after_entries.sort_by_key(|symbol| symbol.index());
+        assert_eq!(after_entries, prior_entries);
+
+        let loaded = loader
+            .load_open_with_tasty_unpickler(&open)
+            .expect("Open retry preserves existing scala bindings");
+        assert_eq!(symbol_name(loader.store, loaded), "Open");
+        assert_eq!(loader.store.symbols.get(unit).owner, unit_owner);
+        assert_eq!(
+            loader.store.scopes.get(scala_scope).lookup_all(&and_name),
+            &[definitions.and_type]
+        );
+        assert_eq!(
+            loader.store.scopes.get(scala_scope).lookup_all(&or_name),
+            &[definitions.or_type]
+        );
+    }
+
+    #[test]
+    fn adapter_rejects_multi_declaration_unit_before_touching_existing_package_scope() {
+        let name = open_binary_name();
+        let mut store = SemanticStore::new();
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for Object");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK classpath");
+        let bytes = semantic_unpickler_fixture_bytes("Both.tasty");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(HashMap::from([(
+                name.clone(),
+                bytes,
+            )]))),
+            Box::new(jdk),
+        ]);
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        let package = loader
+            .session
+            .packages
+            .resolve_package(loader.store, "me/cytrowski/tastyfixtures/semantic");
+        let scope = loader.session.packages.scope_of(package).unwrap();
+        let baseline = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        let mut baseline = baseline;
+        baseline.sort_by_key(|symbol| symbol.index());
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+
+        let error = loader
+            .load_open_with_tasty_unpickler(&name)
+            .expect_err("the multi-declaration Both unit is outside the one-class adapter");
+        assert!(matches!(error, SemanticTastyLoadError::UnsupportedShape(_)));
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert_eq!(
+            loader
+                .session
+                .packages
+                .get(&["me", "cytrowski", "tastyfixtures", "semantic"]),
+            Some(package)
+        );
+        assert_eq!(
+            loader.store.scopes.get(scope).lookup_all(&Name::new(
+                loader.store.names.intern("Both"),
+                Namespace::Type
+            )),
+            &[]
+        );
+        assert_eq!(
+            loader.store.scopes.get(scope).lookup_all(&Name::new(
+                loader.store.names.intern("Both"),
+                Namespace::Term
+            )),
+            &[]
+        );
+        assert_eq!(
+            loader.store.scopes.get(scope).lookup_all(&Name::new(
+                loader.store.names.intern("Both$"),
+                Namespace::Type
+            )),
+            &[]
+        );
+        let mut after = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        after.sort_by_key(|symbol| symbol.index());
+        assert_eq!(after, baseline);
+    }
+
+    #[test]
+    fn adapter_rejects_noncanonical_root_address_before_entering_existing_package() {
+        let annotated =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/SymbolAnnotated");
+        let open = open_binary_name();
+        let bytes = semantic_unpickler_fixture_bytes("SymbolAnnotated.tasty");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for Object");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK classpath");
+        let fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(HashMap::from([(
+                annotated.clone(),
+                bytes,
+            )]))),
+            Box::new(crate::class_path::DirectoryClassPath::new(fixture_root)),
+            Box::new(jdk),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        let package = loader
+            .session
+            .packages
+            .resolve_package(loader.store, "me/cytrowski/tastyfixtures/semantic");
+        let scope = loader.session.packages.scope_of(package).unwrap();
+        let mut baseline = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        baseline.sort_by_key(|symbol| symbol.index());
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+
+        let error = loader
+            .load_open_with_tasty_unpickler(&annotated)
+            .expect_err("SymbolAnnotated roots at TYPEDEF@5, outside the frozen adapter shape");
+        assert!(matches!(
+            error,
+            SemanticTastyLoadError::UnsupportedShape(
+                "the TASTy unit must have its class at TYPEDEF@4 and constructor at DEFDEF@21"
+            )
+        ));
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert_eq!(
+            loader
+                .session
+                .packages
+                .get(&["me", "cytrowski", "tastyfixtures", "semantic"]),
+            Some(package)
+        );
+        let mut after = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        after.sort_by_key(|symbol| symbol.index());
+        assert_eq!(after, baseline);
+        assert!(loader.repository.get(&annotated).is_none());
+        assert!(!loader.semantic_tasty_loaded.contains_key(&annotated));
+
+        let loaded = loader
+            .load_open_with_tasty_unpickler(&open)
+            .expect("the pinned Open unit retries successfully after preflight rejection");
+        assert_eq!(symbol_name(loader.store, loaded), "Open");
+        assert!(loader.store.symbols.contains(loaded));
+        let mut after_retry = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        after_retry.sort_by_key(|symbol| symbol.index());
+        assert_eq!(after_retry, baseline);
+        assert!(!baseline.contains(&loaded));
+    }
+
+    #[test]
+    fn adapter_late_identity_failure_cleans_surviving_package_scope_and_retries() {
+        let open = open_binary_name();
+        let alias = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Alias");
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty",
+        );
+        let bytes = fs::read(fixture_path).expect("pinned Open fixture");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for Object");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK classpath");
+        let fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(HashMap::from([(
+                alias.clone(),
+                bytes,
+            )]))),
+            Box::new(crate::class_path::DirectoryClassPath::new(fixture_root)),
+            Box::new(jdk),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+
+        // This package and its scope survive the adapter's store checkpoint.
+        let package_path = "me/cytrowski/tastyfixtures/visibility";
+        let package = loader
+            .session
+            .packages
+            .resolve_package(loader.store, package_path);
+        let package_scope = loader.session.packages.scope_of(package).unwrap();
+        let open_name = Name::new(loader.store.names.intern("Open"), Namespace::Type);
+        let alias_name = Name::new(loader.store.names.intern("Alias"), Namespace::Type);
+        let prior_entries = loader
+            .store
+            .scopes
+            .get(package_scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        let mut prior_entries_sorted = prior_entries.clone();
+        prior_entries_sorted.sort_by_key(|symbol| symbol.index());
+        assert!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&open_name)
+                .is_empty()
+        );
+
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+        let error = loader
+            .load_open_with_tasty_unpickler(&alias)
+            .expect_err("the indexed Open shape must reject Alias after projection");
+        assert!(matches!(error, SemanticTastyLoadError::UnsupportedShape(_)));
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert_eq!(
+            loader
+                .session
+                .packages
+                .get(&["me", "cytrowski", "tastyfixtures", "visibility"]),
+            Some(package)
+        );
+        assert!(loader.store.symbols.contains(package));
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&open_name),
+            &[]
+        );
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&alias_name),
+            &[]
+        );
+        let mut after_entries = loader
+            .store
+            .scopes
+            .get(package_scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        after_entries.sort_by_key(|symbol| symbol.index());
+        assert_eq!(after_entries, prior_entries_sorted);
+
+        let loaded = loader
+            .load_open_with_tasty_unpickler(&open)
+            .expect("valid Open succeeds after cleanup from the surviving package scope");
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&open_name),
+            &[loaded]
+        );
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&alias_name),
+            &[]
+        );
+    }
+
+    #[test]
+    fn adapter_rejects_preexisting_identity_shell_without_replacing_its_declaration() {
+        let name = open_binary_name();
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let shell = loader
+            .ensure_class_identity(&name)
+            .expect("the ordinary loader can publish a canonical Open identity shell");
+        let package = loader
+            .session
+            .packages
+            .get(&["me", "cytrowski", "tastyfixtures", "visibility"])
+            .expect("Open package is already entered");
+        let scope = loader.session.packages.scope_of(package).unwrap();
+        let open_name = Name::new(loader.store.names.intern("Open"), Namespace::Type);
+        assert_eq!(loader.session.identified.get(&name), Some(&shell));
+        assert_eq!(
+            loader.store.scopes.get(scope).lookup_all(&open_name),
+            &[shell]
+        );
+        assert_eq!(loader.store.symbols.get(shell).info, SymbolInfo::Missing);
+
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+        let error = loader
+            .load_open_with_tasty_unpickler(&name)
+            .expect_err("the adapter must not allocate a second identity for an existing shell");
+        assert!(matches!(
+            error,
+            SemanticTastyLoadError::UnsupportedShape(
+                "the requested class already has a loader identity or package type declaration"
+            )
+        ));
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert_eq!(loader.session.identified.get(&name), Some(&shell));
+        assert_eq!(
+            loader.store.scopes.get(scope).lookup_all(&open_name),
+            &[shell]
+        );
+        assert_eq!(loader.store.symbols.get(shell).info, SymbolInfo::Missing);
+        assert!(loader.repository.get(&name).is_none());
+        assert!(!loader.semantic_tasty_loaded.contains_key(&name));
+    }
+
+    #[test]
+    fn adapter_rejects_reentered_type_from_handed_off_packages_without_replacing_it() {
+        let name = open_binary_name();
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty",
+        );
+        let bytes = fs::read(fixture_path).expect("pinned Open TASTy fixture");
+        let file = tasty_symbol::parse_classloader_tasty(&bytes).expect("pinned TASTy parse");
+        let packages = loader.session.packages.take_packages();
+        let mut unpickler =
+            TastyUnpickler::with_packages(&file, loader.store, loader.definitions, packages);
+        unpickler
+            .enter_symbols()
+            .expect("the first adapter handoff enters Open into the canonical package scope");
+        let (index, packages) = unpickler.into_parts();
+        let original = index.symbol_at(4).expect("Open TYPEDEF@4 identity");
+        loader.session = LoadingSession::with_packages(packages);
+
+        let package = loader
+            .session
+            .packages
+            .get(&["me", "cytrowski", "tastyfixtures", "visibility"])
+            .expect("the handed-off package identity is retained");
+        let scope = loader.session.packages.scope_of(package).unwrap();
+        let open_name = Name::new(loader.store.names.intern("Open"), Namespace::Type);
+        let original_symbol = loader.store.symbols.get(original).clone();
+        assert_eq!(
+            loader.store.scopes.get(scope).lookup_all(&open_name),
+            &[original]
+        );
+        assert!(loader.session.identified.is_empty());
+        assert!(loader.session.resolved.is_empty());
+
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+        let error = loader
+            .load_open_with_tasty_unpickler(&name)
+            .expect_err("a package declaration survives even when loader caches are fresh");
+        assert!(matches!(
+            error,
+            SemanticTastyLoadError::UnsupportedShape(
+                "the requested class already has a loader identity or package type declaration"
+            )
+        ));
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert!(loader.store.symbols.contains(original));
+        assert_eq!(loader.store.symbols.get(original), &original_symbol);
+        assert_eq!(
+            loader.store.scopes.get(scope).lookup_all(&open_name),
+            &[original]
+        );
+        assert!(loader.session.identified.is_empty());
+        assert!(loader.session.resolved.is_empty());
+        assert!(loader.repository.get(&name).is_none());
+        assert!(!loader.semantic_tasty_loaded.contains_key(&name));
+    }
+
+    #[test]
+    fn adapter_package_collision_guard_keeps_term_namespace_separate() {
+        let name = open_binary_name();
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let package = loader
+            .session
+            .packages
+            .resolve_package(loader.store, name.package_path());
+        let scope = loader.session.packages.scope_of(package).unwrap();
+        let term_name = Name::new(loader.store.names.intern("Open"), Namespace::Term);
+        let term = loader.store.symbols.alloc(Symbol {
+            name: term_name,
+            owner: Some(package),
+            kind: SymbolKind::Object,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        loader.store.scopes.get_mut(scope).enter(term_name, term);
+
+        let loaded = loader
+            .load_open_with_tasty_unpickler(&name)
+            .expect("a term-namespace declaration does not collide with the requested class type");
+        let type_name = Name::new(loader.store.names.intern("Open"), Namespace::Type);
+        assert_eq!(
+            loader.store.scopes.get(scope).lookup_all(&type_name),
+            &[loaded]
+        );
+        assert_eq!(
+            loader.store.scopes.get(scope).lookup_all(&term_name),
+            &[term]
+        );
+    }
+
+    #[test]
+    fn adapter_missing_malformed_unsupported_and_duplicate_controls_are_typed_and_atomic() {
+        let name = open_binary_name();
+        let jmods = || {
+            let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for Object");
+            crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+                .expect("real JDK classpath")
+        };
+
+        // Missing resource is rejected before any semantic transaction begins.
+        let mut missing_store = SemanticStore::new();
+        let mut missing_loader = ClassLoader::new(
+            CompositeClassPath::new(vec![
+                Box::new(InMemoryTastyClassPath(HashMap::new())),
+                Box::new(jmods()),
+            ]),
+            &mut missing_store,
+        );
+        let missing_mark = missing_loader.store.checkpoint();
+        assert!(matches!(
+            missing_loader.load_open_with_tasty_unpickler(&name),
+            Err(SemanticTastyLoadError::ClassLoad(ClassLoadError::NotFound(
+                _
+            )))
+        ));
+        assert_eq!(missing_loader.store.checkpoint(), missing_mark);
+        assert!(missing_loader.session.packages.get(&["scala"]).is_none());
+
+        // Truncated TASTy is a typed file error and leaves bootstrap state intact.
+        let mut malformed_store = SemanticStore::new();
+        let malformed = InMemoryTastyClassPath(HashMap::from([(name.clone(), vec![0, 1, 2])]));
+        let mut malformed_loader = ClassLoader::new(
+            CompositeClassPath::new(vec![Box::new(malformed), Box::new(jmods())]),
+            &mut malformed_store,
+        );
+        let malformed_mark = malformed_loader.store.checkpoint();
+        assert!(matches!(
+            malformed_loader.load_open_with_tasty_unpickler(&name),
+            Err(SemanticTastyLoadError::ClassLoad(
+                ClassLoadError::InvalidTastyFile(_, _)
+            ))
+        ));
+        assert_eq!(malformed_loader.store.checkpoint(), malformed_mark);
+        assert!(malformed_loader.session.packages.get(&["scala"]).is_none());
+
+        // A class-file resource selected under the requested name is explicitly unsupported.
+        let mut unsupported_store = SemanticStore::new();
+        let class_bytes = fixture_bytes("nested_sample/NestedSample.class");
+        let unsupported = InMemoryClassPath(HashMap::from([(name.clone(), class_bytes)]));
+        let mut unsupported_loader = ClassLoader::new(
+            CompositeClassPath::new(vec![Box::new(unsupported), Box::new(jmods())]),
+            &mut unsupported_store,
+        );
+        let unsupported_mark = unsupported_loader.store.checkpoint();
+        assert!(matches!(
+            unsupported_loader.load_open_with_tasty_unpickler(&name),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected classpath resource is not TASTy"
+            ))
+        ));
+        assert_eq!(unsupported_loader.store.checkpoint(), unsupported_mark);
+        assert!(
+            unsupported_loader
+                .session
+                .packages
+                .get(&["scala"])
+                .is_none()
+        );
+
+        // The legacy identity remains canonical, and the adapter refuses a duplicate identity.
+        let mut duplicate_store = SemanticStore::new();
+        let mut duplicate_loader = ClassLoader::new(open_test_class_path(), &mut duplicate_store);
+        let legacy = duplicate_loader
+            .load_class(&name)
+            .expect("legacy default load");
+        let duplicate_mark = duplicate_loader.store.checkpoint();
+        assert!(matches!(
+            duplicate_loader.load_open_with_tasty_unpickler(&name),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "the requested class already has a loader identity or package type declaration"
+            ))
+        ));
+        assert_eq!(duplicate_loader.store.checkpoint(), duplicate_mark);
+        assert_eq!(duplicate_loader.load_class(&name).unwrap(), legacy);
+    }
+
+    #[test]
+    fn unit_experiment_records_bootstrap_identity_and_unbound_baseline() {
+        let mut store = SemanticStore::new();
+        let loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let definitions = loader.definitions();
+        let unit = unit_type_ref_target(loader.store, definitions.unit).expect("Unit TypeRef");
+        let builtin = loader.store.symbols.get(unit);
+        assert_eq!(builtin.name.namespace(), Namespace::Type);
+        assert_eq!(loader.store.names.resolve(builtin.name.text()), "Unit");
+        assert_eq!(builtin.owner, None);
+        assert_eq!(builtin.kind, SymbolKind::Class);
+        assert_eq!(builtin.origin, SymbolOrigin::Builtin);
+        assert_eq!(builtin.info, SymbolInfo::Missing);
+        assert!(loader.session.packages.get(&["scala"]).is_none());
+    }
+
+    #[test]
+    fn unit_experiment_resolves_serialized_address_25_to_canonical_unit_before_completion() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let unit = loader
+            .bind_open_builtin_unit()
+            .expect("canonical Unit binding");
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty",
+        );
+        let bytes = fs::read(fixture_path).expect("pinned Open TASTy fixture");
+        let file = tasty_symbol::parse_classloader_tasty(&bytes).expect("pinned TASTy parse");
+        let packages = loader.session.packages.take_packages();
+        let mut unpickler =
+            TastyUnpickler::with_packages(&file, loader.store, loader.definitions, packages);
+        unpickler
+            .enter_symbols()
+            .expect("enter Open before resolving its reference");
+        let unit_reference = unpickler
+            .unpickle_type(25)
+            .expect("serialized TYPEREF at address 25");
+        let (index, mut packages) = unpickler.into_parts();
+        loader.session.packages.swap_packages(&mut packages);
+        assert!(index.symbol_at(4).is_some(), "Open TYPEDEF@4 is entered");
+        assert_eq!(
+            unit_type_ref_target(loader.store, unit_reference),
+            Some(unit)
+        );
+        assert!(
+            matches!(loader.store.symbols.get(unit).info, SymbolInfo::Missing),
+            "the constructor has not yet completed Unit or its result tree"
+        );
+    }
+
+    #[test]
+    fn unit_experiment_binds_the_canonical_identity_with_explicit_owner_binding() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let unit = loader
+            .bind_open_builtin_unit()
+            .expect("canonical Unit binding");
+        assert_eq!(loader.bind_open_builtin_unit().unwrap(), unit);
+        let term_unit = Name::new(loader.store.names.intern("Unit"), Namespace::Term);
+        let scala = loader.session.packages.get(&["scala"]).unwrap();
+        let scala_scope = loader.session.packages.scope_of(scala).unwrap();
+        let term_symbol = loader.store.symbols.alloc(Symbol {
+            name: term_unit,
+            owner: Some(scala),
+            kind: SymbolKind::Value,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        loader
+            .store
+            .scopes
+            .get_mut(scala_scope)
+            .enter(term_unit, term_symbol);
+        assert_eq!(loader.store.symbols.get(unit).owner, Some(scala));
+        let open = loader
+            .load_open_with_tasty_unpickler(&open_binary_name())
+            .expect("constructor should resolve the bound canonical Unit");
+        let repeated = loader
+            .load_open_with_tasty_unpickler(&open_binary_name())
+            .expect("repeat load should return the cached identity");
+        let info = class_info(loader.store, open).clone();
+        let constructor_name = Name::new(loader.store.names.intern("<init>"), Namespace::Term);
+        let constructor = loader
+            .store
+            .scopes
+            .get(info.declarations)
+            .lookup(&constructor_name)
+            .unwrap();
+        let Type::Method(method) =
+            loader
+                .store
+                .types
+                .get(match loader.store.symbols.get(constructor).info {
+                    SymbolInfo::Complete(ty) => ty,
+                    _ => panic!("constructor should be complete"),
+                })
+        else {
+            panic!("constructor should have a method type");
+        };
+        assert_eq!(method.params.len(), 0);
+        assert_eq!(
+            unit_type_ref_target(loader.store, method.result),
+            Some(open)
+        );
+        assert_eq!(loader.store.symbols.get(constructor).owner, Some(open));
+        assert_eq!(loader.store.symbols.get(unit).owner, Some(scala));
+        assert_eq!(loader.store.symbols.get(unit).kind, SymbolKind::Class);
+        assert_eq!(repeated, open);
+        assert_eq!(
+            loader.store.scopes.get(scala_scope).lookup_all(&Name::new(
+                loader.store.names.intern("Unit"),
+                Namespace::Type
+            )),
+            &[unit]
+        );
+        assert_eq!(
+            loader.store.scopes.get(scala_scope).lookup_all(&term_unit),
+            &[term_symbol]
+        );
+    }
+
+    #[test]
+    fn unit_experiment_is_structurally_deterministic_across_fresh_stores() {
+        fn summary() -> (String, String, String, usize) {
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+            let unit = loader
+                .bind_open_builtin_unit()
+                .expect("canonical Unit binding");
+            let open = loader
+                .load_open_with_tasty_unpickler(&open_binary_name())
+                .expect("Open projection");
+            let class = class_info(loader.store, open).clone();
+            let constructor_name = Name::new(loader.store.names.intern("<init>"), Namespace::Term);
+            let constructor = loader
+                .store
+                .scopes
+                .get(class.declarations)
+                .lookup(&constructor_name)
+                .unwrap();
+            let SymbolInfo::Complete(constructor_type) = loader.store.symbols.get(constructor).info
+            else {
+                panic!("constructor should be complete");
+            };
+            let Type::Method(method) = loader.store.types.get(constructor_type) else {
+                panic!("constructor should have a method type");
+            };
+            assert_eq!(
+                unit_type_ref_target(loader.store, method.result),
+                Some(open)
+            );
+            assert_eq!(loader.store.symbols.get(unit).kind, SymbolKind::Class);
+            (
+                loader
+                    .store
+                    .names
+                    .resolve(loader.store.symbols.get(open).name.text())
+                    .to_owned(),
+                loader
+                    .store
+                    .names
+                    .resolve(loader.store.symbols.get(open).name.text())
+                    .to_owned(),
+                loader
+                    .store
+                    .names
+                    .resolve(
+                        loader
+                            .store
+                            .symbols
+                            .get(
+                                loader
+                                    .store
+                                    .types
+                                    .get(class.parents[0])
+                                    .reference_symbol()
+                                    .unwrap(),
+                            )
+                            .name
+                            .text(),
+                    )
+                    .to_owned(),
+                method.params.len(),
+            )
+        }
+        assert_eq!(summary(), summary());
+    }
+
+    #[test]
+    fn unit_experiment_late_failure_rolls_back_projection_and_retries() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let _unit = loader
+            .bind_open_builtin_unit()
+            .expect("canonical Unit binding");
+        let name = open_binary_name();
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+        let package_mark = loader.session.packages.checkpoint();
+        let object_before = loader
+            .store
+            .symbols
+            .get(loader.definitions.object_class)
+            .clone();
+
+        let projected = loader
+            .load_open_with_tasty_unpickler(&name)
+            .expect("root and constructor should complete before injected late failure");
+        let constructor_name = Name::new(loader.store.names.intern("<init>"), Namespace::Term);
+        let declarations = class_info(loader.store, projected).declarations;
+        let constructor = loader
+            .store
+            .scopes
+            .get(declarations)
+            .lookup(&constructor_name)
+            .expect("projected constructor");
+        let Type::Method(method) =
+            loader
+                .store
+                .types
+                .get(match loader.store.symbols.get(constructor).info {
+                    SymbolInfo::Complete(ty) => ty,
+                    _ => panic!("constructor projection should be complete"),
+                })
+        else {
+            panic!("constructor projection should be a method");
+        };
+        assert_eq!(method.params.len(), 0);
+        assert_eq!(
+            unit_type_ref_target(loader.store, method.result),
+            Some(projected)
+        );
+
+        // Simulate an enclosing loader transaction rejecting a later phase
+        // after the adapter has performed real projection work.
+        let injected_late_failure: Result<(), &'static str> = Err("injected after projection");
+        assert_eq!(injected_late_failure, Err("injected after projection"));
+        loader.session.rollback_to(loader.store, session_mark);
+        *loader
+            .store
+            .symbols
+            .get_mut(loader.definitions.object_class) = object_before.clone();
+        loader.store.rollback_to(store_mark);
+        loader.repository.discard_rolled_back_symbols(loader.store);
+        loader.semantic_tasty_loaded.remove(&name);
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert_eq!(loader.session.packages.checkpoint(), package_mark);
+        let unit = unit_type_ref_target(loader.store, loader.definitions.unit).unwrap();
+        let scala = loader.session.packages.get(&["scala"]).unwrap();
+        assert_eq!(loader.store.symbols.get(unit).owner, Some(scala));
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(loader.session.packages.scope_of(scala).unwrap())
+                .lookup_all(&Name::new(
+                    loader.store.names.intern("Unit"),
+                    Namespace::Type
+                )),
+            &[unit]
+        );
+        assert_eq!(
+            loader.store.symbols.get(loader.definitions.object_class),
+            &object_before
+        );
+        assert!(!loader.session.resolved.contains_key(&name));
+        assert!(loader.repository.get(&name).is_none());
+        assert!(!loader.semantic_tasty_loaded.contains_key(&name));
+
+        let retried = loader
+            .load_open_with_tasty_unpickler(&name)
+            .expect("retry after rollback should complete the same shape");
+        assert_eq!(
+            retried, projected,
+            "rollback should release ids for deterministic retry"
+        );
+        assert!(matches!(
+            loader.store.symbols.get(retried).info,
+            SymbolInfo::Complete(_)
+        ));
+    }
+
+    #[test]
+    fn unit_experiment_rejects_type_collision_and_invalid_builtin_state() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let scala = loader
+            .session
+            .packages
+            .resolve_package(loader.store, "scala");
+        let scope = loader.session.packages.scope_of(scala).unwrap();
+        let collision = loader.store.symbols.alloc(Symbol {
+            name: Name::new(loader.store.names.intern("Unit"), Namespace::Type),
+            owner: Some(scala),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        loader.store.scopes.get_mut(scope).enter(
+            Name::new(loader.store.names.intern("Unit"), Namespace::Type),
+            collision,
+        );
+        assert!(matches!(
+            loader.bind_open_builtin_unit(),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "scala has a conflicting Unit type binding or owner"
+            ))
+        ));
+
+        let unit = unit_type_ref_target(loader.store, loader.definitions.unit).unwrap();
+        loader.store.symbols.get_mut(unit).origin = SymbolOrigin::Synthetic;
+        assert!(matches!(
+            loader.bind_open_builtin_unit(),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "Definitions::unit has an invalid prior state"
+            ))
+        ));
     }
 
     /// A hand-built, minimal, synthetic class file: JVMS §4.1 header +
