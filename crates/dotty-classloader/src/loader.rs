@@ -527,6 +527,7 @@ pub struct ClassLoader<'store, E> {
     definitions: Definitions,
     #[allow(dead_code)]
     semantic_tasty_loaded: HashMap<BinaryName, SymbolId>,
+    option_get_or_else_tasty_loaded: Option<(SymbolId, SymbolId)>,
 }
 
 /// Canonical term/type identities for a top-level Scala object.
@@ -799,6 +800,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             collect_load_profiles: false,
             definitions,
             semantic_tasty_loaded: HashMap::new(),
+            option_get_or_else_tasty_loaded: None,
         }
     }
 
@@ -1031,6 +1033,250 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.repository.discard_rolled_back_symbols(self.store);
                 Err(error)
             }
+        }
+    }
+
+    /// Opt-in projection of the one measured member from the frozen Scala
+    /// library fixture. This is deliberately separate from `load_class` and
+    /// does not complete or cache `scala.Option` as a loaded class.
+    #[allow(dead_code)]
+    pub(crate) fn load_option_get_or_else_with_tasty_unpickler(
+        &mut self,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        const OPTION: &str = "scala/Option";
+        const ROOT_ADDRESS: u32 = 507;
+        const METHOD_ADDRESS: u32 = 666;
+
+        if let Some((_, method)) = self.option_get_or_else_tasty_loaded {
+            return Ok(method);
+        }
+        let name = BinaryName::from_internal(OPTION);
+        if self.session.identified.contains_key(&name)
+            || self.session.resolved.contains_key(&name)
+            || self.repository.get(&name).is_some()
+            || self.open_package_contains_type_declaration(&name)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "scala.Option already has a loader identity or package declaration",
+            ));
+        }
+        let resource = self
+            .class_path
+            .find_class(&name)
+            .map_err(|error| {
+                SemanticTastyLoadError::ClassLoad(ClassLoadError::Io(name.clone(), Rc::new(error)))
+            })?
+            .ok_or_else(|| {
+                SemanticTastyLoadError::ClassLoad(ClassLoadError::NotFound(name.clone()))
+            })?;
+        if resource.format() != ClassFormat::Tasty {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected scala.Option resource is not TASTy",
+            ));
+        }
+        let file = tasty_symbol::parse_classloader_tasty(resource.bytes()).map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(name.clone(), error))
+        })?;
+
+        let store_checkpoint = self.store.checkpoint();
+        let session_checkpoint = self.session.checkpoint();
+        let package_scope_before = self.snapshot_option_package_scope();
+        let aliases_before = self.snapshot_open_builtin_aliases();
+        let result = {
+            let packages = self.session.packages.take_packages();
+            // getOrElse's selected type references only its entered owner and
+            // the canonical compiler builtin `scala.Any`. Keep the resolver
+            // closed to classpath traversal so any new external dependency
+            // remains an explicit unpickler failure.
+            let resolver = crate::resolver::ClasspathSymbolResolver::new(
+                crate::class_path::CompositeClassPath::new(Vec::new()),
+                self.definitions,
+                LoadingSession::new(),
+            );
+            let tasty_session = TastySession::with_packages(packages)
+                .with_resolver(Box::new(resolver))
+                .expect("fresh classpath resolver owns no competing package authority");
+            let mut unpickler =
+                TastyUnpickler::with_session(&file, self.store, self.definitions, tasty_session);
+            let result = (|| {
+                unpickler
+                    .enter_symbols()
+                    .map_err(|error| SemanticTastyLoadError::Unpickle { address: 0, error })?;
+                let root = unpickler.index().symbol_at(ROOT_ADDRESS).ok_or(
+                    SemanticTastyLoadError::UnsupportedShape(
+                        "Option.tasty has no root symbol at TYPEDEF@507",
+                    ),
+                )?;
+                let method = unpickler.index().symbol_at(METHOD_ADDRESS).ok_or(
+                    SemanticTastyLoadError::UnsupportedShape(
+                        "Option.tasty has no entered member at DEFDEF@666",
+                    ),
+                )?;
+                let method_type = unpickler.complete_symbol(METHOD_ADDRESS).map_err(|error| {
+                    SemanticTastyLoadError::Unpickle {
+                        address: METHOD_ADDRESS,
+                        error,
+                    }
+                })?;
+                Ok((root, method, method_type))
+            })();
+            let (_, mut packages) = unpickler.into_parts();
+            self.session.packages.swap_packages(&mut packages);
+            result
+        };
+
+        let result = result.and_then(|(root, method, method_type)| {
+            self.validate_option_get_or_else_symbols(&name, root, method, method_type)?;
+            Ok((root, method))
+        });
+        match result {
+            Ok((root, method)) => {
+                self.session.record_origin(root, resource.origin().clone());
+                self.session
+                    .record_origin(method, resource.origin().clone());
+                self.option_get_or_else_tasty_loaded = Some((root, method));
+                Ok(method)
+            }
+            Err(error) => {
+                self.remove_option_package_insertions(package_scope_before);
+                self.session.rollback_to(self.store, session_checkpoint);
+                self.restore_open_builtin_aliases(aliases_before);
+                self.store.rollback_to(store_checkpoint);
+                self.repository.discard_rolled_back_symbols(self.store);
+                Err(error)
+            }
+        }
+    }
+
+    fn validate_option_get_or_else_symbols(
+        &self,
+        name: &BinaryName,
+        root: SymbolId,
+        method: SymbolId,
+        method_type: TypeId,
+    ) -> Result<(), SemanticTastyLoadError> {
+        let root_symbol = self.store.symbols.get(root);
+        if !matches!(root_symbol.kind, SymbolKind::Class | SymbolKind::Trait)
+            || !symbol_matches_binary_name(self.store, root, name)
+            || root_symbol.info != SymbolInfo::Missing
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "Option root identity or unloaded state changed during selected member projection",
+            ));
+        }
+        let member = self.store.symbols.get(method);
+        if member.kind != SymbolKind::Method
+            || member.owner != Some(root)
+            || self.store.names.resolve(member.name.text()) != "getOrElse"
+            || member.info != SymbolInfo::Complete(method_type)
+            || member.visibility != Visibility::Public
+            || !member.flags.contains(SymbolFlags::FINAL)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "DEFDEF@666 is not the completed getOrElse member owned by scala.Option",
+            ));
+        }
+        let Type::Poly(poly) = self.store.types.get(method_type) else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "getOrElse@666 did not retain its method type parameter",
+            ));
+        };
+        if poly.params.len() != 1
+            || self
+                .store
+                .names
+                .resolve(poly.params[0].name.as_name().text())
+                != "B"
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "getOrElse@666 no longer has its selected method-local B binder",
+            ));
+        }
+        let Type::Bounds { low, high } = self.store.types.get(poly.params[0].bounds) else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "getOrElse.B no longer has its bounded Scala 3.9 shape",
+            ));
+        };
+        let Some(option_a) = type_ref_symbol(self.store, *low) else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "getOrElse.B lower bound is not the owner's Option.A parameter",
+            ));
+        };
+        if self.store.symbols.get(option_a).owner != Some(root)
+            || self
+                .store
+                .names
+                .resolve(self.store.symbols.get(option_a).name.text())
+                != "A"
+            || type_ref_symbol(self.store, *high) != Some(self.definitions.any_class)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "getOrElse.B bounds differ from Option.A .. Any",
+            ));
+        }
+        let Type::Method(method_ty) = self.store.types.get(poly.result) else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "getOrElse.B does not lead to one ordinary method clause",
+            ));
+        };
+        if method_ty.kind != MethodKind::Plain || method_ty.params.len() != 1 {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "getOrElse does not have its selected single plain parameter clause",
+            ));
+        }
+        let default = method_ty.params[0];
+        if self.store.names.resolve(default.name.as_name().text()) != "default" {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "getOrElse's selected method parameter is not default",
+            ));
+        }
+        let Type::ByName {
+            result: default_type,
+        } = self.store.types.get(default.ty)
+        else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "getOrElse.default is not projected as a by-name parameter",
+            ));
+        };
+        if !matches!(
+            self.store.types.get(*default_type),
+            Type::ParamRef { binder, index: 0 } if *binder == method_type
+        ) || !matches!(
+            self.store.types.get(method_ty.result),
+            Type::ParamRef { binder, index: 0 } if *binder == method_type
+        ) {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "getOrElse.default and result do not share the original B binder",
+            ));
+        }
+        Ok(())
+    }
+
+    fn snapshot_option_package_scope(&self) -> Option<(ScopeId, HashSet<SymbolId>)> {
+        let package = self.session.packages.get(&["scala"])?;
+        let scope = self.session.packages.scope_of(package)?;
+        Some((
+            scope,
+            self.store.scopes.get(scope).entered_symbols().collect(),
+        ))
+    }
+
+    fn remove_option_package_insertions(&mut self, before: Option<(ScopeId, HashSet<SymbolId>)>) {
+        let Some((scope, before)) = before else {
+            return;
+        };
+        if !self.store.scopes.contains(scope) {
+            return;
+        }
+        let inserted = self
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .filter(|symbol| !before.contains(symbol))
+            .collect::<HashSet<_>>();
+        for symbol in inserted {
+            self.store.scopes.get_mut(scope).remove(symbol);
         }
     }
 
@@ -6431,8 +6677,10 @@ mod tests {
         }
     }
 
+    type SharedTastyResources = Arc<std::sync::Mutex<HashMap<BinaryName, Vec<u8>>>>;
+
     #[derive(Clone)]
-    struct SharedTastyClassPath(Arc<std::sync::Mutex<HashMap<BinaryName, Vec<u8>>>>);
+    struct SharedTastyClassPath(SharedTastyResources);
 
     impl ClassPathEntry for SharedTastyClassPath {
         fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
@@ -6531,6 +6779,43 @@ mod tests {
         let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
             .expect("real JDK classpath");
         CompositeClassPath::new(vec![Box::new(fixtures), Box::new(jdk)])
+    }
+
+    fn option_get_or_else_class_path(selected_option: SharedTastyClassPath) -> CompositeClassPath {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let tasty_fixtures = root.join("../dotty-tasty/tests/fixtures");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for Scala library");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK classpath");
+        CompositeClassPath::new(vec![
+            Box::new(crate::class_path::DirectoryClassPath::new(
+                root.join("tests/fixtures/tasty_sample"),
+            )),
+            Box::new(crate::class_path::DirectoryClassPath::new(
+                root.join("tests/fixtures/tasty_fields"),
+            )),
+            Box::new(crate::class_path::DirectoryClassPath::new(
+                root.join("tests/fixtures/tasty_visibility"),
+            )),
+            Box::new(selected_option),
+            Box::new(crate::class_path::DirectoryClassPath::new(
+                tasty_fixtures.join("scala3-library"),
+            )),
+            Box::new(crate::class_path::DirectoryClassPath::new(
+                tasty_fixtures.join("path_dependent"),
+            )),
+            Box::new(jdk),
+        ])
+    }
+
+    fn option_fixture_shared_path(bytes: Vec<u8>) -> (SharedTastyClassPath, SharedTastyResources) {
+        let name = BinaryName::from_internal("scala/Option");
+        let resources = Arc::new(std::sync::Mutex::new(HashMap::from([(name, bytes)])));
+        (SharedTastyClassPath(resources.clone()), resources)
+    }
+
+    fn option_get_or_else_fixture_bytes() -> Vec<u8> {
+        dotty_tasty_fixture_bytes("scala3-library/scala/Option.tasty")
     }
 
     fn replace_fixture_text(bytes: &mut [u8], from: &[u8], to: &[u8]) {
@@ -6763,6 +7048,233 @@ mod tests {
         assert!(parent_first.2);
         assert!(parent_first.3);
         assert!(parent_first.0.contains("parents=1"));
+    }
+
+    fn option_get_or_else_projection_signature(
+        store: &SemanticStore,
+        root: SymbolId,
+        method: SymbolId,
+        definitions: Definitions,
+    ) -> String {
+        assert!(matches!(
+            store.symbols.get(root).kind,
+            SymbolKind::Class | SymbolKind::Trait
+        ));
+        assert_eq!(store.symbols.get(root).info, SymbolInfo::Missing);
+        assert_eq!(store.symbols.get(method).kind, SymbolKind::Method);
+        assert_eq!(store.symbols.get(method).owner, Some(root));
+        assert_eq!(symbol_name(store, method), "getOrElse");
+        assert_eq!(store.symbols.get(method).visibility, Visibility::Public);
+        assert!(store.symbols.get(method).flags.contains(SymbolFlags::FINAL));
+        let info = match store.symbols.get(method).info {
+            SymbolInfo::Complete(info) => info,
+            other => panic!("getOrElse is not complete: {other:?}"),
+        };
+        let Type::Poly(poly) = store.types.get(info) else {
+            panic!("getOrElse keeps its method type parameter binder");
+        };
+        assert_eq!(poly.params.len(), 1);
+        assert_eq!(
+            store.names.resolve(poly.params[0].name.as_name().text()),
+            "B"
+        );
+        let Type::Bounds { low, high } = store.types.get(poly.params[0].bounds) else {
+            panic!("B retains its lower and upper bounds");
+        };
+        let option_a = type_ref_symbol(store, *low).expect("B lower bound is Option.A");
+        assert_eq!(store.symbols.get(option_a).owner, Some(root));
+        assert_eq!(symbol_name(store, option_a), "A");
+        assert_eq!(type_ref_symbol(store, *high), Some(definitions.any_class));
+        let Type::Method(method_type) = store.types.get(poly.result) else {
+            panic!("B binder leads to the getOrElse method clause");
+        };
+        assert_eq!(method_type.kind, MethodKind::Plain);
+        assert_eq!(method_type.params.len(), 1);
+        let default = method_type.params[0];
+        assert_eq!(
+            store.names.resolve(default.name.as_name().text()),
+            "default"
+        );
+        let Type::ByName {
+            result: default_type,
+        } = store.types.get(default.ty)
+        else {
+            panic!("default retains its by-name parameter type");
+        };
+        assert!(matches!(
+            store.types.get(*default_type),
+            Type::ParamRef { binder, index: 0 } if *binder == info
+        ));
+        assert!(matches!(
+            store.types.get(method_type.result),
+            Type::ParamRef { binder, index: 0 } if *binder == info
+        ));
+        format!(
+            "{}:[{}..{}]=>({}:by-name(ParamRef[0]))Plain:ParamRef[0]",
+            symbol_name(store, root),
+            symbol_name(store, option_a),
+            symbol_name(store, definitions.any_class),
+            store.names.resolve(default.name.as_name().text()),
+        )
+    }
+
+    #[test]
+    fn option_get_or_else_opt_in_loader_is_bounded_cached_and_deterministic() {
+        const EXPECTED_SHA256: &str =
+            "3db4c542a097dfc91e0fd92e0726070cfcde00e32f312b37b5b6d9383475d20d";
+        let bytes = option_get_or_else_fixture_bytes();
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library/scala/Option.tasty");
+        let digest = std::process::Command::new("sha256sum")
+            .arg("--")
+            .arg(fixture_path)
+            .output()
+            .expect("sha256sum is available to fixture tests");
+        assert!(digest.status.success());
+        assert_eq!(
+            String::from_utf8(digest.stdout)
+                .unwrap()
+                .split_whitespace()
+                .next(),
+            Some(EXPECTED_SHA256)
+        );
+
+        let (selected_path, _) = option_fixture_shared_path(bytes.clone());
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(option_get_or_else_class_path(selected_path), &mut store);
+        let method = loader
+            .load_option_get_or_else_with_tasty_unpickler()
+            .expect("the bounded Option member adapter completes getOrElse");
+        let (root, cached_method) = loader
+            .option_get_or_else_tasty_loaded
+            .expect("the selected owner/member pair is cached");
+        assert_eq!(method, cached_method);
+        let repeat_checkpoint = loader.store.checkpoint();
+        assert_eq!(
+            loader
+                .load_option_get_or_else_with_tasty_unpickler()
+                .expect("repeat request succeeds"),
+            method,
+            "repeat request reuses the same selected member identity"
+        );
+        assert_eq!(loader.store.checkpoint(), repeat_checkpoint);
+        assert!(
+            loader
+                .repository
+                .get(&BinaryName::from_internal("scala/Option"))
+                .is_none()
+        );
+        assert!(
+            !loader
+                .session
+                .resolved
+                .contains_key(&BinaryName::from_internal("scala/Option"))
+        );
+        assert_eq!(
+            loader.origin(root),
+            Some(&ClassOrigin::Directory(PathBuf::from("/pair-fixtures")))
+        );
+        assert_eq!(
+            loader.origin(method),
+            Some(&ClassOrigin::Directory(PathBuf::from("/pair-fixtures")))
+        );
+        let signature =
+            option_get_or_else_projection_signature(loader.store, root, method, loader.definitions);
+
+        let (fresh_path, _) = option_fixture_shared_path(bytes);
+        let mut fresh_store = SemanticStore::new();
+        let mut fresh_loader =
+            ClassLoader::new(option_get_or_else_class_path(fresh_path), &mut fresh_store);
+        let fresh_method = fresh_loader
+            .load_option_get_or_else_with_tasty_unpickler()
+            .expect("an independent fresh session completes the selected member");
+        let (fresh_root, _) = fresh_loader.option_get_or_else_tasty_loaded.unwrap();
+        assert_eq!(
+            option_get_or_else_projection_signature(
+                fresh_loader.store,
+                fresh_root,
+                fresh_method,
+                fresh_loader.definitions,
+            ),
+            signature
+        );
+    }
+
+    #[test]
+    fn option_get_or_else_opt_in_loader_rolls_back_entered_scope_and_retries() {
+        let good_bytes = option_get_or_else_fixture_bytes();
+        let mut bad_bytes = good_bytes.clone();
+        replace_fixture_text(&mut bad_bytes, b"getOrElse", b"getOrElsn");
+        let (selected_path, resources) = option_fixture_shared_path(bad_bytes);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(option_get_or_else_class_path(selected_path), &mut store);
+        let prior_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/Animal");
+        let prior_symbol = loader
+            .load_class(&prior_name)
+            .expect("pre-existing classloader identity and origin");
+        let prior_origin = loader.origin(prior_symbol).cloned();
+        assert!(prior_origin.is_some());
+        let package = loader
+            .session
+            .packages
+            .resolve_package(loader.store, "scala");
+        let scope = loader
+            .session
+            .packages
+            .scope_of(package)
+            .expect("pre-existing scala package scope");
+        let package_members = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .collect::<HashSet<_>>();
+        let checkpoint = loader.store.checkpoint();
+        let origins_before = loader.session.origins.clone();
+        let identified_before = loader.session.identified.clone();
+        let resolved_before = loader.session.resolved.clone();
+
+        assert!(matches!(
+            loader.load_option_get_or_else_with_tasty_unpickler(),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "DEFDEF@666 is not the completed getOrElse member owned by scala.Option"
+            ))
+        ));
+        assert_eq!(loader.store.checkpoint(), checkpoint);
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(scope)
+                .entered_symbols()
+                .collect::<HashSet<_>>(),
+            package_members,
+            "failed entry leaves the existing scala declaration scope untouched"
+        );
+        assert_eq!(loader.session.origins, origins_before);
+        assert_eq!(loader.session.identified, identified_before);
+        assert_eq!(loader.session.resolved, resolved_before);
+        assert_eq!(loader.origin(prior_symbol), prior_origin.as_ref());
+        assert_eq!(loader.session.packages.get(&["scala"]), Some(package));
+        assert!(loader.option_get_or_else_tasty_loaded.is_none());
+        assert!(loader.semantic_tasty_loaded.is_empty());
+        assert!(
+            loader
+                .repository
+                .get(&BinaryName::from_internal("scala/Option"))
+                .is_none()
+        );
+
+        *resources.lock().unwrap() =
+            HashMap::from([(BinaryName::from_internal("scala/Option"), good_bytes)]);
+        let method = loader
+            .load_option_get_or_else_with_tasty_unpickler()
+            .expect("retry after failure completes the original selected member");
+        let (root, cached_method) = loader.option_get_or_else_tasty_loaded.unwrap();
+        assert_eq!(method, cached_method);
+        assert_eq!(loader.store.symbols.get(method).owner, Some(root));
+        assert!(loader.origin(root).is_some());
+        assert!(loader.origin(method).is_some());
     }
 
     #[test]
