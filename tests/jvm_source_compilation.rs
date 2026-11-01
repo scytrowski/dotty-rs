@@ -60,6 +60,13 @@ type SourceSemanticObserver<'observer> = dyn for<'a> FnMut(
         &mut JvmCompilationUnit<'a>,
         &Definitions,
     ) + 'observer;
+type SourceTyperObserver<'observer> = dyn for<'a> FnMut(
+        &AstArena<Untyped>,
+        TreeId<Untyped>,
+        &SourceSemanticIndex,
+        &mut SourceTyper<'a>,
+        &Definitions,
+    ) + 'observer;
 type TyperFailureObserver<'observer> =
     dyn for<'a> FnMut(&AstArena<Untyped>, &SourceTyper<'a>, &TyperError) + 'observer;
 type SourceFailureExpectation = (&'static str, &'static str, fn(&PipelineFailure) -> bool);
@@ -69,6 +76,7 @@ struct SourceBatchObservers<'observer> {
     batch: Option<&'observer mut SourceBatchObserver<'observer>>,
     typer_failure: Option<&'observer mut TyperFailureObserver<'observer>>,
     source: Option<&'observer mut SourceSemanticObserver<'observer>>,
+    typer: Option<&'observer mut SourceTyperObserver<'observer>>,
 }
 
 #[derive(Debug)]
@@ -303,6 +311,29 @@ fn compile_source_batch_with_source_observer<'observer>(
     )
 }
 
+fn compile_source_batch_with_typer_and_source_observer<'observer>(
+    source_text: &str,
+    source_file_name: &str,
+    output_directory: &Path,
+    source_id: SourceId,
+    cardinality: SourceUnitCardinality,
+    observe_typer: &'observer mut SourceTyperObserver<'observer>,
+    observe_source: &'observer mut SourceSemanticObserver<'observer>,
+) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
+    compile_source_batch_with_typer_failure_observer(
+        source_text,
+        source_file_name,
+        output_directory,
+        source_id,
+        cardinality,
+        SourceBatchObservers {
+            source: Some(observe_source),
+            typer: Some(observe_typer),
+            ..SourceBatchObservers::default()
+        },
+    )
+}
+
 fn compile_source_batch_with_typer_failure_observer(
     source_text: &str,
     source_file_name: &str,
@@ -315,6 +346,7 @@ fn compile_source_batch_with_typer_failure_observer(
         batch: mut observe,
         typer_failure: mut observe_typer_failure,
         source: mut observe_source,
+        typer: mut observe_typer,
     } = observers;
     let source = SourceText::new(source_text)
         .map_err(|error| PipelineFailure::SourceText(error.to_string()))?;
@@ -702,6 +734,9 @@ fn compile_source_batch_with_typer_failure_observer(
         });
     }
 
+    if let Some(observer) = observe_typer.as_mut() {
+        observer(&parsed.ast, parsed.root, &index, &mut typer, &definitions);
+    }
     let mut unit = JvmCompilationUnit {
         store: typer.store(),
         typed_ast: typer.typed_ast(),
@@ -25446,4 +25481,440 @@ fn cross_class_private_method_call_reports_its_first_backend_failure() {
         ),
         "{error:?}"
     );
+}
+
+#[test]
+fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proof_error() {
+    use dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs;
+
+    const SOURCE: &str =
+        include_str!("fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala");
+    let source_id = SourceId::from_index(19601);
+    let output = TestOutputDirectory::new("dual-reference-forwarding");
+    let mut proof_error = None;
+    let mut pickler_error = None;
+    let mut stale_error = None;
+    let mut observed_jvm_bytes = None;
+    let mut observed = false;
+    let mut observe_typer = |ast: &AstArena<Untyped>,
+                             source_root: TreeId<Untyped>,
+                             index: &SourceSemanticIndex,
+                             typer: &mut SourceTyper<'_>,
+                             definitions: &Definitions| {
+        struct Bindings<'a> {
+            typed: &'a SourceTypedIndex,
+            classes: Vec<SymbolId>,
+            methods: Vec<SymbolId>,
+        }
+        impl dotty_tasty_pickler::SourceTypedBindings for Bindings<'_> {
+            fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
+                self.typed.get(source, tree)
+            }
+            fn planned_class_symbols(&self) -> &[SymbolId] {
+                &self.classes
+            }
+            fn planned_method_symbols(&self) -> &[SymbolId] {
+                &self.methods
+            }
+        }
+        let TreeKind::PackageDef(package) = &ast.get(source_root).kind else {
+            panic!("unit root is package")
+        };
+        let mut classes = Vec::new();
+        let mut methods = Vec::new();
+        let mut factory_data = None;
+        for &tree in &package.stats {
+            let TreeKind::TypeDef(definition) = &ast.get(tree).kind else {
+                continue;
+            };
+            let class = index.symbol_at(source_id, tree).unwrap();
+            classes.push(class);
+            let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
+                continue;
+            };
+            for &member_tree in &template.body {
+                if let Some(symbol) = index.symbol_at(source_id, member_tree) {
+                    methods.push(symbol);
+                }
+                if let TreeKind::DefDef(method_def) = &ast.get(member_tree).kind
+                    && typer
+                        .store()
+                        .names
+                        .resolve(method_def.name.as_name().text())
+                        == "wrap"
+                {
+                    factory_data = Some((class, tree, template.constructor, member_tree));
+                }
+            }
+        }
+        let (factory, class_tree, constructor_tree, method_tree) = factory_data.unwrap();
+        let constructor = index.symbol_at(source_id, constructor_tree).unwrap();
+        typer.complete_symbol(constructor).unwrap();
+        let TreeKind::DefDef(constructor_def) = &ast.get(constructor_tree).kind else {
+            panic!("default constructor is a source definition")
+        };
+        let constructor_params = constructor_def
+            .value_param_clauses
+            .iter()
+            .map(|clause| {
+                clause
+                    .iter()
+                    .map(|tree| index.symbol_at(source_id, *tree).unwrap())
+                    .collect()
+            })
+            .collect();
+        let method = index.symbol_at(source_id, method_tree).unwrap();
+        let members = [dotty_tasty_pickler::ClassMemberPicklePlan::Method {
+            symbol: method,
+            source_tree: method_tree,
+        }];
+        let bindings = Bindings {
+            typed: typer.source_typed_index(),
+            classes,
+            methods,
+        };
+        let state = dotty_tasty_pickler::ClassStatePicklePlan {
+            store: typer.store(),
+            definitions,
+            source_ast: ast,
+            typed_ast: typer.typed_ast(),
+            source_index: index,
+            typed_bindings: &bindings,
+            source: dotty_tasty_pickler::SourceMetadata {
+                id: source_id,
+                name: "PairFactory.scala".into(),
+            },
+            class: factory,
+            class_tree,
+            constructor: dotty_tasty_pickler::PrimaryConstructorInputPlan {
+                symbol: constructor,
+                source_tree: constructor_tree,
+                parameter_clauses: constructor_params,
+            },
+            members: &members,
+        };
+        pickler_error = Some(match state.validate() {
+            Ok(validated) => match validated.distinct_reference_method_signature(method) {
+                Ok(_) => "Ok(signature accepted)".to_owned(),
+                Err(error) => format!("Err({error:?})"),
+            },
+            Err(error) => format!("Err(class-state {error:?})"),
+        });
+    };
+    let mut observe_source = |ast: &AstArena<Untyped>,
+                              source_root: TreeId<Untyped>,
+                              index: &SourceSemanticIndex,
+                              source_typed_index: &SourceTypedIndex,
+                              unit: &mut JvmCompilationUnit<'_>,
+                              definitions: &Definitions| {
+        observed = true;
+        let counter = audit_class_named(unit, "Counter");
+        let pair = audit_class_named(unit, "Pair");
+        let factory = audit_class_named(unit, "PairFactory");
+        assert_eq!(
+            unit.classes
+                .iter()
+                .map(|plan| unit
+                    .store
+                    .names
+                    .resolve(unit.store.symbols.get(plan.class).name.text()))
+                .collect::<Vec<_>>(),
+            ["Counter", "Pair", "PairFactory"]
+        );
+        let source_method = ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if unit.store.names.resolve(definition.name.as_name().text()) == "wrap" =>
+                {
+                    Some((tree, definition))
+                }
+                _ => None,
+            })
+            .expect("original source declares PairFactory.wrap");
+        let method = index.symbol_at(source_id, source_method.0).unwrap();
+        assert_eq!(unit.store.symbols.get(method).owner, Some(factory));
+        let [first_tree, second_tree] = source_method.1.value_param_clauses[0].as_slice() else {
+            panic!("wrap has exactly two ordered formals");
+        };
+        let first = index.symbol_at(source_id, *first_tree).unwrap();
+        let second = index.symbol_at(source_id, *second_tree).unwrap();
+        assert_ne!(first, second);
+        for (tree, symbol, name) in [
+            (*first_tree, first, "first"),
+            (*second_tree, second, "second"),
+        ] {
+            assert_eq!(unit.store.symbols.get(symbol).owner, Some(method));
+            assert_eq!(
+                unit.store
+                    .names
+                    .resolve(unit.store.symbols.get(symbol).name.text()),
+                name
+            );
+            assert!(
+                matches!(index.definition_of(symbol), Some(SourceDefinition::Canonical { source, tree: actual }) if source == source_id && actual == tree)
+            );
+            assert_eq!(source_typed_index.get(source_id, tree), None);
+            assert!(
+                matches!(unit.store.symbols.get(symbol).info, SymbolInfo::Complete(ty) if matches!(unit.store.types.get(ty), Type::TypeRef { target: TypeRefTarget::Symbol(target), .. } if *target == counter))
+            );
+        }
+        let SymbolInfo::Complete(method_type) = unit.store.symbols.get(method).info else {
+            panic!("wrap signature is completed in the source session");
+        };
+        let Type::Method(signature) = unit.store.types.get(method_type) else {
+            panic!("wrap has an ordinary method signature");
+        };
+        assert_eq!(signature.params.len(), 2);
+        assert!(signature.params.iter().all(|parameter| matches!(unit.store.types.get(parameter.ty), Type::TypeRef { target: TypeRefTarget::Symbol(target), .. } if *target == counter)));
+        assert_eq!(audit_type_symbol(unit, signature.result), Some(pair));
+        let pair_source = index.definition_of(pair).unwrap();
+        let SourceDefinition::Canonical {
+            tree: pair_tree, ..
+        } = pair_source
+        else {
+            panic!("Pair is canonical source")
+        };
+        let TreeKind::TypeDef(pair_def) = &ast.get(pair_tree).kind else {
+            panic!("Pair is a class definition")
+        };
+        let TreeKind::Template(pair_template) = &ast.get(pair_def.rhs).kind else {
+            panic!("Pair has a template")
+        };
+        let pair_constructor = index
+            .symbol_at(source_id, pair_template.constructor)
+            .unwrap();
+        let TreeKind::DefDef(pair_constructor_def) = &ast.get(pair_template.constructor).kind
+        else {
+            panic!("Pair has a primary constructor")
+        };
+        let pair_template_formals = pair_constructor_def.value_param_clauses[0]
+            .iter()
+            .map(|tree| index.symbol_at(source_id, *tree).unwrap())
+            .collect::<Vec<_>>();
+        let pair_constructor_formals = pair_constructor_def.value_param_clauses[0]
+            .iter()
+            .map(|tree| {
+                index
+                    .derived_symbol_at(pair_constructor, source_id, *tree)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pair_constructor_formals.len(), 2);
+        assert!(
+            pair_constructor_formals
+                .iter()
+                .all(|symbol| unit.store.symbols.get(*symbol).owner == Some(pair_constructor))
+        );
+
+        let source_rhs = source_method.1.rhs.unwrap();
+        let TreeKind::Apply(source_outer) = &ast.get(source_rhs).kind else {
+            panic!("body is the direct outer Pair constructor application");
+        };
+        assert_eq!(source_outer.args.len(), 2);
+        let typed_rhs = source_typed_index.get(source_id, source_rhs).unwrap();
+        let TreeKind::Apply(typed_outer) = &unit.typed_ast.get(typed_rhs).kind else {
+            panic!("typed body preserves the outer Apply");
+        };
+        assert_eq!(typed_outer.args.len(), 2);
+        let source_select = source_outer.function;
+        let TreeKind::Select(selection) = &ast.get(source_select).kind else {
+            panic!("Pair constructor application has original Select");
+        };
+        let source_new = selection.qualifier;
+        assert!(matches!(ast.get(source_new).kind, TreeKind::New(_)));
+        let typed_select = source_typed_index.get(source_id, source_select).unwrap();
+        let constructor = term_type_target(unit, unit.typed_ast.get(typed_select).ty).unwrap();
+        assert_eq!(unit.store.symbols.get(constructor).owner, Some(pair));
+        let typed_new = source_typed_index.get(source_id, source_new).unwrap();
+        assert!(matches!(
+            unit.typed_ast.get(typed_new).kind,
+            TreeKind::New(_)
+        ));
+        let emitted = dotty_jvm::emit_class(unit, factory, definitions).unwrap();
+        let emitted_bytes = emitted.bytes().to_vec();
+        let mut class_reader = Reader::new(&emitted_bytes);
+        let emitted_class = ClassFile::decode(&mut class_reader).unwrap();
+        assert!(class_reader.is_at_end());
+        let wrap_method = emitted_class
+            .methods
+            .iter()
+            .find(|candidate| emitted_class.constant_pool.utf8(candidate.name_index) == Ok("wrap"))
+            .unwrap();
+        assert_eq!(
+            emitted_class
+                .constant_pool
+                .utf8(wrap_method.descriptor_index),
+            Ok("(Lexample/Counter;Lexample/Counter;)Lexample/Pair;")
+        );
+        let [Attribute::Code(wrap_code)] = wrap_method.attributes.as_slice() else {
+            panic!("wrap has one code attribute")
+        };
+        assert_eq!((wrap_code.max_stack, wrap_code.max_locals), (4, 3));
+        assert_eq!(
+            decode_subset_instructions(wrap_code.code)
+                .into_iter()
+                .map(|(_, opcode)| opcode)
+                .collect::<Vec<_>>(),
+            [0xbb, 0x59, 0x2b, 0x2c, 0xb7, 0xb0],
+            "Rust backend loads the two original formal slots directly, without allocating Counter"
+        );
+        assert_invocation_sequence(
+            &emitted_class,
+            wrap_code.code,
+            &[(
+                0xb7,
+                "example/Pair",
+                "<init>",
+                "(Lexample/Counter;Lexample/Counter;)V",
+            )],
+        );
+        observed_jvm_bytes = Some(emitted_bytes);
+        eprintln!(
+            "dual-reference session receipt source={source_id:?} classes=[Counter:{counter:?},Pair:{pair:?},PairFactory:{factory:?}] wrap_tree={:?} wrap={method:?} method_type={method_type:?} formals=[({first_tree:?},{first:?},type={:?},span={:?}),({second_tree:?},{second:?},type={:?},span={:?})] Pair_ctor={pair_constructor:?} Pair_template_formals={pair_template_formals:?} Pair_ctor_formals={pair_constructor_formals:?} outer_apply={source_rhs:?}/{typed_rhs:?} select={source_select:?}/{typed_select:?} new={source_new:?}/{typed_new:?}",
+            source_method.0,
+            signature.params[0].ty,
+            ast.get(*first_tree).position,
+            signature.params[1].ty,
+            ast.get(*second_tree).position,
+        );
+        for (ordinal, (source_argument, formal)) in source_outer
+            .args
+            .iter()
+            .copied()
+            .zip([first, second])
+            .enumerate()
+        {
+            let TreeKind::Ident(_) = &ast.get(source_argument).kind else {
+                panic!("the outer arguments are original formal Ident leaves");
+            };
+            let typed_argument = source_typed_index.get(source_id, source_argument).unwrap();
+            assert!(matches!(
+                unit.typed_ast.get(typed_argument).kind,
+                TreeKind::Ident(_)
+            ));
+            assert_eq!(
+                term_type_target(unit, unit.typed_ast.get(typed_argument).ty),
+                Some(formal)
+            );
+            eprintln!(
+                "dual-reference argument[{ordinal}]={source_argument:?}/{typed_argument:?} source_span={:?} formal={formal:?} typed_type={:?}",
+                ast.get(source_argument).position,
+                unit.typed_ast.get(typed_argument).ty
+            );
+            assert_ne!(source_outer.args[0], source_outer.args[1]);
+            assert_ne!(typed_outer.args[0], typed_outer.args[1]);
+            assert_ne!(source_argument.index(), source_rhs.index());
+            assert_eq!(ordinal, if formal == first { 0 } else { 1 });
+        }
+        let result =
+            validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                source_id,
+                source_root,
+                store: unit.store,
+                definitions,
+                source_ast: ast,
+                typed_ast: unit.typed_ast,
+                source_index: index,
+                source_typed_index,
+                jvm_unit: unit,
+            });
+        proof_error = Some(match result {
+            Ok(proofs) => format!("Ok({} proofs)", proofs.len()),
+            Err(error) => format!("Err({error:?})"),
+        });
+        let mut stale_source_typed_index = source_typed_index.clone();
+        let first_argument = source_outer.args[0];
+        let first_typed_argument = source_typed_index.get(source_id, first_argument).unwrap();
+        let second_typed_argument = source_typed_index
+            .get(source_id, source_outer.args[1])
+            .unwrap();
+        stale_source_typed_index
+            .remove(source_id, first_argument)
+            .unwrap();
+        stale_source_typed_index
+            .insert(source_id, first_argument, second_typed_argument)
+            .unwrap();
+        assert_ne!(first_typed_argument, second_typed_argument);
+        let stale_result =
+            validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                source_id,
+                source_root,
+                store: unit.store,
+                definitions,
+                source_ast: ast,
+                typed_ast: unit.typed_ast,
+                source_index: index,
+                source_typed_index: &stale_source_typed_index,
+                jvm_unit: unit,
+            });
+        let stale_result = match stale_result {
+            Ok(proofs) => format!("Ok({} proofs)", proofs.len()),
+            Err(error) => format!("Err({error:?})"),
+        };
+        stale_error = Some(stale_result.clone());
+        eprintln!(
+            "dual-reference deliberately stale source-typed edge first result: {stale_result}"
+        );
+    };
+    let artifacts = compile_source_batch_with_typer_and_source_observer(
+        SOURCE,
+        "PairFactory.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe_typer,
+        &mut observe_source,
+    )
+    .expect("JVM-only backend accepts the exact forwarding source");
+    assert!(
+        observed,
+        "all source identities came from one genuine frontend session"
+    );
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["example/Counter", "example/Pair", "example/PairFactory"]
+    );
+    let factory_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "example/PairFactory")
+        .unwrap();
+    assert_eq!(
+        factory_artifact.class.bytes(),
+        observed_jvm_bytes.as_deref().unwrap(),
+        "the measured JVM output is exactly the normal published source artifact"
+    );
+    let paired = dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan(
+        SOURCE,
+        "PairFactory.scala",
+        SourceId::from_index(19602),
+        |_| (),
+    );
+    let proof_error = proof_error.unwrap();
+    let pickler_error = pickler_error.unwrap();
+    let stale_error = stale_error.unwrap();
+    let paired_error = match paired {
+        Ok(_) => "Ok(callback reached)".to_owned(),
+        Err(error) => format!("Err({error:?})"),
+    };
+    assert_eq!(
+        proof_error,
+        "Err(SemanticIdentity(\"both factory formals must have the canonical Int type\"))"
+    );
+    assert_eq!(
+        stale_error, proof_error,
+        "wrong argument-to-typed-tree mapping is masked by the same earlier method-formal guard"
+    );
+    assert_eq!(
+        pickler_error,
+        "Err(Unsupported { feature: ClassMembers, symbol: Some(SymbolId(60)) })"
+    );
+    assert!(paired_error.contains("phase: \"cross-class constructor-call identity proof\""));
+    assert!(paired_error.contains("both factory formals must have the canonical Int type"));
+    eprintln!("dual-reference-forwarding proof first result: {proof_error}");
+    eprintln!("dual-reference-forwarding standalone pickler signature result: {pickler_error}");
+    eprintln!("dual-reference-forwarding paired planner first result: {paired_error}");
 }
