@@ -38,13 +38,28 @@ impl Drop for TempDir {
     }
 }
 
-fn parse_tool_major_version(version_output: &str) -> Option<u32> {
+fn parse_tool_major_version(executable: &str, version_output: &str) -> Option<u32> {
+    if executable == "javap" {
+        let last_line = version_output
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())?
+            .trim();
+        if last_line
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        {
+            return parse_version_major(last_line, true);
+        }
+    }
+
     version_output.lines().find_map(|line| {
         let line = line.trim();
         let explicit_version =
             if line.starts_with("openjdk version ") || line.starts_with("java version ") {
                 Some((line.split('"').nth(1)?, true))
-            } else if let Some(version) = line.strip_prefix("javac ") {
+            } else if executable == "javac" {
+                let version = line.strip_prefix("javac ")?;
                 Some((version.split_whitespace().next()?, true))
             } else {
                 None
@@ -93,7 +108,7 @@ fn executable_major_version(executable: &str) -> Option<u32> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    parse_tool_major_version(&text)
+    parse_tool_major_version(executable, &text)
 }
 
 fn require_jdk_or_skip() -> bool {
@@ -123,27 +138,40 @@ fn require_jdk_or_skip() -> bool {
 #[test]
 fn parses_jdk_version_formats_and_rejects_older_major_versions() {
     assert_eq!(
-        parse_tool_major_version("openjdk version \"17.0.18\" 2025-10-21"),
+        parse_tool_major_version("java", "openjdk version \"17.0.18\" 2025-10-21"),
         Some(17)
     );
-    assert_eq!(parse_tool_major_version("javac 21.0.12"), Some(21));
-    assert_eq!(parse_tool_major_version("javac 21"), Some(21));
+    assert_eq!(parse_tool_major_version("javac", "javac 21.0.12"), Some(21));
+    assert_eq!(parse_tool_major_version("javac", "javac 21"), Some(21));
     assert_eq!(
-        parse_tool_major_version("openjdk version \"21\" 2023-09-19"),
+        parse_tool_major_version("java", "openjdk version \"21\" 2023-09-19"),
         Some(21)
     );
     assert_eq!(
-        parse_tool_major_version("java version \"21\" 2023-09-19"),
+        parse_tool_major_version("java", "java version \"21\" 2023-09-19"),
         Some(21)
     );
-    assert_eq!(parse_tool_major_version("21-ea"), Some(21));
-    assert_eq!(parse_tool_major_version("javac version unknown"), None);
+    assert_eq!(parse_tool_major_version("javap", "21\n"), Some(21));
+    assert_eq!(parse_tool_major_version("javap", "21.0.12\n"), Some(21));
+    assert_eq!(
+        parse_tool_major_version("javac", "javac version unknown"),
+        None
+    );
     assert_eq!(
         parse_tool_major_version(
+            "java",
             "OpenJDK warning: shared memory file failed (pid=21)\n   3343610\nTry setting java.io.tmpdir"
         ),
         None
     );
+    assert_eq!(
+        parse_tool_major_version(
+            "javap",
+            "OpenJDK warning: shared memory file failed (pid=21)\n   3343610\nTry setting java.io.tmpdir"
+        ),
+        None
+    );
+    assert_eq!(parse_tool_major_version("javap", "21-ea"), Some(21));
 }
 
 fn run(executable: &str, args: &[&str]) -> Output {
