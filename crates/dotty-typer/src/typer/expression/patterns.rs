@@ -147,11 +147,9 @@ impl SourceTyper<'_> {
             }
         };
         let callable = candidate.callable;
-        let authenticated_product_selector = member_name
-            == Name::new(self.store.names.intern("_1"), Namespace::Term)
-            && self
-                .source_case_class_product_selector_owner(candidate.symbol)
-                .is_some();
+        let authenticated_product_selector = self
+            .source_case_class_product_selector_owner(candidate.symbol)
+            .is_some();
         let value_type = match self.store.types.try_get(callable) {
             Some(Type::Method(method))
                 if method.kind == MethodKind::Plain
@@ -2424,7 +2422,7 @@ mod tests {
     use dotty_core::{
         Definitions, MemberRequest, Name, Namespace, Packages, ResolutionError, ResolverCheckpoint,
         SemanticStore, SourceSemanticIndex, SourceText, Symbol, SymbolFlags, SymbolInfo,
-        SymbolKind, SymbolLinks, SymbolOrigin, SymbolResolver, Visibility,
+        SymbolKind, SymbolLinks, SymbolOrigin, SymbolResolver, TermName, Visibility,
     };
     use dotty_lexer::ContextualScanner;
     use dotty_namer::name_compilation_unit;
@@ -3743,6 +3741,168 @@ mod tests {
         assert_eq!(
             typer.typed_arena.get(unapply.patterns[0]).ty,
             definitions.int
+        );
+    }
+
+    #[test]
+    fn real_flagged_product_extractor_reads_ordered_source_selectors() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "package scala { trait Product }; package app { case class Flagged(value: Int, enabled: Boolean); class C { def choose(value: Any): Int = value match { case Flagged(_, _) => 1; case _ => 0 } } }",
+        );
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "choose" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("choose method");
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::CaseDef(case_def) => match &parsed.ast.get(case_def.pattern).kind {
+                    TreeKind::Apply(application)
+                        if matches!(
+                            &parsed.ast.get(application.function).kind,
+                            TreeKind::Ident(name)
+                                if store.names.resolve(name.name.text()) == "Flagged"
+                        ) =>
+                    {
+                        Some(case_def.pattern)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("Flagged(_, _) pattern");
+        let flagged = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Flagged" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("Flagged class");
+        let TreeKind::TypeDef(class_definition) = &parsed
+            .ast
+            .get(
+                index
+                    .definition_of(flagged)
+                    .and_then(|definition| match definition {
+                        dotty_core::SourceDefinition::Canonical { tree, .. } => Some(tree),
+                        _ => None,
+                    })
+                    .expect("Flagged canonical source tree"),
+            )
+            .kind
+        else {
+            panic!("Flagged source definition must be a class");
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+            panic!("Flagged must have a template");
+        };
+        let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+            panic!("Flagged must have a primary constructor");
+        };
+        let fields = &constructor.value_param_clauses[0];
+
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        typer
+            .complete_symbol(flagged)
+            .expect("source Flagged class and Product ancestry must complete first");
+        let flagged_type = typer.store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(flagged),
+        });
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, flagged_type, context, journal, mappings)
+            })
+            .expect("ordinary generated unapply must project Flagged's Product selectors");
+        let TreeKind::UnApply(unapply) = &typer.typed_arena.get(typed).kind else {
+            panic!("expected a typed extractor pattern");
+        };
+        assert_eq!(unapply.patterns.len(), 2);
+        assert_eq!(
+            typer.typed_arena.get(unapply.patterns[0]).ty,
+            definitions.int
+        );
+        assert_eq!(
+            typer.typed_arena.get(unapply.patterns[1]).ty,
+            definitions.boolean
+        );
+        let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(unapply_symbol),
+            ..
+        }) = typer
+            .store
+            .types
+            .try_get(typer.typed_arena.get(unapply.function).ty)
+        else {
+            panic!("generated Flagged.unapply must be the selected function");
+        };
+        assert_eq!(
+            typer.index.generated_case_class_method(
+                flagged,
+                dotty_core::GeneratedCaseClassMethodRole::Unapply,
+            ),
+            Some(*unapply_symbol)
+        );
+        let class_scope = typer.index.scope_of(flagged).unwrap();
+        for (position, (spelling, expected_type)) in
+            [("_1", definitions.int), ("_2", definitions.boolean)]
+                .into_iter()
+                .enumerate()
+        {
+            let selector_name = TermName::new(typer.store.names.intern(spelling));
+            let selector = typer
+                .store
+                .scopes
+                .get(class_scope)
+                .lookup(selector_name.as_name())
+                .expect("canonical source selector");
+            let original_field = typer
+                .index
+                .symbol_at(source, fields[position])
+                .expect("original constructor field");
+            assert_ne!(selector, original_field);
+            assert_eq!(
+                typer.source_case_class_product_selector_owner(selector),
+                Some(flagged)
+            );
+            let SymbolInfo::Complete(selector_info) = *typer.store.symbols.info(selector) else {
+                panic!("selector must have completed SymbolInfo");
+            };
+            let Type::Method(method) = typer.store.types.get(selector_info) else {
+                panic!("selector must have completed MethodType");
+            };
+            assert_eq!(method.result, expected_type);
+        }
+        let selector_3 = TermName::new(typer.store.names.intern("_3"));
+        assert_eq!(
+            typer
+                .store
+                .scopes
+                .get(class_scope)
+                .lookup(selector_3.as_name()),
+            None
         );
     }
 
