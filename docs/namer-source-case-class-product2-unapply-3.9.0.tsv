@@ -1,0 +1,3 @@
+state	class	companion	unapply	formal	apply	fields
+before	matching.Flagged	matching.Flagged$ (linked)	absent	absent	present	value,enabled
+after	matching.Flagged	matching.Flagged$ (linked)	one Method, role=Unapply, owner=Flagged$, source=Flagged TypeDef	one synthetic x$1 Parameter, owner=unapply, source=Flagged TypeDef	present, unchanged	value,enabled; original source identities unchanged
