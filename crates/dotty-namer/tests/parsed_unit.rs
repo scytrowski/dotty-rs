@@ -6600,6 +6600,14 @@ fn generated_unapply_is_independent_of_case_class_companion_declaration_order() 
             SymbolOrigin::Source(named.source)
         );
         let module_scope = named.index.scope_of(module_class).unwrap();
+        let class_scope = named.index.scope_of(class).unwrap();
+        let selector = named
+            .store
+            .scopes
+            .get(class_scope)
+            .lookup(TermName::new(named.store.names.intern("_1")).as_name())
+            .expect("the existing one-field Box path retains its _1 selector");
+        assert_eq!(named.store.symbols.get(selector).owner, Some(class));
         let unapply_name = TermName::new(named.store.names.intern("unapply"));
         let unapply = named
             .index
@@ -6669,6 +6677,309 @@ fn generated_unapply_is_independent_of_case_class_companion_declaration_order() 
                 .get(module_scope)
                 .lookup_all(unapply_name.as_name()),
             [unapply]
+        );
+    }
+}
+
+#[test]
+fn generated_product2_identity_for_two_field_case_class_is_canonical() {
+    use dotty_core::{
+        GeneratedCaseClassMethod, GeneratedCaseClassMethodRole, SymbolFlags, SymbolKind,
+        SymbolOrigin, TermName, TypeName,
+    };
+
+    let sources = [
+        "package matching\ncase class Flagged(value: Int, enabled: Boolean)\nobject Flagged { def marker: Int = 1 }",
+        "package matching\nobject Flagged { def marker: Int = 1 }\ncase class Flagged(value: Int, enabled: Boolean)",
+    ];
+    let mut normalized = Vec::new();
+
+    for (source_index, source_text) in sources.into_iter().enumerate() {
+        let mut named = named_source(source_text, 1959 + source_index as u32);
+        let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+            panic!("compilation unit should have a package root");
+        };
+        let class_tree = package
+            .stats
+            .iter()
+            .copied()
+            .find(|tree| matches!(named.parsed.ast.get(*tree).kind, TreeKind::TypeDef(_)))
+            .unwrap();
+        let class = named.index.symbol_at(named.source, class_tree).unwrap();
+        let package_scope = named
+            .index
+            .scope_of(named.store.symbols.get(class).owner.unwrap())
+            .unwrap();
+        let companion = named.store.symbols.get(class).links.companion.unwrap();
+        let companion_module_class = named
+            .store
+            .scopes
+            .get(package_scope)
+            .lookup(TypeName::new(named.store.names.intern("Flagged$")).as_name())
+            .unwrap();
+        let companion_scope = named.index.scope_of(companion_module_class).unwrap();
+        let unapply = named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
+            .expect("two-field monomorphic case class receives generated unapply identity");
+        let apply = named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply)
+            .expect("generated apply remains present");
+        let TreeKind::TypeDef(definition) = &named.parsed.ast.get(class_tree).kind else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &named.parsed.ast.get(definition.rhs).kind else {
+            unreachable!();
+        };
+        let TreeKind::DefDef(constructor) = &named.parsed.ast.get(template.constructor).kind else {
+            unreachable!();
+        };
+        let fields = constructor.value_param_clauses[0]
+            .iter()
+            .map(|tree| named.index.symbol_at(named.source, *tree).unwrap())
+            .collect::<Vec<_>>();
+        let generated_formals = named
+            .store
+            .scopes
+            .get(named.index.scope_of(unapply).unwrap())
+            .lookup_all(TermName::new(named.store.names.intern("x$1")).as_name())
+            .to_vec();
+
+        assert_eq!(named.store.symbols.get(class).kind, SymbolKind::Class);
+        assert_eq!(named.store.symbols.get(companion).kind, SymbolKind::Object);
+        assert_eq!(
+            named.store.symbols.get(companion_module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(fields.len(), 2);
+        assert_eq!(
+            named.store.symbols.get(fields[0]).name.text(),
+            named.store.names.intern("value")
+        );
+        assert_eq!(
+            named.store.symbols.get(fields[1]).name.text(),
+            named.store.names.intern("enabled")
+        );
+        assert_eq!(named.store.symbols.get(unapply).kind, SymbolKind::Method);
+        assert_eq!(
+            named.store.symbols.get(unapply).owner,
+            Some(companion_module_class)
+        );
+        assert!(
+            named
+                .store
+                .symbols
+                .get(unapply)
+                .flags
+                .contains(SymbolFlags::SYNTHETIC)
+        );
+        assert_eq!(
+            named.store.symbols.get(unapply).visibility,
+            named.store.symbols.get(class).visibility
+        );
+        assert_eq!(
+            named.store.symbols.get(unapply).origin,
+            SymbolOrigin::Source(named.source)
+        );
+        assert_eq!(
+            named.index.definition_of(unapply),
+            Some(SourceDefinition::Derived {
+                source: named.source,
+                tree: class_tree
+            })
+        );
+        assert_eq!(
+            named.index.generated_case_class_method_identity(unapply),
+            Some(GeneratedCaseClassMethod {
+                class,
+                role: GeneratedCaseClassMethodRole::Unapply
+            })
+        );
+        assert_eq!(generated_formals.len(), 1);
+        let input = generated_formals[0];
+        assert_eq!(named.store.symbols.get(input).kind, SymbolKind::Parameter);
+        assert_eq!(named.store.symbols.get(input).owner, Some(unapply));
+        assert!(
+            named
+                .store
+                .symbols
+                .get(input)
+                .flags
+                .contains(SymbolFlags::SYNTHETIC)
+        );
+        assert_eq!(
+            named.index.definition_of(input),
+            Some(SourceDefinition::Derived {
+                source: named.source,
+                tree: class_tree
+            })
+        );
+        assert_ne!(apply, unapply);
+        assert_eq!(
+            named
+                .index
+                .derived_symbol_at(companion_module_class, named.source, class_tree),
+            Some(apply),
+            "the generated unapply must not overwrite the apply derived-symbol key"
+        );
+        assert!(
+            fields
+                .iter()
+                .all(|field| *field != input && *field != unapply)
+        );
+        assert_eq!(
+            named
+                .store
+                .scopes
+                .get(companion_scope)
+                .lookup_all(TermName::new(named.store.names.intern("unapply")).as_name()),
+            [unapply]
+        );
+        assert_eq!(
+            named
+                .store
+                .scopes
+                .get(companion_scope)
+                .lookup_all(TermName::new(named.store.names.intern("apply")).as_name()),
+            [apply]
+        );
+        let class_scope = named.index.scope_of(class).unwrap();
+        for selector in ["_1", "_2"] {
+            assert!(
+                named
+                    .store
+                    .scopes
+                    .get(class_scope)
+                    .lookup_all(TermName::new(named.store.names.intern(selector)).as_name())
+                    .is_empty(),
+                "identity-only Product2 naming must not publish {selector}"
+            );
+        }
+        assert!(constructor.value_param_clauses[0].iter().all(|parameter| {
+            named
+                .index
+                .derived_symbol_at(class, named.source, *parameter)
+                .is_none()
+        }));
+
+        normalized.push((
+            named.store.symbols.get(class).kind,
+            named.store.symbols.get(companion).kind,
+            named.store.symbols.get(companion_module_class).kind,
+            named.store.symbols.get(unapply).owner == Some(companion_module_class),
+            named.store.symbols.get(input).owner == Some(unapply),
+            fields.len(),
+        ));
+    }
+    assert_eq!(normalized[0], normalized[1]);
+}
+
+#[test]
+fn two_field_companion_collision_policy_preserves_identity_constraints() {
+    use dotty_core::{GeneratedCaseClassMethodRole, TermName, TypeName};
+
+    let mut named = named_source(
+        "case class Flagged(value: Int, enabled: Boolean)\nobject Flagged { def unapply(item: Flagged): Int = 0 }",
+        1961,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("compilation unit should have a package root");
+    };
+    let class = named
+        .index
+        .symbol_at(named.source, package.stats[0])
+        .unwrap();
+    let package_scope = named
+        .index
+        .scope_of(named.store.symbols.get(class).owner.unwrap())
+        .unwrap();
+    let module = named
+        .store
+        .scopes
+        .get(package_scope)
+        .lookup(TypeName::new(named.store.names.intern("Flagged$")).as_name())
+        .unwrap();
+    let unapply_name = TermName::new(named.store.names.intern("unapply"));
+    let candidates = named
+        .store
+        .scopes
+        .get(named.index.scope_of(module).unwrap())
+        .lookup_all(unapply_name.as_name());
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply),
+        None,
+        "an exact explicit candidate replaces the generated identity"
+    );
+
+    let source_text = "case class Flagged(value: Int, enabled: Boolean)\ntype Alias = Flagged\nobject Flagged { def unapply(item: Alias): Int = 0 }";
+    let (parsed, source, mut store) = parsed_source(source_text, 1962);
+    let mut packages = Packages::new();
+    let checkpoint = store.checkpoint();
+    let result = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "FlaggedAlias.scala",
+        &mut store,
+        &mut packages,
+    );
+    assert!(matches!(
+        result,
+        Err(NamerError::UnsupportedCaseClassCompanionShape {
+            reason: "explicit companion unapply signature cannot be compared without type completion",
+            ..
+        })
+    ));
+    assert_eq!(store.checkpoint(), checkpoint);
+}
+
+#[test]
+fn generated_product2_rejects_other_two_field_source_shapes() {
+    use dotty_core::{GeneratedCaseClassMethodRole, TermName, TypeName};
+
+    let sources = [
+        "case class Flagged(enabled: Boolean, value: Int)",
+        "case class Flagged(left: Int, right: Boolean)",
+        "case class Flagged(value: String, enabled: Boolean)",
+        "case class Flagged(value: Int, enabled: String)",
+    ];
+    for (source_index, source_text) in sources.into_iter().enumerate() {
+        let mut named = named_source(source_text, 1963 + source_index as u32);
+        let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+            panic!("compilation unit should have a package root");
+        };
+        let class = named
+            .index
+            .symbol_at(named.source, package.stats[0])
+            .unwrap();
+        assert_eq!(
+            named
+                .index
+                .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply),
+            None,
+            "unrecognized two-field shape must not publish unapply: {source_text}"
+        );
+        let package_scope = named
+            .index
+            .scope_of(named.store.symbols.get(class).owner.unwrap())
+            .unwrap();
+        let module = named
+            .store
+            .scopes
+            .get(package_scope)
+            .lookup(TypeName::new(named.store.names.intern("Flagged$")).as_name())
+            .unwrap();
+        assert!(
+            named
+                .store
+                .scopes
+                .get(named.index.scope_of(module).unwrap())
+                .lookup_all(TermName::new(named.store.names.intern("unapply")).as_name())
+                .is_empty()
         );
     }
 }
