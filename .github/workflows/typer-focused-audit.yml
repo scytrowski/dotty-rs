@@ -60,6 +60,8 @@ jobs:
           mkdir -p "$TMPDIR" "$CARGO_TARGET_DIR/typer-focused-report"
           PYTHONDONTWRITEBYTECODE=1 python3 \
             tools/typer-classpath-corpus-audit/verify_lexical_closure_acceptance.py inputs
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            tools/typer-classpath-corpus-audit/verify_inherited_members_acceptance.py inputs
 
       - name: Check out pinned Scala 3.9.0 sources
         uses: actions/checkout@v4
@@ -96,6 +98,7 @@ jobs:
         env:
           COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
           DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+          DOTTY_INHERITED_MEMBERS_TMP_ROOT: ${{ github.workspace }}/target/inherited-members-oracle
         run: |
           set -euo pipefail
           test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = "777528f19a58e794c9954a42f433373472ec57f8"
@@ -117,6 +120,10 @@ jobs:
               "$(sha256sum crates/dotty-typer/tests/fixtures/lexical-closure-contract/six-root-gate.tsv | cut -d' ' -f1)"
             printf 'negative_matrix_sha256\t%s\n' \
               "$(sha256sum docs/typer-lexical-closure-rollback-matrix-3.9.0.tsv | cut -d' ' -f1)"
+            printf 'inherited_source_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/inherited-members-3.9.0/InheritedMembers.scala | cut -d' ' -f1)"
+            printf 'inherited_four_root_receipt_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/inherited-members-3.9.0/four-root-baseline.tsv | cut -d' ' -f1)"
             printf 'rust\t%s\n' "$(rustc +1.98.1 --version)"
             printf 'cargo\t%s\n' "$(cargo +1.98.1 --version)"
             printf 'java\t%s\n' "$(java --version | head -1)"
@@ -128,6 +135,14 @@ jobs:
             "$DOTTY_AUDIT_REPORT_DIR/positive-root-contract.tsv"
           cp docs/typer-lexical-closure-rollback-matrix-3.9.0.tsv \
             "$DOTTY_AUDIT_REPORT_DIR/negative-rollback-contract.tsv"
+          cp crates/dotty-typer/tests/fixtures/inherited-members-3.9.0/four-root-baseline.tsv \
+            "$DOTTY_AUDIT_REPORT_DIR/inherited-positive-contract.tsv"
+          cp docs/typer-inherited-members-e2e-3.9.0.tsv \
+            "$DOTTY_AUDIT_REPORT_DIR/inherited-e2e-receipt.tsv"
+          cp docs/typer-inherited-members-negative-receipt-3.9.0.tsv \
+            "$DOTTY_AUDIT_REPORT_DIR/inherited-negative-contract.tsv"
+          cp docs/typer-inherited-members-cohort-receipt-3.9.0.tsv \
+            "$DOTTY_AUDIT_REPORT_DIR/inherited-cohort-receipt.tsv"
 
       - name: Download and verify pinned Scala runtime artifacts
         shell: bash
@@ -159,6 +174,13 @@ jobs:
           cp crates/dotty-typer/tests/fixtures/lexical-closure-contract/scala-artifacts.sha256.tsv \
             "$DOTTY_AUDIT_REPORT_DIR/scala-artifacts.sha256.tsv"
 
+      - name: Run pinned inherited-member Scala oracle
+        shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_INHERITED_MEMBERS_TMP_ROOT: ${{ github.workspace }}/target/inherited-members-oracle
+        run: crates/dotty-typer/tests/fixtures/inherited-members-3.9.0/run
+
       - name: Run pinned lexical closure source oracle
         shell: bash
         env:
@@ -188,6 +210,20 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 \
             tools/typer-classpath-corpus-audit/verify_lexical_closure_acceptance.py \
             test-log --group negative "$negative_log"
+
+      - name: Run exact inherited-member Rust acceptance matrix
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          rust_log="$DOTTY_AUDIT_REPORT_DIR/inherited-members-rust.log"
+          cargo +1.98.1 test -p dotty-typer --test inherited_members_baseline \
+            --locked -- --nocapture > "$rust_log" 2>&1
+          cat "$rust_log"
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            tools/typer-classpath-corpus-audit/verify_inherited_members_acceptance.py \
+            test-log "$rust_log"
 
       - name: Run deterministic 25 plus 25 ordinary-method cohorts
         shell: bash
