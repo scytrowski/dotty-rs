@@ -454,7 +454,7 @@ was run separately for Counter, Pair, and PairFactory.
 | Mismatched classfile/TASTy UUID | Scala reports the classfile is out of sync with its TASTy; `-Werror` fails the compile |
 | Wrong Pair constructor arity | Scala typechecker `[E171] Type Error` |
 | Wrong second constructor argument type | Scala typechecker `[E007] Type Mismatch Error` |
-| Altered method name | Scala source lookup `[E008] Not Found Error` |
+| Consumer calls an absent method; a separate TASTy copy renames `create` to `delete` | Scala source lookup `[E008] Not Found Error` |
 | Missing Counter classfile with authentic TASTy | Scala source compile succeeds; runtime first fails with `NoClassDefFoundError: example/Counter` |
 | Pair constructor descriptor changed in a classfile copy | Scala source compile succeeds using TASTy; Java `-Xverify:all` first reports `VerifyError: Bad local variable type` |
 | Factory Pair constructor Methodref changed to Counter's `(I)V` constructor | Scala source compile succeeds using TASTy; Java `-Xverify:all` first reports `VerifyError: Bad type on operand stack` |

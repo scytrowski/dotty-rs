@@ -418,6 +418,27 @@ fn corrupt_factory_formal_target(tasty_bytes: &[u8]) -> Vec<u8> {
     corrupted
 }
 
+fn rename_factory_tasty_method(tasty_bytes: &[u8]) -> Vec<u8> {
+    let original = b"create";
+    let replacement = b"delete";
+    assert_eq!(original.len(), replacement.len());
+    let mut renamed = tasty_bytes.to_vec();
+    let occurrences = renamed
+        .windows(original.len())
+        .filter(|window| *window == original)
+        .count();
+    assert_eq!(
+        occurrences, 1,
+        "Factory method name occurs once in its TASTy name table"
+    );
+    let offset = renamed
+        .windows(original.len())
+        .position(|window| window == original)
+        .unwrap();
+    renamed[offset..offset + replacement.len()].copy_from_slice(replacement);
+    renamed
+}
+
 fn wrong_factory_constructor_methodref(bytes: &[u8]) -> Vec<u8> {
     let class = decode_class(bytes);
     let pair_constructor = (1..=u16::MAX)
@@ -866,6 +887,39 @@ fn negative_reader_probes(
     eprintln!(
         "SCALA_NEGATIVE_FIRST_FAILURE altered-method-name: {}",
         first_error(&unknown)
+    );
+
+    let renamed_member_root = root.join("renamed-tasty-method");
+    let renamed_member_classes = renamed_member_root.join("classes");
+    let renamed_member_out = renamed_member_root.join("out");
+    fs::create_dir_all(&renamed_member_classes).unwrap();
+    fs::create_dir_all(&renamed_member_out).unwrap();
+    write_batch(&renamed_member_classes, batch);
+    let factory = batch
+        .classes()
+        .iter()
+        .find(|class| class.tasty_path() == "example/PairFactory.tasty")
+        .unwrap();
+    fs::write(
+        renamed_member_classes.join(factory.tasty_path()),
+        rename_factory_tasty_method(factory.tasty_bytes()),
+    )
+    .unwrap();
+    let renamed_member_client = renamed_member_root.join("Consumer.scala");
+    fs::write(&renamed_member_client, CLIENT).unwrap();
+    let renamed_member = scala.compile_result(
+        &format!("{}:{}", renamed_member_classes.display(), scala.libraries),
+        &renamed_member_out,
+        &renamed_member_client,
+    );
+    assert!(
+        !renamed_member.status.success(),
+        "Scala resolved create after the TASTy member was renamed"
+    );
+    assert!(first_error(&renamed_member).contains("[E008] Not Found Error"));
+    eprintln!(
+        "SCALA_NEGATIVE_FIRST_FAILURE TASTy create renamed to delete: {}",
+        first_error(&renamed_member)
     );
 
     let descriptor_root = root.join("wrong-pair-constructor-descriptor");
@@ -1325,8 +1379,18 @@ fn official_scala_compiles_and_runs_against_original_rust_multi_argument_batch()
             fs::read(producer.join(class.tasty_path())).unwrap(),
             class.tasty_bytes()
         );
-        TastyFile::parse_and_validate_scala_3_9(class.tasty_bytes())
+        let decoded_class = decode_class(class.classfile_bytes());
+        assert_eq!(
+            decoded_class.version.major, 65,
+            "Rust classfile major version"
+        );
+        let tasty = TastyFile::parse_and_validate_scala_3_9(class.tasty_bytes())
             .expect("genuine Rust sidecar is TASTy 28.9");
+        assert_eq!(
+            decoded_class.tasty_link_id().unwrap().unwrap().as_bytes(),
+            &tasty.header().uuid,
+            "each original Rust classfile links its own TASTy UUID"
+        );
     }
     method_lookup_probes(&root, &scala, &batch, &producer, &hashes);
     negative_reader_probes(&scala, &root, &batch, &producer, &hashes);
