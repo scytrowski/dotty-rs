@@ -917,6 +917,23 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "the TASTy unit must contain exactly one top-level class declaration",
             ));
         }
+        let address_index = file.ast_address_index().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Parse(error),
+            ))
+        })?;
+        if address_index
+            .get(4)
+            .is_none_or(|definition| definition.tag != dotty_tasty::tasty::TYPEDEF_TAG)
+            || address_index
+                .get(21)
+                .is_none_or(|constructor| constructor.tag != dotty_tasty::tasty::DEFDEF_TAG)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the TASTy unit must have its class at TYPEDEF@4 and constructor at DEFDEF@21",
+            ));
+        }
         Ok(())
     }
 
@@ -6179,6 +6196,87 @@ mod tests {
             .collect::<Vec<_>>();
         after.sort_by_key(|symbol| symbol.index());
         assert_eq!(after, baseline);
+    }
+
+    #[test]
+    fn adapter_rejects_noncanonical_root_address_before_entering_existing_package() {
+        let annotated =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/SymbolAnnotated");
+        let open = open_binary_name();
+        let bytes = semantic_unpickler_fixture_bytes("SymbolAnnotated.tasty");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for Object");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK classpath");
+        let fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(HashMap::from([(
+                annotated.clone(),
+                bytes,
+            )]))),
+            Box::new(crate::class_path::DirectoryClassPath::new(fixture_root)),
+            Box::new(jdk),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        let package = loader
+            .session
+            .packages
+            .resolve_package(loader.store, "me/cytrowski/tastyfixtures/semantic");
+        let scope = loader.session.packages.scope_of(package).unwrap();
+        let mut baseline = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        baseline.sort_by_key(|symbol| symbol.index());
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+
+        let error = loader
+            .load_open_with_tasty_unpickler(&annotated)
+            .expect_err("SymbolAnnotated roots at TYPEDEF@5, outside the frozen adapter shape");
+        assert!(matches!(
+            error,
+            SemanticTastyLoadError::UnsupportedShape(
+                "the TASTy unit must have its class at TYPEDEF@4 and constructor at DEFDEF@21"
+            )
+        ));
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert_eq!(
+            loader
+                .session
+                .packages
+                .get(&["me", "cytrowski", "tastyfixtures", "semantic"]),
+            Some(package)
+        );
+        let mut after = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        after.sort_by_key(|symbol| symbol.index());
+        assert_eq!(after, baseline);
+        assert!(loader.repository.get(&annotated).is_none());
+        assert!(!loader.semantic_tasty_loaded.contains_key(&annotated));
+
+        let loaded = loader
+            .load_open_with_tasty_unpickler(&open)
+            .expect("the pinned Open unit retries successfully after preflight rejection");
+        assert_eq!(symbol_name(loader.store, loaded), "Open");
+        assert!(loader.store.symbols.contains(loaded));
+        let mut after_retry = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        after_retry.sort_by_key(|symbol| symbol.index());
+        assert_eq!(after_retry, baseline);
+        assert!(!baseline.contains(&loaded));
     }
 
     #[test]

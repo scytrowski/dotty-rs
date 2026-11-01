@@ -202,12 +202,17 @@ result is `Open`, as specified by constructor completion; its separately
 validated serialized return tree is `Unit`. The default `load_class` path and
 TASTy-first resource preference remain unchanged.
 
-The first rejected adapter shape is a resource whose indexed root does not
-match the requested full binary name (including package), even if its bytes
-otherwise contain the supported `Open` addresses. This fails with a typed
-`UnsupportedShape` after projection and rolls back class/package entries,
-Object state, caches, origins, and the new Unit binding. Missing resources,
-malformed TASTy, class-file resources, and a duplicate legacy identity are
-also rejected with typed errors. The supported boundary remains one
-self-contained class, its root and constructor only; additional external
-semantic dependencies or graph expansion are not resolved by this adapter.
+The adapter preflights the pinned unit shape before entering symbols: exactly
+one package with one top-level class, rooted at `TYPEDEF@4`, with its
+constructor at `DEFDEF@21`. A one-class unit rooted elsewhere, such as
+`SymbolAnnotated.tasty` at `TYPEDEF@5`, is rejected with a typed
+`UnsupportedShape` before any package-scope mutation. This prevents a
+noncanonical root from being entered and then lost during store rollback.
+After projection, a root that does not match the requested full binary name
+(including package) is also rejected with a typed `UnsupportedShape` and rolls
+back class/package entries, Object state, caches, origins, and the new Unit
+binding. Missing resources, malformed TASTy, class-file resources, duplicate
+legacy identities, and multi-declaration units are likewise rejected. The
+supported boundary remains one self-contained class, its root and constructor
+only; additional external semantic dependencies or graph expansion are not
+resolved by this adapter.
