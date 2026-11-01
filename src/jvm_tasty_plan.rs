@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 17203)
-Total output lines: 1593
-
 //! One-session planning for the audited JVM/TASTy class-state overlap.
 //!
 //! The coordinator is deliberately callback-scoped: both producer plans borrow
@@ -607,7 +604,457 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
     }
 
     let mut source_classes = Vec::with_capacity(package.stats.len());
-    let mut package_owner = Non…5203 tokens truncated…table ValDef consumed by the
+    let mut package_owner = None;
+    let mut seen_classes = std::collections::HashSet::with_capacity(package.stats.len());
+    for (class_index, &tree) in package.stats.iter().enumerate() {
+        let fail = |phase, reason: String| PairedPlanError::BatchClass {
+            class_index,
+            declaration_index: tree.index() as usize,
+            phase,
+            reason,
+        };
+        let TreeKind::TypeDef(class_definition) = &parsed.ast.get(tree).kind else {
+            return Err(fail(
+                "source collection",
+                "top-level siblings must all be ordinary classes".to_owned(),
+            ));
+        };
+        let class = index.symbol_at(source_id, tree).ok_or_else(|| {
+            fail(
+                "source collection",
+                "missing canonical source class identity".to_owned(),
+            )
+        })?;
+        let class_symbol = store.symbols.get(class);
+        if class_symbol.kind != SymbolKind::Class {
+            return Err(fail(
+                "source collection",
+                "top-level declaration is not an ordinary class".to_owned(),
+            ));
+        }
+        if !seen_classes.insert(class) {
+            return Err(fail(
+                "source collection",
+                "duplicate canonical class identity".to_owned(),
+            ));
+        }
+        if index.definition_of(class)
+            != Some(dotty_core::SourceDefinition::Canonical {
+                source: source_id,
+                tree,
+            })
+        {
+            return Err(fail(
+                "source collection",
+                "class identity is not bound to this source declaration".to_owned(),
+            ));
+        }
+        let owner = class_symbol.owner.ok_or_else(|| {
+            fail(
+                "source collection",
+                "class has no canonical package owner".to_owned(),
+            )
+        })?;
+        if store.symbols.get(owner).kind != SymbolKind::Package {
+            return Err(fail(
+                "source collection",
+                "class owner is not a package".to_owned(),
+            ));
+        }
+        if package_owner.is_some_and(|expected| expected != owner) {
+            return Err(fail(
+                "source collection",
+                "classes do not have the exact same package owner".to_owned(),
+            ));
+        }
+        package_owner = Some(owner);
+
+        let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+            return Err(fail(
+                "source collection",
+                "class declaration must have an ordinary template".to_owned(),
+            ));
+        };
+        if !template.parents.is_empty() || template.self_val.is_some() {
+            return Err(fail(
+                "source collection",
+                "classes with explicit parents or self types are unsupported".to_owned(),
+            ));
+        }
+        let constructor_tree = template.constructor;
+        let constructor = index
+            .symbol_at(source_id, constructor_tree)
+            .ok_or_else(|| {
+                fail(
+                    "source collection",
+                    "missing canonical primary-constructor identity".to_owned(),
+                )
+            })?;
+        let TreeKind::DefDef(constructor_definition) = &parsed.ast.get(constructor_tree).kind
+        else {
+            return Err(fail(
+                "source collection",
+                "primary constructor must be a source definition".to_owned(),
+            ));
+        };
+        if !constructor_definition.type_params.is_empty() {
+            return Err(fail(
+                "source collection",
+                "generic primary constructors are unsupported".to_owned(),
+            ));
+        }
+        let constructor_parameters = constructor_definition
+            .value_param_clauses
+            .iter()
+            .map(|clause| {
+                clause
+                    .iter()
+                    .map(|parameter_tree| {
+                        index
+                            .derived_symbol_at(constructor, source_id, *parameter_tree)
+                            .ok_or_else(|| {
+                                fail(
+                                    "source collection",
+                                    "missing canonical constructor-owned formal identity"
+                                        .to_owned(),
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        source_classes.push(BatchClassSource {
+            tree,
+            class,
+            constructor_tree,
+            constructor,
+            constructor_parameters,
+        });
+    }
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for (class_index, source_class) in source_classes.iter().enumerate() {
+        let declaration_index = source_class.tree.index() as usize;
+        typer
+            .complete_symbol(source_class.class)
+            .map_err(|error| PairedPlanError::BatchClass {
+                class_index,
+                declaration_index,
+                phase: "class typing",
+                reason: format!("{error:?}"),
+            })?;
+        typer
+            .complete_symbol(source_class.constructor)
+            .map_err(|error| PairedPlanError::BatchClass {
+                class_index,
+                declaration_index,
+                phase: "constructor typing",
+                reason: format!("{error:?}"),
+            })?;
+        for parameter in source_class
+            .constructor_parameters
+            .iter()
+            .flatten()
+            .copied()
+        {
+            typer
+                .complete_symbol(parameter)
+                .map_err(|error| PairedPlanError::BatchClass {
+                    class_index,
+                    declaration_index,
+                    phase: "constructor formal typing",
+                    reason: format!("{error:?}"),
+                })?;
+        }
+        let TreeKind::TypeDef(class_definition) = &parsed.ast.get(source_class.tree).kind else {
+            return Err(PairedPlanError::UnsupportedSourceShape(
+                "source class declaration for constructor parameters",
+            ));
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+            return Err(PairedPlanError::UnsupportedSourceShape(
+                "source class template for constructor parameters",
+            ));
+        };
+        let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+            return Err(PairedPlanError::UnsupportedSourceShape(
+                "source primary constructor declaration",
+            ));
+        };
+        for parameter_tree in constructor.value_param_clauses.iter().flatten().copied() {
+            // Ordinary private-local constructor inputs have a separate
+            // class-owned source identity whose signature may not otherwise
+            // be requested by a field or method. Complete only that
+            // counterpart for the ordered proof; accessor fields retain
+            // their existing JVM validation boundary.
+            let ordinary_formal = matches!(
+                parsed.ast.try_get(parameter_tree).map(|node| &node.kind),
+                Some(TreeKind::ValDef(definition))
+                    if definition.metadata.modifiers.as_slice()
+                        == [dotty_core::ast::Modifier::ParamAccessor,
+                            dotty_core::ast::Modifier::PrivateLocal]
+            );
+            if !ordinary_formal {
+                continue;
+            }
+            let parameter = index.symbol_at(source_id, parameter_tree).ok_or(
+                PairedPlanError::UnsupportedSourceShape(
+                    "canonical class-owned constructor parameter identity",
+                ),
+            )?;
+            typer
+                .complete_symbol(parameter)
+                .map_err(|error| PairedPlanError::BatchClass {
+                    class_index,
+                    declaration_index,
+                    phase: "constructor template formal typing",
+                    reason: format!("{error:?}"),
+                })?;
+        }
+    }
+
+    let planned_class_symbols = source_classes
+        .iter()
+        .map(|source_class| source_class.class)
+        .collect::<Vec<_>>();
+    let mut drafts = Vec::with_capacity(source_classes.len());
+    for (class_index, source_class) in source_classes.into_iter().enumerate() {
+        let TreeKind::TypeDef(class_definition) = &parsed.ast.get(source_class.tree).kind else {
+            return Err(PairedPlanError::BatchClass {
+                class_index,
+                declaration_index: source_class.tree.index() as usize,
+                phase: "member planning",
+                reason: "class tree changed during planning".to_owned(),
+            });
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+            return Err(PairedPlanError::BatchClass {
+                class_index,
+                declaration_index: source_class.tree.index() as usize,
+                phase: "member planning",
+                reason: "class template is missing".to_owned(),
+            });
+        };
+        let mut tasty_members = Vec::with_capacity(template.body.len());
+        let mut jvm_fields = Vec::new();
+        let mut jvm_methods = Vec::new();
+        let mut source_member_order = Vec::with_capacity(template.body.len());
+        for (member_index, &tree) in template.body.iter().enumerate() {
+            let fail = |phase, reason: String| PairedPlanError::BatchClass {
+                class_index,
+                declaration_index: member_index,
+                phase,
+                reason,
+            };
+            match &parsed.ast.get(tree).kind {
+                TreeKind::ValDef(field_definition) => {
+                    let field = index.symbol_at(source_id, tree).ok_or_else(|| {
+                        fail(
+                            "member planning",
+                            "missing canonical source field identity".to_owned(),
+                        )
+                    })?;
+                    if typer.store().symbols.get(field).kind != SymbolKind::Field
+                        || typer.store().symbols.get(field).owner != Some(source_class.class)
+                    {
+                        return Err(fail(
+                            "member planning",
+                            "field is not owned by its declaring class".to_owned(),
+                        ));
+                    }
+                    let field_flags = typer.store().symbols.get(field).flags;
+                    let private = field_definition.metadata.visibility
+                        == Some(VisibilitySyntax::Private { qualifier: None });
+                    let mutable_private = private
+                        && field_flags == SymbolFlags::MUTABLE
+                        && field_definition.metadata.modifiers.as_slice()
+                            == [dotty_core::ast::Modifier::Var];
+                    let immutable_reference_candidate = private
+                        && field_flags.is_empty()
+                        && field_definition.metadata.modifiers.is_empty()
+                        && field_definition.rhs.is_some();
+                    if !mutable_private && !immutable_reference_candidate {
+                        return Err(fail(
+                            "member planning",
+                            "only unqualified private mutable fields and initialized private immutable same-batch reference fields are supported".to_owned(),
+                        ));
+                    }
+                    if immutable_reference_candidate {
+                        typer.complete_symbol(field).map_err(|error| {
+                            PairedPlanError::BatchClass {
+                                class_index,
+                                declaration_index: member_index,
+                                phase: "field typing",
+                                reason: format!("{error:?}"),
+                            }
+                        })?;
+                        let SymbolInfo::Complete(field_type) =
+                            typer.store().symbols.get(field).info
+                        else {
+                            return Err(fail(
+                                "field typing",
+                                "field type did not complete".to_owned(),
+                            ));
+                        };
+                        let field_type_is_planned_sibling = matches!(typer.store().types.try_get(field_type),
+                                Some(Type::TypeRef {
+                                    prefix,
+                                    target: TypeRefTarget::Symbol(target),
+                                }) if *target != source_class.class
+                                    && planned_class_symbols.contains(target)
+                                    && typer.store().symbols.get(*target).owner
+                                        == typer.store().symbols.get(source_class.class).owner
+                                    && matches!(typer.store().types.try_get(*prefix),
+                                        Some(Type::TypeRef {
+                                            prefix: package_prefix,
+                                            target: TypeRefTarget::Symbol(package),
+                                        }) if *package_prefix == definitions.no_prefix
+                                            && Some(*package)
+                                                == typer.store().symbols.get(*target).owner));
+                        if !field_type_is_planned_sibling {
+                            return Err(fail(
+                                "member planning",
+                                "private immutable fields require a canonical same-batch class TypeRef"
+                                    .to_owned(),
+                            ));
+                        }
+                    }
+                    typer
+                        .complete_symbol(field)
+                        .map_err(|error| PairedPlanError::BatchClass {
+                            class_index,
+                            declaration_index: member_index,
+                            phase: "field typing",
+                            reason: format!("{error:?}"),
+                        })?;
+                    let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info
+                    else {
+                        return Err(fail(
+                            "field typing",
+                            "field type did not complete".to_owned(),
+                        ));
+                    };
+                    let rhs = field_definition.rhs.ok_or_else(|| {
+                        fail("field typing", "field initializer is missing".to_owned())
+                    })?;
+                    let context = typer
+                        .field_initializer_context_for(field)
+                        .map_err(|error| PairedPlanError::BatchClass {
+                            class_index,
+                            declaration_index: member_index,
+                            phase: "field typing",
+                            reason: format!("{error:?}"),
+                        })?;
+                    let typed_initializer = typer
+                        .type_expression_expected(rhs, context, field_type)
+                        .map_err(|error| PairedPlanError::BatchClass {
+                            class_index,
+                            declaration_index: member_index,
+                            phase: "field initializer typing",
+                            reason: format!("{error:?}"),
+                        })?;
+                    if typer.source_typed_index().get(source_id, rhs) != Some(typed_initializer) {
+                        return Err(fail(
+                            "field initializer typing",
+                            "source-to-typed initializer binding is not canonical".to_owned(),
+                        ));
+                    }
+                    tasty_members.push(ClassMemberPicklePlan::Field(ClassFieldPicklePlan {
+                        symbol: field,
+                        source_tree: tree,
+                        typed_initializer,
+                        declared_type: field_type,
+                    }));
+                    jvm_fields.push(JvmFieldPlan {
+                        field,
+                        source_visibility: JvmFieldSourceVisibility::PlainPrivate,
+                        initializer: Some(typed_initializer),
+                    });
+                    source_member_order.push(field);
+                }
+                TreeKind::DefDef(method_definition) if tree != source_class.constructor_tree => {
+                    if !method_definition.type_params.is_empty() {
+                        return Err(fail(
+                            "member planning",
+                            "generic methods are unsupported".to_owned(),
+                        ));
+                    }
+                    let method = index.symbol_at(source_id, tree).ok_or_else(|| {
+                        fail(
+                            "member planning",
+                            "missing canonical source method identity".to_owned(),
+                        )
+                    })?;
+                    if typer.store().symbols.get(method).kind != SymbolKind::Method
+                        || typer.store().symbols.get(method).owner != Some(source_class.class)
+                    {
+                        return Err(fail(
+                            "member planning",
+                            "method is not owned by its declaring class".to_owned(),
+                        ));
+                    }
+                    typer
+                        .complete_symbol(method)
+                        .map_err(|error| PairedPlanError::BatchClass {
+                            class_index,
+                            declaration_index: member_index,
+                            phase: "method typing",
+                            reason: format!("{error:?}"),
+                        })?;
+                    let parameters = method_definition
+                        .value_param_clauses
+                        .iter()
+                        .flatten()
+                        .map(|parameter_tree| {
+                            index.symbol_at(source_id, *parameter_tree).ok_or_else(|| {
+                                fail(
+                                    "method planning",
+                                    "missing canonical method formal identity".to_owned(),
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let rhs = method_definition.rhs.ok_or_else(|| {
+                        fail(
+                            "method typing",
+                            "concrete method body is missing".to_owned(),
+                        )
+                    })?;
+                    let context = typer.expression_context_for(method).map_err(|error| {
+                        PairedPlanError::BatchClass {
+                            class_index,
+                            declaration_index: member_index,
+                            phase: "method typing",
+                            reason: format!("{error:?}"),
+                        }
+                    })?;
+                    let body = typer.type_expression(rhs, context).map_err(|error| {
+                        PairedPlanError::BatchClass {
+                            class_index,
+                            declaration_index: member_index,
+                            phase: "method body typing",
+                            reason: format!("{error:?}"),
+                        }
+                    })?;
+                    if typer.source_typed_index().get(source_id, rhs) != Some(body) {
+                        return Err(fail(
+                            "method body typing",
+                            "source-to-typed method body binding is not canonical".to_owned(),
+                        ));
+                    }
+                    tasty_members.push(ClassMemberPicklePlan::Method {
+                        symbol: method,
+                        source_tree: tree,
+                    });
+                    // The only reference local projected by this paired
+                    // adapter is the exact immutable ValDef consumed by the
                     // final one-argument constructor application. The
                     // cross-class proof below revalidates the complete shape;
                     // this projection only makes its canonical local

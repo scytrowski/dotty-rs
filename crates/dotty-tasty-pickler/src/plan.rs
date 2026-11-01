@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 15515)
-Total output lines: 1535
-
 use std::collections::{HashMap, HashSet};
 
 mod class_state;
@@ -668,7 +665,345 @@ impl<'a> Validator<'_, 'a> {
         Ok(found)
     }
 
-    fn package(&mut self, package: SymbolI…3515 tokens truncated…lt<bool, PickleError> {
+    fn package(&mut self, package: SymbolId) -> Result<(), PickleError> {
+        let mut current = Some(package);
+        let mut seen = HashSet::new();
+        let mut chain = Vec::new();
+        while let Some(symbol) = current {
+            if chain.len() >= self.limits.max_owner_depth {
+                return Err(PickleError::LimitExceeded {
+                    kind: LimitKind::OwnerDepth,
+                    limit: self.limits.max_owner_depth,
+                });
+            }
+            self.charge(1)?;
+            if !seen.insert(symbol) {
+                return Err(PickleError::OwnerCycle { symbol });
+            }
+            self.kind(symbol, SymbolKind::Package)?;
+            let record = self.symbol(symbol)?;
+            if record.name.namespace() != Namespace::Term {
+                return Err(PickleError::NameMismatch {
+                    symbol,
+                    tree: self.plan.source_root,
+                });
+            }
+            current = record.owner;
+            chain.push(symbol);
+        }
+        let [leaf, root] = chain.as_slice() else {
+            return Err(self.unsupported(UnsupportedFeature::PackageBoundary, Some(package)));
+        };
+        if !self.name(self.symbol(*root)?.name)?.is_empty()
+            || self.name(self.symbol(*leaf)?.name)?.is_empty()
+        {
+            return Err(self.unsupported(UnsupportedFeature::PackageBoundary, Some(package)));
+        }
+        Ok(())
+    }
+
+    fn parameters(
+        &mut self,
+        method: SymbolId,
+        definition: &DefDef<Untyped>,
+        clauses: &[Vec<SymbolId>],
+    ) -> Result<(), PickleError> {
+        self.charge(clauses.len())?;
+        if clauses.len() != definition.value_param_clauses.len() {
+            return Err(PickleError::ParameterOrder { method, clause: 0 });
+        }
+        if clauses.iter().any(|clause| !clause.is_empty()) {
+            self.scope(method)?;
+        }
+        let int = self.builtin(Builtin::Int, self.plan.definitions.int, "Int")?;
+        let boolean = self.builtin(Builtin::Boolean, self.plan.definitions.boolean, "Boolean")?;
+        let mut seen = HashSet::new();
+        for (clause, (symbols, trees)) in clauses
+            .iter()
+            .zip(&definition.value_param_clauses)
+            .enumerate()
+        {
+            self.charge(symbols.len())?;
+            if symbols.len() != trees.len() {
+                return Err(PickleError::ParameterOrder { method, clause });
+            }
+            for (&symbol, &tree) in symbols.iter().zip(trees) {
+                if !seen.insert(symbol) {
+                    return Err(PickleError::DuplicateDeclaration { symbol });
+                }
+                let TreeKind::ValDef(parameter) = &self.source_tree(tree)?.kind else {
+                    return Err(PickleError::SourceShape {
+                        tree,
+                        expected: SourceRole::Parameter,
+                    });
+                };
+                self.parameter_metadata(&parameter.metadata, symbol)?;
+                if parameter.rhs.is_some() {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))
+                    );
+                }
+                let TreeKind::Ident(parameter_type) = &self.source_tree(parameter.tpt)?.kind else {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))
+                    );
+                };
+                let declared_type = if parameter_type.name == self.symbol(int)?.name {
+                    Some(self.plan.definitions.int)
+                } else if parameter_type.name == self.symbol(boolean)?.name {
+                    Some(self.plan.definitions.boolean)
+                } else {
+                    None
+                };
+                self.source_symbol(
+                    symbol,
+                    tree,
+                    SymbolKind::Parameter,
+                    *parameter.name.as_name(),
+                )?;
+                self.owner(symbol, Some(method))?;
+                let ty = self.complete(symbol)?;
+                if !declared_type.is_some_and(|declared| declared == ty)
+                    && !self.is_planned_sibling_class_type(ty, Some(parameter_type.name))
+                {
+                    return Err(PickleError::UnsupportedTypeReference { ty });
+                }
+                if self.scope(method)?.lookup_all(parameter.name.as_name()) != [symbol] {
+                    return Err(PickleError::ScopeMembers { owner: method });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate(&mut self) -> Result<SymbolId, PickleError> {
+        let p = self.plan;
+        self.charge(1)?;
+        self.charge(p.local_values.len())?;
+        let mut local_symbols = HashSet::new();
+        for binding in p.local_values {
+            if self
+                .local_bindings
+                .insert(binding.source_tree, *binding)
+                .is_some()
+                || !local_symbols.insert(binding.symbol)
+            {
+                return Err(PickleError::DuplicateDeclaration {
+                    symbol: binding.symbol,
+                });
+            }
+            self.registered_local_symbols.insert(binding.symbol);
+        }
+        if p.source.name.len() > self.limits.max_name_bytes {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::NameBytes,
+                limit: self.limits.max_name_bytes,
+            });
+        }
+        if p.source.name.is_empty()
+            || p.source.name.contains(['\\', ':', '\0'])
+            || p.source
+                .name
+                .split('/')
+                .any(|part| matches!(part, "" | "." | ".."))
+        {
+            return Err(PickleError::InvalidSourceName);
+        }
+        if !matches!(self.ty(p.definitions.no_prefix)?, Type::NoPrefix) {
+            return Err(PickleError::MalformedType {
+                ty: p.definitions.no_prefix,
+                role: TypeRole::NoPrefix,
+            });
+        }
+        self.builtin(Builtin::Int, p.definitions.int, "Int")?;
+        self.builtin(Builtin::Boolean, p.definitions.boolean, "Boolean")?;
+        self.builtin(Builtin::Unit, p.definitions.unit, "Unit")?;
+        if self.builtin(Builtin::Object, p.definitions.object_type, "Object")?
+            != p.definitions.object_class
+        {
+            return Err(PickleError::BuiltinIdentity {
+                builtin: Builtin::Object,
+                ty: p.definitions.object_type,
+            });
+        }
+        let TreeKind::PackageDef(package_tree) = &self.source_tree(p.source_root)?.kind else {
+            return Err(PickleError::SourceShape {
+                tree: p.source_root,
+                expected: SourceRole::Package,
+            });
+        };
+        self.charge(package_tree.stats.len())?;
+        if package_tree.stats.as_slice() != [p.class_tree] {
+            return Err(self.unsupported(UnsupportedFeature::PackageBoundary, Some(p.class)));
+        }
+        let package = p
+            .source_index
+            .symbol_at(p.source.id, p.source_root)
+            .ok_or(PickleError::SourceDefinition { symbol: p.class })?;
+        self.package(package)?;
+        self.owner(p.class, Some(package))?;
+        let TreeKind::Ident(package_name) = &self.source_tree(package_tree.name)?.kind else {
+            return Err(self.unsupported(UnsupportedFeature::PackageBoundary, Some(package)));
+        };
+        if package_name.name != self.symbol(package)?.name {
+            return Err(PickleError::NameMismatch {
+                symbol: package,
+                tree: package_tree.name,
+            });
+        }
+        let class_name = self.symbol(p.class)?.name;
+        if !class_name.is_type() {
+            return Err(PickleError::NameMismatch {
+                symbol: p.class,
+                tree: p.class_tree,
+            });
+        }
+        for symbol in [package, p.class] {
+            let name = self.name(self.symbol(symbol)?.name)?;
+            if name.is_empty() || name.contains(['/', '\\', '.', '\0']) {
+                return Err(self.unsupported(UnsupportedFeature::Name, Some(symbol)));
+            }
+        }
+        let TreeKind::TypeDef(class) = &self.source_tree(p.class_tree)?.kind else {
+            return Err(PickleError::SourceShape {
+                tree: p.class_tree,
+                expected: SourceRole::Class,
+            });
+        };
+        self.metadata(&class.metadata, p.class)?;
+        self.source_symbol(
+            p.class,
+            p.class_tree,
+            SymbolKind::Class,
+            *class.name.as_name(),
+        )?;
+        if class.variance.is_some() {
+            return Err(self.unsupported(UnsupportedFeature::TypeParameters, Some(p.class)));
+        }
+        let info_id = self.complete(p.class)?;
+        let Type::ClassInfo(info) = self.ty(info_id)? else {
+            return Err(PickleError::MalformedType {
+                ty: info_id,
+                role: TypeRole::ClassInfo,
+            });
+        };
+        if info.class != p.class
+            || info.prefix != p.definitions.no_prefix
+            || p.source_index.scope_of(p.class) != Some(info.declarations)
+        {
+            return Err(PickleError::MalformedType {
+                ty: info_id,
+                role: TypeRole::ClassInfo,
+            });
+        }
+        self.ty(info.prefix)?;
+        self.charge(info.parents.len())?;
+        for &parent in &info.parents {
+            self.ty(parent)?;
+        }
+        if info.parents.as_slice() != [p.definitions.object_type] {
+            return Err(self.unsupported(UnsupportedFeature::Parents, Some(p.class)));
+        }
+        if info.self_type.is_some() {
+            return Err(self.unsupported(UnsupportedFeature::SelfType, Some(p.class)));
+        }
+        let class_scope = self.scope(p.class)?;
+        if self.scope(package)?.lookup_all(&class_name) != [p.class] {
+            return Err(PickleError::ScopeMembers { owner: package });
+        }
+        let TreeKind::Template(template) = &self.source_tree(class.rhs)?.kind else {
+            return Err(PickleError::SourceShape {
+                tree: class.rhs,
+                expected: SourceRole::Template,
+            });
+        };
+        if !template.parents.is_empty() {
+            return Err(self.unsupported(UnsupportedFeature::Parents, Some(p.class)));
+        }
+        if template.self_val.is_some() {
+            return Err(self.unsupported(UnsupportedFeature::SelfType, Some(p.class)));
+        }
+        if !template.metadata.derives.is_empty() || !template.metadata.uses.is_empty() {
+            return Err(self.unsupported(UnsupportedFeature::TemplateMetadata, Some(p.class)));
+        }
+        self.charge(template.body.len())?;
+        for &tree in &template.body {
+            if !matches!(self.source_tree(tree)?.kind, TreeKind::DefDef(_)) {
+                return Err(self.unsupported(UnsupportedFeature::ClassMembers, Some(p.class)));
+            }
+        }
+        self.charge(p.methods.len())?;
+        let mut expected = HashSet::new();
+        expected.insert(p.constructor.symbol);
+        for method in p.methods {
+            self.symbol(method.symbol)?;
+            if !expected.insert(method.symbol) {
+                return Err(PickleError::DuplicateDeclaration {
+                    symbol: method.symbol,
+                });
+            }
+        }
+        if template.body.len() != p.methods.len()
+            || !template
+                .body
+                .iter()
+                .zip(p.methods)
+                .all(|(&tree, method)| tree == method.source_tree)
+        {
+            return Err(PickleError::SourceOrder { class: p.class });
+        }
+        // Check constructor inputs before class-scope exact-membership checks:
+        // an accessor-bearing `val`/`var` parameter adds a legitimate field to
+        // that scope, but this serializer slice must report it as an
+        // unsupported constructor form rather than an opaque scope mismatch.
+        let has_two_reference_parameters = self.constructor(template.constructor)?;
+        let mut entered = HashSet::new();
+        let mut invalid_scope = false;
+        for symbol in class_scope.entered_symbols() {
+            self.charge(1)?;
+            if !expected.contains(&symbol) || !entered.insert(symbol) {
+                // Finish the bounded scan before reporting membership: the
+                // winning error must not depend on HashMap iteration order.
+                invalid_scope = true;
+            }
+        }
+        if invalid_scope || entered != expected {
+            return Err(PickleError::ScopeMembers { owner: p.class });
+        }
+        for symbol in std::iter::once(p.constructor.symbol)
+            .chain(p.methods.iter().map(|method| method.symbol))
+        {
+            let name = self.symbol(symbol)?.name;
+            if !class_scope.lookup_all(&name).contains(&symbol) {
+                return Err(PickleError::ScopeMembers { owner: p.class });
+            }
+        }
+        if has_two_reference_parameters && !p.methods.is_empty() {
+            return Err(self.unsupported(
+                UnsupportedFeature::PrimaryConstructorInput,
+                Some(p.constructor.symbol),
+            ));
+        }
+        for method in p.methods {
+            self.method(method)?;
+        }
+        if self.seen_local_bindings.len() != p.local_values.len() {
+            let binding = p
+                .local_values
+                .iter()
+                .find(|binding| !self.seen_local_bindings.contains(&binding.source_tree))
+                .expect("binding count mismatch has an unseen binding");
+            return Err(PickleError::SourceDefinition {
+                symbol: binding.symbol,
+            });
+        }
+        if p.methods.is_empty() && !has_two_reference_parameters {
+            return Err(self.unsupported(UnsupportedFeature::MethodCount, Some(p.class)));
+        }
+        Ok(package)
+    }
+
+    fn constructor(&mut self, source_tree: TreeId<Untyped>) -> Result<bool, PickleError> {
         let p = self.plan;
         let constructor = &p.constructor;
         if source_tree != constructor.source_tree {

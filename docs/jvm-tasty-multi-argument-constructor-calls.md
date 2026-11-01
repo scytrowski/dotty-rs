@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 13804)
-Total output lines: 716
-
 # Two-argument sibling constructor-call audit
 
 This record began as an evidence-only audit for [issue #1913](https://github.com/scytrowski/dotty-rs/issues/1913). Later sections record bounded increments and distinguish Rust-produced output from the checked-in Scala 3.9.0 oracle artifacts.
@@ -283,7 +280,105 @@ Issue [#1914](https://github.com/scytrowski/dotty-rs/issues/1914) extends the re
 
 The new opaque `NestedConstructorArgumentPairProof` preserves both ordered contexts: the factory's two original formal source trees, symbols, and types; the Pair primary constructor's two original formal source trees, symbols, and types; and one `NestedConstructorArgumentProof` per outer argument position. Each nested receipt links the original outer argument and `Apply`, inner Counter `Apply`, selected constructor, `New`, and caller-formal leaf to their exact typed roots, original source positions, and resolved `Int` type. The two calls may share the canonical Counter class and constructor symbols, but their Apply/Select/New/leaf identities remain separate. Repeating `first` as both arguments is accepted when both source and typed roots prove that same symbol; the receipt still retains the declared `second` formal in its ordered method context.
 
-At the #1914 revision, the paired planner ran this identity proof before any producer callback, then rejected a valid pair at `BatchUnit { phase: "two-argument constructor receipt integration", ... }` because the producer only carried singleton constructor argument bindings. That was the first paired-planner failure; body …1804 tokens truncated… stale UUID before any
+At the #1914 revision, the paired planner ran this identity proof before any producer callback, then rejected a valid pair at `BatchUnit { phase: "two-argument constructor receipt integration", ... }` because the producer only carried singleton constructor argument bindings. That was the first paired-planner failure; body validation was not reached in that flow. The pre-existing validator also had explicit one-argument guards in both the outer constructor `Apply` and the planned primary-constructor/formal checks.
+
+Focused tests cover the original fixture; swapped formal and expression order; repeated caller-formal use; renamed package/classes/method; declaration reordering; missing nested Select binding; and a forged leaf mapping that attempts to substitute the sibling's typed root. The latter two fail closed with `TypedBinding` errors. Source-invalid arity/type/duplicate-formal controls still fail in source typing. Unsupported deeper allocation and branch expressions fail because the leaf is not an original factory formal. Defaulted and generic factory methods are rejected by the earliest source/planning boundary. Secondary constructors remain rejected by existing method ownership checks. A source variation adding an overload currently fails earlier during method typing (`TypeNameNotFound`) and therefore does not exercise the proof's dedicated overloaded-method guard; no end-to-end overload-proof result is claimed.
+
+Current paired proof checks:
+
+```sh
+cargo test -p dotty --test jvm_tasty_constructor_call_proofs --locked
+cargo test -p dotty --test jvm_tasty_multi_argument_constructor_matrix --locked
+```
+
+Run all build, format, documentation, boundary, workspace, Scala-oracle, and mandatory JDK checks from the issue worker handoff; set `TMPDIR`, `CARGO_TARGET_DIR`, and JVM temporary storage to paths under the issue worktree.
+
+## Ordered nested constructor body validation (#1915)
+
+The one-session planner now adapts the immutable ordered proof into two
+`NestedConstructorCallBinding` receipts. Each retains its own outer argument
+root, nested `Apply`/`Select`/`New`/type tree/leaf bindings, inner constructor
+formal, and actual caller formal named by that leaf. The pickler shares one
+visited set and item budget across both branches, checks the outer constructor
+and factory method arities, and validates the outer constructor's two
+source-ordered reference formals as the same planned sibling class. Each inner
+receipt remains a one-argument `Counter(Int)` constructor. The caller formal is
+read from the proof instead of inferred from argument position, so formal
+reordering, expression reordering, and authentic repeated use retain their
+original identities.
+
+The first body-validator failure after connecting the batch adapter was the
+outer `Pair` primary-constructor guard: it required exactly one source formal
+and reported `UnsupportedFeature::PrimaryConstructorInput` for the selected
+constructor. After making that check use the observed `Apply` arity, the next
+failure was the constructor signature/formal validator's one-formal predicate
+(`MalformedType { role: ConstructorSignature }`). Both checks now accept two
+formals only when each is a planned sibling reference to the same class and
+the completed signature matches their source order. The exact original source,
+renamed and declaration-reordered controls, swapped formal and expression
+orders, and repeated-formal source all pass direct `validate_method_bodies()`.
+
+The root matrix also corrupts the second receipt by removing the batch pair,
+duplicating or reversing call-site identities, substituting a constructor or
+caller formal, and reusing the first typed leaf. These forged receipts fail
+validation. Third/deeper constructor expressions, branch arguments, invalid
+outer arity, and unsupported default, generic, overloaded, secondary, or
+contextual shapes remain rejected at their earlier measured gates. The prior
+single-argument and source-local body validators remain covered by the focused
+factory and pickler regressions.
+
+This change validates bounded source/typed plan identity only. It does not add
+expression wire serialization, change JVM code generation, or establish a
+Scala-readable Rust-produced sidecar. The Scala 3.9 oracle artifacts and
+independent consumer remain the unchanged baseline; class and TASTy emission
+was not modified.
+
+## Integrated JVM/TASTy batch acceptance (#1917)
+
+Issue [#1917](https://github.com/scytrowski/dotty-rs/issues/1917) connects the
+existing one-session ordered source proof and genuine TASTy writer to the JVM
+artifact batch. The integration baseline is `6c4ec4609d8d76f30f69cf911caa4d927d00740d`.
+Before this change, `emit_paired_jvm_tasty_batch` reached
+`BatchArtifact { class_index: 2, phase: "cross-class invocation" }` for the
+unchanged `PairFactory.scala` source and returned no artifact manifest.
+
+The contract now admits exactly two sibling constructor arguments when the
+original pair receipt proves their source and typed roots. It checks the outer
+`Pair.<init>(LCounter;LCounter;)V`, two distinct `Counter.<init>(I)V` calls,
+each original leaf formal and its JVM local slot, and the generated
+`PairFactory.create(II)Lexample/Pair;` instructions. The bytecode reader
+consumes the full straight-line sequence symbolically through `areturn`; it
+checks both formal loads in order, all three allocations and constructor
+Methodrefs, `max_stack=6`, `max_locals=3`, and empty exception metadata. The
+source/TASTy plans and all class/TASTy links validate before the batch returns.
+The new bytecode code is a validator for this bounded shape; class emission
+continues to use the existing JVM backend.
+
+The regression emits `Counter`, `Pair`, and `PairFactory` from one real source
+frontend session and compares all six files across fresh sessions. Rust
+artifact SHA-256 and linked TASTy UUIDs for the checked-in fixture source are:
+
+| Artifact | SHA-256 | Linked UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3-c009-68ac-0000-000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008071c3-c009-68ac-0000-000000008193` |
+| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| `example/PairFactory.class` | `e4212a30e382a609ec64aa54e002900448e7323e68839ebb25fa2fccf054e1f4` | `0036155a-30ac-b6c8-0000-000000008198` |
+| `example/PairFactory.tasty` | `ef6cc72805a9f3846d0cf31721cc06e88bb35716da1b0500eb6fad233b254836` | `0036155a-30ac-b6c8-0000-000000008198` |
+
+The focused integration confirms classfile 65.0, TASTy 28.9.0, each
+classfile-to-sidecar UUID, Pair's two private `Counter` fields and ordered
+two-reference constructor ABI, and the exact factory method descriptor and
+instructions. The existing TASTy regression checks separate `first` and
+`second` PARAM references in its nested leaves. Renamed and
+declaration-reordered producers remain deterministic across fresh sessions;
+the authentic repeated-formal case also remains accepted.
+
+Corruption controls reject a missing second inner initialization, swapped or
+duplicated formal loads, wrong inner owner, wrong outer descriptor, truncated
+class bytes, incorrect stack/local limits, missing class/sidecar paths,
+duplicate or unsafe paths, malformed TASTy, and a stale UUID before any
 accepted manifest. Paired-receipt regressions reject missing, duplicate,
 reversed, or forged constructor/formal/typed-leaf bindings. The reused
 test-only publisher injects failures after each of six staged writes, before
