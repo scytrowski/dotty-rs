@@ -19,8 +19,9 @@ use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::bytecode::CodeSequence;
 use dotty_classfile::bytecode::{
-    CfgCodeAnalyzer, ClassReference, ConstantPoolIndexOperand, ControlFlowGraph, Instruction,
-    LocalIndex, SpecialMethodReference, VirtualMethodReference, analyze as analyze_instructions,
+    AnalysisError, CfgCodeAnalyzer, ClassReference, ConstantPoolIndexOperand, ControlFlowGraph,
+    Instruction, LocalIndex, SpecialMethodReference, VirtualMethodReference,
+    analyze as analyze_instructions,
 };
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use std::process::Command;
@@ -4807,6 +4808,53 @@ fn sha256sum(path: &std::path::Path) -> String {
         .to_owned()
 }
 
+fn classfile_constant_pool_entry_offset(classfile: &[u8], wanted: ConstantPoolIndex) -> usize {
+    let count = usize::from(u16::from_be_bytes([classfile[8], classfile[9]]));
+    let mut index = 1usize;
+    let mut offset = 10usize;
+    while index < count {
+        let entry_offset = offset;
+        let tag = classfile[offset];
+        offset += 1;
+        let wide_slots = match tag {
+            1 => {
+                let length = usize::from(u16::from_be_bytes([
+                    classfile[offset],
+                    classfile[offset + 1],
+                ]));
+                offset += 2 + length;
+                1
+            }
+            3 | 4 => {
+                offset += 4;
+                1
+            }
+            5 | 6 => {
+                offset += 8;
+                2
+            }
+            7 | 8 | 16 | 19 | 20 => {
+                offset += 2;
+                1
+            }
+            9 | 10 | 11 | 12 | 17 | 18 => {
+                offset += 4;
+                1
+            }
+            15 => {
+                offset += 3;
+                1
+            }
+            other => panic!("unexpected constant-pool tag {other} at slot {index}"),
+        };
+        if index == usize::from(wanted.0) {
+            return entry_offset;
+        }
+        index += wide_slots;
+    }
+    panic!("constant-pool entry {} is absent", wanted.0)
+}
+
 #[test]
 fn reference_field_batch_publication_rejects_partial_and_faulted_results() {
     let batch = emit_paired_jvm_tasty_batch(
@@ -5261,9 +5309,11 @@ fn sibling_constructor_batch_emits_six_deterministic_linked_artifacts() {
     };
     assert_eq!((code.max_stack, code.max_locals), (6, 3));
     let mut pc = 0;
+    let outer_allocation_pc = pc;
     let outer_allocation = take_batch_cp_operand(code.code, &mut pc, 0xbb);
     assert_eq!(batch_class_name(factory, outer_allocation), "example/Pair");
     take_batch_opcode(code.code, &mut pc, 0x59);
+    let first_allocation_pc = pc;
     let first_allocation = take_batch_cp_operand(code.code, &mut pc, 0xbb);
     assert_eq!(
         batch_class_name(factory, first_allocation),
@@ -5276,6 +5326,7 @@ fn sibling_constructor_batch_emits_six_deterministic_linked_artifacts() {
         batch_method_ref(factory, first_constructor),
         ("example/Counter", ("<init>", "(I)V"))
     );
+    let second_allocation_pc = pc;
     let second_allocation = take_batch_cp_operand(code.code, &mut pc, 0xbb);
     assert_eq!(
         batch_class_name(factory, second_allocation),
@@ -5288,6 +5339,7 @@ fn sibling_constructor_batch_emits_six_deterministic_linked_artifacts() {
         batch_method_ref(factory, second_constructor),
         ("example/Counter", ("<init>", "(I)V"))
     );
+    let pair_constructor_pc = pc;
     let pair_constructor = take_batch_cp_operand(code.code, &mut pc, 0xb7);
     assert_eq!(
         batch_method_ref(factory, pair_constructor),
@@ -5298,6 +5350,52 @@ fn sibling_constructor_batch_emits_six_deterministic_linked_artifacts() {
     );
     take_batch_opcode(code.code, &mut pc, 0xb0);
     assert_eq!(pc, code.code.len(), "the checker consumes all instructions");
+    assert_ne!(first_allocation_pc, second_allocation_pc);
+    assert_eq!(first_constructor, second_constructor);
+    eprintln!(
+        "sibling-allocation-pcs outer={outer_allocation_pc} first_counter={first_allocation_pc} second_counter={second_allocation_pc} pair_init={pair_constructor_pc}"
+    );
+
+    let mut sequence = CodeSequence::new();
+    sequence
+        .instruction(Instruction::New(ClassReference::new(
+            ConstantPoolIndexOperand::try_from(outer_allocation.0).unwrap(),
+        )))
+        .instruction(Instruction::Dup)
+        .instruction(Instruction::New(ClassReference::new(
+            ConstantPoolIndexOperand::try_from(first_allocation.0).unwrap(),
+        )))
+        .instruction(Instruction::Dup)
+        .instruction(Instruction::ILoad(LocalIndex::new(1)))
+        .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+            ConstantPoolIndexOperand::try_from(first_constructor.0).unwrap(),
+        )))
+        .instruction(Instruction::New(ClassReference::new(
+            ConstantPoolIndexOperand::try_from(second_allocation.0).unwrap(),
+        )))
+        .instruction(Instruction::Dup)
+        .instruction(Instruction::ILoad(LocalIndex::new(2)))
+        .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+            ConstantPoolIndexOperand::try_from(second_constructor.0).unwrap(),
+        )))
+        .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+            ConstantPoolIndexOperand::try_from(pair_constructor.0).unwrap(),
+        )))
+        .instruction(Instruction::AReturn);
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+    let analysis = CfgCodeAnalyzer::analyze_with_current_class(
+        &graph,
+        "create",
+        "(II)Lexample/Pair;",
+        false,
+        &factory.constant_pool,
+        factory.this_class,
+    )
+    .expect("decoded sibling allocations pass class-aware uninitialized-site analysis");
+    assert_eq!(
+        (analysis.max_stack, analysis.max_locals),
+        (code.max_stack, code.max_locals)
+    );
 }
 
 #[test]
@@ -5421,6 +5519,415 @@ fn sibling_constructor_batches_are_deterministic_after_renaming_and_reordering()
 }
 
 #[test]
+fn sibling_constructor_batch_executes_original_rust_artifacts_with_independent_pair_identity() {
+    if !require_exact_jdk_21_or_skip() {
+        return;
+    }
+
+    let batch = emit_paired_jvm_tasty_batch(
+        MULTI_ARGUMENT_CONSTRUCTOR_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(19190),
+    )
+    .expect("the original single-session three-class source emits six linked artifacts");
+    assert_eq!(batch.classes().len(), 3);
+    let stage = TestDirectory::new("sibling-constructor-runtime-identity");
+    let classes = stage.path().join("original-rust-classes");
+    let harness_sources = stage.path().join("harness-sources");
+    let harness_classes = stage.path().join("harness-classes");
+    std::fs::create_dir(&harness_sources).unwrap();
+    std::fs::create_dir(&harness_classes).unwrap();
+
+    let mut artifact_paths = Vec::with_capacity(6);
+    for artifact in batch.classes() {
+        for (relative_path, bytes) in [
+            (artifact.classfile_path(), artifact.classfile_bytes()),
+            (artifact.tasty_path(), artifact.tasty_bytes()),
+        ] {
+            let path = classes.join(relative_path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+            artifact_paths.push((path, relative_path.to_owned()));
+        }
+    }
+    let original_hashes = artifact_paths
+        .iter()
+        .map(|(path, relative_path)| {
+            let hash = sha256sum(path);
+            eprintln!(
+                "sibling-pair-original-sha256 {relative_path} {hash} tasty-link={:?}",
+                batch
+                    .classes()
+                    .iter()
+                    .find(|artifact| {
+                        artifact.classfile_path() == relative_path
+                            || artifact.tasty_path() == relative_path
+                    })
+                    .unwrap()
+                    .tasty_link_id()
+            );
+            hash
+        })
+        .collect::<Vec<_>>();
+
+    let harness = harness_sources.join("PairFactoryIdentityHarness.java");
+    std::fs::write(
+        &harness,
+        r#"import java.lang.reflect.Field;
+
+public final class PairFactoryIdentityHarness {
+    public static void main(String[] args) throws ReflectiveOperationException {
+        example.PairFactory factory = new example.PairFactory();
+        example.Pair first = factory.create(7, 3);
+        example.Pair reversed = factory.create(3, 7);
+        example.Pair signed = factory.create(-9, 42);
+        if (first == reversed || first == signed || reversed == signed) {
+            throw new AssertionError("each create must return an independent Pair");
+        }
+        example.Counter[][] counters = {
+            {field(first, "left"), field(first, "right")},
+            {field(reversed, "left"), field(reversed, "right")},
+            {field(signed, "left"), field(signed, "right")}
+        };
+        for (int i = 0; i < counters.length; i++) {
+            if (counters[i][0] == counters[i][1]) {
+                throw new AssertionError("left and right must be distinct Counters");
+            }
+            for (int j = i + 1; j < counters.length; j++) {
+                for (int left = 0; left < 2; left++) {
+                    for (int right = 0; right < 2; right++) {
+                        if (counters[i][left] == counters[j][right]) {
+                            throw new AssertionError("create calls must not share Counters");
+                        }
+                    }
+                }
+            }
+        }
+        expect(first.leftValue(), 7);
+        expect(first.rightValue(), 3);
+        expect(reversed.leftValue(), 3);
+        expect(reversed.rightValue(), 7);
+        expect(signed.leftValue(), -9);
+        expect(signed.rightValue(), 42);
+
+        counters[0][0].set(100);
+        expect(first.leftValue(), 100);
+        expect(first.rightValue(), 3);
+        expect(reversed.leftValue(), 3);
+        expect(reversed.rightValue(), 7);
+        expect(signed.leftValue(), -9);
+        counters[0][1].set(-5);
+        expect(first.leftValue(), 100);
+        expect(first.rightValue(), -5);
+        expect(reversed.leftValue(), 3);
+        expect(signed.leftValue(), -9);
+        counters[1][0].set(-100);
+        expect(first.leftValue(), 100);
+        expect(first.rightValue(), -5);
+        expect(reversed.leftValue(), -100);
+        expect(reversed.rightValue(), 7);
+        expect(signed.leftValue(), -9);
+        expect(signed.rightValue(), 42);
+        System.out.println("values=7/3,3/7,-9/42; independent=true; mutations=100/-5,-100/7");
+    }
+
+    private static example.Counter field(example.Pair pair, String name)
+        throws ReflectiveOperationException {
+        Field field = example.Pair.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return (example.Counter) field.get(pair);
+    }
+
+    private static void expect(int actual, int expected) {
+        if (actual != expected) throw new AssertionError("expected " + expected + ", got " + actual);
+    }
+}
+"#,
+    )
+    .unwrap();
+    let javac = Command::new("javac")
+        .args(["-classpath", classes.to_str().unwrap(), "-d"])
+        .arg(&harness_classes)
+        .arg(&harness)
+        .output()
+        .expect("start JDK 21 javac for the separate test-only Java harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected the separate identity harness:\n{}\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    for ((path, relative_path), expected_hash) in artifact_paths.iter().zip(&original_hashes) {
+        assert_eq!(
+            sha256sum(path),
+            *expected_hash,
+            "javac changed {relative_path}"
+        );
+    }
+
+    let javap = Command::new("javap")
+        .args(["-v", "-p", "-c", "-classpath", classes.to_str().unwrap()])
+        .arg("example.PairFactory")
+        .output()
+        .expect("start JDK 21 javap on the original Rust PairFactory.class");
+    assert!(
+        javap.status.success(),
+        "javap rejected original Rust PairFactory.class:\n{}",
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let dump = String::from_utf8_lossy(&javap.stdout);
+    for expected in [
+        "major version: 65",
+        "create(int, int)",
+        "descriptor: (II)Lexample/Pair;",
+        "new           #",
+        "example/Counter",
+        "example/Pair",
+        "invokespecial",
+    ] {
+        assert!(
+            dump.contains(expected),
+            "javap omitted {expected:?}:\n{dump}"
+        );
+    }
+
+    let classpath = std::env::join_paths([harness_classes.as_path(), classes.as_path()]).unwrap();
+    let java = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(&classpath)
+        .arg("PairFactoryIdentityHarness")
+        .output()
+        .expect("start strict JDK 21 verification for the original Rust classfiles");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all -ea rejected the original Rust graph:\n{}\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "values=7/3,3/7,-9/42; independent=true; mutations=100/-5,-100/7"
+    );
+    for ((path, relative_path), expected_hash) in artifact_paths.iter().zip(&original_hashes) {
+        assert_eq!(
+            sha256sum(path),
+            *expected_hash,
+            "java changed {relative_path}"
+        );
+        let source_bytes = batch
+            .classes()
+            .iter()
+            .find(|artifact| {
+                artifact.classfile_path() == relative_path || artifact.tasty_path() == relative_path
+            })
+            .map(|artifact| {
+                if artifact.classfile_path() == relative_path {
+                    artifact.classfile_bytes()
+                } else {
+                    artifact.tasty_bytes()
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            source_bytes,
+            "JDK tools must not replace original Rust artifact {relative_path}"
+        );
+    }
+
+    let factory = batch
+        .classes()
+        .iter()
+        .find(|artifact| artifact.classfile_path() == "example/PairFactory.class")
+        .unwrap();
+    let mut decoded = Reader::new(factory.classfile_bytes());
+    let class = ClassFile::decode(&mut decoded).unwrap();
+    let create = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "create")
+        .unwrap();
+    let [Attribute::Code(code)] = create.attributes.as_slice() else {
+        panic!("PairFactory.create has one Code attribute");
+    };
+    let code_start = code.code.as_ptr() as usize - factory.classfile_bytes().as_ptr() as usize;
+    let mut pc = 0;
+    take_batch_cp_operand(code.code, &mut pc, 0xbb);
+    take_batch_opcode(code.code, &mut pc, 0x59);
+    take_batch_cp_operand(code.code, &mut pc, 0xbb);
+    take_batch_opcode(code.code, &mut pc, 0x59);
+    let first_load_pc = pc;
+    take_batch_opcode(code.code, &mut pc, 0x1b);
+    take_batch_cp_operand(code.code, &mut pc, 0xb7);
+    take_batch_cp_operand(code.code, &mut pc, 0xbb);
+    take_batch_opcode(code.code, &mut pc, 0x59);
+    let second_load_pc = pc;
+    take_batch_opcode(code.code, &mut pc, 0x1c);
+    let second_constructor_pc = pc;
+    take_batch_cp_operand(code.code, &mut pc, 0xb7);
+
+    let swapped_classes = stage.path().join("swapped-order-test-copy");
+    for artifact in batch.classes() {
+        let path = swapped_classes.join(artifact.classfile_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = if artifact.classfile_path() == "example/PairFactory.class" {
+            let mut bytes = artifact.classfile_bytes().to_vec();
+            bytes[code_start + first_load_pc] = 0x1c;
+            bytes[code_start + second_load_pc] = 0x1b;
+            bytes
+        } else {
+            artifact.classfile_bytes().to_vec()
+        };
+        std::fs::write(path, bytes).unwrap();
+    }
+    let swapped_classpath =
+        std::env::join_paths([harness_classes.as_path(), swapped_classes.as_path()]).unwrap();
+    let swapped = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(swapped_classpath)
+        .arg("PairFactoryIdentityHarness")
+        .output()
+        .expect("start verifier-valid swapped-load negative control");
+    let swapped_error = String::from_utf8_lossy(&swapped.stderr);
+    assert!(
+        !swapped.status.success(),
+        "swapped loads preserve the wrong runtime values"
+    );
+    assert!(
+        swapped_error.contains("AssertionError: expected 7, got 3"),
+        "swapped Int loads must fail a runtime value assertion, not verification:\n{swapped_error}"
+    );
+    assert!(
+        !swapped_error.contains("VerifyError") && !swapped_error.contains("LinkageError"),
+        "swapped Int loads are JVM-valid and fail only semantic assertions:\n{swapped_error}"
+    );
+
+    let verifier_error_classes = stage.path().join("verify-error-test-copy");
+    for artifact in batch.classes() {
+        let path = verifier_error_classes.join(artifact.classfile_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = if artifact.classfile_path() == "example/PairFactory.class" {
+            let mut bytes = artifact.classfile_bytes().to_vec();
+            bytes[code_start + second_constructor_pc..code_start + second_constructor_pc + 3]
+                .fill(0x00);
+            bytes
+        } else {
+            artifact.classfile_bytes().to_vec()
+        };
+        std::fs::write(path, bytes).unwrap();
+    }
+    let verifier_error_classpath =
+        std::env::join_paths([harness_classes.as_path(), verifier_error_classes.as_path()])
+            .unwrap();
+    let verifier_error = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(verifier_error_classpath)
+        .arg("PairFactoryIdentityHarness")
+        .output()
+        .expect("start strict JVM verification for the missing-init test copy");
+    let verifier_error_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&verifier_error.stdout),
+        String::from_utf8_lossy(&verifier_error.stderr)
+    );
+    assert!(!verifier_error.status.success());
+    assert!(
+        verifier_error_text.contains("VerifyError"),
+        "missing inner initialization fails at JVM verification:\n{verifier_error_text}"
+    );
+    assert!(
+        !verifier_error_text.contains("LinkageError")
+            && !verifier_error_text.contains("AssertionError"),
+        "missing inner initialization is a VerifyError, not linkage or a value assertion:\n{verifier_error_text}"
+    );
+
+    let pair_artifact = batch
+        .classes()
+        .iter()
+        .find(|artifact| artifact.classfile_path() == "example/Pair.class")
+        .unwrap();
+    let pair_class = ClassFile::decode(&mut Reader::new(pair_artifact.classfile_bytes())).unwrap();
+    let left_value = pair_class
+        .methods
+        .iter()
+        .find(|method| pair_class.constant_pool.utf8(method.name_index).unwrap() == "leftValue")
+        .unwrap();
+    let [Attribute::Code(left_value_code)] = left_value.attributes.as_slice() else {
+        panic!("Pair.leftValue has one Code attribute");
+    };
+    let mut left_value_pc = 0;
+    take_batch_opcode(left_value_code.code, &mut left_value_pc, 0x2a);
+    take_batch_cp_operand(left_value_code.code, &mut left_value_pc, 0xb4);
+    let get_method_ref = take_batch_cp_operand(left_value_code.code, &mut left_value_pc, 0xb6);
+    let Some(ConstantPoolEntry::Methodref {
+        class_index: get_owner,
+        name_and_type_index: get_name_and_type,
+    }) = pair_class.constant_pool.get(get_method_ref)
+    else {
+        panic!("Pair.leftValue invokes a class Methodref");
+    };
+    assert_eq!(
+        pair_class.constant_pool.class_name(*get_owner).unwrap(),
+        "example/Counter"
+    );
+    assert_eq!(
+        pair_class
+            .constant_pool
+            .name_and_type(*get_name_and_type)
+            .unwrap(),
+        ("get", "()I")
+    );
+    let pair_object_class = pair_class.super_class.unwrap();
+    let get_method_ref_offset =
+        classfile_constant_pool_entry_offset(pair_artifact.classfile_bytes(), get_method_ref);
+    let linkage_error_classes = stage.path().join("linkage-error-test-copy");
+    for artifact in batch.classes() {
+        let path = linkage_error_classes.join(artifact.classfile_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = if artifact.classfile_path() == "example/Pair.class" {
+            let mut bytes = artifact.classfile_bytes().to_vec();
+            bytes[get_method_ref_offset + 1..get_method_ref_offset + 3]
+                .copy_from_slice(&pair_object_class.0.to_be_bytes());
+            bytes
+        } else {
+            artifact.classfile_bytes().to_vec()
+        };
+        std::fs::write(path, bytes).unwrap();
+    }
+    let linkage_error_classpath =
+        std::env::join_paths([harness_classes.as_path(), linkage_error_classes.as_path()]).unwrap();
+    let linkage_error = Command::new("java")
+        .args(["-Xverify:all", "-ea", "-classpath"])
+        .arg(linkage_error_classpath)
+        .arg("PairFactoryIdentityHarness")
+        .output()
+        .expect("start JVM on the unresolved Methodref test copy");
+    let linkage_error_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&linkage_error.stdout),
+        String::from_utf8_lossy(&linkage_error.stderr)
+    );
+    assert!(!linkage_error.status.success());
+    assert!(
+        linkage_error_text.contains("NoSuchMethodError"),
+        "a verifier-valid unresolved Methodref fails during JVM linkage:\n{linkage_error_text}"
+    );
+    assert!(
+        !linkage_error_text.contains("VerifyError")
+            && !linkage_error_text.contains("AssertionError"),
+        "the unresolved Methodref is a linkage failure, not verification or a semantic assertion:\n{linkage_error_text}"
+    );
+
+    for ((path, relative_path), expected_hash) in artifact_paths.iter().zip(&original_hashes) {
+        assert_eq!(
+            sha256sum(path),
+            *expected_hash,
+            "negative test copies must not alter original {relative_path}"
+        );
+    }
+}
+
+#[test]
 fn sibling_constructor_batch_contract_rejects_bytecode_and_link_corruption() {
     let batch = emit_paired_jvm_tasty_batch(
         MULTI_ARGUMENT_CONSTRUCTOR_BATCH,
@@ -5478,14 +5985,17 @@ fn sibling_constructor_batch_contract_rejects_bytecode_and_link_corruption() {
             let code_start =
                 code.code.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
             let mut pc = 0;
-            take_batch_cp_operand(code.code, &mut pc, 0xbb);
+            let outer_allocation = take_batch_cp_operand(code.code, &mut pc, 0xbb);
             take_batch_opcode(code.code, &mut pc, 0x59);
-            take_batch_cp_operand(code.code, &mut pc, 0xbb);
+            let first_allocation_opcode = pc;
+            let first_allocation = take_batch_cp_operand(code.code, &mut pc, 0xbb);
             take_batch_opcode(code.code, &mut pc, 0x59);
             let first_load_opcode = pc;
             take_batch_opcode(code.code, &mut pc, 0x1b);
+            let first_constructor_opcode = pc;
             take_batch_cp_operand(code.code, &mut pc, 0xb7);
-            take_batch_cp_operand(code.code, &mut pc, 0xbb);
+            let second_allocation_opcode = pc;
+            let second_allocation = take_batch_cp_operand(code.code, &mut pc, 0xbb);
             take_batch_opcode(code.code, &mut pc, 0x59);
             let second_load_opcode = pc;
             take_batch_opcode(code.code, &mut pc, 0x1c);
@@ -5495,10 +6005,44 @@ fn sibling_constructor_batch_contract_rejects_bytecode_and_link_corruption() {
             let outer_constructor_ref = take_batch_cp_operand(code.code, &mut pc, 0xb7);
 
             let mut cases = Vec::new();
+            let mut missing_first_new = valid_artifacts.clone();
+            sibling_factory_classfile_mut(&mut missing_first_new).classfile_bytes
+                [code_start + first_allocation_opcode] = 0x00;
+            cases.push(("missing-first-inner-new", missing_first_new));
+
+            let mut missing_second_new = valid_artifacts.clone();
+            sibling_factory_classfile_mut(&mut missing_second_new).classfile_bytes
+                [code_start + second_allocation_opcode] = 0x00;
+            cases.push(("missing-second-inner-new", missing_second_new));
+
             let mut missing_inner_init = valid_artifacts.clone();
             sibling_factory_classfile_mut(&mut missing_inner_init).classfile_bytes
                 [code_start + second_constructor_opcode] = 0x00;
             cases.push(("missing-second-inner-init", missing_inner_init));
+
+            let mut missing_first_inner_init = valid_artifacts.clone();
+            sibling_factory_classfile_mut(&mut missing_first_inner_init).classfile_bytes
+                [code_start + first_constructor_opcode] = 0x00;
+            cases.push(("missing-first-inner-init", missing_first_inner_init));
+
+            let mut premature_outer_init = valid_artifacts.clone();
+            let classfile =
+                &mut sibling_factory_classfile_mut(&mut premature_outer_init).classfile_bytes;
+            classfile[code_start + second_constructor_opcode + 1
+                ..code_start + second_constructor_opcode + 3]
+                .copy_from_slice(&outer_constructor_ref.0.to_be_bytes());
+            cases.push(("premature-outer-init", premature_outer_init));
+
+            let mut duplicate_inner_init_reference = valid_artifacts.clone();
+            let classfile = &mut sibling_factory_classfile_mut(&mut duplicate_inner_init_reference)
+                .classfile_bytes;
+            classfile[code_start + outer_constructor_opcode + 1
+                ..code_start + outer_constructor_opcode + 3]
+                .copy_from_slice(&second_constructor_ref.0.to_be_bytes());
+            cases.push((
+                "outer-call-reuses-inner-methodref",
+                duplicate_inner_init_reference,
+            ));
 
             let mut swapped_loads = valid_artifacts.clone();
             let classfile = &mut sibling_factory_classfile_mut(&mut swapped_loads).classfile_bytes;
@@ -5554,6 +6098,69 @@ fn sibling_constructor_batch_contract_rejects_bytecode_and_link_corruption() {
                     "{label} must fail at the paired call bytecode stage: {error:?}"
                 );
             }
+
+            let operand =
+                |index: ConstantPoolIndex| ConstantPoolIndexOperand::try_from(index.0).unwrap();
+            let mut third_live_allocation = CodeSequence::new();
+            third_live_allocation
+                .instruction(Instruction::New(ClassReference::new(operand(
+                    outer_allocation,
+                ))))
+                .instruction(Instruction::Dup)
+                .instruction(Instruction::New(ClassReference::new(operand(
+                    first_allocation,
+                ))))
+                .instruction(Instruction::Dup)
+                .instruction(Instruction::New(ClassReference::new(operand(
+                    second_allocation,
+                ))))
+                .instruction(Instruction::Dup)
+                .instruction(Instruction::Return);
+            let graph = ControlFlowGraph::build(&third_live_allocation).unwrap();
+            assert!(
+                matches!(
+                    CfgCodeAnalyzer::analyze_with_current_class(
+                        &graph,
+                        "create",
+                        "(II)Lexample/Pair;",
+                        false,
+                        &decoded.constant_pool,
+                        decoded.this_class,
+                    ),
+                    Err(AnalysisError::TooManyLiveAllocations {
+                        instruction: 4,
+                        limit: 2,
+                        ..
+                    })
+                ),
+                "third simultaneously uninitialized object fails in CFG analysis"
+            );
+
+            let mut escaped_uninitialized = CodeSequence::new();
+            escaped_uninitialized
+                .instruction(Instruction::New(ClassReference::new(operand(
+                    first_allocation,
+                ))))
+                .instruction(Instruction::AStore(LocalIndex::new(3)))
+                .instruction(Instruction::Return);
+            let graph = ControlFlowGraph::build(&escaped_uninitialized).unwrap();
+            assert!(
+                matches!(
+                    CfgCodeAnalyzer::analyze_with_current_class(
+                        &graph,
+                        "create",
+                        "(II)Lexample/Pair;",
+                        false,
+                        &decoded.constant_pool,
+                        decoded.this_class,
+                    ),
+                    Err(AnalysisError::UninitializedReferenceUse {
+                        instruction: 1,
+                        allocation_site: 0,
+                    })
+                ),
+                "uninitialized allocation cannot escape to a local"
+            );
 
             let mut truncated = valid_artifacts.clone();
             let classfile = &mut sibling_factory_classfile_mut(&mut truncated).classfile_bytes;
