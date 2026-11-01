@@ -39,26 +39,48 @@ impl Drop for TempDir {
 }
 
 fn parse_tool_major_version(version_output: &str) -> Option<u32> {
-    version_output.split_whitespace().find_map(|token| {
-        let token = token.trim_matches('"');
-        let numeric_version = token.split(['-', '+']).next()?;
-        if numeric_version.is_empty()
-            || (!numeric_version.contains('.') && !token.ends_with("-ea"))
-            || !numeric_version
-                .chars()
-                .all(|character| character.is_ascii_digit() || character == '.')
-        {
-            return None;
+    version_output.lines().find_map(|line| {
+        let line = line.trim();
+        let explicit_version =
+            if line.starts_with("openjdk version ") || line.starts_with("java version ") {
+                Some((line.split('"').nth(1)?, true))
+            } else if let Some(version) = line.strip_prefix("javac ") {
+                Some((version.split_whitespace().next()?, true))
+            } else {
+                None
+            };
+        if let Some((version, allow_major_only)) = explicit_version {
+            return parse_version_major(version, allow_major_only);
         }
 
-        let mut components = numeric_version.split('.');
-        let first = components.next()?.parse::<u32>().ok()?;
-        if first == 1 {
-            components.next()?.parse::<u32>().ok()
-        } else {
-            Some(first)
-        }
+        line.split_whitespace().find_map(|token| {
+            let numeric_version = token.split(['-', '+']).next()?;
+            if !numeric_version.contains('.') && !token.ends_with("-ea") {
+                return None;
+            }
+            parse_version_major(token, false)
+        })
     })
+}
+
+fn parse_version_major(version: &str, allow_major_only: bool) -> Option<u32> {
+    let numeric_version = version.trim_matches('"').split(['-', '+']).next()?;
+    if numeric_version.is_empty()
+        || (!allow_major_only && !numeric_version.contains('.') && !version.ends_with("-ea"))
+        || !numeric_version
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == '.')
+    {
+        return None;
+    }
+
+    let mut components = numeric_version.split('.');
+    let first = components.next()?.parse::<u32>().ok()?;
+    if first == 1 {
+        components.next()?.parse::<u32>().ok()
+    } else {
+        Some(first)
+    }
 }
 
 fn executable_major_version(executable: &str) -> Option<u32> {
@@ -105,8 +127,23 @@ fn parses_jdk_version_formats_and_rejects_older_major_versions() {
         Some(17)
     );
     assert_eq!(parse_tool_major_version("javac 21.0.12"), Some(21));
+    assert_eq!(parse_tool_major_version("javac 21"), Some(21));
+    assert_eq!(
+        parse_tool_major_version("openjdk version \"21\" 2023-09-19"),
+        Some(21)
+    );
+    assert_eq!(
+        parse_tool_major_version("java version \"21\" 2023-09-19"),
+        Some(21)
+    );
     assert_eq!(parse_tool_major_version("21-ea"), Some(21));
     assert_eq!(parse_tool_major_version("javac version unknown"), None);
+    assert_eq!(
+        parse_tool_major_version(
+            "OpenJDK warning: shared memory file failed (pid=21)\n   3343610\nTry setting java.io.tmpdir"
+        ),
+        None
+    );
 }
 
 fn run(executable: &str, args: &[&str]) -> Output {
