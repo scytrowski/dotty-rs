@@ -987,6 +987,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
+        let pair_package_scope_before = self.snapshot_pair_package_scope();
         let aliases_before = self.snapshot_open_builtin_aliases();
         let object_before = self
             .store
@@ -1020,9 +1021,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 })
             }
             Err(error) => {
-                for name in [&base_name, &wrapped_name] {
-                    self.remove_open_root_from_package_scope_for_name(name);
-                }
+                self.remove_pair_package_insertions(pair_package_scope_before);
                 self.session.rollback_to(self.store, session_checkpoint);
                 if self.store.symbols.contains(self.definitions.object_class) {
                     *self.store.symbols.get_mut(self.definitions.object_class) = object_before;
@@ -1551,6 +1550,46 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "a pair unit must contain exactly one top-level class in one package",
             ));
         }
+        let root = package.stats.get(0).expect("shape checked above");
+        let (type_or_template, tail) = match root.decode_definition_body() {
+            Ok(dotty_tasty::tasty::DefinitionBody::TypeDef {
+                type_or_template,
+                tail,
+                ..
+            }) => (type_or_template, tail),
+            _ => {
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "a pair root must be a class-like type definition",
+                ));
+            }
+        };
+        let is_template = matches!(
+            type_or_template,
+            dotty_tasty::tasty::RawTree::LengthNode(ref template)
+                if template.tag == dotty_tasty::tasty::TEMPLATE_TAG
+        );
+        let has_object_modifier = tail.iter().any(|modifier| {
+            matches!(
+                modifier,
+                dotty_tasty::tasty::DefinitionTail::Modifier(dotty_tasty::tasty::OBJECT_TAG)
+            )
+        });
+        let has_trait_modifier = tail.iter().any(|modifier| {
+            matches!(
+                modifier,
+                dotty_tasty::tasty::DefinitionTail::Modifier(dotty_tasty::tasty::TRAIT_TAG)
+            )
+        });
+        let expected_kind = if has_direct_member {
+            is_template && !has_object_modifier && !has_trait_modifier
+        } else {
+            is_template && has_trait_modifier && !has_object_modifier
+        };
+        if !expected_kind {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "InfoBase must be a trait and InfoWrapped must be a class",
+            ));
+        }
         let index = file.ast_address_index().map_err(|error| {
             SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
                 name.clone(),
@@ -1621,28 +1660,33 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
     }
 
-    fn remove_open_root_from_package_scope_for_name(&mut self, name: &BinaryName) {
-        let package_path = name.package_path();
-        let segments = package_path.split('/').collect::<Vec<_>>();
-        let Some(package) = self.session.packages.get(&segments) else {
+    fn snapshot_pair_package_scope(&self) -> Option<(ScopeId, HashSet<SymbolId>)> {
+        let package_path = "me/cytrowski/tastyfixtures/semantic";
+        let package_segments = package_path.split('/').collect::<Vec<_>>();
+        let package = self.session.packages.get(&package_segments)?;
+        let scope = self.session.packages.scope_of(package)?;
+        Some((
+            scope,
+            self.store.scopes.get(scope).entered_symbols().collect(),
+        ))
+    }
+
+    fn remove_pair_package_insertions(&mut self, before: Option<(ScopeId, HashSet<SymbolId>)>) {
+        let Some((scope, before)) = before else {
             return;
         };
-        let Some(scope) = self.session.packages.scope_of(package) else {
+        if !self.store.scopes.contains(scope) {
             return;
-        };
-        let symbol_name = Name::new(self.store.names.intern(name.simple_name()), Namespace::Type);
-        for symbol in self
+        }
+        let inserted = self
             .store
             .scopes
             .get(scope)
-            .lookup_all(&symbol_name)
-            .to_vec()
-        {
-            if self.store.symbols.contains(symbol)
-                && symbol_matches_binary_name(self.store, symbol, name)
-            {
-                self.store.scopes.get_mut(scope).remove(symbol);
-            }
+            .entered_symbols()
+            .filter(|symbol| !before.contains(symbol))
+            .collect::<HashSet<_>>();
+        for symbol in inserted {
+            self.store.scopes.get_mut(scope).remove(symbol);
         }
     }
 
@@ -6925,6 +6969,111 @@ mod tests {
             assert!(loader.repository.get(&base).is_none());
             assert!(loader.repository.get(&wrapped).is_none());
         }
+    }
+
+    #[test]
+    fn info_pair_rejects_object_mutated_base_before_entering_preexisting_package() {
+        let base = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoBase");
+        let wrapped = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/InfoWrapped");
+        let mut base_bytes = semantic_unpickler_fixture_bytes("InfoBase.tasty");
+        assert_eq!(base_bytes.get(329), Some(&dotty_tasty::tasty::TRAIT_TAG));
+        base_bytes[329] = dotty_tasty::tasty::OBJECT_TAG;
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            semantic_info_pair_class_path_with(
+                base_bytes,
+                semantic_unpickler_fixture_bytes("InfoWrapped.tasty"),
+            ),
+            &mut store,
+        );
+        let package_path = ["me", "cytrowski", "tastyfixtures", "semantic"];
+        let package = loader
+            .session
+            .packages
+            .resolve_package(loader.store, &package_path.join("/"));
+        let scope = loader.session.packages.scope_of(package).expect("scope");
+        let entries_before = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+
+        let error = loader
+            .load_info_pair_with_tasty_unpickler(&base)
+            .expect_err("the object-mutated base must fail its root-kind guard");
+        assert!(matches!(
+            error,
+            SemanticTastyLoadError::PairUnitFailure {
+                binary_name,
+                format: ClassFormat::Tasty,
+                cause,
+                ..
+            } if binary_name == base
+                && matches!(*cause, SemanticTastyLoadError::UnsupportedShape(_))
+        ));
+        let entries_after = loader
+            .store
+            .scopes
+            .get(scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+        assert_eq!(entries_after, entries_before);
+        assert!(
+            entries_after
+                .iter()
+                .all(|symbol| loader.store.symbols.contains(*symbol))
+        );
+        assert!(loader.semantic_tasty_loaded.is_empty());
+        assert!(!loader.session.resolved.contains_key(&base));
+        assert!(!loader.session.resolved.contains_key(&wrapped));
+        assert!(loader.repository.get(&base).is_none());
+        assert!(loader.repository.get(&wrapped).is_none());
+    }
+
+    #[test]
+    fn info_pair_rollback_removes_new_scope_entries_without_matching_name_or_kind() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let package = loader
+            .session
+            .packages
+            .resolve_package(loader.store, "me/cytrowski/tastyfixtures/semantic");
+        let scope = loader.session.packages.scope_of(package).expect("scope");
+        let before = loader
+            .snapshot_pair_package_scope()
+            .expect("pre-existing scope");
+        let unrelated_name = Name::new(loader.store.names.intern("WrongName"), Namespace::Type);
+        let inserted = loader.store.symbols.alloc(Symbol {
+            name: unrelated_name,
+            owner: Some(package),
+            kind: SymbolKind::ModuleClass,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        loader
+            .store
+            .scopes
+            .get_mut(scope)
+            .enter(unrelated_name, inserted);
+
+        loader.remove_pair_package_insertions(Some(before));
+
+        assert!(
+            !loader
+                .store
+                .scopes
+                .get(scope)
+                .entered_symbols()
+                .any(|symbol| symbol == inserted)
+        );
+        assert!(loader.store.symbols.contains(inserted));
     }
 
     #[test]
