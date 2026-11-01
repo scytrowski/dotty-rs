@@ -21,6 +21,20 @@ pub enum SourceSemanticIndexError {
         source: SourceId,
         tree_index: u32,
     },
+    /// A case-class generated method role was already assigned to a symbol.
+    DuplicateGeneratedCaseClassMethodRole {
+        class: SymbolId,
+        role: GeneratedCaseClassMethodRole,
+    },
+    /// A symbol was already assigned a generated case-class method role.
+    DuplicateGeneratedCaseClassMethodSymbol { symbol: SymbolId },
+    /// A generated method was not derived from its canonical source class.
+    GeneratedCaseClassMethodClassMismatch {
+        class: SymbolId,
+        source: SourceId,
+        tree_index: u32,
+        actual: Option<SymbolId>,
+    },
     /// A semantic symbol was assigned conflicting canonical/derived source definitions.
     ConflictingSourceProvenance {
         symbol: SymbolId,
@@ -72,6 +86,28 @@ pub enum SourceDefinition {
         /// Original source tree from which the identity was derived.
         tree: TreeId<Untyped>,
     },
+}
+
+/// Generated case-class companion method that carries canonical class provenance.
+///
+/// The role index is separate from [`SourceSemanticIndex::derived_symbol_at`]
+/// so multiple generated methods can point at the same source class tree
+/// without colliding with the legacy generated-`apply` lookup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GeneratedCaseClassMethodRole {
+    /// The synthetic companion constructor method.
+    Apply,
+    /// The synthetic companion extractor method.
+    Unapply,
+}
+
+/// Reverse provenance for a generated case-class companion method.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GeneratedCaseClassMethod {
+    /// Canonical source case-class symbol.
+    pub class: SymbolId,
+    /// Generated companion method role.
+    pub role: GeneratedCaseClassMethodRole,
 }
 
 /// Opaque identifier for an immutable source declaration context.
@@ -133,6 +169,9 @@ pub struct SourceExportSite {
 pub struct SourceSemanticIndex {
     symbols_by_tree: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     derived_symbols_by_owner_and_tree: HashMap<(SymbolId, SourceId, TreeId<Untyped>), SymbolId>,
+    generated_case_class_methods_by_class_and_role:
+        HashMap<(SymbolId, GeneratedCaseClassMethodRole), SymbolId>,
+    generated_case_class_method_roles_by_symbol: HashMap<SymbolId, GeneratedCaseClassMethod>,
     definitions_by_symbol: HashMap<SymbolId, SourceDefinition>,
     scopes_by_owner: HashMap<SymbolId, ScopeId>,
     extension_prefix_clauses_by_method: HashMap<SymbolId, Vec<Vec<TreeId<Untyped>>>>,
@@ -172,6 +211,27 @@ impl SourceSemanticIndex {
             .copied()
     }
 
+    /// Returns the generated companion method for one canonical case class and role.
+    pub fn generated_case_class_method(
+        &self,
+        class: SymbolId,
+        role: GeneratedCaseClassMethodRole,
+    ) -> Option<SymbolId> {
+        self.generated_case_class_methods_by_class_and_role
+            .get(&(class, role))
+            .copied()
+    }
+
+    /// Returns the canonical class and role associated with a generated method.
+    pub fn generated_case_class_method_identity(
+        &self,
+        method: SymbolId,
+    ) -> Option<GeneratedCaseClassMethod> {
+        self.generated_case_class_method_roles_by_symbol
+            .get(&method)
+            .copied()
+    }
+
     /// Returns the source definition tree for a canonical or derived symbol.
     ///
     /// Lookup is O(1). Package symbols are shared across source clauses and
@@ -206,6 +266,59 @@ impl SourceSemanticIndex {
         self.ensure_source_provenance(symbol, definition)?;
         self.derived_symbols_by_owner_and_tree.insert(key, symbol);
         self.definitions_by_symbol.insert(symbol, definition);
+        Ok(())
+    }
+
+    /// Associates one generated companion method with its canonical case class.
+    ///
+    /// This role-aware mapping supplements the legacy owner/source/tree mapping
+    /// used by generated `apply`; it never replaces or changes that mapping.
+    pub fn record_generated_case_class_method(
+        &mut self,
+        class: SymbolId,
+        role: GeneratedCaseClassMethodRole,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+        method: SymbolId,
+    ) -> Result<(), SourceSemanticIndexError> {
+        let actual = self.symbol_at(source, tree);
+        if actual != Some(class) {
+            return Err(
+                SourceSemanticIndexError::GeneratedCaseClassMethodClassMismatch {
+                    class,
+                    source,
+                    tree_index: tree.index(),
+                    actual,
+                },
+            );
+        }
+        if self
+            .generated_case_class_methods_by_class_and_role
+            .contains_key(&(class, role))
+        {
+            return Err(
+                SourceSemanticIndexError::DuplicateGeneratedCaseClassMethodRole { class, role },
+            );
+        }
+        if self
+            .generated_case_class_method_roles_by_symbol
+            .contains_key(&method)
+        {
+            return Err(
+                SourceSemanticIndexError::DuplicateGeneratedCaseClassMethodSymbol {
+                    symbol: method,
+                },
+            );
+        }
+        let definition = SourceDefinition::Derived { source, tree };
+        self.ensure_source_provenance(method, definition)?;
+
+        let identity = GeneratedCaseClassMethod { class, role };
+        self.generated_case_class_methods_by_class_and_role
+            .insert((class, role), method);
+        self.generated_case_class_method_roles_by_symbol
+            .insert(method, identity);
+        self.definitions_by_symbol.insert(method, definition);
         Ok(())
     }
 
@@ -382,6 +495,79 @@ impl SourceSemanticIndex {
                     "derived source {}/tree {} overwrites its canonical identity",
                     source.index(),
                     tree.index()
+                ));
+            }
+        }
+
+        for ((class, role), method) in &self.generated_case_class_methods_by_class_and_role {
+            let expected_identity = GeneratedCaseClassMethod {
+                class: *class,
+                role: *role,
+            };
+            if self.generated_case_class_method_roles_by_symbol.get(method)
+                != Some(&expected_identity)
+            {
+                violations.push(format!(
+                    "generated case-class {:?} method for class {} has no matching reverse provenance",
+                    role,
+                    class.index()
+                ));
+            }
+            if !store.symbols.contains(*class) {
+                violations.push(format!(
+                    "generated case-class {:?} method refers to missing class {}",
+                    role,
+                    class.index()
+                ));
+                continue;
+            }
+            if !store.symbols.contains(*method) {
+                violations.push(format!(
+                    "generated case-class {:?} method {} is missing",
+                    role,
+                    method.index()
+                ));
+                continue;
+            }
+            let method_symbol = store.symbols.get(*method);
+            if method_symbol.kind != SymbolKind::Method {
+                violations.push(format!(
+                    "generated case-class {:?} symbol {} is not a method",
+                    role,
+                    method.index()
+                ));
+            }
+            let class_definition = self.definition_of(*class);
+            let method_definition = self.definition_of(*method);
+            match class_definition {
+                Some(SourceDefinition::Canonical { source, tree })
+                    if method_definition == Some(SourceDefinition::Derived { source, tree }) => {}
+                Some(SourceDefinition::Canonical { source, tree }) => violations.push(format!(
+                    "generated case-class {:?} method {} does not derive from class {} source {}/tree {}",
+                    role,
+                    method.index(),
+                    class.index(),
+                    source.index(),
+                    tree.index()
+                )),
+                _ => violations.push(format!(
+                    "generated case-class {:?} method refers to class {} without canonical source provenance",
+                    role,
+                    class.index()
+                )),
+            }
+        }
+        for (method, identity) in &self.generated_case_class_method_roles_by_symbol {
+            if self
+                .generated_case_class_methods_by_class_and_role
+                .get(&(identity.class, identity.role))
+                != Some(method)
+            {
+                violations.push(format!(
+                    "generated case-class method {} has no matching {:?} role entry for class {}",
+                    method.index(),
+                    identity.role,
+                    identity.class.index()
                 ));
             }
         }
@@ -707,6 +893,12 @@ mod tests {
         })
     }
 
+    fn method_symbol(store: &mut SemanticStore) -> SymbolId {
+        let method = symbol(store);
+        store.symbols.get_mut(method).kind = SymbolKind::Method;
+        method
+    }
+
     fn tree_id() -> TreeId<Untyped> {
         let mut arena = dotty_core::AstArena::<Untyped>::new();
         arena.alloc(Tree {
@@ -752,6 +944,158 @@ mod tests {
             index.definition_of(symbol),
             Some(SourceDefinition::Canonical { source, tree })
         );
+    }
+
+    #[test]
+    fn generated_case_class_roles_coexist_with_legacy_derived_apply_mapping() {
+        let mut store = SemanticStore::new();
+        let class = symbol(&mut store);
+        let owner = symbol(&mut store);
+        let apply = method_symbol(&mut store);
+        let unapply = method_symbol(&mut store);
+        let source = SourceId::from_index(31);
+        let tree = tree_id();
+        let mut index = SourceSemanticIndex::new();
+        index.record_symbol(source, tree, class).unwrap();
+        index
+            .record_derived_symbol(owner, source, tree, apply)
+            .unwrap();
+        index
+            .record_generated_case_class_method(
+                class,
+                GeneratedCaseClassMethodRole::Apply,
+                source,
+                tree,
+                apply,
+            )
+            .unwrap();
+        index
+            .record_generated_case_class_method(
+                class,
+                GeneratedCaseClassMethodRole::Unapply,
+                source,
+                tree,
+                unapply,
+            )
+            .unwrap();
+
+        assert_eq!(index.symbol_at(source, tree), Some(class));
+        assert_eq!(index.derived_symbol_at(owner, source, tree), Some(apply));
+        assert_eq!(
+            index.generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply),
+            Some(apply)
+        );
+        assert_eq!(
+            index.generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply),
+            Some(unapply)
+        );
+        assert_eq!(
+            index.generated_case_class_method_identity(apply),
+            Some(GeneratedCaseClassMethod {
+                class,
+                role: GeneratedCaseClassMethodRole::Apply,
+            })
+        );
+        assert_eq!(
+            index.generated_case_class_method_identity(unapply),
+            Some(GeneratedCaseClassMethod {
+                class,
+                role: GeneratedCaseClassMethodRole::Unapply,
+            })
+        );
+        assert_eq!(
+            index.definition_of(apply),
+            Some(SourceDefinition::Derived { source, tree })
+        );
+        assert_eq!(
+            index.definition_of(unapply),
+            Some(SourceDefinition::Derived { source, tree })
+        );
+        assert!(index.validate(&store, &Packages::new()).is_empty());
+
+        let duplicate = method_symbol(&mut store);
+        assert_eq!(
+            index.record_generated_case_class_method(
+                class,
+                GeneratedCaseClassMethodRole::Apply,
+                source,
+                tree,
+                duplicate,
+            ),
+            Err(
+                SourceSemanticIndexError::DuplicateGeneratedCaseClassMethodRole {
+                    class,
+                    role: GeneratedCaseClassMethodRole::Apply,
+                }
+            )
+        );
+        assert_eq!(
+            index.generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply),
+            Some(apply)
+        );
+        assert_eq!(index.definition_of(duplicate), None);
+
+        let other_class = symbol(&mut store);
+        let other_source = SourceId::from_index(33);
+        let other_tree = tree_id();
+        index
+            .record_symbol(other_source, other_tree, other_class)
+            .unwrap();
+        assert_eq!(
+            index.record_generated_case_class_method(
+                other_class,
+                GeneratedCaseClassMethodRole::Apply,
+                other_source,
+                other_tree,
+                apply,
+            ),
+            Err(
+                SourceSemanticIndexError::DuplicateGeneratedCaseClassMethodSymbol { symbol: apply }
+            )
+        );
+        assert_eq!(
+            index.generated_case_class_method(other_class, GeneratedCaseClassMethodRole::Apply),
+            None
+        );
+        assert_eq!(
+            index.definition_of(apply),
+            Some(SourceDefinition::Derived { source, tree })
+        );
+    }
+
+    #[test]
+    fn generated_case_class_role_rejects_foreign_class_provenance_without_mutation() {
+        let mut store = SemanticStore::new();
+        let class = symbol(&mut store);
+        let foreign_class = symbol(&mut store);
+        let method = method_symbol(&mut store);
+        let source = SourceId::from_index(32);
+        let tree = tree_id();
+        let mut index = SourceSemanticIndex::new();
+        index.record_symbol(source, tree, class).unwrap();
+
+        assert_eq!(
+            index.record_generated_case_class_method(
+                foreign_class,
+                GeneratedCaseClassMethodRole::Unapply,
+                source,
+                tree,
+                method,
+            ),
+            Err(
+                SourceSemanticIndexError::GeneratedCaseClassMethodClassMismatch {
+                    class: foreign_class,
+                    source,
+                    tree_index: tree.index(),
+                    actual: Some(class),
+                }
+            )
+        );
+        assert_eq!(
+            index.generated_case_class_method(foreign_class, GeneratedCaseClassMethodRole::Unapply),
+            None
+        );
+        assert_eq!(index.definition_of(method), None);
     }
 
     #[test]

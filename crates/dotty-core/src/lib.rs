@@ -80,8 +80,8 @@ pub use source::{
     is_line_break_char,
 };
 pub use source_semantics::{
-    SourceContext, SourceContextId, SourceDefinition, SourceExportSite, SourceSemanticIndex,
-    SourceSemanticIndexError,
+    GeneratedCaseClassMethod, GeneratedCaseClassMethodRole, SourceContext, SourceContextId,
+    SourceDefinition, SourceExportSite, SourceSemanticIndex, SourceSemanticIndexError,
 };
 pub use source_typed_index::{ConflictingTypedTree, SourceTypedIndex};
 pub use store::{SemanticStore, StoreCheckpoint};
