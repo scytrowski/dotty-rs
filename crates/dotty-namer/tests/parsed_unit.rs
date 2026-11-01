@@ -6414,12 +6414,6 @@ fn explicit_companion_unapply_is_preserved_without_generated_identity_collisions
             1,
         ),
         (
-            "Overload",
-            "case class Box(value: Int)\nobject Box { def unapply(value: String): Option[String] = Some(value) }",
-            true,
-            2,
-        ),
-        (
             "WrongResult",
             "case class Box(value: Int)\nobject Box { def unapply(value: Box): Int = value.value }",
             false,
@@ -6497,6 +6491,58 @@ fn explicit_companion_unapply_is_preserved_without_generated_identity_collisions
             assert_eq!(generated_method, None);
             assert_eq!(candidates, [explicit]);
         }
+    }
+}
+
+#[test]
+fn unknown_explicit_unapply_parameter_identity_defers_generation_for_alias_contexts() {
+    let cases = [
+        (
+            "package alias",
+            "case class Box(value: Int)\ntype Alias = Box\nobject Box { def unapply(value: Alias): Option[Int] = Some(value.value) }",
+        ),
+        (
+            "imported alias",
+            "case class Box(value: Int)\nobject ExtractorTypes { type Alias = Box }\nimport ExtractorTypes.Alias\nobject Box { def unapply(value: Alias): Option[Int] = Some(value.value) }",
+        ),
+        (
+            "companion-local alias",
+            "case class Box(value: Int)\nobject Box { type Alias = Box; def unapply(value: Alias): Option[Int] = Some(value.value) }",
+        ),
+        (
+            "unresolved overload name",
+            "case class Box(value: Int)\nobject Box { def unapply(value: String): Option[String] = Some(value) }",
+        ),
+    ];
+
+    for (source_index, (label, source_text)) in cases.into_iter().enumerate() {
+        let (parsed, source, mut store) = parsed_source(source_text, 1890 + source_index as u32);
+        let mut packages = Packages::new();
+        let checkpoint = store.checkpoint();
+        let result = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "ExplicitUnapplyAlias.scala",
+            &mut store,
+            &mut packages,
+        );
+
+        assert!(
+            matches!(
+                result,
+                Err(NamerError::UnsupportedCaseClassCompanionShape {
+                    reason: "explicit companion unapply signature cannot be compared without type completion",
+                    ..
+                })
+            ),
+            "{label} must not be assumed distinct from Box: {result:?}"
+        );
+        assert_eq!(
+            store.checkpoint(),
+            checkpoint,
+            "deferred collision checks must not publish a synthetic or explicit method: {label}"
+        );
     }
 }
 

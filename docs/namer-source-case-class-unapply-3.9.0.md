@@ -10,10 +10,13 @@ lookup and its derived-symbol identity remain unchanged.
 The generated method is entered in the companion module-class scope as a
 synthetic Method with the class visibility, source origin, declaration scope,
 and declaration context. It has no completed signature. Explicit
-`unapply(Box)` replaces the generated method, while an `unapply` overload with
-a different direct class parameter coexists with it. Source shapes whose
-collision cannot be compared without type completion remain explicitly
-unsupported.
+`unapply(Box)` replaces the generated method. Namer does not treat a different
+simple type name as proof of a distinct parameter type: package, imported, or
+companion-local aliases can name the same class. When the parameter identity
+cannot be established from the direct source shape, naming returns the
+existing unsupported companion-shape error without publishing a generated
+candidate. This also defers otherwise valid overloads such as `unapply(String)`
+until source type identity can be resolved safely.
 
 ## Pinned oracle controls
 
@@ -24,8 +27,10 @@ rejected classifications are in the neighboring
 [`typer-source-case-class-match-baseline-3.9.0.md`](typer-source-case-class-match-baseline-3.9.0.md).
 Scala accepts an explicit same-shape extractor and an overload beside the
 generated extractor, and rejects the exact-shape extractor with an invalid
-result. Those controls constrain namer collision behavior; this increment
-does not type their signatures.
+result. Scala also accepts package-level, imported, and companion-local aliases
+for the case class as explicit extractor parameters. The Rust Namer explicitly
+defers these unresolved identities instead of publishing a second candidate;
+this increment does not complete alias types or the extractor signatures.
 
 ## Live typer discovery
 
@@ -53,8 +58,9 @@ identity, companion scope entry, and continued absence of `_1`.
 
 This increment does not complete the synthetic method's `MethodType` or body,
 define `Product`/`_1` projection, complete `Match` typing, or change JVM, IR,
-or TASTy behavior. Unsupported source shapes do not receive guessed
-signatures.
+or TASTy behavior. Unknown explicit parameter types remain unsupported until
+canonical source identity is available; no alias meaning or signature is
+guessed.
 
 ## Reproduce
 

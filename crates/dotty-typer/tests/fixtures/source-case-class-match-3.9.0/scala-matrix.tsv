@@ -9,4 +9,7 @@ ExplicitCompanion	accepted
 ExplicitUnapplyOverload	accepted
 ExplicitUnapplyReuse	accepted_with_warning
 ExplicitUnapplyWrongResult	rejected
+PackageAliasUnapply	accepted_with_warning
+ImportedAliasUnapply	accepted_with_warning
+CompanionAliasUnapply	accepted_with_warning
 NonCaseControl	accepted

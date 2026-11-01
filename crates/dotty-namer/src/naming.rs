@@ -2107,9 +2107,10 @@ impl Namer<'_> {
     }
 
     /// Returns whether an explicit source companion has the exact one-argument
-    /// `unapply(Class)` shape that replaces the generated extractor. Other
-    /// direct one-argument types remain overloads; uncertain syntax is deferred
-    /// to type completion instead of publishing an ambiguous duplicate.
+    /// `unapply(Class)` shape that replaces the generated extractor. A
+    /// differently spelled type identifier is not proof of a distinct type:
+    /// it may be an alias, so that signature is deferred instead of publishing
+    /// an ambiguous duplicate.
     fn explicit_companion_unapply_collides(
         &self,
         companion_module_class: SymbolId,
@@ -2169,7 +2170,10 @@ impl Namer<'_> {
                             None
                         };
                     }
-                    TreeKind::Ident(_) => {}
+                    // Namer has not established the identity behind this name.
+                    // In particular, it may alias the case class from a
+                    // package, import, or companion-local declaration.
+                    TreeKind::Ident(_) => unsupported_comparison = true,
                     _ => unsupported_comparison = true,
                 },
                 _ => unsupported_comparison = true,

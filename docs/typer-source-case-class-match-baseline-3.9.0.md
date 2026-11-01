@@ -42,8 +42,13 @@ a non-exhaustivity warning for
 `case Box(member)`; an explicit same-parameter `unapply(Box): Int` is also
 retained, and the pattern is rejected because `Int` is not an extractor result.
 An overload `unapply(String)` is accepted alongside the generated
-`unapply(Box)`. These controls establish that generated publication must not
-replace a legal explicit member or mask an invalid explicit extractor. The distinct
+`unapply(Box)`. Package-level, imported, and companion-local aliases of `Box`
+are also accepted as explicit extractors, with the explicit method retained
+instead of an additional generated candidate. Rust Namer preserves exact
+`unapply(Box)` replacement; other simple parameter names remain unsupported
+without canonical type identity, including otherwise valid overloads. These
+controls establish that generated publication must not replace a legal
+explicit member or mask an invalid explicit extractor. The distinct
 same-spelled control keeps the package-level case class `matching.Box` and adds
 the nested extractor `matching.OtherScope.Box`, whose
 `unapply(matching.Box): Option[Int]` is selected by `OtherScope.extract`. The
