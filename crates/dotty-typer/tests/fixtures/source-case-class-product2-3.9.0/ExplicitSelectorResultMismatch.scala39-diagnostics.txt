@@ -1,4 +1,4 @@
--- [E007] Type Mismatch Error: ConflictingSelectors.scala:7:36 -----------------
+-- [E007] Type Mismatch Error: ExplicitSelectorResultMismatch.scala:7:36 -------
 7 |    case Flagged(value, enabled) => value
   |                                    ^^^^^
   |                                    Found:    (value : String)

@@ -40,14 +40,23 @@ the input case-class value for nonzero arity.
 
 Observed matrix outcomes are pinned in `scala-matrix.tsv` with the compiler
 diagnostic output for each row beside it (trailing whitespace is normalized).
-Scala rejects arities one and three,
-the swapped literal types, an `Int` result body for an `Int` method, conflicting
-explicit `_1`/`_2` declarations, and a non-case class without an extractor.
-A case class whose constructor order is `(enabled: Boolean, value: Int)` is
-accepted and keeps that order. An explicit companion `unapply` with a tuple
-result and an unrelated same-spelled extractor are accepted with an
-exhaustivity warning. Thus those two cases are Scala-valid warning cases, not
-invalid controls.
+Scala rejects arities one and three, the swapped literal types, an `Int`
+result body for an `Int` method, the explicit-selector result mismatch, and a
+non-case class without an extractor. In `ExplicitSelectorResultMismatch.scala`,
+the declared `_1: String` selector binds `value: String`, which does not conform
+to the declared `select(...): Int` result. The rejection is result conformance;
+the explicit selector declarations themselves are accepted.
+
+`ExplicitSelectors.scala` is the accepted control. Its typed-tree snapshot
+`ExplicitSelectors.scala39-typed-tree.txt` independently pins class-owned
+`_1: String` and `_2: String`, and the pattern binders `value: String` and
+`enabled: String`; the enclosing `select` result is `String`. This confirms
+that explicitly declared selectors suppress generated selectors, consistent
+with the pinned compiler's `selectorNamesInBody`. A case class whose constructor
+order is `(enabled: Boolean, value: Int)` is accepted and keeps that order. An
+explicit companion `unapply` with a tuple result and an unrelated same-spelled
+extractor are accepted with an exhaustivity warning. Those two cases are
+Scala-valid warning cases, not invalid controls.
 
 ## Rust source baseline
 
@@ -71,6 +80,12 @@ workflow.
 
 The two-row first-blocker receipt is
 [`typer-heterogeneous-product2-first-blockers-3.9.0.tsv`](typer-heterogeneous-product2-first-blockers-3.9.0.tsv).
+The Rust first-blocker baseline was measured with rustc 1.98.1 and Cargo
+1.98.1 against repository main commit
+`fd090895e587852f9feca5599d4ddc55211ce81b`. The toolchain and Git commit SHA
+are recorded in the receipt's `rust_toolchain` and `baseline_repository_sha`
+columns. The Git SHA identifies the production repository state, while the
+separate `baseline_receipt_sha256` field hashes the Rust receipt contents.
 The Rust receipt SHA-256 is
 `1c9a73c7dbb0c82664b53a9d784a2facadb1d62d7640fcd1a19464e73984a8c6`.
 

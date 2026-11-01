@@ -3,7 +3,8 @@ WrongArityThree	rejected
 WrongLiteralTypes	rejected
 WrongResult	rejected
 ReversedFields	accepted
-ConflictingSelectors	rejected
+ExplicitSelectorResultMismatch	rejected
+ExplicitSelectors	accepted
 ExplicitUnapplyCollision	accepted_with_warning
 OrdinaryNonCase	rejected
 UnrelatedSameNameExtractor	accepted_with_warning

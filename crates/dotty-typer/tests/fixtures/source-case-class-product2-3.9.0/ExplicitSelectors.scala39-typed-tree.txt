@@ -1,0 +1,97 @@
+[[syntax trees at end of                     typer]] // ExplicitSelectors.scala
+<package <<root>.this.matching:<root>.this.matching> {
+  case class Flagged([owner = constructor <init>]value: <root>.this.scala.Int,
+    [owner = constructor <init>]enabled: <root>.this.scala.Boolean) extends
+    <<<new Object:Object>.<init>:((): Object)>():Object>, _root_.scala.Product,
+    scala.this.package.Serializable {
+    [owner = class Flagged]val value: <root>.this.scala.Int
+    [owner = class Flagged]val enabled: <root>.this.scala.Boolean
+    [owner = class Flagged]def _1: scala.this.Predef.String =
+      <<<Flagged.this.value:<root>.this.scala.Int>.toString:((): String)>():
+        String>
+    [owner = class Flagged]def _2: scala.this.Predef.String =
+      <<<Flagged.this.enabled:<root>.this.scala.Boolean>.toString:((): String)>(
+        ):String>
+    [owner = class Flagged]def copy(
+      [owner = method copy]value: <root>.this.scala.Int,
+      [owner = method copy]enabled: <root>.this.scala.Boolean):
+      matching.this.Flagged =
+      <
+        <<new matching.this.Flagged:matching.this.Flagged>.<init>:
+          ((value: <root>.this.scala.Int, enabled: <root>.this.scala.Boolean):
+            matching.this.Flagged)
+        >
+      (<value:<root>.this.scala.Int>, <enabled:<root>.this.scala.Boolean>):
+        matching.this.Flagged>
+    [owner = class Flagged]def copy$default$1:
+      <root>.this.scala.Int @uncheckedVariance =
+      <Flagged.this.value:<root>.this.scala.Int>
+    [owner = class Flagged]def copy$default$2:
+      <root>.this.scala.Boolean @uncheckedVariance =
+      <Flagged.this.enabled:<root>.this.scala.Boolean>
+  }
+  [owner = package matching]final lazy module val Flagged:
+    matching.this.Flagged$ =
+    <
+      <<new matching.this.Flagged$:matching.this.Flagged$>.<init>:
+        ((): matching.this.Flagged$)>
+    ():matching.this.Flagged$>
+  final module class Flagged$() extends <
+    <<new scala.this.AnyRef:scala.this.AnyRef>.<init>:((): Object)>():Object> {
+    this: matching.this.Flagged.type =>
+    [owner = object Flagged$]def apply(
+      [owner = method apply]value: <root>.this.scala.Int,
+      [owner = method apply]enabled: <root>.this.scala.Boolean):
+      matching.this.Flagged =
+      <
+        <<new matching.this.Flagged:matching.this.Flagged>.<init>:
+          ((value: <root>.this.scala.Int, enabled: <root>.this.scala.Boolean):
+            matching.this.Flagged)
+        >
+      (<value:<root>.this.scala.Int>, <enabled:<root>.this.scala.Boolean>):
+        matching.this.Flagged>
+    [owner = object Flagged$]def unapply(
+      [owner = method unapply]x$1: matching.this.Flagged): matching.this.Flagged
+       = <x$1:matching.this.Flagged>
+    [owner = object Flagged$]override def toString: String =
+      <"Flagged":("Flagged" : String)>
+  }
+  [owner = package matching]final lazy module val ExplicitSelectors:
+    matching.this.ExplicitSelectors$ =
+    <
+      <<new matching.this.ExplicitSelectors$:matching.this.ExplicitSelectors$>.
+        <init>:((): matching.this.ExplicitSelectors$)>
+    ():matching.this.ExplicitSelectors$>
+  final module class ExplicitSelectors$() extends <
+    <<new Object:Object>.<init>:((): Object)>():Object> {
+    this: matching.this.ExplicitSelectors.type =>
+    [owner = object ExplicitSelectors$]def select(
+      [owner = method select]item: matching.this.Flagged):
+      scala.this.Predef.String =
+      <<item:matching.this.Flagged> match
+        {
+          <case
+            <<matching.this.Flagged:matching.this.Flagged$>(
+              [owner = method select]value @ <_:scala.this.Predef.String>,
+              [owner = method select]enabled @ <_:scala.this.Predef.String>):
+              matching.this.Flagged>
+           =>
+            <
+              <(if
+                <
+                  <
+                    <scala.this.Predef.augmentString:
+                      ((x: Predef$.this.String): scala.this.collection.StringOps
+                        )
+                    >
+                  (<enabled:scala.this.Predef.String>):
+                    scala.this.collection.StringOps>
+                .nonEmpty:=> <root>.this.scala.Boolean>
+               then <value:scala.this.Predef.String> else <"":("" : String)>):(
+                (value : scala.this.Predef.String) || ("" : String))>
+             :String:String>
+          :String>
+        }
+      :String>
+  }
+}:<root>.this.matching.type>
