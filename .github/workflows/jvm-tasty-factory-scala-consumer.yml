@@ -170,6 +170,7 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_ALIAS: '1'
           DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_BATCH: '1'
           DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
           DOTTY_TASTY_PICKLER_ORACLE_TMP: ${{ github.workspace }}/target/scala-reader-oracle
           TMPDIR: ${{ github.workspace }}/target/issue-1881-tmp
@@ -186,6 +187,7 @@ jobs:
             --test jvm_tasty_reference_constructor_scala_consumer \
             --test jvm_tasty_nested_constructor_scala_consumer \
             --test jvm_tasty_multi_argument_constructor_calls \
+            --test jvm_tasty_multi_argument_constructor_scala_consumer \
             --test jvm_tasty_factory_result_scala_consumer \
             --test jvm_tasty_reference_local_scala_consumer \
             --test jvm_tasty_dual_reference_signature \
