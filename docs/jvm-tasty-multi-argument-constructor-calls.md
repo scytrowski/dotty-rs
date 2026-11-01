@@ -1,6 +1,6 @@
 # Two-argument sibling constructor-call audit
 
-This is an evidence-only audit for [issue #1913](https://github.com/scytrowski/dotty-rs/issues/1913). It adds no source typing, JVM, TASTy, paired artifact, or public API support. The checked-in Scala artifacts are output from Scala 3.9.0; they are not Rust output and do not establish Rust-to-Scala interoperability.
+This record began as an evidence-only audit for [issue #1913](https://github.com/scytrowski/dotty-rs/issues/1913). Later sections record bounded increments and distinguish Rust-produced output from the checked-in Scala 3.9.0 oracle artifacts.
 
 ## Ordered direct-formal proof baseline (#1961 checkpoint 1)
 
@@ -112,6 +112,38 @@ provenance fixes, format, frontend-boundary, Clippy, rustdoc, focused tests,
 and the full workspace suite passed. The workspace suite used two test
 threads after the host's file-descriptor limit caused nine unrelated
 classloader failures at default parallelism.
+
+## Direct-formal PairFactory body TASTy (#1964)
+
+Issue [#1964](https://github.com/scytrowski/dotty-rs/issues/1964) carries the
+ordered #1961 proof into the pickler as original method-formal and argument
+source/typed roots. The pickler checks each original argument binding and span,
+the exact source formal declaration and owner, the formal and constructor
+parameter reference types, and each typed argument's direct `TermRef` target.
+It rejects swapped receipt roots or formal mappings and missing source-to-typed
+edges. Repeated use of one real formal remains valid because identity is taken
+from the proof, not inferred from distinct runtime values.
+
+Rust-produced `PairFactory.tasty` now retains the two original method `PARAM`
+declarations and emits `APPLY(SELECTin(NEW(Pair)),
+TERMREFdirect(first), TERMREFdirect(second))` in argument order. The signed
+selection remains `Pair.<init>(Counter, Counter): Pair`; no `Counter` object is
+constructed in the method body. A focused wire regression asserts distinct
+PARAM addresses and exact TERMREF targets. With the pinned Scala 3.9.0 source
+compiler and JDK 21, `-decompile` reconstructs
+`new example.Pair(first, second)` and `-from-tasty` accepts the Rust-produced
+Counter, Pair, and PairFactory sidecars. This is reader acceptance; it does not
+claim Scala client runtime interoperability for those Rust classfiles.
+
+The valid renamed, reordered, reversed-argument, reordered-formal, and repeated
+`first` source variants all pass full paired TASTy validation. Unsupported
+locals, branches, nested allocations, and malformed source shapes retain their
+earlier typed rejection stages. The original Scala fixture artifacts and their
+recorded hashes remain unchanged. Focused validation ran
+`jvm_tasty_direct_formal_constructor_pair`,
+`jvm_tasty_dual_reference_forwarding`, and
+`jvm_tasty_multi_argument_constructor_calls`; the strict pinned Scala reader
+gate was enabled for the direct-formal Rust sidecars.
 
 ## Pinned source and oracle
 

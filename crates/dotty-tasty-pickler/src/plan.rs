@@ -76,6 +76,16 @@ pub trait SourceTypedBindings {
         None
     }
 
+    /// Exact original source/typed argument leaves and method-formal roots
+    /// authorized by the cross-class proof for a direct-formal constructor pair.
+    fn direct_formal_constructor_call_pair(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<DirectFormalConstructorCallPairBinding> {
+        None
+    }
+
     /// Exact source/typed/symbol evidence for one same-instance planned method
     /// call used as a constructor argument. Producers must derive this from
     /// the same source/typed proof session as `typed_at`.
@@ -116,6 +126,18 @@ pub struct NestedConstructorCallBinding {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NestedConstructorCallPairBinding {
     pub calls: [NestedConstructorCallBinding; 2],
+    pub argument_formals: [SymbolId; 2],
+}
+
+/// Ordered proof roots for exactly two direct caller-formal constructor
+/// arguments. The producer derives these from the immutable ordered
+/// cross-class receipt; the pickler rechecks them against its original trees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirectFormalConstructorCallPairBinding {
+    pub source_method_formals: [TreeId<Untyped>; 2],
+    pub method_formals: [SymbolId; 2],
+    pub source_arguments: [TreeId<Untyped>; 2],
+    pub typed_arguments: [TreeId<Typed>; 2],
     pub argument_formals: [SymbolId; 2],
 }
 

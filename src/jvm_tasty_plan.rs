@@ -21,10 +21,10 @@ use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty_pickler::{
-    ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, LocalValueBinding,
-    NestedConstructorCallBinding, NestedConstructorCallPairBinding, PickleError,
-    PlannedCallBinding, PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
-    ValidatedClassStatePlan,
+    ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
+    DirectFormalConstructorCallPairBinding, LocalValueBinding, NestedConstructorCallBinding,
+    NestedConstructorCallPairBinding, PickleError, PlannedCallBinding, PrimaryConstructorInputPlan,
+    SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
 };
 use dotty_typer::{SourceTyper, TyperError};
 
@@ -144,6 +144,8 @@ struct BatchSourceTypedBindings<'a> {
     planned_methods: Vec<SymbolId>,
     nested_constructor_calls: Vec<(SourceId, SymbolId, NestedConstructorCallBinding)>,
     nested_constructor_call_pairs: Vec<(SourceId, SymbolId, NestedConstructorCallPairBinding)>,
+    direct_formal_constructor_call_pairs:
+        Vec<(SourceId, SymbolId, DirectFormalConstructorCallPairBinding)>,
     planned_calls: Vec<(SourceId, SymbolId, PlannedCallBinding)>,
     local_values: Vec<(SourceId, SymbolId, LocalValueBinding)>,
 }
@@ -183,6 +185,18 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
         method: SymbolId,
     ) -> Option<NestedConstructorCallPairBinding> {
         self.nested_constructor_call_pairs.iter().find_map(
+            |(proof_source, proof_method, bindings)| {
+                (*proof_source == source && *proof_method == method).then_some(*bindings)
+            },
+        )
+    }
+
+    fn direct_formal_constructor_call_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<DirectFormalConstructorCallPairBinding> {
+        self.direct_formal_constructor_call_pairs.iter().find_map(
             |(proof_source, proof_method, bindings)| {
                 (*proof_source == source && *proof_method == method).then_some(*bindings)
             },
@@ -1324,6 +1338,34 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                             argument_formals: pair.map(|nested| nested.argument_formal()),
                         },
                     )
+                })
+            })
+            .collect(),
+        direct_formal_constructor_call_pairs: constructor_call_proofs
+            .iter()
+            .filter_map(|proof| {
+                proof.ordered_argument_pair().and_then(|pair| {
+                    let arguments = pair.arguments();
+                    Some((
+                        proof.source_id(),
+                        proof.method(),
+                        DirectFormalConstructorCallPairBinding {
+                            source_method_formals: pair.source_method_formals(),
+                            method_formals: pair.method_formals(),
+                            source_arguments: [
+                                arguments[0].source_argument(),
+                                arguments[1].source_argument(),
+                            ],
+                            typed_arguments: [
+                                arguments[0].typed_argument(),
+                                arguments[1].typed_argument(),
+                            ],
+                            argument_formals: [
+                                arguments[0].formal()?.formal(),
+                                arguments[1].formal()?.formal(),
+                            ],
+                        },
+                    ))
                 })
             })
             .collect(),

@@ -26322,15 +26322,14 @@ fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proo
         pickler_error,
         "Ok(two ordered method PARAM roots and Pair result)"
     );
-    assert!(paired_error.contains("phase: \"JVM/TASTy cross-contract validation\""));
-    assert!(paired_error.contains("BodyExpression"));
+    assert_eq!(paired_error, "Ok(callback reached)");
     assert!(
-        !paired_callback_ran,
-        "unsupported TASTy signature cannot publish a batch"
+        paired_callback_ran,
+        "validated direct-formal constructor bodies publish a complete batch"
     );
     eprintln!("dual-reference-forwarding proof result: {proof_error}");
     eprintln!("dual-reference-forwarding standalone pickler signature result: {pickler_error}");
-    eprintln!("dual-reference-forwarding paired planner first result: {paired_error}");
+    eprintln!("dual-reference-forwarding paired planner result: {paired_error}");
 }
 
 #[test]
