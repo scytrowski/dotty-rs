@@ -6,8 +6,8 @@ The historical `comparison.tsv` and `comparison-1948.tsv` remain untouched.
 ## Inputs and provenance
 
 - Probe base revision: `b2c7fee27ef2dec416706f59abda050be35d2c4b` (#1951 merged).
-- Probe test commit validated locally: `0bf89a9e1d2360233e1910c766a3d833214ebd4b`.
-- Published GitHub commit with the same test source: `49ee77efff4b4ff605b92ac10f5c0ccbdbbe2e3d`.
+- Probe test commit validated locally: `bad6e58698faafd6fcddf20bc3bd69f5b044f09f`.
+- Published GitHub test commit: `c38bd34e31bf4e2b8b2c0e98fbbeb466b113c7ec`.
 - Fixture: `crates/dotty-classloader/tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty`.
 - Fixture SHA-256: `49286e74a3d3693b08d2a29575f23089f6be5c486231390059f43c19a8929894`.
 - Scala dependencies use the checked-in `tasty_sample`, `tasty_fields`,
@@ -44,19 +44,23 @@ type-parameter declarations. Its parent is the canonical
 `Definitions::object_class`. Repeating constructor completion returns the
 same `TypeId` and does not grow the TASTy type index.
 
-## Failure atomicity boundary
+## Failure atomicity
 
-After the successful completion, the test submits the invalid address
-`u32::MAX` and observes typed `MissingEnteredSymbol { address: 4294967295 }`.
-It verifies that this failed completion leaves the already completed class
-and constructor state intact. This is a bounded session rollback/state
-preservation check; it is not a failure inside constructor projection.
+While the original constructor is still `Missing`, the test calls
+`complete_symbols(&[21, u32::MAX])`. The first address performs the actual
+constructor completion and allocates its signature; the second returns the
+exact typed error `MissingEnteredSymbol { address: 4294967295 }`. The batch
+transaction then rolls back the constructor to `Missing` and restores the
+TASTy type-index count. It confirms the previously completed class retains
+the same symbol and `ClassInfo` identity.
 
-The frozen empty constructor has no term/type parameters, and under genuine
-dependencies its serialized return tree and effective owner result both
-complete. Consequently this probe did not produce a constructor-specific
-typed failure. It makes no claim about malformed constructors or other
-classes.
+The test retries `complete_symbol(21)` in the same unpickler/session, confirms
+the constructor type is rebuilt, then repeats completion and verifies the
+same type identity without further type-index allocations. After dropping
+the unpickler it checks the original class scope still owns exactly one
+constructor. This exercises rollback after real constructor work using the
+unchanged fixture and resolver; the deliberate failure is the invalid second
+batch address, not a semantic error in `Open`'s constructor projection.
 
 ## Reproduction
 
