@@ -7,15 +7,15 @@ use dotty_classfile::access_flags::{
 use dotty_core::{SymbolFlags, SymbolKind};
 use dotty_tasty::tasty::{
     ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, ApplyNode,
-    AstError, CASEACCESSOR_TAG, CONTRAVARIANT_TAG, COVARIANT_TAG, DEFDEF_TAG, DefDefBody,
-    DefinitionBody, DefinitionTail, EMPTYCLAUSE_TAG, FIELDACCESSOR_TAG, FINAL_TAG, IDENTTPT_TAG,
-    IdentNode, LOCAL_TAG, MUTABLE_TAG, OBJECT_TAG, PACKAGE_TAG, PRIVATE_TAG, PRIVATEQUALIFIED_TAG,
-    PROTECTED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree, Reader, ReferenceNode,
-    RenderedSignedName, SELECTIN_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG, STABLE_TAG, STATIC_TAG,
-    SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode, StructuredTree, TEMPLATE_TAG,
-    TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG, TYPEREF_TAG,
-    TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError, TermValue,
-    TypeApplyNode, VALDEF_TAG,
+    AstError, BYNAMETPT_TAG, CASEACCESSOR_TAG, CONTRAVARIANT_TAG, COVARIANT_TAG, DEFDEF_TAG,
+    DefDefBody, DefinitionBody, DefinitionTail, EMPTYCLAUSE_TAG, FIELDACCESSOR_TAG, FINAL_TAG,
+    IDENTTPT_TAG, IdentNode, LOCAL_TAG, MUTABLE_TAG, OBJECT_TAG, PACKAGE_TAG, PRIVATE_TAG,
+    PRIVATEQUALIFIED_TAG, PROTECTED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree,
+    Reader, ReferenceNode, RenderedSignedName, SELECTIN_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG,
+    STABLE_TAG, STATIC_TAG, SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode,
+    StructuredTree, TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG,
+    TYPEDEF_TAG, TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile,
+    TastyFileError, TermValue, TypeApplyNode, VALDEF_TAG,
 };
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -333,6 +333,10 @@ pub(crate) struct DecodedTastyMethod {
 pub(crate) enum DecodedTastyType {
     Named(BinaryName),
     ParamRef(u32),
+    /// A by-name method parameter whose declared type is a method-local
+    /// parameter reference. The bounded decoder admits only this selected
+    /// `BYNAMETPT(ParamRef)` shape.
+    ByName(Box<DecodedTastyType>),
     /// A reference to a parameter declared by the containing class. Kept
     /// distinct from method-local parameters so lowering can preserve exact
     /// evidence for a bounded receiver substitution.
@@ -1402,6 +1406,7 @@ where
         };
         let members = decode_members(
             &file,
+            requested,
             &template.stats,
             package,
             &class_type_parameters,
@@ -2348,6 +2353,50 @@ fn decode_tasty_member_type(
     resolve_parent_name_with_bare(file, tree, package, resolve_bare).map(DecodedTastyType::Named)
 }
 
+/// Decodes a method parameter, with the one measured `Option.getOrElse`
+/// address-identified `BYNAMETPT(ParamRef)` exception. Other by-name member
+/// shapes remain unsupported by the legacy decoder.
+fn decode_tasty_member_parameter_type(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    package: &str,
+    type_parameters: &HashMap<u32, u32>,
+    class_type_parameters: &HashMap<u32, u32>,
+    resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
+    allow_selected_get_or_else_by_name: bool,
+) -> Option<DecodedTastyType> {
+    if allow_selected_get_or_else_by_name
+        && let RawTree::Ast { tag, child, .. } | RawTree::NatAst { tag, child, .. } = tree
+        && *tag == BYNAMETPT_TAG
+    {
+        let DecodedTastyType::ParamRef(index) = decode_tasty_member_type(
+            file,
+            child,
+            package,
+            type_parameters,
+            class_type_parameters,
+            resolve_bare,
+            1,
+        )?
+        else {
+            return None;
+        };
+        return Some(DecodedTastyType::ByName(Box::new(
+            DecodedTastyType::ParamRef(index),
+        )));
+    }
+
+    decode_tasty_member_type(
+        file,
+        tree,
+        package,
+        type_parameters,
+        class_type_parameters,
+        resolve_bare,
+        0,
+    )
+}
+
 fn decode_tasty_parent_type(
     file: &TastyFile<'_>,
     tree: &RawTree<'_>,
@@ -2518,6 +2567,7 @@ fn decode_tasty_type_parameter(
 /// shapes remain unresolved rather than being guessed.
 fn decode_members(
     file: &TastyFile<'_>,
+    owner: &BinaryName,
     stats: &[RawTree<'_>],
     package: &str,
     class_type_parameters: &HashMap<u32, u32>,
@@ -2629,15 +2679,18 @@ fn decode_members(
                     let Some(parameter_name) = wire_name(file, *parameter_name) else {
                         continue;
                     };
+                    let allow_selected_get_or_else_by_name = owner.as_internal() == "scala/Option"
+                        && method_name == "getOrElse"
+                        && parameter_name == "default";
                     let declared_type = parameter.decode_body().ok().and_then(|body| {
-                        decode_tasty_member_type(
+                        decode_tasty_member_parameter_type(
                             file,
                             &body.type_tree,
                             package,
                             &type_parameters_by_address,
                             class_type_parameters,
                             resolve_bare,
-                            0,
+                            allow_selected_get_or_else_by_name,
                         )
                     });
                     decoded_parameters.push(DecodedTastyParameter {
@@ -6385,6 +6438,192 @@ mod tests {
             apply.return_type,
             Some(DecodedTastyType::ClassParamRef(1))
         ));
+    }
+
+    #[test]
+    fn option_get_or_else_preserves_original_by_name_parameter_address_and_binder() {
+        const OPTION_SHA256: &str =
+            "3db4c542a097dfc91e0fd92e0726070cfcde00e32f312b37b5b6d9383475d20d";
+        const OPTION_ROOT_ADDRESS: u32 = 507;
+        const METHOD_ADDRESS: u32 = 666;
+        const RESULT_TYPE_TREE_ADDRESS: u32 = 687;
+
+        let bytes = fixture_bytes("scala3-library/scala/Option.tasty");
+        let digest = std::process::Command::new("sha256sum")
+            .arg("--")
+            .arg(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../dotty-tasty/tests/fixtures/scala3-library/scala/Option.tasty"),
+            )
+            .output()
+            .expect("sha256sum is available to fixture tests");
+        assert!(digest.status.success());
+        assert_eq!(
+            String::from_utf8(digest.stdout)
+                .unwrap()
+                .split_whitespace()
+                .next(),
+            Some(OPTION_SHA256)
+        );
+
+        let file = TastyFile::parse(&bytes).expect("pinned Option TASTy should parse");
+        let index = file.ast_address_index().expect("Option AST index");
+        let option_root = index
+            .get(OPTION_ROOT_ADDRESS)
+            .expect("frozen Option root address")
+            .decode_structured()
+            .expect("Option root structure");
+        assert!(matches!(option_root, StructuredNode::TypeDef(_)));
+        let method = index
+            .get(METHOD_ADDRESS)
+            .expect("frozen getOrElse address")
+            .decode_structured()
+            .expect("getOrElse structure");
+        let StructuredNode::DefDef(method) = method else {
+            panic!("address {METHOD_ADDRESS} must be a DefDef");
+        };
+        assert_eq!(file.names().get_utf8(method.name), Some("getOrElse"));
+        let parameters = index.children_of(METHOD_ADDRESS).collect::<Vec<_>>();
+        let method_type_parameter = parameters
+            .iter()
+            .filter(|node| node.tag == dotty_tasty::tasty::TYPEPARAM_TAG)
+            .find_map(|node| {
+                let raw = index.get(u32::try_from(node.offset).ok()?)?;
+                let ParameterNode::TypeParam { name, .. } = raw.decode_parameter().ok()? else {
+                    return None;
+                };
+                (file.names().get_utf8(name) == Some("B"))
+                    .then_some(u32::try_from(node.offset).ok()?)
+            })
+            .expect("getOrElse method-local B must be an indexed definition");
+        let default_parameter_address = parameters
+            .iter()
+            .filter(|node| node.tag == dotty_tasty::tasty::PARAM_TAG)
+            .find_map(|node| {
+                let raw = index.get(u32::try_from(node.offset).ok()?)?;
+                let ParameterNode::TermParam { name, .. } = raw.decode_parameter().ok()? else {
+                    return None;
+                };
+                (file.names().get_utf8(name) == Some("default"))
+                    .then_some(u32::try_from(node.offset).ok()?)
+            })
+            .expect("default must have an absolute address in the original AST index");
+        assert_eq!(default_parameter_address, 681);
+        assert_eq!(method_type_parameter, 669);
+        assert!(index.get(default_parameter_address).is_some());
+        assert!(index.get(method_type_parameter).is_some());
+        let default = index
+            .get(default_parameter_address)
+            .unwrap()
+            .decode_parameter()
+            .unwrap();
+        let ParameterNode::TermParam { .. } = default else {
+            panic!("default parameter address must identify a term parameter");
+        };
+        let default_type_tree = default.decode_body().unwrap().type_tree;
+        assert!(matches!(
+            &default_type_tree,
+            RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } if *tag == dotty_tasty::tasty::BYNAMETPT_TAG
+        ));
+        assert!(index.get_node(RESULT_TYPE_TREE_ADDRESS).is_some());
+
+        let method_type_parameters = HashMap::from([(method_type_parameter, 0)]);
+        let mut resolve_bare = |_: &str, _: &str| None;
+        assert_eq!(
+            decode_tasty_member_type(
+                &file,
+                &default_type_tree,
+                "scala",
+                &method_type_parameters,
+                &HashMap::new(),
+                &mut resolve_bare,
+                0,
+            ),
+            None,
+            "generic member types must not gain by-name support"
+        );
+        let default_type = decode_tasty_member_parameter_type(
+            &file,
+            &default_type_tree,
+            "scala",
+            &method_type_parameters,
+            &HashMap::new(),
+            &mut resolve_bare,
+            true,
+        );
+        assert_eq!(
+            default_type,
+            Some(DecodedTastyType::ByName(Box::new(
+                DecodedTastyType::ParamRef(0)
+            ))),
+            "the selected BYNAMETPT must wrap the existing method-local parameter identity"
+        );
+        let foreign_method_parameter = index
+            .iter_nodes()
+            .filter(|node| node.tag == dotty_tasty::tasty::DEFDEF_TAG)
+            .find_map(|node| {
+                let raw = index.get(u32::try_from(node.offset).ok()?)?;
+                let StructuredNode::DefDef(definition) = raw.decode_structured().ok()? else {
+                    return None;
+                };
+                (file.names().get_utf8(definition.name) == Some("map")).then_some(node.offset)
+            })
+            .and_then(|address| {
+                index
+                    .children_of(u32::try_from(address).ok()?)
+                    .filter(|node| node.tag == dotty_tasty::tasty::TYPEPARAM_TAG)
+                    .find_map(|node| {
+                        let raw = index.get(u32::try_from(node.offset).ok()?)?;
+                        let ParameterNode::TypeParam { name, .. } = raw.decode_parameter().ok()?
+                        else {
+                            return None;
+                        };
+                        (file.names().get_utf8(name) == Some("B"))
+                            .then_some(u32::try_from(node.offset).ok()?)
+                    })
+            })
+            .expect("Option.map must have a distinct method-local B binder");
+        assert_ne!(foreign_method_parameter, method_type_parameter);
+        let mut resolve_foreign_bare = |_: &str, _: &str| None;
+        assert_eq!(
+            decode_tasty_member_parameter_type(
+                &file,
+                &default_type_tree,
+                "scala",
+                &HashMap::from([(foreign_method_parameter, 0)]),
+                &HashMap::new(),
+                &mut resolve_foreign_bare,
+                true,
+            ),
+            None,
+            "a same-spelled B from another method must not be accepted as the local binder"
+        );
+        let mut resolve_dangling_bare = |_: &str, _: &str| None;
+        assert_eq!(
+            decode_tasty_member_parameter_type(
+                &file,
+                &default_type_tree,
+                "scala",
+                &HashMap::from([(u32::MAX, 0)]),
+                &HashMap::new(),
+                &mut resolve_dangling_bare,
+                true,
+            ),
+            None,
+            "an unmatched direct reference must not bind by name"
+        );
+        assert_eq!(
+            decode_tasty_member_type(
+                &file,
+                &method.return_type,
+                "scala",
+                &method_type_parameters,
+                &HashMap::new(),
+                &mut resolve_bare,
+                0,
+            ),
+            Some(DecodedTastyType::ParamRef(0))
+        );
     }
 
     #[test]
