@@ -1,0 +1,5 @@
+session	root	source_path	source_span	class_owner	method_owner	signature	parent	product_selector	selected_unapply	ordered_cases	match_result	typed_root	normalized_sessions_equal
+first	unwrap	Positive.scala#tree18	64:136	matching.Box	matching.Matcher	(Box):Int	scala.Product	_1:Int@Box	Box$.unapply	Bind(value:Int)	Int	complete	true
+first	classify	Positive.scala#tree36	140:237	matching.Box	matching.Matcher	(Box):Int	scala.Product	_1:Int@Box	Box$.unapply	Literal(0:Int),Bind(value:Int)	Int	complete	true
+second	unwrap	Positive.scala#tree18	64:136	matching.Box	matching.Matcher	(Box):Int	scala.Product	_1:Int@Box	Box$.unapply	Bind(value:Int)	Int	complete	true
+second	classify	Positive.scala#tree36	140:237	matching.Box	matching.Matcher	(Box):Int	scala.Product	_1:Int@Box	Box$.unapply	Literal(0:Int),Bind(value:Int)	Int	complete	true
