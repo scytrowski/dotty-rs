@@ -192,7 +192,41 @@ impl FunctionLiteralIndex {
             return None;
         }
         let member = store.symbols.get(symbol);
-        if member.owner != Some(owner) || member.flags.contains(SymbolFlags::STATIC) {
+        if member.flags.contains(SymbolFlags::STATIC) {
+            return None;
+        }
+        let declaring_owner = member.owner?;
+        let inherited_from_direct_parent = if declaring_owner == owner {
+            false
+        } else {
+            if member.visibility != Visibility::Public {
+                return None;
+            }
+            let SymbolInfo::Complete(class_info_type) = *store.symbols.info(owner) else {
+                return None;
+            };
+            let Some(Type::ClassInfo(class_info)) = store.types.try_get(class_info_type) else {
+                return None;
+            };
+            if class_info.class != owner {
+                return None;
+            }
+            let direct_parents = class_info
+                .parents
+                .iter()
+                .map(|parent| match store.types.try_get(*parent) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(parent),
+                        ..
+                    }) => Some(*parent),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            direct_parents.as_slice() == [declaring_owner]
+                && store.symbols.contains(declaring_owner)
+                && store.symbols.get(declaring_owner).kind == SymbolKind::Class
+        };
+        if declaring_owner != owner && !inherited_from_direct_parent {
             return None;
         }
         let capturable = match member.kind {

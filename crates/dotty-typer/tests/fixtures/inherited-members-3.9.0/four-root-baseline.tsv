@@ -1,5 +1,5 @@
 owner	method	source_tree	source_span	classinfo_parent	parent_method_owner	parent_field_owner	selected_inherited_target	source_signature	rust_status	rust_result	first_error_chain
 inheritancetyper.Child	direct	InheritedMembers.scala#22	122..154	inheritancetyper.Parent	inheritancetyper.Parent.add	inheritancetyper.Parent.bias	Parent.add	(Int):Int	fully_typed	Int	-
 inheritancetyper.Child	withBias	InheritedMembers.scala#29	157..193	inheritancetyper.Parent	inheritancetyper.Parent.add	inheritancetyper.Parent.bias	Parent.bias	(Int):Int	fully_typed	Int	-
-inheritancetyper.Child	lifted	InheritedMembers.scala#39	196..232	inheritancetyper.Parent	inheritancetyper.Parent.add	inheritancetyper.Parent.bias	unresolved	():Function1[Int,Int]	blocked	-	FunctionLiteralCaptureUnsupported:FunctionLiteralCaptureUnsupported
-inheritancetyper.Child	mapped	InheritedMembers.scala#49	235..273	inheritancetyper.Parent	inheritancetyper.Parent.add	inheritancetyper.Parent.bias	unresolved	():Function1[Int,Int]	blocked	-	FunctionLiteralCaptureUnsupported:FunctionLiteralCaptureUnsupported
+inheritancetyper.Child	lifted	InheritedMembers.scala#39	196..232	inheritancetyper.Parent	inheritancetyper.Parent.add	inheritancetyper.Parent.bias	Parent.add	():Function1[Int,Int]	fully_typed	Function1[Int,Int]	-
+inheritancetyper.Child	mapped	InheritedMembers.scala#49	235..273	inheritancetyper.Parent	inheritancetyper.Parent.add	inheritancetyper.Parent.bias	Parent.bias	():Function1[Int,Int]	fully_typed	Function1[Int,Int]	-

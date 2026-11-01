@@ -1,0 +1,3 @@
+owner	method	declared_member	capture	result	first_error
+Child	lifted	Parent.add	Child.this	Function1[Int,Int]	-
+Child	mapped	Parent.bias	Child.this	Function1[Int,Int]	-
