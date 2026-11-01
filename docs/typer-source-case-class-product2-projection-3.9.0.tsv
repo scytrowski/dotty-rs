@@ -1,0 +1,3 @@
+state	class	ordered_fields	selector_signatures	class_parents	unapply_result	arity_2_components	_3
+before c9eafc1cc6	Flagged	value:Int,enabled:Boolean	incomplete	Object	Flagged	blocked at one-field authentication	absent
+after	Flagged	value:Int,enabled:Boolean	_1:Int@Flagged,_2:Boolean@Flagged	Object,scala.Product (canonical once)	Flagged	Int,Boolean	absent

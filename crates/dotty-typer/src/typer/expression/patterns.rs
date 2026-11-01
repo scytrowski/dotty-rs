@@ -3744,11 +3744,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn real_flagged_product_extractor_reads_ordered_source_selectors() {
-        let (parsed, mut store, packages, definitions, index, source) = setup(
-            "package scala { trait Product }; package app { case class Flagged(value: Int, enabled: Boolean); class C { def choose(value: Any): Int = value match { case Flagged(_, _) => 1; case _ => 0 } } }",
+    fn flagged_product_extractor_receipt(siblings: &str) -> String {
+        let source_text = format!(
+            "package scala {{ trait Product }}; package app {{ {siblings} case class Flagged(value: Int, enabled: Boolean); class C {{ def choose(value: Any): Int = value match {{ case Flagged(_, _) => 1; case _ => 0 }} }} }}"
         );
+        let (parsed, mut store, packages, definitions, index, source) = setup(&source_text);
         let method = parsed
             .ast
             .iter()
@@ -3903,6 +3903,21 @@ mod tests {
                 .get(class_scope)
                 .lookup(selector_3.as_name()),
             None
+        );
+        "class=Flagged;fields=value:Int,enabled:Boolean;selectors=_1:Int@Flagged,_2:Boolean@Flagged;parents=Object,scala.Product;unapply=Flagged$:Flagged;components=Int,Boolean;_3=absent".to_owned()
+    }
+
+    #[test]
+    fn real_flagged_product_extractor_reads_ordered_source_selectors() {
+        let ordered = "case class Earlier(flag: Boolean); case class Later(code: Int);";
+        let expected = flagged_product_extractor_receipt(ordered);
+        assert_eq!(flagged_product_extractor_receipt(ordered), expected);
+        assert_eq!(
+            flagged_product_extractor_receipt(
+                "case class Later(code: Int); case class Earlier(flag: Boolean);"
+            ),
+            expected,
+            "reordering sibling declarations must preserve the normalized projection receipt"
         );
     }
 

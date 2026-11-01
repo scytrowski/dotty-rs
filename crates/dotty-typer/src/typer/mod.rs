@@ -4477,6 +4477,50 @@ mod tests {
     }
 
     #[test]
+    fn completing_flagged_first_selector_authenticates_both_projection_methods() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { trait Product }; case class Flagged(value: Int, enabled: Boolean)",
+        );
+        let flagged = class_symbol(&parsed, &store, &index, source, "Flagged");
+        let class_scope = index.scope_of(flagged).unwrap();
+        let selector_1 = store
+            .scopes
+            .get(class_scope)
+            .lookup(TermName::new(store.names.intern("_1")).as_name())
+            .unwrap();
+        let selector_2 = store
+            .scopes
+            .get(class_scope)
+            .lookup(TermName::new(store.names.intern("_2")).as_name())
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        typer
+            .complete_symbol(selector_1)
+            .expect("the first selector should complete its source class");
+        for (selector, expected_type) in [
+            (selector_1, definitions.int),
+            (selector_2, definitions.boolean),
+        ] {
+            let SymbolInfo::Complete(info) = *typer.store().symbols.info(selector) else {
+                panic!("both selectors must be completed by class completion");
+            };
+            let Type::Method(method) = typer.store().types.get(info) else {
+                panic!("source selectors must complete as MethodTypes");
+            };
+            assert!(method.params.is_empty());
+            assert_eq!(method.kind, MethodKind::Plain);
+            assert_eq!(method.result, expected_type);
+        }
+    }
+
+    #[test]
     fn flagged_product_projection_rolls_back_partial_selectors_when_product_is_malformed() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "package scala { class Product }; package matching { case class Flagged(value: Int, enabled: Boolean) }",
@@ -4503,6 +4547,14 @@ mod tests {
             definitions,
             &packages,
         );
+        let saved_selector_owner = typer.store.symbols.get(selector_2).owner;
+        typer.store.symbols.get_mut(selector_2).owner = Some(selector_1);
+        assert_eq!(
+            typer.source_case_class_product_selector_owner(selector_2),
+            None,
+            "a selector moved under another method cannot authenticate as class-owned"
+        );
+        typer.store.symbols.get_mut(selector_2).owner = saved_selector_owner;
         let checkpoint = typer.store.checkpoint();
         let error = typer
             .complete_symbol(flagged)
@@ -4531,6 +4583,52 @@ mod tests {
         };
         assert_eq!(first.result, definitions.int);
         assert_eq!(second.result, definitions.boolean);
+    }
+
+    #[test]
+    fn three_field_case_class_is_not_projected_as_general_product_n() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { trait Product }; package matching { case class Wider(value: Int, enabled: Boolean, label: String) }",
+        );
+        let wider = class_symbol(&parsed, &store, &index, source, "Wider");
+        let class_scope = index.scope_of(wider).unwrap();
+        let selector_1_name = TermName::new(store.names.intern("_1"));
+        let selector_3_name = TermName::new(store.names.intern("_3"));
+        assert_eq!(
+            store
+                .scopes
+                .get(class_scope)
+                .lookup(selector_1_name.as_name()),
+            None,
+            "Typer must not synthesize a ProductN selector for this unsupported shape"
+        );
+        assert_eq!(
+            store
+                .scopes
+                .get(class_scope)
+                .lookup(selector_3_name.as_name()),
+            None
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let product = typer.canonical_scala_product_type(0).unwrap().unwrap();
+        let product_symbol = type_symbol(typer.store(), product);
+        let class_info = typer.complete_symbol(wider).unwrap();
+        let Type::ClassInfo(class_info) = typer.store().types.get(class_info) else {
+            panic!("Wider class must still complete normally");
+        };
+        assert!(
+            class_info
+                .parents
+                .iter()
+                .all(|parent| type_symbol(typer.store(), *parent) != product_symbol)
+        );
     }
 
     #[test]
