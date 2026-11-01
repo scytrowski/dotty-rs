@@ -10,6 +10,8 @@ change production semantics.
 - Frozen cohort selection baseline: `2894d8c969e0d210b3f461d35e08d55daf6b2227`.
 - Refreshed execution baseline after prerequisite #1940: `7222d2d856aa7b7cab667c9e1e30489c700164cd`.
 - Rust: `rustc 1.98.1 (48a229cea 2026-09-01)`.
+- JDK: Eclipse Temurin `21.0.13+9` (the Rust checks workflow installs this
+  version so the real-JDK semantic audit has its declared classpath input).
 - Scala reference: 3.9.0 source revision
   `777528f19a58e794c9954a42f433373472ec57f8`.
 - TASTy inputs: the legacy classloader validates and accepts 28.8.0 and

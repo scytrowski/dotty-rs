@@ -30,6 +30,12 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Install JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21.0.13+9'
+
       - name: Lint GitHub Actions workflows
         run: tools/check-workflows.sh
 
