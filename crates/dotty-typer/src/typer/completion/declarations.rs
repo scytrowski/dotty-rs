@@ -240,6 +240,7 @@ impl SourceTyper<'_> {
             self.source_case_class_product_selector(symbol, kind, &template, constructor);
         let mut product_type_to_add = None;
         if let Some(selectors) = product_selector {
+            let mut selector_results = Vec::with_capacity(selectors.len());
             for (parameter_tree, selector) in selectors {
                 let Some(TreeKind::ValDef(parameter)) =
                     self.arena.try_get(parameter_tree).map(|node| &node.kind)
@@ -253,6 +254,22 @@ impl SourceTyper<'_> {
                 };
                 let result =
                     self.type_of_tpt_inner_journaled(parameter.tpt, type_context, info_journal)?;
+                selector_results.push((selector, result));
+            }
+            // The bounded two-field extractor contract is exactly Int/Boolean.
+            // Validate both projected source types before publishing either
+            // selector, so class-first and selector-first completion agree.
+            // Keep the existing one-field selector behavior unchanged.
+            if selector_results.len() == 2
+                && (selector_results[0].1 != self.definitions.int
+                    || selector_results[1].1 != self.definitions.boolean)
+            {
+                return Err(TyperError::UnsupportedProduct2FieldTypes {
+                    class: symbol,
+                    tree_index: template.constructor.index(),
+                });
+            }
+            for (selector, result) in selector_results {
                 let method_info = self.store.types.alloc(Type::Method(MethodType {
                     params: Vec::new(),
                     result,

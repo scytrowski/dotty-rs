@@ -20833,6 +20833,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::PatDefExpansionConflict { .. } => "PatDefExpansionConflict",
         TyperError::PatDefBinderInventoryConflict { .. } => "PatDefBinderInventoryConflict",
         TyperError::PatDefAggregateArityDeferred { .. } => "PatDefAggregateArityDeferred",
+        TyperError::UnsupportedProduct2FieldTypes { .. } => "UnsupportedProduct2FieldTypes",
     }
 }
 

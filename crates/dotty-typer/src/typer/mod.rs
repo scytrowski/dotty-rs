@@ -4521,6 +4521,79 @@ mod tests {
     }
 
     #[test]
+    fn shadowed_product2_field_types_roll_back_and_retry_in_the_same_session() {
+        for shadowed_type in ["Int", "Boolean"] {
+            let source_text = format!(
+                "package scala {{ trait Product }}; package matching {{ class {shadowed_type}; case class Flagged(value: Int, enabled: Boolean) }}"
+            );
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(&source_text);
+            let flagged = class_symbol(&parsed, &store, &index, source, "Flagged");
+            let shadow = class_symbol(&parsed, &store, &index, source, shadowed_type);
+            let package_scope = index
+                .scope_of(store.symbols.get(shadow).owner.unwrap())
+                .expect("shadowing package scope");
+            let class_scope = index.scope_of(flagged).unwrap();
+            let selector_1 = store
+                .scopes
+                .get(class_scope)
+                .lookup(TermName::new(store.names.intern("_1")).as_name())
+                .unwrap();
+            let selector_2 = store
+                .scopes
+                .get(class_scope)
+                .lookup(TermName::new(store.names.intern("_2")).as_name())
+                .unwrap();
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+
+            let checkpoint = typer.store().checkpoint();
+            let completion = if shadowed_type == "Int" {
+                typer.complete_symbol(flagged)
+            } else {
+                typer.complete_symbol(selector_1)
+            };
+            assert!(matches!(
+                completion,
+                Err(TyperError::UnsupportedProduct2FieldTypes {
+                    class,
+                    tree_index: _
+                }) if class == flagged
+            ));
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert_eq!(*typer.store().symbols.info(flagged), SymbolInfo::Missing);
+            assert_eq!(*typer.store().symbols.info(selector_1), SymbolInfo::Missing);
+            assert_eq!(*typer.store().symbols.info(selector_2), SymbolInfo::Missing);
+
+            // Removing the source shadow makes the same declaration resolve
+            // against the canonical builtin on retry in this typer session.
+            typer.store.scopes.get_mut(package_scope).remove(shadow);
+            typer
+                .complete_symbol(flagged)
+                .expect("valid canonical field types should retry after rollback");
+            for (selector, expected_type) in [
+                (selector_1, definitions.int),
+                (selector_2, definitions.boolean),
+            ] {
+                let SymbolInfo::Complete(info) = *typer.store().symbols.info(selector) else {
+                    panic!("both selector signatures must publish on valid retry");
+                };
+                let Type::Method(method) = typer.store().types.get(info) else {
+                    panic!("source selectors must complete as MethodTypes");
+                };
+                assert!(method.params.is_empty());
+                assert_eq!(method.result, expected_type);
+            }
+        }
+    }
+
+    #[test]
     fn flagged_product_projection_rolls_back_partial_selectors_when_product_is_malformed() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "package scala { class Product }; package matching { case class Flagged(value: Int, enabled: Boolean) }",

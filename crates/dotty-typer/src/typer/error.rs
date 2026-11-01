@@ -256,6 +256,12 @@ pub enum TyperError {
         symbol: SymbolId,
         info: TypeId,
     },
+    /// A two-field source case class does not have the bounded Product2
+    /// projection field types `Int` and `Boolean` in that order.
+    UnsupportedProduct2FieldTypes {
+        class: SymbolId,
+        tree_index: u32,
+    },
     /// A `new` type tree is a template; anonymous-class lowering is deferred.
     AnonymousClassInstantiationDeferred {
         source: SourceId,
