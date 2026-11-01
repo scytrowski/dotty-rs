@@ -674,10 +674,16 @@ fn inspect_original_tasty(
                 }
             }
             "Pair" => {
-                for member in ["def leftValue", "def rightValue", "first", "second"] {
+                for member in [
+                    "class Pair(first: example.Counter, second: example.Counter)",
+                    "private[this] val left: example.Counter = Pair.this.first",
+                    "private[this] val right: example.Counter = Pair.this.second",
+                    "def leftValue",
+                    "def rightValue",
+                ] {
                     assert!(
                         decompiled.contains(member),
-                        "Pair decompile omitted {member}: {decompiled}"
+                        "Pair decompile did not preserve the ordered reference constructor and private immutable aliases ({member}): {decompiled}"
                     );
                 }
             }
@@ -816,10 +822,42 @@ fn negative_reader_probes(
             );
             assert!(!compilation.status.success(), "Scala accepted {label}");
             let diagnostic = first_error(&compilation);
-            assert_ne!(
-                diagnostic, "no diagnostic",
-                "Scala rejected {label} without a diagnostic"
+            let stderr = strip_ansi(&String::from_utf8_lossy(&compilation.stderr));
+            let expected_first_failure = match corruption {
+                "missing" | "misplaced" => {
+                    format!(
+                        "Loading Scala 3 binary from {}. It should have been loaded from `.tasty` file. This `.tasty` file is missing.",
+                        classes.join(&class_path).display()
+                    )
+                }
+                "corrupt" => {
+                    format!("error while loading {class_name},")
+                }
+                "mismatched-uuid" => format!(
+                    "{} is out of sync with its TASTy file. Loaded TASTy file. Try cleaning the project to fix this issue",
+                    classes.join(&class_path).display()
+                ),
+                _ => unreachable!(),
+            };
+            assert!(
+                diagnostic.contains(&expected_first_failure),
+                "wrong first rejecting stage for {label}; expected {expected_first_failure:?}, got {diagnostic:?}\nfull stderr:\n{stderr}"
             );
+            if corruption == "corrupt" {
+                assert!(
+                    stderr.contains(&format!("{class_name}.tasty file"))
+                        && stderr.contains(
+                            "is broken, reading aborted with class java.lang.ArrayIndexOutOfBoundsException"
+                        ),
+                    "corrupt {class_name} sidecar did not fail in Scala's TASTy reader:\n{stderr}"
+                );
+            }
+            if corruption == "mismatched-uuid" {
+                assert!(
+                    stderr.contains("No warnings can be incurred under -Werror"),
+                    "UUID warning was not promoted to the expected compile failure for {label}:\n{stderr}"
+                );
+            }
             eprintln!("SCALA_NEGATIVE_FIRST_FAILURE {label}: {diagnostic}");
         }
     }

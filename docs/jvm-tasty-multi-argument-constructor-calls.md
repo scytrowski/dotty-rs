@@ -442,6 +442,12 @@ and sidecar; these failed with the corresponding source-level member or
 constructor lookup errors. The Factory result probe also called a Pair member,
 so its return type came through the selected source signature.
 
+Official Pair decompilation is checked for the ordered constructor
+`Pair(first: example.Counter, second: example.Counter)` and for both exact
+`private[this] val` aliases: `left = Pair.this.first` and
+`right = Pair.this.second`. This verifies the field mutability, visibility,
+type, and source-formal binding rather than only the presence of the names.
+
 ### Scala consumer and reader negative results
 
 The strict gate records the first observable rejection. Each sidecar control
@@ -449,9 +455,9 @@ was run separately for Counter, Pair, and PairFactory.
 
 | Mutation | First rejecting stage and result |
 | --- | --- |
-| Missing or misplaced sidecar | Scala class loader reports that the `.tasty` file is missing; `-Werror` makes it fail the compile |
-| Truncated/corrupt sidecar | Scala reports `error while loading` the selected class during TASTy loading |
-| Mismatched classfile/TASTy UUID | Scala reports the classfile is out of sync with its TASTy; `-Werror` fails the compile |
+| Missing or misplaced sidecar | First diagnostic names the selected `.class`, says it should have been loaded from a `.tasty` file, and reports that this `.tasty` file is missing |
+| Truncated/corrupt sidecar | First diagnostic is `error while loading <class>,`; the following reader diagnostic names `<class>.tasty` and reports `is broken, reading aborted with class java.lang.ArrayIndexOutOfBoundsException` |
+| Mismatched classfile/TASTy UUID | First diagnostic says the selected `.class` is out of sync with its TASTy and that TASTy was loaded; `-Werror` then reports `No warnings can be incurred under -Werror` |
 | Wrong Pair constructor arity | Scala typechecker `[E171] Type Error` |
 | Wrong second constructor argument type | Scala typechecker `[E007] Type Mismatch Error` |
 | Consumer calls an absent method; a separate TASTy copy renames `create` to `delete` | Scala source lookup `[E008] Not Found Error` |
