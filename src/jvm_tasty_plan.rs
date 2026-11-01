@@ -1241,6 +1241,16 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         phase: "cross-class constructor-call identity proof",
         reason: format!("{error:?}"),
     })?;
+    if constructor_call_proofs
+        .iter()
+        .any(|proof| proof.nested_argument_pair().is_some())
+    {
+        return Err(PairedPlanError::BatchUnit {
+            phase: "two-argument constructor receipt integration",
+            reason: "the paired producer still consumes singleton constructor argument bindings"
+                .to_owned(),
+        });
+    }
     let planned_classes = drafts
         .iter()
         .map(|draft| draft.source.class)

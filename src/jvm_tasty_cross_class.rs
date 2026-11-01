@@ -102,6 +102,8 @@ pub enum ConstructorArgumentProofKind {
     Formal,
     /// The outer constructor receives one nested `new Target(formal)` call.
     NestedNew,
+    /// The outer constructor receives two ordered sibling `new Target(formal)` calls.
+    NestedNewPair,
     /// The outer constructor receives a same-instance planned method result.
     PlannedCall,
     /// The outer constructor receives one initialized immutable local val.
@@ -121,8 +123,20 @@ struct FormalConstructorArgumentProof {
 enum ConstructorArgumentProofShape {
     Formal(FormalConstructorArgumentProof),
     NestedNew(NestedConstructorArgumentProof),
+    NestedNewPair(NestedConstructorArgumentPairProof),
     PlannedCall(PlannedCallProof),
     LocalVal(LocalValConstructorArgumentProof),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NestedConstructorArgumentPairProof {
+    source_method_formals: [TreeId<Untyped>; 2],
+    method_formals: [SymbolId; 2],
+    method_formal_types: [TypeId; 2],
+    source_constructor_formals: [TreeId<Untyped>; 2],
+    constructor_formals: [SymbolId; 2],
+    constructor_formal_types: [TypeId; 2],
+    arguments: [NestedConstructorArgumentProof; 2],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +169,9 @@ impl ConstructorArgumentProof {
         match self.shape {
             ConstructorArgumentProofShape::Formal(_) => ConstructorArgumentProofKind::Formal,
             ConstructorArgumentProofShape::NestedNew(_) => ConstructorArgumentProofKind::NestedNew,
+            ConstructorArgumentProofShape::NestedNewPair(_) => {
+                ConstructorArgumentProofKind::NestedNewPair
+            }
             ConstructorArgumentProofShape::PlannedCall(_) => {
                 ConstructorArgumentProofKind::PlannedCall
             }
@@ -191,6 +208,55 @@ impl ConstructorArgumentProof {
             }
             _ => None,
         }
+    }
+
+    /// Exact ordered receipts for a pair of independently validated nested
+    /// constructor arguments. Singleton proofs keep their original shape.
+    pub const fn nested_pair(self) -> Option<[NestedConstructorArgumentProof; 2]> {
+        match self.shape {
+            ConstructorArgumentProofShape::NestedNewPair(proof) => Some(proof.arguments),
+            _ => None,
+        }
+    }
+
+    /// Ordered outer signature identities retained alongside both branch receipts.
+    pub const fn nested_pair_context(self) -> Option<NestedConstructorArgumentPairProofView> {
+        match self.shape {
+            ConstructorArgumentProofShape::NestedNewPair(proof) => {
+                Some(NestedConstructorArgumentPairProofView { proof })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Read-only outer formal identities for one validated two-argument receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NestedConstructorArgumentPairProofView {
+    proof: NestedConstructorArgumentPairProof,
+}
+
+impl NestedConstructorArgumentPairProofView {
+    pub const fn source_method_formals(self) -> [TreeId<Untyped>; 2] {
+        self.proof.source_method_formals
+    }
+    pub const fn method_formals(self) -> [SymbolId; 2] {
+        self.proof.method_formals
+    }
+    pub const fn method_formal_types(self) -> [TypeId; 2] {
+        self.proof.method_formal_types
+    }
+    pub const fn source_constructor_formals(self) -> [TreeId<Untyped>; 2] {
+        self.proof.source_constructor_formals
+    }
+    pub const fn constructor_formals(self) -> [SymbolId; 2] {
+        self.proof.constructor_formals
+    }
+    pub const fn constructor_formal_types(self) -> [TypeId; 2] {
+        self.proof.constructor_formal_types
+    }
+    pub const fn arguments(self) -> [NestedConstructorArgumentProof; 2] {
+        self.proof.arguments
     }
 }
 
@@ -272,11 +338,16 @@ impl FormalConstructorArgumentProofView {
     }
 }
 
-/// Exact original source and typed identities for the supported one-level
-/// nested constructor argument. This is present only when the outer
-/// constructor argument is itself `Apply(Select(New(...), <init>), formal)`.
+/// Exact original source and typed identities for one supported one-level
+/// nested constructor argument. In a pair receipt, these values preserve the
+/// call-site roots independently even when both calls select the same
+/// constructor symbol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NestedConstructorArgumentProof {
+    source_outer_argument: TreeId<Untyped>,
+    typed_outer_argument: TreeId<Typed>,
+    source_apply: TreeId<Untyped>,
+    typed_apply: TreeId<Typed>,
     source_select: TreeId<Untyped>,
     source_new: TreeId<Untyped>,
     source_argument: TreeId<Untyped>,
@@ -286,11 +357,25 @@ pub struct NestedConstructorArgumentProof {
     class: SymbolId,
     constructor: SymbolId,
     formal: SymbolId,
+    argument_formal: SymbolId,
     formal_type: TypeId,
+    argument_formal_type: TypeId,
     result_type: TypeId,
 }
 
 impl NestedConstructorArgumentProof {
+    pub const fn source_outer_argument(self) -> TreeId<Untyped> {
+        self.source_outer_argument
+    }
+    pub const fn typed_outer_argument(self) -> TreeId<Typed> {
+        self.typed_outer_argument
+    }
+    pub const fn source_apply(self) -> TreeId<Untyped> {
+        self.source_apply
+    }
+    pub const fn typed_apply(self) -> TreeId<Typed> {
+        self.typed_apply
+    }
     pub const fn source_select(self) -> TreeId<Untyped> {
         self.source_select
     }
@@ -318,8 +403,16 @@ impl NestedConstructorArgumentProof {
     pub const fn formal(self) -> SymbolId {
         self.formal
     }
+    /// Exact caller-method formal named by the original inner argument leaf.
+    pub const fn argument_formal(self) -> SymbolId {
+        self.argument_formal
+    }
     pub const fn formal_type(self) -> TypeId {
         self.formal_type
+    }
+    /// Type of the caller-method formal named by the original inner argument leaf.
+    pub const fn argument_formal_type(self) -> TypeId {
+        self.argument_formal_type
     }
     pub const fn result_type(self) -> TypeId {
         self.result_type
@@ -504,6 +597,10 @@ impl ValidatedCrossClassConstructorCallProof<'_> {
             ConstructorArgumentProofShape::NestedNew(proof) => Some(proof),
             _ => None,
         }
+    }
+    /// Exact ordered roots for a two-argument nested constructor proof.
+    pub const fn nested_argument_pair(&self) -> Option<[NestedConstructorArgumentProof; 2]> {
+        self.argument_proof.nested_pair()
     }
     /// Canonical semantic type of the method formal and constructor argument.
     pub const fn formal_type(&self) -> TypeId {
@@ -710,25 +807,48 @@ fn validate_cross_class_constructor_call_proofs_inner<'session>(
                     "a source method cannot receive duplicate constructor-call proofs",
                 ));
             }
-            let proof = validate_constructor_call_candidate(
-                source_id,
-                caller_class,
-                &package.stats,
-                method_tree,
-                method_def,
-                method,
-                source_rhs,
-                store,
-                definitions,
-                source_ast,
-                typed_ast,
-                source_index,
-                source_typed_index,
-                typer,
-                jvm_unit,
-                caller_plan,
-                &metadata,
-            )?;
+            let proof = if method_def.value_param_clauses.len() == 1
+                && method_def.value_param_clauses[0].len() == 2
+            {
+                validate_two_nested_constructor_call_candidate(
+                    source_id,
+                    caller_class,
+                    &package.stats,
+                    method_tree,
+                    method_def,
+                    method,
+                    source_rhs,
+                    store,
+                    definitions,
+                    source_ast,
+                    typed_ast,
+                    source_index,
+                    source_typed_index,
+                    jvm_unit,
+                    caller_plan,
+                    &metadata,
+                )?
+            } else {
+                validate_constructor_call_candidate(
+                    source_id,
+                    caller_class,
+                    &package.stats,
+                    method_tree,
+                    method_def,
+                    method,
+                    source_rhs,
+                    store,
+                    definitions,
+                    source_ast,
+                    typed_ast,
+                    source_index,
+                    source_typed_index,
+                    typer,
+                    jvm_unit,
+                    caller_plan,
+                    &metadata,
+                )?
+            };
             proofs.push(proof);
         }
     }
@@ -774,6 +894,1090 @@ fn validate_cross_class_constructor_call_proofs_inner<'session>(
         }
     }
     Ok(proofs)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_two_nested_constructor_call_candidate<'session>(
+    source_id: SourceId,
+    caller_class: SymbolId,
+    source_class_trees: &[TreeId<Untyped>],
+    method_tree: TreeId<Untyped>,
+    method_def: &dotty_core::ast::DefDef<Untyped>,
+    method: SymbolId,
+    source_rhs: TreeId<Untyped>,
+    store: &'session SemanticStore,
+    definitions: &'session Definitions,
+    source_ast: &'session AstArena<Untyped>,
+    typed_ast: &'session TypedAst,
+    source_index: &'session SourceSemanticIndex,
+    source_typed_index: &'session SourceTypedIndex,
+    jvm_unit: &'session JvmCompilationUnit<'session>,
+    caller_plan: &JvmClassPlan,
+    metadata: &[dotty_jvm::JvmClassMetadata],
+) -> Result<ValidatedCrossClassConstructorCallProof<'session>, CrossClassConstructorCallProofError>
+{
+    use CrossClassConstructorCallProofError as Error;
+
+    let source_error = |message| Error::SourceShape(message);
+    let identity_error = |message| Error::SourceIdentity(message);
+    let semantic_error = |message| Error::SemanticIdentity(message);
+    let typed_error = |message| Error::TypedBinding(message);
+    let caller_info = store.symbols.get(caller_class);
+    if source_index.symbol_at(source_id, method_tree) != Some(method)
+        || source_index.definition_of(method)
+            != Some(SourceDefinition::Canonical {
+                source: source_id,
+                tree: method_tree,
+            })
+        || !store.symbols.contains(method)
+        || !has_source_origin(store, method, source_id)
+        || store.symbols.get(method).kind != SymbolKind::Method
+        || store.symbols.get(method).owner != Some(caller_class)
+        || store.symbols.get(method).visibility != dotty_core::Visibility::Public
+        || has_any_flag(
+            store.symbols.get(method).flags,
+            SymbolFlags::ABSTRACT
+                | SymbolFlags::SYNTHETIC
+                | SymbolFlags::STATIC
+                | SymbolFlags::GIVEN
+                | SymbolFlags::IMPLICIT
+                | SymbolFlags::ERASED
+                | SymbolFlags::EXTENSION,
+        )
+    {
+        return Err(identity_error(
+            "candidate method is not the canonical public source method",
+        ));
+    }
+    if caller_info.kind != SymbolKind::Class
+        || caller_plan.class != caller_class
+        || method_def.metadata.visibility.is_some()
+        || !method_def.type_params.is_empty()
+        || method_def.value_param_clauses.len() != 1
+        || method_def.value_param_clauses[0].len() != 2
+    {
+        return Err(source_error(
+            "two-argument candidate must have one plain two-formal clause and a concrete public body",
+        ));
+    }
+
+    let method_formal_trees = [
+        method_def.value_param_clauses[0][0],
+        method_def.value_param_clauses[0][1],
+    ];
+    let mut method_formals = [method; 2];
+    let mut method_formal_types = [definitions.int; 2];
+    for index in 0..2 {
+        require_source_position(
+            source_ast,
+            source_id,
+            method_formal_trees[index],
+            "factory formal has a foreign source position",
+        )?;
+        let TreeKind::ValDef(parameter) = &source_ast
+            .try_get(method_formal_trees[index])
+            .ok_or_else(|| source_error("factory formal source tree is stale"))?
+            .kind
+        else {
+            return Err(source_error("factory formals must be value parameters"));
+        };
+        if parameter.rhs.is_some() {
+            return Err(source_error("factory formals cannot have default values"));
+        }
+        let symbol = source_index
+            .symbol_at(source_id, method_formal_trees[index])
+            .ok_or_else(|| identity_error("factory formal has no canonical source symbol"))?;
+        if source_index.definition_of(symbol)
+            != Some(SourceDefinition::Canonical {
+                source: source_id,
+                tree: method_formal_trees[index],
+            })
+            || !store.symbols.contains(symbol)
+            || !has_source_origin(store, symbol, source_id)
+            || store.symbols.get(symbol).kind != SymbolKind::Parameter
+            || store.symbols.get(symbol).owner != Some(method)
+            || !method_formals[..index]
+                .iter()
+                .all(|earlier| *earlier != symbol)
+        {
+            return Err(identity_error(
+                "factory formals must have distinct canonical parameter identities in source order",
+            ));
+        }
+        let SymbolInfo::Complete(formal_type) = store.symbols.get(symbol).info else {
+            return Err(semantic_error("factory formal type is incomplete"));
+        };
+        if formal_type != definitions.int {
+            return Err(semantic_error(
+                "both factory formals must have the canonical Int type",
+            ));
+        }
+        method_formals[index] = symbol;
+        method_formal_types[index] = formal_type;
+    }
+    let SymbolInfo::Complete(method_type) = store.symbols.get(method).info else {
+        return Err(semantic_error("factory method signature is incomplete"));
+    };
+    let Some(Type::Method(method_signature)) = store.types.try_get(method_type) else {
+        return Err(semantic_error(
+            "factory method must have one plain method type",
+        ));
+    };
+    if method_signature.kind != dotty_core::MethodKind::Plain
+        || method_signature.params.len() != 2
+        || method_signature.params[0].ty != method_formal_types[0]
+        || method_signature.params[1].ty != method_formal_types[1]
+    {
+        return Err(semantic_error(
+            "factory signature must retain its two ordered Int formals",
+        ));
+    }
+
+    let TreeKind::Apply(outer_apply) = &source_ast
+        .try_get(source_rhs)
+        .ok_or_else(|| source_error("factory method RHS is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "factory body must be the original direct constructor Apply",
+        ));
+    };
+    if outer_apply.kind != ApplyKind::Regular || outer_apply.args.len() != 2 {
+        return Err(source_error(
+            "outer constructor application must have exactly two regular arguments",
+        ));
+    }
+    let source_select = outer_apply.function;
+    let TreeKind::Select(source_selection) = &source_ast
+        .try_get(source_select)
+        .ok_or_else(|| source_error("outer constructor Select is stale"))?
+        .kind
+    else {
+        return Err(source_error("outer constructor function must be Select"));
+    };
+    if store.names.resolve(source_selection.name.text()) != "<init>" {
+        return Err(source_error(
+            "outer constructor call must select the primary constructor",
+        ));
+    }
+    let source_new = source_selection.qualifier;
+    let TreeKind::New(source_new_node) = &source_ast
+        .try_get(source_new)
+        .ok_or_else(|| source_error("outer New is stale"))?
+        .kind
+    else {
+        return Err(source_error("outer constructor receiver must be New"));
+    };
+
+    let caller_source = source_index
+        .definition_of(caller_class)
+        .and_then(|definition| match definition {
+            SourceDefinition::Canonical { source, tree } if source == source_id => Some(tree),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            identity_error("factory class has no canonical declaration in this source")
+        })?;
+    let TreeKind::TypeDef(caller_def) = &source_ast
+        .try_get(caller_source)
+        .ok_or_else(|| identity_error("factory class source tree is stale"))?
+        .kind
+    else {
+        return Err(identity_error("factory source declaration is not a class"));
+    };
+    let TreeKind::Template(caller_template) = &source_ast
+        .try_get(caller_def.rhs)
+        .ok_or_else(|| identity_error("factory template is stale"))?
+        .kind
+    else {
+        return Err(identity_error("factory class must have a template"));
+    };
+    let method_name = store.names.resolve(method_def.name.as_name().text());
+    let same_named_methods = caller_template
+        .body
+        .iter()
+        .filter(
+            |tree| match source_ast.try_get(**tree).map(|node| &node.kind) {
+                Some(TreeKind::DefDef(definition)) => {
+                    store.names.resolve(definition.name.as_name().text()) == method_name
+                }
+                _ => false,
+            },
+        )
+        .count();
+    if same_named_methods != 1 {
+        return Err(source_error("overloaded factory methods are unsupported"));
+    }
+    require_source_position(
+        source_ast,
+        source_id,
+        caller_source,
+        "factory class source position is foreign",
+    )?;
+    let package_owner = caller_info
+        .owner
+        .ok_or_else(|| semantic_error("factory class has no package owner"))?;
+    if caller_info.visibility != dotty_core::Visibility::Public
+        || has_any_flag(
+            caller_info.flags,
+            SymbolFlags::CASE | SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
+        )
+    {
+        return Err(semantic_error(
+            "factory owner must be a public ordinary concrete class",
+        ));
+    }
+    let typed_rhs = source_typed_index
+        .get(source_id, source_rhs)
+        .ok_or_else(|| typed_error("factory RHS has no exact typed binding"))?;
+    let typed_select = source_typed_index
+        .get(source_id, source_select)
+        .ok_or_else(|| typed_error("outer Select has no exact typed binding"))?;
+    let typed_new = source_typed_index
+        .get(source_id, source_new)
+        .ok_or_else(|| typed_error("outer New has no exact typed binding"))?;
+    let typed_new_tpt = source_typed_index
+        .get(source_id, source_new_node.tpt)
+        .ok_or_else(|| typed_error("outer New type tree has no exact typed binding"))?;
+    let typed_outer_args = [
+        source_typed_index
+            .get(source_id, outer_apply.args[0])
+            .ok_or_else(|| typed_error("first outer argument has no exact typed binding"))?,
+        source_typed_index
+            .get(source_id, outer_apply.args[1])
+            .ok_or_else(|| typed_error("second outer argument has no exact typed binding"))?,
+    ];
+    if outer_apply.args[0] == outer_apply.args[1] || typed_outer_args[0] == typed_outer_args[1] {
+        return Err(typed_error(
+            "sibling outer arguments must retain distinct source and typed roots",
+        ));
+    }
+    let typed_root = typed_ast
+        .try_get(typed_rhs)
+        .ok_or_else(|| typed_error("factory typed RHS is stale"))?;
+    let typed_apply = match &typed_root.kind {
+        TreeKind::Apply(application) if application.kind == ApplyKind::Regular => application,
+        _ => {
+            return Err(typed_error(
+                "factory typed RHS must remain the original regular Apply",
+            ));
+        }
+    };
+    if typed_apply.function != typed_select || typed_apply.args != typed_outer_args {
+        return Err(typed_error(
+            "typed outer Apply must preserve exact ordered source mappings",
+        ));
+    }
+    let typed_selection = match &typed_ast
+        .try_get(typed_select)
+        .ok_or_else(|| typed_error("outer typed Select is stale"))?
+        .kind
+    {
+        TreeKind::Select(selection) => selection,
+        _ => {
+            return Err(typed_error(
+                "outer typed constructor function must be Select",
+            ));
+        }
+    };
+    if typed_selection.qualifier != typed_new
+        || source_typed_index.get(source_id, source_selection.qualifier) != Some(typed_new)
+    {
+        return Err(typed_error(
+            "outer Select must retain the exact mapped New receiver",
+        ));
+    }
+    let typed_new_node = match &typed_ast
+        .try_get(typed_new)
+        .ok_or_else(|| typed_error("outer typed New is stale"))?
+        .kind
+    {
+        TreeKind::New(new) if new.tpt == typed_new_tpt => new,
+        _ => {
+            return Err(typed_error(
+                "outer New must retain its exact mapped type tree",
+            ));
+        }
+    };
+    let _ = typed_new_node;
+    let target_type = typed_ast
+        .try_get(typed_new_tpt)
+        .ok_or_else(|| typed_error("outer typed New type tree is stale"))?
+        .ty;
+    let target_class = match store.types.try_get(target_type) {
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        }) => *class,
+        _ => {
+            return Err(typed_error(
+                "Pair New must retain a canonical class TypeRef",
+            ));
+        }
+    };
+    if target_class == caller_class
+        || !store.symbols.contains(target_class)
+        || store.symbols.get(target_class).kind != SymbolKind::Class
+        || store.symbols.get(target_class).owner != Some(package_owner)
+        || store.symbols.get(target_class).visibility != dotty_core::Visibility::Public
+        || has_any_flag(
+            store.symbols.get(target_class).flags,
+            SymbolFlags::CASE | SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
+        )
+        || !has_source_origin(store, target_class, source_id)
+        || source_index.definition_of(target_class).is_none_or(|definition| {
+            !matches!(definition, SourceDefinition::Canonical { source, .. } if source == source_id)
+        })
+    {
+        return Err(identity_error("Pair target must be a distinct canonical class in the same source package"));
+    }
+    if !is_canonical_class_type_ref(
+        store,
+        target_type,
+        target_class,
+        package_owner,
+        definitions.no_prefix,
+    ) {
+        return Err(typed_error(
+            "Pair New must retain its exact canonical class TypeRef",
+        ));
+    }
+    if !is_canonical_class_type_ref(
+        store,
+        method_signature.result,
+        target_class,
+        package_owner,
+        definitions.no_prefix,
+    ) {
+        return Err(semantic_error(
+            "factory signature result must retain the exact Pair TypeRef",
+        ));
+    }
+    let target_tree = source_index
+        .definition_of(target_class)
+        .and_then(|definition| match definition {
+            SourceDefinition::Canonical { source, tree } if source == source_id => Some(tree),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            identity_error("Pair class declaration is missing from this source batch")
+        })?;
+    let Some(target_ordinal) = source_class_trees
+        .iter()
+        .position(|tree| *tree == target_tree)
+    else {
+        return Err(identity_error(
+            "Pair class is outside the exact source package root",
+        ));
+    };
+    if jvm_unit
+        .classes
+        .get(target_ordinal)
+        .is_none_or(|plan| plan.class != target_class)
+    {
+        return Err(Error::JvmPlan(
+            "Pair class must occur at its exact source-order JVM batch position",
+        ));
+    }
+    let TreeKind::TypeDef(target_def) = &source_ast
+        .try_get(target_tree)
+        .ok_or_else(|| identity_error("Pair class source tree is stale"))?
+        .kind
+    else {
+        return Err(identity_error("Pair source declaration is not a class"));
+    };
+    let TreeKind::Template(target_template) = &source_ast
+        .try_get(target_def.rhs)
+        .ok_or_else(|| identity_error("Pair template is stale"))?
+        .kind
+    else {
+        return Err(identity_error("Pair declaration must have a template"));
+    };
+    if target_template.body.iter().any(|tree| {
+        matches!(source_ast.try_get(*tree).map(|node| &node.kind), Some(TreeKind::DefDef(definition)) if store.names.resolve(definition.name.as_name().text()) == "this")
+    }) {
+        return Err(source_error("secondary Pair constructors are unsupported"));
+    }
+    let target_constructor = source_index
+        .symbol_at(source_id, target_template.constructor)
+        .ok_or_else(|| identity_error("Pair primary constructor has no canonical symbol"))?;
+    let typed_constructor = match store.types.try_get(
+        typed_ast
+            .try_get(typed_select)
+            .ok_or_else(|| typed_error("outer typed Select is stale"))?
+            .ty,
+    ) {
+        Some(Type::TermRef {
+            target: TermRefTarget::Symbol(constructor),
+            ..
+        }) => *constructor,
+        _ => {
+            return Err(typed_error(
+                "outer Select must retain a canonical constructor TermRef",
+            ));
+        }
+    };
+    if typed_constructor != target_constructor
+        || !store.symbols.contains(target_constructor)
+        || store.symbols.get(target_constructor).kind != SymbolKind::Constructor
+        || store.symbols.get(target_constructor).owner != Some(target_class)
+        || !has_source_origin(store, target_constructor, source_id)
+        || store.symbols.get(target_constructor).visibility != dotty_core::Visibility::Public
+        || has_any_flag(
+            store.symbols.get(target_constructor).flags,
+            SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
+        )
+    {
+        return Err(semantic_error(
+            "outer Select must choose the Pair primary constructor by canonical identity",
+        ));
+    }
+    let TreeKind::DefDef(target_constructor_def) = &source_ast
+        .try_get(target_template.constructor)
+        .ok_or_else(|| identity_error("Pair constructor source tree is stale"))?
+        .kind
+    else {
+        return Err(identity_error(
+            "Pair primary constructor source tree must be DefDef",
+        ));
+    };
+    let target_formal_trees = target_constructor_def
+        .value_param_clauses
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    if !target_constructor_def.type_params.is_empty() || target_formal_trees.len() != 2 {
+        return Err(source_error(
+            "Pair primary constructor must have exactly two ordinary formals",
+        ));
+    }
+    let target_formals = [
+        source_index
+            .derived_symbol_at(target_constructor, source_id, target_formal_trees[0])
+            .ok_or_else(|| {
+                identity_error("first Pair formal has no canonical constructor identity")
+            })?,
+        source_index
+            .derived_symbol_at(target_constructor, source_id, target_formal_trees[1])
+            .ok_or_else(|| {
+                identity_error("second Pair formal has no canonical constructor identity")
+            })?,
+    ];
+    let SymbolInfo::Complete(target_signature_type) = store.symbols.get(target_constructor).info
+    else {
+        return Err(semantic_error("Pair constructor signature is incomplete"));
+    };
+    let Some(Type::Method(target_signature)) = store.types.try_get(target_signature_type) else {
+        return Err(semantic_error(
+            "Pair constructor signature must be one method type",
+        ));
+    };
+    if target_signature.kind != dotty_core::MethodKind::Plain || target_signature.params.len() != 2
+    {
+        return Err(semantic_error(
+            "Pair constructor must have one plain two-formal signature",
+        ));
+    }
+    let pair_formal_types = [target_signature.params[0].ty, target_signature.params[1].ty];
+    let pair_counter_classes = [
+        canonical_class_type_symbol(
+            store,
+            pair_formal_types[0],
+            package_owner,
+            definitions.no_prefix,
+        ),
+        canonical_class_type_symbol(
+            store,
+            pair_formal_types[1],
+            package_owner,
+            definitions.no_prefix,
+        ),
+    ];
+    let [Some(counter_class), Some(second_counter_class)] = pair_counter_classes else {
+        return Err(semantic_error(
+            "Pair constructor formals must be canonical planned class references",
+        ));
+    };
+    if counter_class != second_counter_class
+        || counter_class == target_class
+        || counter_class == caller_class
+    {
+        return Err(semantic_error(
+            "Pair constructor formals must name the same distinct Counter class",
+        ));
+    }
+    for index in 0..2 {
+        let TreeKind::ValDef(parameter) = &source_ast.get(target_formal_trees[index]).kind else {
+            return Err(source_error(
+                "Pair primary constructor formals must be values",
+            ));
+        };
+        if parameter.rhs.is_some()
+            || !store.symbols.contains(target_formals[index])
+            || store.symbols.get(target_formals[index]).kind != SymbolKind::Parameter
+            || store.symbols.get(target_formals[index]).owner != Some(target_constructor)
+            || !has_source_origin(store, target_formals[index], source_id)
+            || store.symbols.get(target_formals[index]).info
+                != SymbolInfo::Complete(pair_formal_types[index])
+            || !is_canonical_class_type_ref(
+                store,
+                pair_formal_types[index],
+                counter_class,
+                package_owner,
+                definitions.no_prefix,
+            )
+        {
+            return Err(semantic_error(
+                "Pair constructor formal order and exact Counter type must match its source declaration",
+            ));
+        }
+    }
+
+    let target_metadata = metadata
+        .iter()
+        .find(|entry| entry.identity().symbol() == target_class)
+        .ok_or(Error::JvmPlan("Pair JVM class metadata is missing"))?;
+    let target_constructor_metadata = target_metadata.constructor().ok_or(Error::JvmPlan(
+        "Pair primary constructor metadata is missing",
+    ))?;
+    if target_constructor_metadata.symbol() != target_constructor
+        || target_constructor_metadata
+            .parameters()
+            .iter()
+            .map(|parameter| parameter.symbol())
+            .collect::<Vec<_>>()
+            != target_formals
+        || !target_constructor_metadata
+            .access_flags()
+            .contains(dotty_classfile::access_flags::ACC_PUBLIC)
+    {
+        return Err(Error::JvmPlan(
+            "Pair constructor metadata must preserve exact ordered source formal identities",
+        ));
+    }
+    let caller_metadata = metadata
+        .iter()
+        .find(|entry| entry.identity().symbol() == caller_class)
+        .ok_or(Error::JvmPlan("factory JVM class metadata is missing"))?;
+    let method_metadata = caller_metadata
+        .methods()
+        .iter()
+        .find(|entry| entry.symbol() == method)
+        .ok_or(Error::JvmPlan("factory JVM method metadata is missing"))?;
+    if method_metadata
+        .parameters()
+        .iter()
+        .map(|parameter| parameter.symbol())
+        .collect::<Vec<_>>()
+        != method_formals
+        || !method_metadata
+            .access_flags()
+            .contains(dotty_classfile::access_flags::ACC_PUBLIC)
+        || method_metadata.descriptor().as_str().ends_with(")V")
+    {
+        return Err(Error::JvmPlan(
+            "factory JVM metadata must retain both ordered canonical Int formals and a Pair result",
+        ));
+    }
+
+    let mut nested_proofs = Vec::with_capacity(2);
+    let mut target_formal_types = [definitions.int; 2];
+    for index in 0..2 {
+        let source_outer_argument = outer_apply.args[index];
+        let typed_outer_argument = typed_outer_args[index];
+        let TreeKind::Apply(inner_apply) = &source_ast
+            .try_get(source_outer_argument)
+            .ok_or_else(|| source_error("nested Counter Apply source root is stale"))?
+            .kind
+        else {
+            return Err(source_error(
+                "each Pair argument must be one nested Counter Apply",
+            ));
+        };
+        if inner_apply.kind != ApplyKind::Regular || inner_apply.args.len() != 1 {
+            return Err(source_error(
+                "each nested Counter call must have one regular argument",
+            ));
+        }
+        let source_inner_select = inner_apply.function;
+        let TreeKind::Select(inner_selection) = &source_ast
+            .try_get(source_inner_select)
+            .ok_or_else(|| source_error("nested Counter Select source root is stale"))?
+            .kind
+        else {
+            return Err(source_error("nested Counter function must be Select"));
+        };
+        if store.names.resolve(inner_selection.name.text()) != "<init>" {
+            return Err(source_error(
+                "nested Counter call must select its primary constructor",
+            ));
+        }
+        let source_inner_new = inner_selection.qualifier;
+        let TreeKind::New(inner_new) = &source_ast
+            .try_get(source_inner_new)
+            .ok_or_else(|| source_error("nested Counter New source root is stale"))?
+            .kind
+        else {
+            return Err(source_error("nested Counter receiver must be New"));
+        };
+        let source_leaf = inner_apply.args[0];
+        let TreeKind::Ident(leaf_ident) = &source_ast
+            .try_get(source_leaf)
+            .ok_or_else(|| source_error("nested Counter leaf source root is stale"))?
+            .kind
+        else {
+            return Err(source_error(
+                "nested Counter leaf must be an original factory formal",
+            ));
+        };
+        let leaf_name = store.names.resolve(leaf_ident.name.text());
+        let caller_formal_index = method_formal_trees.iter().position(|tree| {
+            matches!(&source_ast.get(*tree).kind, TreeKind::ValDef(parameter) if store.names.resolve(parameter.name.as_name().text()) == leaf_name)
+        }).ok_or_else(|| source_error("nested Counter leaf must resolve to one caller formal"))?;
+        let caller_formal = method_formals[caller_formal_index];
+        let source_inner_select_typed = source_typed_index
+            .get(source_id, source_inner_select)
+            .ok_or_else(|| typed_error("nested Counter Select has no exact typed binding"))?;
+        let source_inner_new_typed = source_typed_index
+            .get(source_id, source_inner_new)
+            .ok_or_else(|| typed_error("nested Counter New has no exact typed binding"))?;
+        let source_inner_tpt_typed = source_typed_index
+            .get(source_id, inner_new.tpt)
+            .ok_or_else(|| typed_error("nested Counter type tree has no exact typed binding"))?;
+        let source_leaf_typed = source_typed_index
+            .get(source_id, source_leaf)
+            .ok_or_else(|| typed_error("nested Counter leaf has no exact typed binding"))?;
+        let typed_inner_apply_node = typed_ast
+            .try_get(typed_outer_argument)
+            .ok_or_else(|| typed_error("nested Counter typed Apply is stale"))?;
+        let TreeKind::Apply(typed_inner_apply) = &typed_inner_apply_node.kind else {
+            return Err(typed_error("nested Counter typed root must remain Apply"));
+        };
+        if typed_inner_apply.kind != ApplyKind::Regular
+            || typed_inner_apply.function != source_inner_select_typed
+            || typed_inner_apply.args != [source_leaf_typed]
+            || source_typed_index.get(source_id, source_inner_select)
+                != Some(source_inner_select_typed)
+            || source_typed_index.get(source_id, source_inner_new) != Some(source_inner_new_typed)
+        {
+            return Err(typed_error(
+                "nested Counter typed Apply must preserve exact original Select, New, and leaf roots",
+            ));
+        }
+        let TreeKind::Select(typed_inner_selection) = &typed_ast
+            .try_get(source_inner_select_typed)
+            .ok_or_else(|| typed_error("nested Counter typed Select is stale"))?
+            .kind
+        else {
+            return Err(typed_error(
+                "nested Counter typed function must remain Select",
+            ));
+        };
+        if typed_inner_selection.qualifier != source_inner_new_typed {
+            return Err(typed_error(
+                "nested Counter Select must retain its exact mapped New receiver",
+            ));
+        }
+        let TreeKind::New(typed_inner_new_node) = &typed_ast
+            .try_get(source_inner_new_typed)
+            .ok_or_else(|| typed_error("nested Counter typed New is stale"))?
+            .kind
+        else {
+            return Err(typed_error("nested Counter typed receiver must remain New"));
+        };
+        if typed_inner_new_node.tpt != source_inner_tpt_typed {
+            return Err(typed_error(
+                "nested Counter New must retain its exact mapped type tree",
+            ));
+        }
+        let inner_class_type = typed_ast
+            .try_get(source_inner_tpt_typed)
+            .ok_or_else(|| typed_error("nested Counter typed type tree is stale"))?
+            .ty;
+        if !is_canonical_class_type_ref(
+            store,
+            inner_class_type,
+            counter_class,
+            package_owner,
+            definitions.no_prefix,
+        ) {
+            return Err(typed_error(
+                "nested Counter New must retain the exact Pair formal TypeRef",
+            ));
+        }
+        let inner_constructor = match store.types.try_get(
+            typed_ast
+                .try_get(source_inner_select_typed)
+                .ok_or_else(|| typed_error("nested Counter typed Select is stale"))?
+                .ty,
+        ) {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(constructor),
+                ..
+            }) => *constructor,
+            _ => {
+                return Err(typed_error(
+                    "nested Counter Select must retain its canonical constructor TermRef",
+                ));
+            }
+        };
+        if !store.symbols.contains(inner_constructor)
+            || store.symbols.get(inner_constructor).kind != SymbolKind::Constructor
+            || store.symbols.get(inner_constructor).owner != Some(counter_class)
+            || !has_source_origin(store, inner_constructor, source_id)
+        {
+            return Err(semantic_error(
+                "nested Select must choose a source constructor owned by the exact Counter class",
+            ));
+        }
+        let counter_tree = source_index
+            .definition_of(counter_class)
+            .and_then(|definition| match definition {
+                SourceDefinition::Canonical { source, tree } if source == source_id => Some(tree),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                identity_error("Counter class has no canonical declaration in this source")
+            })?;
+        let counter_ordinal = source_class_trees
+            .iter()
+            .position(|tree| *tree == counter_tree)
+            .ok_or_else(|| identity_error("Counter class is outside the exact source batch"))?;
+        if jvm_unit
+            .classes
+            .get(counter_ordinal)
+            .is_none_or(|plan| plan.class != counter_class)
+        {
+            return Err(Error::JvmPlan(
+                "Counter class is absent from its exact source-order JVM batch position",
+            ));
+        }
+        let TreeKind::TypeDef(counter_def) = &source_ast.get(counter_tree).kind else {
+            return Err(identity_error("Counter declaration must be a class"));
+        };
+        if store.symbols.get(counter_class).visibility != dotty_core::Visibility::Public
+            || has_any_flag(
+                store.symbols.get(counter_class).flags,
+                SymbolFlags::CASE
+                    | SymbolFlags::ENUM
+                    | SymbolFlags::ABSTRACT
+                    | SymbolFlags::SYNTHETIC,
+            )
+        {
+            return Err(semantic_error(
+                "Counter target must be a public ordinary concrete class",
+            ));
+        }
+        let TreeKind::Template(counter_template) = &source_ast.get(counter_def.rhs).kind else {
+            return Err(identity_error("Counter declaration must have a template"));
+        };
+        if counter_template.body.iter().any(|tree| {
+            matches!(source_ast.try_get(*tree).map(|node| &node.kind), Some(TreeKind::DefDef(definition)) if store.names.resolve(definition.name.as_name().text()) == "this")
+        }) {
+            return Err(source_error("secondary Counter constructors are unsupported"));
+        }
+        let counter_constructor = source_index
+            .symbol_at(source_id, counter_template.constructor)
+            .ok_or_else(|| identity_error("Counter primary constructor has no canonical symbol"))?;
+        if inner_constructor != counter_constructor {
+            return Err(semantic_error(
+                "nested Select must choose the exact Counter primary constructor",
+            ));
+        }
+        if store.symbols.get(counter_constructor).visibility != dotty_core::Visibility::Public
+            || has_any_flag(
+                store.symbols.get(counter_constructor).flags,
+                SymbolFlags::ABSTRACT | SymbolFlags::SYNTHETIC,
+            )
+        {
+            return Err(semantic_error(
+                "Counter primary constructor must be public and ordinary",
+            ));
+        }
+        let TreeKind::DefDef(counter_ctor_def) = &source_ast.get(counter_template.constructor).kind
+        else {
+            return Err(identity_error(
+                "Counter primary constructor source tree must be DefDef",
+            ));
+        };
+        let counter_formal_trees = counter_ctor_def
+            .value_param_clauses
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        if !counter_ctor_def.type_params.is_empty() || counter_formal_trees.len() != 1 {
+            return Err(source_error(
+                "nested Counter constructor must have one ordinary formal",
+            ));
+        }
+        let counter_formal = source_index
+            .derived_symbol_at(counter_constructor, source_id, counter_formal_trees[0])
+            .ok_or_else(|| {
+                identity_error("Counter constructor formal has no canonical identity")
+            })?;
+        let SymbolInfo::Complete(counter_signature_type) =
+            store.symbols.get(counter_constructor).info
+        else {
+            return Err(semantic_error(
+                "Counter constructor signature is incomplete",
+            ));
+        };
+        let Some(Type::Method(counter_signature)) = store.types.try_get(counter_signature_type)
+        else {
+            return Err(semantic_error(
+                "Counter constructor signature must be a method type",
+            ));
+        };
+        let SymbolInfo::Complete(counter_formal_type) = store.symbols.get(counter_formal).info
+        else {
+            return Err(semantic_error(
+                "Counter constructor formal type is incomplete",
+            ));
+        };
+        if counter_signature.kind != dotty_core::MethodKind::Plain
+            || counter_signature.params.len() != 1
+            || counter_signature.params[0].ty != counter_formal_type
+            || counter_formal_type != definitions.int
+            || method_formal_types[caller_formal_index] != definitions.int
+        {
+            return Err(semantic_error(
+                "Counter and caller signatures must retain exact canonical Int formals",
+            ));
+        }
+        let typed_leaf_node = typed_ast
+            .try_get(source_leaf_typed)
+            .ok_or_else(|| typed_error("nested Counter typed leaf is stale"))?;
+        if !matches!(typed_leaf_node.kind, TreeKind::Ident(_))
+            || !matches!(store.types.try_get(typed_leaf_node.ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == caller_formal)
+        {
+            return Err(typed_error(
+                "nested leaf must retain the exact original caller formal TermRef and type",
+            ));
+        }
+        let result_type = typed_inner_apply_node.ty;
+        if !matches!(
+            store.types.try_get(result_type),
+            Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == counter_class
+        ) {
+            return Err(typed_error(
+                "nested Counter Apply result must retain its canonical Counter TypeRef",
+            ));
+        }
+        for (source_tree, typed_tree, description) in [
+            (
+                source_outer_argument,
+                typed_outer_argument,
+                "outer Pair argument",
+            ),
+            (
+                source_inner_select,
+                source_inner_select_typed,
+                "nested Counter Select",
+            ),
+            (
+                source_inner_new,
+                source_inner_new_typed,
+                "nested Counter New",
+            ),
+            (
+                inner_new.tpt,
+                source_inner_tpt_typed,
+                "nested Counter type tree",
+            ),
+            (source_leaf, source_leaf_typed, "nested caller formal leaf"),
+        ] {
+            require_matching_source_typed_positions(
+                source_ast,
+                typed_ast,
+                source_id,
+                source_tree,
+                typed_tree,
+                description,
+            )?;
+        }
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_rhs,
+            typed_rhs,
+            "factory body",
+        )?;
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_select,
+            typed_select,
+            "outer Pair Select",
+        )?;
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_new,
+            typed_new,
+            "outer Pair New",
+        )?;
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_new_node.tpt,
+            typed_new_tpt,
+            "outer Pair type tree",
+        )?;
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_inner_select,
+            source_inner_select_typed,
+            "nested Counter Select",
+        )?;
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_inner_new,
+            source_inner_new_typed,
+            "nested Counter New",
+        )?;
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            inner_new.tpt,
+            source_inner_tpt_typed,
+            "nested Counter type tree",
+        )?;
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_leaf,
+            source_leaf_typed,
+            "nested caller formal leaf",
+        )?;
+        let counter_metadata = metadata
+            .iter()
+            .find(|entry| entry.identity().symbol() == counter_class)
+            .ok_or(Error::JvmPlan("Counter JVM metadata is missing"))?;
+        let counter_ctor_metadata = counter_metadata.constructor().ok_or(Error::JvmPlan(
+            "Counter primary constructor metadata is missing",
+        ))?;
+        if counter_ctor_metadata.symbol() != counter_constructor
+            || counter_ctor_metadata
+                .parameters()
+                .iter()
+                .map(|parameter| parameter.symbol())
+                .collect::<Vec<_>>()
+                != [counter_formal]
+            || !counter_ctor_metadata
+                .access_flags()
+                .contains(dotty_classfile::access_flags::ACC_PUBLIC)
+        {
+            return Err(Error::JvmPlan(
+                "Counter metadata must retain its exact public primary constructor formal",
+            ));
+        }
+        nested_proofs.push(NestedConstructorArgumentProof {
+            source_outer_argument,
+            typed_outer_argument,
+            source_apply: source_outer_argument,
+            typed_apply: typed_outer_argument,
+            source_select: source_inner_select,
+            source_new: source_inner_new,
+            source_argument: source_leaf,
+            typed_select: source_inner_select_typed,
+            typed_new: source_inner_new_typed,
+            typed_argument: source_leaf_typed,
+            class: counter_class,
+            constructor: counter_constructor,
+            formal: counter_formal,
+            argument_formal: caller_formal,
+            formal_type: counter_formal_type,
+            argument_formal_type: method_formal_types[caller_formal_index],
+            result_type,
+        });
+        target_formal_types[index] = pair_formal_types[index];
+    }
+    let [nested_first, nested_second] =
+        <[NestedConstructorArgumentProof; 2]>::try_from(nested_proofs).map_err(|_| {
+            Error::SourceShape("exactly two nested constructor argument proofs are required")
+        })?;
+    if nested_first.class() != nested_second.class()
+        || nested_first.constructor() != nested_second.constructor()
+        || nested_first.source_outer_argument() == nested_second.source_outer_argument()
+        || nested_first.source_apply() == nested_second.source_apply()
+        || nested_first.source_select() == nested_second.source_select()
+        || nested_first.source_new() == nested_second.source_new()
+        || nested_first.source_argument() == nested_second.source_argument()
+        || nested_first.typed_outer_argument() == nested_second.typed_outer_argument()
+        || nested_first.typed_apply() == nested_second.typed_apply()
+        || nested_first.typed_select() == nested_second.typed_select()
+        || nested_first.typed_new() == nested_second.typed_new()
+        || nested_first.typed_argument() == nested_second.typed_argument()
+    {
+        return Err(typed_error(
+            "sibling constructor receipts must preserve distinct ordered call-site roots",
+        ));
+    }
+    let result_type = typed_root.ty;
+    if !matches!(
+        store.types.try_get(result_type),
+        Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == target_class
+    ) {
+        return Err(typed_error(
+            "factory result must retain its canonical Pair TypeRef",
+        ));
+    }
+    let method_descriptor = method_metadata.descriptor().as_str();
+    let constructor_descriptor = target_constructor_metadata.descriptor().as_str();
+    let constructor_formal_type = target_formal_types[0];
+    Ok(ValidatedCrossClassConstructorCallProof {
+        _store: store,
+        _source_ast: source_ast,
+        _typed_ast: typed_ast,
+        _source_index: source_index,
+        _source_typed_index: source_typed_index,
+        _jvm_unit: jvm_unit,
+        source_id,
+        caller_class,
+        method,
+        method_formal: method_formals[0],
+        formal_class: None,
+        target_class,
+        constructor: target_constructor,
+        source_rhs,
+        source_select,
+        source_new,
+        source_argument: outer_apply.args[0],
+        typed_rhs,
+        typed_select,
+        typed_new,
+        typed_argument: typed_outer_args[0],
+        argument_proof: ConstructorArgumentProof {
+            shape: ConstructorArgumentProofShape::NestedNewPair(
+                NestedConstructorArgumentPairProof {
+                    source_method_formals: method_formal_trees,
+                    method_formals,
+                    method_formal_types,
+                    source_constructor_formals: [target_formal_trees[0], target_formal_trees[1]],
+                    constructor_formals: target_formals,
+                    constructor_formal_types: pair_formal_types,
+                    arguments: [nested_first, nested_second],
+                },
+            ),
+        },
+        formal_type: method_formal_types[0],
+        constructor_formal_type,
+        result_type,
+        method_descriptor: method_descriptor.to_owned(),
+        constructor_descriptor: constructor_descriptor.to_owned(),
+    })
 }
 
 fn is_direct_constructor_call_candidate(ast: &AstArena<Untyped>, rhs: TreeId<Untyped>) -> bool {
@@ -2511,6 +3715,10 @@ fn validate_constructor_call_candidate<'session>(
         }
         (
             Some(NestedConstructorArgumentProof {
+                source_outer_argument: source_argument,
+                typed_outer_argument: typed_argument,
+                source_apply: source_argument,
+                typed_apply: typed_argument,
                 source_select: source_inner_select,
                 source_new: source_inner_new,
                 source_argument: argument_formal_tree,
@@ -2520,7 +3728,9 @@ fn validate_constructor_call_candidate<'session>(
                 class: inner_class,
                 constructor: inner_constructor,
                 formal: inner_formal,
+                argument_formal: method_formal,
                 formal_type: inner_formal_type,
+                argument_formal_type: formal_type,
                 result_type: typed_ast
                     .try_get(typed_argument)
                     .ok_or_else(|| typed_error("typed nested Apply is stale"))?
