@@ -1091,10 +1091,12 @@ fn the_resolver_is_asked_for_a_member_the_local_scope_does_not_have() {
     let holder = symbol(&unpickler, &unit, "Holder");
     let box_class = symbol(&unpickler, &unit, "Box");
     let log = Rc::default();
-    let mut unpickler = unpickler.with_resolver(Box::new(Fixed {
-        answer: Some(holder),
-        log: Rc::clone(&log),
-    }));
+    let mut unpickler = unpickler
+        .with_resolver(Box::new(Fixed {
+            answer: Some(holder),
+            log: Rc::clone(&log),
+        }))
+        .unwrap();
 
     let selected = unpickler
         .unpickle_type_tree_type(unit.at("select missing"))
@@ -1124,10 +1126,12 @@ fn a_local_member_never_asks_the_resolver() {
     let mut session = Session::new();
     let unpickler = entered(&file, &mut session);
     let log = Rc::default();
-    let mut unpickler = unpickler.with_resolver(Box::new(Fixed {
-        answer: None,
-        log: Rc::clone(&log),
-    }));
+    let mut unpickler = unpickler
+        .with_resolver(Box::new(Fixed {
+            answer: None,
+            log: Rc::clone(&log),
+        }))
+        .unwrap();
 
     unpickler
         .unpickle_type_tree_type(unit.at("select class"))

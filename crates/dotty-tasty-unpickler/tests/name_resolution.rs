@@ -139,7 +139,7 @@ fn decode(
     let file = TastyFile::parse_scala_3_9(bytes).unwrap();
     let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions);
     if let Some(resolver) = resolver {
-        unpickler = unpickler.with_resolver(resolver);
+        unpickler = unpickler.with_resolver(resolver).unwrap();
     }
     unpickler.enter_symbols().unwrap();
     let result = unpickler.unpickle_type(at);
@@ -476,7 +476,8 @@ fn decode_with(
     let bytes = missing_member();
     let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
     let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions)
-        .with_resolver(Box::new(resolver));
+        .with_resolver(Box::new(resolver))
+        .unwrap();
     unpickler.enter_symbols().unwrap();
     let result = unpickler.unpickle_type(LEFT_INNER);
     drop(unpickler);
@@ -568,7 +569,8 @@ fn a_local_hit_never_asks_the_resolver() {
     );
     let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
     let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions)
-        .with_resolver(Box::new(resolver));
+        .with_resolver(Box::new(resolver))
+        .unwrap();
     unpickler.enter_symbols().unwrap();
 
     assert!(unpickler.unpickle_type(LEFT_INNER).is_ok());
@@ -590,7 +592,8 @@ fn an_external_reference_resolves_through_the_package_and_member_resolver() {
     };
     let file = TastyFile::parse_scala_3_9(DISTINCT).unwrap();
     let mut unpickler = TastyUnpickler::new(&file, &mut session.store, session.definitions)
-        .with_resolver(Box::new(resolver));
+        .with_resolver(Box::new(resolver))
+        .unwrap();
     unpickler.enter_symbols().unwrap();
 
     let result = unpickler.unpickle_type(38);
@@ -636,7 +639,8 @@ fn a_package_entered_by_another_adapter_is_found_without_the_resolver() {
     let file = TastyFile::parse_scala_3_9(DISTINCT).unwrap();
     let mut unpickler =
         TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages)
-            .with_resolver(Box::new(resolver));
+            .with_resolver(Box::new(resolver))
+            .unwrap();
     unpickler.enter_symbols().unwrap();
 
     // The package resolves from the registry; `Object` is not in its scope,

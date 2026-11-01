@@ -8,14 +8,22 @@
 //! in isolation.
 
 use dotty_classloader::classloader::{
-    BinaryName, ClassLoader, CompositeClassPath, DirectoryClassPath,
+    BinaryName, ClassLoader, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath,
+    LoadingSession,
 };
 use dotty_core::{
-    ClassInfo, Name, Namespace, SemanticStore, SymbolId, SymbolInfo, SymbolKind, Type, TypeId,
-    Visibility,
+    ClassInfo, Definitions, MemberRequest, Name, Namespace, Packages, ResolutionError,
+    ResolverCheckpoint, SemanticStore, SymbolId, SymbolInfo, SymbolKind, SymbolResolver, Type,
+    TypeId, Visibility,
 };
+use dotty_tasty::tasty::{StructuredNode, TastyFile};
+use dotty_tasty_unpickler::tasty_unpickler::{
+    TastySession, TastySessionError, TastyUnpickler, UnpickleError,
+};
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 #[path = "support/cross_adapter_annotations.rs"]
 mod cross_adapter_annotations;
@@ -46,8 +54,556 @@ fn tasty_sample_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_sample")
 }
 
+/// Regression for the live package/session handoff: the same real `Open`
+/// package entered by the unpickler and found through the classpath resolver
+/// must retain its canonical `SymbolId` and `ScopeId`.
+#[test]
+fn unpickler_and_classpath_resolver_converge_on_the_real_open_package() {
+    let path = tasty_visibility_dir();
+    let bytes = fs::read(path.join("me/cytrowski/tastyfixtures/visibility/Open.tasty"))
+        .expect("real Open.tasty fixture");
+    let file = TastyFile::parse_scala_3_9(&bytes).expect("Open.tasty should parse");
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
+    unpickler
+        .enter_symbols()
+        .expect("Open symbols should enter");
+    let (index, mut packages) = unpickler.into_parts();
+    let unpickler_package = index.symbol_at(0).expect("Open package definition");
+    let unpickler_scope = packages
+        .scope_of(unpickler_package)
+        .expect("Open package scope");
+
+    let mut resolver = ClasspathSymbolResolver::new(
+        DirectoryClassPath::new(path),
+        definitions,
+        LoadingSession::new(),
+    );
+    let resolver_package = dotty_core::SymbolResolver::resolve_package_with_packages(
+        &mut resolver,
+        &mut store,
+        &mut packages,
+        &["me", "cytrowski", "tastyfixtures", "visibility"],
+    )
+    .expect("resolver should find the real classpath package")
+    .expect("the package is present in the classpath");
+
+    assert_eq!(resolver_package, unpickler_package);
+    assert_eq!(packages.scope_of(resolver_package), Some(unpickler_scope));
+    assert_eq!(
+        store.symbols.get(resolver_package).name.namespace(),
+        Namespace::Term
+    );
+    assert_eq!(
+        store.scopes.get(unpickler_scope).owner,
+        Some(resolver_package)
+    );
+    assert_eq!(
+        store.symbols.get(resolver_package).owner,
+        Some(
+            packages
+                .symbol(&["me", "cytrowski", "tastyfixtures"])
+                .unwrap()
+        )
+    );
+}
+
+#[test]
+fn resolver_first_package_identity_is_adopted_by_the_tasty_session() {
+    let path = tasty_visibility_dir();
+    let bytes = fs::read(path.join("me/cytrowski/tastyfixtures/visibility/InOwnPackage.tasty"))
+        .expect("real InOwnPackage.tasty fixture");
+    let file = TastyFile::parse_scala_3_9(&bytes).expect("TASTy should parse");
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut resolver = ClasspathSymbolResolver::new(
+        DirectoryClassPath::new(path),
+        definitions,
+        LoadingSession::new(),
+    );
+    let resolver_package = dotty_core::SymbolResolver::resolve_package(
+        &mut resolver,
+        &mut store,
+        &["me", "cytrowski", "tastyfixtures", "visibility"],
+    )
+    .expect("resolver should find the real classpath package")
+    .expect("the package is present in the classpath");
+    let packages = dotty_core::SymbolResolver::take_packages(&mut resolver)
+        .expect("classpath resolver owns package identities");
+    let resolver_scope = packages
+        .scope_of(resolver_package)
+        .expect("resolver package declaration scope");
+
+    let session = TastySession::with_packages(packages)
+        .with_resolver(Box::new(resolver))
+        .expect("the resolver's package registry becomes the session authority");
+    let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    unpickler
+        .enter_symbols()
+        .expect("unit symbols should enter");
+    let package = unpickler.index().symbol_at(0).expect("package definition");
+    let (_, session) = unpickler.into_session_parts();
+
+    assert_eq!(package, resolver_package);
+    assert_eq!(session.packages().scope_of(package), Some(resolver_scope));
+    assert_eq!(store.symbols.get(package).kind, SymbolKind::Package);
+    assert_eq!(store.symbols.get(package).name.namespace(), Namespace::Term);
+    assert_eq!(store.scopes.get(resolver_scope).owner, Some(package));
+    assert_eq!(
+        store.symbols.get(package).owner,
+        Some(
+            session
+                .packages()
+                .symbol(&["me", "cytrowski", "tastyfixtures"])
+                .unwrap()
+        )
+    );
+}
+
+#[test]
+fn independently_entered_conflicting_package_registries_fail_closed() {
+    let path = tasty_visibility_dir();
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut resolver = ClasspathSymbolResolver::new(
+        DirectoryClassPath::new(path),
+        definitions,
+        LoadingSession::new(),
+    );
+    dotty_core::SymbolResolver::resolve_package(
+        &mut resolver,
+        &mut store,
+        &["me", "cytrowski", "tastyfixtures", "visibility"],
+    )
+    .unwrap()
+    .unwrap();
+    let mut tasty_packages = Packages::new();
+    tasty_packages.enter(
+        &mut store,
+        dotty_core::SymbolOrigin::Synthetic,
+        &["me", "cytrowski", "tastyfixtures", "visibility"],
+    );
+    let tasty_package = tasty_packages
+        .symbol(&["me", "cytrowski", "tastyfixtures", "visibility"])
+        .unwrap();
+
+    let error = match TastySession::with_packages(tasty_packages).with_resolver(Box::new(resolver))
+    {
+        Err(error) => error,
+        Ok(_) => panic!("independently entered roots must conflict"),
+    };
+    assert_eq!(
+        error.reason(),
+        TastySessionError::ConflictingPackageAuthorities
+    );
+    let (mut session, resolver) = error.into_parts();
+    assert!(resolver.has_package_root());
+    assert!(
+        session
+            .packages()
+            .symbol(&["me", "cytrowski", "tastyfixtures", "visibility"])
+            .is_some()
+    );
+
+    session = session
+        .with_resolver(Box::new(ClasspathSymbolResolver::new(
+            DirectoryClassPath::new(tasty_visibility_dir()),
+            definitions,
+            LoadingSession::new(),
+        )))
+        .expect("a fresh resolver can attach after the rejected resolver is recovered");
+    let bytes =
+        fs::read(tasty_visibility_dir().join("me/cytrowski/tastyfixtures/visibility/Open.tasty"))
+            .expect("real Open.tasty fixture");
+    let file = TastyFile::parse_scala_3_9(&bytes).expect("Open.tasty should parse");
+    let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    unpickler
+        .enter_symbols()
+        .expect("retry session can enter the unit");
+    assert_eq!(unpickler.index().symbol_at(0), Some(tasty_package));
+}
+
+#[test]
+fn rejected_unpickler_resolver_attachment_returns_the_unpickler_and_resolver() {
+    let file = TastyFile::parse_scala_3_9(DISTINCT).expect("Distinct.tasty should parse");
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let package = store.symbols.alloc(dotty_core::Symbol {
+        name: Name::new(store.names.intern("lang"), Namespace::Term),
+        owner: None,
+        kind: SymbolKind::Package,
+        flags: dotty_core::SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: dotty_core::SymbolInfo::Missing,
+        origin: dotty_core::SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: dotty_core::SymbolLinks::default(),
+    });
+    let object = store.symbols.alloc(dotty_core::Symbol {
+        name: Name::new(store.names.intern("Object"), Namespace::Type),
+        owner: Some(package),
+        kind: SymbolKind::Class,
+        flags: dotty_core::SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: dotty_core::SymbolInfo::Missing,
+        origin: dotty_core::SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: dotty_core::SymbolLinks::default(),
+    });
+    let member_called = Rc::new(Cell::new(false));
+    let session = TastySession::new()
+        .with_resolver(Box::new(AttachmentTestResolver {
+            package,
+            member: object,
+            member_called: Rc::clone(&member_called),
+        }))
+        .expect("first resolver attaches");
+    let unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    let error = match unpickler.with_resolver(Box::new(dotty_core::NoResolver)) {
+        Err(error) => error,
+        Ok(_) => panic!("a second resolver cannot replace the session resolver"),
+    };
+    assert_eq!(error.reason(), TastySessionError::ResolverAlreadyAttached);
+    let (mut unpickler, incoming_resolver) = error.into_parts();
+    assert!(!incoming_resolver.has_package_root());
+
+    unpickler
+        .unpickle_type(38)
+        .expect("original resolver remains usable after rejected replacement");
+    assert!(member_called.get());
+}
+
+struct AttachmentTestResolver {
+    package: SymbolId,
+    member: SymbolId,
+    member_called: Rc<Cell<bool>>,
+}
+
+impl SymbolResolver for AttachmentTestResolver {
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        ResolverCheckpoint::new(0)
+    }
+
+    fn rollback_to(&mut self, _store: &mut SemanticStore, _checkpoint: ResolverCheckpoint) {}
+
+    fn resolve_member(
+        &mut self,
+        _store: &mut SemanticStore,
+        _request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.member_called.set(true);
+        Ok(Some(self.member))
+    }
+
+    fn resolve_package(
+        &mut self,
+        _store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        Ok((path == ["java", "lang"]).then_some(self.package))
+    }
+}
+
 fn published_scala39_library_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dotty-tasty/tests/fixtures/scala3-library")
+}
+
+const COMPLETION: &[u8] =
+    include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/CompletionHolder.tasty");
+const DISTINCT: &[u8] =
+    include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Distinct.tasty");
+
+struct FailOnceAfterPackage<E: dotty_classloader::classloader::ClassPathEntry> {
+    inner: ClasspathSymbolResolver<E>,
+    fail_once: Rc<Cell<bool>>,
+    materialized: Rc<Cell<bool>>,
+    rollback_removed: Rc<Cell<bool>>,
+    member_callback: Rc<Cell<bool>>,
+}
+
+impl<E: dotty_classloader::classloader::ClassPathEntry> SymbolResolver for FailOnceAfterPackage<E> {
+    fn take_packages(&mut self) -> Option<Packages> {
+        self.inner.take_packages()
+    }
+
+    fn checkpoint_with_packages(&self, packages: &Packages) -> ResolverCheckpoint {
+        self.inner.checkpoint_with_packages(packages)
+    }
+
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        self.inner.checkpoint()
+    }
+
+    fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
+        self.inner.rollback_to(store, checkpoint);
+    }
+
+    fn rollback_to_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        checkpoint: ResolverCheckpoint,
+        packages: &mut Packages,
+    ) {
+        self.inner
+            .rollback_to_with_packages(store, checkpoint, packages);
+        self.rollback_removed
+            .set(packages.symbol(&["scala"]).is_none());
+    }
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner.resolve_member(store, request)
+    }
+
+    fn resolve_member_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.member_callback.set(true);
+        self.inner
+            .resolve_member_with_packages(store, packages, request)
+    }
+
+    fn resolve_package(
+        &mut self,
+        store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner.resolve_package(store, path)
+    }
+
+    fn resolve_package_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        let result = self
+            .inner
+            .resolve_package_with_packages(store, packages, path);
+        if result.as_ref().is_ok_and(Option::is_some) && self.fail_once.replace(false) {
+            self.materialized.set(true);
+            Err(ResolutionError::Malformed {
+                reason: "injected late session handoff failure".to_owned(),
+            })
+        } else {
+            result
+        }
+    }
+}
+
+fn definition_address(file: &TastyFile<'_>, definition: &str) -> u32 {
+    let index = file.ast_address_index().expect("TASTy AST index");
+    index
+        .iter_nodes()
+        .find_map(|node| {
+            let at = u32::try_from(node.offset).ok()?;
+            let raw = index.get(at)?;
+            let name = match raw.decode_structured().ok()? {
+                StructuredNode::DefDef(body) => body.name,
+                StructuredNode::ValDef(body) => body.name(),
+                _ => return None,
+            };
+            (file.names().get_utf8(name) == Some(definition)).then_some(at)
+        })
+        .unwrap_or_else(|| panic!("definition {definition} in TASTy fixture"))
+}
+
+#[test]
+fn active_unpickler_resolves_and_retains_a_new_real_classpath_package() {
+    let file = TastyFile::parse_scala_3_9(COMPLETION).expect("Completion.tasty should parse");
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let resolver = ClasspathSymbolResolver::new(
+        DirectoryClassPath::new(published_scala39_library_dir()),
+        definitions,
+        LoadingSession::new(),
+    );
+    let session = TastySession::new()
+        .with_resolver(Box::new(resolver))
+        .expect("an empty resolver registry can join the TASTy session");
+    let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    unpickler
+        .enter_symbols()
+        .expect("Completion symbols should enter");
+    let ast = file.ast_address_index().expect("TASTy AST index");
+    let package_references: Vec<_> = [64, 65]
+        .into_iter()
+        .flat_map(|tag| ast.iter_nodes_with_tag(tag))
+        .filter_map(|node| u32::try_from(node.offset).ok())
+        .collect();
+    assert!(!package_references.is_empty());
+    for address in package_references {
+        let _ = unpickler.unpickle_type(address);
+    }
+    let (_, session) = unpickler.into_session_parts();
+
+    let scala = session
+        .packages()
+        .symbol(&["scala"])
+        .expect("the resolver-created scala package remains in the canonical registry");
+    let scope = session
+        .packages()
+        .scope_of(scala)
+        .expect("scala package scope");
+    assert_eq!(store.symbols.get(scala).kind, SymbolKind::Package);
+    assert_eq!(store.scopes.get(scope).owner, Some(scala));
+}
+
+fn normalized_live_session_receipt() -> Vec<String> {
+    let file = TastyFile::parse_scala_3_9(COMPLETION).expect("Completion.tasty should parse");
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let resolver = ClasspathSymbolResolver::new(
+        DirectoryClassPath::new(published_scala39_library_dir()),
+        definitions,
+        LoadingSession::new(),
+    );
+    let session = TastySession::new()
+        .with_resolver(Box::new(resolver))
+        .expect("resolver registry is empty before the first TASTy unit");
+    let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    unpickler
+        .enter_symbols()
+        .expect("Completion symbols should enter");
+    let ast = file.ast_address_index().expect("TASTy AST index");
+    let package_references: Vec<_> = [64, 65]
+        .into_iter()
+        .flat_map(|tag| ast.iter_nodes_with_tag(tag))
+        .filter_map(|node| u32::try_from(node.offset).ok())
+        .collect();
+    let mut receipt = package_references
+        .into_iter()
+        .map(|address| match unpickler.unpickle_type(address) {
+            Ok(_) => "package-reference=resolved".to_owned(),
+            Err(error) => format!("package-reference={:?}", error.category()),
+        })
+        .collect::<Vec<_>>();
+    let (_, session) = unpickler.into_session_parts();
+    let scala = session
+        .packages()
+        .symbol(&["scala"])
+        .expect("resolver-created scala package");
+    let symbol = store.symbols.get(scala);
+    let name = store.names.resolve(symbol.name.text());
+    let owner = symbol.owner.expect("scala package has the root owner");
+    let owner_symbol = store.symbols.get(owner);
+    receipt.push(format!(
+        "package={name}:kind={:?}:namespace={:?}:owner={}",
+        symbol.kind,
+        symbol.name.namespace(),
+        store.names.resolve(owner_symbol.name.text())
+    ));
+    receipt.sort();
+    receipt
+}
+
+#[test]
+fn independent_live_sessions_have_the_same_normalized_package_receipt() {
+    assert_eq!(
+        normalized_live_session_receipt(),
+        normalized_live_session_receipt()
+    );
+}
+
+#[test]
+fn late_failure_after_real_package_materialization_rolls_back_and_same_session_retry_works() {
+    let file = TastyFile::parse_scala_3_9(COMPLETION).expect("Completion.tasty should parse");
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let failed_once = Rc::new(Cell::new(true));
+    let materialized = Rc::new(Cell::new(false));
+    let rollback_removed = Rc::new(Cell::new(false));
+    let member_callback = Rc::new(Cell::new(false));
+    let resolver = FailOnceAfterPackage {
+        inner: ClasspathSymbolResolver::new(
+            DirectoryClassPath::new(published_scala39_library_dir()),
+            definitions,
+            LoadingSession::new(),
+        ),
+        fail_once: Rc::clone(&failed_once),
+        materialized: Rc::clone(&materialized),
+        rollback_removed: Rc::clone(&rollback_removed),
+        member_callback: Rc::clone(&member_callback),
+    };
+    let session = TastySession::new()
+        .with_resolver(Box::new(resolver))
+        .expect("resolver registry is empty before the first TASTy unit");
+    let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    unpickler
+        .enter_symbols()
+        .expect("Completion symbols should enter");
+    let ast = file.ast_address_index().expect("TASTy AST index");
+    let package_references: Vec<_> = [64, 65]
+        .into_iter()
+        .flat_map(|tag| ast.iter_nodes_with_tag(tag))
+        .filter_map(|node| u32::try_from(node.offset).ok())
+        .collect();
+
+    let mut failed_address = None;
+    for address in package_references {
+        let result = unpickler.unpickle_type(address);
+        if materialized.get() {
+            assert!(matches!(
+                result,
+                Err(UnpickleError::ResolverFailure {
+                    error: ResolutionError::Malformed { ref reason },
+                    ..
+                }) if reason == "injected late session handoff failure"
+            ));
+            failed_address = Some(address);
+            break;
+        }
+    }
+    let address = failed_address.expect("a real Scala package was materialized by the resolver");
+    assert!(
+        rollback_removed.get(),
+        "rollback removes the materialized package"
+    );
+    assert!(!failed_once.get());
+
+    unpickler
+        .unpickle_type(address)
+        .expect("retry in the same session succeeds");
+    assert!(
+        unpickler
+            .complete_symbol(definition_address(&file, "generic"))
+            .is_err()
+    );
+    assert!(
+        member_callback.get(),
+        "member requests use the shared package registry"
+    );
+    member_callback.set(false);
+    let (_, session) = unpickler.into_session_parts();
+    let scala = session
+        .packages()
+        .symbol(&["scala"])
+        .expect("retry commits the canonical scala package");
+    assert_eq!(store.symbols.get(scala).kind, SymbolKind::Package);
+
+    let distinct = TastyFile::parse_scala_3_9(DISTINCT).expect("Distinct.tasty should parse");
+    let mut resumed = TastyUnpickler::with_session(&distinct, &mut store, definitions, session);
+    resumed
+        .enter_symbols()
+        .expect("a second real unit should enter in the same session");
+    assert!(
+        resumed
+            .complete_symbol(definition_address(&distinct, "cross"))
+            .is_err()
+    );
+    assert!(
+        member_callback.get(),
+        "the resolver survives into_session_parts and serves the next unit"
+    );
 }
 
 /// A minimal, hand-built, clearly-synthetic `java/lang/Object` class

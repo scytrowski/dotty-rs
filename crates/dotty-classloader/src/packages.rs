@@ -29,9 +29,22 @@ impl PackageRegistry {
         }
     }
 
+    /// Temporarily lends the session's package authority to an adapter that
+    /// already owns the canonical registry. The class-entry undo journal stays
+    /// with this resolver while only the `Packages` value moves for the call.
+    pub(crate) fn swap_packages(&mut self, packages: &mut Packages) {
+        std::mem::swap(&mut self.packages, packages);
+    }
+
     /// Hands the session-wide registry back, to give to the next adapter.
     pub(crate) fn into_packages(self) -> Packages {
         self.packages
+    }
+
+    /// Transfers only package identity ownership while keeping class-entry
+    /// undo state with the loading session.
+    pub(crate) fn take_packages(&mut self) -> Packages {
+        std::mem::take(&mut self.packages)
     }
 
     /// Returns the package's declaration scope while this adapter still

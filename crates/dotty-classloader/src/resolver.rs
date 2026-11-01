@@ -6,9 +6,9 @@ use crate::error::ClassLoadError;
 use crate::loader::{ClassLoadProfile, ClassLoader};
 use crate::session::{LoadingSession, SessionCheckpoint};
 use dotty_core::{
-    Definitions, MemberRequest, MemberSelector, MemberSpace, Name, Namespace, ResolutionError,
-    ResolverCheckpoint, SemanticStore, Symbol, SymbolId, SymbolInfo, SymbolKind, SymbolResolver,
-    Type, TypeId, TypeRefTarget,
+    Definitions, MemberRequest, MemberSelector, MemberSpace, Name, Namespace, Packages,
+    ResolutionError, ResolverCheckpoint, SemanticStore, Symbol, SymbolId, SymbolInfo, SymbolKind,
+    SymbolResolver, Type, TypeId, TypeRefTarget,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
@@ -1770,6 +1770,14 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
+    fn has_package_root(&self) -> bool {
+        self.session.packages.get::<&str>(&[]).is_some()
+    }
+
+    fn take_packages(&mut self) -> Option<Packages> {
+        Some(self.session.packages.take_packages())
+    }
+
     fn class_type_parameters(
         &self,
         _store: &SemanticStore,
@@ -1937,6 +1945,17 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
         }
     }
 
+    fn rollback_to_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        checkpoint: ResolverCheckpoint,
+        packages: &mut Packages,
+    ) {
+        self.session.packages.swap_packages(packages);
+        self.rollback_to(store, checkpoint);
+        self.session.packages.swap_packages(packages);
+    }
+
     fn resolve_member(
         &mut self,
         store: &mut SemanticStore,
@@ -2063,6 +2082,18 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
         result
     }
 
+    fn resolve_member_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.session.packages.swap_packages(packages);
+        let result = self.resolve_member(store, request);
+        self.session.packages.swap_packages(packages);
+        result
+    }
+
     fn resolve_package(
         &mut self,
         store: &mut SemanticStore,
@@ -2071,6 +2102,18 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
         self.transact(store, |resolver, store| {
             resolver.resolve_package_inner(store, path)
         })
+    }
+
+    fn resolve_package_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.session.packages.swap_packages(packages);
+        let result = self.resolve_package(store, path);
+        self.session.packages.swap_packages(packages);
+        result
     }
 
     fn enter_synthetic_package_member(
@@ -2186,7 +2229,9 @@ mod tests {
         ClassInfo, MemberSelector, Name, Namespace, Packages, Scope, SourceId, SymbolFlags,
         SymbolOrigin, Visibility,
     };
+    use std::cell::RefCell;
     use std::path::PathBuf;
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -5593,6 +5638,277 @@ mod tests {
         );
         let resolver = ClasspathSymbolResolver::new(path, definitions, LoadingSession::new());
         (store, definitions, resolver)
+    }
+
+    #[derive(Default)]
+    struct LiveClassReceipt {
+        class: Option<SymbolId>,
+        rolled_back_class: Option<SymbolId>,
+        type_parameters: Option<Vec<SymbolId>>,
+        injected_failure: bool,
+        rollback_cleared_resolver_state: bool,
+        retained_after_handoff: bool,
+    }
+
+    struct MaterializeClassDuringPackageLookup {
+        inner: ClasspathSymbolResolver<CompositeClassPath>,
+        receipt: Rc<RefCell<LiveClassReceipt>>,
+        fail_after_class_once: bool,
+    }
+
+    impl SymbolResolver for MaterializeClassDuringPackageLookup {
+        fn has_package_root(&self) -> bool {
+            self.inner.has_package_root()
+        }
+
+        fn take_packages(&mut self) -> Option<Packages> {
+            self.inner.take_packages()
+        }
+
+        fn checkpoint_with_packages(&self, packages: &Packages) -> ResolverCheckpoint {
+            let class = self.receipt.borrow().class;
+            if let Some(class) = class {
+                let name = BinaryName::from_internal("enclosing_generics/Outer");
+                let retained = self.inner.session.resolved.get(&name) == Some(&class)
+                    && self.inner.session.identified.get(&name) == Some(&class)
+                    && self.inner.session.metadata.contains_key(&class)
+                    && self.inner.session.origins.contains_key(&class)
+                    && self
+                        .inner
+                        .session
+                        .class_type_parameters
+                        .contains_key(&class);
+                self.receipt.borrow_mut().retained_after_handoff = retained;
+            }
+            self.inner.checkpoint_with_packages(packages)
+        }
+
+        fn class_type_parameters(
+            &self,
+            store: &SemanticStore,
+            class: SymbolId,
+        ) -> Option<Vec<SymbolId>> {
+            self.inner.class_type_parameters(store, class)
+        }
+
+        fn checkpoint(&self) -> ResolverCheckpoint {
+            self.inner.checkpoint()
+        }
+
+        fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
+            self.inner.rollback_to(store, checkpoint);
+        }
+
+        fn rollback_to_with_packages(
+            &mut self,
+            store: &mut SemanticStore,
+            checkpoint: ResolverCheckpoint,
+            packages: &mut Packages,
+        ) {
+            self.inner
+                .rollback_to_with_packages(store, checkpoint, packages);
+            let name = BinaryName::from_internal("enclosing_generics/Outer");
+            let mut receipt = self.receipt.borrow_mut();
+            let class = receipt.class.take();
+            let clear = !self.inner.session.identified.contains_key(&name)
+                && !self.inner.session.resolved.contains_key(&name)
+                && class.is_some_and(|id| {
+                    !self.inner.session.metadata.contains_key(&id)
+                        && !self.inner.session.origins.contains_key(&id)
+                        && !self.inner.session.class_type_parameters.contains_key(&id)
+                })
+                && packages.symbol(&["enclosing_generics"]).is_none();
+            receipt.rolled_back_class = class;
+            receipt.type_parameters = None;
+            receipt.rollback_cleared_resolver_state = clear;
+        }
+
+        fn resolve_member(
+            &mut self,
+            store: &mut SemanticStore,
+            request: &MemberRequest,
+        ) -> Result<Option<SymbolId>, ResolutionError> {
+            self.inner.resolve_member(store, request)
+        }
+
+        fn resolve_member_with_packages(
+            &mut self,
+            store: &mut SemanticStore,
+            packages: &mut Packages,
+            request: &MemberRequest,
+        ) -> Result<Option<SymbolId>, ResolutionError> {
+            self.inner
+                .resolve_member_with_packages(store, packages, request)
+        }
+
+        fn resolve_package(
+            &mut self,
+            store: &mut SemanticStore,
+            path: &[&str],
+        ) -> Result<Option<SymbolId>, ResolutionError> {
+            self.inner.resolve_package(store, path)
+        }
+
+        fn resolve_package_with_packages(
+            &mut self,
+            store: &mut SemanticStore,
+            packages: &mut Packages,
+            path: &[&str],
+        ) -> Result<Option<SymbolId>, ResolutionError> {
+            let package = self
+                .inner
+                .resolve_package_with_packages(store, packages, path)?;
+            if package.is_some() && path.first() == Some(&"scala") {
+                let materialize = self.receipt.borrow().class.is_none();
+                if materialize {
+                    let owner_result = self.inner.resolve_package_with_packages(
+                        store,
+                        packages,
+                        &["enclosing_generics"],
+                    );
+                    let owner = owner_result?.ok_or_else(|| ResolutionError::Malformed {
+                        reason: "generic fixture package was not found".to_owned(),
+                    })?;
+                    let prefix = store
+                        .types
+                        .alloc(Type::type_ref(self.inner.definitions.no_prefix, owner));
+                    let name = Name::new(store.names.intern("Outer"), Namespace::Type);
+                    let class_result = self.inner.resolve_member_with_packages(
+                        store,
+                        packages,
+                        &MemberRequest {
+                            prefix,
+                            name,
+                            selector: MemberSelector::Unique,
+                            space: MemberSpace::Prefix,
+                        },
+                    );
+                    let class = class_result?.ok_or_else(|| ResolutionError::Malformed {
+                        reason: "generic fixture class was not found".to_owned(),
+                    })?;
+                    let type_parameters = self.inner.class_type_parameters(store, class);
+                    self.receipt.borrow_mut().class = Some(class);
+                    self.receipt.borrow_mut().type_parameters = type_parameters;
+                    if self.fail_after_class_once {
+                        self.fail_after_class_once = false;
+                        self.receipt.borrow_mut().injected_failure = true;
+                        return Err(ResolutionError::Malformed {
+                            reason: "injected failure after real class materialization".to_owned(),
+                        });
+                    }
+                }
+            }
+            Ok(package)
+        }
+    }
+
+    #[test]
+    fn live_unpickler_class_materialization_rolls_back_and_retains_positive_state() {
+        use dotty_tasty::tasty::TastyFile;
+        use dotty_tasty_unpickler::tasty_unpickler::{TastySession, TastyUnpickler};
+
+        const COMPLETION: &[u8] = include_bytes!(
+            "../../dotty-tasty-unpickler/tests/fixtures/semantic/CompletionHolder.tasty"
+        );
+        const DISTINCT: &[u8] =
+            include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Distinct.tasty");
+
+        let tasty_file = TastyFile::parse_scala_3_9(COMPLETION).expect("Completion TASTy");
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(fixture_path(
+                "../dotty-tasty/tests/fixtures/scala3-library",
+            ))),
+            Box::new(DirectoryClassPath::new(fixture_path("tests/fixtures"))),
+            Box::new(FixtureClassPath(
+                JdkClassPath::new(fixture_path("tests/fixtures/jdk_classpath")).unwrap(),
+            )),
+        ]);
+        let receipt = Rc::new(RefCell::new(LiveClassReceipt::default()));
+        let resolver = MaterializeClassDuringPackageLookup {
+            inner: ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new()),
+            receipt: Rc::clone(&receipt),
+            fail_after_class_once: true,
+        };
+        let session = TastySession::new()
+            .with_resolver(Box::new(resolver))
+            .expect("resolver attaches to the fresh session");
+        let mut unpickler =
+            TastyUnpickler::with_session(&tasty_file, &mut store, definitions, session);
+        unpickler.enter_symbols().expect("Completion enters");
+        let ast = tasty_file.ast_address_index().expect("AST index");
+        let package_references: Vec<_> = [64, 65]
+            .into_iter()
+            .flat_map(|tag| ast.iter_nodes_with_tag(tag))
+            .filter_map(|node| u32::try_from(node.offset).ok())
+            .collect();
+
+        let failed_address = package_references
+            .iter()
+            .copied()
+            .find(|address| {
+                let result = unpickler.unpickle_type(*address);
+                result.is_err() && receipt.borrow().injected_failure
+            })
+            .expect("the injected late failure follows successful real class loading");
+        // The injected resolver performs a real classfile member lookup from
+        // inside the active package callback. Entered Completion symbols were
+        // committed by the earlier public call and must survive this failure.
+        let failed_class = receipt
+            .borrow()
+            .rolled_back_class
+            .expect("real class materialized before failure");
+        assert!(receipt.borrow().injected_failure);
+        assert!(receipt.borrow().rollback_cleared_resolver_state);
+        let (index, session) = unpickler.into_session_parts();
+        let entered_package = index.symbol_at(0).expect("entered unit package");
+        assert!(store.symbols.contains(entered_package));
+        assert!(!store.symbols.contains(failed_class));
+        let mut unpickler = TastyUnpickler::with_session_and_index(
+            &tasty_file,
+            &mut store,
+            definitions,
+            session,
+            index,
+        );
+        unpickler
+            .unpickle_type(failed_address)
+            .expect("same-session retry succeeds");
+
+        let (_, session) = unpickler.into_session_parts();
+        let retried_class = receipt
+            .borrow()
+            .class
+            .expect("retry materialized the class");
+        assert!(store.symbols.contains(retried_class));
+        assert!(matches!(
+            store.symbols.get(retried_class).origin,
+            SymbolOrigin::Classfile(_)
+        ));
+        let type_parameters = receipt
+            .borrow()
+            .type_parameters
+            .clone()
+            .expect("resolver retains the ordered class type parameters");
+        assert_eq!(type_parameters.len(), 1);
+        let info = match store.symbols.get(retried_class).info {
+            SymbolInfo::Complete(info) => info,
+            _ => panic!("loaded class has complete info"),
+        };
+        assert!(
+            matches!(store.types.get(info), Type::ClassInfo(class) if class.class == retried_class)
+        );
+
+        let distinct = TastyFile::parse_scala_3_9(DISTINCT).expect("Distinct TASTy");
+        let mut resumed = TastyUnpickler::with_session(&distinct, &mut store, definitions, session);
+        resumed
+            .unpickle_type(38)
+            .expect("second unit resolves a real java.lang.Object reference");
+        assert!(
+            receipt.borrow().retained_after_handoff,
+            "resolved identity, metadata, origin, and type parameters survive session handoff"
+        );
     }
     #[test]
     fn resolves_only_packages_with_classpath_evidence_and_reuses_their_identity() {

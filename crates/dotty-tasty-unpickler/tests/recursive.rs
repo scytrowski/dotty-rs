@@ -1422,8 +1422,9 @@ fn a_symbol_the_resolver_knows_wins_over_a_name_designator() {
         position: None,
         links: dotty_core::SymbolLinks::default(),
     });
-    let mut unpickler =
-        unpickler_for(&file, &mut session).with_resolver(Box::new(Answering(Some(answer))));
+    let mut unpickler = unpickler_for(&file, &mut session)
+        .with_resolver(Box::new(Answering(Some(answer))))
+        .unwrap();
 
     let recursive = unpickler.unpickle_type(REC_AT).unwrap();
     drop(unpickler);
@@ -1547,7 +1548,8 @@ fn a_later_tasty_failure_rolls_back_materialized_resolver_state() {
     let state = Rc::new(RefCell::new(MaterializedState::default()));
     let mut unpickler =
         TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages)
-            .with_resolver(Box::new(Materializing(state.clone())));
+            .with_resolver(Box::new(Materializing(state.clone())))
+            .unwrap();
 
     assert!(unpickler.unpickle_type(0).is_err());
 

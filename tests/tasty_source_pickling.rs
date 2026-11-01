@@ -505,7 +505,8 @@ fn counter_source_has_semantic_unpickler_owner_and_signature_parity() {
     let mut unpickler = TastyUnpickler::new(&file, &mut semantic_store, semantic_definitions)
         .with_resolver(Box::new(CanonicalScalaResolver {
             symbols: builtin_symbols,
-        }));
+        }))
+        .expect("canonical package resolver attaches to the TASTy session");
     let semantic_index = unpickler.enter_symbols().unwrap().clone();
     let semantic_class = semantic_index.symbol_at(class.address).unwrap();
     let semantic_constructor = semantic_index.symbol_at(constructor.address).unwrap();
@@ -1467,7 +1468,8 @@ fn semantic_and_wire_projection(product: &Product) {
         .reference_symbol()
         .unwrap();
     let mut unpickler = TastyUnpickler::new(&file, &mut semantic_store, semantic_definitions)
-        .with_resolver(Box::new(CanonicalIntResolver { symbol: int_symbol }));
+        .with_resolver(Box::new(CanonicalIntResolver { symbol: int_symbol }))
+        .expect("canonical package resolver attaches to the TASTy session");
     let unpickled_index = unpickler.enter_symbols().unwrap().clone();
     let package_address = addresses
         .iter_nodes()
@@ -1726,7 +1728,8 @@ fn algorithms_combines_primitives_mutation_and_while_for_scala_390_runtime() {
     let mut unpickler = TastyUnpickler::new(&file, &mut semantic_store, semantic_definitions)
         .with_resolver(Box::new(CanonicalScalaResolver {
             symbols: builtin_symbols,
-        }));
+        }))
+        .expect("canonical package resolver attaches to the TASTy session");
     let semantic_index = unpickler.enter_symbols().unwrap().clone();
     let semantic_class = semantic_index
         .symbol_at(first.output.declarations()[0].address)
@@ -1931,7 +1934,8 @@ fn operations_source_preserves_canonical_references_and_runs_from_fresh_scala_cl
         .reference_symbol()
         .unwrap();
     let mut unpickler = TastyUnpickler::new(&file, &mut semantic_store, semantic_definitions)
-        .with_resolver(Box::new(CanonicalIntResolver { symbol: int_symbol }));
+        .with_resolver(Box::new(CanonicalIntResolver { symbol: int_symbol }))
+        .expect("canonical package resolver attaches to the TASTy session");
     let semantic_index = unpickler.enter_symbols().unwrap().clone();
     let semantic_class = semantic_index
         .symbol_at(first.output.declarations()[0].address)
@@ -2139,7 +2143,8 @@ fn decisions_source_serializes_control_flow_and_runs_from_fresh_scala_class() {
     let mut unpickler = TastyUnpickler::new(&file, &mut semantic_store, semantic_definitions)
         .with_resolver(Box::new(CanonicalScalaResolver {
             symbols: builtin_symbols,
-        }));
+        }))
+        .expect("canonical package resolver attaches to the TASTy session");
     let semantic_index = unpickler.enter_symbols().unwrap().clone();
     let semantic_class = semantic_index
         .symbol_at(first.output.declarations()[0].address)
@@ -2396,7 +2401,8 @@ fn generated_parameter_reference_unpickles_to_the_exact_owned_formal() {
         .reference_symbol()
         .unwrap();
     let mut unpickler = TastyUnpickler::new(&file, &mut semantic_store, semantic_definitions)
-        .with_resolver(Box::new(CanonicalIntResolver { symbol: int_symbol }));
+        .with_resolver(Box::new(CanonicalIntResolver { symbol: int_symbol }))
+        .expect("canonical package resolver attaches to the TASTy session");
     let semantic_index = unpickler.enter_symbols().unwrap().clone();
     let method_symbol = semantic_index.symbol_at(pick.address).unwrap();
     let target_symbol = semantic_index.symbol_at(target_address).unwrap();
