@@ -40,6 +40,8 @@ const REFERENCE_CONSTRUCTOR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_reference_constructor_calls/CounterOwnerFactory.scala");
 const NESTED_CONSTRUCTOR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala");
+const MULTI_ARGUMENT_CONSTRUCTOR_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala");
 const FACTORY_RESULT_BATCH: &str =
     include_str!("fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala");
 const REFERENCE_LOCAL_BATCH: &str =
@@ -5094,6 +5096,566 @@ fn nested_reference_field_call_rejects_the_complete_batch() {
             }
         ))
     ));
+}
+
+fn take_batch_opcode(code: &[u8], pc: &mut usize, expected: u8) {
+    assert_eq!(code.get(*pc), Some(&expected));
+    *pc += 1;
+}
+
+fn take_batch_cp_operand(code: &[u8], pc: &mut usize, opcode: u8) -> ConstantPoolIndex {
+    take_batch_opcode(code, pc, opcode);
+    let index = ConstantPoolIndex(u16::from_be_bytes([code[*pc], code[*pc + 1]]));
+    *pc += 2;
+    index
+}
+
+fn batch_class_name<'a>(class: &'a ClassFile<'a>, index: ConstantPoolIndex) -> &'a str {
+    let ConstantPoolEntry::Class { name_index } = class.constant_pool.get(index).unwrap() else {
+        panic!("allocation operand references CONSTANT_Class");
+    };
+    class.constant_pool.utf8(*name_index).unwrap()
+}
+
+fn batch_method_ref<'a>(
+    class: &'a ClassFile<'a>,
+    index: ConstantPoolIndex,
+) -> (&'a str, (&'a str, &'a str)) {
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = class.constant_pool.get(index).unwrap()
+    else {
+        panic!("invokespecial operand references CONSTANT_Methodref");
+    };
+    (
+        class.constant_pool.class_name(*class_index).unwrap(),
+        class
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .unwrap(),
+    )
+}
+
+fn sibling_factory_classfile_mut(
+    artifacts: &mut JvmTastyBatchArtifacts,
+) -> &mut JvmTastyClassFileArtifact {
+    artifacts
+        .classfiles
+        .iter_mut()
+        .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+        .unwrap()
+}
+
+#[test]
+fn sibling_constructor_batch_emits_six_deterministic_linked_artifacts() {
+    let first = emit_paired_jvm_tasty_batch(
+        MULTI_ARGUMENT_CONSTRUCTOR_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(19170),
+    )
+    .expect("the complete source batch satisfies its cross-producer contract");
+    let second = emit_paired_jvm_tasty_batch(
+        MULTI_ARGUMENT_CONSTRUCTOR_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(19171),
+    )
+    .unwrap();
+    assert_ne!(first.source_id(), second.source_id());
+    assert_eq!(first.classes().len(), 3);
+    assert_eq!(second.classes().len(), 3);
+
+    let expected = [
+        ("example/Counter.class", "example/Counter.tasty"),
+        ("example/Pair.class", "example/Pair.tasty"),
+        ("example/PairFactory.class", "example/PairFactory.tasty"),
+    ];
+    let mut decoded = Vec::new();
+    for (index, (artifact, repeated)) in first.classes().iter().zip(second.classes()).enumerate() {
+        assert_eq!(
+            (artifact.classfile_path(), artifact.tasty_path()),
+            expected[index]
+        );
+        assert_eq!(artifact.source_id(), first.source_id());
+        assert_eq!(artifact.classfile_bytes(), repeated.classfile_bytes());
+        assert_eq!(artifact.tasty_bytes(), repeated.tasty_bytes());
+        assert_eq!(artifact.tasty_link_id(), repeated.tasty_link_id());
+        let tasty = TastyFile::parse_and_validate_scala_3_9(artifact.tasty_bytes()).unwrap();
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version,
+            ),
+            (28, 9, 0)
+        );
+        assert_eq!(
+            artifact.tasty_link_id(),
+            TastyLinkId::from_bytes(tasty.header().uuid)
+        );
+        let mut reader = Reader::new(artifact.classfile_bytes());
+        let class = ClassFile::decode(&mut reader).unwrap();
+        assert!(reader.is_at_end());
+        assert_eq!((class.version.major, class.version.minor), (65, 0));
+        assert_eq!(
+            class.tasty_link_id().unwrap(),
+            Some(artifact.tasty_link_id())
+        );
+        validate_classfile_tasty_link(&class, artifact.tasty_bytes()).unwrap();
+        decoded.push(class);
+    }
+    assert_eq!(
+        first
+            .classes()
+            .iter()
+            .flat_map(|artifact| [artifact.classfile_path(), artifact.tasty_path()])
+            .collect::<Vec<_>>(),
+        [
+            "example/Counter.class",
+            "example/Counter.tasty",
+            "example/Pair.class",
+            "example/Pair.tasty",
+            "example/PairFactory.class",
+            "example/PairFactory.tasty",
+        ]
+    );
+
+    let pair = &decoded[1];
+    let pair_constructor = pair
+        .methods
+        .iter()
+        .find(|method| pair.constant_pool.utf8(method.name_index).unwrap() == "<init>")
+        .unwrap();
+    assert_eq!(
+        pair.constant_pool
+            .utf8(pair_constructor.descriptor_index)
+            .unwrap(),
+        "(Lexample/Counter;Lexample/Counter;)V"
+    );
+    assert_eq!(
+        pair.fields
+            .iter()
+            .map(|field| (
+                pair.constant_pool.utf8(field.name_index).unwrap(),
+                pair.constant_pool.utf8(field.descriptor_index).unwrap(),
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("left", "Lexample/Counter;"),
+            ("right", "Lexample/Counter;"),
+        ]
+    );
+
+    let factory = &decoded[2];
+    let create = factory
+        .methods
+        .iter()
+        .find(|method| factory.constant_pool.utf8(method.name_index).unwrap() == "create")
+        .unwrap();
+    assert_eq!(
+        factory.constant_pool.utf8(create.descriptor_index).unwrap(),
+        "(II)Lexample/Pair;"
+    );
+    let [Attribute::Code(code)] = create.attributes.as_slice() else {
+        panic!("PairFactory.create has one Code attribute");
+    };
+    assert_eq!((code.max_stack, code.max_locals), (6, 3));
+    let mut pc = 0;
+    let outer_allocation = take_batch_cp_operand(code.code, &mut pc, 0xbb);
+    assert_eq!(batch_class_name(factory, outer_allocation), "example/Pair");
+    take_batch_opcode(code.code, &mut pc, 0x59);
+    let first_allocation = take_batch_cp_operand(code.code, &mut pc, 0xbb);
+    assert_eq!(
+        batch_class_name(factory, first_allocation),
+        "example/Counter"
+    );
+    take_batch_opcode(code.code, &mut pc, 0x59);
+    take_batch_opcode(code.code, &mut pc, 0x1b);
+    let first_constructor = take_batch_cp_operand(code.code, &mut pc, 0xb7);
+    assert_eq!(
+        batch_method_ref(factory, first_constructor),
+        ("example/Counter", ("<init>", "(I)V"))
+    );
+    let second_allocation = take_batch_cp_operand(code.code, &mut pc, 0xbb);
+    assert_eq!(
+        batch_class_name(factory, second_allocation),
+        "example/Counter"
+    );
+    take_batch_opcode(code.code, &mut pc, 0x59);
+    take_batch_opcode(code.code, &mut pc, 0x1c);
+    let second_constructor = take_batch_cp_operand(code.code, &mut pc, 0xb7);
+    assert_eq!(
+        batch_method_ref(factory, second_constructor),
+        ("example/Counter", ("<init>", "(I)V"))
+    );
+    let pair_constructor = take_batch_cp_operand(code.code, &mut pc, 0xb7);
+    assert_eq!(
+        batch_method_ref(factory, pair_constructor),
+        (
+            "example/Pair",
+            ("<init>", "(Lexample/Counter;Lexample/Counter;)V"),
+        )
+    );
+    take_batch_opcode(code.code, &mut pc, 0xb0);
+    assert_eq!(pc, code.code.len(), "the checker consumes all instructions");
+}
+
+#[test]
+fn sibling_constructor_batch_publication_contains_all_handled_failures() {
+    let batch = emit_paired_jvm_tasty_batch(
+        MULTI_ARGUMENT_CONSTRUCTOR_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(19172),
+    )
+    .unwrap();
+    let pairs = batch_publish_pairs(&batch);
+    let base = TestDirectory::new("sibling-constructor-publish-faults");
+    assert_eq!(pairs.len(), 3);
+
+    for (index, fault) in (1..=6)
+        .map(BatchPublishFault::AfterStagedFiles)
+        .chain([
+            BatchPublishFault::BeforePromotion,
+            BatchPublishFault::AfterPromotion,
+        ])
+        .enumerate()
+    {
+        let destination = base.path().join(format!("injected-failure-{index}"));
+        assert!(matches!(
+            publish_batch_pairs(&destination, &pairs, Some(fault)),
+            Err(BatchPublishError::Io { .. })
+        ));
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
+    }
+
+    let existing = base.path().join("existing-output");
+    std::fs::create_dir(&existing).unwrap();
+    let sentinel = existing.join("sentinel");
+    std::fs::write(&sentinel, b"preserve existing destination").unwrap();
+    assert!(matches!(
+        publish_batch_pairs(&existing, &pairs, None),
+        Err(BatchPublishError::DestinationExists { .. })
+    ));
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap(),
+        b"preserve existing destination"
+    );
+    assert_eq!(read_relative_files(&existing).unwrap(), ["sentinel"]);
+}
+
+#[test]
+fn sibling_constructor_batches_are_deterministic_after_renaming_and_reordering() {
+    let source = MULTI_ARGUMENT_CONSTRUCTOR_BATCH;
+    let counter_start = source.find("class Counter(start").unwrap();
+    let pair_start = source.find("class Pair(first").unwrap();
+    let factory_start = source.find("class PairFactory:").unwrap();
+    let counter = &source[counter_start..pair_start];
+    let pair = &source[pair_start..factory_start];
+    let factory = &source[factory_start..];
+    let reordered = format!("package example\n\n{factory}\n{pair}\n{counter}");
+    let repeated_formal = source.replace(
+        "new Counter(first), new Counter(second)",
+        "new Counter(first), new Counter(first)",
+    );
+    let renamed = source
+        .replace("package example", "package renamed.example")
+        .replace("Counter", "Token")
+        .replace("Pair", "Envelope");
+
+    for (index, (variant, source_name, paths)) in [
+        (
+            renamed.as_str(),
+            "EnvelopeFactory.scala",
+            [
+                "renamed/example/Token.class",
+                "renamed/example/Envelope.class",
+                "renamed/example/EnvelopeFactory.class",
+            ],
+        ),
+        (
+            reordered.as_str(),
+            "PairFactory.scala",
+            [
+                "example/PairFactory.class",
+                "example/Pair.class",
+                "example/Counter.class",
+            ],
+        ),
+        (
+            repeated_formal.as_str(),
+            "PairFactory.scala",
+            [
+                "example/Counter.class",
+                "example/Pair.class",
+                "example/PairFactory.class",
+            ],
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let first = emit_paired_jvm_tasty_batch(
+            variant,
+            source_name,
+            SourceId::from_index(19180 + index as u32 * 2),
+        )
+        .unwrap();
+        let second = emit_paired_jvm_tasty_batch(
+            variant,
+            source_name,
+            SourceId::from_index(19181 + index as u32 * 2),
+        )
+        .unwrap();
+        assert_eq!(first.classes().len(), 3);
+        for ((left, right), expected_classfile) in
+            first.classes().iter().zip(second.classes()).zip(paths)
+        {
+            assert_eq!(left.classfile_path(), expected_classfile);
+            assert_eq!(left.classfile_bytes(), right.classfile_bytes());
+            assert_eq!(left.tasty_path(), right.tasty_path());
+            assert_eq!(left.tasty_bytes(), right.tasty_bytes());
+            assert_eq!(left.tasty_link_id(), right.tasty_link_id());
+        }
+    }
+}
+
+#[test]
+fn sibling_constructor_batch_contract_rejects_bytecode_and_link_corruption() {
+    let batch = emit_paired_jvm_tasty_batch(
+        MULTI_ARGUMENT_CONSTRUCTOR_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(19173),
+    )
+    .unwrap();
+    let valid_artifacts = JvmTastyBatchArtifacts {
+        classfiles: batch
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastyClassFileArtifact {
+                classfile_path: artifact.classfile_path().to_owned(),
+                classfile_bytes: artifact.classfile_bytes().to_vec(),
+            })
+            .collect(),
+        sidecars: batch
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastySidecarArtifact {
+                tasty_path: artifact.tasty_path().to_owned(),
+                tasty_bytes: artifact.tasty_bytes().to_vec(),
+            })
+            .collect(),
+    };
+
+    with_paired_jvm_tasty_batch_plan(
+        MULTI_ARGUMENT_CONSTRUCTOR_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(19174),
+        |plan| {
+            let tasty_plans = plan
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans).unwrap();
+            validate_jvm_tasty_batch_artifacts(&validated, valid_artifacts.clone()).unwrap();
+
+            let factory = valid_artifacts
+                .classfiles
+                .iter()
+                .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                .unwrap();
+            let mut reader = Reader::new(&factory.classfile_bytes);
+            let decoded = ClassFile::decode(&mut reader).unwrap();
+            let create = decoded
+                .methods
+                .iter()
+                .find(|method| decoded.constant_pool.utf8(method.name_index).unwrap() == "create")
+                .unwrap();
+            let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                panic!("PairFactory.create has one Code attribute");
+            };
+            let code_start =
+                code.code.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
+            let mut pc = 0;
+            take_batch_cp_operand(code.code, &mut pc, 0xbb);
+            take_batch_opcode(code.code, &mut pc, 0x59);
+            take_batch_cp_operand(code.code, &mut pc, 0xbb);
+            take_batch_opcode(code.code, &mut pc, 0x59);
+            let first_load_opcode = pc;
+            take_batch_opcode(code.code, &mut pc, 0x1b);
+            take_batch_cp_operand(code.code, &mut pc, 0xb7);
+            take_batch_cp_operand(code.code, &mut pc, 0xbb);
+            take_batch_opcode(code.code, &mut pc, 0x59);
+            let second_load_opcode = pc;
+            take_batch_opcode(code.code, &mut pc, 0x1c);
+            let second_constructor_opcode = pc;
+            let second_constructor_ref = take_batch_cp_operand(code.code, &mut pc, 0xb7);
+            let outer_constructor_opcode = pc;
+            let outer_constructor_ref = take_batch_cp_operand(code.code, &mut pc, 0xb7);
+
+            let mut cases = Vec::new();
+            let mut missing_inner_init = valid_artifacts.clone();
+            sibling_factory_classfile_mut(&mut missing_inner_init).classfile_bytes
+                [code_start + second_constructor_opcode] = 0x00;
+            cases.push(("missing-second-inner-init", missing_inner_init));
+
+            let mut swapped_loads = valid_artifacts.clone();
+            let classfile = &mut sibling_factory_classfile_mut(&mut swapped_loads).classfile_bytes;
+            classfile[code_start + first_load_opcode] = 0x1c;
+            classfile[code_start + second_load_opcode] = 0x1b;
+            cases.push(("swapped-second-formal-load", swapped_loads));
+
+            let mut duplicated_load = valid_artifacts.clone();
+            sibling_factory_classfile_mut(&mut duplicated_load).classfile_bytes
+                [code_start + second_load_opcode] = 0x1b;
+            cases.push(("duplicated-second-formal-load", duplicated_load));
+
+            let mut wrong_inner_owner = valid_artifacts.clone();
+            let classfile =
+                &mut sibling_factory_classfile_mut(&mut wrong_inner_owner).classfile_bytes;
+            classfile[code_start + second_constructor_opcode + 1
+                ..code_start + second_constructor_opcode + 3]
+                .copy_from_slice(&outer_constructor_ref.0.to_be_bytes());
+            cases.push(("wrong-second-inner-constructor", wrong_inner_owner));
+
+            let mut wrong_outer_descriptor = valid_artifacts.clone();
+            let classfile =
+                &mut sibling_factory_classfile_mut(&mut wrong_outer_descriptor).classfile_bytes;
+            classfile[code_start + outer_constructor_opcode + 1
+                ..code_start + outer_constructor_opcode + 3]
+                .copy_from_slice(&second_constructor_ref.0.to_be_bytes());
+            cases.push(("wrong-outer-constructor-descriptor", wrong_outer_descriptor));
+
+            let mut wrong_stack = valid_artifacts.clone();
+            sibling_factory_classfile_mut(&mut wrong_stack).classfile_bytes
+                [code_start - 8..code_start - 6]
+                .copy_from_slice(&[0, 5]);
+            cases.push(("wrong-max-stack", wrong_stack));
+
+            let mut wrong_locals = valid_artifacts.clone();
+            sibling_factory_classfile_mut(&mut wrong_locals).classfile_bytes
+                [code_start - 6..code_start - 4]
+                .copy_from_slice(&[0, 2]);
+            cases.push(("wrong-max-locals", wrong_locals));
+
+            for (label, corrupted) in cases {
+                let error = validate_jvm_tasty_batch_artifacts(&validated, corrupted)
+                    .expect_err("corrupt paired-constructor code fails batch validation");
+                assert!(
+                    matches!(
+                        error,
+                        JvmTastyContractError::BatchArtifact {
+                            class_index: 2,
+                            phase: "cross-class invocation",
+                            ..
+                        }
+                    ),
+                    "{label} must fail at the paired call bytecode stage: {error:?}"
+                );
+            }
+
+            let mut truncated = valid_artifacts.clone();
+            let classfile = &mut sibling_factory_classfile_mut(&mut truncated).classfile_bytes;
+            classfile.truncate(code_start + second_constructor_opcode + 1);
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, truncated),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 2,
+                    phase: "class-file decode",
+                    ..
+                })
+            ));
+
+            let mut missing_sidecar = valid_artifacts.clone();
+            missing_sidecar
+                .sidecars
+                .retain(|sidecar| sidecar.tasty_path != "example/PairFactory.tasty");
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, missing_sidecar),
+                Err(JvmTastyContractError::BatchArtifactPaths {
+                    reason: "missing expected TASTy sidecar path",
+                    ..
+                })
+            ));
+
+            let mut missing_classfile = valid_artifacts.clone();
+            missing_classfile
+                .classfiles
+                .retain(|classfile| classfile.classfile_path != "example/PairFactory.class");
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, missing_classfile),
+                Err(JvmTastyContractError::BatchArtifactPaths {
+                    reason: "missing expected class-file path",
+                    ..
+                })
+            ));
+
+            let mut duplicate_path = valid_artifacts.clone();
+            duplicate_path
+                .classfiles
+                .iter_mut()
+                .find(|classfile| classfile.classfile_path == "example/PairFactory.class")
+                .unwrap()
+                .classfile_path = "example/Pair.class".to_owned();
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, duplicate_path),
+                Err(JvmTastyContractError::BatchArtifactPaths {
+                    reason: "duplicate artifact path",
+                    ..
+                })
+            ));
+
+            let mut unsafe_path = valid_artifacts.clone();
+            unsafe_path
+                .classfiles
+                .iter_mut()
+                .find(|classfile| classfile.classfile_path == "example/PairFactory.class")
+                .unwrap()
+                .classfile_path = "../PairFactory.class".to_owned();
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, unsafe_path),
+                Err(JvmTastyContractError::BatchArtifactPaths { .. })
+            ));
+
+            let mut corrupt_sidecar = valid_artifacts.clone();
+            corrupt_sidecar
+                .sidecars
+                .iter_mut()
+                .find(|sidecar| sidecar.tasty_path == "example/PairFactory.tasty")
+                .unwrap()
+                .tasty_bytes = vec![0, 1, 2];
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, corrupt_sidecar),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 2,
+                    phase: "class-file/TASTy link",
+                    ..
+                })
+            ));
+
+            let mut stale_link = valid_artifacts;
+            let classfile = &mut sibling_factory_classfile_mut(&mut stale_link).classfile_bytes;
+            let link_id = batch.classes()[2].tasty_link_id();
+            let uuid = link_id.as_bytes();
+            let uuid_offset = classfile
+                .windows(uuid.len())
+                .position(|window| window == uuid)
+                .unwrap();
+            classfile[uuid_offset] ^= 0x80;
+            assert!(matches!(
+                validate_jvm_tasty_batch_artifacts(&validated, stale_link),
+                Err(JvmTastyContractError::BatchArtifact {
+                    class_index: 2,
+                    phase: "class-file/TASTy link",
+                    ..
+                })
+            ));
+            Ok::<_, JvmTastyContractError>(())
+        },
+    )
+    .unwrap()
+    .unwrap();
 }
 
 #[test]

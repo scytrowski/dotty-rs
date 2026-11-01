@@ -189,3 +189,78 @@ expression wire serialization, change JVM code generation, or establish a
 Scala-readable Rust-produced sidecar. The Scala 3.9 oracle artifacts and
 independent consumer remain the unchanged baseline; class and TASTy emission
 was not modified.
+
+## Integrated JVM/TASTy batch acceptance (#1917)
+
+Issue [#1917](https://github.com/scytrowski/dotty-rs/issues/1917) connects the
+existing one-session ordered source proof and genuine TASTy writer to the JVM
+artifact batch. The integration baseline is `6c4ec4609d8d76f30f69cf911caa4d927d00740d`.
+Before this change, `emit_paired_jvm_tasty_batch` reached
+`BatchArtifact { class_index: 2, phase: "cross-class invocation" }` for the
+unchanged `PairFactory.scala` source and returned no artifact manifest.
+
+The contract now admits exactly two sibling constructor arguments when the
+original pair receipt proves their source and typed roots. It checks the outer
+`Pair.<init>(LCounter;LCounter;)V`, two distinct `Counter.<init>(I)V` calls,
+each original leaf formal and its JVM local slot, and the generated
+`PairFactory.create(II)Lexample/Pair;` instructions. The bytecode reader
+consumes the full straight-line sequence symbolically through `areturn`; it
+checks both formal loads in order, all three allocations and constructor
+Methodrefs, `max_stack=6`, `max_locals=3`, and empty exception metadata. The
+source/TASTy plans and all class/TASTy links validate before the batch returns.
+The new bytecode code is a validator for this bounded shape; class emission
+continues to use the existing JVM backend.
+
+The regression emits `Counter`, `Pair`, and `PairFactory` from one real source
+frontend session and compares all six files across fresh sessions. Rust
+artifact SHA-256 and linked TASTy UUIDs for the checked-in fixture source are:
+
+| Artifact | SHA-256 | Linked UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3-c009-68ac-0000-000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008071c3-c009-68ac-0000-000000008193` |
+| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| `example/PairFactory.class` | `e4212a30e382a609ec64aa54e002900448e7323e68839ebb25fa2fccf054e1f4` | `0036155a-30ac-b6c8-0000-000000008198` |
+| `example/PairFactory.tasty` | `ef6cc72805a9f3846d0cf31721cc06e88bb35716da1b0500eb6fad233b254836` | `0036155a-30ac-b6c8-0000-000000008198` |
+
+The focused integration confirms classfile 65.0, TASTy 28.9.0, each
+classfile-to-sidecar UUID, Pair's two private `Counter` fields and ordered
+two-reference constructor ABI, and the exact factory method descriptor and
+instructions. The existing TASTy regression checks separate `first` and
+`second` PARAM references in its nested leaves. Renamed and
+declaration-reordered producers remain deterministic across fresh sessions;
+the authentic repeated-formal case also remains accepted.
+
+Corruption controls reject a missing second inner initialization, swapped or
+duplicated formal loads, wrong inner owner, wrong outer descriptor, truncated
+class bytes, incorrect stack/local limits, missing class/sidecar paths,
+duplicate or unsafe paths, malformed TASTy, and a stale UUID before any
+accepted manifest. Paired-receipt regressions reject missing, duplicate,
+reversed, or forged constructor/formal/typed-leaf bindings. The reused
+test-only publisher injects failures after each of six staged writes, before
+promotion, and after promotion; each handled failure leaves no final tree and
+preserves an existing destination sentinel. These checks cover handled
+failures and do not claim crash-atomic multi-file durability.
+
+At the implementation checkpoint, `rustc --version` reported
+`1.98.1 (48a229cea 2026-09-01)`. Focused passing commands were:
+
+```sh
+cargo test -p dotty --test jvm_tasty_artifacts sibling_constructor_batch --locked
+cargo test -p dotty --test jvm_tasty_artifacts sibling_constructor_batches_are_deterministic_after_renaming_and_reordering --locked
+cargo test -p dotty --test jvm_tasty_multi_argument_constructor_calls rust_batch_writer_emits_two_distinct_ordered_nested_constructor_receipts --locked
+cargo test -p dotty --test jvm_tasty_multi_argument_constructor_matrix --locked
+```
+
+The standalone JDK 21 runtime and independent Scala reader remain separate
+compatibility gates. Both passed in this worktree with Temurin `21.0.13+9`
+and the pinned Scala checkout at `777528f19a58e794c9954a42f433373472ec57f8`.
+The full workspace suite enabled `DOTTY_CLASSFILE_REQUIRE_JDK=1` and the
+multi-argument, nested-constructor, and cross-class strict Scala consumer
+requirements. It passed with `SCALA39_ROOT` set to that checkout and
+`COURSIER_MAVEN_ROOT` set to the repository's cached Scala 3.9.0 dependencies.
+The final `cargo fmt --all -- --check`, frontend boundary guard, workspace
+Clippy with `-D warnings`, rustdoc with `-D warnings`, full workspace tests,
+and `git diff --check` all passed. Neither compatibility gate substitutes
+for the source, bytecode, or artifact proofs above.

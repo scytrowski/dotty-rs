@@ -9998,8 +9998,29 @@ fn jdk_tool_major_version(tool: &str) -> Option<u32> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    text.split(|character: char| !character.is_ascii_digit())
-        .find_map(|part| part.parse::<u32>().ok())
+    let version_line = text.lines().find_map(|line| {
+        let line = line.trim();
+        if line.starts_with("openjdk version ") || line.starts_with("java version ") {
+            line.split('"').nth(1)
+        } else if let Some(version) = line.strip_prefix("javac ") {
+            Some(version)
+        } else if tool == "javap"
+            && line
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '.')
+        {
+            Some(line)
+        } else {
+            None
+        }
+    })?;
+    let components = version_line.split('.').collect::<Vec<_>>();
+    let major = if components.first() == Some(&"1") {
+        *components.get(1)?
+    } else {
+        *components.first()?
+    };
+    major.parse().ok()
 }
 
 fn verify_emitted_class_with_jdk(bytes: &[u8]) {

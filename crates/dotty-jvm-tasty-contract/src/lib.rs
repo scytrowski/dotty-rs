@@ -1506,6 +1506,7 @@ struct CrossClassMethodRef {
     argument_load_opcode: Option<u8>,
     receiver_field: Option<SymbolId>,
     nested_constructor: Option<NestedConstructorMethodRef>,
+    nested_constructor_pair: Option<[NestedConstructorMethodRef; 2]>,
     factory_method: Option<FactoryMethodRef>,
     factory_local_slot: Option<u16>,
     factory_local_max_locals: Option<u16>,
@@ -1514,6 +1515,309 @@ struct CrossClassMethodRef {
 struct NestedConstructorMethodRef {
     owner_internal_name: String,
     descriptor: String,
+    argument_local_slot: u16,
+}
+
+fn validate_nested_constructor_pair(
+    proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
+    caller: SymbolId,
+    (source_rhs, typed_rhs): (TreeId<Untyped>, TreeId<Typed>),
+    outer_application: &dotty_core::ast::Apply<Typed>,
+    outer_constructor_symbol: SymbolId,
+    outer_metadata: &JvmClassMetadata,
+    all_metadata: &[JvmClassMetadata],
+) -> Result<[NestedConstructorMethodRef; 2], String> {
+    let tasty = proof.tasty_plan.plan();
+    let source_id = tasty.source.id;
+    let pair = tasty
+        .typed_bindings
+        .nested_constructor_call_pair(source_id, caller)
+        .ok_or_else(|| "two-argument constructor has no canonical paired receipt".to_owned())?;
+    let source_rhs_tree = tasty
+        .source_ast
+        .try_get(source_rhs)
+        .ok_or_else(|| "paired constructor source RHS is stale".to_owned())?;
+    let TreeKind::Apply(source_outer) = &source_rhs_tree.kind else {
+        return Err("paired constructor source RHS is not an Apply".into());
+    };
+    let typed_rhs_tree = tasty
+        .typed_ast
+        .try_get(typed_rhs)
+        .ok_or_else(|| "paired constructor typed RHS is stale".to_owned())?;
+    let TreeKind::Apply(typed_outer) = &typed_rhs_tree.kind else {
+        return Err("paired constructor typed RHS is not an Apply".into());
+    };
+    if source_outer.kind != dotty_core::ast::ApplyKind::Regular
+        || typed_outer.kind != dotty_core::ast::ApplyKind::Regular
+        || outer_application.kind != dotty_core::ast::ApplyKind::Regular
+    {
+        return Err("paired constructor call uses a non-regular Apply".into());
+    }
+    if source_outer.args.as_slice() != pair.calls.map(|call| call.source_apply) {
+        return Err(
+            "paired constructor arguments differ from the original source call roots".into(),
+        );
+    }
+    if typed_outer.args.as_slice() != pair.calls.map(|call| call.typed_apply)
+        || outer_application.args.as_slice() != pair.calls.map(|call| call.typed_apply)
+    {
+        return Err(
+            "paired constructor arguments differ from the original typed call roots".into(),
+        );
+    }
+    if !matches!(
+        tasty
+            .source_ast
+            .try_get(source_outer.function)
+            .map(|tree| &tree.kind),
+        Some(TreeKind::Select(_))
+    ) {
+        return Err("paired constructor source function is not a Select".into());
+    }
+
+    let caller_method = proof
+        .metadata
+        .methods()
+        .iter()
+        .find(|method| method.symbol() == caller)
+        .ok_or_else(|| "paired constructor caller is absent from its JVM plan".to_owned())?;
+    if caller_method.descriptor().as_str()
+        != format!("(II)L{};", outer_metadata.identity().internal_name())
+        || caller_method.parameters().len() != 2
+        || caller_method.parameters()[0].slot() != 1
+        || caller_method.parameters()[1].slot() != 2
+        || caller_method
+            .parameters()
+            .iter()
+            .any(|parameter| parameter.width() != 1)
+    {
+        return Err("paired constructor caller must have two ordered Int locals".into());
+    }
+    let outer_constructor = outer_metadata
+        .constructor()
+        .filter(|constructor| constructor.symbol() == outer_constructor_symbol)
+        .ok_or_else(|| "paired outer constructor is absent from its JVM plan".to_owned())?;
+    if !outer_constructor.access_flags().is_public() {
+        return Err("paired outer constructor is not public".into());
+    }
+
+    let mut nested_proofs = Vec::with_capacity(2);
+    for index in 0..2 {
+        let binding = pair.calls[index];
+        if pair.calls[0].source_apply == pair.calls[1].source_apply
+            || pair.calls[0].typed_apply == pair.calls[1].typed_apply
+        {
+            return Err("paired constructor receipts do not retain distinct sibling calls".into());
+        }
+        let source_apply = tasty
+            .source_ast
+            .try_get(binding.source_apply)
+            .ok_or_else(|| format!("nested source call {index} is stale"))?;
+        let TreeKind::Apply(source_call) = &source_apply.kind else {
+            return Err(format!("nested source call {index} is not an Apply"));
+        };
+        let typed_apply = tasty
+            .typed_ast
+            .try_get(binding.typed_apply)
+            .ok_or_else(|| format!("nested typed call {index} is stale"))?;
+        let TreeKind::Apply(typed_call) = &typed_apply.kind else {
+            return Err(format!("nested typed call {index} is not an Apply"));
+        };
+        let source_select = tasty
+            .source_ast
+            .try_get(binding.source_select)
+            .ok_or_else(|| format!("nested source selection {index} is stale"))?;
+        let TreeKind::Select(source_selection) = &source_select.kind else {
+            return Err(format!("nested source selection {index} is not a Select"));
+        };
+        let typed_select = tasty
+            .typed_ast
+            .try_get(binding.typed_select)
+            .ok_or_else(|| format!("nested typed selection {index} is stale"))?;
+        let TreeKind::Select(typed_selection) = &typed_select.kind else {
+            return Err(format!("nested typed selection {index} is not a Select"));
+        };
+        let source_new = tasty
+            .source_ast
+            .try_get(binding.source_new)
+            .ok_or_else(|| format!("nested source allocation {index} is stale"))?;
+        let typed_new = tasty
+            .typed_ast
+            .try_get(binding.typed_new)
+            .ok_or_else(|| format!("nested typed allocation {index} is stale"))?;
+        let source_argument = tasty
+            .source_ast
+            .try_get(binding.source_argument)
+            .ok_or_else(|| format!("nested source leaf {index} is stale"))?;
+        let typed_argument = tasty
+            .typed_ast
+            .try_get(binding.typed_argument)
+            .ok_or_else(|| format!("nested typed leaf {index} is stale"))?;
+        let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(nested_constructor_symbol),
+            ..
+        }) = tasty.store.types.try_get(typed_select.ty)
+        else {
+            return Err(format!(
+                "nested typed selection {index} has no constructor target"
+            ));
+        };
+        if !tasty.store.symbols.contains(*nested_constructor_symbol) {
+            return Err(format!("nested constructor symbol {index} is stale"));
+        }
+        let nested_info = tasty.store.symbols.get(*nested_constructor_symbol);
+        let Some(nested_owner) = nested_info.owner else {
+            return Err(format!("nested constructor {index} has no owner"));
+        };
+        let nested_metadata = all_metadata
+            .iter()
+            .find(|metadata| metadata.identity().symbol() == nested_owner)
+            .ok_or_else(|| format!("nested constructor owner {index} is outside the batch"))?;
+        let nested_constructor = nested_metadata
+            .constructor()
+            .filter(|constructor| constructor.symbol() == *nested_constructor_symbol)
+            .ok_or_else(|| format!("nested constructor {index} is absent from its JVM plan"))?;
+        let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(argument_formal),
+            ..
+        }) = tasty.store.types.try_get(typed_argument.ty)
+        else {
+            return Err(format!(
+                "nested typed leaf {index} is not a formal reference"
+            ));
+        };
+        let parameter = caller_method
+            .parameters()
+            .iter()
+            .find(|parameter| parameter.symbol() == *argument_formal)
+            .ok_or_else(|| format!("nested leaf {index} does not name a caller formal"))?;
+        if !tasty.store.symbols.contains(*argument_formal)
+            || !tasty.store.symbols.contains(binding.constructor)
+        {
+            return Err(format!(
+                "nested constructor receipt {index} contains a stale symbol"
+            ));
+        }
+        let formal_info = tasty.store.symbols.get(*argument_formal);
+        let constructor_info = tasty.store.symbols.get(binding.constructor);
+        if *argument_formal != pair.argument_formals[index]
+            || !matches!(
+                tasty.store.types.try_get(binding.result_type),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(class),
+                    ..
+                }) if *class == nested_owner
+            )
+            || constructor_info.owner != Some(nested_owner)
+            || binding.class != nested_owner
+            || binding.constructor != *nested_constructor_symbol
+            || nested_info.kind != SymbolKind::Constructor
+            || nested_info.origin != SymbolOrigin::Source(source_id)
+            || formal_info.kind != SymbolKind::Parameter
+            || formal_info.owner != Some(caller)
+            || !nested_constructor
+                .parameters()
+                .iter()
+                .any(|parameter| parameter.symbol() == binding.formal)
+        {
+            return Err(format!(
+                "nested constructor receipt {index} has mismatched source symbols"
+            ));
+        }
+        if binding.formal_type != tasty.definitions.int || binding.result_type != typed_apply.ty {
+            return Err(format!(
+                "nested constructor receipt {index} has mismatched semantic types (formal={}, result/apply={})",
+                binding.formal_type == tasty.definitions.int,
+                binding.result_type == typed_apply.ty
+            ));
+        }
+        if source_call.kind != dotty_core::ast::ApplyKind::Regular
+            || typed_call.kind != dotty_core::ast::ApplyKind::Regular
+            || source_call.function != binding.source_select
+            || source_call.args.as_slice() != [binding.source_argument]
+            || typed_call.function != binding.typed_select
+            || typed_call.args.as_slice() != [binding.typed_argument]
+        {
+            return Err(format!(
+                "nested constructor receipt {index} has mismatched Apply shape"
+            ));
+        }
+        if source_selection.qualifier != binding.source_new
+            || typed_selection.qualifier != binding.typed_new
+            || !matches!(source_new.kind, TreeKind::New(_))
+            || !matches!(typed_new.kind, TreeKind::New(_))
+            || !matches!(source_argument.kind, TreeKind::Ident(_))
+        {
+            return Err(format!(
+                "nested constructor receipt {index} has mismatched Select/New/leaf shape"
+            ));
+        }
+        if tasty
+            .typed_bindings
+            .typed_at(source_id, binding.source_apply)
+            != Some(binding.typed_apply)
+            || tasty
+                .typed_bindings
+                .typed_at(source_id, binding.source_select)
+                != Some(binding.typed_select)
+            || tasty.typed_bindings.typed_at(source_id, binding.source_new)
+                != Some(binding.typed_new)
+            || tasty
+                .typed_bindings
+                .typed_at(source_id, binding.source_argument)
+                != Some(binding.typed_argument)
+        {
+            return Err(format!(
+                "nested constructor receipt {index} has stale source-to-typed bindings (apply={}, select={}, new={}, leaf={})",
+                tasty
+                    .typed_bindings
+                    .typed_at(source_id, binding.source_apply)
+                    == Some(binding.typed_apply),
+                tasty
+                    .typed_bindings
+                    .typed_at(source_id, binding.source_select)
+                    == Some(binding.typed_select),
+                tasty.typed_bindings.typed_at(source_id, binding.source_new)
+                    == Some(binding.typed_new),
+                tasty
+                    .typed_bindings
+                    .typed_at(source_id, binding.source_argument)
+                    == Some(binding.typed_argument)
+            ));
+        }
+        if nested_constructor.descriptor().as_str() != "(I)V"
+            || !nested_constructor.access_flags().is_public()
+        {
+            return Err(format!(
+                "nested constructor receipt {index} has an unsupported JVM constructor"
+            ));
+        }
+        nested_proofs.push(NestedConstructorMethodRef {
+            owner_internal_name: nested_metadata.identity().internal_name().to_owned(),
+            descriptor: nested_constructor.descriptor().as_str().to_owned(),
+            argument_local_slot: parameter.slot(),
+        });
+        if index == 0 && nested_owner != pair.calls[1].class {
+            return Err("sibling constructors do not target the same source class".into());
+        }
+    }
+    let [first, second] = nested_proofs.as_slice() else {
+        return Err("paired constructor receipt is incomplete".into());
+    };
+    if first.owner_internal_name != second.owner_internal_name
+        || outer_constructor.descriptor().as_str()
+            != format!(
+                "(L{};L{};)V",
+                first.owner_internal_name, second.owner_internal_name
+            )
+    {
+        return Err(
+            "paired constructor descriptors do not match the two sibling allocations".into(),
+        );
+    }
+    nested_proofs
+        .try_into()
+        .map_err(|_| "paired constructor receipt is incomplete".to_owned())
 }
 
 struct FactoryMethodRef {
@@ -1806,6 +2110,7 @@ fn reference_local_factory_call(
         argument_load_opcode: None,
         receiver_field: None,
         nested_constructor: None,
+        nested_constructor_pair: None,
         factory_method: Some(FactoryMethodRef {
             owner_internal_name: helper_owner.identity().internal_name().to_owned(),
             name: helper.name().to_owned(),
@@ -1984,6 +2289,44 @@ fn validate_cross_class_call_code(
                     .is_some_and(|receiver| matches!(receiver.kind, TreeKind::New(_))),
                 _ => false,
             };
+            if target_info.kind == SymbolKind::Constructor
+                && constructor_receiver
+                && application.kind == dotty_core::ast::ApplyKind::Regular
+                && application.args.len() == 2
+            {
+                let nested_constructors = validate_nested_constructor_pair(
+                    proof,
+                    caller,
+                    (rhs, root),
+                    application,
+                    *target,
+                    target_class_metadata,
+                    &all_metadata,
+                )?;
+                let outer_constructor = target_class_metadata
+                    .constructor()
+                    .filter(|constructor| constructor.symbol() == *target)
+                    .ok_or_else(|| "outer constructor is absent from its JVM plan".to_owned())?;
+                calls.push(CrossClassMethodRef {
+                    caller,
+                    target: *target,
+                    owner_internal_name: target_class_metadata
+                        .identity()
+                        .internal_name()
+                        .to_owned(),
+                    name: "<init>".to_owned(),
+                    descriptor: outer_constructor.descriptor().as_str().to_owned(),
+                    constructor: true,
+                    argument_load_opcode: None,
+                    receiver_field: None,
+                    nested_constructor: None,
+                    nested_constructor_pair: Some(nested_constructors),
+                    factory_method: None,
+                    factory_local_slot: None,
+                    factory_local_max_locals: None,
+                });
+                continue;
+            }
             if target_info.kind == SymbolKind::Constructor
                 && constructor_receiver
                 && application.kind == dotty_core::ast::ApplyKind::Regular
@@ -2207,6 +2550,7 @@ fn validate_cross_class_call_code(
                             argument_load_opcode: None,
                             receiver_field: None,
                             nested_constructor: None,
+                            nested_constructor_pair: None,
                             factory_method: Some(FactoryMethodRef {
                                 owner_internal_name: helper_metadata
                                     .identity()
@@ -2317,7 +2661,9 @@ fn validate_cross_class_call_code(
                                 .internal_name()
                                 .to_owned(),
                             descriptor: nested_descriptor.to_owned(),
+                            argument_local_slot: 1,
                         }),
+                        nested_constructor_pair: None,
                         factory_method: None,
                         factory_local_slot: None,
                         factory_local_max_locals: None,
@@ -2388,6 +2734,7 @@ fn validate_cross_class_call_code(
                     argument_load_opcode: Some(argument_load_opcode),
                     receiver_field: None,
                     nested_constructor: None,
+                    nested_constructor_pair: None,
                     factory_method: None,
                     factory_local_slot: None,
                     factory_local_max_locals: None,
@@ -2451,6 +2798,7 @@ fn validate_cross_class_call_code(
                 _ => None,
             },
             nested_constructor: None,
+            nested_constructor_pair: None,
             factory_method: None,
             factory_local_slot: None,
             factory_local_max_locals: None,
@@ -2639,6 +2987,99 @@ fn validate_cross_class_call_code(
                     "caller method {:?} does not invoke the exact same-instance factory and outer constructor",
                     call.caller
                 ));
+            }
+            continue;
+        }
+        if let Some(nested_pair) = &call.nested_constructor_pair {
+            let mut pc = 0;
+            let outer_allocation = take_factory_call_operand(code.code, &mut pc, 0xbb, "new")?;
+            take_factory_call_opcode(code.code, &mut pc, 0x59, "dup")?;
+            let mut inner_allocations = Vec::with_capacity(2);
+            let mut inner_calls = Vec::with_capacity(2);
+            for nested in nested_pair {
+                let allocation = take_factory_call_operand(code.code, &mut pc, 0xbb, "new")?;
+                take_factory_call_opcode(code.code, &mut pc, 0x59, "dup")?;
+                take_int_local(code.code, &mut pc, nested.argument_local_slot)?;
+                let constructor =
+                    take_factory_call_operand(code.code, &mut pc, 0xb7, "invokespecial")?;
+                inner_allocations.push(allocation);
+                inner_calls.push(constructor);
+            }
+            let outer_call = take_factory_call_operand(code.code, &mut pc, 0xb7, "invokespecial")?;
+            take_factory_call_opcode(code.code, &mut pc, 0xb0, "areturn")?;
+            if pc != code.code.len()
+                || code.max_stack != 6
+                || code.max_locals != 3
+                || !code.exception_table.is_empty()
+            {
+                return Err(format!(
+                    "caller method {:?} has invalid paired constructor instructions, stack/local bounds, or exception metadata",
+                    call.caller
+                ));
+            }
+            let class_name = |index| -> Result<&str, String> {
+                let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Class { name_index }) =
+                    class_file.constant_pool.get(index)
+                else {
+                    return Err(
+                        "paired constructor allocation does not reference CONSTANT_Class".into(),
+                    );
+                };
+                class_file
+                    .constant_pool
+                    .utf8(*name_index)
+                    .map_err(|error| format!("invalid paired allocation class: {error:?}"))
+            };
+            let method_ref = |index| -> Result<(&str, (&str, &str)), String> {
+                let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+                    class_index,
+                    name_and_type_index,
+                }) = class_file.constant_pool.get(index)
+                else {
+                    return Err(
+                        "paired constructor invocation does not reference CONSTANT_Methodref"
+                            .into(),
+                    );
+                };
+                let owner = class_file
+                    .constant_pool
+                    .class_name(*class_index)
+                    .map_err(|error| format!("invalid paired constructor owner: {error:?}"))?;
+                let method = class_file
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .map_err(|error| format!("invalid paired constructor Methodref: {error:?}"))?;
+                Ok((owner, method))
+            };
+            if class_name(outer_allocation)? != call.owner_internal_name
+                || method_ref(outer_call)?
+                    != (
+                        call.owner_internal_name.as_str(),
+                        ("<init>", call.descriptor.as_str()),
+                    )
+            {
+                return Err(format!(
+                    "caller method {:?} does not allocate and invoke its exact paired outer constructor",
+                    call.caller
+                ));
+            }
+            for ((allocation, constructor), expected) in inner_allocations
+                .into_iter()
+                .zip(inner_calls)
+                .zip(nested_pair)
+            {
+                if class_name(allocation)? != expected.owner_internal_name
+                    || method_ref(constructor)?
+                        != (
+                            expected.owner_internal_name.as_str(),
+                            ("<init>", expected.descriptor.as_str()),
+                        )
+                {
+                    return Err(format!(
+                        "caller method {:?} does not allocate and invoke the exact ordered sibling constructors",
+                        call.caller
+                    ));
+                }
             }
             continue;
         }
@@ -2929,6 +3370,22 @@ fn take_factory_local(code: &[u8], pc: &mut usize, store: bool, slot: u16) -> Re
         return Err(format!(
             "expected {mnemonic} local slot {slot}, found {actual}"
         ));
+    }
+    *pc += 1;
+    Ok(())
+}
+
+fn take_int_local(code: &[u8], pc: &mut usize, slot: u16) -> Result<(), String> {
+    if slot <= 3 {
+        return take_factory_call_opcode(code, pc, 0x1a + slot as u8, &format!("iload_{slot}"));
+    }
+    take_factory_call_opcode(code, pc, 0x15, "iload")?;
+    let actual = code
+        .get(*pc)
+        .copied()
+        .ok_or_else(|| "truncated iload local index".to_owned())?;
+    if u16::from(actual) != slot {
+        return Err(format!("expected iload local slot {slot}, found {actual}"));
     }
     *pc += 1;
     Ok(())
