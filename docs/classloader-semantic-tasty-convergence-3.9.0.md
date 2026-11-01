@@ -13,7 +13,11 @@ change production semantics.
 - Scala reference: 3.9.0 source revision
   `777528f19a58e794c9954a42f433373472ec57f8`.
 - TASTy inputs: the legacy classloader validates and accepts 28.8.0 and
-  28.9.0; this cohort records the minor version per frozen input.
+  28.9.0; this cohort records the minor version per frozen input. The
+  original freeze mislabeled the eight classloader fixtures as 28.8. A
+  pre-measurement header check corrected only those version fields to 28.9;
+  all original unit IDs, paths, hashes, requested shapes, ownership rationale
+  and cohort order are unchanged. No adapter result informed this correction.
 - Bootstrap policy: independently create a fresh `SemanticStore` per adapter
   and per run, call `Definitions::bootstrap` once, use the same ordered
   composite classpath for both adapters, and give the unpickler a fresh
@@ -41,9 +45,57 @@ one outcome: `MATCH`, `SEMANTIC_DELTA`, `LOADER_UNSUPPORTED`,
 Retain the first underlying error and adapter provenance. An absent or
 unknown value is not `Any`, `Object`, success, or structural equality.
 
-The audit test validates manifest uniqueness, eligibility, fixture hashes,
-format versions and completeness, and emits normalized TSV twice from fresh
-sessions. The checked-in TSV is the measurement from the refreshed execution
-baseline; execution must fail on missing/duplicate keys, skipped units,
-malformed rows, or outcome mismatch. The prior resolver-free output is not
-used as parity evidence.
+The audit test validates manifest uniqueness, fixture hashes, format versions
+and root coverage, and emits normalized TSV twice from fresh sessions. The
+checked-in TSV is the measurement from the refreshed execution baseline;
+execution fails on missing/duplicate keys, skipped units, malformed rows, or
+outcome mismatch. The prior resolver-free output is retained only as historical
+evidence and is not used as parity evidence.
+
+## Refreshed measurement and scope gate
+
+The 2026-11-01 execution used Rust `1.98.1`, refreshed main
+`7222d2d856aa7b7cab667c9e1e30489c700164cd`, and
+`JAVA_HOME=/home/vdrake6/.sdkman/candidates/java/current`. The real
+`jmods/java.base.jmod` input had SHA-256
+`fad51abeafe6a1ecb0c2696a88684dc417cc534b74b5d865042df7381d9d0e91`. The
+same ordered composite classpath (three classloader fixture roots, the pinned
+Scala library fixtures, the path-dependent fixture root, then the JDK) was
+given independently to the legacy loader and a resolver-backed `TastySession`.
+Each adapter used its own fresh store and one bootstrap. The unpickler resolver
+was carried through session handoffs; no semantic stand-ins were inserted.
+
+The original single-unit candidate `visibility-open` and two-unit candidate
+`animal` + `dog` were retained. The legacy loader returned all nine fields for
+`visibility-open`; all nine unpickler fields stopped at its first actual
+`UnresolvedMember` (`java.lang.Object`, TASTy address 15). For both `animal`
+and `dog`, the unpickler likewise stopped at the first `UnresolvedMember`
+(`java.lang.Object`, addresses 9 and 15). The legacy loader completed the
+hierarchy for both units, while each had one explicitly unsupported member
+signature caused by the unresolved `scala/Predef/String` reference. Thus the
+single-unit and two-unit cases do not qualify as interoperable integration
+candidates under the frozen contract.
+
+Across all 14 frozen rows, 13 files have a matching entered root definition;
+the `visibility-holder` file has no root named `Holder` in either adapter.
+This leaves more than the required 12 real root units without substituting a
+candidate. The remaining cohort also yields explicit unsupported or unresolved
+outcomes, including `scala.Nothing`, `scala.Int`, and the applied `scala.Tuple2`
+parent shape. The per-field report contains 126 rows and is byte-identical
+across two fresh sessions. The raw execution trace SHA-256 is
+`1b4280c931e0d53e8d4fd03c8e4e2fc4934d14a34491013c7e55b9982983b2ac`; the
+normalized comparison TSV SHA-256 is
+`6065fa5947a988166831434fd01610d5f367646559b9c34ea75139cdcbc36eba`.
+
+The no-candidate reassessment trigger is met. Making the frozen integration
+candidates complete would require changes to external semantic resolution or
+its bootstrap contracts, beyond this audit's tests/tooling/docs scope. No
+negative-control suite or repository-wide validation was run after that gate;
+this measurement is evidence for scope reassessment, not a completed issue
+receipt or a parity claim. The original pre-resolver run remains preserved at
+`target/parity-run.txt` in the prior #1927 worktree with SHA-256
+`61a7f0e069c46ee0b492da9e8b78ed7347f7439ab2f9f93afe7e2771a7c9c448`.
+This boundary is also explicit in the
+[`#1940 session contract`](classloader-semantic-tasty-session-contract.md),
+which leaves external aliases and the `Open.tasty` and Animal/Dog graph
+unsupported by the resolver handoff.
