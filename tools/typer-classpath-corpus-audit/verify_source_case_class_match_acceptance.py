@@ -38,7 +38,10 @@ TYPER_TESTS = {
     "typer::expression::patterns::tests::unary_extractor_falls_back_to_get_after_product_arity_mismatch",
     "typer::tests::generated_case_class_unapply_has_source_canonical_plain_signature_and_member_lookup",
     "typer::tests::generated_case_class_unapply_validates_and_rolls_back_source_class_info",
+    "typer::tests::generated_product2_unapply_completes_the_canonical_flagged_signature",
+    "typer::tests::generated_product2_unapply_rejects_forged_provenance_and_field_identities",
     "typer::tests::local_patdef_alias_over_extractor_binds_the_original_selector_type",
+    "typer::tests::non_case_classes_and_explicit_unapply_collisions_have_no_generated_role",
     "typer::tests::unsupported_generated_case_class_unapply_shapes_defer_without_partial_signature",
 }
 POSITIVE = {

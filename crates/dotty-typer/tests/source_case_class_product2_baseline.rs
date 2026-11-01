@@ -286,29 +286,28 @@ fn analyze_session() -> (Vec<String>, Vec<String>) {
                     typed_root.is_none(),
                     "failed roots cannot enter SourceTypedIndex"
                 );
-                let TyperError::MalformedMethodClause {
-                    method,
-                    method_tree_index,
-                    clause_index,
+                let TyperError::ExtractorResultMemberNotFound {
+                    source: error_source,
+                    member,
+                    ..
                 } = &error
                 else {
                     panic!("unexpected first blocker: {error:?}");
                 };
                 assert_eq!(
-                    *method, unapply,
-                    "extractor lookup must discover the canonical Flagged.unapply identity"
+                    *error_source, source,
+                    "the missing result-protocol member must retain this source unit"
                 );
-                assert_eq!(*method_tree_index, class_tree.index());
-                assert_eq!(*clause_index, 0);
+                assert_eq!(
+                    typer.store().names.resolve(member.text()),
+                    "isEmpty",
+                    "the whole extractor path remains blocked at the result protocol"
+                );
                 let rendered = format!(
-                    "error=MalformedMethodClause{{method=Flagged$.unapply,class_tree={},clause=0}};typed_index=absent",
-                    method_tree_index,
+                    "error=ExtractorResultMemberNotFound{{method=Flagged$.unapply,result=Flagged,member={}}};typed_index=absent",
+                    typer.store().names.resolve(member.text()),
                 );
-                (
-                    rendered,
-                    "MalformedMethodClause;resolved=Flagged$.unapply;clause=0;typed_index=absent"
-                        .to_owned(),
-                )
+                (rendered, "ExtractorResultMemberNotFound;resolved=Flagged$.unapply;result=Flagged;member=isEmpty;typed_index=absent".to_owned())
             }
         };
         let range = position.span().range();
@@ -333,7 +332,7 @@ fn analyze_session() -> (Vec<String>, Vec<String>) {
             second_parameter.start(), second_parameter.end(),
         ));
         rows.push(format!(
-            "{name}\tpath=Positive.scala#tree{}\tsource={}\tbytes={}:{}\tmethod_owner=Positive.scala#tree{}(Matcher$)\tflagged_class=Positive.scala#tree{}\tcompanion=Flagged$.linked-to-Flagged\tmodule_class=Flagged$\tapply=present\tunapply=present(identity-only)\tselector_1=class-owned\tselector_2=class-owned\tfield_1=tree#{}@bytes{}-{}:value\tfield_2=tree#{}@bytes{}-{}:enabled\t{result}",
+            "{name}\tpath=Positive.scala#tree{}\tsource={}\tbytes={}:{}\tmethod_owner=Positive.scala#tree{}(Matcher$)\tflagged_class=Positive.scala#tree{}\tcompanion=Flagged$.linked-to-Flagged\tmodule_class=Flagged$\tapply=present\tunapply=signature-complete\tselector_1=class-owned\tselector_2=class-owned\tfield_1=tree#{}@bytes{}-{}:value\tfield_2=tree#{}@bytes{}-{}:enabled\t{result}",
             tree.index(), position.source().index(), range.start(), range.end(), method_owner_tree.index(), class_tree.index(),
             parameters[0].index(), parsed.ast.get(parameters[0]).position.unwrap().span().range().start(),
             parsed.ast.get(parameters[0]).position.unwrap().span().range().end(),

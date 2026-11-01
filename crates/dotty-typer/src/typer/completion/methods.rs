@@ -250,12 +250,11 @@ impl SourceTyper<'_> {
                 clause_index: 0,
             });
         }
-        let Some([parameter_tree]) = constructor
+        let Some(parameter_trees) = constructor
             .value_param_clauses
             .as_slice()
             .first()
             .filter(|_| constructor.value_param_clauses.len() == 1)
-            .map(Vec::as_slice)
         else {
             return Err(TyperError::MalformedMethodClause {
                 method,
@@ -263,40 +262,77 @@ impl SourceTyper<'_> {
                 clause_index: 0,
             });
         };
-        let Some(TreeKind::ValDef(parameter)) =
-            self.arena.try_get(*parameter_tree).map(|node| &node.kind)
-        else {
+        let expected_field_types = match parameter_trees.as_slice() {
+            [_] => vec![self.definitions.int],
+            [_, _] => vec![self.definitions.int, self.definitions.boolean],
+            _ => {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                });
+            }
+        };
+        if parameter_trees.len() == 2 && parameter_trees[0] == parameter_trees[1] {
             return Err(TyperError::MalformedMethodClause {
                 method,
                 method_tree_index: class_tree.index(),
                 clause_index: 0,
             });
-        };
-        let constructor_parameter = self.index.symbol_at(source, *parameter_tree).ok_or(
-            TyperError::MethodParameterSymbolMissing {
-                method,
-                parameter_tree_index: parameter_tree.index(),
-            },
-        )?;
-        let parameter_context = self.parameter_source_context(constructor_parameter).ok_or(
-            TyperError::DeclarationContextMissing {
-                symbol: constructor_parameter,
-            },
-        )?;
-        let field_type =
-            self.type_of_tpt_inner_journaled(parameter.tpt, parameter_context, info_journal)?;
-        let is_int = field_type == self.definitions.int;
-        if !is_int
-            || parameter
-                .metadata
-                .modifiers
-                .contains(&dotty_core::ast::Modifier::Var)
+        }
+        for (parameter_tree, expected_type) in
+            parameter_trees.iter().copied().zip(expected_field_types)
         {
-            return Err(TyperError::MalformedMethodClause {
-                method,
-                method_tree_index: class_tree.index(),
-                clause_index: 0,
-            });
+            let Some(TreeKind::ValDef(parameter)) =
+                self.arena.try_get(parameter_tree).map(|node| &node.kind)
+            else {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                });
+            };
+            let field = self.index.symbol_at(source, parameter_tree).ok_or(
+                TyperError::MethodParameterSymbolMissing {
+                    method,
+                    parameter_tree_index: parameter_tree.index(),
+                },
+            )?;
+            if !self.store.symbols.contains(field)
+                || self.store.symbols.get(field).kind != SymbolKind::Field
+                || self.store.symbols.get(field).owner != Some(class)
+                || self.store.symbols.get(field).origin != SymbolOrigin::Source(source)
+                || self.index.definition_of(field)
+                    != Some(SourceDefinition::Canonical {
+                        source,
+                        tree: parameter_tree,
+                    })
+                || parameter.rhs.is_some()
+                || parameter.metadata.visibility.is_some()
+                || parameter
+                    .metadata
+                    .modifiers
+                    .iter()
+                    .any(|modifier| *modifier != dotty_core::ast::Modifier::ParamAccessor)
+            {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                });
+            }
+            let parameter_context = self
+                .parameter_source_context(field)
+                .ok_or(TyperError::DeclarationContextMissing { symbol: field })?;
+            let field_type =
+                self.type_of_tpt_inner_journaled(parameter.tpt, parameter_context, info_journal)?;
+            if field_type != expected_type {
+                return Err(TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index: class_tree.index(),
+                    clause_index: 0,
+                });
+            }
         }
 
         let input = self

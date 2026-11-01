@@ -3950,9 +3950,252 @@ mod tests {
     }
 
     #[test]
+    fn generated_product2_unapply_completes_the_canonical_flagged_signature() {
+        fn analyze(siblings: &str) -> String {
+            let source_text = format!(
+                "package scala {{ trait Product }}; package matching {{ {siblings} case class Flagged(value: Int, enabled: Boolean); object Flagged {{ val marker = 1 }}; object Probe {{ def selected = Flagged.unapply }} }}; package other {{ case class Flagged(value: String, enabled: String) }}"
+            );
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(&source_text);
+            let class = class_symbol(&parsed, &store, &index, source, "Flagged");
+            let unapply = index
+                .generated_case_class_method(
+                    class,
+                    dotty_core::GeneratedCaseClassMethodRole::Unapply,
+                )
+                .expect("Flagged's canonical generated unapply");
+            let apply = index
+                .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Apply)
+                .expect("Flagged's canonical generated apply");
+            let SourceDefinition::Canonical {
+                source: class_source,
+                tree: class_tree,
+            } = index.definition_of(class).expect("canonical class source")
+            else {
+                panic!("Flagged must retain its canonical source definition");
+            };
+            assert_eq!(class_source, source);
+            let TreeKind::TypeDef(class_definition) = &parsed.ast.get(class_tree).kind else {
+                panic!("Flagged source identity must name its class TypeDef");
+            };
+            let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+                panic!("Flagged must have a source template");
+            };
+            let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+                panic!("Flagged must have a primary constructor");
+            };
+            let source_fields = constructor.value_param_clauses[0]
+                .iter()
+                .map(|tree| {
+                    let TreeKind::ValDef(field) = &parsed.ast.get(*tree).kind else {
+                        panic!("Flagged constructor fields must be ValDefs");
+                    };
+                    let TreeKind::Ident(field_type) = &parsed.ast.get(field.tpt).kind else {
+                        panic!("Flagged field types must be concrete identifiers");
+                    };
+                    (
+                        store.names.resolve(field.name.as_name().text()).to_owned(),
+                        store.names.resolve(field_type.name.text()).to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                source_fields,
+                [
+                    ("value".to_owned(), "Int".to_owned()),
+                    ("enabled".to_owned(), "Boolean".to_owned())
+                ]
+            );
+            let fields = constructor.value_param_clauses[0]
+                .iter()
+                .map(|tree| {
+                    let field = index
+                        .symbol_at(source, *tree)
+                        .expect("original canonical constructor field");
+                    assert_eq!(store.symbols.get(field).kind, SymbolKind::Field);
+                    assert_eq!(store.symbols.get(field).owner, Some(class));
+                    assert_eq!(
+                        store.symbols.get(field).origin,
+                        SymbolOrigin::Source(source)
+                    );
+                    assert_eq!(
+                        index.definition_of(field),
+                        Some(SourceDefinition::Canonical {
+                            source,
+                            tree: *tree,
+                        })
+                    );
+                    field
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(fields.len(), 2);
+            assert_ne!(fields[0], fields[1]);
+
+            let unapply_input = index
+                .derived_symbol_at(unapply, source, class_tree)
+                .expect("unapply's method-owned synthetic input");
+            let apply_input = index
+                .derived_symbol_at(apply, source, constructor.value_param_clauses[0][0])
+                .expect("apply's distinct source field formal");
+            assert_ne!(unapply_input, fields[0]);
+            assert_ne!(unapply_input, fields[1]);
+            assert_ne!(unapply_input, apply_input);
+            assert_eq!(store.symbols.get(unapply_input).owner, Some(unapply));
+
+            let (selected_method, selected_rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, "selected");
+            let context = ExpressionContext {
+                lexical: index.declaration_context_of(selected_method).unwrap(),
+                owner: selected_method,
+                local_scopes: None,
+            };
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let selected = typer
+                .type_expression(selected_rhs, context)
+                .expect("ordinary companion member lookup should resolve unapply");
+            let selected_type = typer.typed_ast().get(selected).ty;
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(selected_symbol),
+                ..
+            } = typer.store().types.get(selected_type)
+            else {
+                panic!("Flagged.unapply selection must resolve to its method symbol");
+            };
+            assert_eq!(*selected_symbol, unapply);
+
+            let signature = typer
+                .complete_symbol(unapply)
+                .expect("generated Product2 unapply signature should complete");
+            let Type::Method(method) = typer.store().types.get(signature) else {
+                panic!("generated unapply must have a plain MethodType");
+            };
+            assert_eq!(method.kind, MethodKind::Plain);
+            assert_eq!(method.params.len(), 1);
+            assert!(!method.params[0].erased);
+            assert!(!method.params[0].varargs);
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(method.params[0].name.as_name().text()),
+                "x$1"
+            );
+            assert_eq!(method.params[0].ty, method.result);
+            assert_eq!(type_symbol(typer.store(), method.params[0].ty), class);
+            assert_eq!(type_symbol(typer.store(), method.result), class);
+            let Type::TypeRef {
+                target: TypeRefTarget::Symbol(input_class),
+                ..
+            } = typer.store().types.get(method.params[0].ty)
+            else {
+                panic!("unapply input must be the canonical Flagged TypeRef");
+            };
+            let Type::TypeRef {
+                target: TypeRefTarget::Symbol(result_class),
+                ..
+            } = typer.store().types.get(method.result)
+            else {
+                panic!("unapply result must be the canonical Flagged TypeRef");
+            };
+            assert_eq!(*input_class, class);
+            assert_eq!(*result_class, class);
+            let companion_owner = typer.store().symbols.get(unapply).owner.unwrap();
+            assert_eq!(
+                typer.store().symbols.get(companion_owner).kind,
+                SymbolKind::ModuleClass
+            );
+            assert_eq!(
+                *typer.store().symbols.info(unapply_input),
+                SymbolInfo::Complete(method.params[0].ty)
+            );
+            assert_eq!(
+                *typer.store().symbols.info(unapply),
+                SymbolInfo::Complete(signature)
+            );
+            for field in fields {
+                assert_eq!(
+                    *typer.store().symbols.info(field),
+                    SymbolInfo::Missing,
+                    "signature completion must not complete or replace the original fields"
+                );
+            }
+            let repeated_signature = typer
+                .complete_symbol(unapply)
+                .expect("repeated completion should be idempotent");
+            assert_eq!(repeated_signature, signature);
+            let apply_signature = typer
+                .complete_symbol(apply)
+                .expect("the separate generated apply signature must remain supported");
+            let Type::Method(apply_method) = typer.store().types.get(apply_signature) else {
+                panic!("generated apply must remain a plain method");
+            };
+            assert_eq!(apply_method.kind, MethodKind::Plain);
+            assert_eq!(apply_method.params.len(), 2);
+            assert_eq!(apply_method.params[0].ty, typer.definitions.int);
+            assert_eq!(apply_method.params[1].ty, typer.definitions.boolean);
+            assert_eq!(type_symbol(typer.store(), apply_method.result), class);
+            let apply_enabled_input = index
+                .derived_symbol_at(apply, source, constructor.value_param_clauses[0][1])
+                .expect("generated apply's independent enabled formal");
+            assert_ne!(apply_input, unapply_input);
+            assert_ne!(apply_enabled_input, unapply_input);
+            assert_eq!(typer.store().symbols.get(apply_input).owner, Some(apply));
+            assert_eq!(
+                typer.store().symbols.get(apply_enabled_input).owner,
+                Some(apply)
+            );
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(apply_method.params[0].name.as_name().text()),
+                "value"
+            );
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(apply_method.params[1].name.as_name().text()),
+                "enabled"
+            );
+
+            format!(
+                "class=Flagged; fields=value:Int,enabled:Boolean; class_owner=source; companion_owner={}; unapply_owner={}; input_owner=unapply; signature=(Flagged):Flagged; plain=true; erased=false; varargs=false",
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(companion_owner).name.text()),
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(unapply).name.text()),
+            )
+        }
+
+        let canonical = analyze("case class Earlier(flag: Boolean); case class Later(code: Int);");
+        assert_eq!(
+            analyze("case class Earlier(flag: Boolean); case class Later(code: Int);"),
+            canonical,
+            "fresh stores should preserve semantic identity and type receipts"
+        );
+        assert_eq!(
+            analyze("case class Later(code: Int); case class Earlier(flag: Boolean);"),
+            canonical,
+            "reordering sibling declarations should not change Flagged's semantic receipt"
+        );
+    }
+
+    #[test]
     fn generated_case_class_unapply_validates_and_rolls_back_source_class_info() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "package scala { trait Product }; package matching { case class Broken(value: Int) extends MissingParent; case class Good(value: Int) }",
+            "package scala { trait Product }; package matching { case class Broken(value: Int) extends MissingParent; case class Good(value: Int, enabled: Boolean) }",
         );
         let broken = class_symbol(&parsed, &store, &index, source, "Broken");
         let broken_unapply = index
@@ -4053,6 +4296,9 @@ mod tests {
             "package scala { trait Product }; case class Mutable(var value: Int)",
             "package scala { trait Product }; case class Generic[A](value: Int)",
             "package scala { trait Product }; class Int; case class Shadowed(value: Int)",
+            "package scala { trait Product }; case class Defaulted(value: Int = 1, enabled: Boolean)",
+            "package scala { trait Product }; case class Multiple(value: Int)(enabled: Boolean)",
+            "package scala { trait Product }; case class Repeated(value: Int*)",
         ] {
             let (parsed, mut store, packages, definitions, index, source) =
                 parse_and_name(source_text);
@@ -4098,6 +4344,184 @@ mod tests {
             deferred_shapes > 0,
             "at least one unsupported method must reach Typer"
         );
+    }
+
+    #[test]
+    fn non_case_classes_and_explicit_unapply_collisions_have_no_generated_role() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { trait Product }; package matching { class Ordinary(value: Int); case class Collision(value: Int, enabled: Boolean); object Collision { def unapply(x: Collision): Collision = x } }",
+        );
+        let ordinary = class_symbol(&parsed, &store, &index, source, "Ordinary");
+        let collision = class_symbol(&parsed, &store, &index, source, "Collision");
+        assert_eq!(
+            index.generated_case_class_method(
+                ordinary,
+                dotty_core::GeneratedCaseClassMethodRole::Unapply,
+            ),
+            None,
+            "an ordinary class has no generated case-class unapply role"
+        );
+        assert_eq!(
+            index.generated_case_class_method(
+                collision,
+                dotty_core::GeneratedCaseClassMethodRole::Unapply,
+            ),
+            None,
+            "an explicit companion unapply collision must not acquire the generated role"
+        );
+        let explicit = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "unapply" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("explicit collision source method");
+        assert_eq!(index.generated_case_class_method_identity(explicit), None);
+        store.symbols.get_mut(explicit).flags = store
+            .symbols
+            .get(explicit)
+            .flags
+            .union(SymbolFlags::SYNTHETIC);
+        assert_eq!(
+            index.generated_case_class_method_identity(explicit),
+            None,
+            "a synthetic flag alone cannot forge the generated source role"
+        );
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let signature = typer
+            .complete_symbol(explicit)
+            .expect("the explicit source collision remains an ordinary method");
+        let Type::Method(method) = typer.store().types.get(signature) else {
+            panic!("explicit unapply must retain its ordinary source method type");
+        };
+        assert_eq!(method.params.len(), 1);
+        assert_eq!(type_symbol(typer.store(), method.params[0].ty), collision);
+        assert_eq!(type_symbol(typer.store(), method.result), collision);
+    }
+
+    #[test]
+    fn generated_product2_unapply_rejects_forged_provenance_and_field_identities() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { trait Product }; package matching { case class Flagged(value: Int, enabled: Boolean); object Flagged { val marker = 1 }; case class Other(code: Int) }",
+        );
+        let flagged = class_symbol(&parsed, &store, &index, source, "Flagged");
+        let other = class_symbol(&parsed, &store, &index, source, "Other");
+        let unapply = index
+            .generated_case_class_method(flagged, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .expect("Flagged.unapply identity");
+        let apply = index
+            .generated_case_class_method(flagged, dotty_core::GeneratedCaseClassMethodRole::Apply)
+            .expect("Flagged.apply identity");
+        let SourceDefinition::Canonical {
+            tree: class_tree, ..
+        } = index.definition_of(flagged).unwrap()
+        else {
+            panic!("Flagged must retain its canonical source definition");
+        };
+        let unapply_input = index
+            .derived_symbol_at(unapply, source, class_tree)
+            .expect("method-owned synthetic formal");
+        let TreeKind::TypeDef(class_definition) = &parsed.ast.get(class_tree).kind else {
+            panic!("Flagged must remain a class TypeDef");
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+            panic!("Flagged must retain its source template");
+        };
+        let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+            panic!("Flagged must retain its primary constructor");
+        };
+        let second_field = index
+            .symbol_at(source, constructor.value_param_clauses[0][1])
+            .expect("enabled source field");
+        let class_companion = store.symbols.get(flagged).links.companion.unwrap();
+        let wrong_companion = store.symbols.get(other).links.companion.unwrap();
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let wrong_owner = typer
+            .source_module_class_of_object(wrong_companion)
+            .expect("Other's canonical companion module class");
+
+        typer.store.symbols.get_mut(flagged).links.companion = None;
+        let checkpoint = typer.store.checkpoint();
+        let error = typer
+            .complete_symbol(unapply)
+            .expect_err("a missing class companion must not authenticate generated unapply");
+        assert!(matches!(error, TyperError::SymbolSourceKindMismatch { .. }));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        typer.store.symbols.get_mut(flagged).links.companion = Some(wrong_companion);
+        let error = typer
+            .complete_symbol(unapply)
+            .expect_err("a wrong class companion must not authenticate generated unapply");
+        assert!(matches!(error, TyperError::SymbolSourceKindMismatch { .. }));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        typer.store.symbols.get_mut(flagged).links.companion = Some(class_companion);
+
+        let saved_owner = typer.store.symbols.get(unapply).owner;
+        typer.store.symbols.get_mut(unapply).owner = Some(wrong_owner);
+        let error = typer
+            .complete_symbol(unapply)
+            .expect_err("the generated method must remain under its source companion module class");
+        assert!(matches!(error, TyperError::SymbolSourceKindMismatch { .. }));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        typer.store.symbols.get_mut(unapply).owner = saved_owner;
+
+        let saved_input_owner = typer.store.symbols.get(unapply_input).owner;
+        typer.store.symbols.get_mut(unapply_input).owner = Some(apply);
+        let checkpoint = typer.store.checkpoint();
+        let error = typer
+            .complete_symbol(unapply)
+            .expect_err("a formal moved under apply must be rejected");
+        assert!(matches!(
+            error,
+            TyperError::MethodParameterSymbolMissing { .. }
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert_eq!(*typer.store().symbols.info(unapply), SymbolInfo::Missing);
+        assert_eq!(
+            *typer.store().symbols.info(unapply_input),
+            SymbolInfo::Missing
+        );
+        typer.store.symbols.get_mut(unapply_input).owner = saved_input_owner;
+
+        let saved_field_owner = typer.store.symbols.get(second_field).owner;
+        typer.store.symbols.get_mut(second_field).owner = Some(other);
+        let checkpoint = typer.store.checkpoint();
+        let error = typer
+            .complete_symbol(unapply)
+            .expect_err("the second source field's wrong owner must be rejected");
+        assert!(matches!(error, TyperError::MalformedMethodClause { .. }));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert_eq!(*typer.store().symbols.info(unapply), SymbolInfo::Missing);
+        assert_eq!(*typer.store().symbols.info(flagged), SymbolInfo::Missing);
+        typer.store.symbols.get_mut(second_field).owner = saved_field_owner;
+        let retry = typer
+            .complete_symbol(unapply)
+            .expect("valid source fields should complete after repairing corrupted ownership");
+        let Type::Method(retry_method) = typer.store().types.get(retry) else {
+            panic!("recovered generated unapply must remain a plain method");
+        };
+        assert_eq!(retry_method.params.len(), 1);
+        assert_eq!(type_symbol(typer.store(), retry_method.result), flagged);
     }
 
     #[test]
