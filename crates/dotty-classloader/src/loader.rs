@@ -1268,6 +1268,19 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 tasty_symbol::TastyDecodeError::Parse(error),
             ))
         })?;
+        let packages = file
+            .ast_nodes_with_tag(dotty_tasty::tasty::PACKAGE_TAG)
+            .map_err(|error| {
+                SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                    name.clone(),
+                    tasty_symbol::TastyDecodeError::Parse(error),
+                ))
+            })?;
+        if packages.len() != 1 {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "Option.tasty must not contain nested package trees",
+            ));
+        }
         let package = asts
             .get(0)
             .filter(|node| node.tag == dotty_tasty::tasty::PACKAGE_TAG)
@@ -6888,6 +6901,81 @@ mod tests {
         bytes[start..start + to.len()].copy_from_slice(to);
     }
 
+    fn option_fixture_with_nested_foreign_package(bytes: &[u8]) -> Vec<u8> {
+        use dotty_tasty::tasty::{
+            EncodedSection, NameTable, PackageNode, RawName, RawNodes, RawTree, Reader,
+            StandardSection, TERMREFPKG_TAG, TastyFile, TastyFileBuilder, TermValue, Writer,
+        };
+
+        let file = TastyFile::parse(bytes).expect("pinned Option fixture parses");
+        let ast_section = file
+            .section(StandardSection::Asts)
+            .expect("Option fixture AST section");
+        let mut ast_reader = ast_section.reader();
+        let roots = RawNodes::decode(&mut ast_reader).expect("Option root AST node");
+        let mut outer = roots
+            .get(0)
+            .expect("one outer package tree")
+            .decode_package()
+            .expect("outer package node");
+        let nested_member = file
+            .ast_address_index()
+            .expect("Option AST index")
+            .get(666)
+            .expect("selected method declaration")
+            .clone();
+
+        let mut name_builder = NameTable::builder();
+        for (_, name) in file.names().iter() {
+            name_builder
+                .intern(name.clone())
+                .expect("copy original TASTy name");
+        }
+        let foreign_package = name_builder
+            .intern(RawName::Utf8("other".to_owned()))
+            .expect("intern foreign package name");
+        let names = name_builder.finish().expect("valid copied name table");
+
+        let nested = PackageNode {
+            path: RawTree::leaf(TERMREFPKG_TAG, TermValue::NameRef(foreign_package))
+                .expect("absolute foreign package path"),
+            stats: RawNodes::from_entries(vec![nested_member])
+                .expect("selected member is a valid nested declaration"),
+        };
+        let mut nested_bytes = Writer::new();
+        nested
+            .encode(&mut nested_bytes)
+            .expect("encode nested foreign package");
+        let mut nested_reader = Reader::new(nested_bytes.as_slice());
+        let nested_node = RawNodes::decode(&mut nested_reader)
+            .expect("encoded nested package AST")
+            .get(0)
+            .expect("nested package node")
+            .clone();
+
+        let mut outer_stats = outer.stats.iter().cloned().collect::<Vec<_>>();
+        outer_stats.push(nested_node);
+        outer.stats = RawNodes::from_entries(outer_stats).expect("extended outer package stats");
+        let mut outer_bytes = Writer::new();
+        outer
+            .encode(&mut outer_bytes)
+            .expect("encode outer scala package");
+        let mut outer_reader = Reader::new(outer_bytes.as_slice());
+        let encoded_roots = RawNodes::decode(&mut outer_reader).expect("one encoded outer tree");
+        let encoded_asts = EncodedSection::asts(ast_section.name, &encoded_roots)
+            .expect("encode AST section with nested package");
+
+        let mut builder = TastyFileBuilder::new(file.header().clone(), names);
+        for section in file.sections().iter() {
+            if section.standard_kind(file.names()) == Some(StandardSection::Asts) {
+                builder.push_section(encoded_asts.clone());
+            } else {
+                builder.push_section(EncodedSection::raw(section.name, section.payload.to_vec()));
+            }
+        }
+        builder.encode().expect("encode nested-package fixture")
+    }
+
     fn info_pair_graph(
         store: &SemanticStore,
         base: SymbolId,
@@ -7400,6 +7488,121 @@ mod tests {
                 .collect::<HashSet<_>>(),
             other_members,
             "successful retry does not publish declarations in the foreign package"
+        );
+    }
+
+    #[test]
+    fn option_get_or_else_rejects_nested_package_before_entry_and_preserves_foreign_scope() {
+        use dotty_tasty::tasty::{PACKAGE_TAG, TastyFile};
+
+        let good_bytes = option_get_or_else_fixture_bytes();
+        let mut renamed_bytes = good_bytes.clone();
+        // Without the nested-package guard, this reaches the adapter's later
+        // selected-member validation after both package scopes are entered.
+        replace_fixture_text(&mut renamed_bytes, b"getOrElse", b"getOrElsn");
+        let nested_bytes = option_fixture_with_nested_foreign_package(&renamed_bytes);
+        let parsed = TastyFile::parse(&nested_bytes).expect("nested fixture parses");
+        let package_nodes = parsed.ast_nodes_with_tag(PACKAGE_TAG).unwrap();
+        assert_eq!(package_nodes.len(), 2, "one nested package was added");
+        let addresses = parsed.ast_address_index().expect("nested fixture index");
+        let outer_address = u32::try_from(package_nodes[0].offset).unwrap();
+        let outer_package = addresses
+            .get(outer_address)
+            .expect("outer package address")
+            .decode_package()
+            .expect("outer package structure");
+        assert_eq!(
+            outer_package
+                .path_name()
+                .and_then(|reference| parsed.render_name(reference).ok())
+                .as_deref(),
+            Some("scala")
+        );
+        let nested_address = u32::try_from(package_nodes[1].offset).unwrap();
+        let nested_package = addresses
+            .get(nested_address)
+            .expect("nested package address")
+            .decode_package()
+            .expect("nested package structure");
+        assert_eq!(
+            nested_package
+                .path_name()
+                .and_then(|reference| parsed.render_name(reference).ok())
+                .as_deref(),
+            Some("other")
+        );
+        assert_eq!(nested_package.stats.len(), 1);
+        assert_eq!(
+            nested_package.stats.get(0).map(|node| node.tag),
+            Some(dotty_tasty::tasty::DEFDEF_TAG),
+            "the nested foreign package contains a valid method declaration"
+        );
+        let method = addresses.get(666).expect("selected method address");
+        let dotty_tasty::tasty::DefinitionNode::DefDef { name, .. } = method
+            .decode_definition()
+            .expect("selected method declaration")
+        else {
+            panic!("selected member is a method declaration");
+        };
+        assert_eq!(parsed.render_name(name).unwrap(), "getOrElsn");
+
+        let (selected_path, resources) = option_fixture_shared_path(nested_bytes);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(option_get_or_else_class_path(selected_path), &mut store);
+        let other_package = loader
+            .session
+            .packages
+            .resolve_package(loader.store, "other");
+        let other_scope = loader
+            .session
+            .packages
+            .scope_of(other_package)
+            .expect("pre-existing nested destination package scope");
+        let other_members = loader
+            .store
+            .scopes
+            .get(other_scope)
+            .entered_symbols()
+            .collect::<HashSet<_>>();
+        let checkpoint = loader.store.checkpoint();
+
+        assert!(matches!(
+            loader.load_option_get_or_else_with_tasty_unpickler(),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "Option.tasty must not contain nested package trees"
+            ))
+        ));
+        assert_eq!(loader.store.checkpoint(), checkpoint);
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(other_scope)
+                .entered_symbols()
+                .collect::<HashSet<_>>(),
+            other_members,
+            "nested-package rejection leaves the destination scope untouched"
+        );
+        assert_eq!(loader.session.packages.get(&["other"]), Some(other_package));
+        assert!(loader.option_get_or_else_tasty_loaded.is_none());
+
+        *resources.lock().unwrap() =
+            HashMap::from([(BinaryName::from_internal("scala/Option"), good_bytes)]);
+        let method = loader
+            .load_option_get_or_else_with_tasty_unpickler()
+            .expect("valid selected fixture retries successfully");
+        let (root, cached_method) = loader.option_get_or_else_tasty_loaded.unwrap();
+        assert_eq!(method, cached_method);
+        assert_eq!(loader.store.symbols.get(method).owner, Some(root));
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(other_scope)
+                .entered_symbols()
+                .collect::<HashSet<_>>(),
+            other_members,
+            "valid retry leaves the foreign package scope unchanged"
         );
     }
 
