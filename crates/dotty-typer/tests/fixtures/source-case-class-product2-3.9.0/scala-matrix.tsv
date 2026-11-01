@@ -1,0 +1,10 @@
+WrongArityOne	rejected
+WrongArityThree	rejected
+WrongLiteralTypes	rejected
+WrongResult	rejected
+ReversedFields	accepted
+ExplicitSelectorResultMismatch	rejected
+ExplicitSelectors	accepted
+ExplicitUnapplyCollision	accepted_with_warning
+OrdinaryNonCase	rejected
+UnrelatedSameNameExtractor	accepted_with_warning

@@ -1,0 +1,9 @@
+-- [E172] Type Error: WrongLiteralTypes.scala:5:17 -----------------------------
+5 |    case Flagged(true, 1) => 0
+  |                 ^^^^
+  |          Values of types Boolean and Int cannot be compared with == or !=
+-- [E172] Type Error: WrongLiteralTypes.scala:5:23 -----------------------------
+5 |    case Flagged(true, 1) => 0
+  |                       ^
+  |          Values of types Int and Boolean cannot be compared with == or !=
+2 errors found

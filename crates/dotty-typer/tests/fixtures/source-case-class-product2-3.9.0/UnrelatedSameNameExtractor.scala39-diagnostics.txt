@@ -1,0 +1,9 @@
+-- [E029] Pattern Match Exhaustivity Warning: UnrelatedSameNameExtractor.scala:7:35
+7 |  def select(item: Foreign): Int = item match
+  |                                   ^^^^
+  |                     match may not be exhaustive.
+  |
+  |                     It would fail on pattern case: matching.Foreign(_, _)
+  |
+  | longer explanation available when compiling with `-explain`
+1 warning found

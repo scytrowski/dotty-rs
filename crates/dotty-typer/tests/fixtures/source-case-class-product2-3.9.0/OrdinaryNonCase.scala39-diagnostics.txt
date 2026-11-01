@@ -1,0 +1,13 @@
+-- [E127] Pattern Match Error: OrdinaryNonCase.scala:5:9 -----------------------
+5 |    case Ordinary(value, enabled) => value
+  |         ^^^^^^^^
+  |matching.Ordinary cannot be used as an extractor in a pattern because it lacks an unapply or unapplySeq method with the appropriate signature
+  |
+  | longer explanation available when compiling with `-explain`
+-- [E006] Not Found Error: OrdinaryNonCase.scala:5:37 --------------------------
+5 |    case Ordinary(value, enabled) => value
+  |                                     ^^^^^
+  |                                  Not found: value - did you mean valueOf?
+  |
+  | longer explanation available when compiling with `-explain`
+2 errors found
