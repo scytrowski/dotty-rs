@@ -87,12 +87,25 @@ across two fresh sessions. The raw execution trace SHA-256 is
 normalized comparison TSV SHA-256 is
 `6065fa5947a988166831434fd01610d5f367646559b9c34ea75139cdcbc36eba`.
 
-The no-candidate reassessment trigger is met. Making the frozen integration
-candidates complete would require changes to external semantic resolution or
-its bootstrap contracts, beyond this audit's tests/tooling/docs scope. No
-negative-control suite or repository-wide validation was run after that gate;
-this measurement is evidence for scope reassessment, not a completed issue
-receipt or a parity claim. The original pre-resolver run remains preserved at
+Neither frozen integration candidate qualifies, as permitted by the issue's
+DoD when the report explains why no candidate qualifies. The negative controls
+reject a one-byte truncation of a real TASTy fixture, confirm a missing JDK
+dependency is explicit and rolls back classloader semantic allocations, then
+successfully load an unrelated real fixture with a complete classpath in the
+same store. The existing unpickler identity regression
+`references_to_same_named_classes_resolve_by_address_not_by_name` verifies two
+real `Inner` classes remain owned by distinct `Left` and `Right` classes; the
+unpickler's `unmodelled_types_are_explicitly_unsupported` regression covers an
+unknown semantic type shape. The frozen `scala/Tuple2` applied-parent case
+retains the legacy loader's `UnresolvedSupertype` and the unpickler's first
+unresolved `scala.Nothing` reference, neither of which counts as equality or a
+supported shape. The unpickler regression
+`a_failed_decode_takes_back_everything_it_allocated` checks its store rollback.
+The two-adapter matrix runs twice in independent fresh sessions and requires
+byte-identical normalized output.
+Making the frozen integration candidates complete would require changes to
+external semantic resolution or its bootstrap contracts, beyond this audit's
+tests/tooling/docs scope. The original pre-resolver run remains preserved at
 `target/parity-run.txt` in the prior #1927 worktree with SHA-256
 `61a7f0e069c46ee0b492da9e8b78ed7347f7439ab2f9f93afe7e2771a7c9c448`.
 This boundary is also explicit in the

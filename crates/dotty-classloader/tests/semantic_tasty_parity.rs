@@ -156,12 +156,38 @@ fn classpath() -> CompositeClassPath {
             root.join("../dotty-tasty/tests/fixtures/path_dependent"),
         )),
     ];
+    entries.push(jdk_classpath());
+    CompositeClassPath::new(entries)
+}
+
+fn classpath_without_jdk() -> CompositeClassPath {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let entries: Vec<Box<dyn dotty_classloader::classloader::ClassPathEntry>> = vec![
+        Box::new(DirectoryClassPath::new(
+            root.join("tests/fixtures/tasty_sample"),
+        )),
+        Box::new(DirectoryClassPath::new(
+            root.join("tests/fixtures/tasty_fields"),
+        )),
+        Box::new(DirectoryClassPath::new(
+            root.join("tests/fixtures/tasty_visibility"),
+        )),
+        Box::new(DirectoryClassPath::new(
+            root.join("../dotty-tasty/tests/fixtures/scala3-library"),
+        )),
+        Box::new(DirectoryClassPath::new(
+            root.join("../dotty-tasty/tests/fixtures/path_dependent"),
+        )),
+    ];
+    CompositeClassPath::new(entries)
+}
+
+fn jdk_classpath() -> Box<dyn dotty_classloader::classloader::ClassPathEntry> {
     let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required for this audit");
-    entries.push(Box::new(
+    Box::new(
         JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
             .expect("real JAVA_HOME jmods should be readable"),
-    ));
-    CompositeClassPath::new(entries)
+    )
 }
 
 fn root_definition_address(
@@ -225,7 +251,7 @@ fn run_once(units: &[Unit]) -> String {
     for unit in units {
         let bytes = fs::read(&unit.path).expect("frozen bytes");
         let file = TastyFile::parse(&bytes).expect("cohort already structurally validated");
-        let simple_name = unit.lookup.rsplit('/').next().unwrap_or(&unit.lookup);
+        let simple_name = unit.lookup.rsplit('/').next().unwrap_or(unit.lookup);
         let mut unpickler = TastyUnpickler::with_session(
             &file,
             &mut unpickler_store,
@@ -338,19 +364,16 @@ fn observation_field_outcome(
 fn field_outcome(adapter: &str, value: &str) -> Option<&'static str> {
     if value.contains("unresolved-type-name") || value.contains("unresolved-term-name") {
         Some("UNRESOLVED_EXTERNAL")
-    } else if value.contains("<missing>") || value.contains("<deferred>") {
-        Some(if adapter == "LOADER" {
-            "LOADER_UNSUPPORTED"
-        } else {
-            "UNPICKLER_UNSUPPORTED"
-        })
-    } else if value.contains("<error>") || value.contains("Error(") {
-        Some(if adapter == "LOADER" {
-            "LOADER_UNSUPPORTED"
-        } else {
-            "UNPICKLER_UNSUPPORTED"
-        })
-    } else if value.contains("unknown-semantic-type-shape") {
+    } else if [
+        "<missing>",
+        "<deferred>",
+        "<error>",
+        "Error(",
+        "unknown-semantic-type-shape",
+    ]
+    .iter()
+    .any(|marker| value.contains(marker))
+    {
         Some(if adapter == "LOADER" {
             "LOADER_UNSUPPORTED"
         } else {
@@ -470,9 +493,9 @@ fn normalized_symbol(store: &SemanticStore, id: SymbolId) -> String {
                             SymbolInfo::Error => "<error>".into(),
                         };
                         format!(
-                            "{}:{}:{}:{}",
+                            "{}:{:?}:{}:{}",
                             name,
-                            format!("{:?}", member.kind),
+                            member.kind,
                             visibility(store, &member.visibility),
                             ty
                         )
@@ -692,4 +715,64 @@ fn frozen_cohort_is_complete_and_both_fresh_adapter_runs_are_deterministic() {
         );
     }
     assert_eq!(keys.len(), units.len() * FIELDS.len());
+}
+
+#[test]
+fn malformed_and_missing_dependency_failures_preserve_store_and_allow_retry() {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let bootstrapped = store.checkpoint();
+
+    let valid = fs::read(
+        units()
+            .into_iter()
+            .find(|unit| unit.id == "visibility-open")
+            .expect("frozen real TASTy fixture")
+            .path,
+    )
+    .expect("frozen fixture bytes");
+    let truncated = TastyFile::parse(&valid[..valid.len() - 1]);
+    assert!(
+        truncated.is_err(),
+        "a one-byte truncation of a real fixture must be rejected"
+    );
+    assert_eq!(store.checkpoint(), bootstrapped);
+
+    let mut session = LoadingSession::new();
+    let missing_dependency = {
+        let mut loader = ClassLoader::with_definitions(
+            classpath_without_jdk(),
+            &mut store,
+            definitions,
+            session,
+        );
+        let result = loader.load_class(&BinaryName::from_internal("Dog"));
+        session = loader.into_session();
+        result
+    };
+    let error = missing_dependency.expect_err("Dog's java.lang.Object dependency is absent");
+    assert!(
+        format!("{error:?}").contains("NotFound")
+            || format!("{error:?}").contains("DependencyFailure"),
+        "missing dependency must remain explicit: {error:?}"
+    );
+    assert_eq!(
+        store.checkpoint(),
+        bootstrapped,
+        "failed dependency loading must roll back semantic allocations"
+    );
+
+    let recovered = {
+        let mut loader =
+            ClassLoader::with_definitions(classpath(), &mut store, definitions, session);
+        loader.load_class(&BinaryName::from_internal(
+            "me/cytrowski/tastyfixtures/visibility/Open",
+        ))
+    }
+    .expect("a fresh classpath can complete valid work after the failed load");
+    assert_eq!(
+        symbol_path(&store, recovered),
+        "me.cytrowski.tastyfixtures.visibility.Open"
+    );
+    assert_ne!(store.checkpoint(), bootstrapped);
 }
