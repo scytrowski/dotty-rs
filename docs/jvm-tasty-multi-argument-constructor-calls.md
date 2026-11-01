@@ -497,14 +497,34 @@ mandatory JDK 21 verification gate.
 
 ## Integrated release evidence for issue #1920
 
-This closeout was run from integrated `main` baseline
-`b2c7fee27ef2dec416706f59abda050be35d2c4b`, which contains merged prerequisites
-#1913–#1919. It adds only a strict runtime receipt normalization and this
-evidence ledger; no compiler semantics, ABI, or code generation changed. The
-release gate used the Scala 3.9.0 source revision
+This closeout's final release gates were rerun from integrated `main` baseline
+`d313e26facea1c7640272f535155e418fb59339c`. It contains prerequisites
+#1913–#1919 and the intervening merged PRs #1950 and #1953. The initial
+verification pass used predecessor baseline
+`b2c7fee27ef2dec416706f59abda050be35d2c4b`; its validation logs are not used
+as evidence for the final baseline. This issue adds only a strict runtime
+receipt normalization and this evidence ledger; it changes no compiler
+semantics, ABI, or code generation. The release gate used the Scala 3.9.0 source revision
 `777528f19a58e794c9954a42f433373472ec57f8`, staged compiler JAR SHA-256
 `172c8b8384e75ee24d327fce5ec788582bf314f66bf9983ba57e0cac6c3ff498`, Temurin
 JDK `21.0.13`, and the two published runtime library hashes recorded above.
+
+The preceding issue evidence was reviewed and merged on these distinct heads:
+
+| Prerequisite | Merged PR | Tested PR head | Merge commit |
+| --- | --- | --- | --- |
+| #1913 | #1923 | `da8ae07a1690af39f36df52625eb39061a46a009` | `b85bcd291d9af425bd3e439476b2a2c7fc03fe16` |
+| #1914 | #1925 | `f41ff248b94aa340bdc02e6ae77ba378b4aa9dbe` | `2894d8c969e0d210b3f461d35e08d55daf6b2227` |
+| #1915 | #1932 | `3db89c996e470e053ef1b08d8d3774224d3ce401` | `0e66ab92d5ec115236691a1ef6b2adb72f0e42fa` |
+| #1916 | #1939 | `be24cc9478552684184b7326d72209d206dd3601` | `6c4ec4609d8d76f30f69cf911caa4d927d00740d` |
+| #1917 | #1943 | `7cac3392a3541f1911f32fc85363552ad2f1c2ae` | `bf637fb9000914beee58038880f57dab5ab23154` |
+| #1918 | #1947 | `3841713ea32feb1fa7e364e8972e3185da2eef2b` | `fd31a4f3dad7d0edac926997763e18637c323d0b` |
+| #1919 | #1949 | `95e45e3d55b3b6a32d5987e79aa3a499843d3360` | `9198d8c8541cbb95930d89ba8521ef744ca13edc` |
+
+Those head receipts belong to their prerequisite reviews. This section records
+the integrated #1920 revalidation at `d313e26facea1c7640272f535155e418fb59339c`;
+the final strict run reproduced the six original artifact hashes and UUID
+links shown in the #1919 evidence above.
 
 The acceptance criteria reconcile to the following evidence:
 
@@ -521,13 +541,13 @@ The acceptance criteria reconcile to the following evidence:
 | AC-9 strict toolchain and repository gates | All required Scala-consumer opt-ins, the oracle, JDK 21 gate, formatting, frontend boundary guard, Clippy, rustdoc, and `cargo test --workspace --all-targets --locked` ran with no required opt-in gate skipped. The regular suites retain their explicitly ignored tests. |
 | AC-10 evidence and deferred boundaries | This ledger separates observed behavior from unsupported scope. The supported contract remains the exact two-argument direct-sibling fixture and bounded pending-object shape covered by the linked tests; the limits listed below remain deferred. |
 
-The ordered checkpoints in the issue scope record completed as follows: (1)
-the integrated baseline and prerequisite PRs were reconciled; (2) the canonical
-producer session and six artifacts were verified; (3) negative inputs and
-publication faults were exercised; (4) independent Java and pinned Scala
-acceptance passed; (5) strict Scala, JDK, and repository gates passed with all
-required opt-ins enabled; and (6) this ledger records the evidence and scope
-limits. A runtime receipt initially included the JVM's `Picked up
+The ordered checkpoints in the issue scope record completed against the final
+baseline as follows: (1) integrated `main` and the prerequisite history were
+reconciled; (2) the canonical producer session and six artifacts were verified;
+(3) negative inputs and publication faults were exercised; (4) independent
+Java and pinned Scala acceptance passed; (5) strict Scala, JDK, and repository
+gates passed with all required opt-ins enabled; and (6) this ledger records the
+evidence and scope limits. A runtime receipt initially included the JVM's `Picked up
 JAVA_TOOL_OPTIONS:` banner before the expected linkage error. The harness now
 removes that environment banner from only the two linkage-error receipts before
 comparing and recording them; the underlying `NoSuchMethodError` and

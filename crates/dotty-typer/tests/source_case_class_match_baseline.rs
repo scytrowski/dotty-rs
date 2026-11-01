@@ -24,7 +24,7 @@ fn two_real_source_roots_have_a_stable_whole_method_baseline_in_fresh_sessions()
     let actual = format!("{}\n", first.join("\n"));
     assert_eq!(
         actual,
-        include_str!("fixtures/source-case-class-match-3.9.0/rust-after-unapply.tsv")
+        include_str!("fixtures/source-case-class-match-3.9.0/rust-after-product.tsv")
             .split_once('\n')
             .expect("baseline header")
             .1
@@ -136,12 +136,37 @@ fn analyze_session() -> Vec<String> {
         })
     );
     let class_scope = index.scope_of(class).expect("Box class scope");
-    assert!(
-        store
-            .scopes
-            .get(class_scope)
-            .lookup(TermName::new(store.names.intern("_1")).as_name())
-            .is_none()
+    let selector = store
+        .scopes
+        .get(class_scope)
+        .lookup(TermName::new(store.names.intern("_1")).as_name())
+        .expect("source-backed case class product selector");
+    let class_tree = match index.definition_of(class).expect("Box source definition") {
+        dotty_core::SourceDefinition::Canonical {
+            source: definition_source,
+            tree,
+        } if definition_source == source => tree,
+        definition => panic!("unexpected Box source definition: {definition:?}"),
+    };
+    let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
+        panic!("Box source tree must be a class definition");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+        panic!("Box RHS must be a template");
+    };
+    let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+        panic!("Box primary constructor must be a method");
+    };
+    let parameter_tree = constructor.value_param_clauses[0][0];
+    let canonical_field = index
+        .symbol_at(source, parameter_tree)
+        .expect("canonical Box.value field");
+    assert_eq!(store.symbols.get(canonical_field).kind, SymbolKind::Field);
+    assert_ne!(selector, canonical_field, "_1 has its own method identity");
+    assert_eq!(
+        index.derived_symbol_at(class, source, parameter_tree),
+        Some(selector),
+        "_1 provenance is tied to the original constructor parameter under Box"
     );
 
     let mut typer = SourceTyper::new(
@@ -185,34 +210,49 @@ fn analyze_session() -> Vec<String> {
                     typer.source_typed_index().get(source, tree).is_none(),
                     "failed retry cannot leave a typed root behind"
                 );
-                let (diagnostic_tree, diagnostic_span) = match &error {
+                match &error {
                     TyperError::ExtractorResultMemberNotFound {
                         tree_index,
                         source: error_source,
                         ..
-                    } if *error_source == source => parsed
-                        .ast
-                        .iter()
-                        .find_map(|(candidate, node)| {
-                            (candidate.index() == *tree_index).then_some((
-                                candidate.index(),
-                                node.position.expect("diagnostic source span"),
-                            ))
-                        })
-                        .expect("extractor error source tree"),
+                    } if *error_source == source => assert!(
+                        parsed
+                            .ast
+                            .iter()
+                            .any(|(candidate, _)| candidate.index() == *tree_index)
+                    ),
+                    TyperError::TypeNameNotFound {
+                        name: missing_name, ..
+                    } if typer.store().names.resolve(missing_name.text()) == "Product" => {}
                     _ => panic!("unexpected first post-signature baseline error: {error:?}"),
-                };
-                let diagnostic_range = diagnostic_span.span().range();
-                format!(
-                    "error:{error:?};diag_tree={diagnostic_tree};diag_bytes={}:{};typed_index=absent",
-                    diagnostic_range.start(),
-                    diagnostic_range.end(),
-                )
+                }
+                match error {
+                    TyperError::ExtractorResultMemberNotFound { tree_index, .. } => {
+                        let diagnostic_span = parsed
+                            .ast
+                            .iter()
+                            .find_map(|(candidate, node)| {
+                                (candidate.index() == tree_index)
+                                    .then_some(node.position.expect("diagnostic source span"))
+                            })
+                            .expect("extractor error source tree");
+                        let range = diagnostic_span.span().range();
+                        format!(
+                            "error:{error:?};diag_tree={tree_index};diag_bytes={}:{};typed_index=absent",
+                            range.start(),
+                            range.end(),
+                        )
+                    }
+                    TyperError::TypeNameNotFound { .. } => {
+                        format!("error:{error:?};product_dependency=unavailable;typed_index=absent")
+                    }
+                    _ => unreachable!("error variant was validated above"),
+                }
             }
         };
         let range = position.span().range();
         rows.push(format!(
-            "{name}\tpath=Positive.scala#tree{}\tsource={}\tbytes={}:{}\tbox_class={}\tbox_companion={}\tbox_module_class={}\tmoduleclass_link=absent\tapply=present\tunapply={}\tselector_1=absent\t{result}",
+            "{name}\tpath=Positive.scala#tree{}\tsource={}\tbytes={}:{}\tbox_class={}\tbox_companion={}\tbox_module_class={}\tmoduleclass_link=absent\tapply=present\tunapply={}\tselector_1=present\t{result}",
             tree.index(),
             position.source().index(),
             range.start(),
@@ -225,10 +265,12 @@ fn analyze_session() -> Vec<String> {
     }
     let signature = typer
         .complete_symbol(unapply)
-        .expect("a failed whole-method attempt must leave generated signature retryable");
+        .expect_err("missing scala.Product must leave generated signature retryable");
     assert!(matches!(
-        typer.store().types.try_get(signature),
-        Some(dotty_core::types::Type::Method(method)) if method.params.len() == 1
+        signature,
+        TyperError::TypeNameNotFound { name, .. }
+            if typer.store().names.resolve(name.text()) == "Product"
     ));
+    assert_eq!(*typer.store().symbols.info(unapply), SymbolInfo::Missing);
     rows
 }
