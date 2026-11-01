@@ -880,27 +880,37 @@ fn complete_open_constructor_once() -> OpenConstructorObservation {
         "class completion leaves its constructor pending"
     );
 
+    let batch_error = unpickler
+        .complete_symbols(&[constructor_address, u32::MAX])
+        .expect_err("the batch completes the constructor, then fails on an invalid address");
+    assert_eq!(
+        format!("{batch_error:?}"),
+        "MissingEnteredSymbol { address: 4294967295 }"
+    );
+    assert_eq!(
+        unpickler.symbol_state_at(constructor_address),
+        Some((SymbolKind::Constructor, SymbolInfo::Missing)),
+        "failed batch rolls back the constructor completion"
+    );
+    assert_eq!(
+        unpickler.symbol_state_at(class_address),
+        Some((SymbolKind::Class, SymbolInfo::Complete(class_info_type))),
+        "failed batch preserves completed class identity and info"
+    );
+    let rolled_back_type_count = unpickler.index().type_count();
     let constructor_type = unpickler
         .complete_symbol(constructor_address)
-        .expect("explicitly complete Open's original constructor DEFDEF");
+        .expect("retry the original constructor after batch rollback");
+    assert!(
+        unpickler.index().type_count() > rolled_back_type_count,
+        "retry reconstructs the constructor type allocations"
+    );
     let type_count = unpickler.index().type_count();
     assert_eq!(
         unpickler.complete_symbol(constructor_address),
         Ok(constructor_type)
     );
     assert_eq!(unpickler.index().type_count(), type_count);
-    let completed_class_state = unpickler.symbol_state_at(class_address);
-    let failure = unpickler
-        .complete_symbol(u32::MAX)
-        .expect_err("unknown address reports a typed completion failure");
-    assert_eq!(
-        format!("{failure:?}"),
-        "MissingEnteredSymbol { address: 4294967295 }"
-    );
-    assert_eq!(
-        unpickler.symbol_state_at(class_address),
-        completed_class_state
-    );
     drop(unpickler);
 
     let method = match store.types.get(constructor_type) {
