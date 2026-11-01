@@ -6412,8 +6412,8 @@ mod tests {
         let child_first = run("InfoWrapped");
         assert_eq!(parent_first, child_first);
         assert!(parent_first.1);
-        assert_eq!(parent_first.2, true);
-        assert_eq!(parent_first.3, true);
+        assert!(parent_first.2);
+        assert!(parent_first.3);
         assert!(parent_first.0.contains("parents=1"));
     }
 
