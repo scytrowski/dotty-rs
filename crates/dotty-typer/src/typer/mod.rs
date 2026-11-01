@@ -3811,7 +3811,7 @@ mod tests {
     #[test]
     fn generated_case_class_unapply_has_source_canonical_plain_signature_and_member_lookup() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "package matching { case class Box(value: Int); object Box { val marker = 1 }; case class Parcel(code: Int); object Probe { def selected = Box.unapply } }",
+            "package scala { trait Product }; package matching { case class Box(value: Int); object Box { val marker = 1 }; case class Parcel(code: Int); object Probe { def selected = Box.unapply } }",
         );
         let box_class = class_symbol(&parsed, &store, &index, source, "Box");
         let unapply = index
@@ -3952,7 +3952,7 @@ mod tests {
     #[test]
     fn generated_case_class_unapply_validates_and_rolls_back_source_class_info() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "package matching { case class Broken(value: Int) extends MissingParent; case class Good(value: Int) }",
+            "package scala { trait Product }; package matching { case class Broken(value: Int) extends MissingParent; case class Good(value: Int) }",
         );
         let broken = class_symbol(&parsed, &store, &index, source, "Broken");
         let broken_unapply = index
@@ -4047,12 +4047,12 @@ mod tests {
     fn unsupported_generated_case_class_unapply_shapes_defer_without_partial_signature() {
         let mut deferred_shapes = 0;
         for source_text in [
-            "case class Text(value: Boolean)",
-            "case class Empty()",
-            "case class Pair(left: Int, right: Int)",
-            "case class Mutable(var value: Int)",
-            "case class Generic[A](value: Int)",
-            "class Int; case class Shadowed(value: Int)",
+            "package scala { trait Product }; case class Text(value: Boolean)",
+            "package scala { trait Product }; case class Empty()",
+            "package scala { trait Product }; case class Pair(left: Int, right: Int)",
+            "package scala { trait Product }; case class Mutable(var value: Int)",
+            "package scala { trait Product }; case class Generic[A](value: Int)",
+            "package scala { trait Product }; class Int; case class Shadowed(value: Int)",
         ] {
             let (parsed, mut store, packages, definitions, index, source) =
                 parse_and_name(source_text);

@@ -6,8 +6,9 @@ Namer enters a distinct class-owned `_1` method identity derived from the
 original constructor parameter. Typer completes that selector as a
 parameterless `Int` method and adds the canonical `scala.Product` parent when
 that exact Product trait is found in the source package scope or through the
-existing symbol resolver. A resolved `scala` package with no unique Product
-defers completion transactionally, so a later resolution attempt can retry.
+existing symbol resolver. Missing or non-canonical `scala` package evidence,
+or a package with no unique Product, defers completion transactionally, so a
+later resolution attempt can retry.
 The generated selector can also be completed first; that route authenticates
 its derived source identity and completes its owning class. The existing
 extractor path retrieves `_1` through normal member lookup and accepts its

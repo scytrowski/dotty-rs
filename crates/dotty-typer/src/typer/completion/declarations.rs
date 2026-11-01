@@ -497,20 +497,31 @@ impl SourceTyper<'_> {
         &mut self,
         tree_index: u32,
     ) -> Result<Option<TypeId>, TyperError> {
+        let name = Name::new(
+            self.store.names.intern("Product"),
+            dotty_core::Namespace::Type,
+        );
         let scala = match self.packages.symbol(&["scala"]) {
             Some(scala) => Some(scala),
             None => self.resolve_external_package(&["scala".to_owned()], tree_index)?,
         };
         let Some(scala) = scala else {
-            return Ok(None);
+            return Err(TyperError::TypeNameNotFound {
+                source: self.source,
+                tree_index,
+                name,
+                position: None,
+            });
         };
         if self.package_path(scala) != ["scala"] {
-            return Ok(None);
+            return Err(TyperError::SymbolResolution {
+                source: self.source,
+                tree_index,
+                error: dotty_core::ResolutionError::Malformed {
+                    reason: "scala package resolution returned a non-canonical package".to_owned(),
+                },
+            });
         }
-        let name = Name::new(
-            self.store.names.intern("Product"),
-            dotty_core::Namespace::Type,
-        );
         let scoped = match self.packages.scope_of(scala) {
             Some(scope) => match self.store.scopes.get(scope).lookup_all(&name) {
                 [product] => Some(*product),
