@@ -4413,6 +4413,127 @@ mod tests {
     }
 
     #[test]
+    fn flagged_product_projection_completes_ordered_selectors_and_one_product_parent() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { trait Product }; package matching { case class Flagged(value: Int, enabled: Boolean) }",
+        );
+        let flagged = class_symbol(&parsed, &store, &index, source, "Flagged");
+        let class_scope = index.scope_of(flagged).expect("Flagged class scope");
+        let selector = |store: &mut SemanticStore, spelling: &str| {
+            store
+                .scopes
+                .get(class_scope)
+                .lookup(TermName::new(store.names.intern(spelling)).as_name())
+        };
+        let selector_1 = selector(&mut store, "_1").expect("source-derived _1 identity");
+        let selector_2 = selector(&mut store, "_2").expect("source-derived _2 identity");
+        assert_ne!(selector_1, selector_2);
+        assert_eq!(selector(&mut store, "_3"), None);
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let product = typer
+            .canonical_scala_product_type(0)
+            .expect("canonical Product resolution")
+            .expect("scala.Product fixture");
+        let product_symbol = type_symbol(typer.store(), product);
+
+        // Completing the later selector first must complete the class and both
+        // methods using their own source-field trees.
+        let second_info = typer.complete_symbol(selector_2).unwrap();
+        let Type::Method(second_method) = typer.store().types.get(second_info) else {
+            panic!("_2 must complete as a method");
+        };
+        assert_eq!(second_method.kind, MethodKind::Plain);
+        assert!(second_method.params.is_empty());
+        assert_eq!(second_method.result, definitions.boolean);
+
+        let first_info = typer.complete_symbol(selector_1).unwrap();
+        let Type::Method(first_method) = typer.store().types.get(first_info) else {
+            panic!("_1 must complete as a method");
+        };
+        assert_eq!(first_method.kind, MethodKind::Plain);
+        assert!(first_method.params.is_empty());
+        assert_eq!(first_method.result, definitions.int);
+        assert_ne!(first_info, second_info);
+
+        let class_info = typer.complete_symbol(flagged).unwrap();
+        let Type::ClassInfo(class_info) = typer.store().types.get(class_info) else {
+            panic!("Flagged must complete as a class");
+        };
+        let product_parents = class_info
+            .parents
+            .iter()
+            .filter(|parent| type_symbol(typer.store(), **parent) == product_symbol)
+            .count();
+        assert_eq!(product_parents, 1);
+        assert_eq!(class_info.parents.len(), 2, "Object plus canonical Product");
+    }
+
+    #[test]
+    fn flagged_product_projection_rolls_back_partial_selectors_when_product_is_malformed() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { class Product }; package matching { case class Flagged(value: Int, enabled: Boolean) }",
+        );
+        let flagged = class_symbol(&parsed, &store, &index, source, "Flagged");
+        let malformed_product = class_symbol(&parsed, &store, &index, source, "Product");
+        assert_eq!(store.symbols.get(malformed_product).kind, SymbolKind::Class);
+        let class_scope = index.scope_of(flagged).unwrap();
+        let selector_1 = store
+            .scopes
+            .get(class_scope)
+            .lookup(TermName::new(store.names.intern("_1")).as_name())
+            .unwrap();
+        let selector_2 = store
+            .scopes
+            .get(class_scope)
+            .lookup(TermName::new(store.names.intern("_2")).as_name())
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let checkpoint = typer.store.checkpoint();
+        let error = typer
+            .complete_symbol(flagged)
+            .expect_err("Product must resolve to the canonical scala.Product trait");
+        assert!(matches!(error, TyperError::SymbolResolution { .. }));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert_eq!(*typer.store.symbols.info(flagged), SymbolInfo::Missing);
+        assert_eq!(*typer.store.symbols.info(selector_1), SymbolInfo::Missing);
+        assert_eq!(*typer.store.symbols.info(selector_2), SymbolInfo::Missing);
+
+        typer.store.symbols.get_mut(malformed_product).kind = SymbolKind::Trait;
+        typer
+            .complete_symbol(flagged)
+            .expect("the same source session should recover after Product is repaired");
+        let SymbolInfo::Complete(first_info) = *typer.store.symbols.info(selector_1) else {
+            panic!("_1 must complete after rollback");
+        };
+        let Type::Method(first) = typer.store.types.get(first_info) else {
+            panic!("_1 must complete after rollback");
+        };
+        let SymbolInfo::Complete(second_info) = *typer.store.symbols.info(selector_2) else {
+            panic!("_2 must complete after rollback");
+        };
+        let Type::Method(second) = typer.store.types.get(second_info) else {
+            panic!("_2 must complete after rollback");
+        };
+        assert_eq!(first.result, definitions.int);
+        assert_eq!(second.result, definitions.boolean);
+    }
+
+    #[test]
     fn generated_product2_unapply_rejects_forged_provenance_and_field_identities() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "package scala { trait Product }; package matching { case class Flagged(value: Int, enabled: Boolean); object Flagged { val marker = 1 }; case class Other(code: Int) }",
