@@ -66,6 +66,16 @@ pub trait SourceTypedBindings {
         None
     }
 
+    /// Exact ordered source/typed identities for two sibling nested
+    /// constructor arguments authorized by one source frontend proof.
+    fn nested_constructor_call_pair(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<[NestedConstructorCallBinding; 2]> {
+        None
+    }
+
     /// Exact source/typed/symbol evidence for one same-instance planned method
     /// call used as a constructor argument. Producers must derive this from
     /// the same source/typed proof session as `typed_at`.

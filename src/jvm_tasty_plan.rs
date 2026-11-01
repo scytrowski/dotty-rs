@@ -142,6 +142,7 @@ struct BatchSourceTypedBindings<'a> {
     planned_classes: Vec<SymbolId>,
     planned_methods: Vec<SymbolId>,
     nested_constructor_calls: Vec<(SourceId, SymbolId, NestedConstructorCallBinding)>,
+    nested_constructor_call_pairs: Vec<(SourceId, SymbolId, [NestedConstructorCallBinding; 2])>,
     planned_calls: Vec<(SourceId, SymbolId, PlannedCallBinding)>,
     local_values: Vec<(SourceId, SymbolId, LocalValueBinding)>,
 }
@@ -173,6 +174,18 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
             .find_map(|(proof_source, proof_method, binding)| {
                 (*proof_source == source && *proof_method == method).then_some(*binding)
             })
+    }
+
+    fn nested_constructor_call_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<[NestedConstructorCallBinding; 2]> {
+        self.nested_constructor_call_pairs.iter().find_map(
+            |(proof_source, proof_method, bindings)| {
+                (*proof_source == source && *proof_method == method).then_some(*bindings)
+            },
+        )
     }
 
     fn planned_call(&self, source: SourceId, method: SymbolId) -> Option<PlannedCallBinding> {
@@ -1289,6 +1302,32 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                             formal_type: nested.formal_type(),
                             result_type: nested.result_type(),
                         },
+                    )
+                })
+            })
+            .collect(),
+        nested_constructor_call_pairs: constructor_call_proofs
+            .iter()
+            .filter_map(|proof| {
+                proof.nested_argument_pair().map(|pair| {
+                    (
+                        proof.source_id(),
+                        proof.method(),
+                        pair.map(|nested| NestedConstructorCallBinding {
+                            source_apply: nested.source_outer_argument(),
+                            typed_apply: nested.typed_outer_argument(),
+                            source_select: nested.source_select(),
+                            source_new: nested.source_new(),
+                            source_argument: nested.source_argument(),
+                            typed_select: nested.typed_select(),
+                            typed_new: nested.typed_new(),
+                            typed_argument: nested.typed_argument(),
+                            class: nested.class(),
+                            constructor: nested.constructor(),
+                            formal: nested.formal(),
+                            formal_type: nested.formal_type(),
+                            result_type: nested.result_type(),
+                        }),
                     )
                 })
             })
