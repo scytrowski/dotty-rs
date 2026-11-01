@@ -9,7 +9,8 @@ use dotty_classloader::classloader::{
     BinaryName, ClassLoader, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath,
     JdkClassPath, LoadingSession,
 };
-use dotty_core::types::{AnnotationArguments, Type};
+use dotty_core::names::TypeName;
+use dotty_core::types::{AnnotationArguments, PolyType, Type, TypeParam, Variance};
 use dotty_core::{Definitions, SemanticStore, SymbolId, SymbolInfo};
 use dotty_tasty::tasty::{DefinitionBody, StructuredNode, TastyFile};
 use dotty_tasty_unpickler::tasty_unpickler::{TastySession, TastyUnpickler};
@@ -210,6 +211,19 @@ fn root_definition_address(
     })
 }
 
+fn fixture_provenance(path: &Path) -> String {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    path.strip_prefix(workspace)
+        .expect("fixture provenance is rooted in the workspace")
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn run_once(units: &[Unit]) -> String {
     // Each adapter gets its own fresh store, one canonical bootstrap, and
     // independent session/identity state across all selected units.
@@ -368,6 +382,7 @@ fn field_outcome(adapter: &str, value: &str) -> Option<&'static str> {
         "<missing>",
         "<deferred>",
         "<error>",
+        "<unavailable>",
         "Error(",
         "unknown-semantic-type-shape",
     ]
@@ -407,7 +422,7 @@ fn failed_observation(outcome: &'static str, error: String, path: &Path) -> Obse
         outcome,
         value: String::new(),
         error,
-        provenance: path.to_string_lossy().into_owned(),
+        provenance: fixture_provenance(path),
     }
 }
 
@@ -441,7 +456,7 @@ fn observe_symbol(store: &SemanticStore, id: SymbolId, path: &Path) -> Observati
         outcome: "MATCH",
         value,
         error: String::new(),
-        provenance: path.to_string_lossy().into_owned(),
+        provenance: fixture_provenance(path),
     }
 }
 
@@ -479,10 +494,30 @@ fn normalized_symbol(store: &SemanticStore, id: SymbolId) -> String {
                     .map(|ty| type_repr(store, *ty))
                     .collect::<Vec<_>>()
                     .join("&");
-                let mut members = store
+                let entered = store
                     .scopes
                     .get(info.declarations)
                     .entered_symbols()
+                    .collect::<Vec<_>>();
+                let type_params = entered.iter().find_map(|member_id| {
+                    let member = store.symbols.get(*member_id);
+                    if member.kind != dotty_core::SymbolKind::Constructor {
+                        return None;
+                    }
+                    let SymbolInfo::Complete(constructor_type) = member.info else {
+                        return None;
+                    };
+                    match store.types.get(constructor_type) {
+                        Type::Poly(poly) => {
+                            Some(format!("[{}]", type_params_repr(store, &poly.params)))
+                        }
+                        Type::Method(_) => Some("[]".into()),
+                        _ => None,
+                    }
+                });
+                let type_params = type_params.unwrap_or_else(|| "<unavailable>".into());
+                let mut members = entered
+                    .into_iter()
                     .map(|member| {
                         let member = store.symbols.get(member);
                         let name = store.names.resolve(member.name.text());
@@ -502,12 +537,6 @@ fn normalized_symbol(store: &SemanticStore, id: SymbolId) -> String {
                     })
                     .collect::<Vec<_>>();
                 members.sort();
-                let type_params = members
-                    .iter()
-                    .filter(|member| member.contains(":TypeParameter:"))
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(";");
                 let constructors = members
                     .iter()
                     .filter(|member| member.contains(":Constructor:"))
@@ -639,11 +668,7 @@ fn type_repr(store: &SemanticStore, id: dotty_core::TypeId) -> String {
         ),
         Type::Poly(poly) => format!(
             "[{}]=>{}",
-            poly.params
-                .iter()
-                .map(|param| store.names.resolve(param.name.as_name().text()))
-                .collect::<Vec<_>>()
-                .join(","),
+            type_params_repr(store, &poly.params),
             type_repr(store, poly.result)
         ),
         Type::Bounds { low, high } => format!(
@@ -673,6 +698,21 @@ fn type_repr(store: &SemanticStore, id: dotty_core::TypeId) -> String {
         Type::Wildcard { bounds } => format!("Wildcard({})", type_repr(store, *bounds)),
         _ => "unknown-semantic-type-shape".into(),
     }
+}
+
+fn type_params_repr(store: &SemanticStore, params: &[TypeParam]) -> String {
+    params
+        .iter()
+        .map(|param| {
+            format!(
+                "{}:{:?}:{}",
+                store.names.resolve(param.name.as_name().text()),
+                param.declared_variance,
+                type_repr(store, param.bounds)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn arguments_repr(_store: &SemanticStore, arguments: &AnnotationArguments) -> String {
@@ -706,6 +746,14 @@ fn frozen_cohort_is_complete_and_both_fresh_adapter_runs_are_deterministic() {
     for row in first.lines().skip(1) {
         let cells = row.split('\t').collect::<Vec<_>>();
         assert_eq!(cells.len(), 11, "malformed comparison row: {row}");
+        assert!(
+            cells[5].starts_with("crates/"),
+            "non-portable legacy provenance: {row}"
+        );
+        assert!(
+            cells[9].starts_with("crates/"),
+            "non-portable unpickler provenance: {row}"
+        );
         let key = (cells[0], cells[1]);
         assert!(keys.insert(key), "duplicate comparison row: {row}");
         let outcome = cells[2];
@@ -715,6 +763,88 @@ fn frozen_cohort_is_complete_and_both_fresh_adapter_runs_are_deterministic() {
         );
     }
     assert_eq!(keys.len(), units.len() * FIELDS.len());
+
+    let function1_type_parameters = first
+        .lines()
+        .skip(1)
+        .find_map(|row| {
+            let cells = row.split('\t').collect::<Vec<_>>();
+            (cells[0] == "function1" && cells[1] == "type_parameters").then_some(cells[3])
+        })
+        .expect("Function1 class type parameter row");
+    assert!(
+        function1_type_parameters.starts_with("[T1:"),
+        "Function1's first declared parameter must be T1: {function1_type_parameters}"
+    );
+    assert!(
+        function1_type_parameters.contains(",R:"),
+        "Function1's second declared parameter must be R: {function1_type_parameters}"
+    );
+}
+
+#[test]
+fn polymorphic_parameter_order_bounds_variance_and_errors_are_normalized() {
+    let mut store = SemanticStore::new();
+    let lower = store.types.alloc(Type::NoType);
+    let error_name = store.names.intern("unsupported bound");
+    let error = store.types.alloc(Type::Error(dotty_core::ErrorType {
+        message: error_name,
+    }));
+    let other_bound = store.types.alloc(Type::NoPrefix);
+    let bounded = store.types.alloc(Type::Bounds {
+        low: lower,
+        high: error,
+    });
+    let distinct = store.types.alloc(Type::Bounds {
+        low: lower,
+        high: other_bound,
+    });
+    let first = TypeParam {
+        name: TypeName::new(store.names.intern("A")),
+        bounds: bounded,
+        declared_variance: Some(Variance::Covariant),
+    };
+    let second = TypeParam {
+        name: TypeName::new(store.names.intern("B")),
+        bounds: distinct,
+        declared_variance: Some(Variance::Contravariant),
+    };
+    let ordered = store.types.alloc(Type::Poly(PolyType {
+        params: vec![first, second],
+        result: lower,
+    }));
+    let reversed = store.types.alloc(Type::Poly(PolyType {
+        params: vec![second, first],
+        result: lower,
+    }));
+    let same_parameter_different_bound = TypeParam {
+        bounds: distinct,
+        ..first
+    };
+    let changed_bound = store.types.alloc(Type::Poly(PolyType {
+        params: vec![same_parameter_different_bound],
+        result: lower,
+    }));
+    let original_bound = store.types.alloc(Type::Poly(PolyType {
+        params: vec![first],
+        result: lower,
+    }));
+
+    let ordered_repr = type_repr(&store, ordered);
+    let reversed_repr = type_repr(&store, reversed);
+    assert_ne!(ordered_repr, reversed_repr, "parameter order is semantic");
+    assert_ne!(
+        type_repr(&store, original_bound),
+        type_repr(&store, changed_bound),
+        "distinct bounds remain observable for otherwise identical parameters"
+    );
+    assert!(ordered_repr.contains("A:Some(Covariant):bounds(NoType,Error("));
+    assert!(ordered_repr.contains("B:Some(Contravariant):bounds(NoType,NoPrefix)"));
+    assert_eq!(
+        field_outcome("UNPICKLER", &ordered_repr),
+        Some("UNPICKLER_UNSUPPORTED"),
+        "an error nested in a parameter bound must remain unsupported"
+    );
 }
 
 #[test]

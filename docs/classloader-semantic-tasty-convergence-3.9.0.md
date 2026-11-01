@@ -36,11 +36,13 @@ change production semantics.
 For each selected unit, report owner path, kind, name, visibility, flags,
 class hierarchy, ordered type parameters and parameter clauses,
 method/result/field type structure, companion relationship, and only the
-annotation forms explicitly supported by both adapters. Normalize type and
-symbol identities within each store to owner-qualified paths and semantic
-shape. Never compare numeric IDs or TASTy addresses across stores, and never
-resolve production identities by rendered names. Each field receives exactly
-one outcome: `MATCH`, `SEMANTIC_DELTA`, `LOADER_UNSUPPORTED`,
+annotation forms explicitly supported by both adapters. Polymorphic
+parameters retain their order, bounds, and declared variance. Fixture
+provenance is repository-relative so fresh checkouts produce the same report.
+Normalize type and symbol identities within each store to owner-qualified
+paths and semantic shape. Never compare numeric IDs or TASTy addresses across
+stores, and never resolve production identities by rendered names. Each field
+receives exactly one outcome: `MATCH`, `SEMANTIC_DELTA`, `LOADER_UNSUPPORTED`,
 `UNPICKLER_UNSUPPORTED`, `MALFORMED_OR_VERSION`, or `UNRESOLVED_EXTERNAL`.
 Retain the first underlying error and adapter provenance. An absent or
 unknown value is not `Any`, `Object`, success, or structural equality.
@@ -82,10 +84,14 @@ This leaves more than the required 12 real root units without substituting a
 candidate. The remaining cohort also yields explicit unsupported or unresolved
 outcomes, including `scala.Nothing`, `scala.Int`, and the applied `scala.Tuple2`
 parent shape. The per-field report contains 126 rows and is byte-identical
-across two fresh sessions. The raw execution trace SHA-256 is
-`1b4280c931e0d53e8d4fd03c8e4e2fc4934d14a34491013c7e55b9982983b2ac`; the
-normalized comparison TSV SHA-256 is
-`6065fa5947a988166831434fd01610d5f367646559b9c34ea75139cdcbc36eba`.
+across two fresh sessions. During review correction, the report was regenerated
+with repository-relative provenance, class type parameters from the ordered
+constructor `PolyType` vector before member sorting, and polymorphic method
+parameter bounds plus declared variance. The normalized comparison TSV SHA-256
+is `34097e61b691ff6ee9c16089336c495decc31241a10e448c1a1776849888aa4e`. The
+pre-correction resolver-backed raw trace is retained as historical evidence
+with SHA-256
+`1b4280c931e0d53e8d4fd03c8e4e2fc4934d14a34491013c7e55b9982983b2ac`.
 
 Neither frozen integration candidate qualifies, as permitted by the issue's
 DoD when the report explains why no candidate qualifies. The negative controls
