@@ -812,6 +812,206 @@ fn frozen_cohort_is_complete_and_both_fresh_adapter_runs_are_deterministic() {
     );
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct OpenConstructorObservation {
+    outcome: String,
+    class_address: u32,
+    constructor_address: u32,
+    graph: String,
+}
+
+fn complete_open_constructor_once() -> OpenConstructorObservation {
+    use dotty_core::{SymbolInfo, SymbolKind};
+    use dotty_tasty::tasty::DEFDEF_TAG;
+
+    let unit = units()
+        .into_iter()
+        .find(|unit| unit.id == "visibility-open")
+        .expect("frozen Open fixture");
+    let bytes = fs::read(&unit.path).expect("frozen Open bytes");
+    let file = TastyFile::parse(&bytes).expect("frozen Open TASTy parses");
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let resolver = ClasspathSymbolResolver::new(classpath(), definitions, LoadingSession::new());
+    let mut unpickler = TastyUnpickler::with_session(
+        &file,
+        &mut store,
+        definitions,
+        TastySession::new()
+            .with_resolver(Box::new(resolver))
+            .expect("fresh resolver-backed TASTy session"),
+    );
+    unpickler.enter_symbols().expect("enter Open symbols");
+    let class_address = root_definition_address(&file, &unpickler, "Open").expect("Open TYPEDEF");
+    let class = unpickler
+        .index()
+        .symbol_at(class_address)
+        .expect("Open symbol");
+    let class_info_type = unpickler
+        .complete_symbol(class_address)
+        .expect("complete Open class with genuine dependencies");
+    assert!(matches!(
+        unpickler.symbol_state_at(class_address),
+        Some((SymbolKind::Class, SymbolInfo::Complete(_)))
+    ));
+
+    let ast = file.ast_address_index().expect("Open address index");
+    let constructors = ast
+        .iter_nodes()
+        .filter(|node| node.tag == DEFDEF_TAG)
+        .filter_map(|node| u32::try_from(node.offset).ok())
+        .filter(|address| {
+            matches!(
+                unpickler.symbol_state_at(*address),
+                Some((SymbolKind::Constructor, _))
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        constructors.len(),
+        1,
+        "Open has one original constructor DEFDEF"
+    );
+    let constructor_address = constructors[0];
+    let constructor = unpickler.index().symbol_at(constructor_address).unwrap();
+    assert_eq!(
+        unpickler.symbol_state_at(constructor_address),
+        Some((SymbolKind::Constructor, SymbolInfo::Missing)),
+        "class completion leaves its constructor pending"
+    );
+
+    let constructor_type = unpickler
+        .complete_symbol(constructor_address)
+        .expect("explicitly complete Open's original constructor DEFDEF");
+    let type_count = unpickler.index().type_count();
+    assert_eq!(
+        unpickler.complete_symbol(constructor_address),
+        Ok(constructor_type)
+    );
+    assert_eq!(unpickler.index().type_count(), type_count);
+    let completed_class_state = unpickler.symbol_state_at(class_address);
+    let failure = unpickler
+        .complete_symbol(u32::MAX)
+        .expect_err("unknown address reports a typed completion failure");
+    assert_eq!(
+        format!("{failure:?}"),
+        "MissingEnteredSymbol { address: 4294967295 }"
+    );
+    assert_eq!(
+        unpickler.symbol_state_at(class_address),
+        completed_class_state
+    );
+    drop(unpickler);
+
+    let method = match store.types.get(constructor_type) {
+        Type::Method(method) => method,
+        other => panic!("Open constructor must have an ordinary method binder: {other:?}"),
+    };
+    assert!(method.params.is_empty());
+    assert_eq!(method.kind, dotty_core::types::MethodKind::Plain);
+    let result_class = match store.types.get(method.result) {
+        Type::TypeRef { target, .. } => target.symbol().expect("resolved constructor result"),
+        other => panic!("constructor result must be a class reference: {other:?}"),
+    };
+    assert_eq!(
+        result_class, class,
+        "constructor result keeps original Open identity"
+    );
+    let class_info = match store.types.get(class_info_type) {
+        Type::ClassInfo(info) => info,
+        other => panic!("Open info must be ClassInfo: {other:?}"),
+    };
+    let parents = class_info
+        .parents
+        .iter()
+        .filter_map(|parent| match store.types.get(*parent) {
+            Type::TypeRef { target, .. } => target.symbol(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(parents, vec![definitions.object_class]);
+    assert_eq!(store.symbols.get(constructor).owner, Some(class));
+    assert_eq!(
+        store.symbols.get(constructor).visibility,
+        dotty_core::Visibility::Public
+    );
+    assert_eq!(store.symbols.get(constructor).kind, SymbolKind::Constructor);
+    assert!(
+        !store
+            .scopes
+            .get(class_info.declarations)
+            .entered_symbols()
+            .any(|id| store.symbols.get(id).kind == SymbolKind::TypeParameter)
+    );
+    assert!(
+        store
+            .scopes
+            .get(class_info.declarations)
+            .entered_symbols()
+            .any(|id| id == constructor)
+    );
+    assert_eq!(
+        store
+            .scopes
+            .get(class_info.declarations)
+            .entered_symbols()
+            .filter(|id| *id == constructor)
+            .count(),
+        1,
+        "constructor appears exactly once in Open's declaration scope"
+    );
+    assert!(!matches!(store.types.get(constructor_type), Type::Poly(_)));
+    assert_eq!(
+        store.symbols.get(class).info,
+        SymbolInfo::Complete(class_info_type)
+    );
+    assert_eq!(
+        store.symbols.get(constructor).info,
+        SymbolInfo::Complete(constructor_type)
+    );
+
+    let graph = format!(
+        "class={}|owner={}|kind={:?}|visibility={:?}|constructor=DEFDEF@{}|binder=Method({:?},params={})|result={}|parents={}",
+        symbol_path(&store, class),
+        symbol_path(&store, store.symbols.get(constructor).owner.unwrap()),
+        store.symbols.get(constructor).kind,
+        store.symbols.get(constructor).visibility,
+        constructor_address,
+        method.kind,
+        method.params.len(),
+        symbol_path(&store, result_class),
+        parents
+            .iter()
+            .map(|id| symbol_path(&store, *id))
+            .collect::<Vec<_>>()
+            .join("&"),
+    );
+    OpenConstructorObservation {
+        outcome: "SUPPORTED".into(),
+        class_address,
+        constructor_address,
+        graph,
+    }
+}
+
+#[test]
+fn frozen_open_constructor_is_explicitly_completed_with_real_dependencies() {
+    let first = complete_open_constructor_once();
+    let second = complete_open_constructor_once();
+    assert_eq!(
+        first, second,
+        "fresh resolver-backed sessions normalize identically"
+    );
+    assert!(
+        first
+            .graph
+            .contains("result=me.cytrowski.tastyfixtures.visibility.Open")
+    );
+    if std::env::var_os("DOTTY_DUMP_OPEN_CONSTRUCTOR").is_some() {
+        println!("{first:?}");
+    }
+}
+
 #[test]
 fn polymorphic_parameter_order_bounds_variance_and_errors_are_normalized() {
     let mut store = SemanticStore::new();
