@@ -6600,6 +6600,14 @@ fn generated_unapply_is_independent_of_case_class_companion_declaration_order() 
             SymbolOrigin::Source(named.source)
         );
         let module_scope = named.index.scope_of(module_class).unwrap();
+        let class_scope = named.index.scope_of(class).unwrap();
+        let selector = named
+            .store
+            .scopes
+            .get(class_scope)
+            .lookup(TermName::new(named.store.names.intern("_1")).as_name())
+            .expect("the existing one-field Box path retains its _1 selector");
+        assert_eq!(named.store.symbols.get(selector).owner, Some(class));
         let unapply_name = TermName::new(named.store.names.intern("unapply"));
         let unapply = named
             .index
@@ -6836,6 +6844,24 @@ fn generated_unapply_identity_for_two_field_case_class_is_canonical() {
                 .lookup_all(TermName::new(named.store.names.intern("apply")).as_name()),
             [apply]
         );
+        let class_scope = named.index.scope_of(class).unwrap();
+        for selector in ["_1", "_2"] {
+            assert!(
+                named
+                    .store
+                    .scopes
+                    .get(class_scope)
+                    .lookup_all(TermName::new(named.store.names.intern(selector)).as_name())
+                    .is_empty(),
+                "identity-only Product2 naming must not publish {selector}"
+            );
+        }
+        assert!(constructor.value_param_clauses[0].iter().all(|parameter| {
+            named
+                .index
+                .derived_symbol_at(class, named.source, *parameter)
+                .is_none()
+        }));
 
         normalized.push((
             named.store.symbols.get(class).kind,

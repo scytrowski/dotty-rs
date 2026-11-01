@@ -1993,11 +1993,13 @@ impl Namer<'_> {
             match self.explicit_companion_unapply_collides(companion_module_class, class_name) {
                 Some(true) => {}
                 Some(false) => {
-                    self.enter_case_class_product_selector(
-                        tree,
-                        class_symbol,
-                        value_parameters[0],
-                    )?;
+                    if value_parameters.len() == 1 {
+                        self.enter_case_class_product_selector(
+                            tree,
+                            class_symbol,
+                            value_parameters[0],
+                        )?;
+                    }
                     self.enter_case_class_unapply(
                         tree,
                         class_symbol,

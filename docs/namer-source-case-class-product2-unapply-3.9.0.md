@@ -18,5 +18,9 @@ Scala 3.9 oracle classifications for the source fixture are in
 `crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0/scala-matrix.tsv`.
 
 This increment does not generate `_1`/`_2`, complete a `MethodType`, or type a
-`Match`. Before/after identity summaries are in
+`Match`. The Typer fixture's original `rust-baseline.tsv` remains the explicit
+pre-identity historical record. The lookup-only current result is kept in
+`rust-after-unapply-identity.tsv`: extractor lookup reaches the canonical
+method, then the existing one-field completion path reports
+`MalformedMethodClause`; no typed root is published. Before/after identity summaries are in
 [`namer-source-case-class-product2-unapply-3.9.0.tsv`](namer-source-case-class-product2-unapply-3.9.0.tsv).
