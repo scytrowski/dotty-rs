@@ -5755,6 +5755,7 @@ fn dual_reference_forwarding_emits_six_linked_artifacts_with_ordered_formal_load
 
 #[test]
 fn dual_reference_forwarding_renamed_and_reordered_batches_are_deterministic() {
+    let long_counter = DUAL_REFERENCE_FORWARDING_BATCH.replace("Counter", "LongCounter");
     let renamed = DUAL_REFERENCE_FORWARDING_BATCH
         .replace("package example", "package renamed.example")
         .replace("PairFactory", "Assembler")
@@ -5790,6 +5791,17 @@ fn dual_reference_forwarding_renamed_and_reordered_batches_are_deterministic() {
                 "example/PairFactory.class",
                 "example/Pair.class",
                 "example/Counter.class",
+            ],
+        ),
+        (
+            long_counter.as_str(),
+            "PairFactory.scala",
+            19668,
+            19669,
+            [
+                "example/LongCounter.class",
+                "example/Pair.class",
+                "example/PairFactory.class",
             ],
         ),
     ] {

@@ -1646,18 +1646,22 @@ fn validate_direct_formal_constructor_pair(
         }
     }
     let constructor_descriptor = outer_constructor.descriptor().as_str();
-    let (constructor_parameters, constructor_result) = constructor_descriptor
-        .strip_prefix('(')
-        .and_then(|descriptor| descriptor.split_once(')'))
-        .ok_or_else(|| "outer constructor descriptor is malformed".to_owned())?;
-    if constructor_parameters.matches('L').count() != 2
-        || constructor_parameters.matches(';').count() != 2
-        || constructor_result != "V"
-        || caller_method.descriptor().as_str()
-            != format!(
-                "({constructor_parameters})L{};",
-                outer_metadata.identity().internal_name()
-            )
+    let parsed_constructor =
+        dotty_classfile::descriptor::MethodDescriptor::parse(constructor_descriptor)
+            .map_err(|error| format!("outer constructor descriptor is malformed: {error}"))?;
+    let caller_descriptor = caller_method.descriptor().as_str();
+    let parsed_caller = dotty_classfile::descriptor::MethodDescriptor::parse(caller_descriptor)
+        .map_err(|error| format!("direct-formal caller descriptor is malformed: {error}"))?;
+    if parsed_constructor.parameters.len() != 2
+        || parsed_constructor.parameters.iter().any(|parameter| {
+            !matches!(parameter, dotty_classfile::descriptor::FieldType::Object(_))
+        })
+        || parsed_constructor.return_type.is_some()
+        || parsed_caller.parameters != parsed_constructor.parameters
+        || parsed_caller.return_type
+            != Some(dotty_classfile::descriptor::FieldType::Object(
+                outer_metadata.identity().internal_name().to_owned(),
+            ))
     {
         return Err(
             "direct-formal caller descriptor differs from its selected two-reference constructor"
