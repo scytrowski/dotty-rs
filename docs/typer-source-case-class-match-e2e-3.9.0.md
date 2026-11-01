@@ -4,6 +4,12 @@ This gate is test, report, and CI work for issue #1938. It does not add
 compiler semantics. The integrated base is `e7f1941d072b705207f8e3606f50b9592c6ea826`
 (merged #1937 / PR #1954); the test fixture `Positive.scala` is unchanged at
 SHA-256 `df57333192eb934169f06a07873c2e1ba88c9159404f60e5bfe33b3d016e215c`.
+The integrated prerequisites retain their upstream attribution: #1933 / PR
+[#1941](https://github.com/scytrowski/dotty-rs/pull/1941), #1934 / PR
+[#1944](https://github.com/scytrowski/dotty-rs/pull/1944), #1935 / PR
+[#1946](https://github.com/scytrowski/dotty-rs/pull/1946), #1936 / PR
+[#1950](https://github.com/scytrowski/dotty-rs/pull/1950), and #1937 / PR
+[#1954](https://github.com/scytrowski/dotty-rs/pull/1954).
 The Scala oracle is pinned to revision
 `777528f19a58e794c9954a42f433373472ec57f8`, Scala 3.9.0, and Temurin
 21.0.8+9. The eight runtime artifact hashes are in the fixture's
