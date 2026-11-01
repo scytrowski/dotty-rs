@@ -2422,6 +2422,24 @@ impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
                     role: TypeRole::Parameter,
                 });
             };
+            if !p.store.symbols.contains(*parameter_class) {
+                return Err(PickleError::InvalidSymbol {
+                    symbol: *parameter_class,
+                });
+            }
+            if !p
+                .typed_bindings
+                .planned_class_symbols()
+                .contains(parameter_class)
+                || !matches!(
+                    p.source_index.definition_of(*parameter_class),
+                    Some(SourceDefinition::Canonical { source, .. }) if source == p.source.id
+                )
+            {
+                return Err(PickleError::SourceDefinition {
+                    symbol: *parameter_class,
+                });
+            }
             let TreeKind::Ident(parameter_type_syntax) = &p
                 .source_ast
                 .try_get(parameter_definition.tpt)
