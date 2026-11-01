@@ -171,6 +171,7 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_BATCH: '1'
           DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_ORACLE: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_BATCH: '1'
           DOTTY_REQUIRE_SCALA_TASTY_PAIR_FORMAL_CONSTRUCTOR: '1'
           DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
@@ -211,6 +212,16 @@ jobs:
           cargo +1.98.1 test -p dotty --test jvm_tasty_plan \
             same_batch_reference_field_alias_targets_template_parameter_and_preserves_read \
             --locked -- --nocapture
+
+      - name: Run strict Scala reader for dual-reference forwarding
+        env:
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_BATCH: '1'
+          TMPDIR: ${{ github.workspace }}/target/issue-1966-dual-reference-tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          cargo +1.98.1 test -p dotty --test jvm_tasty_artifacts \
+            dual_reference_forwarding_emits_six_linked_artifacts_with_ordered_formal_loads \
+            --locked -- --nocapture --test-threads=1
 
       - name: Run mandatory Java 21 verifier and publisher gate
         env:

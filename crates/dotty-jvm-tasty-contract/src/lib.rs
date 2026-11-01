@@ -1496,6 +1496,184 @@ fn validate_reference_field_alias_constructor_code(
     Ok(())
 }
 
+fn validate_direct_formal_constructor_pair(
+    proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
+    caller: SymbolId,
+    (source_rhs, typed_rhs): (TreeId<Untyped>, TreeId<Typed>),
+    outer_application: &dotty_core::ast::Apply<Typed>,
+    outer_constructor_symbol: SymbolId,
+    outer_metadata: &JvmClassMetadata,
+) -> Result<[u16; 2], String> {
+    let tasty = proof.tasty_plan.plan();
+    let binding = tasty
+        .typed_bindings
+        .direct_formal_constructor_call_pair(tasty.source.id, caller)
+        .ok_or_else(|| {
+            "two-argument constructor has no canonical ordered-formal receipt".to_owned()
+        })?;
+    let source_outer_tree = tasty
+        .source_ast
+        .try_get(source_rhs)
+        .ok_or_else(|| "direct-formal source RHS is stale".to_owned())?;
+    let TreeKind::Apply(source_outer) = &source_outer_tree.kind else {
+        return Err("direct-formal source RHS is not an Apply".into());
+    };
+    let typed_outer_tree = tasty
+        .typed_ast
+        .try_get(typed_rhs)
+        .ok_or_else(|| "direct-formal typed RHS is stale".to_owned())?;
+    let TreeKind::Apply(typed_outer) = &typed_outer_tree.kind else {
+        return Err("direct-formal typed RHS is not an Apply".into());
+    };
+    if source_outer.kind != dotty_core::ast::ApplyKind::Regular
+        || typed_outer.kind != dotty_core::ast::ApplyKind::Regular
+        || outer_application.kind != dotty_core::ast::ApplyKind::Regular
+        || source_outer.args.as_slice() != binding.source_arguments
+        || typed_outer.args.as_slice() != binding.typed_arguments
+        || outer_application.args.as_slice() != binding.typed_arguments
+        || tasty.typed_bindings.typed_at(tasty.source.id, source_rhs) != Some(typed_rhs)
+        || !matches!(
+            tasty
+                .source_ast
+                .try_get(source_outer.function)
+                .map(|tree| &tree.kind),
+            Some(TreeKind::Select(_))
+        )
+        || binding.method_formals[0] == binding.method_formals[1]
+        || binding.argument_formals != binding.method_formals
+        || binding.source_method_formals[0] == binding.source_method_formals[1]
+    {
+        return Err(
+            "direct-formal constructor roots or receipt differ from the ordered source call".into(),
+        );
+    }
+
+    let caller_method = proof
+        .metadata
+        .methods()
+        .iter()
+        .find(|method| method.symbol() == caller)
+        .ok_or_else(|| "direct-formal caller is absent from its JVM plan".to_owned())?;
+    let outer_constructor = outer_metadata
+        .constructor()
+        .filter(|constructor| constructor.symbol() == outer_constructor_symbol)
+        .ok_or_else(|| "direct-formal outer constructor is absent from its JVM plan".to_owned())?;
+    if !outer_constructor.access_flags().is_public()
+        || caller_method.parameters().len() != 2
+        || outer_constructor.parameters().len() != 2
+        || caller_method
+            .parameters()
+            .iter()
+            .zip(binding.method_formals)
+            .any(|(parameter, formal)| parameter.symbol() != formal || parameter.width() != 1)
+        || caller_method.parameters()[0].slot() != 1
+        || caller_method.parameters()[1].slot() != 2
+        || outer_constructor
+            .parameters()
+            .iter()
+            .zip(caller_method.parameters())
+            .any(|(target, source)| target.ty() != source.ty())
+    {
+        return Err(
+            "direct-formal caller and target do not have the same ordered reference ABI".into(),
+        );
+    }
+    let source_method_tree = tasty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            ClassMemberPicklePlan::Method {
+                symbol,
+                source_tree,
+            } if *symbol == caller => Some(*source_tree),
+            _ => None,
+        })
+        .ok_or_else(|| "direct-formal caller is absent from its TASTy plan".to_owned())?;
+    let TreeKind::DefDef(source_method) = &tasty
+        .source_ast
+        .try_get(source_method_tree)
+        .ok_or_else(|| "direct-formal caller source definition is stale".to_owned())?
+        .kind
+    else {
+        return Err("direct-formal caller source definition is not a DefDef".into());
+    };
+    if source_method.value_param_clauses.len() != 1
+        || source_method.value_param_clauses[0].as_slice() != binding.source_method_formals
+    {
+        return Err(
+            "direct-formal receipt differs from the ordered source parameter clause".into(),
+        );
+    }
+    for index in 0..2 {
+        let source_argument = tasty
+            .source_ast
+            .try_get(binding.source_arguments[index])
+            .ok_or_else(|| format!("direct source argument {index} is stale"))?;
+        let TreeKind::Ident(source_ident) = &source_argument.kind else {
+            return Err(format!("direct source argument {index} is not an Ident"));
+        };
+        let source_formal = tasty
+            .source_ast
+            .try_get(binding.source_method_formals[index])
+            .ok_or_else(|| format!("caller source formal {index} is stale"))?;
+        let TreeKind::ValDef(source_formal) = &source_formal.kind else {
+            return Err(format!("caller source formal {index} is not a ValDef"));
+        };
+        let typed_argument = tasty
+            .typed_ast
+            .try_get(binding.typed_arguments[index])
+            .ok_or_else(|| format!("direct typed argument {index} is stale"))?;
+        if !matches!(typed_argument.kind, TreeKind::Ident(_))
+            || source_ident.name != *source_formal.name.as_name()
+            || tasty
+                .typed_bindings
+                .typed_at(tasty.source.id, binding.source_arguments[index])
+                != Some(binding.typed_arguments[index])
+            || !matches!(tasty.store.types.try_get(typed_argument.ty), Some(Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) }) if *prefix == tasty.definitions.no_prefix && *symbol == binding.method_formals[index])
+            || !tasty.store.symbols.contains(binding.method_formals[index])
+            || tasty.store.symbols.get(binding.method_formals[index]).kind != SymbolKind::Parameter
+            || tasty.store.symbols.get(binding.method_formals[index]).owner != Some(caller)
+            || tasty
+                .store
+                .symbols
+                .get(binding.method_formals[index])
+                .origin
+                != SymbolOrigin::Source(tasty.source.id)
+        {
+            return Err(format!(
+                "direct argument {index} does not name its ordered caller formal"
+            ));
+        }
+    }
+    let constructor_descriptor = outer_constructor.descriptor().as_str();
+    let parsed_constructor =
+        dotty_classfile::descriptor::MethodDescriptor::parse(constructor_descriptor)
+            .map_err(|error| format!("outer constructor descriptor is malformed: {error}"))?;
+    let caller_descriptor = caller_method.descriptor().as_str();
+    let parsed_caller = dotty_classfile::descriptor::MethodDescriptor::parse(caller_descriptor)
+        .map_err(|error| format!("direct-formal caller descriptor is malformed: {error}"))?;
+    if parsed_constructor.parameters.len() != 2
+        || parsed_constructor.parameters.iter().any(|parameter| {
+            !matches!(parameter, dotty_classfile::descriptor::FieldType::Object(_))
+        })
+        || parsed_constructor.return_type.is_some()
+        || parsed_caller.parameters != parsed_constructor.parameters
+        || parsed_caller.return_type
+            != Some(dotty_classfile::descriptor::FieldType::Object(
+                outer_metadata.identity().internal_name().to_owned(),
+            ))
+    {
+        return Err(
+            "direct-formal caller descriptor differs from its selected two-reference constructor"
+                .into(),
+        );
+    }
+    Ok([
+        caller_method.parameters()[0].slot(),
+        caller_method.parameters()[1].slot(),
+    ])
+}
+
 struct CrossClassMethodRef {
     caller: SymbolId,
     target: SymbolId,
@@ -1507,6 +1685,7 @@ struct CrossClassMethodRef {
     receiver_field: Option<SymbolId>,
     nested_constructor: Option<NestedConstructorMethodRef>,
     nested_constructor_pair: Option<[NestedConstructorMethodRef; 2]>,
+    direct_formal_constructor_pair: Option<[u16; 2]>,
     factory_method: Option<FactoryMethodRef>,
     factory_local_slot: Option<u16>,
     factory_local_max_locals: Option<u16>,
@@ -2111,6 +2290,7 @@ fn reference_local_factory_call(
         receiver_field: None,
         nested_constructor: None,
         nested_constructor_pair: None,
+        direct_formal_constructor_pair: None,
         factory_method: Some(FactoryMethodRef {
             owner_internal_name: helper_owner.identity().internal_name().to_owned(),
             name: helper.name().to_owned(),
@@ -2294,15 +2474,35 @@ fn validate_cross_class_call_code(
                 && application.kind == dotty_core::ast::ApplyKind::Regular
                 && application.args.len() == 2
             {
-                let nested_constructors = validate_nested_constructor_pair(
-                    proof,
-                    caller,
-                    (rhs, root),
-                    application,
-                    *target,
-                    target_class_metadata,
-                    &all_metadata,
-                )?;
+                let direct_formal_constructor_pair = if tasty
+                    .typed_bindings
+                    .direct_formal_constructor_call_pair(tasty.source.id, caller)
+                    .is_some()
+                {
+                    Some(validate_direct_formal_constructor_pair(
+                        proof,
+                        caller,
+                        (rhs, root),
+                        application,
+                        *target,
+                        target_class_metadata,
+                    )?)
+                } else {
+                    None
+                };
+                let nested_constructors = if direct_formal_constructor_pair.is_none() {
+                    Some(validate_nested_constructor_pair(
+                        proof,
+                        caller,
+                        (rhs, root),
+                        application,
+                        *target,
+                        target_class_metadata,
+                        &all_metadata,
+                    )?)
+                } else {
+                    None
+                };
                 let outer_constructor = target_class_metadata
                     .constructor()
                     .filter(|constructor| constructor.symbol() == *target)
@@ -2320,7 +2520,8 @@ fn validate_cross_class_call_code(
                     argument_load_opcode: None,
                     receiver_field: None,
                     nested_constructor: None,
-                    nested_constructor_pair: Some(nested_constructors),
+                    nested_constructor_pair: nested_constructors,
+                    direct_formal_constructor_pair,
                     factory_method: None,
                     factory_local_slot: None,
                     factory_local_max_locals: None,
@@ -2551,6 +2752,7 @@ fn validate_cross_class_call_code(
                             receiver_field: None,
                             nested_constructor: None,
                             nested_constructor_pair: None,
+                            direct_formal_constructor_pair: None,
                             factory_method: Some(FactoryMethodRef {
                                 owner_internal_name: helper_metadata
                                     .identity()
@@ -2664,6 +2866,7 @@ fn validate_cross_class_call_code(
                             argument_local_slot: 1,
                         }),
                         nested_constructor_pair: None,
+                        direct_formal_constructor_pair: None,
                         factory_method: None,
                         factory_local_slot: None,
                         factory_local_max_locals: None,
@@ -2735,6 +2938,7 @@ fn validate_cross_class_call_code(
                     receiver_field: None,
                     nested_constructor: None,
                     nested_constructor_pair: None,
+                    direct_formal_constructor_pair: None,
                     factory_method: None,
                     factory_local_slot: None,
                     factory_local_max_locals: None,
@@ -2799,6 +3003,7 @@ fn validate_cross_class_call_code(
             },
             nested_constructor: None,
             nested_constructor_pair: None,
+            direct_formal_constructor_pair: None,
             factory_method: None,
             factory_local_slot: None,
             factory_local_max_locals: None,
@@ -3083,6 +3288,74 @@ fn validate_cross_class_call_code(
             }
             continue;
         }
+        if let Some(formal_slots) = call.direct_formal_constructor_pair {
+            let mut pc = 0;
+            let allocation = take_factory_call_operand(code.code, &mut pc, 0xbb, "new")?;
+            take_factory_call_opcode(code.code, &mut pc, 0x59, "dup")?;
+            for slot in formal_slots {
+                take_factory_local(code.code, &mut pc, false, slot)?;
+            }
+            let constructor = take_factory_call_operand(code.code, &mut pc, 0xb7, "invokespecial")?;
+            take_factory_call_opcode(code.code, &mut pc, 0xb0, "areturn")?;
+            if pc != code.code.len()
+                || code.max_stack != 4
+                || code.max_locals != 3
+                || !code.exception_table.is_empty()
+            {
+                return Err(format!(
+                    "caller method {:?} has invalid direct-formal constructor instructions, stack/local bounds, or exception metadata",
+                    call.caller
+                ));
+            }
+            let class_name = |index| -> Result<&str, String> {
+                let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Class { name_index }) =
+                    class_file.constant_pool.get(index)
+                else {
+                    return Err("direct-formal allocation does not reference CONSTANT_Class".into());
+                };
+                class_file
+                    .constant_pool
+                    .utf8(*name_index)
+                    .map_err(|error| format!("invalid direct-formal allocation class: {error:?}"))
+            };
+            let method_ref = |index| -> Result<(&str, (&str, &str)), String> {
+                let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+                    class_index,
+                    name_and_type_index,
+                }) = class_file.constant_pool.get(index)
+                else {
+                    return Err(
+                        "direct-formal invocation does not reference CONSTANT_Methodref".into(),
+                    );
+                };
+                let owner = class_file
+                    .constant_pool
+                    .class_name(*class_index)
+                    .map_err(|error| {
+                        format!("invalid direct-formal constructor owner: {error:?}")
+                    })?;
+                let method = class_file
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .map_err(|error| {
+                        format!("invalid direct-formal constructor reference: {error:?}")
+                    })?;
+                Ok((owner, method))
+            };
+            if class_name(allocation)? != call.owner_internal_name
+                || method_ref(constructor)?
+                    != (
+                        call.owner_internal_name.as_str(),
+                        ("<init>", call.descriptor.as_str()),
+                    )
+            {
+                return Err(format!(
+                    "caller method {:?} does not allocate and invoke its exact direct-formal constructor",
+                    call.caller
+                ));
+            }
+            continue;
+        }
         if let Some(nested) = &call.nested_constructor {
             if code.code.len() != 16
                 || code.code[0] != 0xbb
@@ -3324,7 +3597,7 @@ fn validate_cross_class_call_code(
     Ok(())
 }
 
-/// Consume one instruction from the deliberately bounded factory-result
+/// Consume one instruction from a deliberately bounded source-bound call
 /// sequence. This is not a general bytecode decoder: callers enumerate every
 /// supported instruction and require complete consumption of the method body.
 fn take_factory_call_opcode(
@@ -3335,12 +3608,12 @@ fn take_factory_call_opcode(
 ) -> Result<(), String> {
     let Some(actual) = code.get(*pc).copied() else {
         return Err(format!(
-            "truncated factory-result bytecode while reading {mnemonic}"
+            "truncated bounded call bytecode while reading {mnemonic}"
         ));
     };
     if actual != expected {
         return Err(format!(
-            "expected {mnemonic} in bounded factory-result bytecode, found opcode 0x{actual:02x}"
+            "expected {mnemonic} in bounded call bytecode, found opcode 0x{actual:02x}"
         ));
     }
     *pc += 1;

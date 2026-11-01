@@ -66,6 +66,41 @@ The signature contract now accepts exactly one existing or two same-class planne
 
 The focused Rust source-session regression verifies the two distinct identities, their source ownership and order, the `Counter` parameter class, the `Pair` result class, the separate PARAM addresses/names, and the projected `Counter`/`Pair` type names. Issue #1964 extends that signature support through the exact original `new Pair(first, second)` body: its paired-plan adapter forwards the ordered source/typed proof, the pickler validates both direct formal references, and the writer emits two direct `TERMREF` leaves in order. The Rust output passed the pinned Scala 3.9 `-decompile` and `-from-tasty` reader checks. See the [two-argument constructor-call implementation record](jvm-tasty-multi-argument-constructor-calls.md#direct-formal-pairfactory-body-tasty-1964) for receipt checks and the exact wire shape.
 
+## Joint JVM/TASTy forwarding batch (#1966)
+
+Issue [#1966](https://github.com/scytrowski/dotty-rs/issues/1966) joins the already-proved source receipt and direct-reference TASTy body to the JVM backend. It starts from current `main` at `4591bcab5388fb21b1630f87884a6e46affff7bb` and compiles the unchanged source above through one original frontend session. The adapter returns exactly `Counter.class/.tasty`, `Pair.class/.tasty`, and `PairFactory.class/.tasty`; each classfile is major 65, each sidecar is TASTy 28.9.0, and every classfile `TASTY` attribute matches its own sidecar UUID.
+
+The source-bound classfile check requires `PairFactory.wrap` to retain the method-owned `first` and `second` symbols in local slots 1 and 2, load those references in source order, allocate only `Pair`, call the selected `Pair.<init>(Counter, Counter)`, and return it. It consumes the whole method body, checks `max_stack=4` and `max_locals=3`, and rejects swapped same-typed `aload` instructions before the batch is returned. The paired artifact regression also checks that the emitted `wrap` TASTy has two distinct ordered PARAM declarations and two `TERMREFdirect` arguments targeting those exact PARAM addresses.
+
+| Rust output | SHA-256 | TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008047c3c00968ac0000000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008047c3c00968ac0000000000008193` |
+| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d7441c7f00000000000008198` |
+| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d7441c7f00000000000008198` |
+| `example/PairFactory.class` | `13adef3d34ffbf9af3bf39cc996a29e1a45d8e76c0082012fcee898efd323dae` | `00f0b42f44fbadc80000000000008195` |
+| `example/PairFactory.tasty` | `4df88f35f03867ae637ed6131e4fca4e7c264bf10db2b9165c213ee85eec0fdb` | `00f0b42f44fbadc80000000000008195` |
+
+Two fresh sessions produce identical bytes and UUIDs for all six original outputs. A renamed package/class variant and a class-declaration reorder each produce stable output across fresh sessions. The source-bound swapped-load negative first fails during `cross-class invocation` with `expected aload_1 in bounded call bytecode, found opcode 0x2c`. The test-only stage/promotion publisher rejects handled writes after each of the six staged artifacts and before/after promotion, leaves no accepted destination on failure, and preserves an existing destination sentinel. These checks establish handled-failure safety only; they do not claim crash-atomic multi-file durability.
+
+The strict batch-reader regression verifies the Scala checkout at revision `777528f19a58e794c9954a42f433373472ec57f8` and compiler version `3.9.0-bin-SNAPSHOT-git-777528f`. Scala `-decompile` and `-print-tasty` read each of the three Rust sidecars; Scala `-from-tasty -release 21` reconstructs all three classes from that batch. The gate is enabled by `DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_BATCH=1` in the pinned Scala consumer workflow.
+
+Reproduce the batch gate from a persistent issue worktree with its own scratch and build directories:
+
+```sh
+export SCALA39_ROOT=/path/to/scala3-at-777528f19a58e794c9954a42f433373472ec57f8
+export JAVA_HOME=/path/to/temurin-21
+export PATH="$JAVA_HOME/bin:$PATH"
+export TMPDIR="$PWD/.issue1966-tmp"
+export CARGO_TARGET_DIR="$PWD/.issue1966-target"
+export CARGO_BUILD_JOBS=2
+export DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_BATCH=1
+
+cargo test -p dotty --test jvm_tasty_artifacts \
+  dual_reference_forwarding_emits_six_linked_artifacts_with_ordered_formal_loads \
+  --locked -- --nocapture
+```
+
 ## Scala validity and Rust first-stage controls
 
 The reproducible control compiler is [`verify-controls.py`](../tests/fixtures/jvm_tasty_dual_reference_forwarding/verify-controls.py), run by [`rebuild-oracle.sh`](../tests/fixtures/jvm_tasty_dual_reference_forwarding/rebuild-oracle.sh). The Rust test creates an independent paired-planner source session for each control and asserts that no batch callback publishes output.
