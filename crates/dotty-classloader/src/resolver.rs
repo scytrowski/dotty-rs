@@ -6,9 +6,9 @@ use crate::error::ClassLoadError;
 use crate::loader::{ClassLoadProfile, ClassLoader};
 use crate::session::{LoadingSession, SessionCheckpoint};
 use dotty_core::{
-    Definitions, MemberRequest, MemberSelector, MemberSpace, Name, Namespace, ResolutionError,
-    ResolverCheckpoint, SemanticStore, Symbol, SymbolId, SymbolInfo, SymbolKind, SymbolResolver,
-    Type, TypeId, TypeRefTarget,
+    Definitions, MemberRequest, MemberSelector, MemberSpace, Name, Namespace, Packages,
+    ResolutionError, ResolverCheckpoint, SemanticStore, Symbol, SymbolId, SymbolInfo, SymbolKind,
+    SymbolResolver, Type, TypeId, TypeRefTarget,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
@@ -1770,6 +1770,14 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
+    fn has_package_root(&self) -> bool {
+        self.session.packages.get::<&str>(&[]).is_some()
+    }
+
+    fn take_packages(&mut self) -> Option<Packages> {
+        Some(self.session.packages.take_packages())
+    }
+
     fn class_type_parameters(
         &self,
         _store: &SemanticStore,
@@ -1937,6 +1945,17 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
         }
     }
 
+    fn rollback_to_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        checkpoint: ResolverCheckpoint,
+        packages: &mut Packages,
+    ) {
+        self.session.packages.swap_packages(packages);
+        self.rollback_to(store, checkpoint);
+        self.session.packages.swap_packages(packages);
+    }
+
     fn resolve_member(
         &mut self,
         store: &mut SemanticStore,
@@ -2063,6 +2082,18 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
         result
     }
 
+    fn resolve_member_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.session.packages.swap_packages(packages);
+        let result = self.resolve_member(store, request);
+        self.session.packages.swap_packages(packages);
+        result
+    }
+
     fn resolve_package(
         &mut self,
         store: &mut SemanticStore,
@@ -2071,6 +2102,18 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
         self.transact(store, |resolver, store| {
             resolver.resolve_package_inner(store, path)
         })
+    }
+
+    fn resolve_package_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.session.packages.swap_packages(packages);
+        let result = self.resolve_package(store, path);
+        self.session.packages.swap_packages(packages);
+        result
     }
 
     fn enter_synthetic_package_member(

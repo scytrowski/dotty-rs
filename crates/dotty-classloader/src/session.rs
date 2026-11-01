@@ -429,4 +429,71 @@ mod tests {
         );
         assert!(!session.class_type_parameters.contains_key(&new_class));
     }
+
+    #[test]
+    fn taking_packages_preserves_positive_loading_session_state() {
+        let mut store = SemanticStore::new();
+        let class = symbol(&mut store, "Generic");
+        let object = symbol(&mut store, "Module");
+        let module_class = symbol(&mut store, "Module$");
+        let parameter = symbol(&mut store, "A");
+        let class_name = BinaryName::from_internal("sample/Generic");
+        let module_name = BinaryName::from_internal("sample/Module");
+        let module_class_name = BinaryName::from_internal("sample/Module$");
+        let mut session = LoadingSession::new();
+        let package = session.packages.resolve_package(&mut store, "sample");
+        let package_scope = session.packages.scope_of(package).unwrap();
+        session.cache_resolved(class_name.clone(), class);
+        session.cache_module(
+            module_name.clone(),
+            crate::loader::ModuleIdentity {
+                object,
+                module_class,
+                companion_class: None,
+                object_name: module_name.clone(),
+                module_class_name,
+                nested_type_visibilities: HashMap::new(),
+            },
+        );
+        let origin = ClassOrigin::Directory("fixture-root".into());
+        session.record_origin(class, origin.clone());
+        session.record_metadata(
+            class,
+            ClassfileMetadata {
+                binary_name: class_name.clone(),
+                access_flags: ClassAccessFlags(0x0021),
+                fields: Vec::new(),
+                methods: Vec::new(),
+                signature: None,
+                nest_host: None,
+                nest_members: Vec::new(),
+                permitted_subclasses: Vec::new(),
+                inner_classes: Vec::new(),
+                enclosing_method: None,
+                record_components: None,
+                annotations: Vec::new(),
+            },
+        );
+        session.record_class_type_parameters(class, vec![parameter]);
+
+        let packages = session.packages.take_packages();
+
+        assert_eq!(packages.symbol(&["sample"]), Some(package));
+        assert_eq!(packages.scope_of(package), Some(package_scope));
+        assert_eq!(session.identified.get(&class_name), Some(&class));
+        assert_eq!(session.resolved.get(&class_name), Some(&class));
+        assert_eq!(
+            session.modules.get(&module_name).map(|entry| entry.object),
+            Some(object)
+        );
+        assert_eq!(session.origins.get(&class), Some(&origin));
+        assert_eq!(
+            session.metadata.get(&class).map(|entry| &entry.binary_name),
+            Some(&class_name)
+        );
+        assert_eq!(
+            session.class_type_parameters.get(&class),
+            Some(&vec![parameter])
+        );
+    }
 }
