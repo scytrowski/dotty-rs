@@ -43,6 +43,7 @@ fn parse_tool_major_version(version_output: &str) -> Option<u32> {
         let token = token.trim_matches('"');
         let numeric_version = token.split(['-', '+']).next()?;
         if numeric_version.is_empty()
+            || (!numeric_version.contains('.') && !token.ends_with("-ea"))
             || !numeric_version
                 .chars()
                 .all(|character| character.is_ascii_digit() || character == '.')

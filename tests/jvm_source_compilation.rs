@@ -11242,9 +11242,40 @@ fn tool_major_version(tool: &str) -> Option<u32> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    version_text
-        .split(|character: char| !character.is_ascii_digit())
-        .find_map(|component| component.parse::<u32>().ok())
+    parse_jdk_tool_major_version(tool, &version_text)
+}
+
+fn parse_jdk_tool_major_version(tool: &str, version_text: &str) -> Option<u32> {
+    let version_line = version_text.lines().find_map(|line| {
+        let line = line.trim();
+        if line.starts_with("openjdk version ") || line.starts_with("java version ") {
+            line.split('"').nth(1)
+        } else if let Some(version) = line.strip_prefix("javac ") {
+            Some(version)
+        } else if tool == "javap"
+            && line
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '.')
+        {
+            Some(line)
+        } else {
+            None
+        }
+    })?;
+    let components = version_line.split('.').collect::<Vec<_>>();
+    let major = if components.first() == Some(&"1") {
+        *components.get(1)?
+    } else {
+        *components.first()?
+    };
+    major.parse().ok()
+}
+
+#[test]
+fn jdk_version_parser_ignores_numeric_warning_lines() {
+    let output =
+        "Warning: os::commit_memory failed (pid=391927)\nopenjdk version \"21.0.13\" 2025-10-21\n";
+    assert_eq!(parse_jdk_tool_major_version("java", output), Some(21));
 }
 
 #[test]
