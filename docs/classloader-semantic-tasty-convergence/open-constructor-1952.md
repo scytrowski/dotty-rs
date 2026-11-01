@@ -6,7 +6,8 @@ The historical `comparison.tsv` and `comparison-1948.tsv` remain untouched.
 ## Inputs and provenance
 
 - Probe base revision: `b2c7fee27ef2dec416706f59abda050be35d2c4b` (#1951 merged).
-- Probe test commit: `0bf89a9e1d2360233e1910c766a3d833214ebd4b`.
+- Probe test commit validated locally: `0bf89a9e1d2360233e1910c766a3d833214ebd4b`.
+- Published GitHub commit with the same test source: `49ee77efff4b4ff605b92ac10f5c0ccbdbbe2e3d`.
 - Fixture: `crates/dotty-classloader/tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty`.
 - Fixture SHA-256: `49286e74a3d3693b08d2a29575f23089f6be5c486231390059f43c19a8929894`.
 - Scala dependencies use the checked-in `tasty_sample`, `tasty_fields`,
