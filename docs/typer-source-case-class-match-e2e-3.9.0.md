@@ -53,3 +53,38 @@ artifact hashes, and the GitHub Actions run URL. The accompanying
 reports are the executable evidence for that SHA. The focused audit is required
 on changes to core, lexer/parser/namer/typer, fixture, report, verifier, or
 workflow paths.
+
+The implementation PR is [#1956](https://github.com/scytrowski/dotty-rs/pull/1956).
+Its required focused CI run is linked from the report artifact's
+`environment.tsv`; that file records the exact run URL and tested head SHA.
+
+## Reproduction
+
+With the pinned Scala checkout, Temurin JDK, and verified artifact cache used
+by CI available, run the following from the repository root:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+  -s tools/typer-classpath-corpus-audit -p 'test_*.py'
+PYTHONDONTWRITEBYTECODE=1 python3 \
+  tools/typer-classpath-corpus-audit/verify_source_case_class_match_acceptance.py inputs
+SCALA39_ROOT=/path/to/scala3-at-777528f19a58e794c9954a42f433373472ec57f8 \
+JAVA_HOME=/path/to/temurin-21.0.8+9 \
+COURSIER_MAVEN_ROOT=/path/to/verified-maven-cache \
+crates/dotty-typer/tests/fixtures/source-case-class-match-3.9.0/run
+cargo +1.98.1 test -p dotty-typer --test source_case_class_match \
+  --locked -- --nocapture
+cargo +1.98.1 test -p dotty-namer --test parsed_unit --locked unapply -- --nocapture
+cargo +1.98.1 test -p dotty-typer --lib --locked unapply -- --nocapture
+cargo +1.98.1 test -p dotty-typer --lib --locked \
+  binary_product_extractors_reject_wrong_selector_and_source_arities -- --nocapture
+cargo +1.98.1 test -p dotty-typer --lib --locked \
+  unary_extractor_falls_back_to_get_after_product_arity_mismatch -- --nocapture
+cargo +1.98.1 test -p dotty-typer --lib --locked \
+  local_patdef_alias_over_extractor_binds_the_original_selector_type -- --nocapture
+```
+
+CI captures these logs, verifies the exact executed test inventories, then
+reruns the 25+25 ordinary cohorts in deterministic pairs and emits the runtime
+receipt. The workflow definition is
+[typer-focused-audit.yml](../.github/workflows/typer-focused-audit.yml).
