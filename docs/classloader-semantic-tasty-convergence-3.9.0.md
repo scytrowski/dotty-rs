@@ -155,8 +155,11 @@ workflow supplies the exact audit JDK and classpath version. The historical
 #1945 comparison TSV, frozen cohort, and prior measurements are unchanged.
 The separate #1948 live comparison is checked in as
 [`comparison-1948.tsv`](classloader-semantic-tasty-convergence/comparison-1948.tsv)
-(SHA-256 `6178cc5c32a5bf87cfc7fd0cd392373b97e193a08d6cc4d9f53999973e90d192`).
-It records the post-fix classloader/unpickler run over the same frozen inputs;
+(SHA-256 `a4b14bdf2ba921363358f568b8bce636e0e24453c2a3c6e57bd61478c231e6e0`).
+The live comparator masks store-local `TypeId` values in diagnostic text, and
+a focused regression verifies equivalent failures with independently
+allocated IDs produce identical normalized diagnostics. It records the
+post-fix classloader/unpickler run over the same frozen inputs;
 the Open address-15 Object dependency now resolves, while the report still
 marks its type parameters and parameter clauses `UNPICKLER_UNSUPPORTED` and
 Animal/Dog member signatures unresolved on `scala/Predef/String`. Resolving

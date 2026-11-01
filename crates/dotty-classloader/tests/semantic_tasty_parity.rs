@@ -421,9 +421,39 @@ fn failed_observation(outcome: &'static str, error: String, path: &Path) -> Obse
     Observation {
         outcome,
         value: String::new(),
-        error,
+        error: normalize_allocation_ids(&error),
         provenance: fixture_provenance(path),
     }
+}
+
+/// Keep diagnostic meaning while removing arena allocation details from the
+/// checked-in comparison. Type IDs are local to one semantic store and can
+/// change when an unrelated dependency is materialized first.
+fn normalize_allocation_ids(error: &str) -> String {
+    let mut normalized = String::with_capacity(error.len());
+    let mut rest = error;
+    while let Some(index) = rest.find("TypeId(") {
+        let (prefix, id_and_tail) = rest.split_at(index);
+        normalized.push_str(prefix);
+        normalized.push_str("TypeId(*)");
+        let after_prefix = &id_and_tail["TypeId(".len()..];
+        if let Some(close) = after_prefix.find(')')
+            && !after_prefix[..close].is_empty()
+            && after_prefix[..close]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+        {
+            rest = &after_prefix[close + 1..];
+        } else {
+            // Preserve malformed or future debug output verbatim rather than
+            // accidentally consuming text that is not a numeric TypeId.
+            normalized.truncate(normalized.len() - "TypeId(*)".len());
+            normalized.push_str("TypeId(");
+            rest = after_prefix;
+        }
+    }
+    normalized.push_str(rest);
+    normalized
 }
 
 fn classloader_outcome(error: &str) -> &'static str {
@@ -844,6 +874,30 @@ fn polymorphic_parameter_order_bounds_variance_and_errors_are_normalized() {
         field_outcome("UNPICKLER", &ordered_repr),
         Some("UNPICKLER_UNSUPPORTED"),
         "an error nested in a parameter bound must remain unsupported"
+    );
+}
+
+#[test]
+fn equivalent_failures_with_independent_type_ids_normalize_identically() {
+    let mut first_store = SemanticStore::new();
+    let first_prefix = first_store.types.alloc(Type::NoType);
+    let mut second_store = SemanticStore::new();
+    let _unrelated = second_store.types.alloc(Type::NoPrefix);
+    let second_prefix = second_store.types.alloc(Type::NoType);
+    assert_ne!(first_prefix, second_prefix);
+
+    let first =
+        format!("UnresolvedMember {{ address: 1699, prefix: {first_prefix:?}, name: \"Null\" }}");
+    let second =
+        format!("UnresolvedMember {{ address: 1699, prefix: {second_prefix:?}, name: \"Null\" }}");
+    assert_eq!(
+        normalize_allocation_ids(&first),
+        normalize_allocation_ids(&second),
+        "equivalent semantic failures must compare independently of arena IDs"
+    );
+    assert_eq!(
+        normalize_allocation_ids(&first),
+        "UnresolvedMember { address: 1699, prefix: TypeId(*), name: \"Null\" }"
     );
 }
 
