@@ -286,28 +286,20 @@ fn analyze_session() -> (Vec<String>, Vec<String>) {
                     typed_root.is_none(),
                     "failed roots cannot enter SourceTypedIndex"
                 );
-                let TyperError::ExtractorResultMemberNotFound {
-                    source: error_source,
-                    member,
-                    ..
-                } = &error
-                else {
+                let TyperError::TypeNameNotFound { name, .. } = &error else {
                     panic!("unexpected first blocker: {error:?}");
                 };
                 assert_eq!(
-                    *error_source, source,
-                    "the missing result-protocol member must retain this source unit"
+                    typer.store().names.resolve(name.text()),
+                    "Product",
+                    "the fixture-only frontend has no canonical scala.Product package entry"
                 );
-                assert_eq!(
-                    typer.store().names.resolve(member.text()),
-                    "isEmpty",
-                    "the whole extractor path remains blocked at the result protocol"
-                );
-                let rendered = format!(
-                    "error=ExtractorResultMemberNotFound{{method=Flagged$.unapply,result=Flagged,member={}}};typed_index=absent",
-                    typer.store().names.resolve(member.text()),
-                );
-                (rendered, "ExtractorResultMemberNotFound;resolved=Flagged$.unapply;result=Flagged;member=isEmpty;typed_index=absent".to_owned())
+                let rendered =
+                    "error=TypeNameNotFound{scala.Product};typed_index=absent".to_owned();
+                (
+                    rendered,
+                    "TypeNameNotFound;canonical=scala.Product;typed_index=absent".to_owned(),
+                )
             }
         };
         let range = position.span().range();

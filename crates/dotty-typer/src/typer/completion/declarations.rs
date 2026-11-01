@@ -239,29 +239,48 @@ impl SourceTyper<'_> {
         let product_selector =
             self.source_case_class_product_selector(symbol, kind, &template, constructor);
         let mut product_type_to_add = None;
-        if let Some((parameter_tree, selector)) = product_selector {
-            let Some(TreeKind::ValDef(parameter)) =
-                self.arena.try_get(parameter_tree).map(|node| &node.kind)
-            else {
-                return Err(TyperError::MalformedSourceAst {
-                    source: self.source,
-                    tree_index: parameter_tree.index(),
-                    symbol,
-                    kind,
+        if let Some(selectors) = product_selector {
+            let mut selector_results = Vec::with_capacity(selectors.len());
+            for (parameter_tree, selector) in selectors {
+                let Some(TreeKind::ValDef(parameter)) =
+                    self.arena.try_get(parameter_tree).map(|node| &node.kind)
+                else {
+                    return Err(TyperError::MalformedSourceAst {
+                        source: self.source,
+                        tree_index: parameter_tree.index(),
+                        symbol,
+                        kind,
+                    });
+                };
+                let result =
+                    self.type_of_tpt_inner_journaled(parameter.tpt, type_context, info_journal)?;
+                selector_results.push((selector, result));
+            }
+            // The bounded two-field extractor contract is exactly Int/Boolean.
+            // Validate both projected source types before publishing either
+            // selector, so class-first and selector-first completion agree.
+            // Keep the existing one-field selector behavior unchanged.
+            if selector_results.len() == 2
+                && (selector_results[0].1 != self.definitions.int
+                    || selector_results[1].1 != self.definitions.boolean)
+            {
+                return Err(TyperError::UnsupportedProduct2FieldTypes {
+                    class: symbol,
+                    tree_index: template.constructor.index(),
                 });
-            };
-            let result =
-                self.type_of_tpt_inner_journaled(parameter.tpt, type_context, info_journal)?;
-            let method_info = self.store.types.alloc(Type::Method(MethodType {
-                params: Vec::new(),
-                result,
-                kind: MethodKind::Plain,
-            }));
-            let previous = *self.store.symbols.info(selector);
-            info_journal.push((selector, previous));
-            self.store
-                .symbols
-                .set_info(selector, SymbolInfo::Complete(method_info));
+            }
+            for (selector, result) in selector_results {
+                let method_info = self.store.types.alloc(Type::Method(MethodType {
+                    params: Vec::new(),
+                    result,
+                    kind: MethodKind::Plain,
+                }));
+                let previous = *self.store.symbols.info(selector);
+                info_journal.push((selector, previous));
+                self.store
+                    .symbols
+                    .set_info(selector, SymbolInfo::Complete(method_info));
+            }
             product_type_to_add = self.canonical_scala_product_type(source_tree.index())?;
         }
         let first_parent_is_trait = match (parents.first(), template.parents.first()) {
@@ -361,7 +380,7 @@ impl SourceTyper<'_> {
         kind: SymbolKind,
         template: &dotty_core::ast::Template<Untyped>,
         constructor: &dotty_core::ast::DefDef<Untyped>,
-    ) -> Option<(TreeId<Untyped>, SymbolId)> {
+    ) -> Option<Vec<(TreeId<Untyped>, SymbolId)>> {
         let class_symbol = self.store.symbols.get(class);
         if kind != SymbolKind::Class
             || class_symbol.kind != SymbolKind::Class
@@ -375,69 +394,72 @@ impl SourceTyper<'_> {
             || !self.source_class_type_parameters(class).ok()?.is_empty()
             || !template.parents.is_empty()
             || constructor.value_param_clauses.len() != 1
-            || constructor.value_param_clauses[0].len() != 1
+            || !matches!(constructor.value_param_clauses[0].len(), 1 | 2)
         {
             return None;
         }
-        let parameter_tree = constructor.value_param_clauses[0][0];
-        let TreeKind::ValDef(parameter) = &self.arena.try_get(parameter_tree)?.kind else {
-            return None;
-        };
-        let source_field = self.index.symbol_at(self.source, parameter_tree)?;
-        if !self.store.symbols.contains(source_field)
-            || self.store.symbols.get(source_field).kind != SymbolKind::Field
-            || self.store.symbols.get(source_field).owner != Some(class)
-            || self.store.symbols.get(source_field).origin != SymbolOrigin::Source(self.source)
-            || self.index.definition_of(source_field)
-                != Some(SourceDefinition::Canonical {
-                    source: self.source,
-                    tree: parameter_tree,
-                })
-        {
-            return None;
-        }
-        let repeated_parameter = self.arena.try_get(parameter.tpt).is_some_and(|node| {
-            matches!(
-                &node.kind,
-                TreeKind::PhaseSpecific(UntypedNode::PostfixOp(operator))
-                    if self.store.names.resolve(operator.op.text()) == "*"
-            )
-        });
-        if repeated_parameter
-            || parameter.metadata.modifiers.iter().any(|modifier| {
+        let scope = self.index.scope_of(class)?;
+        let mut projection = Vec::with_capacity(2);
+        for (index, parameter_tree) in constructor.value_param_clauses[0].iter().enumerate() {
+            let TreeKind::ValDef(parameter) = &self.arena.try_get(*parameter_tree)?.kind else {
+                return None;
+            };
+            let source_field = self.index.symbol_at(self.source, *parameter_tree)?;
+            if !self.store.symbols.contains(source_field)
+                || self.store.symbols.get(source_field).kind != SymbolKind::Field
+                || self.store.symbols.get(source_field).owner != Some(class)
+                || self.store.symbols.get(source_field).origin != SymbolOrigin::Source(self.source)
+                || self.index.definition_of(source_field)
+                    != Some(SourceDefinition::Canonical {
+                        source: self.source,
+                        tree: *parameter_tree,
+                    })
+            {
+                return None;
+            }
+            let repeated_parameter = self.arena.try_get(parameter.tpt).is_some_and(|node| {
                 matches!(
-                    modifier,
-                    dotty_core::ast::Modifier::Implicit
-                        | dotty_core::ast::Modifier::Given
-                        | dotty_core::ast::Modifier::Erased
-                        | dotty_core::ast::Modifier::Inline
-                        | dotty_core::ast::Modifier::Override
+                    &node.kind,
+                    TreeKind::PhaseSpecific(UntypedNode::PostfixOp(operator))
+                        if self.store.names.resolve(operator.op.text()) == "*"
                 )
-            })
-        {
-            return None;
+            });
+            if repeated_parameter
+                || parameter.metadata.modifiers.iter().any(|modifier| {
+                    matches!(
+                        modifier,
+                        dotty_core::ast::Modifier::Implicit
+                            | dotty_core::ast::Modifier::Given
+                            | dotty_core::ast::Modifier::Erased
+                            | dotty_core::ast::Modifier::Inline
+                            | dotty_core::ast::Modifier::Override
+                    )
+                })
+            {
+                return None;
+            }
+            let selector_name = Name::new(
+                self.store.names.intern(&format!("_{}", index + 1)),
+                dotty_core::Namespace::Term,
+            );
+            let [selector] = self.store.scopes.get(scope).lookup_all(&selector_name) else {
+                return None;
+            };
+            let selector = *selector;
+            let selector_symbol = self.store.symbols.get(selector);
+            if selector_symbol.kind != SymbolKind::Method
+                || selector_symbol.owner != Some(class)
+                || selector_symbol.origin != SymbolOrigin::Source(self.source)
+                || self
+                    .index
+                    .derived_symbol_at(class, self.source, *parameter_tree)
+                    != Some(selector)
+            {
+                return None;
+            }
+            projection.push((*parameter_tree, selector));
         }
-        let selector_name = Name::new(self.store.names.intern("_1"), dotty_core::Namespace::Term);
-        let [selector] = self
-            .index
-            .scope_of(class)
-            .map(|scope| self.store.scopes.get(scope).lookup_all(&selector_name))?
-        else {
-            return None;
-        };
-        let selector = *selector;
-        let selector_symbol = self.store.symbols.get(selector);
-        if selector_symbol.kind != SymbolKind::Method
-            || selector_symbol.owner != Some(class)
-            || selector_symbol.origin != SymbolOrigin::Source(self.source)
-            || self
-                .index
-                .derived_symbol_at(class, self.source, parameter_tree)
-                != Some(selector)
-        {
-            return None;
-        }
-        Some((parameter_tree, selector))
+        Some(projection)
     }
 
     pub(in crate::typer) fn source_case_class_product_selector_owner(
@@ -463,7 +485,10 @@ impl SourceTyper<'_> {
         };
         if selector_symbol.kind != SymbolKind::Method
             || selector_symbol.origin != SymbolOrigin::Source(source)
-            || self.store.names.resolve(selector_symbol.name.text()) != "_1"
+            || !matches!(
+                self.store.names.resolve(selector_symbol.name.text()),
+                "_1" | "_2"
+            )
             || self.store.symbols.get(owner).kind != SymbolKind::Class
         {
             return None;
@@ -489,7 +514,7 @@ impl SourceTyper<'_> {
             return None;
         }
         self.source_case_class_product_selector(owner, SymbolKind::Class, template, constructor)
-            .filter(|(tree, symbol)| *tree == parameter_tree && *symbol == selector)
+            .filter(|projection| projection.contains(&(parameter_tree, selector)))
             .map(|_| owner)
     }
 
