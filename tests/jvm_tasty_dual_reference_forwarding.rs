@@ -410,11 +410,13 @@ fn source_variants_record_first_reachable_paired_stage_without_forging_ids() {
     );
     let reordered = reordered.replace("class PairFactory:\n  def wrap(first: Counter, second: Counter): Pair =\n    new Pair(first, second)\n", "class PairFactory:\n  def wrap(first: Counter, second: Counter): Pair =\n    new Pair(first, second)\n\nclass Pair(first: Counter, second: Counter):\n  private val left: Counter = first\n  private val right: Counter = second\n  def leftValue(): Int = left.get()\n  def rightValue(): Int = right.get()\n\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n");
     let cases = [
-        ("renamed package/classes/method/formals", renamed, "JVM/TASTy cross-contract validation", "MalformedType"),
-        ("reordered declarations", reordered, "JVM/TASTy cross-contract validation", "MalformedType"),
-        ("intentional repeated first", source.replace("new Pair(first, second)", "new Pair(first, first)"), "JVM/TASTy cross-contract validation", "MalformedType"),
-        ("swapped arguments", source.replace("new Pair(first, second)", "new Pair(second, first)"), "JVM/TASTy cross-contract validation", "MalformedType"),
-        ("swapped formals", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(second: Counter, first: Counter)"), "JVM/TASTy cross-contract validation", "MalformedType"),
+        // These controls retain valid two-formal signatures; rejection now
+        // correctly waits for the out-of-scope method body representation.
+        ("renamed package/classes/method/formals", renamed, "JVM/TASTy cross-contract validation", "BodyExpression"),
+        ("reordered declarations", reordered, "JVM/TASTy cross-contract validation", "BodyExpression"),
+        ("intentional repeated first", source.replace("new Pair(first, second)", "new Pair(first, first)"), "JVM/TASTy cross-contract validation", "BodyExpression"),
+        ("swapped arguments", source.replace("new Pair(first, second)", "new Pair(second, first)"), "JVM/TASTy cross-contract validation", "BodyExpression"),
+        ("swapped formals", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(second: Counter, first: Counter)"), "JVM/TASTy cross-contract validation", "BodyExpression"),
         ("third method formal", source.replace("second: Counter): Pair", "second: Counter, unused: Int): Pair"), "cross-class constructor-call identity proof", "SourceShape"),
         ("contextual formal", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter)(using second: Counter)"), "complete JVM unit validation", "ParameterCountMismatch"),
         ("default formal", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter, second: Counter = new Counter(0))"), "cross-class constructor-call identity proof", "factory formals cannot have default values"),

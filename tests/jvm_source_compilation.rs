@@ -25541,6 +25541,11 @@ fn cross_class_private_method_call_reports_its_first_backend_failure() {
 #[test]
 fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proof_error() {
     use dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs;
+    use dotty_tasty::{
+        Reader as TastyReader,
+        ast::{IDENTTPT_TAG, PARAM_TAG},
+        term::RawTree,
+    };
 
     const SOURCE: &str =
         include_str!("fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala");
@@ -25623,6 +25628,8 @@ fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proo
             })
             .collect();
         let method = index.symbol_at(source_id, method_tree).unwrap();
+        let counter = classes[0];
+        let pair = classes[1];
         let members = [dotty_tasty_pickler::ClassMemberPicklePlan::Method {
             symbol: method,
             source_tree: method_tree,
@@ -25654,7 +25661,104 @@ fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proo
         };
         pickler_error = Some(match state.validate() {
             Ok(validated) => match validated.distinct_reference_method_signature(method) {
-                Ok(_) => "Ok(signature accepted)".to_owned(),
+                Ok(signature) => {
+                    let TreeKind::DefDef(method_definition) = &ast.get(method_tree).kind else {
+                        panic!("wrap source tree is a method")
+                    };
+                    let [first_tree, second_tree] =
+                        method_definition.value_param_clauses[0].as_slice()
+                    else {
+                        panic!("wrap has exactly two original source formals")
+                    };
+                    let first = index.symbol_at(source_id, *first_tree).unwrap();
+                    let second = index.symbol_at(source_id, *second_tree).unwrap();
+                    assert_ne!(first, second);
+                    assert_eq!(
+                        signature
+                            .parameters()
+                            .iter()
+                            .map(|formal| formal.symbol())
+                            .collect::<Vec<_>>(),
+                        [first, second]
+                    );
+                    assert!(signature.parameters().iter().all(|formal| {
+                        formal.class() == counter
+                            && typer.store().symbols.get(formal.symbol()).owner == Some(method)
+                            && formal.source_tree()
+                                == if formal.symbol() == first {
+                                    *first_tree
+                                } else {
+                                    *second_tree
+                                }
+                    }));
+                    assert_eq!(signature.parameter_class(), counter);
+                    assert_eq!(signature.result_class(), pair);
+                    assert_eq!(signature.method(), method);
+                    let projected = validated
+                        .project_distinct_reference_method_signature(method)
+                        .unwrap();
+                    assert_eq!(projected.parameter_addresses.len(), 2);
+                    assert_ne!(
+                        projected.parameter_addresses[0],
+                        projected.parameter_addresses[1]
+                    );
+                    let parameters = projected
+                        .parameter_addresses
+                        .iter()
+                        .map(|address| {
+                            let RawTree::LengthNode(node) = RawTree::decode(&mut TastyReader::new(
+                                &projected.fragment.ast.bytes()[*address as usize..],
+                            ))
+                            .unwrap() else {
+                                panic!("each method formal projection is a PARAM declaration")
+                            };
+                            assert_eq!(node.tag, PARAM_TAG);
+                            let parameter = node.decode_parameter().unwrap();
+                            let body = parameter.decode_body().unwrap();
+                            (
+                                projected.fragment.names.render(parameter.name()).unwrap(),
+                                body.type_tree
+                                    .name_refs()
+                                    .into_iter()
+                                    .map(|name| projected.fragment.names.render(name).unwrap())
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        parameters,
+                        [
+                            (
+                                "first".to_owned(),
+                                vec!["Counter".to_owned(), "example".to_owned()]
+                            ),
+                            (
+                                "second".to_owned(),
+                                vec!["Counter".to_owned(), "example".to_owned()]
+                            ),
+                        ]
+                    );
+                    let RawTree::NatAst { tag, .. } = RawTree::decode(&mut TastyReader::new(
+                        &projected.fragment.ast.bytes()[projected.result_address as usize..],
+                    ))
+                    .unwrap() else {
+                        panic!("method result projection is IDENTtpt")
+                    };
+                    assert_eq!(tag, IDENTTPT_TAG);
+                    let result_tree = RawTree::decode(&mut TastyReader::new(
+                        &projected.fragment.ast.bytes()[projected.result_address as usize..],
+                    ))
+                    .unwrap();
+                    assert_eq!(
+                        result_tree
+                            .name_refs()
+                            .into_iter()
+                            .map(|name| projected.fragment.names.render(name).unwrap())
+                            .collect::<Vec<_>>(),
+                        ["Pair", "example"]
+                    );
+                    "Ok(two ordered method PARAM roots and Pair result)".to_owned()
+                }
                 Err(error) => format!("Err({error:?})"),
             },
             Err(error) => format!("Err(class-state {error:?})"),
@@ -26216,11 +26320,10 @@ fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proo
     );
     assert_eq!(
         pickler_error,
-        "Err(Unsupported { feature: ClassMembers, symbol: Some(SymbolId(60)) })"
+        "Ok(two ordered method PARAM roots and Pair result)"
     );
     assert!(paired_error.contains("phase: \"JVM/TASTy cross-contract validation\""));
-    assert!(paired_error.contains("MalformedType"));
-    assert!(paired_error.contains("role: Parameter"));
+    assert!(paired_error.contains("BodyExpression"));
     assert!(
         !paired_callback_ran,
         "unsupported TASTy signature cannot publish a batch"
@@ -26228,6 +26331,230 @@ fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proo
     eprintln!("dual-reference-forwarding proof result: {proof_error}");
     eprintln!("dual-reference-forwarding standalone pickler signature result: {pickler_error}");
     eprintln!("dual-reference-forwarding paired planner first result: {paired_error}");
+}
+
+#[test]
+fn distinct_reference_signature_rejects_a_rolled_back_second_formal_class() {
+    const SOURCE: &str =
+        include_str!("fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala");
+    let source_id = SourceId::from_index(19603);
+    let output = TestOutputDirectory::new("stale-dual-reference-formal");
+    let mut stale_target = None;
+    let mut signature_error = None;
+
+    let mut observe_typer = |ast: &AstArena<Untyped>,
+                             source_root: TreeId<Untyped>,
+                             index: &SourceSemanticIndex,
+                             typer: &mut SourceTyper<'_>,
+                             _definitions: &Definitions| {
+        let TreeKind::PackageDef(package) = &ast.get(source_root).kind else {
+            panic!("authentic source root is a package")
+        };
+        let factory = package
+            .stats
+            .iter()
+            .find_map(|&tree| {
+                let TreeKind::TypeDef(definition) = &ast.get(tree).kind else {
+                    return None;
+                };
+                let class = index.symbol_at(source_id, tree)?;
+                (typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(class).name.text())
+                    == "PairFactory")
+                    .then_some((tree, definition.rhs))
+            })
+            .unwrap();
+        let TreeKind::Template(template) = &ast.get(factory.1).kind else {
+            panic!("PairFactory has a class template")
+        };
+        let constructor = index.symbol_at(source_id, template.constructor).unwrap();
+        typer
+            .complete_symbol(constructor)
+            .expect("factory's genuine default constructor completes");
+    };
+
+    let mut mutate_store = |ast: &AstArena<Untyped>,
+                            source: SourceId,
+                            index: &SourceSemanticIndex,
+                            store: &mut SemanticStore| {
+        let package_tree = ast
+            .iter()
+            .find_map(|(tree, node)| matches!(&node.kind, TreeKind::PackageDef(_)).then_some(tree))
+            .unwrap();
+        let TreeKind::PackageDef(package) = &ast.get(package_tree).kind else {
+            panic!("authentic source has a package root")
+        };
+        let mut counter = None;
+        let mut second_formal = None;
+        let mut method = None;
+        for &class_tree in &package.stats {
+            let TreeKind::TypeDef(class_definition) = &ast.get(class_tree).kind else {
+                continue;
+            };
+            let class = index.symbol_at(source, class_tree).unwrap();
+            if store.names.resolve(store.symbols.get(class).name.text()) == "Counter" {
+                counter = Some(class);
+            }
+            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
+                continue;
+            };
+            for &member_tree in &template.body {
+                let TreeKind::DefDef(definition) = &ast.get(member_tree).kind else {
+                    continue;
+                };
+                if store.names.resolve(definition.name.as_name().text()) == "wrap" {
+                    method = Some(index.symbol_at(source, member_tree).unwrap());
+                    let [first, second] = definition.value_param_clauses[0].as_slice() else {
+                        panic!("factory keeps exactly two source formals")
+                    };
+                    let _ = first;
+                    second_formal = Some(index.symbol_at(source, *second).unwrap());
+                }
+            }
+        }
+        let counter = counter.unwrap();
+        let second_formal = second_formal.unwrap();
+        let method = method.unwrap();
+        let SymbolInfo::Complete(second_type) = store.symbols.get(second_formal).info else {
+            panic!("typed source formal has a complete type")
+        };
+        let prefix = match store.types.get(second_type) {
+            Type::TypeRef { prefix, .. } => *prefix,
+            other => panic!("formal type is a class TypeRef, got {other:?}"),
+        };
+        let stale_formal_type = store.types.alloc(Type::type_ref(prefix, counter));
+        let SymbolInfo::Complete(signature_type) = store.symbols.get(method).info else {
+            panic!("typed source method has a complete signature")
+        };
+        let Type::Method(mut signature) = store.types.get(signature_type).clone() else {
+            panic!("wrap has a method signature")
+        };
+        assert_eq!(signature.params.len(), 2);
+        signature.params[1].ty = stale_formal_type;
+        let stale_signature_type = store.types.alloc(Type::Method(signature));
+
+        let checkpoint = store.checkpoint();
+        let stale_record = store.symbols.get(counter).clone();
+        let stale = store.symbols.alloc(stale_record);
+        store.rollback_to(checkpoint);
+        *store.types.get_mut(stale_formal_type) = Type::type_ref(prefix, stale);
+        store.symbols.get_mut(second_formal).info = SymbolInfo::Complete(stale_formal_type);
+        store.symbols.get_mut(method).info = SymbolInfo::Complete(stale_signature_type);
+        assert!(!store.symbols.contains(stale));
+        stale_target = Some(stale);
+    };
+
+    struct Bindings<'a> {
+        typed: &'a SourceTypedIndex,
+        classes: Vec<SymbolId>,
+    }
+    impl dotty_tasty_pickler::SourceTypedBindings for Bindings<'_> {
+        fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
+            self.typed.get(source, tree)
+        }
+        fn planned_class_symbols(&self) -> &[SymbolId] {
+            &self.classes
+        }
+    }
+
+    let mut observe_source = |ast: &AstArena<Untyped>,
+                              source_root: TreeId<Untyped>,
+                              index: &SourceSemanticIndex,
+                              typed_index: &SourceTypedIndex,
+                              unit: &mut JvmCompilationUnit<'_>,
+                              definitions: &Definitions| {
+        let TreeKind::PackageDef(package) = &ast.get(source_root).kind else {
+            panic!("authentic source root is a package")
+        };
+        let factory = package
+            .stats
+            .iter()
+            .find_map(|&tree| {
+                let TreeKind::TypeDef(definition) = &ast.get(tree).kind else {
+                    return None;
+                };
+                let symbol = index.symbol_at(source_id, tree)?;
+                (unit
+                    .store
+                    .names
+                    .resolve(unit.store.symbols.get(symbol).name.text())
+                    == "PairFactory")
+                    .then_some((symbol, tree, definition.rhs))
+            })
+            .unwrap();
+        let factory_symbol = factory.0;
+        let factory_tree = factory.1;
+        let TreeKind::Template(template) = &ast.get(factory.2).kind else {
+            panic!("PairFactory has a class template")
+        };
+        let method_tree = template
+            .body
+            .iter()
+            .copied()
+            .find(|&tree| {
+                matches!(&ast.get(tree).kind, TreeKind::DefDef(definition)
+                    if unit.store.names.resolve(definition.name.as_name().text()) == "wrap")
+            })
+            .unwrap();
+        let method = index.symbol_at(source_id, method_tree).unwrap();
+        let constructor = index.symbol_at(source_id, template.constructor).unwrap();
+        let members = [dotty_tasty_pickler::ClassMemberPicklePlan::Method {
+            symbol: method,
+            source_tree: method_tree,
+        }];
+        let bindings = Bindings {
+            typed: typed_index,
+            classes: unit.classes.iter().map(|class| class.class).collect(),
+        };
+        let state = dotty_tasty_pickler::ClassStatePicklePlan {
+            store: unit.store,
+            definitions,
+            source_ast: ast,
+            typed_ast: unit.typed_ast,
+            source_index: index,
+            typed_bindings: &bindings,
+            source: dotty_tasty_pickler::SourceMetadata {
+                id: source_id,
+                name: "PairFactory.scala".into(),
+            },
+            class: factory_symbol,
+            class_tree: factory_tree,
+            constructor: dotty_tasty_pickler::PrimaryConstructorInputPlan {
+                symbol: constructor,
+                source_tree: template.constructor,
+                parameter_clauses: vec![],
+            },
+            members: &members,
+        };
+        let validated = state
+            .validate()
+            .expect("authentic class state remains valid before signature validation");
+        let error = validated
+            .distinct_reference_method_signature(method)
+            .expect_err("a rolled-back formal target is a typed validation error");
+        signature_error = Some(error);
+    };
+
+    let _compilation = compile_source_batch_with_typer_failure_observer(
+        SOURCE,
+        "PairFactory.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        SourceBatchObservers {
+            source: Some(&mut observe_source),
+            source_store_mutator: Some(&mut mutate_store),
+            typer: Some(&mut observe_typer),
+            ..SourceBatchObservers::default()
+        },
+    );
+    let stale = stale_target.expect("mutator captured the rolled-back symbol ID");
+    assert!(matches!(
+        signature_error,
+        Some(dotty_tasty_pickler::PickleError::InvalidSymbol { symbol }) if symbol == stale
+    ));
 }
 
 fn assert_direct_formal_pair_variant(

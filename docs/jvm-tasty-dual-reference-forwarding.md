@@ -58,6 +58,14 @@ The caller formals and Pair constructor formals are distinct identities even tho
 
 The inspected `dotty-tasty-pickler::method` planned-class-parameter predicate is an inspection candidate; it is not reported as an executed result for this source because the paired planner stops earlier. The standalone signature projection above is the independently executed pickler result. No producer guard was bypassed, no node or type was forged, and no output path was made to accept the source.
 
+## Method signature increment (#1963)
+
+Issue [#1963](https://github.com/scytrowski/dotty-rs/issues/1963) uses the same original `PairFactory.scala` source and one frontend session described above. Before the increment, its ordinary method signature was rejected in two bounded pickler paths: `PicklePlan::method` returned `MalformedType { role: Parameter }` for its two planned-class formals, while the read-only class-state signature proof returned `Unsupported { feature: ClassMembers }` because that proof accepted only one formal.
+
+The signature contract now accepts exactly one existing or two same-class planned sibling reference formals in one ordinary plain clause. Both formals retain their distinct method-owned source `SymbolId`s, canonical `ValueParam` declarations, original order, matching `MethodType` entries, public visibility and exact same-source class `TypeRef`; the result must be a different canonical planned sibling class with the correct package prefix. Mixed primitive/reference pairs, different class formals, third formals, and non-plain or exotic clauses remain unsupported. The standalone projection emits separate ordered `PARAM first: Counter` and `PARAM second: Counter` roots followed by `IDENTtpt Pair`, matching the formal/type shape and ordering shown in the pinned Scala snapshot above.
+
+The focused Rust source-session regression verifies the two distinct identities, their source ownership and order, the `Counter` parameter class, the `Pair` result class, the separate PARAM addresses/names, and the projected `Counter`/`Pair` type names. The paired planner now passes the signature boundary and stops later at `Unsupported { feature: BodyExpression }` for the original direct constructor application. That later body layer belongs to issue #4; this increment does not encode or validate the method body and does not claim complete Rust-produced `PairFactory.tasty` output.
+
 ## Scala validity and Rust first-stage controls
 
 The reproducible control compiler is [`verify-controls.py`](../tests/fixtures/jvm_tasty_dual_reference_forwarding/verify-controls.py), run by [`rebuild-oracle.sh`](../tests/fixtures/jvm_tasty_dual_reference_forwarding/rebuild-oracle.sh). The Rust test creates an independent paired-planner source session for each control and asserts that no batch callback publishes output.

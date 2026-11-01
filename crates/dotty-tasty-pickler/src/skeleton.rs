@@ -96,6 +96,19 @@ fn text<'a>(plan: &ValidatedPicklePlan<'_, 'a>, name: Name) -> Result<&'a str, P
         .ok_or(PickleError::InvalidName { name: name.text() })
 }
 
+fn method_type_syntax(
+    plan: &ValidatedPicklePlan<'_, '_>,
+    context: &mut EncodingContext<'_>,
+    ty: dotty_core::TypeId,
+) -> Result<AstLabel, PickleError> {
+    let definitions = &plan.plan().definitions;
+    if ty == definitions.int || ty == definitions.boolean || ty == definitions.unit {
+        context.primitive_type_syntax(ty)
+    } else {
+        context.same_source_reference_type_syntax(ty)
+    }
+}
+
 impl ValidatedPicklePlan<'_, '_> {
     /// Emits only the frozen one-class declaration skeleton, with real method
     /// bodies explicitly recorded as omitted. It never publishes a file.
@@ -344,7 +357,7 @@ impl ValidatedPicklePlan<'_, '_> {
                             }
                         };
                         let parameter_type =
-                            context.primitive_type_syntax(parameter_semantic_type)?;
+                            method_type_syntax(self, &mut context, parameter_semantic_type)?;
                         context.bind_declaration(
                             parameter,
                             AstNode::Length {
@@ -378,7 +391,7 @@ impl ValidatedPicklePlan<'_, '_> {
                 Some(_) => method_info,
                 None => return Err(PickleError::IncompleteType { ty: method_info }),
             };
-            let result = context.primitive_type_syntax(result_semantic_type)?;
+            let result = method_type_syntax(self, &mut context, result_semantic_type)?;
             // No invented METHODtype payload, abstract modifier or substitute
             // for the method's real RHS.
             fields.push(AstField::Tree(result));
