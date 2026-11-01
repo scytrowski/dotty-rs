@@ -1332,8 +1332,8 @@ impl<'a> EncodingContext<'a> {
 
     /// Lowers the exact public primary constructor selection for one planned
     /// sibling class. The symbol is checked against its canonical source
-    /// declaration and completed `(Int)Class` signature before a signed name
-    /// is emitted; no constructor is copied into the current sidecar.
+    /// declaration and one of the bounded supported signatures before a
+    /// signed name is emitted; no constructor is copied into the current sidecar.
     pub(crate) fn same_source_constructor_select_in(
         &mut self,
         class: SymbolId,
@@ -1380,9 +1380,6 @@ impl<'a> EncodingContext<'a> {
                 });
             };
             if signature.kind != MethodKind::Plain
-                || signature.params.len() != 1
-                || signature.params[0].erased
-                || signature.params[0].varargs
                 || !matches!(c.ty(signature.result)?, Type::TypeRef {
                     prefix,
                     target: TypeRefTarget::Symbol(target),
@@ -1390,13 +1387,18 @@ impl<'a> EncodingContext<'a> {
             {
                 return Err(reference(constructor, ReferenceError::Metadata));
             }
-            let parameter_class = if signature.params[0].ty == c.definitions.int {
-                None
-            } else {
+            if signature
+                .params
+                .iter()
+                .any(|parameter| parameter.erased || parameter.varargs)
+            {
+                return Err(reference(constructor, ReferenceError::Metadata));
+            }
+            let reference_parameter_class = |ty| {
                 let Type::TypeRef {
-                    prefix: parameter_prefix,
+                    prefix,
                     target: TypeRefTarget::Symbol(parameter_class),
-                } = c.ty(signature.params[0].ty)?
+                } = c.ty(ty)?
                 else {
                     return Err(reference(constructor, ReferenceError::Metadata));
                 };
@@ -1410,7 +1412,7 @@ impl<'a> EncodingContext<'a> {
                     || !parameter_record.flags.is_empty()
                     || !parameter_record.annotations.is_empty()
                     || parameter_record.owner != class_record.owner
-                    || !matches!(c.ty(*parameter_prefix)?, Type::TypeRef {
+                    || !matches!(c.ty(*prefix)?, Type::TypeRef {
                         prefix,
                         target: TypeRefTarget::Symbol(package),
                     } if *prefix == c.definitions.no_prefix
@@ -1418,7 +1420,20 @@ impl<'a> EncodingContext<'a> {
                 {
                     return Err(reference(constructor, ReferenceError::Metadata));
                 }
-                Some(parameter_class)
+                Ok(parameter_class)
+            };
+            let parameter_classes = match signature.params.as_slice() {
+                [parameter] if parameter.ty == c.definitions.int => vec![None],
+                [parameter] => vec![Some(reference_parameter_class(parameter.ty)?)],
+                [first, second] => {
+                    let first_class = reference_parameter_class(first.ty)?;
+                    let second_class = reference_parameter_class(second.ty)?;
+                    if first_class != second_class {
+                        return Err(reference(constructor, ReferenceError::Metadata));
+                    }
+                    vec![Some(first_class), Some(second_class)]
+                }
+                _ => return Err(reference(constructor, ReferenceError::Metadata)),
             };
             let owner = class_record
                 .owner
@@ -1431,28 +1446,32 @@ impl<'a> EncodingContext<'a> {
             let class_name = c.utf8(c.text(class_record.name.text())?)?;
             let result_signature = c.intern(NameKey::Qualified(package_name, class_name))?;
             let original = c.utf8("<init>")?;
-            let parameter_signature = if let Some(parameter_class) = parameter_class {
-                let parameter_record = c.symbol(parameter_class)?;
-                let parameter_package = parameter_record
-                    .owner
-                    .ok_or(reference(parameter_class, ReferenceError::Owner))?;
-                let parameter_package = c.package_name(parameter_package)?;
-                let parameter_name = c.utf8(c.text(parameter_record.name.text())?)?;
-                c.intern(NameKey::Qualified(parameter_package, parameter_name))?
-            } else {
-                let scala = c.utf8("scala")?;
-                let int = c.utf8("Int")?;
-                c.intern(NameKey::Qualified(scala, int))?
-            };
-            let parameter_signature =
-                i32::try_from(parameter_signature).map_err(|_| PickleError::LimitExceeded {
-                    kind: LimitKind::Names,
-                    limit: i32::MAX as usize,
-                })?;
+            let mut parameter_signatures = Vec::with_capacity(parameter_classes.len());
+            for parameter_class in parameter_classes {
+                let parameter_signature = if let Some(parameter_class) = parameter_class {
+                    let parameter_record = c.symbol(parameter_class)?;
+                    let parameter_package = parameter_record
+                        .owner
+                        .ok_or(reference(parameter_class, ReferenceError::Owner))?;
+                    let parameter_package = c.package_name(parameter_package)?;
+                    let parameter_name = c.utf8(c.text(parameter_record.name.text())?)?;
+                    c.intern(NameKey::Qualified(parameter_package, parameter_name))?
+                } else {
+                    let scala = c.utf8("scala")?;
+                    let int = c.utf8("Int")?;
+                    c.intern(NameKey::Qualified(scala, int))?
+                };
+                parameter_signatures.push(i32::try_from(parameter_signature).map_err(|_| {
+                    PickleError::LimitExceeded {
+                        kind: LimitKind::Names,
+                        limit: i32::MAX as usize,
+                    }
+                })?);
+            }
             let signed_name = c.intern(NameKey::SignedMany(
                 original,
                 result_signature,
-                vec![parameter_signature],
+                parameter_signatures,
             ))?;
             let owner_type = c.lower_same_source_class_type(class, owner_type)?;
             c.wire
