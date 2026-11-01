@@ -22,6 +22,35 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             with self.assertRaises(gate.ReceiptError):
                 gate.require_test_log(log, {"required_case"})
 
+    def test_single_thread_nocapture_logs_keep_tests_with_interleaved_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = self.write_log(
+                Path(directory) / "nocapture.log",
+                "running 1 test\n"
+                "test receipt_case ... ISSUE1938_POSITIVE\tfirst\tunwrap\n"
+                "ISSUE1938_POSITIVE\tsecond\tunwrap\n"
+                "ok\n"
+                "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out\n",
+            )
+            self.assertEqual(gate.passed_tests(log.read_text(encoding="utf-8")), {"receipt_case"})
+            gate.require_test_log(log, {"receipt_case"})
+
+    def test_single_thread_nocapture_failed_test_is_not_counted_as_passed(self) -> None:
+        self.assertEqual(
+            gate.passed_tests("test failed_case ... marker output\nFAILED\n"),
+            set(),
+        )
+
+    def test_receipt_markers_survive_the_rust_test_prefix(self) -> None:
+        log = (
+            "test receipt_case ... ISSUE1938_POSITIVE\tfirst\tunwrap\n"
+            "ISSUE1938_POSITIVE\tsecond\tunwrap\n"
+        )
+        self.assertEqual(
+            gate.marker_lines(log, "ISSUE1938_POSITIVE\t"),
+            ["ISSUE1938_POSITIVE\tfirst\tunwrap", "ISSUE1938_POSITIVE\tsecond\tunwrap"],
+        )
+
     def test_combined_logs_require_the_exact_nonduplicated_test_set(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             first = self.write_log(

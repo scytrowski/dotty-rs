@@ -168,7 +168,28 @@ def validate_inputs(root: Path) -> None:
 
 
 def passed_tests(text: str) -> set[str]:
-    return set(re.findall(r"^test (.+?) \.\.\. ok$", text, re.MULTILINE))
+    passed = set()
+    pending = None
+    for line in text.splitlines():
+        completed = re.match(r"^test (.+?) \.\.\. (ok|FAILED)$", line)
+        if completed:
+            pending = None
+            if completed.group(2) == "ok":
+                passed.add(completed.group(1))
+            continue
+        started = re.match(r"^test (.+?) \.\.\.(?: .*)?$", line)
+        if started:
+            pending = started.group(1)
+        elif pending and line == "ok":
+            passed.add(pending)
+            pending = None
+        elif pending and line == "FAILED":
+            pending = None
+    return passed
+
+
+def marker_lines(text: str, marker: str) -> list[str]:
+    return [line[line.index(marker):] for line in text.splitlines() if marker in line]
 
 
 def require_test_log(path: Path, expected: set[str]) -> str:
@@ -209,7 +230,7 @@ def require_test_logs(paths: list[Path], expected: set[str]) -> None:
 
 def validate_rust_log(path: Path) -> None:
     text = require_test_log(path, RUST_TESTS)
-    positive_lines = [line for line in text.splitlines() if line.startswith("ISSUE1938_POSITIVE\t")]
+    positive_lines = marker_lines(text, "ISSUE1938_POSITIVE\t")
     actual_positive = {tuple(line.split("\t")[1:]) for line in positive_lines}
     if len(positive_lines) != 4 or actual_positive != POSITIVE:
         raise ReceiptError("positive receipt must contain the exact two roots in two sessions")
@@ -226,7 +247,7 @@ def validate_rust_log(path: Path) -> None:
     }
     if committed_rows != actual_positive or len(committed) != 4:
         raise ReceiptError("committed positive receipt disagrees with actual typed-root log")
-    negative_lines = [line for line in text.splitlines() if line.startswith("ISSUE1938_NEGATIVE\t")]
+    negative_lines = marker_lines(text, "ISSUE1938_NEGATIVE\t")
     actual_negative = {}
     for line in negative_lines:
         fields = line.split("\t")
