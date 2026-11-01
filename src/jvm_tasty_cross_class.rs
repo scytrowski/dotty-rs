@@ -960,6 +960,12 @@ fn validate_two_nested_constructor_call_candidate<'session>(
             "two-argument candidate must have one plain two-formal clause and a concrete public body",
         ));
     }
+    require_source_position(
+        source_ast,
+        source_id,
+        method_tree,
+        "factory method declaration has a foreign source position",
+    )?;
 
     let method_formal_trees = [
         method_def.value_param_clauses[0][0],
@@ -1092,6 +1098,12 @@ fn validate_two_nested_constructor_call_candidate<'session>(
     else {
         return Err(identity_error("factory class must have a template"));
     };
+    require_source_position(
+        source_ast,
+        source_id,
+        caller_def.rhs,
+        "factory template has a foreign source position",
+    )?;
     let method_name = store.names.resolve(method_def.name.as_name().text());
     let same_named_methods = caller_template
         .body
@@ -1130,6 +1142,19 @@ fn validate_two_nested_constructor_call_candidate<'session>(
     let typed_rhs = source_typed_index
         .get(source_id, source_rhs)
         .ok_or_else(|| typed_error("factory RHS has no exact typed binding"))?;
+    let method_plan = caller_plan
+        .methods
+        .iter()
+        .filter(|plan| plan.method == method)
+        .collect::<Vec<_>>();
+    if method_plan.len() != 1
+        || method_plan[0].parameters != method_formals
+        || method_plan[0].body != Some(typed_rhs)
+    {
+        return Err(Error::JvmPlan(
+            "JVM method plan must retain the exact ordered canonical formals and typed RHS",
+        ));
+    }
     let typed_select = source_typed_index
         .get(source_id, source_select)
         .ok_or_else(|| typed_error("outer Select has no exact typed binding"))?;
@@ -1262,6 +1287,12 @@ fn validate_two_nested_constructor_call_candidate<'session>(
         .ok_or_else(|| {
             identity_error("Pair class declaration is missing from this source batch")
         })?;
+    require_source_position(
+        source_ast,
+        source_id,
+        target_tree,
+        "Pair class declaration has a foreign source position",
+    )?;
     let Some(target_ordinal) = source_class_trees
         .iter()
         .position(|tree| *tree == target_tree)
@@ -1293,6 +1324,12 @@ fn validate_two_nested_constructor_call_candidate<'session>(
     else {
         return Err(identity_error("Pair declaration must have a template"));
     };
+    require_source_position(
+        source_ast,
+        source_id,
+        target_def.rhs,
+        "Pair template has a foreign source position",
+    )?;
     if target_template.body.iter().any(|tree| {
         matches!(source_ast.try_get(*tree).map(|node| &node.kind), Some(TreeKind::DefDef(definition)) if store.names.resolve(definition.name.as_name().text()) == "this")
     }) {
@@ -1341,6 +1378,12 @@ fn validate_two_nested_constructor_call_candidate<'session>(
             "Pair primary constructor source tree must be DefDef",
         ));
     };
+    require_source_position(
+        source_ast,
+        source_id,
+        target_template.constructor,
+        "Pair primary constructor has a foreign source position",
+    )?;
     let target_formal_trees = target_constructor_def
         .value_param_clauses
         .iter()
@@ -1351,6 +1394,18 @@ fn validate_two_nested_constructor_call_candidate<'session>(
         return Err(source_error(
             "Pair primary constructor must have exactly two ordinary formals",
         ));
+    }
+    for (index, formal_tree) in target_formal_trees.iter().copied().enumerate() {
+        require_source_position(
+            source_ast,
+            source_id,
+            formal_tree,
+            if index == 0 {
+                "first Pair constructor formal has a foreign source position"
+            } else {
+                "second Pair constructor formal has a foreign source position"
+            },
+        )?;
     }
     let target_formals = [
         source_index
@@ -1656,6 +1711,12 @@ fn validate_two_nested_constructor_call_candidate<'session>(
         let TreeKind::TypeDef(counter_def) = &source_ast.get(counter_tree).kind else {
             return Err(identity_error("Counter declaration must be a class"));
         };
+        require_source_position(
+            source_ast,
+            source_id,
+            counter_tree,
+            "Counter class declaration has a foreign source position",
+        )?;
         if store.symbols.get(counter_class).visibility != dotty_core::Visibility::Public
             || has_any_flag(
                 store.symbols.get(counter_class).flags,
@@ -1672,6 +1733,12 @@ fn validate_two_nested_constructor_call_candidate<'session>(
         let TreeKind::Template(counter_template) = &source_ast.get(counter_def.rhs).kind else {
             return Err(identity_error("Counter declaration must have a template"));
         };
+        require_source_position(
+            source_ast,
+            source_id,
+            counter_def.rhs,
+            "Counter template has a foreign source position",
+        )?;
         if counter_template.body.iter().any(|tree| {
             matches!(source_ast.try_get(*tree).map(|node| &node.kind), Some(TreeKind::DefDef(definition)) if store.names.resolve(definition.name.as_name().text()) == "this")
         }) {
@@ -1701,6 +1768,12 @@ fn validate_two_nested_constructor_call_candidate<'session>(
                 "Counter primary constructor source tree must be DefDef",
             ));
         };
+        require_source_position(
+            source_ast,
+            source_id,
+            counter_template.constructor,
+            "Counter primary constructor has a foreign source position",
+        )?;
         let counter_formal_trees = counter_ctor_def
             .value_param_clauses
             .iter()
@@ -1712,6 +1785,12 @@ fn validate_two_nested_constructor_call_candidate<'session>(
                 "nested Counter constructor must have one ordinary formal",
             ));
         }
+        require_source_position(
+            source_ast,
+            source_id,
+            counter_formal_trees[0],
+            "Counter constructor formal has a foreign source position",
+        )?;
         let counter_formal = source_index
             .derived_symbol_at(counter_constructor, source_id, counter_formal_trees[0])
             .ok_or_else(|| {

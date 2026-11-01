@@ -972,6 +972,162 @@ fn two_ordered_nested_arguments_keep_distinct_source_and_typed_provenance() {
                 "(Lexample/Counter;Lexample/Counter;)V",
             );
             let [first, second] = proof.nested_argument_pair().unwrap();
+
+            let mut wrong_body_classes = jvm_unit.classes.clone();
+            let factory_plan = wrong_body_classes
+                .iter_mut()
+                .find(|class| class.class == proof.caller_class())
+                .unwrap();
+            let factory_method_plan = factory_plan
+                .methods
+                .iter_mut()
+                .find(|method| method.method == proof.method())
+                .unwrap();
+            factory_method_plan.body = Some(proof.typed_new());
+            let wrong_body_unit = JvmCompilationUnit {
+                store: jvm_unit.store,
+                typed_ast: jvm_unit.typed_ast,
+                classes: wrong_body_classes,
+            };
+            wrong_body_unit.metadata(definitions).unwrap();
+            let wrong_body_result =
+                validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root: root,
+                    store,
+                    definitions,
+                    source_ast: source,
+                    typed_ast: typed,
+                    source_index: index,
+                    source_typed_index: bindings,
+                    jvm_unit: &wrong_body_unit,
+                });
+            assert!(matches!(
+                wrong_body_result,
+                Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::JvmPlan(_))
+            ));
+
+            let factory_method_tree = match index.definition_of(proof.method()) {
+                Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+                _ => panic!("factory method has its exact original declaration"),
+            };
+            let pair_tree = match index.definition_of(proof.target_class()) {
+                Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+                _ => panic!("Pair class has its exact original declaration"),
+            };
+            let factory_tree = match index.definition_of(proof.caller_class()) {
+                Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+                _ => panic!("factory class has its exact original declaration"),
+            };
+            let TreeKind::TypeDef(factory_definition) = &source.get(factory_tree).kind else {
+                panic!("factory source declaration is a class");
+            };
+            let pair_constructor_tree = match index.definition_of(proof.constructor()) {
+                Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+                _ => panic!("Pair constructor has its exact original declaration"),
+            };
+            let counter_tree = match index.definition_of(first.class()) {
+                Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+                _ => panic!("Counter class has its exact original declaration"),
+            };
+            let TreeKind::TypeDef(counter_definition) = &source.get(counter_tree).kind else {
+                panic!("Counter source declaration is a class");
+            };
+            let TreeKind::Template(counter_template) = &source.get(counter_definition.rhs).kind
+            else {
+                panic!("Counter source declaration has a template");
+            };
+            let counter_constructor_tree = counter_template.constructor;
+            let TreeKind::DefDef(counter_constructor_definition) =
+                &source.get(counter_constructor_tree).kind
+            else {
+                panic!("Counter constructor is a source definition");
+            };
+            let counter_formal_trees = counter_constructor_definition
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            assert_eq!(counter_formal_trees.len(), 1);
+            let pair_context = proof.argument_proof().nested_pair_context().unwrap();
+            let retained_positions = [
+                ("factory method", factory_method_tree),
+                ("factory template", factory_definition.rhs),
+                ("Pair class", pair_tree),
+                ("Pair constructor", pair_constructor_tree),
+                ("Counter class", counter_tree),
+                ("Counter constructor", counter_constructor_tree),
+                (
+                    "factory first formal",
+                    pair_context.source_method_formals()[0],
+                ),
+                (
+                    "factory second formal",
+                    pair_context.source_method_formals()[1],
+                ),
+                (
+                    "Pair first formal",
+                    pair_context.source_constructor_formals()[0],
+                ),
+                (
+                    "Pair second formal",
+                    pair_context.source_constructor_formals()[1],
+                ),
+                ("Counter formal", counter_formal_trees[0]),
+            ];
+            for (label, tree) in retained_positions {
+                let mut foreign_position_source = clone_arena(source);
+                let source_position = foreign_position_source.get(tree).position.unwrap();
+                foreign_position_source.get_mut(tree).position = Some(SourceSpan::new(
+                    SourceId::from_index(19143),
+                    source_position.span(),
+                ));
+                let foreign_position_result = validate_cross_class_constructor_call_proofs(
+                    CrossClassConstructorCallProofInput {
+                        source_id,
+                        source_root: root,
+                        store,
+                        definitions,
+                        source_ast: &foreign_position_source,
+                        typed_ast: typed,
+                        source_index: index,
+                        source_typed_index: bindings,
+                        jvm_unit,
+                    },
+                );
+                assert!(
+                    matches!(
+                        foreign_position_result,
+                        Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(_))
+                    ),
+                    "pair proof must reject a foreign {label} source position"
+                );
+
+                let mut missing_position_source = clone_arena(source);
+                missing_position_source.get_mut(tree).position = None;
+                let missing_position_result = validate_cross_class_constructor_call_proofs(
+                    CrossClassConstructorCallProofInput {
+                        source_id,
+                        source_root: root,
+                        store,
+                        definitions,
+                        source_ast: &missing_position_source,
+                        typed_ast: typed,
+                        source_index: index,
+                        source_typed_index: bindings,
+                        jvm_unit,
+                    },
+                );
+                assert!(
+                    matches!(
+                        missing_position_result,
+                        Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(_))
+                    ),
+                    "pair proof must reject a missing {label} source position"
+                );
+            }
+
             let mut missing = bindings.clone();
             assert_eq!(
                 missing.remove(source_id, first.source_select()),
