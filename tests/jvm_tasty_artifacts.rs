@@ -8,7 +8,9 @@ use dotty_jvm_tasty_contract::{
     validate_jvm_tasty_batch, validate_jvm_tasty_batch_artifacts,
 };
 use dotty_jvm_tasty_contract::{JvmTastyContractError, validate_classfile_tasty_link};
+use dotty_tasty::ast::{APPLY_TAG, DEFDEF_TAG, PARAM_TAG, TERMREFDIRECT_TAG};
 use dotty_tasty::tasty::{DefinitionBody, TastyFile};
+use dotty_tasty::term::{AstRefKind, RawTree, TermValue};
 
 use dotty::jvm_tasty_artifacts::{
     PairedArtifactError, PairedBatchArtifactError, emit_paired_jvm_tasty_batch,
@@ -43,6 +45,8 @@ const NESTED_CONSTRUCTOR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala");
 const MULTI_ARGUMENT_CONSTRUCTOR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala");
+const DUAL_REFERENCE_FORWARDING_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala");
 const PAIR_FACTORY_IDENTITY_HARNESS_JAVA: &[u8] = include_bytes!(
     "fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactoryIdentityHarness.java"
 );
@@ -55,6 +59,186 @@ const REFERENCE_LOCAL_BATCH: &str =
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
 const COUNTER_FACTORY_REFERENCE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def create(counter: Counter): Counter = counter\n";
+
+fn tasty_method_body<'a>(
+    file: &'a TastyFile<'a>,
+    name: &str,
+) -> (u32, dotty_tasty::ast::DefDefBody<'a>) {
+    let index = file.ast_address_index().unwrap();
+    index
+        .iter_nodes_with_tag(DEFDEF_TAG)
+        .find_map(|node| {
+            let body = index.get(node.offset as u32)?.decode_defdef_body().ok()?;
+            (file.names().render(body.name).ok()? == name).then_some((node.offset as u32, body))
+        })
+        .unwrap_or_else(|| panic!("TASTy declares {name}"))
+}
+
+fn tasty_parameter_addresses(
+    index: &dotty_tasty::ast::AstAddressIndex<'_>,
+    method_address: u32,
+) -> Vec<u32> {
+    index
+        .iter_nodes_with_tag(PARAM_TAG)
+        .filter(|node| {
+            let mut parent = index.parent_of(node.offset as u32);
+            while let Some(item) = parent {
+                if item.offset as u32 == method_address {
+                    return true;
+                }
+                parent = index.parent_of(item.offset as u32);
+            }
+            false
+        })
+        .map(|node| node.offset as u32)
+        .collect()
+}
+
+fn verify_dual_reference_batch_with_pinned_scala(
+    batch: &dotty::jvm_tasty_artifacts::PairedJvmTastyBatchArtifacts,
+) {
+    const REVISION: &str = "777528f19a58e794c9954a42f433373472ec57f8";
+    let scala_root = std::path::PathBuf::from(
+        std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT is required by the strict gate"),
+    );
+    let java_home = std::path::PathBuf::from(
+        std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required by the strict gate"),
+    );
+    let revision = Command::new("git")
+        .args(["-C"])
+        .arg(&scala_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("read pinned Scala revision");
+    assert!(revision.status.success());
+    assert_eq!(String::from_utf8_lossy(&revision.stdout).trim(), REVISION);
+    let scalac = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let version = Command::new(&scalac)
+        .arg("-version")
+        .output()
+        .expect("query pinned Scala compiler version");
+    let version_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&version.stdout),
+        String::from_utf8_lossy(&version.stderr)
+    );
+    assert!(version.status.success());
+    assert!(
+        version_text.contains("3.9.0-bin-SNAPSHOT-git-777528f"),
+        "{version_text}"
+    );
+    let java = java_home.join("bin/java");
+    let java_version = Command::new(&java)
+        .arg("-version")
+        .output()
+        .expect("query configured JDK");
+    assert!(java_version.status.success());
+    let java_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&java_version.stdout),
+        String::from_utf8_lossy(&java_version.stderr)
+    );
+    assert!(java_text.contains("21.0.13"), "{java_text}");
+
+    let libraries = [
+        scala_root.join("dist/target/universal/stage/maven2/org/scala-lang/scala3-library_3/3.9.0-bin-SNAPSHOT/scala3-library_3-3.9.0-bin-SNAPSHOT.jar"),
+        scala_root.join("dist/target/universal/stage/maven2/org/scala-lang/scala-library/3.9.0-bin-SNAPSHOT/scala-library-3.9.0-bin-SNAPSHOT.jar"),
+    ];
+    for path in &libraries {
+        assert!(
+            path.is_file(),
+            "Scala runtime jar exists: {}",
+            path.display()
+        );
+    }
+    let root = TestDirectory::new("dual-reference-forwarding-scala-reader");
+    let producer = root.path().join("rust-producer");
+    let reconstructed = root.path().join("scala-from-tasty");
+    for artifact in batch.classes() {
+        for (relative, bytes) in [
+            (artifact.classfile_path(), artifact.classfile_bytes()),
+            (artifact.tasty_path(), artifact.tasty_bytes()),
+        ] {
+            let path = producer.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+    }
+    std::fs::create_dir_all(&reconstructed).unwrap();
+    let sidecars = ["Counter", "Pair", "PairFactory"]
+        .map(|name| producer.join(format!("example/{name}.tasty")));
+    for (name, sidecar) in ["Counter", "Pair", "PairFactory"]
+        .into_iter()
+        .zip(&sidecars)
+    {
+        let decompiled = Command::new(&scalac)
+            .args(["-color:never", "-decompile"])
+            .arg(sidecar)
+            .output()
+            .expect("run pinned Scala decompiler");
+        assert!(
+            decompiled.status.success(),
+            "Scala rejected Rust {name}.tasty: {}",
+            String::from_utf8_lossy(&decompiled.stderr)
+        );
+        let decompiled = String::from_utf8_lossy(&decompiled.stdout);
+        match name {
+            "Counter" => assert!(
+                decompiled.contains("def get") && decompiled.contains("def set"),
+                "{decompiled}"
+            ),
+            "Pair" => assert!(
+                decompiled.contains("class Pair(first: example.Counter, second: example.Counter)")
+                    && decompiled.contains("def leftValue")
+                    && decompiled.contains("def rightValue")
+            ),
+            "PairFactory" => assert!(
+                decompiled.contains(
+                    "def wrap(first: example.Counter, second: example.Counter): example.Pair"
+                ) && decompiled.contains("new example.Pair(first, second)"),
+                "{decompiled}"
+            ),
+            _ => unreachable!(),
+        }
+        let printed = Command::new(&scalac)
+            .arg("-print-tasty")
+            .arg(sidecar)
+            .output()
+            .expect("run pinned Scala TASTy printer");
+        assert!(
+            printed.status.success(),
+            "Scala rejected {name}.tasty in print mode: {}",
+            String::from_utf8_lossy(&printed.stderr)
+        );
+        assert!(String::from_utf8_lossy(&printed.stdout).contains("version: 28.9.0"));
+    }
+    let classpath = format!(
+        "{}:{}:{}",
+        producer.display(),
+        libraries[0].display(),
+        libraries[1].display()
+    );
+    let from_tasty = Command::new(&scalac)
+        .args(["-release", "21", "-from-tasty", "-classpath"])
+        .arg(classpath)
+        .arg("-d")
+        .arg(&reconstructed)
+        .args(&sidecars)
+        .output()
+        .expect("run pinned Scala -from-tasty on the Rust batch");
+    assert!(
+        from_tasty.status.success(),
+        "Scala -from-tasty rejected the Rust batch: {}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    for name in ["Counter", "Pair", "PairFactory"] {
+        assert!(
+            reconstructed
+                .join(format!("example/{name}.class"))
+                .is_file()
+        );
+    }
+}
 
 #[test]
 fn counter_emits_complete_class_and_tasty_with_the_same_real_header_uuid() {
@@ -5401,6 +5585,345 @@ fn sibling_constructor_batch_emits_six_deterministic_linked_artifacts() {
         (analysis.max_stack, analysis.max_locals),
         (code.max_stack, code.max_locals)
     );
+}
+
+#[test]
+fn dual_reference_forwarding_emits_six_linked_artifacts_with_ordered_formal_loads() {
+    let first = emit_paired_jvm_tasty_batch(
+        DUAL_REFERENCE_FORWARDING_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(19660),
+    )
+    .expect("the one-session source batch satisfies the linked JVM/TASTy contract");
+    let second = emit_paired_jvm_tasty_batch(
+        DUAL_REFERENCE_FORWARDING_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(19661),
+    )
+    .unwrap();
+    assert_ne!(first.source_id(), second.source_id());
+    match std::env::var("DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_BATCH").as_deref() {
+        Ok("1") => verify_dual_reference_batch_with_pinned_scala(&first),
+        Ok(value) => panic!(
+            "DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_BATCH must equal 1, got {value:?}"
+        ),
+        Err(std::env::VarError::NotPresent) => {}
+        Err(error) => panic!("read strict Scala reader gate: {error}"),
+    }
+    assert_eq!(first.classes().len(), 3);
+    assert_eq!(second.classes().len(), 3);
+    let expected = [
+        ("example/Counter.class", "example/Counter.tasty"),
+        ("example/Pair.class", "example/Pair.tasty"),
+        ("example/PairFactory.class", "example/PairFactory.tasty"),
+    ];
+    let mut decoded = Vec::new();
+    for (index, (artifact, repeated)) in first.classes().iter().zip(second.classes()).enumerate() {
+        assert_eq!(
+            (artifact.classfile_path(), artifact.tasty_path()),
+            expected[index]
+        );
+        assert_eq!(artifact.source_id(), first.source_id());
+        assert_eq!(artifact.classfile_bytes(), repeated.classfile_bytes());
+        assert_eq!(artifact.tasty_bytes(), repeated.tasty_bytes());
+        assert_eq!(artifact.tasty_link_id(), repeated.tasty_link_id());
+        let tasty = TastyFile::parse_and_validate_scala_3_9(artifact.tasty_bytes()).unwrap();
+        assert_eq!(
+            (
+                tasty.header().major_version,
+                tasty.header().minor_version,
+                tasty.header().experimental_version
+            ),
+            (28, 9, 0)
+        );
+        assert_eq!(
+            artifact.tasty_link_id(),
+            TastyLinkId::from_bytes(tasty.header().uuid)
+        );
+        if index == 2 {
+            let (wrap_address, wrap) = tasty_method_body(&tasty, "wrap");
+            assert_eq!(wrap.parameters.len(), 2);
+            assert_eq!(
+                wrap.parameters
+                    .iter()
+                    .map(|parameter| tasty.names().render(parameter.name()).unwrap())
+                    .collect::<Vec<_>>(),
+                ["first", "second"]
+            );
+            let address_index = tasty.ast_address_index().unwrap();
+            let formal_addresses = tasty_parameter_addresses(&address_index, wrap_address);
+            assert_eq!(formal_addresses.len(), 2);
+            let RawTree::LengthNode(outer_node) = wrap.rhs.expect("wrap has a body") else {
+                panic!("wrap body is an APPLY node");
+            };
+            assert_eq!(outer_node.tag, APPLY_TAG);
+            let outer = outer_node.decode_apply().unwrap();
+            assert_eq!(outer.arguments.len(), 2);
+            for (argument, formal_address) in outer.arguments.iter().zip(formal_addresses) {
+                assert_eq!(argument.ast_refs().len(), 1);
+                assert_eq!(argument.ast_refs()[0].kind, AstRefKind::TermRefDirect);
+                assert_eq!(argument.ast_refs()[0].address, formal_address);
+                let RawTree::Leaf(term) = argument else {
+                    panic!("forwarded formal is a direct TASTy reference leaf");
+                };
+                assert_eq!(term.tag, TERMREFDIRECT_TAG);
+                assert!(
+                    matches!(term.value, TermValue::AstRef(address) if address == formal_address)
+                );
+            }
+        }
+        let mut reader = Reader::new(artifact.classfile_bytes());
+        let class = ClassFile::decode(&mut reader).unwrap();
+        assert!(reader.is_at_end());
+        assert_eq!((class.version.major, class.version.minor), (65, 0));
+        assert_eq!(
+            class.tasty_link_id().unwrap(),
+            Some(artifact.tasty_link_id())
+        );
+        validate_classfile_tasty_link(&class, artifact.tasty_bytes()).unwrap();
+        decoded.push(class);
+    }
+    assert_eq!(
+        first
+            .classes()
+            .iter()
+            .flat_map(|artifact| [artifact.classfile_path(), artifact.tasty_path()])
+            .collect::<Vec<_>>(),
+        [
+            "example/Counter.class",
+            "example/Counter.tasty",
+            "example/Pair.class",
+            "example/Pair.tasty",
+            "example/PairFactory.class",
+            "example/PairFactory.tasty",
+        ]
+    );
+    let pair = &decoded[1];
+    assert_eq!(
+        pair.fields
+            .iter()
+            .map(|field| (
+                pair.constant_pool.utf8(field.name_index).unwrap(),
+                pair.constant_pool.utf8(field.descriptor_index).unwrap(),
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("left", "Lexample/Counter;"),
+            ("right", "Lexample/Counter;")
+        ]
+    );
+    let factory = &decoded[2];
+    let wrap = factory
+        .methods
+        .iter()
+        .find(|method| factory.constant_pool.utf8(method.name_index).unwrap() == "wrap")
+        .unwrap();
+    assert_eq!(
+        factory.constant_pool.utf8(wrap.descriptor_index).unwrap(),
+        "(Lexample/Counter;Lexample/Counter;)Lexample/Pair;"
+    );
+    let [Attribute::Code(code)] = wrap.attributes.as_slice() else {
+        panic!("wrap has one Code attribute");
+    };
+    assert_eq!((code.max_stack, code.max_locals), (4, 3));
+    let mut pc = 0;
+    let allocation = take_batch_cp_operand(code.code, &mut pc, 0xbb);
+    assert_eq!(batch_class_name(factory, allocation), "example/Pair");
+    take_batch_opcode(code.code, &mut pc, 0x59);
+    take_batch_opcode(code.code, &mut pc, 0x2b);
+    take_batch_opcode(code.code, &mut pc, 0x2c);
+    let constructor = take_batch_cp_operand(code.code, &mut pc, 0xb7);
+    assert_eq!(
+        batch_method_ref(factory, constructor),
+        (
+            "example/Pair",
+            ("<init>", "(Lexample/Counter;Lexample/Counter;)V")
+        )
+    );
+    take_batch_opcode(code.code, &mut pc, 0xb0);
+    assert_eq!(pc, code.code.len());
+    assert!(!factory.methods.iter().any(|method| {
+        let name = factory.constant_pool.utf8(method.name_index).unwrap();
+        name == "<init>"
+            && factory
+                .constant_pool
+                .utf8(method.descriptor_index)
+                .unwrap()
+                .starts_with("(Lexample/Counter;")
+    }));
+}
+
+#[test]
+fn dual_reference_forwarding_renamed_and_reordered_batches_are_deterministic() {
+    let renamed = DUAL_REFERENCE_FORWARDING_BATCH
+        .replace("package example", "package renamed.example")
+        .replace("PairFactory", "Assembler")
+        .replace("Pair", "Envelope")
+        .replace("Counter", "Gauge");
+    let source = DUAL_REFERENCE_FORWARDING_BATCH;
+    let counter_start = source.find("class Counter(start").unwrap();
+    let pair_start = source.find("class Pair(first").unwrap();
+    let factory_start = source.find("class PairFactory:").unwrap();
+    let counter = &source[counter_start..pair_start];
+    let pair = &source[pair_start..factory_start];
+    let factory = &source[factory_start..];
+    let reordered = format!("package example\n\n{factory}\n{pair}\n{counter}");
+
+    for (variant, source_name, first_id, second_id, expected_paths) in [
+        (
+            renamed.as_str(),
+            "Assembler.scala",
+            19662,
+            19663,
+            [
+                "renamed/example/Gauge.class",
+                "renamed/example/Envelope.class",
+                "renamed/example/Assembler.class",
+            ],
+        ),
+        (
+            reordered.as_str(),
+            "PairFactory.scala",
+            19664,
+            19665,
+            [
+                "example/PairFactory.class",
+                "example/Pair.class",
+                "example/Counter.class",
+            ],
+        ),
+    ] {
+        let first =
+            emit_paired_jvm_tasty_batch(variant, source_name, SourceId::from_index(first_id))
+                .expect("the supported source variant emits a complete batch");
+        let second =
+            emit_paired_jvm_tasty_batch(variant, source_name, SourceId::from_index(second_id))
+                .unwrap();
+        assert_ne!(first.source_id(), second.source_id());
+        assert_eq!(first.classes().len(), 3);
+        assert_eq!(second.classes().len(), 3);
+        for (index, (left, right)) in first.classes().iter().zip(second.classes()).enumerate() {
+            assert_eq!(left.classfile_path(), expected_paths[index]);
+            assert_eq!(left.classfile_bytes(), right.classfile_bytes());
+            assert_eq!(left.tasty_path(), right.tasty_path());
+            assert_eq!(left.tasty_bytes(), right.tasty_bytes());
+            assert_eq!(left.tasty_link_id(), right.tasty_link_id());
+        }
+    }
+}
+
+#[test]
+fn dual_reference_forwarding_contract_rejects_same_typed_swapped_formal_loads() {
+    let artifacts = emit_paired_jvm_tasty_batch(
+        DUAL_REFERENCE_FORWARDING_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(19666),
+    )
+    .unwrap();
+    let mut batch_artifacts = JvmTastyBatchArtifacts {
+        classfiles: artifacts
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastyClassFileArtifact {
+                classfile_path: artifact.classfile_path().to_owned(),
+                classfile_bytes: artifact.classfile_bytes().to_vec(),
+            })
+            .collect(),
+        sidecars: artifacts
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastySidecarArtifact {
+                tasty_path: artifact.tasty_path().to_owned(),
+                tasty_bytes: artifact.tasty_bytes().to_vec(),
+            })
+            .collect(),
+    };
+    let factory = batch_artifacts
+        .classfiles
+        .iter_mut()
+        .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+        .unwrap();
+    let mut reader = Reader::new(&factory.classfile_bytes);
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let wrap = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "wrap")
+        .unwrap();
+    let [Attribute::Code(code)] = wrap.attributes.as_slice() else {
+        panic!("wrap has one Code attribute");
+    };
+    assert_eq!(&code.code[4..6], &[0x2b, 0x2c]);
+    let code_start = code.code.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
+    factory.classfile_bytes[code_start + 4] = 0x2c;
+    factory.classfile_bytes[code_start + 5] = 0x2b;
+
+    let error = with_paired_jvm_tasty_batch_plan(
+        DUAL_REFERENCE_FORWARDING_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(19667),
+        |plan| {
+            let tasty_plans = plan
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans).unwrap();
+            validate_jvm_tasty_batch_artifacts(&validated, batch_artifacts).unwrap_err()
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            error,
+            JvmTastyContractError::BatchArtifact {
+                phase: "cross-class invocation",
+                ref reason,
+                ..
+        } if reason.contains("expected aload_1 in bounded call bytecode")
+        ),
+        "unexpected first rejection: {error:?}"
+    );
+}
+
+#[test]
+fn dual_reference_forwarding_publisher_rejects_each_six_file_fault_without_partial_output() {
+    let batch = emit_paired_jvm_tasty_batch(
+        DUAL_REFERENCE_FORWARDING_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(19668),
+    )
+    .unwrap();
+    let pairs = batch_publish_pairs(&batch);
+    assert_eq!(pairs.len(), 3);
+    let root = TestDirectory::new("dual-reference-forwarding-publish-faults");
+    for (index, fault) in (1..=6)
+        .map(BatchPublishFault::AfterStagedFiles)
+        .chain([
+            BatchPublishFault::BeforePromotion,
+            BatchPublishFault::AfterPromotion,
+        ])
+        .enumerate()
+    {
+        let destination = root.path().join(format!("failed-{index}"));
+        assert!(matches!(
+            publish_batch_pairs(&destination, &pairs, Some(fault)),
+            Err(BatchPublishError::Io { .. })
+        ));
+        assert!(!destination.exists(), "fault case {index}");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    let existing = root.path().join("existing-output");
+    std::fs::create_dir(&existing).unwrap();
+    let sentinel = existing.join("sentinel");
+    std::fs::write(&sentinel, b"preserve prior output").unwrap();
+    assert!(matches!(
+        publish_batch_pairs(&existing, &pairs, None),
+        Err(BatchPublishError::DestinationExists { .. })
+    ));
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve prior output");
+    assert_eq!(read_relative_files(&existing).unwrap(), ["sentinel"]);
 }
 
 #[test]
