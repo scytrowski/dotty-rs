@@ -498,11 +498,11 @@ mandatory JDK 21 verification gate.
 ## Integrated release evidence for issue #1920
 
 This closeout's final release gates were rerun from integrated `main` baseline
-`d313e26facea1c7640272f535155e418fb59339c`. It contains prerequisites
-#1913–#1919 and the intervening merged PRs #1950 and #1953. The initial
-verification pass used predecessor baseline
-`b2c7fee27ef2dec416706f59abda050be35d2c4b`; its validation logs are not used
-as evidence for the final baseline. This issue adds only a strict runtime
+`e7f1941d072b705207f8e3606f50b9592c6ea826`. It contains prerequisites
+#1913–#1919 and the intervening merged PRs #1950, #1953, and #1954. The initial
+integrated verification used `d313e26facea1c7640272f535155e418fb59339c`;
+its validation logs are not evidence for the final baseline. This issue adds
+only a strict runtime
 receipt normalization and this evidence ledger; it changes no compiler
 semantics, ABI, or code generation. The release gate used the Scala 3.9.0 source revision
 `777528f19a58e794c9954a42f433373472ec57f8`, staged compiler JAR SHA-256
@@ -522,7 +522,7 @@ The preceding issue evidence was reviewed and merged on these distinct heads:
 | #1919 | #1949 | `95e45e3d55b3b6a32d5987e79aa3a499843d3360` | `9198d8c8541cbb95930d89ba8521ef744ca13edc` |
 
 Those head receipts belong to their prerequisite reviews. This section records
-the integrated #1920 revalidation at `d313e26facea1c7640272f535155e418fb59339c`;
+the integrated #1920 revalidation at `e7f1941d072b705207f8e3606f50b9592c6ea826`;
 the final strict run reproduced the six original artifact hashes and UUID
 links shown in the #1919 evidence above.
 
