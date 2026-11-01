@@ -74,6 +74,9 @@ matrix=(
   'WrongConstructorType.scala	rejected'
   'SameSpelledExtractor.scala	accepted_with_warning'
   'ExplicitCompanion.scala	accepted'
+  'ExplicitUnapplyOverload.scala	accepted'
+  'ExplicitUnapplyReuse.scala	accepted_with_warning'
+  'ExplicitUnapplyWrongResult.scala	rejected'
   'NonCaseControl.scala	accepted'
 )
 matrix_output="$scratch/matrix.tsv"

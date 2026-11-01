@@ -6,4 +6,7 @@ WrongSelectorType	accepted_with_warning
 WrongConstructorType	rejected
 SameSpelledExtractor	accepted_with_warning
 ExplicitCompanion	accepted
+ExplicitUnapplyOverload	accepted
+ExplicitUnapplyReuse	accepted_with_warning
+ExplicitUnapplyWrongResult	rejected
 NonCaseControl	accepted

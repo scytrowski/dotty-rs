@@ -36,7 +36,14 @@ the case-class companion generation comments and code around lines 992–1047
 specify `unapply(x$1: C) = x$1` for an ordinary non-repeated case class.
 
 The bounded oracle matrix classifies `Box(value)`, `Box(0)`, wildcard,
-explicit companion and a non-case-class extractor as accepted. The distinct
+explicit companion reuse and a non-case-class extractor as accepted. An
+explicit companion `unapply(Box): Option[Int]` is retained and accepted with
+a non-exhaustivity warning for
+`case Box(member)`; an explicit same-parameter `unapply(Box): Int` is also
+retained, and the pattern is rejected because `Int` is not an extractor result.
+An overload `unapply(String)` is accepted alongside the generated
+`unapply(Box)`. These controls establish that generated publication must not
+replace a legal explicit member or mask an invalid explicit extractor. The distinct
 same-spelled control keeps the package-level case class `matching.Box` and adds
 the nested extractor `matching.OtherScope.Box`, whose
 `unapply(matching.Box): Option[Int]` is selected by `OtherScope.extract`. The
