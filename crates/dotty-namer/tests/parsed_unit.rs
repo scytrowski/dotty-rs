@@ -6682,7 +6682,7 @@ fn generated_unapply_is_independent_of_case_class_companion_declaration_order() 
 }
 
 #[test]
-fn generated_unapply_identity_for_two_field_case_class_is_canonical() {
+fn generated_product2_identity_for_two_field_case_class_is_canonical() {
     use dotty_core::{
         GeneratedCaseClassMethod, GeneratedCaseClassMethodRole, SymbolFlags, SymbolKind,
         SymbolOrigin, TermName, TypeName,
@@ -6876,7 +6876,7 @@ fn generated_unapply_identity_for_two_field_case_class_is_canonical() {
 }
 
 #[test]
-fn two_field_unapply_reuses_exact_companion_collision_and_defers_aliases() {
+fn two_field_companion_collision_policy_preserves_identity_constraints() {
     use dotty_core::{GeneratedCaseClassMethodRole, TermName, TypeName};
 
     let mut named = named_source(
@@ -6938,7 +6938,7 @@ fn two_field_unapply_reuses_exact_companion_collision_and_defers_aliases() {
 }
 
 #[test]
-fn generated_two_field_unapply_rejects_other_two_field_source_shapes() {
+fn generated_product2_rejects_other_two_field_source_shapes() {
     use dotty_core::{GeneratedCaseClassMethodRole, TermName, TypeName};
 
     let sources = [
