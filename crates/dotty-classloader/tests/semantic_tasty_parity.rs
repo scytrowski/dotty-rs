@@ -809,6 +809,135 @@ fn frozen_cohort_is_complete_and_both_fresh_adapter_runs_are_deterministic() {
     );
 }
 
+fn complete_option_get_or_else_once() -> String {
+    use dotty_core::SymbolKind;
+    use dotty_tasty::tasty::{PARAM_TAG, ParameterNode, StructuredNode};
+
+    const ROOT_ADDRESS: u32 = 507;
+    const METHOD_ADDRESS: u32 = 666;
+    const DEFAULT_ADDRESS: u32 = 681;
+
+    let unit = units()
+        .into_iter()
+        .find(|unit| unit.id == "option")
+        .expect("frozen Option cohort unit");
+    let bytes = fs::read(&unit.path).expect("frozen Option bytes");
+    let file = TastyFile::parse(&bytes).expect("frozen Option TASTy parses");
+    let ast = file.ast_address_index().expect("Option AST address index");
+    let method_node = ast
+        .get(METHOD_ADDRESS)
+        .expect("frozen getOrElse address")
+        .decode_structured()
+        .expect("getOrElse structure");
+    let StructuredNode::DefDef(definition) = method_node else {
+        panic!("address {METHOD_ADDRESS} must be a DefDef");
+    };
+    assert_eq!(file.names().get_utf8(definition.name), Some("getOrElse"));
+    let default_address = ast
+        .children_of(METHOD_ADDRESS)
+        .filter(|node| node.tag == PARAM_TAG)
+        .find_map(|node| {
+            let address = u32::try_from(node.offset).ok()?;
+            let raw = ast.get(address)?;
+            let ParameterNode::TermParam { name, .. } = raw.decode_parameter().ok()? else {
+                return None;
+            };
+            (file.names().get_utf8(name) == Some("default")).then_some(address)
+        })
+        .expect("default must have an address in the original AST index");
+    assert_eq!(default_address, DEFAULT_ADDRESS);
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let resolver = ClasspathSymbolResolver::new(classpath(), definitions, LoadingSession::new());
+    let mut unpickler = TastyUnpickler::with_session(
+        &file,
+        &mut store,
+        definitions,
+        TastySession::new()
+            .with_resolver(Box::new(resolver))
+            .expect("fresh resolver-backed TASTy session"),
+    );
+    unpickler.enter_symbols().expect("enter Option symbols");
+    let root = unpickler
+        .index()
+        .symbol_at(ROOT_ADDRESS)
+        .expect("Option root symbol");
+    let method = unpickler
+        .index()
+        .symbol_at(METHOD_ADDRESS)
+        .expect("getOrElse method symbol");
+    assert_eq!(
+        unpickler.symbol_state_at(METHOD_ADDRESS),
+        Some((SymbolKind::Method, SymbolInfo::Missing))
+    );
+
+    let method_type = unpickler
+        .complete_symbol(METHOD_ADDRESS)
+        .expect("explicitly complete the selected ordinary member");
+    let type_count = unpickler.index().type_count();
+    assert_eq!(
+        unpickler.complete_symbol(METHOD_ADDRESS),
+        Ok(method_type),
+        "repeat completion reuses the completed member"
+    );
+    assert_eq!(unpickler.index().type_count(), type_count);
+    assert_eq!(
+        unpickler.symbol_state_at(METHOD_ADDRESS),
+        Some((SymbolKind::Method, SymbolInfo::Complete(method_type)))
+    );
+    drop(unpickler);
+    assert_eq!(store.symbols.get(method).owner, Some(root));
+    assert_eq!(store.symbols.get(method).kind, SymbolKind::Method);
+
+    let Type::Poly(poly) = store.types.get(method_type) else {
+        panic!("getOrElse must retain its B polymorphic binder");
+    };
+    assert_eq!(poly.params.len(), 1);
+    assert_eq!(
+        store.names.resolve(poly.params[0].name.as_name().text()),
+        "B"
+    );
+    let method_id = poly.result;
+    let Type::Method(method_ty) = store.types.get(method_id) else {
+        panic!("getOrElse B binder must lead to a method type");
+    };
+    assert_eq!(method_ty.params.len(), 1);
+    assert_eq!(
+        store
+            .names
+            .resolve(method_ty.params[0].name.as_name().text()),
+        "default"
+    );
+    let Type::ByName {
+        result: default_result,
+    } = store.types.get(method_ty.params[0].ty)
+    else {
+        panic!("default must be projected as ByName");
+    };
+    assert!(matches!(
+        store.types.get(*default_result),
+        Type::ParamRef { binder, index: 0 } if *binder == method_type
+    ));
+    assert!(matches!(
+        store.types.get(method_ty.result),
+        Type::ParamRef { binder, index: 0 } if *binder == method_type
+    ));
+    let normalized = type_repr(&store, method_type);
+    assert_eq!(
+        normalized,
+        "[B:None:bounds(scala.Option.A,Any)]=>(by-name(ParamRef[0]))Plain:ParamRef[0]"
+    );
+    normalized
+}
+
+#[test]
+fn option_get_or_else_is_explicitly_completed_with_a_fresh_canonical_resolver() {
+    let first = complete_option_get_or_else_once();
+    let second = complete_option_get_or_else_once();
+    assert_eq!(first, second, "fresh sessions produce the same member type");
+}
+
 fn assert_live_report_matches_frozen_with_selected_option_member_delta(
     live: &str,
     historical: &str,
