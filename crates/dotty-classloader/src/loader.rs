@@ -6330,7 +6330,7 @@ mod tests {
         store: &SemanticStore,
         base: SymbolId,
         wrapped: SymbolId,
-    ) -> (usize, bool, bool) {
+    ) -> (usize, bool, bool, bool, bool) {
         let info_type = match store.symbols.get(wrapped).info {
             SymbolInfo::Complete(info) => info,
             other => panic!("InfoWrapped is not complete: {other:?}"),
@@ -6338,13 +6338,28 @@ mod tests {
         let Type::ClassInfo(info) = store.types.get(info_type) else {
             panic!("InfoWrapped info is not ClassInfo")
         };
-        let base_edges = info.parents.iter().filter(|parent| {
-            let Type::Applied { tycon, .. } = store.types.get(**parent) else {
+        let base_parent = info.parents.iter().find_map(|parent| {
+            let Type::Applied { tycon, args } = store.types.get(*parent) else {
+                return None;
+            };
+            (type_ref_symbol(store, *tycon) == Some(base) && args.len() == 1).then_some(args[0])
+        });
+        let parent_count = info
+            .parents
+            .iter()
+            .filter(|parent| {
+                matches!(store.types.get(**parent), Type::Applied { tycon, .. } if type_ref_symbol(store, *tycon) == Some(base))
+            })
+            .count();
+        let applied_parent_is_f_int = base_parent.is_some_and(|parent| {
+            let Type::Applied { args, .. } = store.types.get(parent) else {
                 return false;
             };
-            type_ref_symbol(store, *tycon) == Some(base)
+            args.len() == 1
+                && type_ref_symbol(store, args[0]).is_some_and(|symbol| {
+                    store.names.resolve(store.symbols.get(symbol).name.text()) == "Int"
+                })
         });
-        let parent_count = base_edges.count();
         let method = store
             .scopes
             .get(info.declarations)
@@ -6356,7 +6371,27 @@ mod tests {
             .expect("InfoWrapped directly declares m");
         let method_complete = matches!(store.symbols.get(method).info, SymbolInfo::Complete(_));
         let method_owner = store.symbols.get(method).owner == Some(wrapped);
-        (parent_count, method_complete, method_owner)
+        let method_matches_parent_application = base_parent.is_some_and(|parent| {
+            let SymbolInfo::Complete(method_info) = store.symbols.get(method).info else {
+                return false;
+            };
+            let result = match store.types.get(method_info) {
+                Type::Method(method) => method.result,
+                _ => method_info,
+            };
+            let result = match store.types.get(result) {
+                Type::ByName { result } => *result,
+                _ => result,
+            };
+            store.types.get(result) == store.types.get(parent)
+        });
+        (
+            parent_count,
+            method_complete,
+            method_owner,
+            applied_parent_is_f_int,
+            method_matches_parent_application,
+        )
     }
 
     #[test]
@@ -6394,8 +6429,13 @@ mod tests {
                     .expect("repeat child request"),
                 wrapped
             );
-            let (base_edges, method_complete, method_owner) =
-                info_pair_graph(loader.store, base, wrapped);
+            let (
+                base_edges,
+                method_complete,
+                method_owner,
+                applied_parent_is_f_int,
+                method_matches_parent_application,
+            ) = info_pair_graph(loader.store, base, wrapped);
             let package = loader
                 .session
                 .packages
@@ -6416,8 +6456,9 @@ mod tests {
                     .get(package_scope)
                     .lookup_all(&wrapped_type)
                     == [wrapped];
-            let normalized =
-                format!("parents={base_edges};m={method_complete};owner={method_owner}");
+            let normalized = format!(
+                "parents={base_edges};applied=F[Int]:{applied_parent_is_f_int};m={method_complete};m_type=F[Int]:{method_matches_parent_application};owner={method_owner}"
+            );
             (
                 normalized,
                 exact_package_entries,
@@ -6428,6 +6469,10 @@ mod tests {
         let parent_first = run("InfoBase");
         let child_first = run("InfoWrapped");
         assert_eq!(parent_first, child_first);
+        assert_eq!(
+            parent_first.0,
+            "parents=1;applied=F[Int]:true;m=true;m_type=F[Int]:true;owner=true"
+        );
         assert!(parent_first.1);
         assert!(parent_first.2);
         assert!(parent_first.3);
