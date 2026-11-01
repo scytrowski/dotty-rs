@@ -53,11 +53,11 @@ pub use error::{
 };
 pub use plan::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, DefaultConstructorPlan,
-    DistinctReferenceMethodParameter, DistinctReferenceMethodSignature, LocalValueBinding,
-    MethodPicklePlan, NestedConstructorCallBinding, NestedConstructorCallPairBinding, PicklePlan,
-    PlannedCallBinding, PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
-    ValidatedClassStatePlan, ValidatedPicklePlan, ValidatedSameBatchReferenceField,
-    ValidationLimits,
+    DirectFormalConstructorCallPairBinding, DistinctReferenceMethodParameter,
+    DistinctReferenceMethodSignature, LocalValueBinding, MethodPicklePlan,
+    NestedConstructorCallBinding, NestedConstructorCallPairBinding, PicklePlan, PlannedCallBinding,
+    PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
+    ValidatedPicklePlan, ValidatedSameBatchReferenceField, ValidationLimits,
 };
 pub use projection::{
     EncodingContext, ProjectedFragment, ProjectedMethodSignature, ProjectionLimits,

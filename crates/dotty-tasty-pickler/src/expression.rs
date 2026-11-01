@@ -427,21 +427,54 @@ fn lower_expression_inner(
                 type_tree.ty,
             )?;
             let mut fields = vec![AstField::Tree(selected_constructor)];
-            for &source_argument in &application.args {
-                let argument_depth = child_expression_depth(ast, source_argument, depth);
-                let argument = lower_expression_inner(
-                    store,
-                    ast,
-                    source_argument,
-                    method,
-                    parameters,
-                    ExpressionState {
-                        depth: argument_depth,
-                        budget,
-                    },
-                    context,
-                )?;
-                fields.push(AstField::Tree(argument));
+            let direct_formals = if application.args.len() == 2 {
+                application
+                    .args
+                    .iter()
+                    .map(|argument| {
+                        let argument = ast.try_get(*argument)?;
+                        let Type::TermRef {
+                            prefix,
+                            target: TermRefTarget::Symbol(formal),
+                        } = store.types.try_get(argument.ty)?
+                        else {
+                            return None;
+                        };
+                        (matches!(argument.kind, TreeKind::Ident(_))
+                            && *prefix == context.definitions().no_prefix
+                            && parameters.contains(formal)
+                            && store.symbols.contains(*formal)
+                            && store.symbols.get(*formal).kind == dotty_core::SymbolKind::Parameter
+                            && store.symbols.get(*formal).owner == Some(method))
+                        .then_some(*formal)
+                    })
+                    .collect::<Option<Vec<_>>>()
+            } else {
+                None
+            };
+            if let Some(formals) = direct_formals {
+                for (&argument, formal) in application.args.iter().zip(formals) {
+                    let argument_depth = child_expression_depth(ast, argument, depth);
+                    budget.visit(argument, argument_depth)?;
+                    fields.push(AstField::Tree(context.local_reference(formal, None)?));
+                }
+            } else {
+                for &source_argument in &application.args {
+                    let argument_depth = child_expression_depth(ast, source_argument, depth);
+                    let argument = lower_expression_inner(
+                        store,
+                        ast,
+                        source_argument,
+                        method,
+                        parameters,
+                        ExpressionState {
+                            depth: argument_depth,
+                            budget,
+                        },
+                        context,
+                    )?;
+                    fields.push(AstField::Tree(argument));
+                }
             }
             return context.wire_node(AstNode::Length {
                 tag: APPLY_TAG,

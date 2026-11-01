@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::reader::Reader as ClassReader;
+use dotty_core::SourceId;
 use dotty_jvm_tasty_contract::validate_classfile_tasty_link;
 use dotty_tasty::ast::{APPLY_TAG, DEFDEF_TAG, PARAM_TAG, SELECTIN_TAG, TERMREFDIRECT_TAG};
 use dotty_tasty::file::TastyFile;
@@ -390,6 +392,169 @@ fn task_tmp() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
+fn strip_ansi(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\u{1b}' && characters.peek() == Some(&'[') {
+            characters.next();
+            for code in characters.by_ref() {
+                if code.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn rust_pair_factory_tasty(source: &str, source_id: u32) -> Vec<u8> {
+    with_paired_jvm_tasty_batch_plan(
+        source,
+        "PairFactory.scala",
+        SourceId::from_index(source_id),
+        |batch| {
+            let factory = batch
+                .classes
+                .iter()
+                .find(|class| class.tasty_path.ends_with("/PairFactory.tasty"))
+                .expect("the source batch contains PairFactory");
+            factory.tasty_plan.pickle().unwrap().bytes().to_vec()
+        },
+    )
+    .expect("the original direct-formal Pair constructor body validates and serializes")
+}
+
+#[test]
+fn rust_pair_factory_tasty_emits_ordered_direct_formal_constructor_arguments() {
+    let source = include_str!("fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala");
+    let bytes = rust_pair_factory_tasty(source, 19640);
+    let file = tasty(&bytes);
+    let (method_address, body) = method_body(&file, "wrap");
+    assert_eq!(body.parameters.len(), 2);
+    assert_eq!(
+        body.parameters
+            .iter()
+            .map(|parameter| file.names().render(parameter.name()).unwrap())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert!(
+        body.return_type
+            .name_refs()
+            .iter()
+            .any(|name| file.names().render(*name).unwrap() == "Pair")
+    );
+    let index = file.ast_address_index().unwrap();
+    let parameters = parameter_addresses(&index, method_address);
+    assert_eq!(parameters.len(), 2);
+    assert_ne!(parameters[0], parameters[1]);
+    let RawTree::LengthNode(body_node) = body.rhs.unwrap() else {
+        panic!("wrap RHS is the original Pair constructor APPLY")
+    };
+    assert_eq!(body_node.tag, APPLY_TAG);
+    let application = body_node.decode_apply().unwrap();
+    let RawTree::LengthNode(select_node) = application.function else {
+        panic!("Pair constructor function is SELECTin")
+    };
+    assert_eq!(select_node.tag, SELECTIN_TAG);
+    let selection = select_node.decode_select_in().unwrap();
+    assert!(matches!(
+        selection.qualifier,
+        RawTree::Ast {
+            tag: dotty_tasty::ast::NEW_TAG,
+            ..
+        }
+    ));
+    assert_eq!(application.arguments.len(), 2);
+    for (argument, parameter_address) in application.arguments.iter().zip(parameters) {
+        let RawTree::Leaf(term) = argument else {
+            panic!("each Pair argument is one direct original formal reference")
+        };
+        assert_eq!(term.tag, TERMREFDIRECT_TAG);
+        let reference = term.ast_ref().unwrap();
+        assert_eq!(reference.kind, AstRefKind::TermRefDirect);
+        assert_eq!(reference.address, parameter_address);
+        assert!(matches!(term.value, TermValue::AstRef(address) if address == parameter_address));
+    }
+}
+
+#[test]
+fn strict_pinned_scala_reader_accepts_rust_pair_factory_tasty() {
+    if std::env::var("DOTTY_REQUIRE_SCALA_TASTY_PAIR_FORMAL_CONSTRUCTOR").as_deref() != Ok("1") {
+        return;
+    }
+    let source = include_str!("fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala");
+    let mut outputs = Vec::new();
+    with_paired_jvm_tasty_batch_plan(
+        source,
+        "PairFactory.scala",
+        SourceId::from_index(19641),
+        |batch| {
+            outputs.extend(batch.classes.iter().map(|class| {
+                (
+                    class.tasty_path.clone(),
+                    class.tasty_plan.pickle().unwrap().bytes().to_vec(),
+                )
+            }));
+        },
+    )
+    .expect("genuine source batch emits all Rust TASTy sidecars");
+    let temporary = task_tmp().join(format!(
+        "dotty-issue-1964-scala-reader-{}",
+        std::process::id()
+    ));
+    let candidate = temporary.join("candidate");
+    let rebuilt = temporary.join("rebuilt");
+    std::fs::remove_dir_all(&temporary).ok();
+    std::fs::create_dir_all(&candidate).unwrap();
+    std::fs::create_dir_all(&rebuilt).unwrap();
+    for (path, bytes) in outputs {
+        let path = candidate.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+    let factory_tasty = candidate.join("example/PairFactory.tasty");
+    let scala_root =
+        PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("pinned Scala 3.9 checkout"));
+    let scalac = scala_root.join("dist/target/universal/stage/bin/scalac");
+    let decompile = Command::new(&scalac)
+        .arg("-decompile")
+        .arg(&factory_tasty)
+        .output()
+        .expect("Scala 3.9 decompiles genuine Rust PairFactory.tasty");
+    assert!(
+        decompile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&decompile.stderr)
+    );
+    let decompiled = strip_ansi(&String::from_utf8_lossy(&decompile.stdout));
+    assert!(
+        decompiled.contains("def wrap(first: example.Counter, second: example.Counter): example.Pair = new example.Pair(first, second)"),
+        "{decompiled}"
+    );
+
+    let from_tasty = Command::new(&scalac)
+        .arg("-from-tasty")
+        .arg("-classpath")
+        .arg(&candidate)
+        .arg("-d")
+        .arg(&rebuilt)
+        .arg(candidate.join("example/Counter.tasty"))
+        .arg(candidate.join("example/Pair.tasty"))
+        .arg(&factory_tasty)
+        .output()
+        .expect("Scala 3.9 reads all genuine Rust sidecars with -from-tasty");
+    assert!(
+        from_tasty.status.success(),
+        "{}",
+        String::from_utf8_lossy(&from_tasty.stderr)
+    );
+    std::fs::remove_dir_all(temporary).unwrap();
+}
+
 #[test]
 fn source_variants_record_first_reachable_paired_stage_without_forging_ids() {
     use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
@@ -410,13 +575,11 @@ fn source_variants_record_first_reachable_paired_stage_without_forging_ids() {
     );
     let reordered = reordered.replace("class PairFactory:\n  def wrap(first: Counter, second: Counter): Pair =\n    new Pair(first, second)\n", "class PairFactory:\n  def wrap(first: Counter, second: Counter): Pair =\n    new Pair(first, second)\n\nclass Pair(first: Counter, second: Counter):\n  private val left: Counter = first\n  private val right: Counter = second\n  def leftValue(): Int = left.get()\n  def rightValue(): Int = right.get()\n\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n");
     let cases = [
-        // These controls retain valid two-formal signatures; rejection now
-        // correctly waits for the out-of-scope method body representation.
-        ("renamed package/classes/method/formals", renamed, "JVM/TASTy cross-contract validation", "BodyExpression"),
-        ("reordered declarations", reordered, "JVM/TASTy cross-contract validation", "BodyExpression"),
-        ("intentional repeated first", source.replace("new Pair(first, second)", "new Pair(first, first)"), "JVM/TASTy cross-contract validation", "BodyExpression"),
-        ("swapped arguments", source.replace("new Pair(first, second)", "new Pair(second, first)"), "JVM/TASTy cross-contract validation", "BodyExpression"),
-        ("swapped formals", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(second: Counter, first: Counter)"), "JVM/TASTy cross-contract validation", "BodyExpression"),
+        ("renamed package/classes/method/formals", renamed, "", ""),
+        ("reordered declarations", reordered, "", ""),
+        ("intentional repeated first", source.replace("new Pair(first, second)", "new Pair(first, first)"), "", ""),
+        ("swapped arguments", source.replace("new Pair(first, second)", "new Pair(second, first)"), "", ""),
+        ("swapped formals", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(second: Counter, first: Counter)"), "", ""),
         ("third method formal", source.replace("second: Counter): Pair", "second: Counter, unused: Int): Pair"), "cross-class constructor-call identity proof", "SourceShape"),
         ("contextual formal", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter)(using second: Counter)"), "complete JVM unit validation", "ParameterCountMismatch"),
         ("default formal", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter, second: Counter = new Counter(0))"), "cross-class constructor-call identity proof", "factory formals cannot have default values"),
@@ -439,6 +602,33 @@ fn source_variants_record_first_reachable_paired_stage_without_forging_ids() {
     for (ordinal, (label, variant, expected_phase, expected_error)) in cases.into_iter().enumerate()
     {
         let mut callback_ran = false;
+        if expected_phase.is_empty() {
+            let result = with_paired_jvm_tasty_batch_plan(
+                &variant,
+                "PairFactory.scala",
+                SourceId::from_index(19620 + ordinal as u32),
+                |batch| {
+                    callback_ran = true;
+                    for class in batch.classes {
+                        class
+                            .tasty_plan
+                            .validate_method_bodies()
+                            .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+                        class
+                            .tasty_plan
+                            .pickle()
+                            .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+                    }
+                },
+            );
+            result
+                .unwrap_or_else(|error| panic!("supported direct-formal case {label}: {error:?}"));
+            assert!(
+                callback_ran,
+                "the supported source batch is published: {label}"
+            );
+            continue;
+        }
         let result = with_paired_jvm_tasty_batch_plan(
             &variant,
             "PairFactory.scala",
