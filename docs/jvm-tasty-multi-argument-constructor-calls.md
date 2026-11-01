@@ -2,6 +2,45 @@
 
 This is an evidence-only audit for [issue #1913](https://github.com/scytrowski/dotty-rs/issues/1913). It adds no source typing, JVM, TASTy, paired artifact, or public API support. The checked-in Scala artifacts are output from Scala 3.9.0; they are not Rust output and do not establish Rust-to-Scala interoperability.
 
+## Ordered direct-formal proof baseline (#1961 checkpoint 1)
+
+Issue [#1961](https://github.com/scytrowski/dotty-rs/issues/1961) starts from
+current `main` at `36d987fe262b18a61e9082216a759aeac3f991b3`, which contains
+the merged #1960 audit. Before extending the proof, the focused legacy
+constructor-proof tests and the #1960 source-session regression passed:
+
+```text
+cargo test -p dotty --test jvm_tasty_constructor_call_proofs --locked: 4 passed
+cargo test -p dotty --test jvm_tasty_dual_reference_forwarding --locked: 3 passed
+cargo test -p dotty --test jvm_source_compilation dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proof_error --locked: passed
+```
+
+The existing immutable proof kinds remain `Formal`, `NestedNew`,
+`NestedNewPair`, `PlannedCall`, and `LocalVal`. Their read-only projections
+(`formal`, `nested_pair`, `nested_pair_context`, `nested_argument`,
+`planned_call`, and `local_val`) are the compatibility baseline. The authentic
+one-session `PairFactory.wrap(first, second)` source still emits its ordinary
+JVM classes and preserves their bytes; the read-only proof currently stops at
+`SemanticIdentity("both factory formals must have the canonical Int type")`.
+Corrupting the first argument's typed-index edge to the second argument's root
+currently produces that same earlier error, so the corruption is masked at
+this baseline. The paired planner reports that error at its
+`cross-class constructor-call identity proof` phase and does not invoke its
+callback.
+
+The independent Scala 3.9 oracle files are unchanged baseline fixtures. Their
+SHA-256 values are recorded here so the proof-only work does not replace them
+with Rust output:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `Counter.class` | `35afad87cca23efbf1185229d0fbed6b689aea7649ef69a3cf14232779763395` |
+| `Counter.tasty` | `f3cb320b58199798c7ab1d31f017476059506f52349fb9fef927a593aa3dce7e` |
+| `Pair.class` | `e6db9d87df09fcd961b932ab7bc66b0b73fcdf30bb50ab5895043f1a7e7c614c` |
+| `Pair.tasty` | `bd7d14f448a1cd4a64c94b34f8416d41816c1c9a57978750639f1e70404bc617` |
+| `PairFactory.class` | `7727e0f390d3dc4109decaffe1a87610c76253b950829292499f1643229dd0b2` |
+| `PairFactory.tasty` | `c7fe6a0e8334e8518b5f467c6253f47c531fc9ccb8831c8e51b29d185747d8e5` |
+
 ## Pinned source and oracle
 
 [`PairFactory.scala`](../tests/fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala) is the issue's unchanged one-file producer source. It contains the original `Counter`, `Pair`, and `PairFactory` declarations in that order. Its SHA-256 is `7e40de1afb6272dbcf481baab7148801a055210216a19bdeaff85fafb40ff1bf`. The independent Scala consumer is [`Consumer.scala`](../tests/fixtures/jvm_tasty_multi_argument_constructor_calls/Consumer.scala); it is compiled separately and is not used to produce the oracle classes.
