@@ -50,6 +50,21 @@ if [[ "${UPDATE_SNAPSHOT:-0}" == 1 ]]; then
 else
   diff -u "$fixture_dir/Positive.scala39-typed-tree.txt" "$scratch/Positive.current.txt"
 fi
+"$java_home/bin/java" -XX:-UsePerfData -Xshare:off -Djava.io.tmpdir="$scratch/tmp" \
+  -cp "$classpath" dotty.tools.dotc.Main -classpath "$classpath" \
+  -d "$scratch/classes" -Vprint:typer -Xprint-types -Yprint-debug \
+  -Yprint-debug-owners -color:never SameSpelledExtractor.scala \
+  > "$scratch/SameSpelledExtractor.current.txt" 2> "$scratch/same-spelled-compiler-stderr.txt"
+python3 - "$scratch/SameSpelledExtractor.current.txt" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); p.write_text(p.read_text().rstrip()+"\n")
+PY
+if [[ "${UPDATE_SNAPSHOT:-0}" == 1 ]]; then
+  cp "$scratch/SameSpelledExtractor.current.txt" "$fixture_dir/SameSpelledExtractor.scala39-typed-tree.txt"
+else
+  diff -u "$fixture_dir/SameSpelledExtractor.scala39-typed-tree.txt" "$scratch/SameSpelledExtractor.current.txt"
+fi
 matrix=(
   'Wildcard.scala	accepted'
   'WrongResult.scala	rejected'
@@ -57,7 +72,7 @@ matrix=(
   'WrongArityTwo.scala	rejected'
   'WrongSelectorType.scala	accepted_with_warning'
   'WrongConstructorType.scala	rejected'
-  'SameSpelledExtractor.scala	accepted'
+  'SameSpelledExtractor.scala	accepted_with_warning'
   'ExplicitCompanion.scala	accepted'
   'NonCaseControl.scala	accepted'
 )
@@ -86,4 +101,5 @@ fi
 printf 'Scala 3.9.0 source revision: %s\n' "$expected_revision"
 printf 'JDK: %s\n' "$(grep '^JAVA_VERSION=' "$java_home/release")"
 printf 'Positive whole-source typer snapshot matches.\n'
+printf 'Distinct same-spelled extractor owner snapshot matches.\n'
 printf 'Bounded extractor acceptance matrix matches.\n'

@@ -1,7 +1,9 @@
 package matching
-class Box(val value: Int)
-object Box:
-  def unapply(box: Box): Option[Int] = Some(box.value)
-object SameSpelledExtractor:
-  def extract(box: Box): Int = box match
-    case Box(value) => value
+case class Box(value: Int)
+
+object OtherScope:
+  object Box:
+    def unapply(value: matching.Box): Option[Int] = Some(value.value)
+
+  def extract(value: matching.Box): Int = value match
+    case Box(result) => result

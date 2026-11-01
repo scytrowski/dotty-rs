@@ -36,12 +36,17 @@ the case-class companion generation comments and code around lines 992–1047
 specify `unapply(x$1: C) = x$1` for an ordinary non-repeated case class.
 
 The bounded oracle matrix classifies `Box(value)`, `Box(0)`, wildcard,
-explicit companion, a valid unrelated same-spelled `Option` extractor and a
-non-case-class extractor as accepted. A result mismatch, arity zero, arity two
-and a constructor applied to an unrelated selector type are rejected. The
-`Box(value: String)` type-pattern control is accepted with a non-exhaustivity
-warning: the type test is legal even though the case cannot match an `Int`
-selector. That distinction is preserved in the matrix.
+explicit companion and a non-case-class extractor as accepted. The distinct
+same-spelled control keeps the package-level case class `matching.Box` and adds
+the nested extractor `matching.OtherScope.Box`, whose
+`unapply(matching.Box): Option[Int]` is selected by `OtherScope.extract`. The
+typed snapshot `SameSpelledExtractor.scala39-typed-tree.txt` records the
+pattern's qualifier as `OtherScope$.this.Box` and the distinct `unapply` owner;
+Scala accepts it with a non-exhaustivity warning. A result mismatch, arity
+zero, arity two and a constructor applied to an unrelated selector type are
+rejected. The `Box(value: String)` type-pattern control is also accepted with a
+non-exhaustivity warning: the type test is legal even though the case cannot
+match an `Int` selector. These distinctions are preserved in the matrix.
 
 ## Current Rust baseline
 
