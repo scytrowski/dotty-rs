@@ -40,6 +40,8 @@ const REFERENCE_CONSTRUCTOR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_reference_constructor_calls/CounterOwnerFactory.scala");
 const NESTED_CONSTRUCTOR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala");
+const MULTI_ARGUMENT_CONSTRUCTOR_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala");
 const FACTORY_RESULT_BATCH: &str =
     include_str!("fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala");
 const REFERENCE_LOCAL_BATCH: &str =
@@ -5089,6 +5091,26 @@ fn nested_reference_field_call_rejects_the_complete_batch() {
         Err(PairedBatchArtifactError::Contract(
             JvmTastyContractError::BatchArtifact {
                 class_index: 1,
+                phase: "cross-class invocation",
+                ..
+            }
+        ))
+    ));
+}
+
+#[test]
+fn sibling_constructor_batch_baseline_rejects_before_returning_a_manifest() {
+    let result = emit_paired_jvm_tasty_batch(
+        MULTI_ARGUMENT_CONSTRUCTOR_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(19170),
+    );
+
+    assert!(matches!(
+        result,
+        Err(PairedBatchArtifactError::Contract(
+            JvmTastyContractError::BatchArtifact {
+                class_index: 2,
                 phase: "cross-class invocation",
                 ..
             }
