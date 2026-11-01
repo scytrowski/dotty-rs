@@ -47,6 +47,6 @@ pub mod tasty_unpickler {
     };
     pub use crate::index::TastySemanticIndex;
     pub use crate::reachability::{IdentityNode, IdentityOutcome, identity_reachability};
-    pub use crate::session::{TastySession, TastySessionError};
+    pub use crate::session::{ResolverAttachmentFailure, TastySession, TastySessionError};
     pub use crate::unpickler::TastyUnpickler;
 }

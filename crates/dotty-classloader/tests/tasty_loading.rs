@@ -184,12 +184,127 @@ fn independently_entered_conflicting_package_registries_fail_closed() {
         dotty_core::SymbolOrigin::Synthetic,
         &["me", "cytrowski", "tastyfixtures", "visibility"],
     );
+    let tasty_package = tasty_packages
+        .symbol(&["me", "cytrowski", "tastyfixtures", "visibility"])
+        .unwrap();
 
-    let result = TastySession::with_packages(tasty_packages).with_resolver(Box::new(resolver));
+    let error = match TastySession::with_packages(tasty_packages).with_resolver(Box::new(resolver))
+    {
+        Err(error) => error,
+        Ok(_) => panic!("independently entered roots must conflict"),
+    };
     assert_eq!(
-        result.err(),
-        Some(TastySessionError::ConflictingPackageAuthorities)
+        error.reason(),
+        TastySessionError::ConflictingPackageAuthorities
     );
+    let (mut session, resolver) = error.into_parts();
+    assert!(resolver.has_package_root());
+    assert!(
+        session
+            .packages()
+            .symbol(&["me", "cytrowski", "tastyfixtures", "visibility"])
+            .is_some()
+    );
+
+    session = session
+        .with_resolver(Box::new(ClasspathSymbolResolver::new(
+            DirectoryClassPath::new(tasty_visibility_dir()),
+            definitions,
+            LoadingSession::new(),
+        )))
+        .expect("a fresh resolver can attach after the rejected resolver is recovered");
+    let bytes =
+        fs::read(tasty_visibility_dir().join("me/cytrowski/tastyfixtures/visibility/Open.tasty"))
+            .expect("real Open.tasty fixture");
+    let file = TastyFile::parse_scala_3_9(&bytes).expect("Open.tasty should parse");
+    let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    unpickler
+        .enter_symbols()
+        .expect("retry session can enter the unit");
+    assert_eq!(unpickler.index().symbol_at(0), Some(tasty_package));
+}
+
+#[test]
+fn rejected_unpickler_resolver_attachment_returns_the_unpickler_and_resolver() {
+    let file = TastyFile::parse_scala_3_9(DISTINCT).expect("Distinct.tasty should parse");
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let package = store.symbols.alloc(dotty_core::Symbol {
+        name: Name::new(store.names.intern("lang"), Namespace::Term),
+        owner: None,
+        kind: SymbolKind::Package,
+        flags: dotty_core::SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: dotty_core::SymbolInfo::Missing,
+        origin: dotty_core::SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: dotty_core::SymbolLinks::default(),
+    });
+    let object = store.symbols.alloc(dotty_core::Symbol {
+        name: Name::new(store.names.intern("Object"), Namespace::Type),
+        owner: Some(package),
+        kind: SymbolKind::Class,
+        flags: dotty_core::SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: dotty_core::SymbolInfo::Missing,
+        origin: dotty_core::SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: dotty_core::SymbolLinks::default(),
+    });
+    let member_called = Rc::new(Cell::new(false));
+    let session = TastySession::new()
+        .with_resolver(Box::new(AttachmentTestResolver {
+            package,
+            member: object,
+            member_called: Rc::clone(&member_called),
+        }))
+        .expect("first resolver attaches");
+    let unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    let error = match unpickler.with_resolver(Box::new(dotty_core::NoResolver)) {
+        Err(error) => error,
+        Ok(_) => panic!("a second resolver cannot replace the session resolver"),
+    };
+    assert_eq!(error.reason(), TastySessionError::ResolverAlreadyAttached);
+    let (mut unpickler, incoming_resolver) = error.into_parts();
+    assert!(!incoming_resolver.has_package_root());
+
+    unpickler
+        .unpickle_type(38)
+        .expect("original resolver remains usable after rejected replacement");
+    assert!(member_called.get());
+}
+
+struct AttachmentTestResolver {
+    package: SymbolId,
+    member: SymbolId,
+    member_called: Rc<Cell<bool>>,
+}
+
+impl SymbolResolver for AttachmentTestResolver {
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        ResolverCheckpoint::new(0)
+    }
+
+    fn rollback_to(&mut self, _store: &mut SemanticStore, _checkpoint: ResolverCheckpoint) {}
+
+    fn resolve_member(
+        &mut self,
+        _store: &mut SemanticStore,
+        _request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.member_called.set(true);
+        Ok(Some(self.member))
+    }
+
+    fn resolve_package(
+        &mut self,
+        _store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        Ok((path == ["java", "lang"]).then_some(self.package))
+    }
 }
 
 fn published_scala39_library_dir() -> PathBuf {

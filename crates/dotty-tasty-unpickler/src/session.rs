@@ -48,6 +48,60 @@ impl std::fmt::Display for TastySessionError {
 
 impl std::error::Error for TastySessionError {}
 
+/// A rejected resolver attachment leaves the existing owner untouched and
+/// returns both it and the incoming resolver so their state remains
+/// recoverable.
+pub struct ResolverAttachmentFailure<T> {
+    reason: TastySessionError,
+    owner: Box<T>,
+    resolver: Box<dyn SymbolResolver>,
+}
+
+impl<T> ResolverAttachmentFailure<T> {
+    pub(crate) fn new(
+        reason: TastySessionError,
+        owner: T,
+        resolver: Box<dyn SymbolResolver>,
+    ) -> Self {
+        Self {
+            reason,
+            owner: Box::new(owner),
+            resolver,
+        }
+    }
+
+    /// The reason the resolver could not be attached.
+    pub fn reason(&self) -> TastySessionError {
+        self.reason
+    }
+
+    /// Recovers the unchanged owner and resolver passed to the rejected
+    /// attachment.
+    pub fn into_parts(self) -> (T, Box<dyn SymbolResolver>) {
+        (*self.owner, self.resolver)
+    }
+}
+
+impl<T> std::fmt::Debug for ResolverAttachmentFailure<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolverAttachmentFailure")
+            .field("reason", &self.reason)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> std::fmt::Display for ResolverAttachmentFailure<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.reason.fmt(f)
+    }
+}
+
+impl<T: 'static> std::error::Error for ResolverAttachmentFailure<T> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.reason)
+    }
+}
+
 impl TastySession {
     pub fn new() -> Self {
         Self::default()
@@ -65,16 +119,22 @@ impl TastySession {
     /// Attaches a resolver to this session when exactly one side owns package
     /// identities. All other resolver state remains owned by it and is carried
     /// through later unpickler handoffs. A second resolver cannot replace the
-    /// first one.
+    /// first one. If attachment fails, the error returns this unchanged session
+    /// and the incoming resolver through [`ResolverAttachmentFailure::into_parts`].
     pub fn with_resolver(
         mut self,
-        resolver: Box<dyn SymbolResolver>,
-    ) -> Result<Self, TastySessionError> {
+        mut resolver: Box<dyn SymbolResolver>,
+    ) -> Result<Self, ResolverAttachmentFailure<Self>> {
         if self.resolver.is_some() {
-            return Err(TastySessionError::ResolverAlreadyAttached);
+            return Err(ResolverAttachmentFailure::new(
+                TastySessionError::ResolverAlreadyAttached,
+                self,
+                resolver,
+            ));
         }
-        let mut resolver = resolver;
-        adopt_resolver_packages(&mut self.packages, resolver.as_mut())?;
+        if let Err(reason) = adopt_resolver_packages(&mut self.packages, resolver.as_mut()) {
+            return Err(ResolverAttachmentFailure::new(reason, self, resolver));
+        }
         self.resolver = Some(resolver);
         Ok(self)
     }
@@ -113,7 +173,10 @@ pub(crate) fn adopt_resolver_packages(
     match (session_has_root, resolver_has_root) {
         (false, true) => *packages = resolver_packages,
         (true, false) | (false, false) => {}
-        (true, true) => return Err(TastySessionError::ConflictingPackageAuthorities),
+        // `has_package_root` is the preflight part of the transfer protocol.
+        // A resolver returning a rooted registry after reporting no root is a
+        // contract violation; there is no sound way to merge the two stores.
+        (true, true) => unreachable!("resolver package-root preflight was inconsistent"),
     }
     Ok(())
 }

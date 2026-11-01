@@ -24,6 +24,7 @@ The focused fixtures are unchanged repository artifacts:
 | `crates/dotty-tasty-unpickler/tests/fixtures/semantic/CompletionHolder.tasty` | `0c6c4a02f3ce54a752c7995cc62fd7d6c9d0ae5b0c3d169a0bce5669c93d52ed` | Active package/member callbacks and a late failure followed by retry |
 | `crates/dotty-tasty/tests/fixtures/scala3-library/scala/collection/immutable/List.tasty` | `d5fa585bd0f7ecf28624532a7d8b4b3db4faee84d064022bf228955142e581c3` | Real classpath-backed package evidence for `scala` |
 | `crates/dotty-tasty-unpickler/tests/fixtures/semantic/Distinct.tasty` | `58f40ea8596794b54c1516fc4f7975f65c7440b56d67adc67408b32975f14da8` | Existing independent address-indexed package and owner fixture |
+| `crates/dotty-classloader/tests/fixtures/enclosing_generics/Outer.class` | `ab0681cadf8e5ba1b0f088817ff28035d383919ef8cb8207f731a0a644207398` | Live generic classfile materialization, metadata/origin/type parameters, and late rollback/retry |
 
 The original #1927 cohort and its result files were not modified. The #1928
 Open/Animal/Dog candidates remain unproven; the spike did not execute them
@@ -72,7 +73,9 @@ owns a root and the incoming resolver also owns a root, attachment fails with
 `TastySessionError::ConflictingPackageAuthorities`. The session never guesses
 whether equal-looking paths name the same symbols. Begin the combined session
 before either side independently enters a package, or transfer the first
-authority before the next adapter starts.
+authority before the next adapter starts. A rejected attachment returns the
+unchanged session/unpickler and incoming resolver together, so the caller can
+inspect or retry without losing either side's committed state.
 
 ### Alternatives considered
 
@@ -118,6 +121,14 @@ in this order:
 Resolver package-scope links are removed before store scopes are truncated.
 Committed work before the call remains reachable, and the same unpickler and
 resolver can retry.
+
+The live classfile regression injects its failure after the resolver has
+loaded `enclosing_generics.Outer` from the checked-in classpath fixture. It
+checks that rollback removes the class's identity, package declaration,
+metadata, origin, and type-parameter cache entries while preserving symbols
+committed by the earlier `enter_symbols` call. Retry loads a valid `Outer`
+again; after session handoff, the next unpickler operation confirms the
+resolver still retains that class's identity and positive metadata state.
 
 ## Supported scope and first-failure matrix
 

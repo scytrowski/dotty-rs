@@ -135,7 +135,10 @@ pub trait SymbolResolver {
     }
 
     /// Transfers only the canonical package registry to a session that will
-    /// become its next mutation authority. Resolver implementations must keep
+    /// become its next mutation authority. Implementations that return a
+    /// rooted registry must also report `true` from [`has_package_root`](Self::has_package_root)
+    /// so callers can reject conflicting authority before consuming it.
+    /// Resolver implementations must keep
     /// their positive identities, metadata, origins and undo journals intact.
     /// `None` means the resolver does not own a package registry.
     fn take_packages(&mut self) -> Option<Packages> {

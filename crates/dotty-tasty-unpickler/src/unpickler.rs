@@ -16,7 +16,9 @@ use crate::binders::PendingBinder;
 use crate::error::UnpickleError;
 use crate::index::TastySemanticIndex;
 use crate::packages::ScopeJournal;
-use crate::session::{TastySession, TastySessionError, adopt_resolver_packages};
+use crate::session::{
+    ResolverAttachmentFailure, TastySession, TastySessionError, adopt_resolver_packages,
+};
 
 /// The marks of one public call, to roll it back.
 pub(crate) struct Transaction {
@@ -154,15 +156,22 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
     /// Uses `resolver` for the name-based references the entered state cannot
     /// resolve. Without one, [`NoResolver`] leaves them unresolved. Returns an
     /// error if a resolver is already attached or both sides already own a
-    /// package root.
+    /// package root. On failure, [`ResolverAttachmentFailure::into_parts`]
+    /// returns this unchanged unpickler and the incoming resolver.
     pub fn with_resolver(
         mut self,
         mut resolver: Box<dyn SymbolResolver>,
-    ) -> Result<Self, TastySessionError> {
+    ) -> Result<Self, ResolverAttachmentFailure<Self>> {
         if self.resolver_attached {
-            return Err(TastySessionError::ResolverAlreadyAttached);
+            return Err(ResolverAttachmentFailure::new(
+                TastySessionError::ResolverAlreadyAttached,
+                self,
+                resolver,
+            ));
         }
-        adopt_resolver_packages(&mut self.packages, resolver.as_mut())?;
+        if let Err(reason) = adopt_resolver_packages(&mut self.packages, resolver.as_mut()) {
+            return Err(ResolverAttachmentFailure::new(reason, self, resolver));
+        }
         self.resolver = resolver;
         self.resolver_attached = true;
         Ok(self)
