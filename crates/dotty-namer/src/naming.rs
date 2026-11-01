@@ -8,10 +8,10 @@ use dotty_core::ast::{
     ExtensionMethods, Modifier, Modifiers, Select, UntypedNode, VisibilitySyntax,
 };
 use dotty_core::{
-    AstArena, Packages, Scope, ScopeId, SemanticStore, SourceContext, SourceContextId,
-    SourceDefinition, SourceExportSite, SourceId, SourceSemanticIndex, SourceSemanticIndexError,
-    SourceSpan, Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin,
-    TreeId, TreeKind, TypeName, Untyped, Visibility,
+    AstArena, GeneratedCaseClassMethodRole, Packages, Scope, ScopeId, SemanticStore, SourceContext,
+    SourceContextId, SourceDefinition, SourceExportSite, SourceId, SourceSemanticIndex,
+    SourceSemanticIndexError, SourceSpan, Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind,
+    SymbolLinks, SymbolOrigin, TreeId, TreeKind, TypeName, Untyped, Visibility,
 };
 
 use crate::{NamerDiagnostic, NamerIssue, VisibilityAccess};
@@ -29,6 +29,8 @@ pub enum NamerError {
         source: SourceId,
         tree_index: u32,
     },
+    /// Generated case-class method provenance could not be registered.
+    GeneratedCaseClassMethodIndex { error: SourceSemanticIndexError },
     /// A semantic symbol was assigned conflicting canonical/derived source definitions.
     ConflictingSourceProvenance {
         symbol: SymbolId,
@@ -103,6 +105,10 @@ impl fmt::Display for NamerError {
                 "source {} tree {tree_index} already has a derived semantic symbol for owner {}",
                 source.index(),
                 owner.index()
+            ),
+            Self::GeneratedCaseClassMethodIndex { error } => write!(
+                f,
+                "generated case-class method provenance is inconsistent: {error}"
             ),
             Self::ConflictingSourceProvenance {
                 symbol,
@@ -240,6 +246,13 @@ impl From<SourceSemanticIndexError> for NamerError {
                 source,
                 tree_index,
             },
+            error @ (SourceSemanticIndexError::DuplicateGeneratedCaseClassMethodRole { .. }
+            | SourceSemanticIndexError::DuplicateGeneratedCaseClassMethodSymbol {
+                ..
+            }
+            | SourceSemanticIndexError::GeneratedCaseClassMethodClassMismatch { .. }) => {
+                Self::GeneratedCaseClassMethodIndex { error }
+            }
             SourceSemanticIndexError::ConflictingSourceProvenance {
                 symbol,
                 existing,
@@ -2098,6 +2111,13 @@ impl Namer<'_> {
                 flags: SymbolFlags::SYNTHETIC,
                 visibility: self.store.symbols.get(class_symbol).visibility,
             },
+        )?;
+        self.index.record_generated_case_class_method(
+            class_symbol,
+            GeneratedCaseClassMethodRole::Apply,
+            self.source,
+            class_tree,
+            apply,
         )?;
         let apply_scope = self.store.scopes.alloc(Scope::new(Some(apply)));
         self.index.record_scope(apply, apply_scope)?;

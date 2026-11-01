@@ -6044,7 +6044,10 @@ fn nested_case_class_gets_a_companion_and_source_mapped_apply_parameters() {
 
 #[test]
 fn top_level_case_class_gets_a_package_owned_companion_and_source_mapped_apply() {
-    use dotty_core::{Namespace, SymbolKind, SymbolOrigin, TermName};
+    use dotty_core::{
+        GeneratedCaseClassMethod, GeneratedCaseClassMethodRole, Namespace, SymbolKind,
+        SymbolOrigin, TermName,
+    };
 
     let mut named = named_source("case class Node[+A, +B](first: A, second: B)", 1825);
     let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
@@ -6210,6 +6213,32 @@ fn top_level_case_class_gets_a_package_owned_companion_and_source_mapped_apply()
         .collect::<Vec<_>>();
     assert_eq!(named.store.symbols.get(apply).kind, SymbolKind::Method);
     assert_eq!(
+        named
+            .index
+            .derived_symbol_at(companion_module_class, named.source, class_tree),
+        Some(apply),
+        "the legacy owner/source/tree apply mapping remains unchanged"
+    );
+    assert_eq!(
+        named
+            .index
+            .generated_case_class_method(class_symbol, GeneratedCaseClassMethodRole::Apply),
+        Some(apply)
+    );
+    assert_eq!(
+        named.index.generated_case_class_method_identity(apply),
+        Some(GeneratedCaseClassMethod {
+            class: class_symbol,
+            role: GeneratedCaseClassMethodRole::Apply,
+        })
+    );
+    assert_eq!(
+        named
+            .index
+            .generated_case_class_method(class_symbol, GeneratedCaseClassMethodRole::Unapply),
+        None
+    );
+    assert_eq!(
         named.store.symbols.get(apply).owner,
         Some(companion_module_class)
     );
@@ -6314,7 +6343,10 @@ fn top_level_case_class_reuses_explicit_companion_without_duplicate_identities()
 #[test]
 fn top_level_case_class_companions_are_owned_by_independent_semantic_stores() {
     fn assert_local_companion(named: &NamedSource) {
-        use dotty_core::{SymbolKind, SymbolOrigin, TermName, TypeName};
+        use dotty_core::{
+            GeneratedCaseClassMethod, GeneratedCaseClassMethodRole, SymbolKind, SymbolOrigin,
+            TermName, TypeName,
+        };
 
         let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
             panic!("compilation unit should have a package root");
@@ -6357,6 +6389,23 @@ fn top_level_case_class_companions_are_owned_by_independent_semantic_stores() {
                 .derived_symbol_at(owner, named.source, class_tree),
             Some(module_class)
         );
+        let apply = named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply)
+            .expect("each independent store has its own apply role");
+        assert_eq!(
+            named
+                .index
+                .derived_symbol_at(module_class, named.source, class_tree),
+            Some(apply)
+        );
+        assert_eq!(
+            named.index.generated_case_class_method_identity(apply),
+            Some(GeneratedCaseClassMethod {
+                class,
+                role: GeneratedCaseClassMethodRole::Apply,
+            })
+        );
     }
 
     let first = named_source("case class Shared[A](value: A)", 1840);
@@ -6365,6 +6414,81 @@ fn top_level_case_class_companions_are_owned_by_independent_semantic_stores() {
     assert_ne!(first.source, second.source);
     assert_local_companion(&first);
     assert_local_companion(&second);
+}
+
+#[test]
+fn generated_case_class_method_roles_are_keyed_by_canonical_class_across_packages() {
+    use dotty_core::{GeneratedCaseClassMethodRole, SymbolKind};
+
+    fn named_box(
+        package_name: &str,
+        source: SourceId,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+    ) -> (
+        dotty_parser::ParseResult,
+        SourceSemanticIndex,
+        dotty_core::TreeId<dotty_core::Untyped>,
+    ) {
+        let text = format!("package {package_name}\ncase class Box(value: Int)");
+        let scanner = dotty_lexer::ContextualScanner::new(&text).expect("source should lex");
+        let parsed = parse_compilation_unit(
+            SourceText::new(&text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let index = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "Box.scala",
+            store,
+            packages,
+        )
+        .expect("case class should be named");
+        let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+            panic!("compilation unit should have a package root");
+        };
+        let class_tree = *package.stats.last().expect("Box declaration");
+        (parsed, index, class_tree)
+    }
+
+    let mut store = SemanticStore::new();
+    let mut packages = Packages::new();
+    let first_source = SourceId::from_index(1842);
+    let second_source = SourceId::from_index(1843);
+    let (_first_parsed, first_index, first_tree) =
+        named_box("left", first_source, &mut store, &mut packages);
+    let (_second_parsed, second_index, second_tree) =
+        named_box("right", second_source, &mut store, &mut packages);
+    let first_class = first_index.symbol_at(first_source, first_tree).unwrap();
+    let second_class = second_index.symbol_at(second_source, second_tree).unwrap();
+    assert_ne!(first_class, second_class);
+
+    for (index, source, tree, class) in [
+        (&first_index, first_source, first_tree, first_class),
+        (&second_index, second_source, second_tree, second_class),
+    ] {
+        let apply = index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply)
+            .expect("each package has its own generated apply");
+        let owner = store.symbols.get(apply).owner.expect("apply owner");
+        assert_eq!(store.symbols.get(owner).kind, SymbolKind::ModuleClass);
+        assert_eq!(index.derived_symbol_at(owner, source, tree), Some(apply));
+        assert_eq!(
+            index.generated_case_class_method_identity(apply),
+            Some(dotty_core::GeneratedCaseClassMethod {
+                class,
+                role: GeneratedCaseClassMethodRole::Apply,
+            })
+        );
+        assert_eq!(
+            index.generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply),
+            None
+        );
+    }
 }
 
 #[test]
