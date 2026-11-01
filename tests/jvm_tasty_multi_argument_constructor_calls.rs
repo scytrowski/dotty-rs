@@ -13,6 +13,11 @@ use dotty_tasty::ast::{
 use dotty_tasty::file::TastyFile;
 use dotty_tasty::tasty::{RenderedNameSignature, RenderedParamSig, RenderedSignedName};
 use dotty_tasty::term::{AstRefKind, RawTree, TermValue};
+use dotty::jvm_tasty_artifacts::{
+    PairedArtifactError, PairedBatchArtifactError, emit_paired_jvm_tasty_batch,
+};
+use dotty_core::SourceId;
+use dotty_tasty_pickler::{PickleError, UnsupportedFeature};
 
 const COUNTER_CLASS: &[u8] = include_bytes!(
     "fixtures/jvm_tasty_multi_argument_constructor_calls/scala39/example/Counter.class"
@@ -37,6 +42,26 @@ const ORACLE_SOURCE: &str =
 const ORACLE_CONSUMER: &str =
     include_str!("fixtures/jvm_tasty_multi_argument_constructor_calls/Consumer.scala");
 const REQUIRE_SCALA_CONSUMER: &str = "DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSUMER";
+
+#[test]
+fn rust_batch_writer_baseline_rejects_the_validated_two_argument_pair_at_expression_emission() {
+    let error = emit_paired_jvm_tasty_batch(ORACLE_SOURCE, "PairFactory.scala", SourceId::from_index(1916))
+        .expect_err("the current writer rejects the outer Pair constructor's two arguments");
+    assert!(matches!(
+        error,
+        PairedBatchArtifactError::ClassArtifact {
+            class_index: 2,
+            error,
+            ..
+        } if matches!(
+            *error,
+            PairedArtifactError::TastyPickle(PickleError::Unsupported {
+                feature: UnsupportedFeature::BodyExpression,
+                ..
+            })
+        )
+    ));
+}
 
 fn task_tmp() -> PathBuf {
     std::env::var_os("TMPDIR")
