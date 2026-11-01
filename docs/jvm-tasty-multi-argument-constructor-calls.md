@@ -288,6 +288,18 @@ and classfile-to-sidecar UUIDs observed before the Java client compile were:
 | `example/PairFactory.class` | `e4212a30e382a609ec64aa54e002900448e7323e68839ebb25fa2fccf054e1f4` | `0036155a-30ac-b6c8-0000-000000008198` |
 | `example/PairFactory.tasty` | `ef6cc72805a9f3846d0cf31721cc06e88bb35716da1b0500eb6fad233b254836` | `0036155a-30ac-b6c8-0000-000000008198` |
 
+The independent Java runtime client's exact source is
+[`PairFactoryIdentityHarness.java`](../tests/fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactoryIdentityHarness.java),
+with SHA-256
+`e3f173a04d86ebc746af15e779fe0f3a4b2d9a382b291f488a5606fced5bea90`.
+`tests/jvm_tasty_artifacts.rs::sibling_constructor_batch_executes_original_rust_artifacts_with_independent_pair_identity`
+copies these fixture bytes to its generated
+`PairFactoryIdentityHarness.java` before invoking `javac`; the test checks and
+prints that generated-file digest. Reproduce the source digest with
+`sha256sum tests/fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactoryIdentityHarness.java`.
+This client-source receipt is separate from the six Rust artifact hashes
+above, the Scala consumer-source hash below, and the Java executable hash.
+
 The test hashes those six files again after `javac`, after the JVM run, and
 after all isolated negative copies. Every hash and original file byte matched
 the pre-client value. `javap -v -p -c` reported major version 65 and the
@@ -530,7 +542,7 @@ The acceptance criteria reconcile to the following evidence:
 
 | Criterion | Evidence and result |
 | --- | --- |
-| AC-1 provenance | The strict harness validates pinned Scala source revision, compiler/JDK identity, published runtime library hashes, fixture source hashes, and artifact receipts. |
+| AC-1 provenance | This ledger records the producer, independent Java and Scala client source hashes, pinned Scala source revision, compiler/JDK identity, published runtime library hashes, and six artifact receipts; the Java test checks the generated client against its recorded source digest. |
 | AC-2 canonical semantic session | The existing same-session Rust regression checks source-to-typed roots, symbols, ordered parameters, and the exact supported proof boundary. It passed in the strict run. |
 | AC-3 genuine original TASTy | The strict Scala consumer reads the six unmodified Rust-produced files; `-decompile`, `-print-tasty`, `-from-tasty`, selected source lookup, and runtime use the original artifacts. Inspection output is not substituted into the consumer classpath. |
 | AC-4 artifact set, identity, and reproducibility | The three class/sidecar pairs, UUID links, paths, and hashes are recorded above. The gate checks two fresh Rust sessions produce identical six-file output and exercises renamed and declaration-reordered source variants. |
