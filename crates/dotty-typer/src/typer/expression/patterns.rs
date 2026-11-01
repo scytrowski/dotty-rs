@@ -148,6 +148,11 @@ impl SourceTyper<'_> {
         };
         let callable = candidate.callable;
         let value_type = match self.store.types.try_get(callable) {
+            Some(Type::Method(method))
+                if method.kind == MethodKind::Plain && method.params.is_empty() =>
+            {
+                method.result
+            }
             Some(Type::Method(_)) => {
                 return Err(TyperError::ExtractorResultMemberUnsupported {
                     source: self.source,
@@ -2458,6 +2463,237 @@ mod tests {
         )
         .unwrap();
         (parsed, store, packages, definitions, index, source)
+    }
+
+    #[test]
+    fn one_field_source_case_class_projects_its_canonical_product_selector() {
+        let source_text = "package scala { trait Product }; package matching { case class Box(value: Int); object Matcher { def unwrap(box: Box): Int = box match { case Box(value) => value } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Box" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("Box source class");
+        let unapply = index
+            .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .expect("generated Box.unapply");
+        let selector_name = Name::new(store.names.intern("_1"), Namespace::Term);
+        let product_name = dotty_core::TypeName::new(store.names.intern("Product"));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let unapply_info = typer
+            .complete_symbol(unapply)
+            .expect("complete generated unapply");
+        let result = match typer.store().types.try_get(unapply_info) {
+            Some(Type::Method(method)) => method.result,
+            other => panic!("unexpected generated unapply signature: {other:?}"),
+        };
+        let class_info = typer.complete_symbol(class).expect("complete Box class");
+        let (product, product_edges, parent_count) = match typer.store().types.try_get(class_info) {
+            Some(Type::ClassInfo(info)) => {
+                let scala = packages.symbol(&["scala"]).expect("scala package");
+                let scala_scope = packages.scope_of(scala).expect("scala package scope");
+                let product = typer
+                    .store()
+                    .scopes
+                    .get(scala_scope)
+                    .lookup(product_name.as_name())
+                    .expect("canonical Product");
+                let edges = info
+                    .parents
+                    .iter()
+                    .filter(|parent| match typer.store().types.try_get(**parent) {
+                        Some(Type::TypeRef {
+                            target: TypeRefTarget::Symbol(symbol),
+                            ..
+                        }) => *symbol == product,
+                        _ => false,
+                    })
+                    .count();
+                (product, edges, info.parents.len())
+            }
+            other => panic!("unexpected Box class info: {other:?}"),
+        };
+        assert_eq!(
+            product_edges, 1,
+            "Product appears exactly once in Box parents"
+        );
+        assert_eq!(parent_count, 2, "Box keeps Object and adds only Product");
+        assert_eq!(
+            typer.store().symbols.get(product).owner,
+            packages.symbol(&["scala"]),
+            "selector ancestry uses the canonical scala.Product owner"
+        );
+        let members = typer
+            .lookup_overload_members_journaled(result, selector_name, &mut Vec::new())
+            .expect("normal member lookup for Box._1");
+        assert_eq!(members.len(), 1);
+        let selector = members[0].symbol;
+        assert_eq!(typer.store().symbols.get(selector).owner, Some(class));
+        let component = typer
+            .run_expression_transaction(|typer, journal, _| {
+                typer.unary_extractor_component_type(result, parsed.root.index(), unapply, journal)
+            })
+            .expect("existing unary product extractor path");
+        assert_eq!(component, definitions.int);
+        assert_eq!(typer.complete_symbol(class).unwrap(), class_info);
+    }
+
+    #[test]
+    fn ordinary_and_multiclause_classes_do_not_receive_case_product_projection() {
+        let source_text = "package scala { trait Product }; package matching { class Ordinary(val value: Int); case class Pair(left: Int, right: Int); case class Curried(value: Int)(extra: Int); case class Repeated(values: Int*) }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let selector_name = Name::new(store.names.intern("_1"), Namespace::Term);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        for (tree, node) in parsed.ast.iter() {
+            let TreeKind::TypeDef(definition) = &node.kind else {
+                continue;
+            };
+            let name = typer
+                .store()
+                .names
+                .resolve(definition.name.as_name().text())
+                .to_owned();
+            if !matches!(name.as_str(), "Ordinary" | "Pair" | "Curried" | "Repeated") {
+                continue;
+            }
+            let class = index
+                .symbol_at(source, tree)
+                .expect("source class identity");
+            let class_scope = index.scope_of(class).expect("class scope");
+            assert!(
+                typer
+                    .store()
+                    .scopes
+                    .get(class_scope)
+                    .lookup(&selector_name)
+                    .is_none(),
+                "{name} must not acquire a synthesized _1"
+            );
+            let class_info = typer
+                .complete_symbol(class)
+                .expect("complete negative control");
+            let Type::ClassInfo(info) = typer.store().types.get(class_info) else {
+                panic!("class completion must produce ClassInfo");
+            };
+            assert!(
+                !info
+                    .parents
+                    .iter()
+                    .any(|parent| match typer.store().types.try_get(*parent) {
+                        Some(Type::TypeRef {
+                            target: TypeRefTarget::Symbol(parent),
+                            ..
+                        }) => {
+                            typer
+                                .store()
+                                .names
+                                .resolve(typer.store().symbols.get(*parent).name.text())
+                                == "Product"
+                        }
+                        _ => false,
+                    }),
+                "{name} must not gain Product ancestry"
+            );
+        }
+    }
+
+    #[test]
+    fn user_defined_selector_is_not_replaced_by_case_class_projection() {
+        let source_text = "package scala { trait Product }; package matching { case class Custom(value: Int) { def _1: Boolean = true } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let selector_name = Name::new(store.names.intern("_1"), Namespace::Term);
+        let (custom, class_tree) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Custom" =>
+                {
+                    index.symbol_at(source, tree).map(|class| (class, tree))
+                }
+                _ => None,
+            })
+            .expect("Custom case class");
+        let class_scope = index.scope_of(custom).expect("Custom class scope");
+        let user_selector = store
+            .scopes
+            .get(class_scope)
+            .lookup(&selector_name)
+            .expect("the explicit _1 remains available");
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
+            panic!("Custom source tree must be a class");
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            panic!("Custom RHS must be a template");
+        };
+        let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+            panic!("Custom primary constructor must be a method");
+        };
+        let parameter_tree = constructor.value_param_clauses[0][0];
+        assert_eq!(
+            index.derived_symbol_at(custom, source, parameter_tree),
+            None
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let class_info = typer.complete_symbol(custom).expect("complete Custom");
+        let Type::ClassInfo(info) = typer.store().types.get(class_info) else {
+            panic!("class completion must produce ClassInfo");
+        };
+        assert!(
+            !info
+                .parents
+                .iter()
+                .any(|parent| match typer.store().types.try_get(*parent) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(parent),
+                        ..
+                    }) => {
+                        typer
+                            .store()
+                            .names
+                            .resolve(typer.store().symbols.get(*parent).name.text())
+                            == "Product"
+                    }
+                    _ => false,
+                })
+        );
+        assert_eq!(
+            typer
+                .store()
+                .scopes
+                .get(class_scope)
+                .lookup_all(&selector_name),
+            &[user_selector],
+            "completion does not add an overloaded synthetic selector"
+        );
     }
 
     fn method_and_pattern(

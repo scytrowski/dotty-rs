@@ -1,0 +1,3 @@
+state	class_shape	product_owner	product_edges	selector_owner	selector_source	selector_result	extractor_component
+before	case Box(value: Int)	canonical scala.Product	0	absent	absent	absent	unsupported
+after	case Box(value: Int)	canonical scala.Product	1	Box	primary-constructor value parameter	Int	Int

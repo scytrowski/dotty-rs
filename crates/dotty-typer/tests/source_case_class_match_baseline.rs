@@ -24,7 +24,7 @@ fn two_real_source_roots_have_a_stable_whole_method_baseline_in_fresh_sessions()
     let actual = format!("{}\n", first.join("\n"));
     assert_eq!(
         actual,
-        include_str!("fixtures/source-case-class-match-3.9.0/rust-after-unapply.tsv")
+        include_str!("fixtures/source-case-class-match-3.9.0/rust-after-product.tsv")
             .split_once('\n')
             .expect("baseline header")
             .1
@@ -136,12 +136,37 @@ fn analyze_session() -> Vec<String> {
         })
     );
     let class_scope = index.scope_of(class).expect("Box class scope");
-    assert!(
-        store
-            .scopes
-            .get(class_scope)
-            .lookup(TermName::new(store.names.intern("_1")).as_name())
-            .is_none()
+    let selector = store
+        .scopes
+        .get(class_scope)
+        .lookup(TermName::new(store.names.intern("_1")).as_name())
+        .expect("source-backed case class product selector");
+    let class_tree = match index.definition_of(class).expect("Box source definition") {
+        dotty_core::SourceDefinition::Canonical {
+            source: definition_source,
+            tree,
+        } if definition_source == source => tree,
+        definition => panic!("unexpected Box source definition: {definition:?}"),
+    };
+    let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
+        panic!("Box source tree must be a class definition");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+        panic!("Box RHS must be a template");
+    };
+    let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+        panic!("Box primary constructor must be a method");
+    };
+    let parameter_tree = constructor.value_param_clauses[0][0];
+    let canonical_field = index
+        .symbol_at(source, parameter_tree)
+        .expect("canonical Box.value field");
+    assert_eq!(store.symbols.get(canonical_field).kind, SymbolKind::Field);
+    assert_ne!(selector, canonical_field, "_1 has its own method identity");
+    assert_eq!(
+        index.derived_symbol_at(class, source, parameter_tree),
+        Some(selector),
+        "_1 provenance is tied to the original constructor parameter under Box"
     );
 
     let mut typer = SourceTyper::new(
@@ -212,7 +237,7 @@ fn analyze_session() -> Vec<String> {
         };
         let range = position.span().range();
         rows.push(format!(
-            "{name}\tpath=Positive.scala#tree{}\tsource={}\tbytes={}:{}\tbox_class={}\tbox_companion={}\tbox_module_class={}\tmoduleclass_link=absent\tapply=present\tunapply={}\tselector_1=absent\t{result}",
+            "{name}\tpath=Positive.scala#tree{}\tsource={}\tbytes={}:{}\tbox_class={}\tbox_companion={}\tbox_module_class={}\tmoduleclass_link=absent\tapply=present\tunapply={}\tselector_1=present\t{result}",
             tree.index(),
             position.source().index(),
             range.start(),

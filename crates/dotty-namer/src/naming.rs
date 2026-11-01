@@ -1985,17 +1985,25 @@ impl Namer<'_> {
         let synthesize_unapply = top_level
             && case_class_shape_supported
             && constructor.type_params.is_empty()
+            && constructor.value_param_clauses.len() == 1
             && value_parameters.len() == 1;
         if synthesize_unapply {
             let class_name = self.store.symbols.get(class_symbol).name;
             match self.explicit_companion_unapply_collides(companion_module_class, class_name) {
                 Some(true) => {}
-                Some(false) => self.enter_case_class_unapply(
-                    tree,
-                    class_symbol,
-                    companion_module_class,
-                    declaration_context,
-                )?,
+                Some(false) => {
+                    self.enter_case_class_product_selector(
+                        tree,
+                        class_symbol,
+                        value_parameters[0],
+                    )?;
+                    self.enter_case_class_unapply(
+                        tree,
+                        class_symbol,
+                        companion_module_class,
+                        declaration_context,
+                    )?;
+                }
                 None => {
                     return Err(unsupported(
                         "explicit companion unapply signature cannot be compared without type completion",
@@ -2006,6 +2014,93 @@ impl Namer<'_> {
         // Keep canonical companion identities for valid but unsupported shapes while
         // omitting a generated apply whose parameter metadata is incomplete. A source
         // application through that absent apply remains an explicit typer error.
+        Ok(())
+    }
+
+    /// Enters the source-proven selector used by the bounded one-field case
+    /// class product protocol. Its identity is derived from the constructor
+    /// parameter under the class owner, keeping it distinct from both the
+    /// canonical field and the constructor/companion parameter copies.
+    fn enter_case_class_product_selector(
+        &mut self,
+        class_tree: TreeId<Untyped>,
+        class_symbol: SymbolId,
+        parameter_tree: TreeId<Untyped>,
+    ) -> Result<(), NamerError> {
+        let TreeKind::TypeDef(definition) = &self.arena.get(class_tree).kind else {
+            return Err(NamerError::MalformedAstShape {
+                tree_index: class_tree.index(),
+                expected: "case class TypeDef",
+            });
+        };
+        let TreeKind::Template(template) = &self.arena.get(definition.rhs).kind else {
+            return Err(NamerError::MalformedAstShape {
+                tree_index: definition.rhs.index(),
+                expected: "case class Template",
+            });
+        };
+        let Some(parameter_node) = self.arena.try_get(parameter_tree) else {
+            return Err(NamerError::MalformedAstShape {
+                tree_index: parameter_tree.index(),
+                expected: "case class constructor parameter",
+            });
+        };
+        let TreeKind::ValDef(parameter) = &parameter_node.kind else {
+            return Err(NamerError::MalformedAstShape {
+                tree_index: parameter_tree.index(),
+                expected: "case class constructor parameter ValDef",
+            });
+        };
+        if self.arena.try_get(parameter.tpt).is_some_and(|node| {
+            matches!(
+                &node.kind,
+                TreeKind::PhaseSpecific(UntypedNode::PostfixOp(operator))
+                    if self.store.names.resolve(operator.op.text()) == "*"
+            )
+        }) {
+            return Ok(());
+        }
+        if template.body.iter().any(|tree| {
+            let Some(node) = self.arena.try_get(*tree) else {
+                return false;
+            };
+            let name = match &node.kind {
+                TreeKind::DefDef(definition) => Some(definition.name.as_name()),
+                TreeKind::ValDef(definition) => Some(definition.name.as_name()),
+                _ => None,
+            };
+            name.is_some_and(|name| self.store.names.resolve(name.text()) == "_1")
+        }) {
+            return Ok(());
+        }
+        let scope = self
+            .index
+            .scope_of(class_symbol)
+            .ok_or(NamerError::MalformedAstShape {
+                tree_index: class_tree.index(),
+                expected: "case class with a declaration scope",
+            })?;
+        let selector_name = *dotty_core::TermName::new(self.store.names.intern("_1")).as_name();
+        if !self
+            .store
+            .scopes
+            .get(scope)
+            .lookup_all(&selector_name)
+            .is_empty()
+        {
+            return Ok(());
+        }
+        self.enter_derived_symbol(
+            parameter_tree,
+            selector_name,
+            class_symbol,
+            scope,
+            SymbolSpec {
+                kind: SymbolKind::Method,
+                flags: SymbolFlags::SYNTHETIC,
+                visibility: Visibility::Public,
+            },
+        )?;
         Ok(())
     }
 
