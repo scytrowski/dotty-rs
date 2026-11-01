@@ -288,6 +288,18 @@ and classfile-to-sidecar UUIDs observed before the Java client compile were:
 | `example/PairFactory.class` | `e4212a30e382a609ec64aa54e002900448e7323e68839ebb25fa2fccf054e1f4` | `0036155a-30ac-b6c8-0000-000000008198` |
 | `example/PairFactory.tasty` | `ef6cc72805a9f3846d0cf31721cc06e88bb35716da1b0500eb6fad233b254836` | `0036155a-30ac-b6c8-0000-000000008198` |
 
+The independent Java runtime client's exact source is
+[`PairFactoryIdentityHarness.java`](../tests/fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactoryIdentityHarness.java),
+with SHA-256
+`e3f173a04d86ebc746af15e779fe0f3a4b2d9a382b291f488a5606fced5bea90`.
+`tests/jvm_tasty_artifacts.rs::sibling_constructor_batch_executes_original_rust_artifacts_with_independent_pair_identity`
+copies these fixture bytes to its generated
+`PairFactoryIdentityHarness.java` before invoking `javac`; the test checks and
+prints that generated-file digest. Reproduce the source digest with
+`sha256sum tests/fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactoryIdentityHarness.java`.
+This client-source receipt is separate from the six Rust artifact hashes
+above, the Scala consumer-source hash below, and the Java executable hash.
+
 The test hashes those six files again after `javac`, after the JVM run, and
 after all isolated negative copies. Every hash and original file byte matched
 the pre-client value. `javap -v -p -c` reported major version 65 and the
@@ -494,3 +506,68 @@ requires the pinned compiler, JDK, source revision, and runtime hashes instead
 of skipping. That workflow still runs the inherited strict Scala consumers,
 the standalone #1916 reader suite, the #1918 JDK runtime gate, and the
 mandatory JDK 21 verification gate.
+
+## Integrated release evidence for issue #1920
+
+This closeout's final release gates were rerun from integrated `main` baseline
+`e7f1941d072b705207f8e3606f50b9592c6ea826`. It contains prerequisites
+#1913–#1919 and the intervening merged PRs #1950, #1953, and #1954. The initial
+integrated verification used `d313e26facea1c7640272f535155e418fb59339c`;
+its validation logs are not evidence for the final baseline. This issue adds
+only a strict runtime
+receipt normalization and this evidence ledger; it changes no compiler
+semantics, ABI, or code generation. The release gate used the Scala 3.9.0 source revision
+`777528f19a58e794c9954a42f433373472ec57f8`, staged compiler JAR SHA-256
+`172c8b8384e75ee24d327fce5ec788582bf314f66bf9983ba57e0cac6c3ff498`, Temurin
+JDK `21.0.13`, and the two published runtime library hashes recorded above.
+
+The preceding issue evidence was reviewed and merged on these distinct heads:
+
+| Prerequisite | Merged PR | Tested PR head | Merge commit |
+| --- | --- | --- | --- |
+| #1913 | #1923 | `da8ae07a1690af39f36df52625eb39061a46a009` | `b85bcd291d9af425bd3e439476b2a2c7fc03fe16` |
+| #1914 | #1925 | `f41ff248b94aa340bdc02e6ae77ba378b4aa9dbe` | `2894d8c969e0d210b3f461d35e08d55daf6b2227` |
+| #1915 | #1932 | `3db89c996e470e053ef1b08d8d3774224d3ce401` | `0e66ab92d5ec115236691a1ef6b2adb72f0e42fa` |
+| #1916 | #1939 | `be24cc9478552684184b7326d72209d206dd3601` | `6c4ec4609d8d76f30f69cf911caa4d927d00740d` |
+| #1917 | #1943 | `7cac3392a3541f1911f32fc85363552ad2f1c2ae` | `bf637fb9000914beee58038880f57dab5ab23154` |
+| #1918 | #1947 | `3841713ea32feb1fa7e364e8972e3185da2eef2b` | `fd31a4f3dad7d0edac926997763e18637c323d0b` |
+| #1919 | #1949 | `95e45e3d55b3b6a32d5987e79aa3a499843d3360` | `9198d8c8541cbb95930d89ba8521ef744ca13edc` |
+
+Those head receipts belong to their prerequisite reviews. This section records
+the integrated #1920 revalidation at `e7f1941d072b705207f8e3606f50b9592c6ea826`;
+the final strict run reproduced the six original artifact hashes and UUID
+links shown in the #1919 evidence above.
+
+The acceptance criteria reconcile to the following evidence:
+
+| Criterion | Evidence and result |
+| --- | --- |
+| AC-1 provenance | This ledger records the producer, independent Java and Scala client source hashes, pinned Scala source revision, compiler/JDK identity, published runtime library hashes, and six artifact receipts; the Java test checks the generated client against its recorded source digest. |
+| AC-2 canonical semantic session | The existing same-session Rust regression checks source-to-typed roots, symbols, ordered parameters, and the exact supported proof boundary. It passed in the strict run. |
+| AC-3 genuine original TASTy | The strict Scala consumer reads the six unmodified Rust-produced files; `-decompile`, `-print-tasty`, `-from-tasty`, selected source lookup, and runtime use the original artifacts. Inspection output is not substituted into the consumer classpath. |
+| AC-4 artifact set, identity, and reproducibility | The three class/sidecar pairs, UUID links, paths, and hashes are recorded above. The gate checks two fresh Rust sessions produce identical six-file output and exercises renamed and declaration-reordered source variants. |
+| AC-5 ordered bytecode contract | The symbolic bytecode contract and independent `javap` observations above cover `create(II)Lexample/Pair;`, left-to-right sibling construction, constructor descriptor, stack, locals, and argument count. The JDK verifier/runtime gate passed. |
+| AC-6 strict Java runtime and mutation isolation | `java -Xverify:all -ea` ran the independent client and mutation probes. Original artifact hashes are checked before and after probes; runtime object identity and independent mutation assertions passed. |
+| AC-7 official Scala source consumer and TASTy tools | The pinned Scala source consumer compiled against original Rust output, ran successfully, and each original sidecar passed official decompile, print, and from-TASTy inspection. Positive member lookup and matched classfile-only failures are recorded above. |
+| AC-8 negative and publisher-fault matrix | First-stage sidecar, lookup, descriptor, and address failures are recorded above. The strict Rust tests cover producer rejection stages and injected publication faults, including preservation of an existing destination and absence of partial accepted output. |
+| AC-9 strict toolchain and repository gates | All required Scala-consumer opt-ins, the oracle, JDK 21 gate, formatting, frontend boundary guard, Clippy, rustdoc, and `cargo test --workspace --all-targets --locked` ran with no required opt-in gate skipped. The regular suites retain their explicitly ignored tests. |
+| AC-10 evidence and deferred boundaries | This ledger separates observed behavior from unsupported scope. The supported contract remains the exact two-argument direct-sibling fixture and bounded pending-object shape covered by the linked tests; the limits listed below remain deferred. |
+
+The ordered checkpoints in the issue scope record completed against the final
+baseline as follows: (1) integrated `main` and the prerequisite history were
+reconciled; (2) the canonical producer session and six artifacts were verified;
+(3) negative inputs and publication faults were exercised; (4) independent
+Java and pinned Scala acceptance passed; (5) strict Scala, JDK, and repository
+gates passed with all required opt-ins enabled; and (6) this ledger records the
+evidence and scope limits. A runtime receipt initially included the JVM's `Picked up
+JAVA_TOOL_OPTIONS:` banner before the expected linkage error. The harness now
+removes that environment banner from only the two linkage-error receipts before
+comparing and recording them; the underlying `NoSuchMethodError` and
+`NoClassDefFoundError` assertions remain required.
+
+This evidence does not expand support to arbitrary third arguments, conditional
+branches, deeper pending-object nesting, generic or contextual constructors,
+defaults, secondary constructors, cross-unit compilation, or a public compiler
+session/CLI. A production semantic, ABI, or codegen failure is outside this
+release closeout and must be returned to its owning prerequisite rather than
+masked by changing this evidence.
