@@ -1322,14 +1322,16 @@ fn analyze_candidate_session() -> Vec<String> {
                     };
                     assert_closure_root_identity(
                         &typer,
-                        &parsed.ast,
-                        source,
-                        source_rhs,
-                        child,
-                        parent,
-                        symbol,
-                        target,
-                        &name,
+                        ClosureRootReceipt {
+                            source_ast: &parsed.ast,
+                            source,
+                            source_lambda: source_rhs,
+                            child,
+                            parent,
+                            root_symbol: symbol,
+                            expected_member: target,
+                            root_name: &name,
+                        },
                     )
                 };
                 let result_shape = match typer.store().symbols.info(symbol) {
@@ -1363,17 +1365,31 @@ fn analyze_candidate_session() -> Vec<String> {
     receipt
 }
 
-fn assert_closure_root_identity(
-    typer: &SourceTyper<'_>,
-    source_ast: &AstArena<Untyped>,
+struct ClosureRootReceipt<'a> {
+    source_ast: &'a AstArena<Untyped>,
     source: SourceId,
     source_lambda: TreeId<Untyped>,
     child: dotty_core::SymbolId,
     parent: dotty_core::SymbolId,
     root_symbol: dotty_core::SymbolId,
     expected_member: dotty_core::SymbolId,
-    root_name: &str,
+    root_name: &'a str,
+}
+
+fn assert_closure_root_identity(
+    typer: &SourceTyper<'_>,
+    receipt: ClosureRootReceipt<'_>,
 ) -> String {
+    let ClosureRootReceipt {
+        source_ast,
+        source,
+        source_lambda,
+        child,
+        parent,
+        root_symbol,
+        expected_member,
+        root_name,
+    } = receipt;
     let lambda = typer
         .source_typed_index()
         .get(source, source_lambda)
@@ -1436,6 +1452,11 @@ fn assert_closure_root_identity(
         Some(method.value_param_clauses[0][0]),
         "{root_name} source parameter maps to this synthetic method parameter"
     );
+    let typed_parameter = typer.typed_ast().get(method.value_param_clauses[0][0]);
+    assert_eq!(type_shape(typer.store(), typed_parameter.ty), "Int");
+    let TreeKind::ValDef(typed_parameter) = &typed_parameter.kind else {
+        panic!("{root_name} synthetic method parameter must be a ValDef")
+    };
     let body = method.rhs.expect("synthetic lambda body");
     let TreeKind::Apply(application) = &typer.typed_ast().get(body).kind else {
         panic!("{root_name} synthetic lambda body must preserve its source application")
@@ -1452,6 +1473,100 @@ fn assert_closure_root_identity(
         1,
         "{root_name} synthetic method body must contain its own canonical Parent reference"
     );
+    let reference = typer.typed_ast().get(local_references[0]);
+    let Type::TermRef { prefix, .. } = typer.store().types.get(reference.ty) else {
+        panic!("{root_name} inherited reference must retain its receiver prefix")
+    };
+    assert!(
+        matches!(
+            typer.store().types.get(*prefix),
+            Type::ThisType { class } if *class == child
+        ),
+        "{root_name} inherited reference must use the captured Child.this receiver"
+    );
+
+    let parameter_references = std::iter::once(application.function)
+        .chain(application.args.iter().copied())
+        .flat_map(|tree| {
+            let mut candidates = vec![tree];
+            if let TreeKind::Select(selection) = &typer.typed_ast().get(tree).kind {
+                candidates.push(selection.qualifier);
+            }
+            candidates
+        })
+        .filter_map(|tree| {
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } = typer.store().types.get(typer.typed_ast().get(tree).ty)
+            else {
+                return None;
+            };
+            (typer.store().symbols.get(*symbol).owner == Some(*lambda_symbol))
+                .then_some((tree, *symbol))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        parameter_references.len(),
+        1,
+        "{root_name} lambda body references its own synthetic parameter once"
+    );
+    let (parameter_reference_tree, parameter_symbol) = parameter_references[0];
+    let parameter_reference = typer.typed_ast().get(parameter_reference_tree);
+    assert!(matches!(
+        typer.store().types.get(parameter_reference.ty),
+        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+            if *symbol == parameter_symbol
+    ));
+    assert_eq!(
+        typer.store().symbols.get(parameter_symbol).owner,
+        Some(*lambda_symbol)
+    );
+    assert_eq!(
+        typer.store().symbols.get(parameter_symbol).name,
+        *typed_parameter.name.as_name()
+    );
+    let SymbolInfo::Complete(parameter_info) = typer.store().symbols.info(parameter_symbol) else {
+        panic!("{root_name} synthetic parameter signature must be complete")
+    };
+    assert_eq!(type_shape(typer.store(), *parameter_info), "Int");
+    let parameter_reference_span = parameter_reference
+        .position
+        .expect("synthetic parameter reference span")
+        .span();
+    let source_parameter_reference = source_ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let span = node.position?.span();
+            matches!(&node.kind, TreeKind::Ident(ident)
+                if span == parameter_reference_span
+                    && ident.name == *typed_parameter.name.as_name())
+            .then_some(tree)
+        })
+        .expect("source lambda body parameter reference");
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .get(source, source_parameter_reference),
+        Some(parameter_reference_tree),
+        "{root_name} source body reference maps to its own synthetic parameter reference"
+    );
+    let source_parameter_name = typed_parameter.name.as_name();
+    assert_eq!(
+        typer.store().names.resolve(source_parameter_name.text()),
+        "x",
+        "frozen lambda parameter name"
+    );
+    let SymbolInfo::Complete(lambda_info) = typer.store().symbols.info(*lambda_symbol) else {
+        panic!("{root_name} synthetic method signature must be complete")
+    };
+    let Type::Method(lambda_type) = typer.store().types.get(*lambda_info) else {
+        panic!("{root_name} synthetic method must retain its method type")
+    };
+    assert_eq!(lambda_type.params.len(), 1);
+    assert_eq!(type_shape(typer.store(), lambda_type.params[0].ty), "Int");
+    assert_eq!(type_shape(typer.store(), lambda_type.result), "Int");
+    assert_eq!(typer.typed_ast().get(body).ty, lambda_type.result);
     match typer.store().symbols.get(expected_member).kind {
         SymbolKind::Method => {
             let method_info = match *typer.store().symbols.info(expected_member) {
@@ -1478,6 +1593,10 @@ fn assert_closure_root_identity(
     assert_eq!(
         typer.store().symbols.get(expected_member).owner,
         Some(parent)
+    );
+    assert_eq!(
+        type_shape(typer.store(), typer.typed_ast().get(lambda).ty),
+        "Function1[Int,Int]"
     );
 
     let body_source_tree = source_function.body;
