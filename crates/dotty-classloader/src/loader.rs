@@ -4770,6 +4770,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 .unwrap_or_else(|| {
                     self.unresolved_tasty_type("type parameter reference is out of range")
                 }),
+            Some(tasty_symbol::DecodedTastyType::ByName(result)) => {
+                let result = self.lower_tasty_type(
+                    owner,
+                    Some(result),
+                    type_parameters,
+                    class_type_parameters,
+                );
+                self.store.types.alloc(Type::ByName { result })
+            }
             Some(tasty_symbol::DecodedTastyType::ClassParamRef(index)) => class_type_parameters
                 .get(*index as usize)
                 .copied()
@@ -9998,6 +10007,168 @@ mod tests {
         };
         assert_eq!(args.len(), 1);
         assert_eq!(store.types.get(args[0]), &expected);
+    }
+
+    #[test]
+    fn lowers_scala39_option_get_or_else_by_name_parameter_to_its_method_binder() {
+        let bytes = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library/scala/Option.tasty"),
+        )
+        .expect("pinned Option.tasty fixture should exist");
+        let class_name = BinaryName::from_internal("scala/Option");
+        let fixture_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for canonical resolver");
+        let class_path = crate::class_path::CompositeClassPath::new(vec![
+            Box::new(crate::class_path::DirectoryClassPath::new(
+                fixture_root.join("tests/fixtures/tasty_sample"),
+            )),
+            Box::new(crate::class_path::DirectoryClassPath::new(
+                fixture_root.join("tests/fixtures/tasty_fields"),
+            )),
+            Box::new(crate::class_path::DirectoryClassPath::new(
+                fixture_root.join("tests/fixtures/tasty_visibility"),
+            )),
+            Box::new(crate::class_path::DirectoryClassPath::new(
+                fixture_root.join("../dotty-tasty/tests/fixtures/scala3-library"),
+            )),
+            Box::new(crate::class_path::DirectoryClassPath::new(
+                fixture_root.join("../dotty-tasty/tests/fixtures/path_dependent"),
+            )),
+            Box::new(
+                crate::jdk_class_path::JdkClassPath::new(
+                    std::path::PathBuf::from(java_home).join("jmods"),
+                )
+                .expect("canonical JDK classpath should open"),
+            ),
+        ]);
+        let decoded = tasty_symbol::decode_with_resolvers(
+            &bytes,
+            &class_name,
+            |owner, alias| {
+                resolve_tasty_alias(&class_path, owner, alias)
+                    .expect("canonical alias lookup should succeed")
+            },
+            |package, simple_name| {
+                resolve_tasty_bare_reference(&class_path, package, simple_name)
+                    .expect("canonical bare-name lookup should succeed")
+            },
+        )
+        .expect("pinned Option class member signatures should decode");
+        let method = decoded
+            .methods
+            .iter()
+            .find(|method| method.name == "getOrElse")
+            .expect("Option.getOrElse should be present");
+        assert!(method.flags.is_public());
+        assert_eq!(method.type_parameters.len(), 1);
+        assert_eq!(method.parameters.len(), 1);
+        assert!(method.has_term_clause);
+        assert_eq!(
+            method.parameters[0].declared_type,
+            Some(tasty_symbol::DecodedTastyType::ByName(Box::new(
+                tasty_symbol::DecodedTastyType::ParamRef(0)
+            )))
+        );
+        assert_eq!(
+            method.return_type,
+            Some(tasty_symbol::DecodedTastyType::ParamRef(0))
+        );
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let origin = SymbolOrigin::Tasty(loader.store.origins.register_tasty());
+        let (class_symbol, declarations, origin) = loader
+            .enter_class(&class_name, decoded.flags, origin)
+            .expect("Option class identity should be enterable without loading its parents");
+        let class_type_parameters = loader.enter_tasty_class_type_parameters(
+            &class_name,
+            declarations,
+            &decoded.type_parameters,
+            origin,
+        );
+        let method_type_id = loader.lower_tasty_method_with_class_parameters(
+            &class_name,
+            method,
+            &class_type_parameters,
+        );
+        let method_symbol = loader.enter_method(
+            class_symbol,
+            declarations,
+            &method.name,
+            method.flags,
+            method_type_id,
+            origin,
+        );
+        assert_eq!(
+            loader.store.symbols.get(method_symbol).owner,
+            Some(class_symbol)
+        );
+        assert_eq!(
+            loader.store.symbols.get(method_symbol).visibility,
+            Visibility::Public
+        );
+        assert_eq!(
+            loader.store.symbols.get(method_symbol).flags,
+            SymbolFlags::JAVA_DEFINED | SymbolFlags::FINAL
+        );
+
+        let Type::Poly(poly) = loader.store.types.get(method_type_id) else {
+            panic!("getOrElse should lower to a polymorphic type");
+        };
+        assert_eq!(poly.params.len(), 1);
+        assert_eq!(
+            loader
+                .store
+                .names
+                .resolve(poly.params[0].name.as_name().text()),
+            "B"
+        );
+        let Type::Bounds { low, .. } = loader.store.types.get(poly.params[0].bounds) else {
+            panic!("getOrElse.B should retain its decoded lower bound");
+        };
+        let class_parameter = loader
+            .store
+            .types
+            .get(*low)
+            .reference_symbol()
+            .expect("getOrElse.B lower bound should use Option.A's canonical symbol");
+        assert_eq!(
+            loader.store.symbols.get(class_parameter).owner,
+            Some(class_symbol)
+        );
+        assert_eq!(
+            loader
+                .store
+                .names
+                .resolve(loader.store.symbols.get(class_parameter).name.text()),
+            "A"
+        );
+
+        let Type::Method(member_method) = loader.store.types.get(poly.result) else {
+            panic!("getOrElse should retain its single ordered term clause");
+        };
+        assert_eq!(member_method.params.len(), 1);
+        assert_eq!(
+            loader
+                .store
+                .names
+                .resolve(member_method.params[0].name.as_name().text()),
+            "default"
+        );
+        let expected = Type::ParamRef {
+            binder: method_type_id,
+            index: 0,
+        };
+        let Type::ByName { result } = loader.store.types.get(member_method.params[0].ty) else {
+            panic!("getOrElse.default must preserve its by-name wrapper");
+        };
+        assert_eq!(loader.store.types.get(*result), &expected);
+        assert_eq!(loader.store.types.get(member_method.result), &expected);
+        assert_eq!(
+            loader.store.symbols.get(method_symbol).info,
+            SymbolInfo::Complete(method_type_id)
+        );
     }
 
     #[test]
