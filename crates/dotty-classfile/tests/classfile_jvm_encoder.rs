@@ -40,17 +40,15 @@ impl Drop for TempDir {
 
 fn parse_tool_major_version(executable: &str, version_output: &str) -> Option<u32> {
     if executable == "javap" {
-        let last_line = version_output
+        let version_lines = version_output
             .lines()
-            .rev()
-            .find(|line| !line.trim().is_empty())?
-            .trim();
-        if last_line
-            .chars()
-            .all(|character| character.is_ascii_digit())
-        {
-            return parse_version_major(last_line, true);
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("Picked up JAVA_TOOL_OPTIONS: "))
+            .collect::<Vec<_>>();
+        if version_lines.len() == 1 {
+            return parse_version_major(version_lines[0], true);
         }
+        return None;
     }
 
     version_output.lines().find_map(|line| {
@@ -152,7 +150,18 @@ fn parses_jdk_version_formats_and_rejects_older_major_versions() {
         Some(21)
     );
     assert_eq!(parse_tool_major_version("javap", "21\n"), Some(21));
+    assert_eq!(
+        parse_tool_major_version(
+            "javap",
+            "21\nPicked up JAVA_TOOL_OPTIONS: -XX:-UsePerfData\n"
+        ),
+        Some(21)
+    );
     assert_eq!(parse_tool_major_version("javap", "21.0.12\n"), Some(21));
+    assert_eq!(
+        parse_tool_major_version("javap", "21\nUnknown launcher output: ignored?\n"),
+        None
+    );
     assert_eq!(
         parse_tool_major_version("javac", "javac version unknown"),
         None
