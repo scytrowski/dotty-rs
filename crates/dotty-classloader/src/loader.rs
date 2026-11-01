@@ -953,15 +953,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     error,
                 ))
             })?;
-        let wrapped_file = tasty_symbol::parse_classloader_tasty(wrapped_resource.bytes())
-            .map_err(|error| {
-                SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
-                    wrapped_name.clone(),
-                    error,
-                ))
-            })?;
         Self::validate_info_pair_unit_shape(&base_file, &base_name, false)?;
-        Self::validate_info_pair_unit_shape(&wrapped_file, &wrapped_name, true)?;
 
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
@@ -976,7 +968,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             &base_name,
             &wrapped_name,
             &base_file,
-            &wrapped_file,
+            wrapped_resource.bytes(),
         );
         match result {
             Ok((base, wrapped)) => {
@@ -1018,7 +1010,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         base_name: &BinaryName,
         wrapped_name: &BinaryName,
         base_file: &dotty_tasty::tasty::TastyFile<'_>,
-        wrapped_file: &dotty_tasty::tasty::TastyFile<'_>,
+        wrapped_bytes: &[u8],
     ) -> Result<(SymbolId, SymbolId), SemanticTastyLoadError> {
         let session = std::mem::replace(&mut self.session, LoadingSession::new());
         let mut resolver = crate::resolver::ClasspathSymbolResolver::new(
@@ -1085,11 +1077,31 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let mut indexes: HashMap<BinaryName, TastySemanticIndex> = HashMap::new();
         let mut constructor_addresses = HashMap::new();
         let mut root_addresses = HashMap::new();
+        let mut wrapped_file = None;
         for is_base in order {
+            if !is_base && wrapped_file.is_none() {
+                let file = match tasty_symbol::parse_classloader_tasty(wrapped_bytes) {
+                    Ok(file) => file,
+                    Err(error) => {
+                        self.restore_tasty_pair_packages(base_file, tasty_session);
+                        return Err(SemanticTastyLoadError::ClassLoad(
+                            ClassLoadError::InvalidTastyFile(wrapped_name.clone(), error),
+                        ));
+                    }
+                };
+                if let Err(error) = Self::validate_info_pair_unit_shape(&file, wrapped_name, true) {
+                    self.restore_tasty_pair_packages(base_file, tasty_session);
+                    return Err(error);
+                }
+                wrapped_file = Some(file);
+            }
             let (name, file) = if is_base {
                 (base_name, base_file)
             } else {
-                (wrapped_name, wrapped_file)
+                (
+                    wrapped_name,
+                    wrapped_file.as_ref().expect("parsed before entry"),
+                )
             };
             let mut unpickler =
                 TastyUnpickler::with_session(file, self.store, self.definitions, tasty_session);
@@ -1154,12 +1166,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             indexes.insert(name.clone(), index);
         }
 
+        let wrapped_file = wrapped_file.expect("both units entered");
         let mut identities = HashMap::new();
         for is_base in order {
             let (name, file) = if is_base {
                 (base_name, base_file)
             } else {
-                (wrapped_name, wrapped_file)
+                (wrapped_name, &wrapped_file)
             };
             let index = indexes.remove(name).expect("both units entered");
             let root = root_addresses[name];
@@ -1235,9 +1248,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             tasty_session = session;
             identities.insert(name.clone(), (class, constructor, method));
         }
-        let (_, mut packages) =
-            TastyUnpickler::with_session(wrapped_file, self.store, self.definitions, tasty_session)
-                .into_parts();
+        let (_, mut packages) = TastyUnpickler::with_session(
+            &wrapped_file,
+            self.store,
+            self.definitions,
+            tasty_session,
+        )
+        .into_parts();
         self.session.packages.swap_packages(&mut packages);
         for name in [base_name, wrapped_name] {
             let (class, constructor, method) = identities[name];
