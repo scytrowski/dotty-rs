@@ -15,6 +15,10 @@ FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-match-3.9.0"
 SOURCE_SHA256 = "df57333192eb934169f06a07873c2e1ba88c9159404f60e5bfe33b3d016e215c"
 SCALA_REVISION = "777528f19a58e794c9954a42f433373472ec57f8"
 RUST_TESTS = {
+    "flagged_product2_late_case_failure_rolls_back_before_valid_sibling",
+    "flagged_product2_negative_matrix_rejects_without_publishing_roots",
+    "flagged_product2_requires_canonical_product_identity",
+    "flagged_product2_whole_method_baseline",
     "frozen_extractor_negative_matrix_rejects_or_defers_without_typed_roots",
     "frozen_source_case_class_match_methods_type_as_whole_defdefs",
     "late_body_error_rolls_back_extractor_and_case_binder_state_before_retry",
