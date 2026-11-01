@@ -5887,6 +5887,148 @@ fn dual_reference_forwarding_contract_rejects_same_typed_swapped_formal_loads() 
 }
 
 #[test]
+fn dual_reference_forwarding_contract_rejects_allocation_constructor_and_bound_corruption() {
+    let artifacts = emit_paired_jvm_tasty_batch(
+        DUAL_REFERENCE_FORWARDING_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(19669),
+    )
+    .unwrap();
+    let valid_artifacts = JvmTastyBatchArtifacts {
+        classfiles: artifacts
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastyClassFileArtifact {
+                classfile_path: artifact.classfile_path().to_owned(),
+                classfile_bytes: artifact.classfile_bytes().to_vec(),
+            })
+            .collect(),
+        sidecars: artifacts
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastySidecarArtifact {
+                tasty_path: artifact.tasty_path().to_owned(),
+                tasty_bytes: artifact.tasty_bytes().to_vec(),
+            })
+            .collect(),
+    };
+    let factory = valid_artifacts
+        .classfiles
+        .iter()
+        .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+        .unwrap();
+    let mut reader = Reader::new(&factory.classfile_bytes);
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let wrap = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index).unwrap() == "wrap")
+        .unwrap();
+    let [Attribute::Code(code)] = wrap.attributes.as_slice() else {
+        panic!("wrap has one Code attribute");
+    };
+    let code_start = code.code.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
+    let unexpected_class = class.this_class;
+    let wrong_constructor = (1..=u16::MAX)
+        .map(ConstantPoolIndex)
+        .find(|index| {
+            let Some(ConstantPoolEntry::Methodref {
+                class_index,
+                name_and_type_index,
+            }) = class.constant_pool.get(*index)
+            else {
+                return false;
+            };
+            class.constant_pool.class_name(*class_index).ok() == Some("java/lang/Object")
+                && class
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .is_ok_and(|(name, descriptor)| name == "<init>" && descriptor == "()V")
+        })
+        .expect("the factory constructor has an Object.<init>()V methodref");
+
+    let mut cases = Vec::new();
+    let mut allocates_unexpected_class = valid_artifacts.clone();
+    sibling_factory_classfile_mut(&mut allocates_unexpected_class).classfile_bytes
+        [code_start + 1..code_start + 3]
+        .copy_from_slice(&unexpected_class.0.to_be_bytes());
+    cases.push((
+        "allocates-unexpected-class-instead-of-pair",
+        allocates_unexpected_class,
+    ));
+
+    let mut calls_wrong_constructor = valid_artifacts.clone();
+    sibling_factory_classfile_mut(&mut calls_wrong_constructor).classfile_bytes
+        [code_start + code.code.len() - 3..code_start + code.code.len() - 1]
+        .copy_from_slice(&wrong_constructor.0.to_be_bytes());
+    cases.push(("calls-wrong-constructor", calls_wrong_constructor));
+
+    let mut wrong_stack = valid_artifacts.clone();
+    sibling_factory_classfile_mut(&mut wrong_stack).classfile_bytes[code_start - 8..code_start - 6]
+        .copy_from_slice(&[0, 3]);
+    cases.push(("wrong-max-stack", wrong_stack));
+
+    let mut wrong_locals = valid_artifacts.clone();
+    sibling_factory_classfile_mut(&mut wrong_locals).classfile_bytes
+        [code_start - 6..code_start - 4]
+        .copy_from_slice(&[0, 2]);
+    cases.push(("wrong-max-locals", wrong_locals));
+
+    let mut extra_allocation = valid_artifacts.clone();
+    let classfile = &mut sibling_factory_classfile_mut(&mut extra_allocation).classfile_bytes;
+    let old_code_length =
+        u32::from_be_bytes(classfile[code_start - 4..code_start].try_into().unwrap());
+    let attribute_length = u32::from_be_bytes(
+        classfile[code_start - 12..code_start - 8]
+            .try_into()
+            .unwrap(),
+    );
+    let areturn = code_start + code.code.len() - 1;
+    classfile.splice(
+        areturn..areturn,
+        [
+            0xbb,
+            unexpected_class.0.to_be_bytes()[0],
+            unexpected_class.0.to_be_bytes()[1],
+        ],
+    );
+    classfile[code_start - 4..code_start].copy_from_slice(&(old_code_length + 3).to_be_bytes());
+    classfile[code_start - 12..code_start - 8]
+        .copy_from_slice(&(attribute_length + 3).to_be_bytes());
+    cases.push(("extra-allocation", extra_allocation));
+
+    with_paired_jvm_tasty_batch_plan(
+        DUAL_REFERENCE_FORWARDING_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(19670),
+        |plan| {
+            let tasty_plans = plan
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans).unwrap();
+            for (label, corrupted) in cases {
+                let error = validate_jvm_tasty_batch_artifacts(&validated, corrupted)
+                    .expect_err("direct-formal bytecode corruption rejects the complete batch");
+                assert!(
+                    matches!(
+                        error,
+                        JvmTastyContractError::BatchArtifact {
+                            class_index: 2,
+                            phase: "cross-class invocation",
+                            ..
+                        }
+                    ),
+                    "{label} must fail at the direct-formal bytecode stage: {error:?}"
+                );
+            }
+        },
+    )
+    .unwrap();
+}
+
+#[test]
 fn dual_reference_forwarding_publisher_rejects_each_six_file_fault_without_partial_output() {
     let batch = emit_paired_jvm_tasty_batch(
         DUAL_REFERENCE_FORWARDING_BATCH,
