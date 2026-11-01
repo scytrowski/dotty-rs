@@ -12,6 +12,10 @@ Normative sources:
 - JVM Specification SE 26, Chapter 5 — [Loading, Linking, and Initializing](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-5.html)
 - JLS SE 26, Chapter 12, §12.2 — [Loading of Classes and Interfaces](https://docs.oracle.com/javase/specs/jls/se26/html/jls-12.html)
 
+The live package/session contract between the classpath resolver and semantic
+TASTy unpickler is documented in
+[`classloader-semantic-tasty-session-contract.md`](classloader-semantic-tasty-session-contract.md).
+
 Where this document is silent, the JVMS is authoritative, per the same
 policy as `docs/classfile-format-jdk25.md`.
 
