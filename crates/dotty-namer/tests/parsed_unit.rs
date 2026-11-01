@@ -2380,11 +2380,11 @@ fn malformed_later_enum_case_rolls_back_earlier_case_class_identity() {
     use dotty_core::ast::{ErrorNode, ErrorNodeKind, UntypedNode};
 
     let (mut parsed, source, mut store) = parsed_source(
-        "enum Direction:\n  case Up(value: Int)\n  case Down(step: Int)",
+        "case class Box(value: Int)\nenum Direction:\n  case Up(value: Int)\n  case Down(step: Int)",
         508,
     );
     let enum_tree = match &parsed.ast.get(parsed.root).kind {
-        TreeKind::PackageDef(package) => package.stats[0],
+        TreeKind::PackageDef(package) => package.stats[1],
         _ => panic!("parser should return a package root"),
     };
     let invalid_parameter = {
@@ -2442,6 +2442,47 @@ fn malformed_later_enum_case_rolls_back_earlier_case_class_identity() {
     );
     assert!(packages.get(&[] as &[&str]).is_some());
     assert!(packages.is_empty());
+
+    let retry_source = SourceId::from_index(509);
+    let retry_text = "case class Box(value: Int)";
+    let retry_scanner = dotty_lexer::ContextualScanner::new(retry_text).unwrap();
+    let retry_parsed = parse_compilation_unit(
+        SourceText::new(retry_text).unwrap(),
+        retry_source,
+        retry_scanner,
+        &mut store.names,
+    );
+    let retry_index = name_compilation_unit(
+        &retry_parsed.ast,
+        retry_parsed.root,
+        retry_source,
+        "Box.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("a clean retry should publish case-class methods");
+    let TreeKind::PackageDef(retry_package) = &retry_parsed.ast.get(retry_parsed.root).kind else {
+        panic!("retry source should have a package root");
+    };
+    let retry_class = retry_index
+        .symbol_at(retry_source, retry_package.stats[0])
+        .unwrap();
+    assert!(
+        retry_index
+            .generated_case_class_method(
+                retry_class,
+                dotty_core::GeneratedCaseClassMethodRole::Apply
+            )
+            .is_some()
+    );
+    assert!(
+        retry_index
+            .generated_case_class_method(
+                retry_class,
+                dotty_core::GeneratedCaseClassMethodRole::Unapply
+            )
+            .is_some()
+    );
 }
 
 #[test]
@@ -6236,7 +6277,8 @@ fn top_level_case_class_gets_a_package_owned_companion_and_source_mapped_apply()
         named
             .index
             .generated_case_class_method(class_symbol, GeneratedCaseClassMethodRole::Unapply),
-        None
+        None,
+        "generic classes are outside the monomorphic unapply increment"
     );
     assert_eq!(
         named.store.symbols.get(apply).owner,
@@ -6280,7 +6322,7 @@ fn top_level_case_class_gets_a_package_owned_companion_and_source_mapped_apply()
 
 #[test]
 fn top_level_case_class_reuses_explicit_companion_without_duplicate_identities() {
-    use dotty_core::{SymbolKind, SymbolOrigin, TermName, TypeName};
+    use dotty_core::{GeneratedCaseClassMethodRole, SymbolKind, SymbolOrigin, TermName, TypeName};
 
     let mut named = named_source(
         "case class Node(value: Int); object Node { def custom: Int = 1 }",
@@ -6303,6 +6345,7 @@ fn top_level_case_class_reuses_explicit_companion_without_duplicate_identities()
         .unwrap();
     let module_scope = named.index.scope_of(module_class).unwrap();
     let apply_name = *TermName::new(named.store.names.intern("apply")).as_name();
+    let unapply_name = *TermName::new(named.store.names.intern("unapply")).as_name();
 
     assert_eq!(named.store.symbols.get(class).links.companion, Some(object));
     assert_eq!(named.store.symbols.get(object).links.companion, Some(class));
@@ -6333,11 +6376,293 @@ fn top_level_case_class_reuses_explicit_companion_without_duplicate_identities()
         1,
         "the existing source object receives one source-derived apply"
     );
+    let unapply = named
+        .index
+        .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
+        .expect("the explicit companion receives one generated unapply");
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(module_scope)
+            .lookup_all(&unapply_name),
+        [unapply]
+    );
+    assert_eq!(named.store.symbols.get(unapply).owner, Some(module_class));
     assert_eq!(
         named.index.symbol_at(named.source, object_tree),
         Some(object)
     );
     assert_ne!(object, class);
+}
+
+#[test]
+fn explicit_companion_unapply_is_preserved_without_generated_identity_collisions() {
+    use dotty_core::{GeneratedCaseClassMethodRole, SymbolKind, SymbolOrigin, TermName, TypeName};
+
+    let cases = [
+        (
+            "Explicit",
+            "case class Box(value: Int)\nobject Box { def unapply(value: Box): Option[Int] = Some(value.value) }",
+            false,
+            1,
+        ),
+        (
+            "ExplicitBeforeClass",
+            "object Box { def unapply(value: Box): Option[Int] = Some(value.value) }\ncase class Box(value: Int)",
+            false,
+            1,
+        ),
+        (
+            "Overload",
+            "case class Box(value: Int)\nobject Box { def unapply(value: String): Option[String] = Some(value) }",
+            true,
+            2,
+        ),
+        (
+            "WrongResult",
+            "case class Box(value: Int)\nobject Box { def unapply(value: Box): Int = value.value }",
+            false,
+            1,
+        ),
+    ];
+
+    for (source_index, (label, source_text, generated, expected_count)) in
+        cases.into_iter().enumerate()
+    {
+        let mut named = named_source(source_text, 1844 + source_index as u32);
+        let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+            panic!("compilation unit should have a package root");
+        };
+        let class_tree = package
+            .stats
+            .iter()
+            .copied()
+            .find(|tree| matches!(named.parsed.ast.get(*tree).kind, TreeKind::TypeDef(_)))
+            .expect("case class declaration");
+        let class = named.index.symbol_at(named.source, class_tree).unwrap();
+        let owner = named.store.symbols.get(class).owner.unwrap();
+        let module_name = *TypeName::new(named.store.names.intern("Box$")).as_name();
+        let module_class = named
+            .store
+            .scopes
+            .get(named.index.scope_of(owner).unwrap())
+            .lookup(&module_name)
+            .unwrap();
+        let module_scope = named.index.scope_of(module_class).unwrap();
+        let unapply_name = *TermName::new(named.store.names.intern("unapply")).as_name();
+        let candidates = named
+            .store
+            .scopes
+            .get(module_scope)
+            .lookup_all(&unapply_name);
+        assert_eq!(
+            candidates.len(),
+            expected_count,
+            "{label} should retain exactly the explicit/generated unapply candidates"
+        );
+
+        let explicit_tree = named
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(method)
+                    if named.store.names.resolve(method.name.as_name().text()) == "unapply" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .expect("explicit source unapply tree");
+        let explicit = named.index.symbol_at(named.source, explicit_tree).unwrap();
+        assert_eq!(
+            named.store.symbols.get(explicit).origin,
+            SymbolOrigin::Source(named.source)
+        );
+        assert_eq!(named.store.symbols.get(explicit).kind, SymbolKind::Method);
+
+        let generated_method = named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply);
+        if generated {
+            let generated_method = generated_method.expect("generated overload is indexed by role");
+            assert_ne!(generated_method, explicit);
+            assert!(candidates.contains(&generated_method));
+            assert_eq!(
+                named.store.symbols.get(generated_method).owner,
+                Some(module_class)
+            );
+        } else {
+            assert_eq!(generated_method, None);
+            assert_eq!(candidates, [explicit]);
+        }
+    }
+}
+
+#[test]
+fn generated_unapply_is_independent_of_case_class_companion_declaration_order() {
+    use dotty_core::{
+        GeneratedCaseClassMethod, GeneratedCaseClassMethodRole, Namespace, SymbolFlags, SymbolKind,
+        SymbolOrigin, TermName, TypeName,
+    };
+
+    for (source_index, source_text) in [
+        (
+            1847,
+            "case class Box(value: Int)\nobject Box { def marker: Int = 1 }",
+        ),
+        (
+            1848,
+            "object Box { def marker: Int = 1 }\ncase class Box(value: Int)",
+        ),
+    ] {
+        let mut named = named_source(source_text, source_index);
+        let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+            panic!("compilation unit should have a package root");
+        };
+        let class_tree = package
+            .stats
+            .iter()
+            .copied()
+            .find(|tree| matches!(named.parsed.ast.get(*tree).kind, TreeKind::TypeDef(_)))
+            .expect("case class declaration");
+        let class = named.index.symbol_at(named.source, class_tree).unwrap();
+        let owner = named.store.symbols.get(class).owner.unwrap();
+        let companion = named.store.symbols.get(class).links.companion.unwrap();
+        let module_class = named
+            .store
+            .scopes
+            .get(named.index.scope_of(owner).unwrap())
+            .lookup(TypeName::new(named.store.names.intern("Box$")).as_name())
+            .unwrap();
+        assert_eq!(
+            named.store.symbols.get(companion).links.companion,
+            Some(class)
+        );
+        assert_eq!(named.store.symbols.get(module_class).links.companion, None);
+        assert!(
+            named
+                .store
+                .symbols
+                .get(class)
+                .flags
+                .contains(SymbolFlags::CASE)
+        );
+        assert_eq!(
+            named.store.symbols.get(class).origin,
+            SymbolOrigin::Source(named.source)
+        );
+        let module_scope = named.index.scope_of(module_class).unwrap();
+        let unapply_name = TermName::new(named.store.names.intern("unapply"));
+        let unapply = named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
+            .expect("declaration order must not affect generated unapply");
+        assert_eq!(named.store.symbols.get(unapply).kind, SymbolKind::Method);
+        assert_eq!(
+            named.store.symbols.get(unapply).name.namespace(),
+            Namespace::Term
+        );
+        assert_eq!(named.store.symbols.get(unapply).owner, Some(module_class));
+        assert!(
+            named
+                .store
+                .symbols
+                .get(unapply)
+                .flags
+                .contains(SymbolFlags::SYNTHETIC)
+        );
+        assert_eq!(
+            named.store.symbols.get(unapply).visibility,
+            named.store.symbols.get(class).visibility
+        );
+        assert_eq!(
+            named.store.symbols.get(unapply).origin,
+            SymbolOrigin::Source(named.source)
+        );
+        assert_eq!(
+            named.index.definition_of(unapply),
+            Some(SourceDefinition::Derived {
+                source: named.source,
+                tree: class_tree,
+            })
+        );
+        assert_eq!(
+            named.index.generated_case_class_method_identity(unapply),
+            Some(GeneratedCaseClassMethod {
+                class,
+                role: GeneratedCaseClassMethodRole::Unapply,
+            })
+        );
+        assert_eq!(named.index.symbol_at(named.source, class_tree), Some(class));
+        let apply = named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply)
+            .expect("existing generated apply remains registered");
+        assert_ne!(apply, unapply);
+        assert_eq!(
+            named
+                .index
+                .derived_symbol_at(module_class, named.source, class_tree),
+            Some(apply),
+            "the existing apply owner/source/tree lookup remains unchanged"
+        );
+        let unapply_scope = named.index.scope_of(unapply).unwrap();
+        assert_eq!(named.store.scopes.get(unapply_scope).owner, Some(unapply));
+        let context = named.index.declaration_context_of(unapply).unwrap();
+        assert_eq!(named.index.source_context(context).owner, unapply);
+        assert_eq!(
+            named.index.source_context(context).lexical_scope,
+            unapply_scope
+        );
+        assert_eq!(
+            named
+                .store
+                .scopes
+                .get(module_scope)
+                .lookup_all(unapply_name.as_name()),
+            [unapply]
+        );
+    }
+}
+
+#[test]
+fn ordinary_class_companion_does_not_receive_generated_unapply() {
+    use dotty_core::{GeneratedCaseClassMethodRole, TermName, TypeName};
+
+    let mut named = named_source(
+        "class Box(value: Int)\nobject Box { def marker: Int = 1 }",
+        1849,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("compilation unit should have a package root");
+    };
+    let class_tree = package.stats[0];
+    let class = named.index.symbol_at(named.source, class_tree).unwrap();
+    let owner = named.store.symbols.get(class).owner.unwrap();
+    let package_scope = named.index.scope_of(owner).unwrap();
+    let module_class = named
+        .store
+        .scopes
+        .get(package_scope)
+        .lookup(TypeName::new(named.store.names.intern("Box$")).as_name())
+        .unwrap();
+    let module_scope = named.index.scope_of(module_class).unwrap();
+    assert_eq!(
+        named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply),
+        None
+    );
+    assert!(
+        named
+            .store
+            .scopes
+            .get(module_scope)
+            .lookup_all(TermName::new(named.store.names.intern("unapply")).as_name())
+            .is_empty()
+    );
 }
 
 #[test]
@@ -6484,9 +6809,20 @@ fn generated_case_class_method_roles_are_keyed_by_canonical_class_across_package
                 role: GeneratedCaseClassMethodRole::Apply,
             })
         );
+        let unapply = index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
+            .expect("each package has its own generated unapply");
+        assert_eq!(store.symbols.get(unapply).owner, Some(owner));
         assert_eq!(
-            index.generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply),
-            None
+            index.generated_case_class_method_identity(unapply),
+            Some(dotty_core::GeneratedCaseClassMethod {
+                class,
+                role: GeneratedCaseClassMethodRole::Unapply,
+            })
+        );
+        assert_eq!(
+            index.generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply),
+            Some(apply)
         );
     }
 }
@@ -6638,6 +6974,8 @@ fn top_level_case_class_apply_comparison_defers_unresolved_aliases_and_shadowed_
 
 #[test]
 fn unsupported_top_level_case_class_apply_shapes_keep_the_class_and_defer_apply() {
+    use dotty_core::GeneratedCaseClassMethodRole;
+
     let sources = [
         "case class Node(value: Int = 1)",
         "case class Node(value: Int)(tag: Int)",
@@ -6678,6 +7016,13 @@ fn unsupported_top_level_case_class_apply_shapes_keep_the_class_and_defer_apply(
                 .contains(SymbolFlags::CASE_CLASS_APPLY_DEFERRED),
             "{source_text}"
         );
+        assert_eq!(
+            named
+                .index
+                .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply),
+            None,
+            "unsupported constructor shapes do not publish unapply: {source_text}"
+        );
         assert_eq!(named.store.symbols.get(class).links.companion, Some(object));
         assert_eq!(named.store.symbols.get(object).links.companion, Some(class));
         assert!(
@@ -6686,6 +7031,15 @@ fn unsupported_top_level_case_class_apply_shapes_keep_the_class_and_defer_apply(
                 .scopes
                 .get(companion_scope)
                 .lookup_all(TermName::new(named.store.names.intern("apply")).as_name())
+                .is_empty(),
+            "{source_text}"
+        );
+        assert!(
+            named
+                .store
+                .scopes
+                .get(companion_scope)
+                .lookup_all(TermName::new(named.store.names.intern("unapply")).as_name())
                 .is_empty(),
             "{source_text}"
         );
@@ -6763,6 +7117,8 @@ fn top_level_case_class_without_a_constructor_clause_fails_closed() {
 
 #[test]
 fn by_name_top_level_case_class_keeps_its_class_but_defers_generated_apply() {
+    use dotty_core::GeneratedCaseClassMethodRole;
+
     let source_text = "case class Deferred(value: => Int)";
     let source = SourceId::from_index(1836);
     let mut store = SemanticStore::new();
@@ -6806,6 +7162,10 @@ fn by_name_top_level_case_class_keeps_its_class_but_defers_generated_apply() {
     let module_class_name = *TypeName::new(store.names.intern(&module_class_text)).as_name();
     let module_class = store.scopes.get(scope).lookup(&module_class_name).unwrap();
     let companion_scope = index.scope_of(module_class).unwrap();
+    assert_eq!(
+        index.generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply),
+        None
+    );
 
     assert!(
         store
@@ -6821,6 +7181,13 @@ fn by_name_top_level_case_class_keeps_its_class_but_defers_generated_apply() {
             .scopes
             .get(companion_scope)
             .lookup_all(TermName::new(store.names.intern("apply")).as_name())
+            .is_empty()
+    );
+    assert!(
+        store
+            .scopes
+            .get(companion_scope)
+            .lookup_all(TermName::new(store.names.intern("unapply")).as_name())
             .is_empty()
     );
 }

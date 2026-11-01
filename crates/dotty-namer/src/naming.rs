@@ -1954,6 +1954,7 @@ impl Namer<'_> {
                 ));
             }
         };
+        let case_class_shape_supported = synthesize_apply;
         let explicit_apply_comparison = if top_level && synthesize_apply {
             self.explicit_companion_apply_collides(
                 companion_module_class,
@@ -1980,6 +1981,27 @@ impl Namer<'_> {
                 &constructor.type_params,
                 value_parameters,
             )?;
+        }
+        let synthesize_unapply = top_level
+            && case_class_shape_supported
+            && constructor.type_params.is_empty()
+            && value_parameters.len() == 1;
+        if synthesize_unapply {
+            let class_name = self.store.symbols.get(class_symbol).name;
+            match self.explicit_companion_unapply_collides(companion_module_class, class_name) {
+                Some(true) => {}
+                Some(false) => self.enter_case_class_unapply(
+                    tree,
+                    class_symbol,
+                    companion_module_class,
+                    declaration_context,
+                )?,
+                None => {
+                    return Err(unsupported(
+                        "explicit companion unapply signature cannot be compared without type completion",
+                    ));
+                }
+            }
         }
         // Keep canonical companion identities for valid but unsupported shapes while
         // omitting a generated apply whose parameter metadata is incomplete. A source
@@ -2084,6 +2106,82 @@ impl Namer<'_> {
         }
     }
 
+    /// Returns whether an explicit source companion has the exact one-argument
+    /// `unapply(Class)` shape that replaces the generated extractor. Other
+    /// direct one-argument types remain overloads; uncertain syntax is deferred
+    /// to type completion instead of publishing an ambiguous duplicate.
+    fn explicit_companion_unapply_collides(
+        &self,
+        companion_module_class: SymbolId,
+        class_name: dotty_core::Name,
+    ) -> Option<bool> {
+        let Some(SourceDefinition::Derived { source, tree }) =
+            self.index.definition_of(companion_module_class)
+        else {
+            return Some(false);
+        };
+        if source != self.source {
+            return Some(false);
+        }
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) = &self.arena.get(tree).kind
+        else {
+            return Some(false);
+        };
+        let TreeKind::Template(template) = &self.arena.get(module.template).kind else {
+            return Some(false);
+        };
+        let class_name = self.store.names.resolve(class_name.text());
+        let has_type_or_import_shadow =
+            template
+                .body
+                .iter()
+                .any(|member| match &self.arena.get(*member).kind {
+                    TreeKind::Import(_) => true,
+                    TreeKind::TypeDef(definition) => {
+                        self.store.names.resolve(definition.name.as_name().text()) == class_name
+                    }
+                    _ => false,
+                });
+        let mut unsupported_comparison = false;
+        for member in &template.body {
+            let TreeKind::DefDef(method) = &self.arena.get(*member).kind else {
+                continue;
+            };
+            if self.store.names.resolve(method.name.as_name().text()) != "unapply"
+                || method.value_param_clauses.is_empty()
+                || method.value_param_clauses[0].len() != 1
+            {
+                continue;
+            }
+            if !method.type_params.is_empty() || has_type_or_import_shadow {
+                unsupported_comparison = true;
+                continue;
+            }
+            let parameter = method.value_param_clauses[0][0];
+            match &self.arena.get(parameter).kind {
+                TreeKind::ValDef(parameter) => match &self.arena.get(parameter.tpt).kind {
+                    TreeKind::Ident(type_name)
+                        if self.store.names.resolve(type_name.name.text()) == class_name =>
+                    {
+                        return if method.value_param_clauses.len() == 1 {
+                            Some(true)
+                        } else {
+                            None
+                        };
+                    }
+                    TreeKind::Ident(_) => {}
+                    _ => unsupported_comparison = true,
+                },
+                _ => unsupported_comparison = true,
+            }
+        }
+        if unsupported_comparison {
+            None
+        } else {
+            Some(false)
+        }
+    }
+
     fn enter_case_class_apply(
         &mut self,
         class_tree: TreeId<Untyped>,
@@ -2168,6 +2266,52 @@ impl Namer<'_> {
             self.index
                 .record_declaration_context(symbol, apply_context)?;
         }
+        Ok(())
+    }
+
+    fn enter_case_class_unapply(
+        &mut self,
+        class_tree: TreeId<Untyped>,
+        class_symbol: SymbolId,
+        companion_module_class: SymbolId,
+        declaration_context: SourceContextId,
+    ) -> Result<(), NamerError> {
+        let companion_scope =
+            self.index
+                .scope_of(companion_module_class)
+                .ok_or(NamerError::MalformedAstShape {
+                    tree_index: class_tree.index(),
+                    expected: "case class companion with a declaration scope",
+                })?;
+        let unapply_name = *dotty_core::TermName::new(self.store.names.intern("unapply")).as_name();
+        let unapply = self.allocate_source_symbol(
+            class_tree,
+            unapply_name,
+            companion_module_class,
+            SymbolSpec {
+                kind: SymbolKind::Method,
+                flags: SymbolFlags::SYNTHETIC,
+                visibility: self.store.symbols.get(class_symbol).visibility,
+            },
+        );
+        self.store
+            .scopes
+            .get_mut(companion_scope)
+            .enter(unapply_name, unapply);
+        self.scope_insertions.push((companion_scope, unapply));
+        self.index.record_generated_case_class_method(
+            class_symbol,
+            GeneratedCaseClassMethodRole::Unapply,
+            self.source,
+            class_tree,
+            unapply,
+        )?;
+        let unapply_scope = self.store.scopes.alloc(Scope::new(Some(unapply)));
+        self.index.record_scope(unapply, unapply_scope)?;
+        let unapply_context =
+            self.child_source_context(unapply, unapply_scope, Some(declaration_context));
+        self.index
+            .record_declaration_context(unapply, unapply_context)?;
         Ok(())
     }
 
