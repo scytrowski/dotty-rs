@@ -6,8 +6,8 @@ mod source_binding;
 
 pub use class_state::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
-    DistinctReferenceMethodSignature, PrimaryConstructorInputPlan, ValidatedClassStatePlan,
-    ValidatedSameBatchReferenceField,
+    DistinctReferenceMethodParameter, DistinctReferenceMethodSignature,
+    PrimaryConstructorInputPlan, ValidatedClassStatePlan, ValidatedSameBatchReferenceField,
 };
 
 use dotty_core::ast::{
@@ -1436,7 +1436,18 @@ impl<'a> Validator<'_, 'a> {
                     .filter(|formal| self.is_planned_sibling_class_type(formal.ty, None))
                     .count();
                 if planned_class_parameters != 0
-                    && (planned_class_parameters != 1 || signature.params.len() != 1)
+                    && !((planned_class_parameters == 1 && signature.params.len() == 1)
+                        || (planned_class_parameters == 2
+                            && signature.params.len() == 2
+                            && self.same_planned_sibling_class_type(
+                                signature.params[0].ty,
+                                signature.params[1].ty,
+                            )
+                            && self.is_planned_sibling_class_type(signature.result, None)
+                            && !self.same_planned_sibling_class_type(
+                                signature.params[0].ty,
+                                signature.result,
+                            )))
                 {
                     return Err(PickleError::MalformedType {
                         ty,

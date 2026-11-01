@@ -38,19 +38,42 @@ pub struct ClassFieldPicklePlan {
     pub declared_type: TypeId,
 }
 
-/// Validated signature roots for a one-formal method whose parameter and
-/// result are different public classes in the same source batch. The method
-/// body is intentionally not part of this proof.
+/// One original method-owned formal in a validated same-batch reference
+/// signature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DistinctReferenceMethodParameter {
+    pub(crate) symbol: SymbolId,
+    pub(crate) source_tree: TreeId<Untyped>,
+    pub(crate) ty: TypeId,
+    pub(crate) class: SymbolId,
+    pub(crate) class_tree: TreeId<Untyped>,
+    pub(crate) type_syntax: TreeId<Untyped>,
+}
+
+impl DistinctReferenceMethodParameter {
+    pub fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+    pub fn source_tree(&self) -> TreeId<Untyped> {
+        self.source_tree
+    }
+    pub fn ty(&self) -> TypeId {
+        self.ty
+    }
+    pub fn class(&self) -> SymbolId {
+        self.class
+    }
+}
+
+/// Validated signature roots for a one- or two-formal method whose formals
+/// share one public class type and whose result is a different public class in
+/// the same source batch. The method body is intentionally not part of this
+/// proof.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DistinctReferenceMethodSignature {
     pub(crate) method: SymbolId,
     pub(crate) source_tree: TreeId<Untyped>,
-    pub(crate) parameter: SymbolId,
-    pub(crate) parameter_tree: TreeId<Untyped>,
-    pub(crate) parameter_type: TypeId,
-    pub(crate) parameter_class: SymbolId,
-    pub(crate) parameter_class_tree: TreeId<Untyped>,
-    pub(crate) parameter_type_syntax: TreeId<Untyped>,
+    pub(crate) parameters: Vec<DistinctReferenceMethodParameter>,
     pub(crate) result_type: TypeId,
     pub(crate) result_class: SymbolId,
     pub(crate) result_class_tree: TreeId<Untyped>,
@@ -64,16 +87,19 @@ impl DistinctReferenceMethodSignature {
         self.method
     }
     pub fn parameter(&self) -> SymbolId {
-        self.parameter
+        self.parameters[0].symbol
     }
     pub fn parameter_class(&self) -> SymbolId {
-        self.parameter_class
+        self.parameters[0].class
     }
     pub fn result_class(&self) -> SymbolId {
         self.result_class
     }
     pub fn parameter_type(&self) -> TypeId {
-        self.parameter_type
+        self.parameters[0].ty
+    }
+    pub fn parameters(&self) -> &[DistinctReferenceMethodParameter] {
+        &self.parameters
     }
     pub fn result_type(&self) -> TypeId {
         self.result_type
@@ -2258,7 +2284,7 @@ impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
                 })
             || !definition.type_params.is_empty()
             || definition.value_param_clauses.len() != 1
-            || definition.value_param_clauses[0].len() != 1
+            || !(1..=2).contains(&definition.value_param_clauses[0].len())
             || definition.source_param_clause_order.is_some()
             || definition.metadata.visibility.is_some()
             || !definition.metadata.modifiers.is_empty()
@@ -2269,27 +2295,6 @@ impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
                 symbol: Some(method),
             });
         }
-        let parameter_tree = definition.value_param_clauses[0][0];
-        let parameter_node =
-            p.source_ast
-                .try_get(parameter_tree)
-                .ok_or(PickleError::InvalidSourceTree {
-                    tree: parameter_tree,
-                })?;
-        let TreeKind::ValDef(parameter_definition) = &parameter_node.kind else {
-            return Err(PickleError::SourceShape {
-                tree: parameter_tree,
-                expected: SourceRole::Parameter,
-            });
-        };
-        let parameter = p
-            .source_index
-            .symbol_at(p.source.id, parameter_tree)
-            .ok_or(PickleError::SourceDefinition { symbol: method })?;
-        if !p.store.symbols.contains(parameter) {
-            return Err(PickleError::InvalidSymbol { symbol: parameter });
-        }
-        let parameter_record = p.store.symbols.get(parameter);
         let signature_type = match method_record.info {
             SymbolInfo::Complete(ty) => ty,
             info => {
@@ -2310,73 +2315,164 @@ impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
                 role: TypeRole::Parameter,
             });
         };
-        if signature.kind != MethodKind::Plain
-            || signature.params.len() != 1
-            || signature.params[0].erased
-            || signature.params[0].varargs
-            || signature.params[0].name.as_name() != parameter_definition.name.as_name()
-            || parameter_record.kind != SymbolKind::Parameter
-            || parameter_record.owner != Some(method)
-            || parameter_record.origin != SymbolOrigin::Source(p.source.id)
-            || parameter_record.name != *parameter_definition.name.as_name()
-            || parameter_record.visibility != Visibility::Public
-            || !parameter_record.flags.is_empty()
-            || !parameter_record.annotations.is_empty()
-            || p.source_index.definition_of(parameter)
-                != Some(SourceDefinition::Canonical {
-                    source: p.source.id,
-                    tree: parameter_tree,
-                })
-        {
+        let parameter_trees = &definition.value_param_clauses[0];
+        if signature.kind != MethodKind::Plain || signature.params.len() != parameter_trees.len() {
             return Err(PickleError::MalformedType {
                 ty: signature_type,
                 role: TypeRole::Parameter,
             });
         }
-        if parameter_definition.rhs.is_some()
-            || parameter_definition.metadata.visibility.is_some()
-            || !(parameter_definition.metadata.modifiers.is_empty()
-                || parameter_definition.metadata.modifiers.as_slice() == [Modifier::Param])
-            || !parameter_definition.metadata.annotations.is_empty()
-        {
-            return Err(PickleError::Unsupported {
-                feature: UnsupportedFeature::ParameterClauses,
-                symbol: Some(parameter),
+        let method_scope = p
+            .source_index
+            .scope_of(method)
+            .ok_or(PickleError::SourceDefinition { symbol: method })?;
+        if !p.store.scopes.contains(method_scope) {
+            return Err(PickleError::InvalidScope {
+                scope: method_scope,
             });
         }
-        let parameter_type = signature.params[0].ty;
-        let result_type = signature.result;
-        let parameter_signature = match parameter_record.info {
-            SymbolInfo::Complete(ty) => ty,
-            info => {
-                return Err(PickleError::IncompleteSymbol {
-                    symbol: parameter,
-                    info,
+        if p.store.scopes.get(method_scope).owner != Some(method) {
+            return Err(PickleError::ScopeMembers { owner: method });
+        }
+        let mut parameters = Vec::with_capacity(parameter_trees.len());
+        let mut seen_parameters = HashSet::new();
+        for (&parameter_tree, formal) in parameter_trees.iter().zip(&signature.params) {
+            let parameter_node =
+                p.source_ast
+                    .try_get(parameter_tree)
+                    .ok_or(PickleError::InvalidSourceTree {
+                        tree: parameter_tree,
+                    })?;
+            let TreeKind::ValDef(parameter_definition) = &parameter_node.kind else {
+                return Err(PickleError::SourceShape {
+                    tree: parameter_tree,
+                    expected: SourceRole::Parameter,
+                });
+            };
+            let parameter = p
+                .source_index
+                .symbol_at(p.source.id, parameter_tree)
+                .ok_or(PickleError::SourceDefinition { symbol: method })?;
+            if !seen_parameters.insert(parameter) {
+                return Err(PickleError::DuplicateDeclaration { symbol: parameter });
+            }
+            if !p.store.symbols.contains(parameter) {
+                return Err(PickleError::InvalidSymbol { symbol: parameter });
+            }
+            let parameter_record = p.store.symbols.get(parameter);
+            if formal.erased
+                || formal.varargs
+                || formal.name.as_name() != parameter_definition.name.as_name()
+                || parameter_record.kind != SymbolKind::Parameter
+                || parameter_record.owner != Some(method)
+                || parameter_record.origin != SymbolOrigin::Source(p.source.id)
+                || parameter_record.name != *parameter_definition.name.as_name()
+                || parameter_record.visibility != Visibility::Public
+                || !parameter_record.flags.is_empty()
+                || !parameter_record.annotations.is_empty()
+                || p.source_index.definition_of(parameter)
+                    != Some(SourceDefinition::Canonical {
+                        source: p.source.id,
+                        tree: parameter_tree,
+                    })
+                || p.store
+                    .scopes
+                    .get(method_scope)
+                    .lookup_all(parameter_definition.name.as_name())
+                    != [parameter]
+            {
+                return Err(PickleError::MalformedType {
+                    ty: signature_type,
+                    role: TypeRole::Parameter,
                 });
             }
-        };
-        if parameter_signature != parameter_type {
+            if parameter_definition.rhs.is_some()
+                || parameter_definition.metadata.visibility.is_some()
+                || !(parameter_definition.metadata.modifiers.is_empty()
+                    || parameter_definition.metadata.modifiers.as_slice() == [Modifier::Param])
+                || !parameter_definition.metadata.annotations.is_empty()
+            {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::ParameterClauses,
+                    symbol: Some(parameter),
+                });
+            }
+            let parameter_signature = match parameter_record.info {
+                SymbolInfo::Complete(ty) => ty,
+                info => {
+                    return Err(PickleError::IncompleteSymbol {
+                        symbol: parameter,
+                        info,
+                    });
+                }
+            };
+            if parameter_signature != formal.ty {
+                return Err(PickleError::MalformedType {
+                    ty: signature_type,
+                    role: TypeRole::Parameter,
+                });
+            }
+            let Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(parameter_class),
+                ..
+            }) = p.store.types.try_get(formal.ty)
+            else {
+                return Err(PickleError::MalformedType {
+                    ty: formal.ty,
+                    role: TypeRole::Parameter,
+                });
+            };
+            let TreeKind::Ident(parameter_type_syntax) = &p
+                .source_ast
+                .try_get(parameter_definition.tpt)
+                .ok_or(PickleError::InvalidSourceTree {
+                    tree: parameter_definition.tpt,
+                })?
+                .kind
+            else {
+                return Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::ParameterClauses,
+                    symbol: Some(parameter),
+                });
+            };
+            if p.store.symbols.get(*parameter_class).name != parameter_type_syntax.name {
+                return Err(PickleError::MalformedType {
+                    ty: formal.ty,
+                    role: TypeRole::Parameter,
+                });
+            }
+            parameters.push((
+                parameter,
+                parameter_tree,
+                formal.ty,
+                *parameter_class,
+                parameter_definition.tpt,
+            ));
+        }
+        if parameters
+            .iter()
+            .any(|parameter| parameter.3 != parameters[0].3)
+        {
             return Err(PickleError::MalformedType {
                 ty: signature_type,
                 role: TypeRole::Parameter,
             });
         }
-        let class_target = |ty: TypeId| match p.store.types.try_get(ty) {
+        let parameter_class = parameters[0].3;
+        let result_type = signature.result;
+        let result_class = match p.store.types.try_get(result_type) {
             Some(Type::TypeRef {
                 target: TypeRefTarget::Symbol(class),
                 ..
-            }) => Some(*class),
-            _ => None,
+            }) => *class,
+            _ => {
+                return Err(PickleError::MalformedType {
+                    ty: result_type,
+                    role: TypeRole::MethodResult,
+                });
+            }
         };
-        let parameter_class = class_target(parameter_type).ok_or(PickleError::MalformedType {
-            ty: parameter_type,
-            role: TypeRole::Parameter,
-        })?;
-        let result_class = class_target(result_type).ok_or(PickleError::MalformedType {
-            ty: result_type,
-            role: TypeRole::MethodResult,
-        })?;
-        if parameter_class == result_class {
+        if result_class == parameter_class {
             return Err(PickleError::MalformedType {
                 ty: result_type,
                 role: TypeRole::MethodResult,
@@ -2412,10 +2508,11 @@ impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
                 return Err(PickleError::SourceDefinition { symbol: class });
             }
         }
-        for (ty, class) in [
-            (parameter_type, parameter_class),
-            (result_type, result_class),
-        ] {
+        for (ty, class) in parameters
+            .iter()
+            .map(|parameter| (parameter.2, parameter.3))
+            .chain(std::iter::once((result_type, result_class)))
+        {
             let Some(Type::TypeRef {
                 prefix,
                 target: TypeRefTarget::Symbol(target),
@@ -2471,19 +2568,6 @@ impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
                 });
             }
         }
-        let TreeKind::Ident(parameter_syntax) = &p
-            .source_ast
-            .try_get(parameter_definition.tpt)
-            .ok_or(PickleError::InvalidSourceTree {
-                tree: parameter_definition.tpt,
-            })?
-            .kind
-        else {
-            return Err(PickleError::Unsupported {
-                feature: UnsupportedFeature::ParameterClauses,
-                symbol: Some(parameter),
-            });
-        };
         let TreeKind::Ident(result_syntax) = &p
             .source_ast
             .try_get(definition.tpt)
@@ -2497,9 +2581,7 @@ impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
                 symbol: Some(method),
             });
         };
-        if parameter_syntax.name != p.store.symbols.get(parameter_class).name
-            || result_syntax.name != p.store.symbols.get(result_class).name
-        {
+        if result_syntax.name != p.store.symbols.get(result_class).name {
             return Err(PickleError::MalformedType {
                 ty: result_type,
                 role: TypeRole::MethodResult,
@@ -2539,15 +2621,23 @@ impl<'p, 'a> ValidatedClassStatePlan<'p, 'a> {
                 role: TypeRole::Body,
             });
         }
+        let parameters = parameters
+            .into_iter()
+            .map(
+                |(symbol, source_tree, ty, class, type_syntax)| DistinctReferenceMethodParameter {
+                    symbol,
+                    source_tree,
+                    ty,
+                    class,
+                    class_tree: parameter_class_tree,
+                    type_syntax,
+                },
+            )
+            .collect();
         Ok(DistinctReferenceMethodSignature {
             method,
             source_tree,
-            parameter,
-            parameter_tree,
-            parameter_type,
-            parameter_class,
-            parameter_class_tree,
-            parameter_type_syntax: parameter_definition.tpt,
+            parameters,
             result_type,
             result_class,
             result_class_tree,

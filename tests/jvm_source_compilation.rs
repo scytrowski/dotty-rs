@@ -25541,6 +25541,11 @@ fn cross_class_private_method_call_reports_its_first_backend_failure() {
 #[test]
 fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proof_error() {
     use dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs;
+    use dotty_tasty::{
+        Reader as TastyReader,
+        ast::{IDENTTPT_TAG, PARAM_TAG},
+        term::RawTree,
+    };
 
     const SOURCE: &str =
         include_str!("fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala");
@@ -25623,6 +25628,8 @@ fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proo
             })
             .collect();
         let method = index.symbol_at(source_id, method_tree).unwrap();
+        let counter = classes[0];
+        let pair = classes[1];
         let members = [dotty_tasty_pickler::ClassMemberPicklePlan::Method {
             symbol: method,
             source_tree: method_tree,
@@ -25654,7 +25661,104 @@ fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proo
         };
         pickler_error = Some(match state.validate() {
             Ok(validated) => match validated.distinct_reference_method_signature(method) {
-                Ok(_) => "Ok(signature accepted)".to_owned(),
+                Ok(signature) => {
+                    let TreeKind::DefDef(method_definition) = &ast.get(method_tree).kind else {
+                        panic!("wrap source tree is a method")
+                    };
+                    let [first_tree, second_tree] =
+                        method_definition.value_param_clauses[0].as_slice()
+                    else {
+                        panic!("wrap has exactly two original source formals")
+                    };
+                    let first = index.symbol_at(source_id, *first_tree).unwrap();
+                    let second = index.symbol_at(source_id, *second_tree).unwrap();
+                    assert_ne!(first, second);
+                    assert_eq!(
+                        signature
+                            .parameters()
+                            .iter()
+                            .map(|formal| formal.symbol())
+                            .collect::<Vec<_>>(),
+                        [first, second]
+                    );
+                    assert!(signature.parameters().iter().all(|formal| {
+                        formal.class() == counter
+                            && typer.store().symbols.get(formal.symbol()).owner == Some(method)
+                            && formal.source_tree()
+                                == if formal.symbol() == first {
+                                    *first_tree
+                                } else {
+                                    *second_tree
+                                }
+                    }));
+                    assert_eq!(signature.parameter_class(), counter);
+                    assert_eq!(signature.result_class(), pair);
+                    assert_eq!(signature.method(), method);
+                    let projected = validated
+                        .project_distinct_reference_method_signature(method)
+                        .unwrap();
+                    assert_eq!(projected.parameter_addresses.len(), 2);
+                    assert_ne!(
+                        projected.parameter_addresses[0],
+                        projected.parameter_addresses[1]
+                    );
+                    let parameters = projected
+                        .parameter_addresses
+                        .iter()
+                        .map(|address| {
+                            let RawTree::LengthNode(node) = RawTree::decode(&mut TastyReader::new(
+                                &projected.fragment.ast.bytes()[*address as usize..],
+                            ))
+                            .unwrap() else {
+                                panic!("each method formal projection is a PARAM declaration")
+                            };
+                            assert_eq!(node.tag, PARAM_TAG);
+                            let parameter = node.decode_parameter().unwrap();
+                            let body = parameter.decode_body().unwrap();
+                            (
+                                projected.fragment.names.render(parameter.name()).unwrap(),
+                                body.type_tree
+                                    .name_refs()
+                                    .into_iter()
+                                    .map(|name| projected.fragment.names.render(name).unwrap())
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        parameters,
+                        [
+                            (
+                                "first".to_owned(),
+                                vec!["Counter".to_owned(), "example".to_owned()]
+                            ),
+                            (
+                                "second".to_owned(),
+                                vec!["Counter".to_owned(), "example".to_owned()]
+                            ),
+                        ]
+                    );
+                    let RawTree::NatAst { tag, .. } = RawTree::decode(&mut TastyReader::new(
+                        &projected.fragment.ast.bytes()[projected.result_address as usize..],
+                    ))
+                    .unwrap() else {
+                        panic!("method result projection is IDENTtpt")
+                    };
+                    assert_eq!(tag, IDENTTPT_TAG);
+                    let result_tree = RawTree::decode(&mut TastyReader::new(
+                        &projected.fragment.ast.bytes()[projected.result_address as usize..],
+                    ))
+                    .unwrap();
+                    assert_eq!(
+                        result_tree
+                            .name_refs()
+                            .into_iter()
+                            .map(|name| projected.fragment.names.render(name).unwrap())
+                            .collect::<Vec<_>>(),
+                        ["Pair", "example"]
+                    );
+                    "Ok(two ordered method PARAM roots and Pair result)".to_owned()
+                }
                 Err(error) => format!("Err({error:?})"),
             },
             Err(error) => format!("Err(class-state {error:?})"),
@@ -26216,11 +26320,10 @@ fn dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proo
     );
     assert_eq!(
         pickler_error,
-        "Err(Unsupported { feature: ClassMembers, symbol: Some(SymbolId(60)) })"
+        "Ok(two ordered method PARAM roots and Pair result)"
     );
     assert!(paired_error.contains("phase: \"JVM/TASTy cross-contract validation\""));
-    assert!(paired_error.contains("MalformedType"));
-    assert!(paired_error.contains("role: Parameter"));
+    assert!(paired_error.contains("BodyExpression"));
     assert!(
         !paired_callback_ran,
         "unsupported TASTy signature cannot publish a batch"

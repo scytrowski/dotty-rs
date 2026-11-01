@@ -58,7 +58,10 @@ pub struct ProjectedFragment {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectedMethodSignature {
     pub fragment: ProjectedFragment,
+    /// Address of the first formal, retained for the one-formal projection API.
     pub parameter_address: u32,
+    /// Addresses of all projected formals in source/signature order.
+    pub parameter_addresses: Vec<u32>,
     pub result_address: u32,
 }
 
@@ -242,6 +245,51 @@ impl<'a> EncodingContext<'a> {
             context.reserve_declaration(method.symbol)?;
             for parameter in method.parameter_clauses.iter().flatten() {
                 context.reserve_declaration(*parameter)?;
+            }
+        }
+        let mut registered_classes = Vec::new();
+        for method in p.methods {
+            let signature_type = context.complete(method.symbol)?;
+            let (parameters, result) = match context.ty(signature_type)? {
+                Type::Method(signature) => (
+                    signature
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.ty)
+                        .collect::<Vec<_>>(),
+                    signature.result,
+                ),
+                _ => (Vec::new(), signature_type),
+            };
+            for ty in parameters.into_iter().chain(std::iter::once(result)) {
+                let Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(class),
+                    ..
+                }) = context.store.types.try_get(ty)
+                else {
+                    continue;
+                };
+                let class = *class;
+                if class == p.class
+                    || !p.typed_bindings.planned_class_symbols().contains(&class)
+                    || registered_classes.contains(&class)
+                {
+                    continue;
+                }
+                let Some(SourceDefinition::Canonical { source, tree }) =
+                    p.source_index.definition_of(class)
+                else {
+                    return Err(PickleError::SourceDefinition { symbol: class });
+                };
+                if source != p.source.id {
+                    return Err(PickleError::SourceDefinition { symbol: class });
+                }
+                context.register_planned_source_class(
+                    class,
+                    tree,
+                    p.typed_bindings.planned_class_symbols(),
+                )?;
+                registered_classes.push(class);
             }
         }
         if include_local_values {
@@ -2065,10 +2113,10 @@ impl<'a> EncodingContext<'a> {
         })
     }
 
-    /// Projects the two independent type roots of a validated distinct-class
-    /// method signature. The fragment roots are a `PARAM` and its result
-    /// `IDENTtpt`; it intentionally omits the `DEFDEF` body and does not form
-    /// a complete TASTy file.
+    /// Projects a validated distinct-class method signature. The fragment
+    /// roots are its `PARAM` declarations in source order and its result
+    /// `IDENTtpt`; it intentionally omits the `DEFDEF` body and does not form a
+    /// complete TASTy file.
     pub fn distinct_reference_method_signature(
         &mut self,
         validated: &ValidatedClassStatePlan<'_, 'a>,
@@ -2088,39 +2136,32 @@ impl<'a> EncodingContext<'a> {
             {
                 return Err(reference(signature.method, ReferenceError::NotRegistered));
             }
-            let mut parameter_name = None;
-            for (class, class_tree, ty, syntax) in [
-                (
-                    signature.parameter_class,
-                    signature.parameter_class_tree,
-                    signature.parameter_type,
-                    signature.parameter_type_syntax,
-                ),
-                (
-                    signature.result_class,
-                    signature.result_class_tree,
-                    signature.result_type,
-                    signature.result_type_syntax,
-                ),
-            ] {
-                context.register_planned_source_class_for_owner(
-                    class,
-                    class_tree,
-                    plan.class,
-                    plan.typed_bindings.planned_class_symbols(),
-                )?;
+            let mut registered_classes = Vec::new();
+            let mut parameter_roots = Vec::with_capacity(signature.parameters.len());
+            for parameter in &signature.parameters {
+                if !registered_classes.contains(&parameter.class) {
+                    context.register_planned_source_class_for_owner(
+                        parameter.class,
+                        parameter.class_tree,
+                        plan.class,
+                        plan.typed_bindings.planned_class_symbols(),
+                    )?;
+                    registered_classes.push(parameter.class);
+                }
                 let TreeKind::Ident(ident) = &plan
                     .source_ast
-                    .try_get(syntax)
-                    .ok_or(PickleError::InvalidSourceTree { tree: syntax })?
+                    .try_get(parameter.type_syntax)
+                    .ok_or(PickleError::InvalidSourceTree {
+                        tree: parameter.type_syntax,
+                    })?
                     .kind
                 else {
                     return Err(PickleError::SourceShape {
-                        tree: syntax,
+                        tree: parameter.type_syntax,
                         expected: crate::SourceRole::TypeSyntax,
                     });
                 };
-                let child = context.lower(ty, 0)?;
+                let child = context.lower(parameter.ty, 0)?;
                 let name = context.utf8(context.text(ident.name.text())?)?;
                 let type_root = context
                     .wire
@@ -2130,46 +2171,80 @@ impl<'a> EncodingContext<'a> {
                         child,
                     })
                     .map_err(construction)?;
-                if class == signature.parameter_class {
-                    let formal = context.symbol(signature.parameter)?.name;
-                    let formal = context.utf8(context.text(formal.text())?)?;
-                    parameter_name = Some((formal, type_root));
-                } else {
-                    let result_root = type_root;
-                    let (formal, parameter_root) =
-                        parameter_name.ok_or(PickleError::ProjectionAborted)?;
-                    let parameter_root = context
-                        .wire
-                        .push(AstNode::Length {
-                            tag: PARAM_TAG,
-                            fields: vec![AstField::Nat(formal), AstField::Tree(parameter_root)],
-                        })
-                        .map_err(construction)?;
-                    let fragment = context.finish(&[parameter_root, result_root])?;
-                    let parameter_address =
-                        fragment
-                            .ast
-                            .address(parameter_root)
-                            .ok_or(PickleError::Reference {
-                                symbol: signature.parameter,
-                                reason: ReferenceError::NotRegistered,
-                            })?;
-                    let result_address =
-                        fragment
-                            .ast
-                            .address(result_root)
-                            .ok_or(PickleError::Reference {
-                                symbol: signature.method,
-                                reason: ReferenceError::NotRegistered,
-                            })?;
-                    return Ok(ProjectedMethodSignature {
-                        fragment,
-                        parameter_address,
-                        result_address,
-                    });
-                }
+                let formal_name = context.symbol(parameter.symbol)?.name;
+                let formal_name = context.utf8(context.text(formal_name.text())?)?;
+                let parameter_root = context
+                    .wire
+                    .push(AstNode::Length {
+                        tag: PARAM_TAG,
+                        fields: vec![AstField::Nat(formal_name), AstField::Tree(type_root)],
+                    })
+                    .map_err(construction)?;
+                parameter_roots.push((parameter.symbol, parameter_root));
             }
-            Err(PickleError::ProjectionAborted)
+            if !registered_classes.contains(&signature.result_class) {
+                context.register_planned_source_class_for_owner(
+                    signature.result_class,
+                    signature.result_class_tree,
+                    plan.class,
+                    plan.typed_bindings.planned_class_symbols(),
+                )?;
+            }
+            let TreeKind::Ident(result_ident) = &plan
+                .source_ast
+                .try_get(signature.result_type_syntax)
+                .ok_or(PickleError::InvalidSourceTree {
+                    tree: signature.result_type_syntax,
+                })?
+                .kind
+            else {
+                return Err(PickleError::SourceShape {
+                    tree: signature.result_type_syntax,
+                    expected: crate::SourceRole::TypeSyntax,
+                });
+            };
+            let result_child = context.lower(signature.result_type, 0)?;
+            let result_name = context.utf8(context.text(result_ident.name.text())?)?;
+            let result_root = context
+                .wire
+                .push(AstNode::NatAst {
+                    tag: IDENTTPT_TAG,
+                    value: AstOperand::Nat(result_name),
+                    child: result_child,
+                })
+                .map_err(construction)?;
+            let mut roots = parameter_roots
+                .iter()
+                .map(|(_, label)| *label)
+                .collect::<Vec<_>>();
+            roots.push(result_root);
+            let fragment = context.finish(&roots)?;
+            let parameter_addresses = parameter_roots
+                .iter()
+                .map(|(symbol, label)| {
+                    fragment.ast.address(*label).ok_or(PickleError::Reference {
+                        symbol: *symbol,
+                        reason: ReferenceError::NotRegistered,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let parameter_address = *parameter_addresses
+                .first()
+                .ok_or(PickleError::ProjectionAborted)?;
+            let result_address =
+                fragment
+                    .ast
+                    .address(result_root)
+                    .ok_or(PickleError::Reference {
+                        symbol: signature.method,
+                        reason: ReferenceError::NotRegistered,
+                    })?;
+            Ok(ProjectedMethodSignature {
+                fragment,
+                parameter_address,
+                parameter_addresses,
+                result_address,
+            })
         })
     }
     /// The oracle's wire Unit return type for a default constructor. It never
