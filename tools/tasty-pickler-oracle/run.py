@@ -4210,9 +4210,12 @@ def consume_factory_result_batch(toolchain: Toolchain, batch_root: Path,
             runtime = execute([toolchain.java, "-Xverify:all", "-ea", "-XX:-UsePerfData",
                                "-classpath", runtime_cp, "LinkageDriver"])
             expected = "NoSuchMethodError" if label == "no-such-method" else "NoClassDefFoundError"
-            if expected not in runtime:
+            runtime_lines = [line for line in runtime.strip().splitlines()
+                             if not line.startswith("Picked up JAVA_TOOL_OPTIONS:")]
+            normalized_runtime = "\n".join(runtime_lines)
+            if expected not in normalized_runtime:
                 raise RuntimeError(f"{label} control did not reach {expected}: {runtime}")
-            reports[label] = runtime.strip()
+            reports[label] = normalized_runtime
 
         renamed_client = client.read_text()
         if reference_local:
