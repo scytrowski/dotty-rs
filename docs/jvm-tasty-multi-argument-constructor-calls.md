@@ -264,3 +264,115 @@ The final `cargo fmt --all -- --check`, frontend boundary guard, workspace
 Clippy with `-D warnings`, rustdoc with `-D warnings`, full workspace tests,
 and `git diff --check` all passed. Neither compatibility gate substitutes
 for the source, bytecode, or artifact proofs above.
+
+## Strict sibling factory runtime identity (#1918)
+
+Issue [#1918](https://github.com/scytrowski/dotty-rs/issues/1918) runs the
+unchanged `PairFactory.scala` batch produced in one Rust source/typed session.
+The runtime test is
+`sibling_constructor_batch_executes_original_rust_artifacts_with_independent_pair_identity`
+in `tests/jvm_tasty_artifacts.rs`; it writes the original six artifacts to one
+class directory and compiles only the separate Java assertion harness. The
+harness class directory precedes the producer directory on the classpath.
+Neither Scala-produced classes nor replacement producer output participates.
+
+The accepted artifacts remain classfile 65.0 and TASTy 28.9.0. SHA-256 values
+and classfile-to-sidecar UUIDs observed before the Java client compile were:
+
+| Artifact | SHA-256 | TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3-c009-68ac-0000-000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008071c3-c009-68ac-0000-000000008193` |
+| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| `example/PairFactory.class` | `e4212a30e382a609ec64aa54e002900448e7323e68839ebb25fa2fccf054e1f4` | `0036155a-30ac-b6c8-0000-000000008198` |
+| `example/PairFactory.tasty` | `ef6cc72805a9f3846d0cf31721cc06e88bb35716da1b0500eb6fad233b254836` | `0036155a-30ac-b6c8-0000-000000008198` |
+
+The test hashes those six files again after `javac`, after the JVM run, and
+after all isolated negative copies. Every hash and original file byte matched
+the pre-client value. `javap -v -p -c` reported major version 65 and the
+expected `(II)Lexample/Pair;` factory descriptor.
+
+The bytecode walker consumes the complete decoded `PairFactory.create` body;
+the reported PCs come from that byte array, not constants in the test. It
+observed `Pair` allocation at PC 0, separate `Counter` allocation sites at PCs
+4 and 12, and the outer `Pair.<init>` call at PC 20. The exact order is
+`new Pair; dup; new Counter; dup; iload_1; invokespecial Counter.<init>(I)V;
+new Counter; dup; iload_2; invokespecial Counter.<init>(I)V; invokespecial
+Pair.<init>(LCounter;LCounter;)V; areturn`. Both inner calls use the same
+Counter constructor Methodref, while their `new` PCs remain distinct. The
+decoded class-aware CFG analyzer accepts this sequence with the emitted
+`max_stack=6` and `max_locals=3`, completing each inner allocation before the
+outer constructor call.
+
+Under `java -Xverify:all -ea`, the original Rust classes returned `7/3`,
+`3/7`, and `-9/42` for the three input pairs. Test-only reflection confirmed
+that each Pair's `left` and `right` fields reference distinct Counter objects,
+and that all six Counters across the three calls are independent. Mutating the
+first Pair's left then right Counters preserved the other field and both other
+Pairs; mutating the second Pair's left Counter preserved the first and third
+Pairs. No production getter was added.
+
+### Negative first-failure matrix
+
+The accepted manifest was kept separate from each mutated copy. Contract
+corruptions of the two factory `iload`s, either inner `new`, either inner
+`invokespecial`, outer-constructor order/descriptor, constructor Methodref
+owner, and stack/local bounds fail at `BatchArtifact { class_index: 2, phase:
+"cross-class invocation" }`; truncated Factory bytes fail earlier at `phase:
+"class-file decode"`. The CFG analyzer independently reports
+`TooManyLiveAllocations { instruction: 4, limit: 2 }` for a third pending
+allocation and `UninitializedReferenceUse { instruction: 1, allocation_site:
+0 }` for an uninitialized value stored to a local.
+
+Separate JDK-only copies classify failures after the Rust contract test:
+
+| Test-only copy | First observed failure | Classification |
+| --- | --- | --- |
+| Remove the second inner constructor instruction | `VerifyError` under `java -Xverify:all` | JVM verifier rejection of an uninitialized argument |
+| Retarget `Pair.leftValue`'s `Counter.get:()I` Methodref owner to `java/lang/Object` | `NoSuchMethodError` | JVM linkage failure; the descriptor and verifier-compatible receiver shape remain valid |
+| Swap the two `iload` operands | The JVM verifies and runs; the harness fails with `AssertionError: expected 7, got 3` | Runtime argument-order assertion, not `VerifyError` or `LinkageError` |
+
+The swapped-load control is deliberately a runtime semantic failure. The
+contract validator also rejects that copy before accepting an artifact
+manifest, but it is not described as a JVM verifier error. These isolated
+copies do not alter the six hashed producer artifacts.
+
+The strict issue test is part of `.github/workflows/ci.yml` through the
+existing `jvm_tasty_artifacts` target. With
+`DOTTY_CLASSFILE_REQUIRE_JDK=1`, the test's exact-JDK-21 guard fails closed if
+`java`, `javac`, or `javap` is missing or reports a different major version.
+The run used Temurin `21.0.13+9-LTS`, classfile major 65, and Rust `1.98.1`.
+The repository's Scala compatibility baseline remains pinned to revision
+`777528f19a58e794c9954a42f433373472ec57f8`; no Scala producer or consumer ran
+in this runtime-only acceptance. The independent Scala TASTy consumer remains
+a separate compatibility gate.
+
+The issue worktree ran the focused acceptance and preserved Pair-identity
+tests, then the required strict JDK gate and repository checks. With
+`JAVA_HOME=/home/vdrake6/.sdkman/candidates/java/21.0.13.0+9-tem`, its `bin`
+on `PATH`, and `TMPDIR`/`CARGO_TARGET_DIR` beneath the issue worktree, the
+commands were:
+
+```sh
+cargo test -p dotty --test jvm_tasty_artifacts sibling_constructor_batch --locked -- --nocapture
+cargo test -p dotty --test jvm_tasty_dual_reference_identity --locked -- --nocapture
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +stable test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  --test jvm_tasty_artifacts \
+  --test jvm_tasty_dual_reference_identity \
+  --test jvm_stateful_class_contract \
+  --locked
+cargo fmt --all -- --check
+python3 tools/check-frontend-boundaries.py
+cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --workspace --all-targets --locked
+git diff --check
+```
+
+All commands passed with Rust `1.98.1`, Temurin JDK `21.0.13+9-LTS`, and
+`DOTTY_CLASSFILE_REQUIRE_JDK=1` for the strict and workspace suites. The
+full workspace test run bounded build and test concurrency to two jobs.
