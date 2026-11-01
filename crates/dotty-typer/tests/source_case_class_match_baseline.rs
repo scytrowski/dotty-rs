@@ -1,6 +1,7 @@
 use dotty_core::ast::TreeKind;
 use dotty_core::{
-    Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolKind, TermName, TypeName,
+    Definitions, GeneratedCaseClassMethodRole, Packages, SemanticStore, SourceId, SourceText,
+    SymbolInfo, SymbolKind, TermName, TypeName,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
@@ -14,10 +15,16 @@ fn two_real_source_roots_have_a_stable_whole_method_baseline_in_fresh_sessions()
     let first = analyze_session();
     let second = analyze_session();
     assert_eq!(first, second, "fresh sessions must normalize identically");
+    let historical = include_str!("fixtures/source-case-class-match-3.9.0/rust-baseline.tsv");
+    assert!(
+        historical.contains("apply=present\tunapply=absent")
+            && historical.contains("ExtractorUnapplyNotFound"),
+        "the #1933 before-state remains a frozen historical receipt"
+    );
     let actual = format!("{}\n", first.join("\n"));
     assert_eq!(
         actual,
-        include_str!("fixtures/source-case-class-match-3.9.0/rust-baseline.tsv")
+        include_str!("fixtures/source-case-class-match-3.9.0/rust-after-unapply.tsv")
             .split_once('\n')
             .expect("baseline header")
             .1
@@ -88,6 +95,9 @@ fn analyze_session() -> Vec<String> {
     roots.sort_by(|left, right| left.0.cmp(&right.0));
     assert_eq!(roots.len(), 2, "only the two requested DefDefs count");
     let class = box_class.expect("Box class symbol");
+    let unapply = index
+        .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
+        .expect("generated Box.unapply identity");
     let package = store.symbols.get(class).owner.expect("Box package owner");
     let package_scope = index.scope_of(package).expect("package scope");
     let companion = store
@@ -111,12 +121,19 @@ fn analyze_session() -> Vec<String> {
             .lookup(TermName::new(store.names.intern("apply")).as_name())
             .is_some()
     );
-    assert!(
+    assert_eq!(
         store
             .scopes
             .get(module_scope)
-            .lookup(TermName::new(store.names.intern("unapply")).as_name())
-            .is_none()
+            .lookup(TermName::new(store.names.intern("unapply")).as_name()),
+        Some(unapply)
+    );
+    assert_eq!(
+        index.generated_case_class_method_identity(unapply),
+        Some(dotty_core::GeneratedCaseClassMethod {
+            class,
+            role: GeneratedCaseClassMethodRole::Unapply,
+        })
     );
     let class_scope = index.scope_of(class).expect("Box class scope");
     assert!(
@@ -151,6 +168,11 @@ fn analyze_session() -> Vec<String> {
                     typed_root.is_none(),
                     "failed roots cannot enter SourceTypedIndex"
                 );
+                assert_eq!(
+                    *typer.store().symbols.info(unapply),
+                    SymbolInfo::Missing,
+                    "discovery must not invent the generated unapply signature"
+                );
                 let retry = typer
                     .type_method_definition(tree)
                     .expect_err("failed root retry must remain rejected");
@@ -164,7 +186,12 @@ fn analyze_session() -> Vec<String> {
                     "failed retry cannot leave a typed root behind"
                 );
                 let (diagnostic_tree, diagnostic_span) = match &error {
-                    TyperError::ExtractorUnapplyNotFound { tree_index, .. } => parsed
+                    TyperError::SymbolSourceKindMismatch {
+                        tree_index,
+                        symbol,
+                        kind: SymbolKind::Method,
+                        ..
+                    } if *symbol == unapply => parsed
                         .ast
                         .iter()
                         .find_map(|(candidate, node)| {
@@ -186,7 +213,7 @@ fn analyze_session() -> Vec<String> {
         };
         let range = position.span().range();
         rows.push(format!(
-            "{name}\tpath=Positive.scala#tree{}\tsource={}\tbytes={}:{}\tbox_class={}\tbox_companion={}\tbox_module_class={}\tmoduleclass_link=absent\tapply=present\tunapply=absent\tselector_1=absent\t{result}",
+            "{name}\tpath=Positive.scala#tree{}\tsource={}\tbytes={}:{}\tbox_class={}\tbox_companion={}\tbox_module_class={}\tmoduleclass_link=absent\tapply=present\tunapply={}\tselector_1=absent\t{result}",
             tree.index(),
             position.source().index(),
             range.start(),
@@ -194,6 +221,7 @@ fn analyze_session() -> Vec<String> {
             class.index(),
             companion.index(),
             module_class.index(),
+            unapply.index(),
         ));
     }
     rows

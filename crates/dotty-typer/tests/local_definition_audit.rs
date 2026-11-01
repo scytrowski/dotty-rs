@@ -20349,6 +20349,9 @@ fn classify_namer_error(error: &NamerError) -> FailureClassification {
         NamerError::DuplicateDerivedSourceTreeSymbol { .. } => {
             "NamerError::DuplicateDerivedSourceTreeSymbol"
         }
+        NamerError::GeneratedCaseClassMethodIndex { .. } => {
+            "NamerError::GeneratedCaseClassMethodIndex"
+        }
         NamerError::ConflictingSourceProvenance { .. } => "NamerError::ConflictingSourceProvenance",
         NamerError::DuplicateExtensionPrefixClauses { .. } => {
             "NamerError::DuplicateExtensionPrefixClauses"

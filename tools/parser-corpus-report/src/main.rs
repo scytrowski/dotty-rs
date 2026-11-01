@@ -2099,6 +2099,9 @@ fn namer_error_kind(error: &dotty_namer::NamerError) -> String {
         dotty_namer::NamerError::DuplicateDerivedSourceTreeSymbol { .. } => {
             "DuplicateDerivedSourceTreeSymbol"
         }
+        dotty_namer::NamerError::GeneratedCaseClassMethodIndex { .. } => {
+            "GeneratedCaseClassMethodIndex"
+        }
         dotty_namer::NamerError::ConflictingSourceProvenance { .. } => {
             "ConflictingSourceProvenance"
         }

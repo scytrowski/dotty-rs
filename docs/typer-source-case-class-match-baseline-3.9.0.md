@@ -65,16 +65,18 @@ the parsed AST and verifies that failed roots do not appear in
 source IDs, whole-method byte spans, first diagnostic source tree and byte
 span, and the stable error.
 
-Namer already enters the `Box` class, generated companion term and module
-class, links the class and term, and creates generated `apply`. The module-class symbol has no companion link itself. Namer does not
-enter generated `unapply` or the case-class `_1` selector. Both exact method
-roots therefore stop at `ExtractorUnapplyNotFound` on their `Box(...)` pattern;
-product-result typing and selector projection have not been attempted. The
-existing product protocol checks resolve `scala.Product` from the session's
-`scala` package and can validate user-defined Product-shaped extractor results,
-but `Definitions` has no canonical built-in Product identity. This baseline
-does not infer a Product ancestry result for `Box` from a path that has not yet
-run.
+The checked-in `rust-baseline.tsv` is the historical #1933 before-state: it
+records the generated companion term and module class, generated `apply`, no
+generated `unapply`, and `ExtractorUnapplyNotFound` for both exact method
+roots. The current post-#1934 result is recorded separately in
+[`namer-source-case-class-unapply-3.9.0.md`](namer-source-case-class-unapply-3.9.0.md)
+and `rust-after-unapply.tsv`. The module-class symbol still has no companion
+link, and the case-class `_1` selector remains absent. Product-result typing
+and selector projection remain unattempted. The existing product protocol
+checks resolve `scala.Product` from the session's `scala` package and can
+validate user-defined Product-shaped extractor results, but `Definitions` has
+no canonical built-in Product identity. Neither receipt infers a Product
+ancestry result for `Box`.
 
 The test retries each failed root after transaction rollback and asserts the
 same error with no typed root left behind. It then repeats the complete run in
