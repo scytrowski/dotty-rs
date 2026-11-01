@@ -1989,19 +1989,13 @@ impl Namer<'_> {
             && (value_parameters.len() == 1
                 || self.is_flagged_product2_source_shape(value_parameters));
         if synthesize_unapply {
+            self.enter_case_class_product_selectors(tree, class_symbol, value_parameters)?;
+        }
+        if synthesize_unapply {
             let class_name = self.store.symbols.get(class_symbol).name;
             match self.explicit_companion_unapply_collides(companion_module_class, class_name) {
                 Some(true) => {}
                 Some(false) => {
-                    if value_parameters.len() == 1
-                        || self.is_flagged_product2_source_shape(value_parameters)
-                    {
-                        self.enter_case_class_product_selectors(
-                            tree,
-                            class_symbol,
-                            value_parameters,
-                        )?;
-                    }
                     self.enter_case_class_unapply(
                         tree,
                         class_symbol,

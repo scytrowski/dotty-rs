@@ -8,8 +8,10 @@ the original `value` constructor `ValDef`; `_2` derives from the original
 keep the selectors distinct from each other, the canonical class-owned Field
 symbols, and the constructor/companion parameter copies. No `_3` is published.
 
-The existing one-field `Box(value: Int)` selector remains. A class member
-already named for a selector prevents a duplicate synthetic entry for that
-name. This increment publishes identities only: it does not complete selector
-signatures, add Product ancestry, or change extractor typing. The compact
-identity summary is in `namer-source-case-class-product2-selectors-3.9.0.tsv`.
+The existing one-field `Box(value: Int)` selector remains. Selector identities
+are published even when an explicit companion `unapply` replaces the generated
+extractor. A class member already named for a selector prevents a duplicate
+synthetic entry for that name. This increment publishes identities only: it
+does not complete selector signatures, add Product ancestry, or change
+extractor typing. The compact identity summary is in
+`namer-source-case-class-product2-selectors-3.9.0.tsv`.

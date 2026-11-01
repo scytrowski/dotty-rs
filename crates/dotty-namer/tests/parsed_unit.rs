@@ -7097,6 +7097,41 @@ fn two_field_companion_collision_policy_preserves_identity_constraints() {
         None,
         "an exact explicit candidate replaces the generated identity"
     );
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(definition) = &named.parsed.ast.get(class_tree).kind else {
+        unreachable!()
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(definition.rhs).kind else {
+        unreachable!()
+    };
+    let TreeKind::DefDef(constructor) = &named.parsed.ast.get(template.constructor).kind else {
+        unreachable!()
+    };
+    let class_scope = named.index.scope_of(class).unwrap();
+    for (parameter_tree, selector_name) in
+        constructor.value_param_clauses[0].iter().zip(["_1", "_2"])
+    {
+        let selector = named
+            .index
+            .derived_symbol_at(class, named.source, *parameter_tree)
+            .expect("an explicit companion unapply must not suppress class selectors");
+        assert_eq!(named.store.symbols.get(selector).owner, Some(class));
+        assert_eq!(
+            named
+                .store
+                .names
+                .resolve(named.store.symbols.get(selector).name.text()),
+            selector_name
+        );
+        assert_eq!(
+            named
+                .store
+                .scopes
+                .get(class_scope)
+                .lookup_all(TermName::new(named.store.names.intern(selector_name)).as_name()),
+            [selector]
+        );
+    }
 
     let source_text = "case class Flagged(value: Int, enabled: Boolean)\ntype Alias = Flagged\nobject Flagged { def unapply(item: Alias): Int = 0 }";
     let (parsed, source, mut store) = parsed_source(source_text, 1962);
