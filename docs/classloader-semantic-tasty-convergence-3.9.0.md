@@ -1,9 +1,9 @@
 # Scala 3.9.0 semantic TASTy convergence baseline
 
 Status: input cohort frozen before results. The original pre-session-contract
-run is retained as historical evidence, not as a parity measurement. This
-audit observes the existing classloader and semantic unpickler and does not
-change production semantics.
+run is retained as historical evidence, not as a parity measurement. The
+measurement below records the #1945 baseline before the bounded #1948 package
+`TermRef` resolver change documented at the end of this file.
 
 ## Reproduction environment and policy
 
@@ -30,7 +30,7 @@ change production semantics.
 - Cohort was selected and hashed before adapter results were collected. The
   exact input paths, hashes, requested shapes, and rationale are in
   [`cohort.tsv`](classloader-semantic-tasty-convergence/cohort.tsv).
-- The comparison TSV schema is frozen in
+- The comparison TSV schema is frozen in the #1945 historical report at
   [`comparison.tsv`](classloader-semantic-tasty-convergence/comparison.tsv).
 
 ## Comparison contract
@@ -118,5 +118,48 @@ tests/tooling/docs scope. The original pre-resolver run remains preserved at
 `61a7f0e069c46ee0b492da9e8b78ed7347f7439ab2f9f93afe7e2771a7c9c448`.
 This boundary is also explicit in the
 [`#1940 session contract`](classloader-semantic-tasty-session-contract.md),
-which leaves external aliases and the `Open.tasty` and Animal/Dog graph
-unsupported by the resolver handoff.
+which leaves external aliases and full semantic completion of the `Open` and
+Animal/Dog graph unsupported by the resolver handoff.
+
+## Package `TermRef` resolver follow-up (#1948)
+
+The frozen `Open.tasty` bytes remain unchanged (SHA-256
+`49286e74a3d3693b08d2a29575f23089f6be5c486231390059f43c19a8929894`). The
+new classloader integration regression unpickles address 15 with the real
+JDK jmods classpath and captures the resolver callback before any error
+rollback. The request is the unique type member `Object` in prefix space. Its
+prefix is a `TermRef` to the same canonical `java.lang` package symbol held by
+the session package registry, and the resolver's prefix-classification
+counter confirms it reaches `prefix_target_bounded`. Before the fix, this
+request produced the exact typed failure
+`UnresolvedMember { address: 15, name: "Object", namespace: Type }`.
+
+The package `TermRef` and existing package `TypeRef` forms now select the same
+package target. Address 15 resolves to the existing `Definitions::object_class`
+identity, with complete `ClassInfo`, owner `java.lang`, and classfile origin
+from the selected JDK resource. The regression also repeats the lookup through
+a package `TypeRef` in the same resolver session and confirms the same symbol
+identity. Missing Object bytes remain a clean unresolved result; malformed
+Object bytes remain a typed resolver error. A failure injected after real
+Object materialization restores the new `java.lang` package, the builtin
+Object's missing info and builtin origin, then the same unpickler session
+retries successfully with stable identity.
+
+Local diagnostics used Eclipse Temurin `21.0.8+9-LTS` (`bin/java` SHA-256
+`90d0a6d25da103678013f193db078b90ed8aeb27b66ebe78e0149616c9c1b811`;
+`java.base.jmod` SHA-256
+`7e05214a446061c5543f3732f653f514d4e05fa6fd2545aa792c205b24362791`). This
+is recorded as local evidence only. The required Rust CI workflow installs
+Eclipse Temurin `21.0.13+9`; the regression reads `JAVA_HOME/jmods`, so that
+workflow supplies the exact audit JDK and classpath version. The historical
+#1945 comparison TSV, frozen cohort, and prior measurements are unchanged.
+The separate #1948 live comparison is checked in as
+[`comparison-1948.tsv`](classloader-semantic-tasty-convergence/comparison-1948.tsv)
+(SHA-256 `6178cc5c32a5bf87cfc7fd0cd392373b97e193a08d6cc4d9f53999973e90d192`).
+It records the post-fix classloader/unpickler run over the same frozen inputs;
+the Open address-15 Object dependency now resolves, while the report still
+marks its type parameters and parameter clauses `UNPICKLER_UNSUPPORTED` and
+Animal/Dog member signatures unresolved on `scala/Predef/String`. Resolving
+this one Object reference does not establish semantic completion or candidate
+qualification for the full `Open` / Animal / Dog cohort; the #1928 gate remains
+separate.

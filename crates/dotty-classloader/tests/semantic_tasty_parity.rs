@@ -737,10 +737,10 @@ fn frozen_cohort_is_complete_and_both_fresh_adapter_runs_are_deterministic() {
         return;
     }
     let expected =
-        include_str!("../../../docs/classloader-semantic-tasty-convergence/comparison.tsv");
+        include_str!("../../../docs/classloader-semantic-tasty-convergence/comparison-1948.tsv");
     assert_eq!(
         first, expected,
-        "checked-in per-field comparison TSV is stale"
+        "checked-in #1948 per-field measurement is stale"
     );
     let mut keys = HashSet::new();
     for row in first.lines().skip(1) {
