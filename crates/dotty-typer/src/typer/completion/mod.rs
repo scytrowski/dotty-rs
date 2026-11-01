@@ -265,6 +265,13 @@ impl SourceTyper<'_> {
             {
                 None
             }
+            (SymbolKind::Method, TreeKind::TypeDef(_))
+                if self
+                    .generated_case_class_for_unapply(symbol, source, tree)
+                    .is_some() =>
+            {
+                None
+            }
             // Namer records both object term and derived module class against
             // the original parser-only `ModuleDef`; keep their semantic
             // dispatch distinct even though their source tree is shared.
@@ -363,6 +370,16 @@ impl SourceTyper<'_> {
                     self.generated_case_class_for_apply(symbol, source, tree)
                 {
                     self.complete_generated_case_class_apply_signature(
+                        symbol,
+                        class,
+                        source,
+                        tree,
+                        info_journal,
+                    )?
+                } else if let Some(class) =
+                    self.generated_case_class_for_unapply(symbol, source, tree)
+                {
+                    self.complete_generated_case_class_unapply_signature(
                         symbol,
                         class,
                         source,
