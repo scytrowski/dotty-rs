@@ -1,0 +1,122 @@
+--------------------------------------------------------------------------------
+tests/fixtures/jvm_tasty_dual_reference_forwarding/scala39/example/PairFactory.tasty
+--------------------------------------------------------------------------------
+Header:
+  version: 28.9.0
+  tooling: Scala 3.9.0-bin-SNAPSHOT-git-777528f
+     UUID: 00f22622-2b43-3cee-0094-e22b5ccacc1d
+
+Names (299 bytes, starting from 60):
+     0: ASTs
+     1: example
+     2: PairFactory
+     3: <init>
+     4: java
+     5: lang
+     6: java[Qualified . lang]
+     7: Object
+     8: java[Qualified . lang][Qualified . Object]
+     9: <init>[Signed Signature(List(),java.lang.Object) @<init>]
+    10: Unit
+    11: scala
+    12: wrap
+    13: first
+    14: Counter
+    15: second
+    16: Pair
+    17: example[Qualified . Pair]
+    18: example[Qualified . Counter]
+    19: <init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]
+    20: SourceFile
+    21: annotation
+    22: scala[Qualified . annotation]
+    23: internal
+    24: scala[Qualified . annotation][Qualified . internal]
+    25: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
+    26: String
+    27: java[Qualified . lang][Qualified . String]
+    28: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
+    29: tests/fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala
+    30: Positions
+    31: Comments
+    32: Attributes
+
+Trees (89 bytes, starting from 361):
+     0: PACKAGE(87)
+     2:   TERMREFpkg 1 [example]
+     4:   TYPEDEF(83) 2 [PairFactory]
+     7:     TEMPLATE(62)
+     9:       APPLY(10)
+    11:         SELECTin(8) 9 [<init>[Signed Signature(List(),java.lang.Object) @<init>]]
+    14:           NEW
+    15:             TYPEREF 7 [Object]
+    17:               TERMREFpkg 6 [java[Qualified . lang]]
+    19:           SHAREDtype 15
+    21:       DEFDEF(7) 3 [<init>]
+    24:         EMPTYCLAUSE
+    25:         TYPEREF 10 [Unit]
+    27:           TERMREFpkg 11 [scala]
+    29:         STABLE
+    30:       DEFDEF(39) 12 [wrap]
+    33:         PARAM(7) 13 [first]
+    36:           IDENTtpt 14 [Counter]
+    38:             TYPEREF 14 [Counter]
+    40:               TERMREFpkg 1 [example]
+    42:         PARAM(5) 15 [second]
+    45:           IDENTtpt 14 [Counter]
+    47:             SHAREDtype 38
+    49:         IDENTtpt 16 [Pair]
+    51:           TYPEREF 16 [Pair]
+    53:             SHAREDtype 40
+    55:         APPLY(14)
+    57:           SELECTin(8) 19 [<init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]]
+    60:             NEW
+    61:               IDENTtpt 16 [Pair]
+    63:                 SHAREDtype 51
+    65:             SHAREDtype 51
+    67:           TERMREFdirect 33
+    69:           TERMREFdirect 42
+    71:     ANNOTATION(16)
+    73:       TYPEREF 20 [SourceFile]
+    75:         TERMREFpkg 24 [scala[Qualified . annotation][Qualified . internal]]
+    77:       APPLY(10)
+    79:         SELECTin(6) 28 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
+    82:           NEW
+    83:             SHAREDtype 73
+    85:           SHAREDtype 73
+    87:         STRINGconst 29 [tests/fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala]
+    89:
+
+Positions (89 bytes, starting from 452):
+  lines: 17
+  line sizes:
+     15, 0, 26, 34, 26, 45, 0, 44, 35, 37, 35, 37, 0, 18, 51, 27, 0
+  positions:
+     0: 0 .. 445
+     4: 347 .. 445
+     7: 368 .. 445
+    15: 353 .. 353
+    21: 368 .. 368
+    25: 368 .. 368
+    30: 368 .. 445
+    33: 377 .. 391
+    36: 384 .. 391
+    42: 393 .. 408
+    45: 401 .. 408
+    49: 411 .. 415
+    55: 422 .. 445
+    61: 426 .. 430
+    67: 431 .. 436
+    69: 438 .. 444
+    77: 347 .. 445
+    83: 347 .. 347
+    87: 347 .. 347
+
+  source paths:
+     0: 29 [tests/fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala]
+
+Attributes (2 bytes, starting from 545):
+  SOURCEFILEattr 29 [tests/fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala]
+
+
+--------------------------------------------------------------------------------

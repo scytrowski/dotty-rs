@@ -1,0 +1,301 @@
+{
+  "schema_version": 1,
+  "purpose": "Scala-produced evidence oracle only; never substituted for Rust-produced artifacts in interoperability checks.",
+  "source": {
+    "path": "PairFactory.scala",
+    "sha256": "48e4ab7b3038eda26f9070a5879a9cd71d4eb51f69277d1eafcff53bda28610e",
+    "required_one_source_unit": true
+  },
+  "independent_consumer": {
+    "path": "Consumer.scala",
+    "sha256": "ee3c2e2a5f519d796868831a8a8d6b40d4dfcef06ebf2ec3e87ad788a44f63e8",
+    "compiled_against": "Scala-produced producer output and Scala 3.9 runtime only",
+    "assertions": [
+      "wrap(a,b) preserves identity and independent mutation",
+      "wrap(b,a) preserves positional order and identity",
+      "wrap(a,a) intentionally aliases both fields"
+    ],
+    "result": "passed under java -Xverify:all -ea"
+  },
+  "oracle": {
+    "scala_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+    "scalac_version": "Scala compiler version 3.9.0-bin-SNAPSHOT-git-777528f",
+    "scalac_jar_sha256": "b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f",
+    "jdk_version": "openjdk 21.0.13-2026-10-20 Temurin",
+    "java_sha256": "9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155",
+    "classfile_major": 65,
+    "release": 21,
+    "tasty_version": "28.9.0",
+    "producer_source_file_count": 1,
+    "producer_artifact_counts": {
+      "class": 3,
+      "tasty": 3
+    },
+    "compile_command": "scalac -release 21 -d <empty producer> PairFactory.scala",
+    "consumer_command": "scalac -release 21 -classpath <producer>:<scala3-library>:<scala-library> -d <empty consumer> Consumer.scala",
+    "tasty_dump": "pinned scalac -color:never -print-tasty <sidecar>",
+    "javap": "javap -v -p -c -classpath <producer> example.PairFactory"
+  },
+  "artifacts": [
+    {
+      "path": "scala39/example/Counter.class",
+      "size_bytes": 647,
+      "sha256": "35afad87cca23efbf1185229d0fbed6b689aea7649ef69a3cf14232779763395",
+      "classfile_major": 65,
+      "tasty_version": null,
+      "uuid": null,
+      "linked_tasty_uuid": "00912014d709c6e800dd1dd5025f2c1b"
+    },
+    {
+      "path": "scala39/example/Counter.tasty",
+      "size_bytes": 595,
+      "sha256": "f3cb320b58199798c7ab1d31f017476059506f52349fb9fef927a593aa3dce7e",
+      "classfile_major": null,
+      "tasty_version": "28.9.0",
+      "uuid": "00912014-d709-c6e8-00dd-1dd5025f2c1b",
+      "linked_tasty_uuid": null
+    },
+    {
+      "path": "scala39/example/Pair.class",
+      "size_bytes": 771,
+      "sha256": "e6db9d87df09fcd961b932ab7bc66b0b73fcdf30bb50ab5895043f1a7e7c614c",
+      "classfile_major": 65,
+      "tasty_version": null,
+      "uuid": null,
+      "linked_tasty_uuid": "00c1e2d56078cbd30004f481c7f6f15b"
+    },
+    {
+      "path": "scala39/example/Pair.tasty",
+      "size_bytes": 695,
+      "sha256": "bd7d14f448a1cd4a64c94b34f8416d41816c1c9a57978750639f1e70404bc617",
+      "classfile_major": null,
+      "tasty_version": "28.9.0",
+      "uuid": "00c1e2d5-6078-cbd3-0004-f481c7f6f15b",
+      "linked_tasty_uuid": null
+    },
+    {
+      "path": "scala39/example/PairFactory.class",
+      "size_bytes": 674,
+      "sha256": "7727e0f390d3dc4109decaffe1a87610c76253b950829292499f1643229dd0b2",
+      "classfile_major": 65,
+      "tasty_version": null,
+      "uuid": null,
+      "linked_tasty_uuid": "00f226222b433cee0094e22b5ccacc1d"
+    },
+    {
+      "path": "scala39/example/PairFactory.tasty",
+      "size_bytes": 547,
+      "sha256": "c7fe6a0e8334e8518b5f467c6253f47c531fc9ccb8831c8e51b29d185747d8e5",
+      "classfile_major": null,
+      "tasty_version": "28.9.0",
+      "uuid": "00f22622-2b43-3cee-0094-e22b5ccacc1d",
+      "linked_tasty_uuid": null
+    }
+  ],
+  "snapshots": {
+    "Counter.javap.txt": {
+      "sha256": "89b11988cf82882e899a3d97328051a0608f045ce19aaec367eb6fd9637c6562"
+    },
+    "Counter.tasty.txt": {
+      "sha256": "42db5a03e6174287721cac47bb873f11f7c52e7f8bc989193644c335e09ae6fb"
+    },
+    "Pair.javap.txt": {
+      "sha256": "a0a840efe8eef1d5b7bf352f874b02837427b1146d8d04171387c08973108df4"
+    },
+    "Pair.tasty.txt": {
+      "sha256": "193e2f0c74df820862c276f1a8a008908ef98894ae55a2a1acb2bf09dc11d0a1"
+    },
+    "PairFactory.javap.txt": {
+      "sha256": "b202dc47c81b40dbe5e3f8f8b76bfb41151c243a52f0f3f89368feffc82e9fdc"
+    },
+    "PairFactory.tasty.txt": {
+      "sha256": "785b791e4ff408077cd059a3f302e840367bf2b27db33de488869ebabc1cc4bb"
+    }
+  },
+  "controls": [
+    {
+      "case": "renamed package/classes/method/formals",
+      "scala_3_9": "valid",
+      "rust_first": "cross-class proof: SemanticIdentity, both factory formals must have canonical Int type"
+    },
+    {
+      "case": "reordered declarations",
+      "scala_3_9": "valid",
+      "rust_first": "same cross-class proof error"
+    },
+    {
+      "case": "intentional wrap(first, first) alias",
+      "scala_3_9": "valid",
+      "rust_first": "same cross-class proof error"
+    },
+    {
+      "case": "wrap(second, first) positional reversal",
+      "scala_3_9": "valid",
+      "rust_first": "same cross-class proof error"
+    },
+    {
+      "case": "reversed method formal order",
+      "scala_3_9": "valid",
+      "rust_first": "same cross-class proof error"
+    },
+    {
+      "case": "third method formal",
+      "scala_3_9": "valid",
+      "rust_first": "cross-class proof: SourceShape, plain one-clause guard"
+    },
+    {
+      "case": "contextual method formal",
+      "scala_3_9": "valid",
+      "rust_first": "complete JVM unit validation: UnsupportedMethodShape ParameterCountMismatch"
+    },
+    {
+      "case": "defaulted method formal",
+      "scala_3_9": "valid",
+      "rust_first": "cross-class proof: SemanticIdentity canonical Int formals"
+    },
+    {
+      "case": "generic method",
+      "scala_3_9": "valid",
+      "rust_first": "member planning: generic methods are unsupported"
+    },
+    {
+      "case": "overloaded wrap",
+      "scala_3_9": "valid",
+      "rust_first": "cross-class proof: SemanticIdentity canonical Int formals"
+    },
+    {
+      "case": "mixed direct reference and new expression",
+      "scala_3_9": "valid",
+      "rust_first": "cross-class proof: SemanticIdentity canonical Int formals; expression shape masked"
+    },
+    {
+      "case": "alternate Pair subclass as outer constructor",
+      "scala_3_9": "valid",
+      "rust_first": "source collection: classes with explicit parents or self types are unsupported"
+    },
+    {
+      "case": "unused erased formal (experimental flag)",
+      "scala_3_9": "valid",
+      "rust_first": "parser recovery diagnostics on erased formal syntax"
+    },
+    {
+      "case": "third Pair constructor argument",
+      "scala_3_9": "invalid",
+      "rust_first": "method body typing: ApplicationArityMismatch expected 2 actual 3"
+    },
+    {
+      "case": "wrong argument type",
+      "scala_3_9": "invalid",
+      "rust_first": "method body typing: ApplicationArgumentTypeMismatch"
+    },
+    {
+      "case": "wrong Pair arity",
+      "scala_3_9": "invalid",
+      "rust_first": "method body typing: ApplicationArityMismatch expected 2 actual 1"
+    },
+    {
+      "case": "duplicate method formal name",
+      "scala_3_9": "invalid",
+      "rust_first": "method body typing: AmbiguousTermReference"
+    },
+    {
+      "case": "foreign same-spelled Counter type",
+      "scala_3_9": "invalid",
+      "rust_first": "source collection rejects top-level non-class sibling before type mismatch"
+    }
+  ],
+  "rust_evidence": {
+    "baseline_main_sha": "fd090895e587852f9feca5599d4ddc55211ce81b",
+    "source_id": "SourceId(19601)",
+    "class_symbols": {
+      "Counter": "SymbolId(40)",
+      "Pair": "SymbolId(41)",
+      "PairFactory": "SymbolId(42)"
+    },
+    "method": {
+      "source_tree": "TreeId(55)",
+      "symbol": "SymbolId(60)",
+      "signature_type": "TypeId(71)",
+      "descriptor": "(Lexample/Counter;Lexample/Counter;)Lexample/Pair;"
+    },
+    "caller_formals": [
+      {
+        "tree": "TreeId(45)",
+        "symbol": "SymbolId(61)",
+        "type": "TypeId(66)",
+        "span": "377..391",
+        "owner": "wrap"
+      },
+      {
+        "tree": "TreeId(47)",
+        "symbol": "SymbolId(62)",
+        "type": "TypeId(68)",
+        "span": "393..408",
+        "owner": "wrap"
+      }
+    ],
+    "pair_constructor": {
+      "symbol": "SymbolId(52)",
+      "class_template_formals": [
+        "SymbolId(50)",
+        "SymbolId(51)"
+      ],
+      "constructor_owned_formals": [
+        "SymbolId(53)",
+        "SymbolId(54)"
+      ]
+    },
+    "outer_constructor_call": {
+      "source_apply": "TreeId(54)",
+      "typed_apply": "TreeId(18)",
+      "source_select": "TreeId(51)",
+      "typed_select": "TreeId(15)",
+      "source_new": "TreeId(50)",
+      "typed_new": "TreeId(14)",
+      "selected_constructor_owner": "Pair"
+    },
+    "arguments": [
+      {
+        "source_tree": "TreeId(52)",
+        "typed_tree": "TreeId(16)",
+        "span": "431..436",
+        "formal": "SymbolId(61)",
+        "typed_type": "TypeId(89)"
+      },
+      {
+        "source_tree": "TreeId(53)",
+        "typed_tree": "TreeId(17)",
+        "span": "438..444",
+        "formal": "SymbolId(62)",
+        "typed_type": "TypeId(90)"
+      }
+    ],
+    "first_results": {
+      "read_only_cross_class_proof": "SemanticIdentity(\"both factory formals must have the canonical Int type\")",
+      "stale_swapped_source_typed_edge": "same SemanticIdentity guard; corrupted edge masked before observation",
+      "standalone_pickler_class_state": "passes in the same active SourceTyper session after completing the default constructor",
+      "pickler_signature_projection": "Unsupported { feature: ClassMembers, symbol: Some(SymbolId(60)) } because exactly two parameters violate the signature projection one-formal shape",
+      "expression_validation_and_writer": "masked: no validated body receipt is produced before the signature guard; no result claimed",
+      "paired_batch": "BatchUnit phase cross-class constructor-call identity proof wrapping the same SemanticIdentity",
+      "jvm_only": "passes; class artifact is byte-identical to the bytes decoded by the live-session observer"
+    },
+    "jvm_only_method": {
+      "stack": 4,
+      "locals": 3,
+      "instructions": [
+        "new example/Pair",
+        "dup",
+        "aload_1",
+        "aload_2",
+        "invokespecial example/Pair.<init>(Lexample/Counter;Lexample/Counter;)V",
+        "areturn"
+      ],
+      "counter_allocations": 0,
+      "counter_constructor_invocations": 0
+    }
+  },
+  "rebuild_scripts": {
+    "baseline": "rebuild-oracle.sh",
+    "scala_controls": "verify-controls.py"
+  }
+}
