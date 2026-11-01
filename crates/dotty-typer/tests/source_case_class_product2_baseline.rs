@@ -19,11 +19,12 @@ fn two_real_product2_source_roots_have_a_stable_whole_method_baseline_in_fresh_s
         "fresh sessions must preserve canonical source/owner relationships"
     );
     let actual = format!("{}\n", first.join("\n"));
-    let expected =
-        include_str!("fixtures/source-case-class-product2-3.9.0/rust-after-unapply-identity.tsv")
-            .split_once('\n')
-            .expect("baseline header")
-            .1;
+    let expected = include_str!(
+        "fixtures/source-case-class-product2-3.9.0/rust-after-product-selector-identities.tsv"
+    )
+    .split_once('\n')
+    .expect("baseline header")
+    .1;
     assert_eq!(actual, expected);
     for row in first {
         eprintln!("{row}");
@@ -129,14 +130,8 @@ fn analyze_session() -> (Vec<String>, Vec<String>) {
         "case-class apply exists in the source companion"
     );
     assert!(unapply.is_some(), "Flagged.unapply identity is present");
-    assert!(
-        selector_1.is_none(),
-        "the current Namer baseline lacks Flagged._1"
-    );
-    assert!(
-        selector_2.is_none(),
-        "the current Namer baseline lacks Flagged._2"
-    );
+    assert!(selector_1.is_some(), "Flagged._1 identity is present");
+    assert!(selector_2.is_some(), "Flagged._2 identity is present");
 
     let class_tree = match index
         .definition_of(class)
@@ -338,7 +333,7 @@ fn analyze_session() -> (Vec<String>, Vec<String>) {
             second_parameter.start(), second_parameter.end(),
         ));
         rows.push(format!(
-            "{name}\tpath=Positive.scala#tree{}\tsource={}\tbytes={}:{}\tmethod_owner=Positive.scala#tree{}(Matcher$)\tflagged_class=Positive.scala#tree{}\tcompanion=Flagged$.linked-to-Flagged\tmodule_class=Flagged$\tapply=present\tunapply=present(identity-only)\tselector_1=absent\tselector_2=absent\tfield_1=tree#{}@bytes{}-{}:value\tfield_2=tree#{}@bytes{}-{}:enabled\t{result}",
+            "{name}\tpath=Positive.scala#tree{}\tsource={}\tbytes={}:{}\tmethod_owner=Positive.scala#tree{}(Matcher$)\tflagged_class=Positive.scala#tree{}\tcompanion=Flagged$.linked-to-Flagged\tmodule_class=Flagged$\tapply=present\tunapply=present(identity-only)\tselector_1=class-owned\tselector_2=class-owned\tfield_1=tree#{}@bytes{}-{}:value\tfield_2=tree#{}@bytes{}-{}:enabled\t{result}",
             tree.index(), position.source().index(), range.start(), range.end(), method_owner_tree.index(), class_tree.index(),
             parameters[0].index(), parsed.ast.get(parameters[0]).position.unwrap().span().range().start(),
             parsed.ast.get(parameters[0]).position.unwrap().span().range().end(),
