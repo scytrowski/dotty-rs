@@ -214,5 +214,7 @@ back class/package entries, Object state, caches, origins, and the new Unit
 binding. Missing resources, malformed TASTy, class-file resources, duplicate
 legacy identities, and multi-declaration units are likewise rejected. The
 supported boundary remains one self-contained class, its root and constructor
-only; additional external semantic dependencies or graph expansion are not
+only; a type declaration already present in the canonical package scope is
+also rejected before entry even when a fresh loader session has empty name
+caches. Additional external semantic dependencies or graph expansion are not
 resolved by this adapter.
