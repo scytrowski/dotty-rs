@@ -2,10 +2,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::reader::Reader as ClassReader;
+use dotty_core::SourceId;
 use dotty_jvm_tasty_contract::{JvmTastyContractError, validate_classfile_tasty_link};
 use dotty_tasty::ast::{
     APPLY_TAG, DEFDEF_TAG, PARAM_TAG, SELECTIN_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG,
@@ -38,10 +40,258 @@ const ORACLE_CONSUMER: &str =
     include_str!("fixtures/jvm_tasty_multi_argument_constructor_calls/Consumer.scala");
 const REQUIRE_SCALA_CONSUMER: &str = "DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSUMER";
 
+#[test]
+fn rust_batch_writer_emits_two_distinct_ordered_nested_constructor_receipts() {
+    let first = rust_tasty_batch(1916);
+    let second = rust_tasty_batch(1917);
+    assert_eq!(first.len(), 3);
+    assert_eq!(second.len(), 3);
+    assert_eq!(first, second);
+    assert_eq!(
+        first
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "example/Counter.tasty",
+            "example/Pair.tasty",
+            "example/PairFactory.tasty"
+        ]
+    );
+    let (_, factory_bytes) = first
+        .iter()
+        .find(|(path, _)| path == "example/PairFactory.tasty")
+        .unwrap();
+    let factory_tasty = tasty(factory_bytes);
+    let (create_address, body) = method_body(&factory_tasty, "create");
+    assert_eq!(
+        body.parameters
+            .iter()
+            .map(|parameter| factory_tasty.names().render(parameter.name()).unwrap())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert_eq!(body.parameters.len(), 2);
+    for (ordinal, parameter) in body.parameters.iter().enumerate() {
+        let parameter_type = parameter.decode_body().unwrap().type_tree;
+        let type_names = parameter_type
+            .name_refs()
+            .into_iter()
+            .map(|name| factory_tasty.names().render(name).unwrap())
+            .collect::<Vec<_>>();
+        if ordinal == 0 {
+            assert_eq!(type_names, ["Int", "scala"]);
+        } else {
+            assert_eq!(type_names, ["Int"]);
+            assert!(
+                parameter_type
+                    .nodes()
+                    .iter()
+                    .any(|node| node.tag == SHAREDTYPE_TAG)
+            );
+        }
+    }
+    assert_eq!(
+        body.return_type
+            .name_refs()
+            .into_iter()
+            .map(|name| factory_tasty.names().render(name).unwrap())
+            .collect::<Vec<_>>(),
+        ["Pair", "example"]
+    );
+    let index = factory_tasty.ast_address_index().unwrap();
+    let first_address = parameter_address(&index, create_address);
+    let second_address = index
+        .iter_nodes_with_tag(PARAM_TAG)
+        .find(|node| {
+            node.offset as u32 != first_address
+                && std::iter::successors(Some(*node), |parent| {
+                    index.parent_of(parent.offset as u32)
+                })
+                .any(|parent| parent.offset as u32 == create_address)
+        })
+        .expect("create owns two separate formal PARAM nodes")
+        .offset as u32;
+    assert_ne!(first_address, second_address);
+    let applies = index
+        .iter_nodes_with_tag(APPLY_TAG)
+        .filter(|node| {
+            std::iter::successors(Some(*node), |parent| index.parent_of(parent.offset as u32))
+                .any(|parent| parent.offset as u32 == create_address)
+        })
+        .map(|node| node.offset as u32)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        applies.len(),
+        3,
+        "outer call and both nested call roots are distinct"
+    );
+    assert_eq!(
+        applies
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+
+    let RawTree::LengthNode(outer_node) = body.rhs.expect("create has a body") else {
+        panic!("outer expression is an APPLY node");
+    };
+    assert_eq!(outer_node.tag, APPLY_TAG);
+    let outer = outer_node.decode_apply().unwrap();
+    assert_eq!(outer.arguments.len(), 2);
+    let RawTree::LengthNode(outer_select_node) = outer.function else {
+        panic!("outer Pair constructor function is SELECTin");
+    };
+    assert_eq!(outer_select_node.tag, SELECTIN_TAG);
+    let outer_select = outer_select_node.decode_select_in().unwrap();
+    assert!(matches!(
+        outer_select.qualifier,
+        RawTree::Ast {
+            tag: dotty_tasty::ast::NEW_TAG,
+            ..
+        }
+    ));
+    assert_eq!(
+        factory_tasty
+            .names()
+            .render_signed_name(outer_select.name)
+            .unwrap()
+            .unwrap(),
+        RenderedSignedName::Signed {
+            original: "<init>".to_owned(),
+            signature: RenderedNameSignature {
+                parameters: [
+                    RenderedParamSig::TermParameter("example.Counter".to_owned()),
+                    RenderedParamSig::TermParameter("example.Counter".to_owned()),
+                ]
+                .into(),
+                result: "example.Pair".to_owned(),
+            },
+        }
+    );
+    for (argument, formal_address) in outer.arguments.iter().zip([first_address, second_address]) {
+        let RawTree::LengthNode(inner_node) = argument else {
+            panic!("each Pair argument has a separate nested APPLY");
+        };
+        assert_eq!(inner_node.tag, APPLY_TAG);
+        let inner = inner_node.decode_apply().unwrap();
+        assert_eq!(inner.arguments.len(), 1);
+        let RawTree::LengthNode(inner_select_node) = inner.function else {
+            panic!("nested Counter constructor function is SELECTin");
+        };
+        assert_eq!(inner_select_node.tag, SELECTIN_TAG);
+        let inner_select = inner_select_node.decode_select_in().unwrap();
+        assert!(matches!(
+            inner_select.qualifier,
+            RawTree::Ast {
+                tag: dotty_tasty::ast::NEW_TAG,
+                ..
+            }
+        ));
+        assert_eq!(
+            factory_tasty
+                .names()
+                .render_signed_name(inner_select.name)
+                .unwrap()
+                .unwrap(),
+            RenderedSignedName::Signed {
+                original: "<init>".to_owned(),
+                signature: RenderedNameSignature {
+                    parameters: [RenderedParamSig::TermParameter("scala.Int".to_owned())].into(),
+                    result: "example.Counter".to_owned(),
+                },
+            }
+        );
+        assert_eq!(
+            inner.arguments[0].ast_refs()[0].kind,
+            AstRefKind::TermRefDirect
+        );
+        assert_eq!(inner.arguments[0].ast_refs()[0].address, formal_address);
+        let RawTree::Leaf(term) = &inner.arguments[0] else {
+            panic!("each nested call refers to its original method formal");
+        };
+        assert_eq!(term.tag, TERMREFDIRECT_TAG);
+        assert!(matches!(term.value, TermValue::AstRef(address) if address == formal_address));
+    }
+}
+
+#[test]
+fn rust_pair_writer_is_deterministic_for_renamed_and_reordered_source_variants() {
+    let renamed = ORACLE_SOURCE
+        .replace("package example", "package renamed.example")
+        .replace("PairFactory", "Assembler")
+        .replace("Pair", "Envelope");
+    let counter_start = ORACLE_SOURCE.find("class Counter(start").unwrap();
+    let pair_start = ORACLE_SOURCE.find("class Pair(first").unwrap();
+    let factory_start = ORACLE_SOURCE.find("class PairFactory:").unwrap();
+    let counter = &ORACLE_SOURCE[counter_start..pair_start];
+    let pair = &ORACLE_SOURCE[pair_start..factory_start];
+    let factory = &ORACLE_SOURCE[factory_start..];
+    let reordered = format!("package example\n\n{factory}\n{pair}\n{counter}");
+    for (source, source_name, first_id, second_id, expected) in [
+        (
+            renamed.as_str(),
+            "Assembler.scala",
+            1919,
+            1920,
+            [
+                "renamed/example/Counter.tasty",
+                "renamed/example/Envelope.tasty",
+                "renamed/example/Assembler.tasty",
+            ],
+        ),
+        (
+            reordered.as_str(),
+            "PairFactory.scala",
+            1921,
+            1922,
+            [
+                "example/PairFactory.tasty",
+                "example/Pair.tasty",
+                "example/Counter.tasty",
+            ],
+        ),
+    ] {
+        let first = rust_tasty_batch_for(source, source_name, first_id);
+        let second = rust_tasty_batch_for(source, source_name, second_id);
+        assert_eq!(
+            first, second,
+            "fresh sessions serialize {source_name} identically"
+        );
+        assert_eq!(
+            first
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
 fn task_tmp() -> PathBuf {
     std::env::var_os("TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("target/issue-1913/tmp"))
+}
+
+fn strip_ansi(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for code in chars.by_ref() {
+                if ('@'..='~').contains(&code) {
+                    break;
+                }
+            }
+        } else {
+            output.push(character);
+        }
+    }
+    output
 }
 
 fn decode_class(bytes: &[u8]) -> ClassFile<'_> {
@@ -175,6 +425,32 @@ fn parameter_address(index: &dotty_tasty::ast::AstAddressIndex<'_>, method: u32)
             None
         })
         .expect("method owns PARAM nodes")
+}
+
+fn rust_tasty_batch(source_id: u32) -> Vec<(String, Vec<u8>)> {
+    rust_tasty_batch_for(ORACLE_SOURCE, "PairFactory.scala", source_id)
+}
+
+fn rust_tasty_batch_for(source: &str, source_name: &str, source_id: u32) -> Vec<(String, Vec<u8>)> {
+    with_paired_jvm_tasty_batch_plan(
+        source,
+        source_name,
+        SourceId::from_index(source_id),
+        |batch| {
+            batch
+                .classes
+                .iter()
+                .map(|class| {
+                    let output = class.tasty_plan.pickle().unwrap();
+                    (
+                        output.intended_tasty_path().to_owned(),
+                        output.bytes().to_vec(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        },
+    )
+    .expect("the paired plan retains one canonical source session")
 }
 
 #[test]
@@ -468,9 +744,13 @@ fn strict_pinned_scala_consumer_reproduces_oracle_and_independent_mutation() {
     let temp_root = task_tmp().join(format!("dotty-scala-multi-argument-{}", std::process::id()));
     let producer = temp_root.join("producer");
     let consumer = temp_root.join("consumer");
+    let rust_output = temp_root.join("rust-output");
+    let rust_rebuilt = temp_root.join("rust-from-tasty");
     let _ = fs::remove_dir_all(&temp_root);
     fs::create_dir_all(&producer).expect("create empty producer output");
     fs::create_dir_all(&consumer).expect("create empty consumer output");
+    fs::create_dir_all(&rust_output).expect("create empty Rust TASTy output");
+    fs::create_dir_all(&rust_rebuilt).expect("create empty Scala reconstruction output");
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let source_path =
         Path::new("tests/fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala");
@@ -484,11 +764,13 @@ fn strict_pinned_scala_consumer_reproduces_oracle_and_independent_mutation() {
         fs::read_to_string(workspace.join(consumer_path)).unwrap(),
         ORACLE_CONSUMER
     );
+    let java_tmp_options = format!("-Djava.io.tmpdir={} -XX:-UsePerfData", task_tmp().display());
     let scalac = |args: &[&std::ffi::OsStr]| {
         let output = Command::new(&compiler)
             .args(args)
             .current_dir(&workspace)
             .env("JAVA_HOME", &java_home)
+            .env("JAVA_TOOL_OPTIONS", &java_tmp_options)
             .env(
                 "PATH",
                 format!(
@@ -505,6 +787,7 @@ fn strict_pinned_scala_consumer_reproduces_oracle_and_independent_mutation() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        output
     };
     scalac(&[
         "-release".as_ref(),
@@ -562,4 +845,64 @@ fn strict_pinned_scala_consumer_reproduces_oracle_and_independent_mutation() {
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
     );
+
+    for (relative_path, bytes) in rust_tasty_batch(1918) {
+        let output_path = rust_output.join(relative_path);
+        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+        fs::write(output_path, bytes).unwrap();
+    }
+    let rust_sidecars = [
+        rust_output.join("example/Counter.tasty"),
+        rust_output.join("example/Pair.tasty"),
+        rust_output.join("example/PairFactory.tasty"),
+    ];
+    for sidecar in &rust_sidecars {
+        let output = scalac(&["-decompile".as_ref(), sidecar.as_os_str()]);
+        if sidecar.ends_with("PairFactory.tasty") {
+            let decompiled = strip_ansi(&String::from_utf8_lossy(&output.stdout));
+            assert!(
+                decompiled
+                    .contains("def create(first: scala.Int, second: scala.Int): example.Pair"),
+                "{decompiled}"
+            );
+            let construction = decompiled.rsplit_once(" = ").unwrap().1;
+            assert!(
+                construction.contains(
+                    "new example.Pair(new example.Counter(first), new example.Counter(second))"
+                ),
+                "{decompiled}"
+            );
+            let first = construction
+                .find("new example.Counter(first)")
+                .expect("decompiled Factory retains the first nested constructor");
+            let second = construction
+                .find("new example.Counter(second)")
+                .expect("decompiled Factory retains the second nested constructor");
+            assert!(
+                first < second,
+                "Scala decompilation preserves source argument order: {decompiled}"
+            );
+        }
+    }
+    let rust_classpath = format!("{}:{scala_lib}", rust_output.display());
+    scalac(&[
+        "-release".as_ref(),
+        "21".as_ref(),
+        "-from-tasty".as_ref(),
+        "-classpath".as_ref(),
+        rust_classpath.as_ref(),
+        "-d".as_ref(),
+        rust_rebuilt.as_os_str(),
+        rust_sidecars[0].as_os_str(),
+        rust_sidecars[1].as_os_str(),
+        rust_sidecars[2].as_os_str(),
+    ]);
+    for class in ["Counter", "Pair", "PairFactory"] {
+        assert!(
+            rust_rebuilt
+                .join(format!("example/{class}.class"))
+                .is_file(),
+            "Scala -from-tasty reconstructs {class}.class from the three Rust sidecars"
+        );
+    }
 }

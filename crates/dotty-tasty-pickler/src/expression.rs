@@ -386,7 +386,7 @@ fn lower_expression_inner(
                 .try_get(selection.qualifier)
                 .is_some_and(|receiver| matches!(receiver.kind, TreeKind::New(_)))
         {
-            if application.args.len() != 1 {
+            if !(1..=2).contains(&application.args.len()) {
                 return Err(PickleError::Unsupported {
                     feature: UnsupportedFeature::BodyExpression,
                     symbol: Some(method),
@@ -426,25 +426,26 @@ fn lower_expression_inner(
                 new_expression,
                 type_tree.ty,
             )?;
-            let argument_depth = child_expression_depth(ast, application.args[0], depth);
-            let argument = lower_expression_inner(
-                store,
-                ast,
-                application.args[0],
-                method,
-                parameters,
-                ExpressionState {
-                    depth: argument_depth,
-                    budget,
-                },
-                context,
-            )?;
+            let mut fields = vec![AstField::Tree(selected_constructor)];
+            for &source_argument in &application.args {
+                let argument_depth = child_expression_depth(ast, source_argument, depth);
+                let argument = lower_expression_inner(
+                    store,
+                    ast,
+                    source_argument,
+                    method,
+                    parameters,
+                    ExpressionState {
+                        depth: argument_depth,
+                        budget,
+                    },
+                    context,
+                )?;
+                fields.push(AstField::Tree(argument));
+            }
             return context.wire_node(AstNode::Length {
                 tag: APPLY_TAG,
-                fields: vec![
-                    AstField::Tree(selected_constructor),
-                    AstField::Tree(argument),
-                ],
+                fields,
             });
         }
         if application.args.is_empty() {

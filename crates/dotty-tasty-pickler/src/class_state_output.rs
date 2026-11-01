@@ -455,29 +455,54 @@ impl ValidatedClassStatePlan<'_, '_> {
             if let Some(planned_call) = p.typed_bindings.planned_call(p.source.id, symbol) {
                 context.register_planned_call(symbol, planned_call)?;
             }
-            let Some(nested) = p
+            let mut registered = Vec::new();
+            if let Some(nested) = p
                 .typed_bindings
                 .nested_constructor_call(p.source.id, symbol)
-            else {
-                continue;
-            };
-            let Some(dotty_core::SourceDefinition::Canonical { source, tree }) =
-                p.source_index.definition_of(nested.class)
-            else {
-                return Err(PickleError::SourceDefinition {
-                    symbol: nested.class,
-                });
-            };
-            if source != p.source.id {
-                return Err(PickleError::SourceDefinition {
-                    symbol: nested.class,
-                });
+            {
+                let Some(dotty_core::SourceDefinition::Canonical { source, tree }) =
+                    p.source_index.definition_of(nested.class)
+                else {
+                    return Err(PickleError::SourceDefinition {
+                        symbol: nested.class,
+                    });
+                };
+                if source != p.source.id {
+                    return Err(PickleError::SourceDefinition {
+                        symbol: nested.class,
+                    });
+                }
+                context.register_planned_source_class(
+                    nested.class,
+                    tree,
+                    p.typed_bindings.planned_class_symbols(),
+                )?;
+                registered.push(nested.class);
             }
-            context.register_planned_source_class(
-                nested.class,
-                tree,
-                p.typed_bindings.planned_class_symbols(),
-            )?;
+            if let Some(pair) = p
+                .typed_bindings
+                .nested_constructor_call_pair(p.source.id, symbol)
+            {
+                for call in pair.calls {
+                    if registered.contains(&call.class) {
+                        continue;
+                    }
+                    let Some(dotty_core::SourceDefinition::Canonical { source, tree }) =
+                        p.source_index.definition_of(call.class)
+                    else {
+                        return Err(PickleError::SourceDefinition { symbol: call.class });
+                    };
+                    if source != p.source.id {
+                        return Err(PickleError::SourceDefinition { symbol: call.class });
+                    }
+                    context.register_planned_source_class(
+                        call.class,
+                        tree,
+                        p.typed_bindings.planned_class_symbols(),
+                    )?;
+                    registered.push(call.class);
+                }
+            }
         }
         context.reserve_declaration(p.constructor.symbol)?;
         for (source_clause, symbols) in constructor_definition

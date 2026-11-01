@@ -76,7 +76,7 @@ fn validate_with_pair(
         pair,
         missing_source_edge,
     };
-    ClassStatePicklePlan {
+    let plan = ClassStatePicklePlan {
         store: original.store,
         definitions: original.definitions,
         source_ast: original.source_ast,
@@ -88,9 +88,10 @@ fn validate_with_pair(
         class_tree: original.class_tree,
         constructor: original.constructor.clone(),
         members: original.members,
-    }
-    .validate()?
-    .validate_method_bodies()
+    };
+    let validated = plan.validate()?;
+    validated.validate_method_bodies()?;
+    validated.pickle().map(|_| ())
 }
 
 #[test]
@@ -170,12 +171,25 @@ fn multi_argument_factory_variation_matrix_records_first_paired_result() {
                     .typed_bindings
                     .nested_constructor_call_pair(batch.source_id, proof.method())
                     .expect("the batch adapter preserves both immutable proof receipts");
+                assert!(
+                    validate_with_pair(
+                        caller.tasty_plan,
+                        batch.source_id,
+                        proof.method(),
+                        Some(authentic),
+                        None,
+                    )
+                    .is_ok(),
+                    "authentic pair reaches complete TASTy serialization for {name}"
+                );
                 let mut duplicate = authentic;
                 duplicate.calls[1] = duplicate.calls[0];
                 let mut wrong_constructor = authentic;
                 wrong_constructor.calls[1].constructor = proof.constructor();
                 let mut wrong_class = authentic;
                 wrong_class.calls[1].class = proof.caller_class();
+                let mut wrong_result = authentic;
+                wrong_result.calls[1].result_type = caller.tasty_plan.plan().definitions.int;
                 let mut stale_leaf = authentic;
                 stale_leaf.calls[1].typed_argument = stale_leaf.calls[0].typed_argument;
                 let mut forged_receipts = vec![
@@ -193,6 +207,7 @@ fn multi_argument_factory_variation_matrix_records_first_paired_result() {
                     ),
                     ("wrong nested constructor", Some(wrong_constructor)),
                     ("wrong nested class", Some(wrong_class)),
+                    ("wrong nested result type", Some(wrong_result)),
                     ("stale second leaf", Some(stale_leaf)),
                 ];
                 if authentic.argument_formals[0] != authentic.argument_formals[1] {
@@ -342,6 +357,14 @@ fn multi_argument_factory_variation_matrix_records_first_paired_result() {
             source.replace(
                 "new Pair(new Counter(first), new Counter(second))",
                 "new Pair(new Counter(first))",
+            ),
+            "ApplicationArityMismatch",
+        ),
+        (
+            "third Pair argument",
+            source.replace(
+                "new Pair(new Counter(first), new Counter(second))",
+                "new Pair(new Counter(first), new Counter(second), new Counter(first))",
             ),
             "ApplicationArityMismatch",
         ),
