@@ -1077,6 +1077,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let file = tasty_symbol::parse_classloader_tasty(resource.bytes()).map_err(|error| {
             SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(name.clone(), error))
         })?;
+        Self::validate_option_get_or_else_unit_shape(&file, &name)?;
 
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
@@ -1247,6 +1248,66 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         ) {
             return Err(SemanticTastyLoadError::UnsupportedShape(
                 "getOrElse.default and result do not share the original B binder",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Verify the selected fixture's declaration package before unpickler
+    /// entry can mutate any existing package scope.
+    fn validate_option_get_or_else_unit_shape(
+        file: &dotty_tasty::tasty::TastyFile<'_>,
+        name: &BinaryName,
+    ) -> Result<(), SemanticTastyLoadError> {
+        const ROOT_ADDRESS: u32 = 507;
+        const METHOD_ADDRESS: u32 = 666;
+
+        let asts = file.asts().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Parse(error),
+            ))
+        })?;
+        let package = asts
+            .get(0)
+            .filter(|node| node.tag == dotty_tasty::tasty::PACKAGE_TAG)
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "Option.tasty must contain one package tree",
+            ))?
+            .decode_package()
+            .map_err(|error| {
+                SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                    name.clone(),
+                    tasty_symbol::TastyDecodeError::Ast(error),
+                ))
+            })?;
+        let declared_package = package
+            .path_name()
+            .and_then(|reference| file.render_name(reference).ok());
+        let requested_package = name.package_path().replace('/', ".");
+        if asts.len() != 1 || declared_package.as_deref() != Some(requested_package.as_str()) {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "Option.tasty must declare the requested package before symbol entry",
+            ));
+        }
+        let addresses = file.ast_address_index().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Parse(error),
+            ))
+        })?;
+        let root_name = addresses
+            .get(ROOT_ADDRESS)
+            .filter(|node| node.tag == dotty_tasty::tasty::TYPEDEF_TAG)
+            .and_then(|node| node.decode_definition().ok())
+            .and_then(|definition| file.render_name(definition.name()).ok());
+        if root_name.as_deref() != Some(name.simple_name())
+            || addresses
+                .get(METHOD_ADDRESS)
+                .is_none_or(|node| node.tag != dotty_tasty::tasty::DEFDEF_TAG)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "Option.tasty must retain TYPEDEF@507 and DEFDEF@666",
             ));
         }
         Ok(())
@@ -7275,6 +7336,71 @@ mod tests {
         assert_eq!(loader.store.symbols.get(method).owner, Some(root));
         assert!(loader.origin(root).is_some());
         assert!(loader.origin(method).is_some());
+    }
+
+    #[test]
+    fn option_get_or_else_rejects_foreign_package_before_entry_and_preserves_scope_on_retry() {
+        let good_bytes = option_get_or_else_fixture_bytes();
+        let mut wrong_package_bytes = good_bytes.clone();
+        replace_fixture_text(&mut wrong_package_bytes, b"scala", b"other");
+        let (selected_path, resources) = option_fixture_shared_path(wrong_package_bytes);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(option_get_or_else_class_path(selected_path), &mut store);
+        let other_package = loader
+            .session
+            .packages
+            .resolve_package(loader.store, "other");
+        let other_scope = loader
+            .session
+            .packages
+            .scope_of(other_package)
+            .expect("pre-existing destination package scope");
+        let other_members = loader
+            .store
+            .scopes
+            .get(other_scope)
+            .entered_symbols()
+            .collect::<HashSet<_>>();
+        let checkpoint = loader.store.checkpoint();
+
+        assert!(matches!(
+            loader.load_option_get_or_else_with_tasty_unpickler(),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "Option.tasty must declare the requested package before symbol entry"
+            ))
+        ));
+        assert_eq!(loader.store.checkpoint(), checkpoint);
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(other_scope)
+                .entered_symbols()
+                .collect::<HashSet<_>>(),
+            other_members,
+            "wrong-package rejection leaves the pre-existing package scope unchanged"
+        );
+        assert_eq!(loader.session.packages.get(&["other"]), Some(other_package));
+        assert!(loader.option_get_or_else_tasty_loaded.is_none());
+
+        *resources.lock().unwrap() =
+            HashMap::from([(BinaryName::from_internal("scala/Option"), good_bytes)]);
+        let method = loader
+            .load_option_get_or_else_with_tasty_unpickler()
+            .expect("valid selected fixture retries successfully");
+        let (root, cached_method) = loader.option_get_or_else_tasty_loaded.unwrap();
+        assert_eq!(method, cached_method);
+        assert_eq!(loader.store.symbols.get(method).owner, Some(root));
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(other_scope)
+                .entered_symbols()
+                .collect::<HashSet<_>>(),
+            other_members,
+            "successful retry does not publish declarations in the foreign package"
+        );
     }
 
     #[test]
