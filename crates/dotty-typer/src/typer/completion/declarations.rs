@@ -493,7 +493,7 @@ impl SourceTyper<'_> {
             .map(|_| owner)
     }
 
-    fn canonical_scala_product_type(
+    pub(in crate::typer) fn canonical_scala_product_type(
         &mut self,
         tree_index: u32,
     ) -> Result<Option<TypeId>, TyperError> {

@@ -954,26 +954,16 @@ impl SourceTyper<'_> {
         unapply: SymbolId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<bool, TyperError> {
-        let Some(scala_package) = self.packages.symbol(&["scala"]) else {
-            return Ok(false);
+        let product_type = match self.canonical_scala_product_type(pattern_index) {
+            Ok(Some(product_type)) => product_type,
+            Ok(None) => return Ok(false),
+            Err(TyperError::TypeNameNotFound { name, .. })
+                if self.store.names.resolve(name.text()) == "Product" =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
         };
-        let Some(scope) = self.packages.scope_of(scala_package) else {
-            return Ok(false);
-        };
-        let product_name = Name::new(self.store.names.intern("Product"), Namespace::Type);
-        let products = self.store.scopes.get(scope).lookup_all(&product_name);
-        let [product] = products else {
-            return Ok(false);
-        };
-        let product = *product;
-        if !matches!(
-            self.store.symbols.get(product).kind,
-            SymbolKind::Class | SymbolKind::Trait
-        ) {
-            return Ok(false);
-        }
-        let prefix = self.type_symbol_prefix(product);
-        let product_type = self.store.types.alloc(Type::type_ref(prefix, product));
         let result_tycon = match self.store.types.try_get(result_type) {
             Some(Type::Applied { tycon, .. }) => *tycon,
             _ => result_type,
@@ -2717,7 +2707,7 @@ mod tests {
 
     #[test]
     fn missing_scala_package_defers_case_class_completion_until_canonical_retry() {
-        let source_text = "package matching { case class Box(value: Int) }";
+        let source_text = "package matching { case class Box(value: Int); object Matcher { def unwrap(box: Box): Int = box match { case Box(value) => value } } }";
         let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
         let class = parsed
             .ast
@@ -2731,6 +2721,21 @@ mod tests {
                 _ => None,
             })
             .expect("Box source class");
+        let unwrap = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "unwrap" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .expect("source unwrap method");
+        let unapply = index
+            .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .expect("generated Box.unapply");
         let scala = store.symbols.alloc(Symbol {
             name: Name::new(store.names.intern("scala"), Namespace::Term),
             owner: None,
@@ -2755,6 +2760,19 @@ mod tests {
             position: None,
             links: SymbolLinks::default(),
         });
+        let product_declarations = store.scopes.alloc(dotty_core::Scope::new(Some(product)));
+        let product_info = store
+            .types
+            .alloc(Type::ClassInfo(dotty_core::types::ClassInfo {
+                prefix: definitions.no_prefix,
+                class: product,
+                parents: Vec::new(),
+                declarations: product_declarations,
+                self_type: None,
+            }));
+        store
+            .symbols
+            .set_info(product, SymbolInfo::Complete(product_info));
         let should_resolve_package = Rc::new(Cell::new(false));
         let should_resolve_product = Rc::new(Cell::new(false));
         let mut typer = SourceTyper::new(
@@ -2808,6 +2826,26 @@ mod tests {
             *typer.store.symbols.info(selector),
             SymbolInfo::Complete(_)
         ));
+        let unapply_info = typer
+            .complete_symbol(unapply)
+            .expect("generated unapply completes through resolver-only Product");
+        let result_type = match typer.store.types.try_get(unapply_info) {
+            Some(Type::Method(method)) => method.result,
+            other => panic!("expected generated unapply method info, found {other:?}"),
+        };
+        let product_component = typer
+            .run_expression_transaction(|typer, journal, _| {
+                typer.unary_extractor_component_type(result_type, unwrap.index(), unapply, journal)
+            })
+            .expect("resolver-only Product ancestry authorizes unary projection");
+        assert_eq!(product_component, definitions.int);
+        let typed_unwrap = typer
+            .type_method_definition(unwrap)
+            .expect("resolver-only Product supports the source extractor method");
+        assert_eq!(
+            typer.source_typed_index().get(source, unwrap),
+            Some(typed_unwrap)
+        );
     }
 
     #[test]
