@@ -13561,7 +13561,8 @@ fn real_reference_object_apis_compile_and_verify_end_to_end() {
 }
 
 #[test]
-fn multi_argument_sibling_factory_records_rust_identity_and_first_proof_rejection() {
+fn multi_argument_sibling_factory_records_rust_identity_and_pair_proof() {
+    use dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind;
     use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 
     let source_id = SourceId::from_index(1913);
@@ -13831,14 +13832,27 @@ fn multi_argument_sibling_factory_records_rust_identity_and_first_proof_rejectio
                 source_index: index,
                 source_typed_index,
                 jvm_unit: unit,
-            });
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!(
-                "the existing proof rejects this two-formal method before its two-argument body"
-            ),
-        };
-        observed_proof = Some(format!("{error:?}"));
+            })
+            .expect("the exact source session proves both ordered nested arguments");
+        assert_eq!(result.len(), 1);
+        let proof = &result[0];
+        assert_eq!(
+            proof.argument_proof().kind(),
+            ConstructorArgumentProofKind::NestedNewPair
+        );
+        let pair = proof
+            .argument_proof()
+            .nested_pair_context()
+            .expect("pair receipt retains both declared method and constructor formals");
+        assert_eq!(pair.method_formals(), [first, second]);
+        let arguments = proof
+            .nested_argument_pair()
+            .expect("both nested callsite receipts are retained in source order");
+        assert_eq!(
+            arguments.map(|argument| argument.argument_formal()),
+            [first, second]
+        );
+        observed_proof = Some(format!("{:?}", proof.argument_proof().kind()));
     };
     let artifacts = compile_source_batch_with_source_observer(
         MULTI_ARGUMENT_FACTORY_SOURCE,
@@ -13860,11 +13874,7 @@ fn multi_argument_sibling_factory_records_rust_identity_and_first_proof_rejectio
             .collect::<Vec<_>>(),
         ["example/Counter", "example/Pair", "example/PairFactory"]
     );
-    assert!(
-        observed_proof
-            .unwrap()
-            .contains("candidate method must have one plain formal clause")
-    );
+    assert!(observed_proof.unwrap().contains("NestedNewPair"));
 
     let error = with_paired_jvm_tasty_batch_plan(
         MULTI_ARGUMENT_FACTORY_SOURCE,
@@ -13872,14 +13882,14 @@ fn multi_argument_sibling_factory_records_rust_identity_and_first_proof_rejectio
         source_id,
         |_| (),
     )
-    .expect_err("paired TASTy planning reaches and reports its proof's first rejection");
+    .expect_err("paired TASTy planning refuses unconsumed pair receipts");
     let observed = format!("{error:?}");
     assert!(
-        observed.contains("cross-class constructor-call identity proof"),
+        observed.contains("two-argument constructor receipt integration"),
         "{observed}"
     );
     assert!(
-        observed.contains("candidate method must have one plain formal clause"),
+        observed.contains("paired producer still consumes singleton constructor argument bindings"),
         "{observed}"
     );
 }

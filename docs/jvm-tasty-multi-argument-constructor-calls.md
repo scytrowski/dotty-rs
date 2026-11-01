@@ -129,4 +129,23 @@ cargo test -p dotty --test jvm_tasty_multi_argument_constructor_calls --locked
 
 The issue run also executed the inherited nested- and cross-class Scala consumer gates with `DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER=1` and `DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER=1`. It ran the mandatory JDK suite with `DOTTY_CLASSFILE_REQUIRE_JDK=1`, then the repository format, frontend boundary, Clippy, rustdoc, workspace-test, and `git diff --check` gates. Set `TMPDIR` and `CARGO_TARGET_DIR` beneath the task worktree, and set `JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=target/java-tmp -XX:-UsePerfData` so JVM temporary files remain in its ignored `target/` directory.
 
-This audit changes only tests, Scala oracle fixtures, and documentation; production code is unchanged.
+The #1913 section above records the initial one-formal guard as measured at that revision. The #1914 implementation and current measurements follow.
+
+## Ordered nested argument proof (#1914)
+
+Issue [#1914](https://github.com/scytrowski/dotty-rs/issues/1914) extends the read-only source proof for the original `PairFactory.create(first: Int, second: Int)` shape. It uses the same authentic single-session lexer, parser, namer, source typer, source/typed indexes, and JVM compilation unit. It does not build source trees or typed roots for the proof and does not change JVM or TASTy output.
+
+The new opaque `NestedConstructorArgumentPairProof` preserves both ordered contexts: the factory's two original formal source trees, symbols, and types; the Pair primary constructor's two original formal source trees, symbols, and types; and one `NestedConstructorArgumentProof` per outer argument position. Each nested receipt links the original outer argument and `Apply`, inner Counter `Apply`, selected constructor, `New`, and caller-formal leaf to their exact typed roots, original source positions, and resolved `Int` type. The two calls may share the canonical Counter class and constructor symbols, but their Apply/Select/New/leaf identities remain separate. Repeating `first` as both arguments is accepted when both source and typed roots prove that same symbol; the receipt still retains the declared `second` formal in its ordered method context.
+
+The paired planner runs this identity proof before any producer callback. Because the current producer only consumes singleton constructor argument bindings, the planner then rejects a valid pair at `BatchUnit { phase: "two-argument constructor receipt integration", ... }`. That rejection is an explicit bounded stop: it produces no paired artifact and does not silently omit the second argument. The single-argument proof and producer remain available and unchanged in behavior. No classfile, TASTy, JVM, or Scala ABI output behavior is added by this increment.
+
+Focused tests cover the original fixture; swapped formal and expression order; repeated caller-formal use; renamed package/classes/method; declaration reordering; missing nested Select binding; and a forged leaf mapping that attempts to substitute the sibling's typed root. The latter two fail closed with `TypedBinding` errors. Source-invalid arity/type/duplicate-formal controls still fail in source typing. Unsupported deeper allocation and branch expressions fail because the leaf is not an original factory formal. Defaulted and generic factory methods are rejected by the earliest source/planning boundary. Secondary constructors remain rejected by existing method ownership checks. A source variation adding an overload currently fails earlier during method typing (`TypeNameNotFound`) and therefore does not exercise the proof's dedicated overloaded-method guard; no end-to-end overload-proof result is claimed.
+
+Current paired proof checks:
+
+```sh
+cargo test -p dotty --test jvm_tasty_constructor_call_proofs --locked
+cargo test -p dotty --test jvm_tasty_multi_argument_constructor_matrix --locked
+```
+
+Run all build, format, documentation, boundary, workspace, Scala-oracle, and mandatory JDK checks from the issue worker handoff; set `TMPDIR`, `CARGO_TARGET_DIR`, and JVM temporary storage to paths under the issue worktree.
