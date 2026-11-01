@@ -392,7 +392,7 @@ fn task_tmp() -> PathBuf {
 
 #[test]
 fn source_variants_record_first_reachable_paired_stage_without_forging_ids() {
-    use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
+    use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
     use dotty_core::SourceId;
 
     let source = include_str!("fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala");
@@ -410,27 +410,28 @@ fn source_variants_record_first_reachable_paired_stage_without_forging_ids() {
     );
     let reordered = reordered.replace("class PairFactory:\n  def wrap(first: Counter, second: Counter): Pair =\n    new Pair(first, second)\n", "class PairFactory:\n  def wrap(first: Counter, second: Counter): Pair =\n    new Pair(first, second)\n\nclass Pair(first: Counter, second: Counter):\n  private val left: Counter = first\n  private val right: Counter = second\n  def leftValue(): Int = left.get()\n  def rightValue(): Int = right.get()\n\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n");
     let cases = [
-        ("renamed package/classes/method/formals", renamed),
-        ("reordered declarations", reordered),
-        ("intentional repeated first", source.replace("new Pair(first, second)", "new Pair(first, first)")),
-        ("swapped arguments", source.replace("new Pair(first, second)", "new Pair(second, first)")),
-        ("swapped formals", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(second: Counter, first: Counter)")),
-        ("third method formal", source.replace("second: Counter): Pair", "second: Counter, unused: Int): Pair")),
-        ("contextual formal", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter)(using second: Counter)")),
-        ("default formal", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter, second: Counter = new Counter(0))")),
-        ("generic method", source.replace("def wrap(", "def wrap[A](")),
-        ("erased formal used illegally", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter, erased second: Counter)")),
-        ("erased formal unused", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter, erased second: Counter)").replace("new Pair(first, second)", "new Pair(first, first)")),
-        ("overload", source.replace("new Pair(first, second)\n", "new Pair(first, second)\n  def wrap(value: Int, other: Int): Pair = new Pair(new Counter(value), new Counter(other))\n")),
-        ("mixed direct and new", source.replace("new Pair(first, second)", "new Pair(first, new Counter(second.get()))")),
-        ("wrong outer constructor", source.replace("class PairFactory:", "class PairChild(first: Counter, second: Counter) extends Pair(first, second):\n  def marker(): Int = 0\n\nclass PairFactory:").replace("new Pair(first, second)", "new PairChild(first, second)")),
-        ("third outer constructor argument", source.replace("new Pair(first, second)", "new Pair(first, second, first)")),
-        ("type mismatch", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Int, second: Counter)")),
-        ("wrong arity", source.replace("new Pair(first, second)", "new Pair(first)")),
-        ("duplicate formal names", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter, first: Counter)")),
-        ("foreign same-spelled target", source.replace("package example\n", "package example\n\nobject foreign:\n  class Counter(start: Int):\n    def get(): Int = start\n\n").replace("def wrap(first: Counter, second: Counter)", "def wrap(first: foreign.Counter, second: Counter)")),
+        ("renamed package/classes/method/formals", renamed, "cross-class constructor-call identity proof", "SemanticIdentity"),
+        ("reordered declarations", reordered, "cross-class constructor-call identity proof", "SemanticIdentity"),
+        ("intentional repeated first", source.replace("new Pair(first, second)", "new Pair(first, first)"), "cross-class constructor-call identity proof", "SemanticIdentity"),
+        ("swapped arguments", source.replace("new Pair(first, second)", "new Pair(second, first)"), "cross-class constructor-call identity proof", "SemanticIdentity"),
+        ("swapped formals", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(second: Counter, first: Counter)"), "cross-class constructor-call identity proof", "SemanticIdentity"),
+        ("third method formal", source.replace("second: Counter): Pair", "second: Counter, unused: Int): Pair"), "cross-class constructor-call identity proof", "SourceShape"),
+        ("contextual formal", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter)(using second: Counter)"), "complete JVM unit validation", "ParameterCountMismatch"),
+        ("default formal", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter, second: Counter = new Counter(0))"), "cross-class constructor-call identity proof", "SemanticIdentity"),
+        ("generic method", source.replace("def wrap(", "def wrap[A]("), "member planning", "generic methods are unsupported"),
+        ("erased formal used illegally", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter, erased second: Counter)"), "parsing", "ExpectedParameterColonAndType"),
+        ("erased formal unused", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter, erased second: Counter)").replace("new Pair(first, second)", "new Pair(first, first)"), "parsing", "ExpectedParameterColonAndType"),
+        ("overload", source.replace("new Pair(first, second)\n", "new Pair(first, second)\n  def wrap(value: Int, other: Int): Pair = new Pair(new Counter(value), new Counter(other))\n"), "cross-class constructor-call identity proof", "SemanticIdentity"),
+        ("mixed direct and new", source.replace("new Pair(first, second)", "new Pair(first, new Counter(second.get()))"), "cross-class constructor-call identity proof", "SemanticIdentity"),
+        ("wrong outer constructor", source.replace("class PairFactory:", "class PairChild(first: Counter, second: Counter) extends Pair(first, second):\n  def marker(): Int = 0\n\nclass PairFactory:").replace("new Pair(first, second)", "new PairChild(first, second)"), "source collection", "classes with explicit parents"),
+        ("third outer constructor argument", source.replace("new Pair(first, second)", "new Pair(first, second, first)"), "method body typing", "ApplicationArityMismatch"),
+        ("type mismatch", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Int, second: Counter)"), "method body typing", "ApplicationArgumentTypeMismatch"),
+        ("wrong arity", source.replace("new Pair(first, second)", "new Pair(first)"), "method body typing", "ApplicationArityMismatch"),
+        ("duplicate formal names", source.replace("def wrap(first: Counter, second: Counter)", "def wrap(first: Counter, first: Counter)"), "method body typing", "AmbiguousTermReference"),
+        ("foreign same-spelled target", source.replace("package example\n", "package example\n\nobject foreign:\n  class Counter(start: Int):\n    def get(): Int = start\n\n").replace("def wrap(first: Counter, second: Counter)", "def wrap(first: foreign.Counter, second: Counter)"), "source collection", "top-level siblings must all be ordinary classes"),
     ];
-    for (ordinal, (label, variant)) in cases.into_iter().enumerate() {
+    for (ordinal, (label, variant, expected_phase, expected_error)) in cases.into_iter().enumerate()
+    {
         let mut callback_ran = false;
         let result = with_paired_jvm_tasty_batch_plan(
             &variant,
@@ -438,11 +439,21 @@ fn source_variants_record_first_reachable_paired_stage_without_forging_ids() {
             SourceId::from_index(19620 + ordinal as u32),
             |_| callback_ran = true,
         );
-        let first = match result {
-            Ok(_) => "Ok(callback reached)".to_owned(),
-            Err(error) => format!("Err({error:?})"),
+        let error = match result {
+            Ok(_) => panic!("expected {label} to fail at {expected_phase}"),
+            Err(error) => error,
         };
-        eprintln!("dual-reference control {label}: {first}");
+        let (phase, reason) = match &error {
+            PairedPlanError::BatchUnit { phase, reason }
+            | PairedPlanError::BatchClass { phase, reason, .. } => (*phase, reason.as_str()),
+            PairedPlanError::Parsing(diagnostic) => ("parsing", diagnostic.as_str()),
+            other => panic!("{label}: expected a typed first-stage rejection, got {other:?}"),
+        };
+        assert_eq!(phase, expected_phase, "{label}: {error:?}");
+        assert!(
+            reason.contains(expected_error),
+            "{label}: expected first failure containing {expected_error:?}, got {error:?}"
+        );
         assert!(
             !callback_ran,
             "the unsupported/invalid control is never published: {label}"
