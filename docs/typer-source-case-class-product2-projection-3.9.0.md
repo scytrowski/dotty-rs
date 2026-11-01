@@ -51,10 +51,12 @@ Its source hash is
 `4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31`; the
 typed-tree hash is
 `e00a94565775f4c6b3424e65e68f0a1014cea681d092dde36777ef17d5072350`.
-`source-case-class-product2-3.9.0/run` documents the full oracle check. This
-environment has Temurin JDK 21.0.13, while that check requires the recorded
-Temurin 21.0.8+9 distribution; the full pinned runner was therefore not
-re-executed here.
+`source-case-class-product2-3.9.0/run` documents the full oracle check. The
+Scala checkout and Temurin JDK 21.0.8+9 are available at their pinned
+revisions, but the required Maven artifacts are not cached in this worktree.
+The runner stopped at its checksum preflight because
+`org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar` is absent;
+the full pinned oracle was not re-executed here.
 
 The compact semantic delta is in
 [`typer-source-case-class-product2-projection-3.9.0.tsv`](typer-source-case-class-product2-projection-3.9.0.tsv).
