@@ -36,8 +36,40 @@ cargo test -p dotty --test jvm_tasty_multi_argument_constructor_calls \
 
 ## Checkpoint 2: bounded writer
 
-Pending.
+The validated class-state output path now registers the classes from both immutable nested-call receipts, skipping duplicate class identities. Constructor selection accepts the existing singleton `(Int)Class` and `(PlannedSiblingRef)Class` forms, or the new ordered pair whose two reference formals name the same planned sibling class. `SignedMany` keeps both formal type references in source order. Expression lowering accepts only one or two arguments for the selected constructor path and visits each original typed argument in order with the same traversal state and budget.
 
-## Checkpoint 3: pinned reader and final regression gates
+The Rust producer regression calls `pickle()` for all three class plans inside one `with_paired_jvm_tasty_batch_plan` callback. Fresh-session reruns compare all sidecar bytes. The decoder asserts the Factory method's two `Int` PARAMs and `Pair` return, three distinct APPLY addresses, the two-reference Pair constructor signature, both nested one-Int Counter signatures, and direct leaves to the original first and second formal addresses. Renamed package/class and reordered declaration controls are also byte deterministic.
 
-Pending.
+Invalid second receipts are exercised through `pickle()` after body validation; no output is returned for missing, duplicated/shared, reversed, wrong-class, wrong-constructor/owner, wrong-result, stale-leaf, or wrong-source-edge receipts. Source controls reject missing and third outer constructor arguments at source typing with `ApplicationArityMismatch`; deeper nested calls and branch arguments fail before producer callbacks because the ordered proof requires the original factory-formal leaf. Existing one-argument, nested New, factory-result, local-value, Pair definition, and primitive pickler regressions pass unchanged, including the frozen pre-refactor primitive byte fixtures.
+
+The public paired class/TASTy batch helper has a separate downstream contract limitation: after the TASTy writer succeeds, its cross-class invocation validation rejects the two-argument Pair constructor because that validator currently recognizes only direct zero-argument cross-class calls. That validator/JVM integration is outside this issue's approved writer scope. The issue's acceptance gate therefore consumes the original writer-produced `.tasty` sidecars directly from the same validated source session; it makes no paired Rust classfile/runtime claim.
+
+## Checkpoint 3: pinned reader and regression gates
+
+The strict regression, enabled with `DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSUMER=1`, writes the three direct Rust TASTy outputs into an empty task-local directory. Pinned Scala 3.9.0 `-decompile` accepts Counter, Pair, and PairFactory; decompiling PairFactory recovers its exact two-argument `create` signature and ordered `new Pair(new Counter(first), new Counter(second))` body. Pinned `-from-tasty` consumes all three Rust sidecars and reconstructs the three classes. This checks Scala TASTy reader interoperability only; it does not use or assert Rust JVM classfiles.
+
+The Scala source oracle test remains a separate control: it recompiles the checked-in source at revision `777528f19a58e794c9954a42f433373472ec57f8`, confirms all six compiler-generated class/TASTy artifacts byte for byte, and runs its independent Scala client. The Rust writer test compares fresh-session outputs and source variants independently of those Scala-generated fixtures.
+
+Validation passed with Rust 1.98.1, Temurin 21.0.13, Scala 3.9.0 `777528f19a58e794c9954a42f433373472ec57f8`, `CARGO_TARGET_DIR` and `TMPDIR` inside the issue worktree, and at most two Cargo build jobs:
+
+```text
+cargo test -p dotty-tasty-pickler --all-targets --locked
+cargo test -p dotty --test jvm_tasty_multi_argument_constructor_calls \
+  --test jvm_tasty_multi_argument_constructor_matrix --locked
+DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSUMER=1 \
+  cargo test -p dotty --test jvm_tasty_multi_argument_constructor_calls \
+  strict_pinned_scala_consumer --locked -- --nocapture
+cargo fmt --all -- --check
+python3 tools/check-frontend-boundaries.py
+cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo test --workspace --all-targets --locked
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  --test jvm_stateful_class_contract --locked -- --nocapture
+git diff --check
+```
+
+The standard workspace suite passed after the singleton-reference compatibility correction. The required JDK gate passed with `JAVA_HOME` and PATH pointing to Temurin 21.0.13 and a relative worktree-local JVM temp directory. The strict Scala test separately asserted the pinned compiler revision and JDK version.
