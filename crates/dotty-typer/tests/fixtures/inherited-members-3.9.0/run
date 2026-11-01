@@ -75,7 +75,7 @@ jar_paths=(
     "$maven_root/org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar"
 )
 classpath="$(IFS=:; printf '%s' "${jar_paths[*]}")"
-scratch="$repo_root/target/inherited-members-oracle"
+scratch="${DOTTY_INHERITED_MEMBERS_TMP_ROOT:-$repo_root/target/inherited-members-oracle}"
 mkdir -p "$scratch/tmp" "$scratch/classes"
 
 compile_snapshot() {
@@ -109,6 +109,7 @@ expect_failure() {
 
 compile_snapshot InheritedMembers.scala InheritedMembers.scala39-typed-tree.txt
 compile_snapshot InheritedCaptures.scala InheritedCaptures.scala39-typed-tree.txt
+compile_snapshot UnsupportedParentMembers.scala UnsupportedParentMembers.scala39-typed-tree.txt
 compile_snapshot ExplicitSelection.scala ExplicitSelection.scala39-typed-tree.txt
 compile_accepts ShadowedNames.scala
 compile_accepts ChildFieldOverride.scala
@@ -117,8 +118,15 @@ expect_failure NegativeMissingMember.scala NegativeMissingMember.scala39-diagnos
 expect_failure NegativeWrongArgument.scala NegativeWrongArgument.scala39-diagnostics.txt
 expect_failure NegativePrivateAccess.scala NegativePrivateAccess.scala39-diagnostics.txt
 expect_failure NegativeAmbiguousInheritedFieldImport.scala NegativeAmbiguousInheritedFieldImport.scala39-diagnostics.txt
+expect_failure NegativeWrongResult.scala NegativeWrongResult.scala39-diagnostics.txt
+expect_failure NegativeWrongFieldResult.scala NegativeWrongFieldResult.scala39-diagnostics.txt
+expect_failure NegativeOverloadedOuter.scala NegativeOverloadedOuter.scala39-diagnostics.txt
+expect_failure NegativeGenericOuter.scala NegativeGenericOuter.scala39-diagnostics.txt
 
 printf 'Scala source revision: %s\nJDK: %s\n' "$actual_revision" "$jdk_release"
 printf '%s\n' 'Frozen inherited-member source and explicit-selection controls match Scala 3.9.0 typer snapshots.'
 printf '%s\n' 'Missing-member, wrong-argument, private-parent, and ambiguous inherited-field import controls remain rejected.'
 printf '%s\n' 'Valid overriding fields, shadowed same-name members/locals, and unrelated same-spelled classes are accepted.'
+printf '%s\n' 'Scala-valid overloaded and generic inherited methods match the pinned typer snapshot; Rust unsupported cases remain separate.'
+printf '%s\n' 'Nested outer and inherited overloaded/generic same-name examples are separately pinned as Scala ambiguity rejections.'
+printf '%s\n' 'Wrong method-result and inherited-field-result types remain rejected by Scala 3.9.0.'

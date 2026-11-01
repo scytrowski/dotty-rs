@@ -1,0 +1,47 @@
+[[syntax trees at end of                     typer]] // UnsupportedParentMembers.scala
+<package <<root>.this.inheritedmembers:<root>.this.inheritedmembers> {
+  class OverloadedParent() extends <<<new Object:Object>.<init>:((): Object)>():
+    Object> {
+    [owner = class OverloadedParent]def add(
+      [owner = method add]x: <root>.this.scala.Int): <root>.this.scala.Int =
+      <x:<root>.this.scala.Int>
+    [owner = class OverloadedParent]def add(
+      [owner = method add]x: scala.this.Predef.String): scala.this.Predef.String
+       = <x:scala.this.Predef.String>
+  }
+  class OverloadedChild() extends <
+    <
+      <new inheritedmembers.this.OverloadedParent:
+        inheritedmembers.this.OverloadedParent>
+    .<init>:((): inheritedmembers.this.OverloadedParent)>
+  ():inheritedmembers.this.OverloadedParent> {
+    [owner = class OverloadedChild]def run(
+      [owner = method run]x: <root>.this.scala.Int): <root>.this.scala.Int =
+      <
+        <<this:(OverloadedChild.this : inheritedmembers.this.OverloadedChild)>.
+          add:((x: <root>.this.scala.Int): <root>.this.scala.Int)>
+      (<x:<root>.this.scala.Int>):<root>.this.scala.Int>
+  }
+  class GenericParent() extends <<<new Object:Object>.<init>:((): Object)>():
+    Object> {
+    [owner = class GenericParent]def add[[owner = method add]A](
+      [owner = method add]x: A): <root>.this.scala.Int =
+      <0:(0 : scala.this.Int)>
+  }
+  class GenericChild() extends <
+    <
+      <new inheritedmembers.this.GenericParent:
+        inheritedmembers.this.GenericParent>
+    .<init>:((): inheritedmembers.this.GenericParent)>
+  ():inheritedmembers.this.GenericParent> {
+    [owner = class GenericChild]def run(
+      [owner = method run]x: <root>.this.scala.Int): <root>.this.scala.Int =
+      <
+        <
+          <<this:(GenericChild.this : inheritedmembers.this.GenericChild)>.add:
+            ([A](x: A): <root>.this.scala.Int)>
+        [<root>.this.scala.Int^]:
+          ((x: <root>.this.scala.Int^): <root>.this.scala.Int)>
+      (<x:<root>.this.scala.Int>):<root>.this.scala.Int>
+  }
+}:<root>.this.inheritedmembers.type>

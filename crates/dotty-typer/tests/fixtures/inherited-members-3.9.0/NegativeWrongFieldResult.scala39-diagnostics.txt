@@ -1,0 +1,14 @@
+-- [E134] Type Error: NegativeWrongFieldResult.scala:7:32 ----------------------
+7 |  def withBias(x: Int): Int = x + bias
+  |                              ^^^
+  |   None of the overloaded alternatives of method + in class Int with types
+  |    (x: Double): Double
+  |    (x: Float): Float
+  |    (x: Long): Long
+  |    (x: Int): Int
+  |    (x: Char): Int
+  |    (x: Short): Int
+  |    (x: Byte): Int
+  |    (x: String): String
+  |   match arguments ((Child.this.bias : Boolean))
+1 error found
