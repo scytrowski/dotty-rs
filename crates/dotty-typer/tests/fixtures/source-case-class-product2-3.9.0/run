@@ -50,6 +50,7 @@ path = Path(sys.argv[1])
 path.write_text(path.read_text().rstrip() + "\n")
 PY
 diff -u "$fixture_dir/Positive.scala39-typed-tree.txt" "$scratch/Positive.current.txt"
+mkdir -p "$scratch/classes/ExplicitSelectors"
 "$java_home/bin/java" -XX:-UsePerfData -Xshare:off -Djava.io.tmpdir="$scratch/tmp" \
   -cp "$classpath" dotty.tools.dotc.Main -classpath "$classpath" -d "$scratch/classes/ExplicitSelectors" \
   -Vprint:typer -Xprint-types -Yprint-debug -Yprint-debug-owners -color:never \

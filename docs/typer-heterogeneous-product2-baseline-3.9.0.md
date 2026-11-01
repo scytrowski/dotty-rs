@@ -108,3 +108,5 @@ The oracle runner verifies the pinned source/compiler/JDK/artifact hashes,
 recompiles the complete positive typed-tree snapshot, checks the negative
 matrix and diagnostic outputs, and verifies the output SHA manifest. Its
 scratch and `java.io.tmpdir` remain under the supplied task-local target path.
+The runner creates each compiler output directory before invoking scalac, so
+`DOTTY_PRODUCT2_TMP_ROOT` may name a path that does not yet exist.
