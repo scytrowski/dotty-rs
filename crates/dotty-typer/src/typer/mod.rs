@@ -3809,6 +3809,204 @@ mod tests {
     }
 
     #[test]
+    fn generated_case_class_unapply_has_source_canonical_plain_signature_and_member_lookup() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package matching { case class Box(value: Int); object Box { val marker = 1 }; case class Parcel(code: Int); object Probe { def selected = Box.unapply } }",
+        );
+        let box_class = class_symbol(&parsed, &store, &index, source, "Box");
+        let unapply = index
+            .generated_case_class_method(
+                box_class,
+                dotty_core::GeneratedCaseClassMethodRole::Unapply,
+            )
+            .expect("canonical generated unapply");
+        let apply = index
+            .generated_case_class_method(box_class, dotty_core::GeneratedCaseClassMethodRole::Apply)
+            .expect("canonical generated apply");
+        let SourceDefinition::Canonical {
+            tree: class_tree, ..
+        } = index.definition_of(box_class).unwrap()
+        else {
+            panic!("Box must have a canonical source definition");
+        };
+        let unapply_input = index
+            .derived_symbol_at(unapply, source, class_tree)
+            .expect("unapply's one derived formal");
+        let TreeKind::TypeDef(class_definition) = &parsed.ast.get(class_tree).kind else {
+            panic!("Box source identity must point to its TypeDef");
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+            panic!("Box must have a source template");
+        };
+        let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+            panic!("Box must have a primary constructor");
+        };
+        let constructor_parameter_tree = constructor.value_param_clauses[0][0];
+        let constructor_parameter = index
+            .symbol_at(source, constructor_parameter_tree)
+            .expect("canonical constructor parameter");
+        let apply_parameter = index
+            .derived_symbol_at(apply, source, constructor_parameter_tree)
+            .expect("generated apply field formal");
+        assert_ne!(unapply_input, apply_parameter);
+        assert_ne!(unapply_input, constructor_parameter);
+        assert!(
+            store
+                .symbols
+                .get(unapply_input)
+                .flags
+                .contains(SymbolFlags::SYNTHETIC)
+        );
+        assert!(
+            store
+                .symbols
+                .get(unapply)
+                .flags
+                .contains(SymbolFlags::SYNTHETIC)
+        );
+        let (selected_method, selected_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "selected");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(selected_method).unwrap(),
+            owner: selected_method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let selected = typer.type_expression(selected_rhs, context).unwrap();
+        let selected_type = typer.typed_ast().get(selected).ty;
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(selected_symbol),
+            ..
+        } = typer.store().types.get(selected_type)
+        else {
+            panic!("ordinary companion member lookup should select a method term ref");
+        };
+        assert_eq!(*selected_symbol, unapply);
+        let signature = typer
+            .complete_symbol(unapply)
+            .expect("normal symbol completion should complete generated unapply");
+        let Type::Method(method) = typer.store().types.get(signature) else {
+            panic!("generated unapply must be a plain MethodType");
+        };
+        assert_eq!(method.kind, MethodKind::Plain);
+        assert_eq!(method.params.len(), 1);
+        assert!(!method.params[0].erased);
+        assert!(!method.params[0].varargs);
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(method.params[0].name.as_name().text()),
+            "x$1"
+        );
+        assert_eq!(type_symbol(typer.store(), method.params[0].ty), box_class);
+        assert_eq!(type_symbol(typer.store(), method.result), box_class);
+
+        let class_symbol_info = typer.complete_symbol(box_class).unwrap();
+        assert!(matches!(
+            typer.store().types.get(class_symbol_info),
+            Type::ClassInfo(_)
+        ));
+        let SourceDefinition::Canonical {
+            source: class_source,
+            tree: class_tree,
+        } = typer.index.definition_of(box_class).unwrap()
+        else {
+            panic!("Box must retain its canonical source identity");
+        };
+        assert_eq!(class_source, source);
+        assert_eq!(
+            typer.index.definition_of(unapply),
+            Some(SourceDefinition::Derived {
+                source,
+                tree: class_tree,
+            })
+        );
+        assert_ne!(unapply, box_class);
+
+        let parcel = class_symbol(&parsed, typer.store(), &index, source, "Parcel");
+        let parcel_unapply = typer
+            .index
+            .generated_case_class_method(parcel, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .expect("renamed monomorphic case class generated unapply");
+        let parcel_signature = typer.complete_symbol(parcel_unapply).unwrap();
+        let Type::Method(parcel_method) = typer.store().types.get(parcel_signature) else {
+            panic!("renamed case class unapply must be a plain method");
+        };
+        assert_eq!(parcel_method.params.len(), 1);
+        assert_eq!(
+            type_symbol(typer.store(), parcel_method.params[0].ty),
+            parcel
+        );
+        assert_eq!(type_symbol(typer.store(), parcel_method.result), parcel);
+    }
+
+    #[test]
+    fn unsupported_generated_case_class_unapply_shapes_defer_without_partial_signature() {
+        let mut deferred_shapes = 0;
+        for source_text in [
+            "case class Text(value: Boolean)",
+            "case class Empty()",
+            "case class Pair(left: Int, right: Int)",
+            "case class Mutable(var value: Int)",
+            "case class Generic[A](value: Int)",
+            "class Int; case class Shadowed(value: Int)",
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let class_name = source_text
+                .split_once("case class ")
+                .unwrap()
+                .1
+                .split(['(', ' ', '['])
+                .next()
+                .unwrap();
+            let class = class_symbol(&parsed, &store, &index, source, class_name);
+            let Some(method) = index.generated_case_class_method(
+                class,
+                dotty_core::GeneratedCaseClassMethodRole::Unapply,
+            ) else {
+                continue;
+            };
+            deferred_shapes += 1;
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+
+            let first = typer
+                .complete_symbol(method)
+                .expect_err("unsupported constructor shape must be deferred");
+            assert!(
+                matches!(first, TyperError::MalformedMethodClause { .. }),
+                "unexpected unsupported-shape error for {source_text}: {first:?}"
+            );
+            assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+            let retry = typer
+                .complete_symbol(method)
+                .expect_err("failed completion retry must remain unsupported");
+            assert_eq!(format!("{retry:?}"), format!("{first:?}"));
+            assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+        }
+        assert!(
+            deferred_shapes > 0,
+            "at least one unsupported method must reach Typer"
+        );
+    }
+
+    #[test]
     fn application_receiver_view_preserves_this_type_arguments() {
         let source_text = "class C[A] { def same(x: this.type): Int = 1; def run: Int = same(this); def sameGeneric[T](x: T, y: T): Int = 1; def runGeneric: Int = sameGeneric[this.type](this, this) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);

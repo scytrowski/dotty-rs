@@ -186,12 +186,11 @@ fn analyze_session() -> Vec<String> {
                     "failed retry cannot leave a typed root behind"
                 );
                 let (diagnostic_tree, diagnostic_span) = match &error {
-                    TyperError::SymbolSourceKindMismatch {
+                    TyperError::ExtractorResultMemberNotFound {
                         tree_index,
-                        symbol,
-                        kind: SymbolKind::Method,
+                        source: error_source,
                         ..
-                    } if *symbol == unapply => parsed
+                    } if *error_source == source => parsed
                         .ast
                         .iter()
                         .find_map(|(candidate, node)| {
@@ -201,7 +200,7 @@ fn analyze_session() -> Vec<String> {
                             ))
                         })
                         .expect("extractor error source tree"),
-                    _ => panic!("unexpected first baseline error: {error:?}"),
+                    _ => panic!("unexpected first post-signature baseline error: {error:?}"),
                 };
                 let diagnostic_range = diagnostic_span.span().range();
                 format!(
@@ -224,5 +223,12 @@ fn analyze_session() -> Vec<String> {
             unapply.index(),
         ));
     }
+    let signature = typer
+        .complete_symbol(unapply)
+        .expect("a failed whole-method attempt must leave generated signature retryable");
+    assert!(matches!(
+        typer.store().types.try_get(signature),
+        Some(dotty_core::types::Type::Method(method)) if method.params.len() == 1
+    ));
     rows
 }

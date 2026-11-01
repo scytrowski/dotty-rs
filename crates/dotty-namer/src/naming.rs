@@ -2312,6 +2312,22 @@ impl Namer<'_> {
         )?;
         let unapply_scope = self.store.scopes.alloc(Scope::new(Some(unapply)));
         self.index.record_scope(unapply, unapply_scope)?;
+        // Scala's generated extractor takes the case-class instance itself.
+        // The class tree is the canonical origin for this synthetic formal;
+        // owner-specific derived identity keeps it separate from both the
+        // constructor/apply field parameter and the generated method symbol.
+        let input_name = *dotty_core::TermName::new(self.store.names.intern("x$1")).as_name();
+        self.enter_derived_symbol(
+            class_tree,
+            input_name,
+            unapply,
+            unapply_scope,
+            SymbolSpec {
+                kind: SymbolKind::Parameter,
+                flags: SymbolFlags::SYNTHETIC,
+                visibility: Visibility::Public,
+            },
+        )?;
         let unapply_context =
             self.child_source_context(unapply, unapply_scope, Some(declaration_context));
         self.index

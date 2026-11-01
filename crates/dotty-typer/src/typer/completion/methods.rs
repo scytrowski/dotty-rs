@@ -131,6 +131,224 @@ impl SourceTyper<'_> {
         Some(class)
     }
 
+    pub(super) fn generated_case_class_for_unapply(
+        &self,
+        method: SymbolId,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        let method_symbol = self.store.symbols.get(method);
+        let owner = method_symbol.owner?;
+        let identity = self.index.generated_case_class_method_identity(method)?;
+        if !self.store.symbols.contains(owner)
+            || !self.store.symbols.contains(identity.class)
+            || source != self.source
+            || identity.role != dotty_core::GeneratedCaseClassMethodRole::Unapply
+            || method_symbol.kind != SymbolKind::Method
+            || !method_symbol.flags.contains(SymbolFlags::SYNTHETIC)
+            || self.store.names.resolve(method_symbol.name.text()) != "unapply"
+            || method_symbol.name.namespace() != dotty_core::Namespace::Term
+            || method_symbol.origin != SymbolOrigin::Source(source)
+            || self.store.symbols.get(owner).kind != SymbolKind::ModuleClass
+            || self.index.definition_of(method) != Some(SourceDefinition::Derived { source, tree })
+            || self.index.symbol_at(source, tree) != Some(identity.class)
+            || self.index.generated_case_class_method(
+                identity.class,
+                dotty_core::GeneratedCaseClassMethodRole::Unapply,
+            ) != Some(method)
+        {
+            return None;
+        }
+        let class_symbol = self.store.symbols.get(identity.class);
+        if class_symbol.kind != SymbolKind::Class
+            || !class_symbol.flags.contains(SymbolFlags::CASE)
+            || class_symbol.origin != SymbolOrigin::Source(source)
+            || !matches!(
+                self.index.definition_of(identity.class),
+                Some(SourceDefinition::Canonical { source: class_source, tree: class_tree })
+                    if class_source == source && class_tree == tree
+            )
+            || class_symbol.links.companion.is_none()
+            || !matches!(
+                self.arena.try_get(tree).map(|node| &node.kind),
+                Some(TreeKind::TypeDef(definition))
+                    if definition.metadata.modifiers.contains(&dotty_core::ast::Modifier::Case)
+            )
+        {
+            return None;
+        }
+        let companion = class_symbol.links.companion?;
+        if !self.store.symbols.contains(companion)
+            || self.store.symbols.get(companion).kind != SymbolKind::Object
+            || !(self.store.symbols.get(companion).origin == SymbolOrigin::Synthetic
+                || self.store.symbols.get(companion).origin == SymbolOrigin::Source(source))
+            || self.store.symbols.get(companion).owner != class_symbol.owner
+            || self.store.symbols.get(companion).links.companion != Some(identity.class)
+            || self.source_module_class_of_object(companion).ok()? != owner
+        {
+            return None;
+        }
+        Some(identity.class)
+    }
+
+    pub(super) fn complete_generated_case_class_unapply_signature(
+        &mut self,
+        method: SymbolId,
+        class: SymbolId,
+        source: SourceId,
+        class_tree: TreeId<Untyped>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let Some(TreeKind::TypeDef(class_definition)) =
+            self.arena.try_get(class_tree).map(|node| &node.kind)
+        else {
+            return Err(TyperError::SymbolSourceKindMismatch {
+                source,
+                tree_index: class_tree.index(),
+                symbol: method,
+                kind: SymbolKind::Method,
+            });
+        };
+        let Some(TreeKind::Template(template)) = self
+            .arena
+            .try_get(class_definition.rhs)
+            .map(|node| &node.kind)
+        else {
+            return Err(TyperError::MalformedMethodClause {
+                method,
+                method_tree_index: class_tree.index(),
+                clause_index: 0,
+            });
+        };
+        let Some(TreeKind::DefDef(constructor)) = self
+            .arena
+            .try_get(template.constructor)
+            .map(|node| &node.kind)
+        else {
+            return Err(TyperError::MalformedMethodClause {
+                method,
+                method_tree_index: class_tree.index(),
+                clause_index: 0,
+            });
+        };
+        if !constructor.type_params.is_empty() {
+            return Err(TyperError::MalformedMethodClause {
+                method,
+                method_tree_index: class_tree.index(),
+                clause_index: 0,
+            });
+        }
+        let Some([parameter_tree]) = constructor
+            .value_param_clauses
+            .as_slice()
+            .first()
+            .filter(|_| constructor.value_param_clauses.len() == 1)
+            .map(Vec::as_slice)
+        else {
+            return Err(TyperError::MalformedMethodClause {
+                method,
+                method_tree_index: class_tree.index(),
+                clause_index: 0,
+            });
+        };
+        let Some(TreeKind::ValDef(parameter)) =
+            self.arena.try_get(*parameter_tree).map(|node| &node.kind)
+        else {
+            return Err(TyperError::MalformedMethodClause {
+                method,
+                method_tree_index: class_tree.index(),
+                clause_index: 0,
+            });
+        };
+        let constructor_parameter = self.index.symbol_at(source, *parameter_tree).ok_or(
+            TyperError::MethodParameterSymbolMissing {
+                method,
+                parameter_tree_index: parameter_tree.index(),
+            },
+        )?;
+        let parameter_context = self.parameter_source_context(constructor_parameter).ok_or(
+            TyperError::DeclarationContextMissing {
+                symbol: constructor_parameter,
+            },
+        )?;
+        let field_type =
+            self.type_of_tpt_inner_journaled(parameter.tpt, parameter_context, info_journal)?;
+        let is_int = field_type == self.definitions.int;
+        if !is_int
+            || parameter
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Var)
+        {
+            return Err(TyperError::MalformedMethodClause {
+                method,
+                method_tree_index: class_tree.index(),
+                clause_index: 0,
+            });
+        }
+
+        let input = self
+            .index
+            .derived_symbol_at(method, source, class_tree)
+            .ok_or(TyperError::MethodParameterSymbolMissing {
+                method,
+                parameter_tree_index: class_tree.index(),
+            })?;
+        if !self.store.symbols.contains(input) {
+            return Err(TyperError::MethodParameterSymbolMissing {
+                method,
+                parameter_tree_index: class_tree.index(),
+            });
+        }
+        let input_symbol = self.store.symbols.get(input);
+        let input_name = input_symbol.name;
+        if input_symbol.kind != SymbolKind::Parameter
+            || input_symbol.owner != Some(method)
+            || input_symbol.name.namespace() != dotty_core::Namespace::Term
+            || self.store.names.resolve(input_symbol.name.text()) != "x$1"
+            || !input_symbol.flags.contains(SymbolFlags::SYNTHETIC)
+            || self.index.definition_of(input)
+                != Some(SourceDefinition::Derived {
+                    source,
+                    tree: class_tree,
+                })
+        {
+            return Err(TyperError::MethodParameterSymbolMissing {
+                method,
+                parameter_tree_index: class_tree.index(),
+            });
+        }
+        let prefix = self.type_symbol_prefix(class);
+        let box_type = self.store.types.alloc(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(class),
+        });
+        let parameter_name = dotty_core::TermName::new(input_name.text());
+        let signature = method_type_from_symbols(
+            self.store,
+            &[MethodParamSpec {
+                symbol: input,
+                name: parameter_name,
+                ty: box_type,
+                erased: false,
+                varargs: false,
+            }],
+            box_type,
+            MethodKind::Plain,
+        )
+        .map_err(|error| TyperError::TypeRebinding {
+            source,
+            tree_index: class_tree.index(),
+            error,
+        })?;
+        let previous = *self.store.symbols.info(input);
+        info_journal.push((input, previous));
+        self.store
+            .symbols
+            .set_info(input, SymbolInfo::Complete(box_type));
+        Ok(signature)
+    }
+
     pub(super) fn complete_generated_case_class_apply_signature(
         &mut self,
         method: SymbolId,
