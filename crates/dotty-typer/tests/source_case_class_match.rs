@@ -7,14 +7,17 @@ use dotty_classloader::classloader::{
 use dotty_core::ast::{TreeKind, TypedAst};
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
-    Definitions, GeneratedCaseClassMethodRole, Packages, SemanticStore, SourceId, SourceText,
-    SourceTypedIndex, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TreeId, Typed, Untyped,
+    Definitions, GeneratedCaseClassMethodRole, Name, Namespace, Packages, SemanticStore, SourceId,
+    SourceText, SourceTypedIndex, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TreeId, Typed,
+    Untyped,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
 use dotty_typer::{SourceTyper, TyperError};
 
 const SOURCE: &str = include_str!("fixtures/source-case-class-match-3.9.0/Positive.scala");
+const FLAGGED_SOURCE: &str =
+    include_str!("fixtures/source-case-class-product2-3.9.0/Positive.scala");
 const CASE_BINDER_ESCAPE: &str =
     include_str!("fixtures/source-case-class-match-3.9.0/CaseBinderEscape.scala");
 const NON_CASE_MISSING_EXTRACTOR: &str =
@@ -58,6 +61,451 @@ fn frozen_source_case_class_match_methods_type_as_whole_defdefs() {
         first,
         "reordered declarations preserve canonical extractor and selector identities"
     );
+}
+
+#[test]
+fn flagged_product2_whole_method_baseline() {
+    let first = flagged_positive_session(SourceId::from_index(1970));
+    let second = flagged_positive_session(SourceId::from_index(2970));
+    assert_eq!(
+        first, second,
+        "two independent source sessions normalize identically"
+    );
+}
+
+#[test]
+fn flagged_product2_late_case_failure_rolls_back_before_valid_sibling() {
+    let text = FLAGGED_SOURCE.replace(
+        "if enabled then value else 0",
+        "if enabled then true else 0",
+    );
+    let source = SourceId::from_index(1971);
+    let mut session = Session::new(&text, source);
+    let select = session.method_named("select");
+    let classify = session.method_named("classify");
+    let select_symbol = session.index.symbol_at(source, select).unwrap();
+    let class = flagged_class_symbol(&session, source);
+    let unapply = session
+        .index
+        .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
+        .unwrap();
+    session.with_typer(|_, _, index, _, typer| {
+        let before_store = typer.store().checkpoint();
+        let before_typed = typer.typed_ast().checkpoint();
+        let before_mappings = typer.source_typed_index().len();
+        let error = typer
+            .type_method_definition(select)
+            .expect_err("the Boolean then-branch violates the declared Int result");
+        assert!(matches!(
+            error,
+            TyperError::ExpectedExpressionTypeMismatch { .. }
+        ));
+        assert_eq!(typer.store().checkpoint(), before_store);
+        assert_eq!(typer.typed_ast().checkpoint(), before_typed);
+        assert_eq!(typer.source_typed_index().len(), before_mappings);
+        assert!(typer.source_typed_index().get(source, select).is_none());
+        assert_eq!(
+            *typer.store().symbols.info(select_symbol),
+            SymbolInfo::Missing
+        );
+        assert_eq!(*typer.store().symbols.info(unapply), SymbolInfo::Missing);
+        assert_eq!(
+            index.generated_case_class_method_identity(unapply),
+            Some(dotty_core::GeneratedCaseClassMethod {
+                class,
+                role: GeneratedCaseClassMethodRole::Unapply,
+            })
+        );
+        let sibling = typer
+            .type_method_definition(classify)
+            .expect("valid classify method remains typeable after rollback");
+        assert!(matches!(
+            typer.typed_ast().get(sibling).kind,
+            TreeKind::DefDef(_)
+        ));
+    });
+}
+
+#[test]
+fn flagged_product2_negative_matrix_rejects_without_publishing_roots() {
+    let cases = [
+        (
+            "wrong_nested_literal_type",
+            FLAGGED_SOURCE.replace("Flagged(0, true)", "Flagged(true, 0)"),
+            "classify",
+        ),
+        (
+            "wrong_arity_one",
+            FLAGGED_SOURCE.replace("Flagged(value, enabled)", "Flagged(value)"),
+            "select",
+        ),
+        (
+            "wrong_arity_three",
+            FLAGGED_SOURCE.replace("Flagged(value, enabled)", "Flagged(value, enabled, 0)"),
+            "select",
+        ),
+        (
+            "wrong_declared_result",
+            FLAGGED_SOURCE.replace(
+                "def classify(item: Flagged): Int",
+                "def classify(item: Flagged): Boolean",
+            ),
+            "classify",
+        ),
+        (
+            "cross_case_binder_escape",
+            "package matching\ncase class Flagged(value: Int, enabled: Boolean)\nobject Matcher:\n  def classify(item: Flagged): Int =\n    item match\n      case Flagged(value, _) => value\n      case _ => value".to_owned(),
+            "classify",
+        ),
+        (
+            "missing_case_class_extractor_identity",
+            "package matching\nclass Flagged(val value: Int, val enabled: Boolean)\nobject Matcher:\n  def select(item: Flagged): Int =\n    item match\n      case Flagged(value, enabled) => value".to_owned(),
+            "select",
+        ),
+    ];
+    for (offset, (label, text, method_name)) in cases.into_iter().enumerate() {
+        let source = SourceId::from_index(1980 + offset as u32);
+        let mut session = Session::new(&text, source);
+        let method = session.method_named(method_name);
+        session.with_typer(|_, _, _, _, typer| {
+            let before_store = typer.store().checkpoint();
+            let before_typed = typer.typed_ast().checkpoint();
+            let before_mappings = typer.source_typed_index().len();
+            let error = typer
+                .type_method_definition(method)
+                .expect_err("the bounded malformed root is rejected");
+            let expected = match label {
+                "wrong_nested_literal_type" => {
+                    matches!(error, TyperError::PatternTypeMismatch { .. })
+                }
+                "wrong_arity_one" | "wrong_arity_three" => matches!(
+                    error,
+                    TyperError::ExtractorPatternArityUnsupported { .. }
+                        | TyperError::ExtractorProductSelectorCountMismatch { .. }
+                ),
+                "wrong_declared_result" => {
+                    matches!(error, TyperError::ExpectedExpressionTypeMismatch { .. })
+                }
+                "cross_case_binder_escape" => matches!(
+                    error,
+                    TyperError::TermNameNotFound { .. }
+                        | TyperError::UnsupportedTermReference { .. }
+                ),
+                "missing_case_class_extractor_identity" => {
+                    matches!(error, TyperError::ExtractorQualifierNotFound { .. })
+                }
+                _ => unreachable!(),
+            };
+            assert!(expected, "{label}: unexpected diagnostic {error:?}");
+            assert_eq!(
+                typer.store().checkpoint(),
+                before_store,
+                "{label}: semantic rollback"
+            );
+            assert_eq!(
+                typer.typed_ast().checkpoint(),
+                before_typed,
+                "{label}: typed arena rollback"
+            );
+            assert_eq!(
+                typer.source_typed_index().len(),
+                before_mappings,
+                "{label}: source index rollback"
+            );
+            assert!(
+                typer.source_typed_index().get(source, method).is_none(),
+                "{label}: no typed root mapping"
+            );
+        });
+    }
+}
+
+#[test]
+fn flagged_product2_requires_canonical_product_identity() {
+    let source = SourceId::from_index(1990);
+    let mut session = Session::new(FLAGGED_SOURCE, source);
+    let method = session.method_named("select");
+    session.with_typer_without_resolver(|_, _, _, _, typer| {
+        let error = typer
+            .type_method_definition(method)
+            .expect_err("Product cannot be guessed without its canonical classpath identity");
+        assert!(matches!(error, TyperError::TypeNameNotFound { name, .. } if typer.store().names.resolve(name.text()) == "Product"), "{error:?}");
+    });
+}
+
+fn flagged_positive_session(source: SourceId) -> Vec<String> {
+    let mut session = Session::new(FLAGGED_SOURCE, source);
+    let class = flagged_class_symbol(&session, source);
+    let class_tree = session
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, _)| {
+            (session.index.symbol_at(source, tree) == Some(class)).then_some(tree)
+        })
+        .unwrap();
+    assert_eq!(class_tree.index(), 8, "frozen Flagged class source tree");
+    let companion = session.store.symbols.get(class).links.companion.unwrap();
+    assert!(
+        matches!(session.store.symbols.get(class).origin, SymbolOrigin::Source(id) if id == source)
+    );
+    assert_eq!(
+        session.store.symbols.get(companion).links.companion,
+        Some(class)
+    );
+    let unapply = session
+        .index
+        .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
+        .expect("original generated Flagged.unapply");
+    let class_scope = session.index.scope_of(class).expect("Flagged class scope");
+    let mut selectors = Vec::new();
+    for (spelling, expected_tree, expected_span) in [("_1", 2, (37, 47)), ("_2", 4, (49, 65))] {
+        let name = Name::new(session.store.names.intern(spelling), Namespace::Term);
+        let [selector] = session.store.scopes.get(class_scope).lookup_all(&name) else {
+            panic!("Flagged has exactly one {spelling} selector");
+        };
+        assert_eq!(session.store.symbols.get(*selector).owner, Some(class));
+        assert_eq!(
+            session.store.symbols.get(*selector).kind,
+            SymbolKind::Method
+        );
+        let source_fields = session
+            .parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| {
+                (session.index.derived_symbol_at(class, source, tree) == Some(*selector))
+                    .then_some((tree, node.position.unwrap().span().range()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            source_fields.len(),
+            1,
+            "unique source field provenance for {spelling}"
+        );
+        assert_eq!(source_fields[0].0.index(), expected_tree);
+        assert_eq!(
+            (source_fields[0].1.start(), source_fields[0].1.end()),
+            expected_span
+        );
+        selectors.push(*selector);
+    }
+
+    let methods = ["select", "classify"]
+        .into_iter()
+        .map(|name| {
+            let method = session.method_named(name);
+            let span = session
+                .parsed
+                .ast
+                .get(method)
+                .position
+                .unwrap()
+                .span()
+                .range();
+            (name, method, span)
+        })
+        .collect::<Vec<_>>();
+    session.with_typer(|_, parsed, index, definitions, typer| {
+        let class_info = typer.complete_symbol(class).expect("complete source Flagged");
+        let Some(Type::ClassInfo(class_info)) = typer.store().types.try_get(class_info) else {
+            panic!("Flagged has complete ClassInfo");
+        };
+        let product = class_info
+            .parents
+            .iter()
+            .find_map(|parent| match typer.store().types.try_get(*parent) {
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. })
+                    if typer.store().names.resolve(typer.store().symbols.get(*symbol).name.text()) == "Product"
+                        && matches!(typer.store().symbols.get(*symbol).origin, SymbolOrigin::Tasty(_)) => Some(*symbol),
+                _ => None,
+            })
+            .expect("canonical scala.Product TASTy parent");
+        assert_eq!(typer.store().symbols.get(product).kind, SymbolKind::Trait);
+        assert_eq!(typer.store().names.resolve(typer.store().symbols.get(product).name.text()), "Product");
+        let unapply_type = typer.complete_symbol(unapply).expect("generated unapply signature");
+        let Some(Type::Method(unapply_type)) = typer.store().types.try_get(unapply_type) else {
+            panic!("generated unapply has a complete MethodType");
+        };
+        assert_eq!(unapply_type.params.len(), 1);
+        assert!(matches!(typer.store().types.try_get(unapply_type.params[0].ty), Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == class));
+        assert!(matches!(typer.store().types.try_get(unapply_type.result), Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == class));
+        let mut summaries = Vec::new();
+        let mut method_binders = Vec::new();
+        for (name, method, span) in methods {
+            let expected = if name == "select" { (24, 86, 208, 1) } else { (44, 212, 332, 2) };
+            assert_eq!((method.index(), span.start(), span.end()), (expected.0, expected.1, expected.2));
+            let method_symbol = index.symbol_at(source, method).unwrap();
+            let owner = typer.store().symbols.get(method_symbol).owner.unwrap();
+            assert_eq!(typer.store().symbols.get(owner).kind, SymbolKind::ModuleClass);
+            assert_eq!(typer.store().names.resolve(typer.store().symbols.get(owner).name.text()), "Matcher$");
+
+            let typed_method = typer.type_method_definition(method).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            println!("ISSUE1970_TYPED_ROOT\t{source:?}\t{name}\tPositive.scala#tree{}\t{}:{}\ttyped#tree{}", method.index(), span.start(), span.end(), typed_method.index());
+            assert_mapping(typer.source_typed_index(), source, method);
+            assert_eq!(typer.source_typed_index().get(source, method), Some(typed_method));
+            let signature = match *typer.store().symbols.info(method_symbol) {
+                SymbolInfo::Complete(signature) => signature,
+                other => panic!("{name} signature is incomplete: {other:?}"),
+            };
+            let Some(Type::Method(signature)) = typer.store().types.try_get(signature) else {
+                panic!("{name} signature is not a MethodType");
+            };
+            assert_eq!(signature.params.len(), 1);
+            assert!(matches!(typer.store().types.try_get(signature.params[0].ty), Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == class));
+            assert_eq!(signature.result, definitions.int);
+
+            let TreeKind::DefDef(typed_definition) = &typer.typed_ast().get(typed_method).kind else {
+                panic!("{name} is a complete typed DefDef");
+            };
+            let source_definition = match &parsed.ast.get(method).kind {
+                TreeKind::DefDef(definition) => definition,
+                _ => unreachable!(),
+            };
+            assert_eq!(typed_definition.value_param_clauses[0].len(), 1);
+            assert_mapping(typer.source_typed_index(), source, source_definition.value_param_clauses[0][0]);
+            assert_mapping(typer.source_typed_index(), source, source_definition.tpt);
+            assert_eq!(typer.source_typed_index().get(source, source_definition.tpt), Some(typed_definition.tpt));
+            assert_eq!(typer.typed_ast().get(typed_definition.tpt).ty, definitions.int);
+            let source_rhs = source_definition.rhs.unwrap();
+            let typed_rhs = typed_definition.rhs.unwrap();
+            assert_mapping(typer.source_typed_index(), source, source_rhs);
+            assert_eq!(typer.source_typed_index().get(source, source_rhs), Some(typed_rhs));
+            let TreeKind::Match(typed_match) = &typer.typed_ast().get(typed_rhs).kind else {
+                panic!("{name} RHS is Match");
+            };
+            let TreeKind::Match(source_match) = &parsed.ast.get(source_rhs).kind else {
+                panic!("frozen RHS remains Match");
+            };
+            assert_eq!(typed_match.cases.len(), expected.3);
+            assert_eq!(typer.typed_ast().get(typed_rhs).ty, definitions.int);
+            assert_mapping(typer.source_typed_index(), source, source_match.selector);
+            let typed_selector = typer.source_typed_index().get(source, source_match.selector).unwrap();
+            let parameter_symbol = index.symbol_at(source, source_definition.value_param_clauses[0][0]).unwrap();
+            assert!(matches!(typer.store().types.try_get(typer.typed_ast().get(typed_selector).ty), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == parameter_symbol));
+            let mut case_shapes = Vec::new();
+            for (case_index, (source_case, typed_case)) in source_match.cases.iter().zip(&typed_match.cases).enumerate() {
+                assert_mapping(typer.source_typed_index(), source, *source_case);
+                assert_eq!(typer.source_typed_index().get(source, *source_case), Some(*typed_case));
+                let TreeKind::CaseDef(source_case_node) = &parsed.ast.get(*source_case).kind else { panic!("source CaseDef") };
+                let TreeKind::CaseDef(typed_case_node) = &typer.typed_ast().get(*typed_case).kind else { panic!("typed CaseDef") };
+                assert_mapping(typer.source_typed_index(), source, source_case_node.pattern);
+                assert_eq!(typer.source_typed_index().get(source, source_case_node.pattern), Some(typed_case_node.pattern));
+                assert_mapping(typer.source_typed_index(), source, source_case_node.body);
+                let typed_body = typer.source_typed_index().get(source, source_case_node.body).unwrap();
+                let TreeKind::UnApply(typed_unapply) = &typer.typed_ast().get(typed_case_node.pattern).kind else { panic!("typed UnApply") };
+                assert_eq!(typed_symbol(typer.typed_ast(), typer.store(), typed_unapply.function), unapply);
+                assert_eq!(index.generated_case_class_method_identity(unapply), Some(dotty_core::GeneratedCaseClassMethod { class, role: GeneratedCaseClassMethodRole::Unapply }));
+                let unapply_owner = typer.store().symbols.get(unapply).owner.unwrap();
+                assert_eq!(typer.store().symbols.get(unapply_owner).kind, SymbolKind::ModuleClass);
+                assert_eq!(typer.store().names.resolve(typer.store().symbols.get(unapply_owner).name.text()), "Flagged$");
+                assert_eq!(typed_unapply.patterns.len(), 2);
+                let TreeKind::Apply(source_apply) = &parsed.ast.get(source_case_node.pattern).kind else { panic!("source extractor application") };
+                let source_qualifier = source_apply.function;
+                assert_mapping(typer.source_typed_index(), source, source_qualifier);
+                assert!(matches!(parsed.ast.get(source_qualifier).kind, TreeKind::Ident(_) | TreeKind::Select(_)));
+                let TreeKind::Select(typed_selection) = &typer.typed_ast().get(typed_unapply.function).kind else { panic!("typed companion extractor") };
+                assert_eq!(typer.source_typed_index().get(source, source_qualifier), Some(typed_selection.qualifier));
+                for (source_pattern, typed_pattern) in source_apply.args.iter().zip(&typed_unapply.patterns) {
+                    assert_mapping(typer.source_typed_index(), source, *source_pattern);
+                    assert_eq!(typer.source_typed_index().get(source, *source_pattern), Some(*typed_pattern));
+                }
+                let mut case_binders = Vec::new();
+                match (name, case_index) {
+                    ("select", 0) => {
+                        for (position, (wanted_name, wanted_type)) in [("value", definitions.int), ("enabled", definitions.boolean)].into_iter().enumerate() {
+                            let source_pattern = source_apply.args[position];
+                            let typed_pattern = typed_unapply.patterns[position];
+                            let TreeKind::Bind(binding) = &typer.typed_ast().get(typed_pattern).kind else { panic!("case-local {wanted_name} binder") };
+                            let binder = typed_symbol(typer.typed_ast(), typer.store(), typed_pattern);
+                            assert_eq!(typer.store().names.resolve(binding.name.text()), wanted_name);
+                            assert_eq!(*typer.store().symbols.info(binder), SymbolInfo::Complete(wanted_type));
+                            assert_eq!(typer.store().symbols.get(binder).owner, Some(method_symbol));
+                            assert!(matches!(typer.store().symbols.get(binder).origin, SymbolOrigin::Source(id) if id == source));
+                            assert!(matches!(typer.typed_ast().get(binding.body).kind, TreeKind::Ident(_)));
+                            let span = parsed.ast.get(source_pattern).position.unwrap().span().range();
+                            case_shapes.push(format!("Bind({wanted_name}:{})@{}:{}", if position == 0 { "Int" } else { "Boolean" }, span.start(), span.end()));
+                            method_binders.push(binder);
+                            case_binders.push(binder);
+                        }
+                        let TreeKind::Block(source_block) = &parsed.ast.get(source_case_node.body).kind else { panic!("source select body block") };
+                        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_body).kind else { panic!("typed select body block") };
+                        assert_mapping(typer.source_typed_index(), source, source_block.expr);
+                        assert_eq!(typer.source_typed_index().get(source, source_block.expr), Some(typed_block.expr));
+                        let TreeKind::If(source_if) = &parsed.ast.get(source_block.expr).kind else { panic!("source select If") };
+                        let TreeKind::If(typed_if) = &typer.typed_ast().get(typed_block.expr).kind else { panic!("typed select If") };
+                        assert_eq!(typed_symbol(typer.typed_ast(), typer.store(), typed_if.cond), case_binders[1]);
+                        assert_eq!(typed_symbol(typer.typed_ast(), typer.store(), typed_if.then_branch), case_binders[0]);
+                        assert_eq!(*typer.store().symbols.info(case_binders[1]), SymbolInfo::Complete(definitions.boolean));
+                        assert_eq!(*typer.store().symbols.info(case_binders[0]), SymbolInfo::Complete(definitions.int));
+                        assert!(matches!(typer.store().types.try_get(typer.typed_ast().get(typed_if.else_branch).ty), Some(Type::Constant(Constant::Int(0)))));
+                        for source_tree in [source_if.cond, source_if.then_branch, source_if.else_branch] {
+                            assert_mapping(typer.source_typed_index(), source, source_tree);
+                        }
+                        assert_eq!(typer.source_typed_index().get(source, source_if.cond), Some(typed_if.cond));
+                        assert_eq!(typer.source_typed_index().get(source, source_if.then_branch), Some(typed_if.then_branch));
+                        assert_eq!(typer.source_typed_index().get(source, source_if.else_branch), Some(typed_if.else_branch));
+                    }
+                    ("classify", 0) => {
+                        for (position, wanted_literal) in [Constant::Int(0), Constant::Boolean(true)].into_iter().enumerate() {
+                            let typed_pattern = typed_unapply.patterns[position];
+                            assert!(matches!(typer.typed_ast().get(typed_pattern).kind, TreeKind::Literal(_)));
+                            assert_eq!(typer.store().types.try_get(typer.typed_ast().get(typed_pattern).ty), Some(&Type::Constant(wanted_literal)));
+                        }
+                        case_shapes.push("Literal(0:Int),Literal(true:Boolean)".to_owned());
+                    }
+                    ("classify", 1) => {
+                        let TreeKind::Bind(binding) = &typer.typed_ast().get(typed_unapply.patterns[0]).kind else { panic!("classify value binder") };
+                        let binder = typed_symbol(typer.typed_ast(), typer.store(), typed_unapply.patterns[0]);
+                        assert_eq!(typer.store().names.resolve(binding.name.text()), "value");
+                        assert_eq!(*typer.store().symbols.info(binder), SymbolInfo::Complete(definitions.int));
+                        assert_eq!(typer.store().symbols.get(binder).owner, Some(method_symbol));
+                        assert!(matches!(typer.store().symbols.get(binder).origin, SymbolOrigin::Source(id) if id == source));
+                        assert!(matches!(typer.typed_ast().get(typed_unapply.patterns[1]).kind, TreeKind::Ident(_)));
+                        assert_eq!(typer.typed_ast().get(typed_unapply.patterns[1]).ty, definitions.boolean);
+                        assert_eq!(typer.store().names.resolve(match &typer.typed_ast().get(typed_unapply.patterns[1]).kind { TreeKind::Ident(ident) => ident.name.text(), _ => unreachable!() }), "_");
+                        assert_eq!(typed_symbol(typer.typed_ast(), typer.store(), typed_body), binder);
+                        method_binders.push(binder);
+                        case_binders.push(binder);
+                        case_shapes.push("Bind(value:Int),Wildcard(Boolean)".to_owned());
+                    }
+                    _ => unreachable!("only the two frozen methods are expected"),
+                }
+            }
+            let normalized = format!("{name}|Positive.scala#tree{}|{}:{}|typed#tree{}|matching.Flagged|matching.Matcher|(Flagged):Int|scala.Product|_1:Int@Flagged|_2:Boolean@Flagged|Flagged$.unapply|{}", expected.0, expected.1, expected.2, typed_method.index(), case_shapes.join(";"));
+            summaries.push(normalized);
+        }
+        assert_eq!(selectors.len(), 2);
+        for (selector, expected_type) in selectors.into_iter().zip([definitions.int, definitions.boolean]) {
+            let selector_info = typer.complete_symbol(selector).expect("complete canonical source selector");
+            let Some(Type::Method(selector_type)) = typer.store().types.try_get(selector_info) else { panic!("selector is parameterless method") };
+            assert!(selector_type.params.is_empty());
+            assert_eq!(selector_type.result, expected_type);
+        }
+        assert_eq!(method_binders.len(), 3);
+        assert_eq!(method_binders.iter().copied().collect::<std::collections::HashSet<_>>().len(), 3, "each case binder has independent identity");
+        summaries
+    })
+}
+
+fn flagged_class_symbol(session: &Session, source: SourceId) -> SymbolId {
+    session
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if session
+                    .store
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    == "Flagged" =>
+            {
+                session.index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+        .expect("source Flagged symbol")
 }
 
 #[test]
@@ -753,6 +1201,33 @@ impl Session {
             &self.packages,
         )
         .with_resolver(Box::new(resolver));
+        action(
+            self.source,
+            &self.parsed,
+            &self.index,
+            self.definitions,
+            &mut typer,
+        )
+    }
+
+    fn with_typer_without_resolver<R>(
+        &mut self,
+        action: impl FnOnce(
+            SourceId,
+            &dotty_parser::ParseResult,
+            &dotty_core::SourceSemanticIndex,
+            Definitions,
+            &mut SourceTyper<'_>,
+        ) -> R,
+    ) -> R {
+        let mut typer = SourceTyper::new(
+            &self.parsed.ast,
+            self.source,
+            &self.index,
+            &mut self.store,
+            self.definitions,
+            &self.packages,
+        );
         action(
             self.source,
             &self.parsed,
