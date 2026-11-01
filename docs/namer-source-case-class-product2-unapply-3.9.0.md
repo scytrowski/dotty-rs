@@ -17,9 +17,12 @@ overloads defer naming instead of publishing a second candidate. The pinned
 Scala 3.9 oracle classifications for the source fixture are in
 `crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0/scala-matrix.tsv`.
 
-This increment does not generate `_1`/`_2`, complete a `MethodType`, or type a
-`Match`. The Typer fixture's original `rust-baseline.tsv` remains the explicit
-pre-identity historical record. The lookup-only current result is kept in
+At the point recorded by this increment, `_1`/`_2` had not yet been published.
+The follow-up selector identity increment is documented in
+[`namer-source-case-class-product2-selectors-3.9.0.md`](namer-source-case-class-product2-selectors-3.9.0.md).
+Neither increment completes a `MethodType` or types a `Match`. The Typer
+fixture's original `rust-baseline.tsv` remains the explicit pre-identity
+historical record. The lookup-only result after unapply identity is kept in
 `rust-after-unapply-identity.tsv`: extractor lookup reaches the canonical
 method, then the existing one-field completion path reports
 `MalformedMethodClause`; no typed root is published. Before/after identity summaries are in

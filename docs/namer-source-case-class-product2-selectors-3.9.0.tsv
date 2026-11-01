@@ -1,0 +1,3 @@
+state	class	selector	owner	provenance	field
+before	matching.Flagged	_1, _2	absent	absent	value,enabled
+after	matching.Flagged	_1 from value; _2 from enabled	Flagged	separate original constructor ValDefs	value: Int, enabled: Boolean; no _3

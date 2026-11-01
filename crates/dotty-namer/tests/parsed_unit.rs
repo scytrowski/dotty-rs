@@ -1,7 +1,7 @@
 use dotty_core::{
-    HardKeyword, Packages, Punctuation, ScannerEvent, SemanticStore, SourceId, SourceText,
-    SymbolFlags, SymbolKind, TermName, TextRange, Token, TokenKind, TokenSource, TokenValue,
-    TreeKind, TypeName, Visibility,
+    GeneratedCaseClassMethodRole, HardKeyword, Packages, Punctuation, ScannerEvent, SemanticStore,
+    SourceId, SourceText, SymbolFlags, SymbolKind, TermName, TextRange, Token, TokenKind,
+    TokenSource, TokenValue, TreeKind, TypeName, Visibility,
 };
 use dotty_namer::{
     NamerDiagnostic, NamerError, NamerIssue, NamingOutcome, SourceContextId, SourceDefinition,
@@ -64,6 +64,173 @@ fn named_source_tree_name(
         .expect("source definition should have a symbol");
     let name = named.store.symbols.get(symbol).name;
     named.store.names.resolve(name.text()).to_owned()
+}
+
+#[test]
+fn flagged_product_selectors_have_independent_class_owned_provenance() {
+    for (source_text, source_id) in [
+        (
+            "package matching\ncase class Flagged(value: Int, enabled: Boolean)\ncase class Other(x: String)",
+            1962,
+        ),
+        (
+            "package matching\ncase class Other(x: String)\ncase class Flagged(value: Int, enabled: Boolean)",
+            1963,
+        ),
+    ] {
+        let mut named = named_source(source_text, source_id);
+        let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+            panic!("source should have package root");
+        };
+        let class_tree = *package
+            .stats
+            .iter()
+            .find(|tree| {
+                matches!(&named.parsed.ast.get(**tree).kind, TreeKind::TypeDef(definition)
+                if named.store.names.resolve(definition.name.as_name().text()) == "Flagged")
+            })
+            .expect("Flagged declaration should exist");
+        let TreeKind::TypeDef(definition) = &named.parsed.ast.get(class_tree).kind else {
+            unreachable!()
+        };
+        let TreeKind::Template(template) = &named.parsed.ast.get(definition.rhs).kind else {
+            unreachable!()
+        };
+        let TreeKind::DefDef(constructor) = &named.parsed.ast.get(template.constructor).kind else {
+            unreachable!()
+        };
+        let class_symbol = named.index.symbol_at(named.source, class_tree).unwrap();
+        let class_scope = named.index.scope_of(class_symbol).unwrap();
+        let expected = [("value", "_1"), ("enabled", "_2")];
+        for (parameter_tree, (field_name, selector_name)) in
+            constructor.value_param_clauses[0].iter().zip(expected)
+        {
+            let field = named
+                .index
+                .symbol_at(named.source, *parameter_tree)
+                .unwrap();
+            let selector = named
+                .index
+                .derived_symbol_at(class_symbol, named.source, *parameter_tree)
+                .unwrap();
+            let field_symbol = named.store.symbols.get(field);
+            let selector_symbol = named.store.symbols.get(selector);
+            assert_eq!(
+                named.store.names.resolve(field_symbol.name.text()),
+                field_name
+            );
+            assert_eq!(field_symbol.kind, SymbolKind::Field);
+            assert_eq!(field_symbol.owner, Some(class_symbol));
+            assert_eq!(selector_symbol.kind, SymbolKind::Method);
+            assert_eq!(selector_symbol.owner, Some(class_symbol));
+            assert!(selector_symbol.flags.contains(SymbolFlags::SYNTHETIC));
+            assert_ne!(field, selector);
+            assert_eq!(
+                named.store.names.resolve(selector_symbol.name.text()),
+                selector_name
+            );
+            assert_eq!(
+                named
+                    .store
+                    .scopes
+                    .get(class_scope)
+                    .lookup(TermName::new(named.store.names.intern(selector_name)).as_name()),
+                Some(selector)
+            );
+        }
+        assert!(
+            named
+                .store
+                .scopes
+                .get(class_scope)
+                .lookup(TermName::new(named.store.names.intern("_3")).as_name())
+                .is_none()
+        );
+        for role in [
+            GeneratedCaseClassMethodRole::Apply,
+            GeneratedCaseClassMethodRole::Unapply,
+        ] {
+            let method = named
+                .index
+                .generated_case_class_method(class_symbol, role)
+                .unwrap();
+            assert_eq!(
+                named
+                    .index
+                    .generated_case_class_method_identity(method)
+                    .unwrap()
+                    .class,
+                class_symbol
+            );
+            assert_eq!(
+                named
+                    .store
+                    .symbols
+                    .get(named.store.symbols.get(method).owner.unwrap())
+                    .kind,
+                SymbolKind::ModuleClass
+            );
+        }
+    }
+}
+
+#[test]
+fn flagged_selector_collision_skips_only_the_conflicting_identity() {
+    let mut named = named_source(
+        "case class Flagged(value: Int, enabled: Boolean) { def _1: String = \"explicit\" }",
+        1964,
+    );
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("source should have package root");
+    };
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(definition) = &named.parsed.ast.get(class_tree).kind else {
+        unreachable!()
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(definition.rhs).kind else {
+        unreachable!()
+    };
+    let TreeKind::DefDef(constructor) = &named.parsed.ast.get(template.constructor).kind else {
+        unreachable!()
+    };
+    let class = named.index.symbol_at(named.source, class_tree).unwrap();
+    let params = &constructor.value_param_clauses[0];
+    assert!(
+        named
+            .index
+            .derived_symbol_at(class, named.source, params[0])
+            .is_none()
+    );
+    let selector = named
+        .index
+        .derived_symbol_at(class, named.source, params[1])
+        .unwrap();
+    assert_eq!(
+        named
+            .store
+            .names
+            .resolve(named.store.symbols.get(selector).name.text()),
+        "_2"
+    );
+    let scope = named.index.scope_of(class).unwrap();
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(scope)
+            .lookup_all(TermName::new(named.store.names.intern("_1")).as_name())
+            .len(),
+        1
+    );
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(scope)
+            .lookup_all(TermName::new(named.store.names.intern("_2")).as_name())
+            .len(),
+        1
+    );
 }
 
 fn declaration_context(
@@ -6845,23 +7012,39 @@ fn generated_product2_identity_for_two_field_case_class_is_canonical() {
             [apply]
         );
         let class_scope = named.index.scope_of(class).unwrap();
-        for selector in ["_1", "_2"] {
-            assert!(
+        for (parameter_tree, selector_name) in
+            constructor.value_param_clauses[0].iter().zip(["_1", "_2"])
+        {
+            let selector = named
+                .index
+                .derived_symbol_at(class, named.source, *parameter_tree)
+                .expect("each original constructor ValDef owns its selector provenance");
+            assert_eq!(
+                named
+                    .store
+                    .names
+                    .resolve(named.store.symbols.get(selector).name.text()),
+                selector_name
+            );
+            assert_eq!(named.store.symbols.get(selector).owner, Some(class));
+            assert_eq!(named.store.symbols.get(selector).kind, SymbolKind::Method);
+            assert_eq!(
                 named
                     .store
                     .scopes
                     .get(class_scope)
-                    .lookup_all(TermName::new(named.store.names.intern(selector)).as_name())
-                    .is_empty(),
-                "identity-only Product2 naming must not publish {selector}"
+                    .lookup_all(TermName::new(named.store.names.intern(selector_name)).as_name()),
+                [selector]
             );
         }
-        assert!(constructor.value_param_clauses[0].iter().all(|parameter| {
+        assert!(
             named
-                .index
-                .derived_symbol_at(class, named.source, *parameter)
-                .is_none()
-        }));
+                .store
+                .scopes
+                .get(class_scope)
+                .lookup_all(TermName::new(named.store.names.intern("_3")).as_name())
+                .is_empty()
+        );
 
         normalized.push((
             named.store.symbols.get(class).kind,
@@ -6914,6 +7097,41 @@ fn two_field_companion_collision_policy_preserves_identity_constraints() {
         None,
         "an exact explicit candidate replaces the generated identity"
     );
+    let class_tree = package.stats[0];
+    let TreeKind::TypeDef(definition) = &named.parsed.ast.get(class_tree).kind else {
+        unreachable!()
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(definition.rhs).kind else {
+        unreachable!()
+    };
+    let TreeKind::DefDef(constructor) = &named.parsed.ast.get(template.constructor).kind else {
+        unreachable!()
+    };
+    let class_scope = named.index.scope_of(class).unwrap();
+    for (parameter_tree, selector_name) in
+        constructor.value_param_clauses[0].iter().zip(["_1", "_2"])
+    {
+        let selector = named
+            .index
+            .derived_symbol_at(class, named.source, *parameter_tree)
+            .expect("an explicit companion unapply must not suppress class selectors");
+        assert_eq!(named.store.symbols.get(selector).owner, Some(class));
+        assert_eq!(
+            named
+                .store
+                .names
+                .resolve(named.store.symbols.get(selector).name.text()),
+            selector_name
+        );
+        assert_eq!(
+            named
+                .store
+                .scopes
+                .get(class_scope)
+                .lookup_all(TermName::new(named.store.names.intern(selector_name)).as_name()),
+            [selector]
+        );
+    }
 
     let source_text = "case class Flagged(value: Int, enabled: Boolean)\ntype Alias = Flagged\nobject Flagged { def unapply(item: Alias): Int = 0 }";
     let (parsed, source, mut store) = parsed_source(source_text, 1962);
