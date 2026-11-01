@@ -13876,21 +13876,46 @@ fn multi_argument_sibling_factory_records_rust_identity_and_pair_proof() {
     );
     assert!(observed_proof.unwrap().contains("NestedNewPair"));
 
-    let error = with_paired_jvm_tasty_batch_plan(
+    let mut observed_paired_plan = false;
+    with_paired_jvm_tasty_batch_plan(
         MULTI_ARGUMENT_FACTORY_SOURCE,
         "PairFactory.scala",
         source_id,
-        |_| (),
+        |batch| {
+            observed_paired_plan = true;
+            assert_eq!(batch.constructor_call_proofs.len(), 1);
+            let pair = batch.constructor_call_proofs[0]
+                .nested_argument_pair()
+                .expect("paired plan retains both nested callsite receipts");
+            assert_eq!(
+                pair.map(|argument| {
+                    batch.jvm_unit.store.names.resolve(
+                        batch
+                            .jvm_unit
+                            .store
+                            .symbols
+                            .get(argument.argument_formal())
+                            .name
+                            .text(),
+                    )
+                }),
+                ["first", "second"]
+            );
+            let caller = batch
+                .classes
+                .iter()
+                .find(|class| class.class == batch.constructor_call_proofs[0].caller_class())
+                .expect("the paired plan includes the factory class");
+            caller
+                .tasty_plan
+                .validate_method_bodies()
+                .expect("the same source session validates both nested method-body arguments");
+        },
     )
-    .expect_err("paired TASTy planning refuses unconsumed pair receipts");
-    let observed = format!("{error:?}");
+    .expect("paired TASTy planning validates ordered nested constructor receipts");
     assert!(
-        observed.contains("two-argument constructor receipt integration"),
-        "{observed}"
-    );
-    assert!(
-        observed.contains("paired producer still consumes singleton constructor argument bindings"),
-        "{observed}"
+        observed_paired_plan,
+        "the validated source batch reaches callback"
     );
 }
 

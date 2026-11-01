@@ -66,6 +66,16 @@ pub trait SourceTypedBindings {
         None
     }
 
+    /// Exact ordered source/typed identities for two sibling nested
+    /// constructor arguments authorized by one source frontend proof.
+    fn nested_constructor_call_pair(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<NestedConstructorCallPairBinding> {
+        None
+    }
+
     /// Exact source/typed/symbol evidence for one same-instance planned method
     /// call used as a constructor argument. Producers must derive this from
     /// the same source/typed proof session as `typed_at`.
@@ -98,6 +108,15 @@ pub struct NestedConstructorCallBinding {
     pub formal: SymbolId,
     pub formal_type: TypeId,
     pub result_type: TypeId,
+}
+
+/// Ordered pair of singleton constructor receipts and the exact caller-method
+/// formals referenced by each original leaf. Keeping leaf identities outside
+/// `NestedConstructorCallBinding` preserves its existing singleton contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NestedConstructorCallPairBinding {
+    pub calls: [NestedConstructorCallBinding; 2],
+    pub argument_formals: [SymbolId; 2],
 }
 
 /// Exact provenance retained by the source frontend's opaque planned-call

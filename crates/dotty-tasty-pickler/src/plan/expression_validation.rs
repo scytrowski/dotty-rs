@@ -2363,8 +2363,8 @@ impl Validator<'_, '_> {
         };
         if source_apply.kind != ApplyKind::Regular
             || typed_apply.kind != ApplyKind::Regular
-            || source_apply.args.len() != 1
-            || typed_apply.args.len() != 1
+            || source_apply.args.len() != typed_apply.args.len()
+            || !matches!(source_apply.args.len(), 1 | 2)
         {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
         }
@@ -2481,7 +2481,8 @@ impl Validator<'_, '_> {
             });
         };
         let constructor = *constructor;
-        self.validate_planned_primary_constructor(class, constructor)?;
+        let argument_count = source_apply.args.len();
+        self.validate_planned_primary_constructor(class, constructor, argument_count)?;
         let constructor_signature_type = self.complete(constructor)?;
         let Type::Method(constructor_signature) = self.ty(constructor_signature_type)? else {
             return Err(PickleError::MalformedType {
@@ -2502,7 +2503,18 @@ impl Validator<'_, '_> {
                 ty: typed_root.ty,
             });
         }
-        let constructor_argument_type = constructor_signature.params[0].ty;
+        if constructor_signature.kind != MethodKind::Plain
+            || constructor_signature.params.len() != argument_count
+            || constructor_signature
+                .params
+                .iter()
+                .any(|parameter| parameter.erased || parameter.varargs)
+        {
+            return Err(PickleError::MalformedType {
+                ty: constructor_signature_type,
+                role: TypeRole::ConstructorSignature,
+            });
+        }
         if source_select.name.text() != self.symbol(constructor)?.name.text()
             || p.store.names.resolve(source_select.name.text()) != "<init>"
             || typed_select.name != source_select.name
@@ -2517,9 +2529,106 @@ impl Validator<'_, '_> {
             });
         }
 
-        if method.parameter_clauses.len() != 1 || method.parameter_clauses[0].len() != 1 {
+        if method.parameter_clauses.len() != 1
+            || method.parameter_clauses[0].len() != argument_count
+        {
             return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol)));
         }
+        if argument_count == 1
+            && p.typed_bindings
+                .nested_constructor_call_pair(p.source.id, method.symbol)
+                .is_some()
+        {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        }
+        if argument_count == 2 {
+            let Some(pair_binding) = p
+                .typed_bindings
+                .nested_constructor_call_pair(p.source.id, method.symbol)
+            else {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            };
+            if p.typed_bindings
+                .nested_constructor_call(p.source.id, method.symbol)
+                .is_some()
+            {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+            for (index, ((binding, argument_formal), (source_argument_id, typed_argument_id))) in
+                pair_binding
+                    .calls
+                    .into_iter()
+                    .zip(pair_binding.argument_formals)
+                    .zip(
+                        source_apply
+                            .args
+                            .iter()
+                            .copied()
+                            .zip(typed_apply.args.iter().copied()),
+                    )
+                    .enumerate()
+            {
+                let formal = method.parameter_clauses[0][index];
+                let formal_record = self.symbol(formal)?;
+                let formal_type = match formal_record.info {
+                    SymbolInfo::Complete(ty) => ty,
+                    _ => {
+                        return Err(PickleError::MalformedType {
+                            ty: self.complete(method.symbol)?,
+                            role: TypeRole::Parameter,
+                        });
+                    }
+                };
+                if formal_record.kind != SymbolKind::Parameter
+                    || formal_record.owner != Some(method.symbol)
+                    || formal_type != p.definitions.int
+                {
+                    return Err(PickleError::Reference {
+                        symbol: formal,
+                        reason: crate::ReferenceError::Owner,
+                    });
+                }
+                if binding.source_apply != source_argument_id
+                    || binding.typed_apply != typed_argument_id
+                {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    );
+                }
+                let source_argument = self.source_tree(source_argument_id)?;
+                let typed_argument = p.typed_ast.try_get(typed_argument_id).ok_or(
+                    PickleError::InvalidTypedTree {
+                        tree: typed_argument_id,
+                    },
+                )?;
+                self.charge(1)?;
+                if !visited.insert(typed_argument_id) {
+                    return Err(PickleError::RepeatedExpression {
+                        tree: typed_argument_id,
+                    });
+                }
+                self.source_typed_binding(source_argument_id, typed_argument_id)?;
+                self.paired_source_typed_span(
+                    source_argument.position,
+                    typed_argument.position,
+                    typed_argument_id,
+                )?;
+                self.validate_nested_constructor_argument(
+                    binding,
+                    argument_formal,
+                    constructor_signature.params[index].ty,
+                    method,
+                    depth + 1,
+                    visited,
+                )?;
+            }
+            return Ok(());
+        }
+        let constructor_argument_type = constructor_signature.params[0].ty;
         let formal = method.parameter_clauses[0][0];
         let source_argument_id = source_apply.args[0];
         let typed_argument_id = typed_apply.args[0];
@@ -3077,7 +3186,7 @@ impl Validator<'_, '_> {
                 reason: crate::ReferenceError::Owner,
             });
         }
-        self.validate_planned_primary_constructor(binding.class, binding.constructor)?;
+        self.validate_planned_primary_constructor(binding.class, binding.constructor, 1)?;
         let constructor_type = self.complete(binding.constructor)?;
         let Type::Method(signature) = self.ty(constructor_type)? else {
             return Err(PickleError::MalformedType {
@@ -3132,6 +3241,19 @@ impl Validator<'_, '_> {
                 role: TypeRole::ConstructorSignature,
             });
         }
+        let caller_formal_record = self.symbol(caller_formal)?;
+        if caller_formal_record.kind != SymbolKind::Parameter
+            || caller_formal_record.owner != Some(method.symbol)
+            || !method
+                .parameter_clauses
+                .iter()
+                .any(|clause| clause.contains(&caller_formal))
+        {
+            return Err(PickleError::Reference {
+                symbol: caller_formal,
+                reason: crate::ReferenceError::Owner,
+            });
+        }
         let source_argument = self.source_tree(binding.source_argument)?;
         let typed_argument =
             p.typed_ast
@@ -3178,6 +3300,7 @@ impl Validator<'_, '_> {
         &self,
         class: SymbolId,
         constructor: SymbolId,
+        parameter_count: usize,
     ) -> Result<(), PickleError> {
         let p = self.plan;
         let class_definition = p
@@ -3235,7 +3358,7 @@ impl Validator<'_, '_> {
         };
         if !definition.type_params.is_empty()
             || definition.value_param_clauses.len() != 1
-            || definition.value_param_clauses[0].len() != 1
+            || definition.value_param_clauses[0].len() != parameter_count
             || definition
                 .source_param_clause_order
                 .as_ref()
@@ -3290,104 +3413,90 @@ impl Validator<'_, '_> {
         {
             return Err(PickleError::UnsupportedTypeReference { ty: class_type });
         }
-        let constructor_formal_tree = definition.value_param_clauses[0][0];
-        let TreeKind::ValDef(formal) = &self.source_tree(constructor_formal_tree)?.kind else {
-            return Err(PickleError::SourceShape {
-                tree: constructor_formal_tree,
-                expected: SourceRole::Parameter,
-            });
-        };
-        let TreeKind::Ident(source_type) = &self.source_tree(formal.tpt)?.kind else {
-            return Err(PickleError::SourceShape {
-                tree: formal.tpt,
-                expected: SourceRole::TypeSyntax,
-            });
-        };
-        let constructor_formal_symbol = p
-            .source_index
-            .derived_symbol_at(constructor, p.source.id, constructor_formal_tree)
-            .ok_or(PickleError::SourceDefinition {
-                symbol: constructor,
-            })?;
-        let SymbolInfo::Complete(constructor_formal_type) =
-            self.symbol(constructor_formal_symbol)?.info
-        else {
-            return Err(PickleError::IncompleteSymbol {
-                symbol: constructor_formal_symbol,
-                info: self.symbol(constructor_formal_symbol)?.info,
-            });
-        };
-        let is_int_formal = constructor_formal_type == p.definitions.int
-            && p.store.names.resolve(source_type.name.text()) == "Int";
-        let is_reference_formal =
-            self.is_planned_sibling_class_type(constructor_formal_type, Some(source_type.name));
-        if !is_int_formal && !is_reference_formal {
-            return Err(PickleError::UnsupportedTypeReference {
-                ty: constructor_formal_type,
-            });
-        }
-        self.validate_constructor_signature_and_formal(class, constructor, constructor_formal_tree)
+        let constructor_formal_trees = &definition.value_param_clauses[0];
+        self.validate_constructor_signature_and_formals(
+            class,
+            constructor,
+            constructor_formal_trees,
+        )
     }
 
-    fn validate_constructor_signature_and_formal(
+    fn validate_constructor_signature_and_formals(
         &self,
         class: SymbolId,
         constructor: SymbolId,
-        formal_tree: TreeId<Untyped>,
+        formal_trees: &[TreeId<Untyped>],
     ) -> Result<(), PickleError> {
         let p = self.plan;
-        let TreeKind::ValDef(formal) = &self.source_tree(formal_tree)?.kind else {
-            return Err(PickleError::SourceShape {
-                tree: formal_tree,
-                expected: SourceRole::Parameter,
-            });
-        };
-        let TreeKind::Ident(source_type) = &self.source_tree(formal.tpt)?.kind else {
-            return Err(PickleError::SourceShape {
-                tree: formal.tpt,
-                expected: SourceRole::TypeSyntax,
-            });
-        };
-        let formal_symbol = p
-            .source_index
-            .derived_symbol_at(constructor, p.source.id, formal_tree)
-            .ok_or(PickleError::SourceDefinition {
-                symbol: constructor,
-            })?;
-        let formal_record = self.symbol(formal_symbol)?;
-        let SymbolInfo::Complete(formal_type) = formal_record.info else {
-            return Err(PickleError::IncompleteSymbol {
-                symbol: formal_symbol,
-                info: formal_record.info,
-            });
-        };
-        let is_int_formal = formal_type == p.definitions.int
-            && p.store.names.resolve(source_type.name.text()) == "Int";
-        let reference_formal = matches!(
-            self.ty(formal_type)?,
-            Type::TypeRef {
-                prefix,
-                target: TypeRefTarget::Symbol(formal_class),
-            } if *formal_class != class
-                && self.is_planned_sibling_class_type(formal_type, Some(source_type.name))
-                && matches!(self.ty(*prefix)?, Type::TypeRef {
+        let mut formal_data = Vec::with_capacity(formal_trees.len());
+        for &formal_tree in formal_trees {
+            let TreeKind::ValDef(formal) = &self.source_tree(formal_tree)?.kind else {
+                return Err(PickleError::SourceShape {
+                    tree: formal_tree,
+                    expected: SourceRole::Parameter,
+                });
+            };
+            let TreeKind::Ident(source_type) = &self.source_tree(formal.tpt)?.kind else {
+                return Err(PickleError::SourceShape {
+                    tree: formal.tpt,
+                    expected: SourceRole::TypeSyntax,
+                });
+            };
+            let formal_symbol = p
+                .source_index
+                .derived_symbol_at(constructor, p.source.id, formal_tree)
+                .ok_or(PickleError::SourceDefinition {
+                    symbol: constructor,
+                })?;
+            let formal_record = self.symbol(formal_symbol)?;
+            let SymbolInfo::Complete(formal_type) = formal_record.info else {
+                return Err(PickleError::IncompleteSymbol {
+                    symbol: formal_symbol,
+                    info: formal_record.info,
+                });
+            };
+            let is_int_formal = formal_type == p.definitions.int
+                && p.store.names.resolve(source_type.name.text()) == "Int";
+            let reference_formal = matches!(
+                self.ty(formal_type)?,
+                Type::TypeRef {
                     prefix,
-                    target: TypeRefTarget::Symbol(package),
-                } if *prefix == p.definitions.no_prefix
-                    && Some(*package) == self.symbol(class)?.owner)
-        );
-        if (!is_int_formal && !reference_formal)
-            || formal.rhs.is_some()
-            || formal_record.kind != SymbolKind::Parameter
-            || formal_record.owner != Some(constructor)
-            || formal_record.origin != SymbolOrigin::Source(p.source.id)
-            || formal_record.visibility != Visibility::Public
-            || !formal_record.flags.is_empty()
-            || !formal_record.annotations.is_empty()
-            || formal_record.name.text() != formal.name.as_name().text()
-            || formal_record.info != SymbolInfo::Complete(formal_type)
+                    target: TypeRefTarget::Symbol(formal_class),
+                } if *formal_class != class
+                    && self.is_planned_sibling_class_type(formal_type, Some(source_type.name))
+                    && matches!(self.ty(*prefix)?, Type::TypeRef {
+                        prefix,
+                        target: TypeRefTarget::Symbol(package),
+                    } if *prefix == p.definitions.no_prefix
+                        && Some(*package) == self.symbol(class)?.owner)
+            );
+            if (!is_int_formal && !reference_formal)
+                || formal.rhs.is_some()
+                || formal_record.kind != SymbolKind::Parameter
+                || formal_record.owner != Some(constructor)
+                || formal_record.origin != SymbolOrigin::Source(p.source.id)
+                || formal_record.visibility != Visibility::Public
+                || !formal_record.flags.is_empty()
+                || !formal_record.annotations.is_empty()
+                || formal_record.name.text() != formal.name.as_name().text()
+                || formal_record.info != SymbolInfo::Complete(formal_type)
+            {
+                return Err(PickleError::UnsupportedTypeReference { ty: formal_type });
+            }
+            formal_data.push((
+                formal.name.as_name().text().to_owned(),
+                formal_type,
+                reference_formal,
+            ));
+        }
+        if formal_data.len() == 2
+            && (!formal_data.iter().all(|(_, _, is_reference)| *is_reference)
+                || !self.same_planned_sibling_class_type(formal_data[0].1, formal_data[1].1))
         {
-            return Err(PickleError::UnsupportedTypeReference { ty: formal_type });
+            return Err(self.unsupported(
+                UnsupportedFeature::PrimaryConstructorInput,
+                Some(constructor),
+            ));
         }
         let signature_type = self.complete(constructor)?;
         let Type::Method(signature) = self.ty(signature_type)? else {
@@ -3397,11 +3506,17 @@ impl Validator<'_, '_> {
             });
         };
         if signature.kind != MethodKind::Plain
-            || signature.params.len() != 1
-            || signature.params[0].name.as_name().text() != formal.name.as_name().text()
-            || signature.params[0].ty != formal_type
-            || signature.params[0].erased
-            || signature.params[0].varargs
+            || signature.params.len() != formal_data.len()
+            || signature
+                .params
+                .iter()
+                .zip(&formal_data)
+                .any(|(parameter, (name, ty, _))| {
+                    parameter.name.as_name().text() != *name
+                        || parameter.ty != *ty
+                        || parameter.erased
+                        || parameter.varargs
+                })
             || !matches!(self.ty(signature.result)?, Type::TypeRef {
                 prefix,
                 target: TypeRefTarget::Symbol(target),
