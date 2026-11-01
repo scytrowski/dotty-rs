@@ -1691,9 +1691,8 @@ fn validate_two_argument_constructor_call_candidate<'session>(
     });
     let mut ordered_argument_proofs = Vec::with_capacity(2);
     if direct_formal_arguments {
-        for index in 0..2 {
+        for (index, typed_argument) in typed_outer_args.iter().copied().enumerate() {
             let source_argument = outer_apply.args[index];
-            let typed_argument = typed_outer_args[index];
             require_source_position(
                 source_ast,
                 source_id,

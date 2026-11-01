@@ -41,6 +41,69 @@ with Rust output:
 | `PairFactory.class` | `7727e0f390d3dc4109decaffe1a87610c76253b950829292499f1643229dd0b2` |
 | `PairFactory.tasty` | `c7fe6a0e8334e8518b5f467c6253f47c531fc9ccb8831c8e51b29d185747d8e5` |
 
+## Ordered direct-formal proof (#1961 checkpoints 2-3)
+
+The read-only proof now also accepts the issue's real same-session
+`PairFactory.wrap(first: Counter, second: Counter): Pair = new Pair(first,
+second)` shape. `ConstructorArgumentProofKind::DirectFormalPair` identifies this
+case. `ConstructorArgumentProof::ordered_pair()` exposes both ordered source
+and typed argument roots, each argument's validated formal or nested-call
+origin, the two original factory formal declarations/symbols/types, and the
+Pair constructor formal declarations/symbols/types. Existing
+`NestedNewPair`, `nested_pair()`, and `nested_pair_context()` remain available
+for the nested-call case. The proof is still opaque and read-only.
+
+The formal identity comes from each typed argument's exact `TermRef` target,
+which must be one of the two canonical method parameter symbols. The verifier
+then checks its canonical source declaration, method ownership, source origin,
+completed canonical same-package `Counter` type, and exact source-to-typed
+argument edge. The source identifier spelling must also agree with that unique
+declaration. Each ordered argument keeps its own source and typed roots, so a
+valid reversal or repeated use of `first` is preserved without inferring
+identity from position or name alone. The method and Pair constructor retain
+their distinct canonical parameter identities, owners, order, and JVM metadata.
+
+Positive proof coverage uses the genuine one-session frontend and JVM unit for
+the original source, renamed package/classes/method/formals, reordered class
+and formal declarations, reversed argument order, and repeated `first` alias.
+Negative coverage rejects a duplicate typed root, swapped or stale source to
+typed argument edges, stale source/typed roots, a foreign source identity,
+method-local and class-field values, a branch expression, a `new` expression,
+mixed direct/nested origins, overloads, and source-typing failures for wrong
+arity, type, duplicate formal names, defaulted formals, generic/unsupported
+forms, and foreign owners. The paired planner does not invoke its callback for
+these rejected plans.
+
+For the valid source the direct-formal proof succeeds with one receipt. The
+paired planner then reaches the subsequent `JVM/TASTy cross-contract
+validation` stage and reports `TastyPlan(MalformedType { role: Parameter })`.
+That is the first actual downstream failure after this proof; standalone
+pickler validation still reports `Unsupported { feature: ClassMembers }` for
+the incomplete producer plan. This increment changes only the immutable
+cross-class proof and its tests/documentation. It does not change source typing,
+JVM emission, TASTy/pickler production, CLI behavior, the six Scala oracle
+artifacts above, or the #1960 compatibility accessors.
+
+Focused validation completed for this checkpoint:
+
+```sh
+cargo fmt --all -- --check
+cargo test -p dotty --test jvm_tasty_constructor_call_proofs --locked
+cargo test -p dotty --test jvm_tasty_dual_reference_forwarding --locked
+cargo test -p dotty --test jvm_source_compilation dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proof_error --locked -- --nocapture
+cargo test -p dotty --test jvm_source_compilation direct_formal_pair_proof_preserves_names_order_reversal_and_aliasing --locked -- --nocapture
+```
+
+The checked-in Scala artifact regression ran without its strict external
+compiler environment, so this checkpoint does not claim a Scala rebuild or
+consumer run. Repository format, frontend-boundary, Clippy, rustdoc, and
+workspace-test checks passed; the workspace suite was rerun with two test
+threads after the host's file-descriptor limit caused nine unrelated
+classloader tests to fail during the initial parallel run. The mandatory JDK
+21 suite passed with `DOTTY_CLASSFILE_REQUIRE_JDK=1`. The pinned Scala rebuild
+and consumer gate remains unrun because `SCALA39_ROOT` is unavailable in this
+environment.
+
 ## Pinned source and oracle
 
 [`PairFactory.scala`](../tests/fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala) is the issue's unchanged one-file producer source. It contains the original `Counter`, `Pair`, and `PairFactory` declarations in that order. Its SHA-256 is `7e40de1afb6272dbcf481baab7148801a055210216a19bdeaff85fafb40ff1bf`. The independent Scala consumer is [`Consumer.scala`](../tests/fixtures/jvm_tasty_multi_argument_constructor_calls/Consumer.scala); it is compiled separately and is not used to produce the oracle classes.
