@@ -1,6 +1,7 @@
 use dotty_core::ast::TreeKind;
 use dotty_core::{
-    Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolKind, TermName, TypeName,
+    Definitions, GeneratedCaseClassMethodRole, Packages, SemanticStore, SourceDefinition, SourceId,
+    SourceText, SymbolKind, TermName, TypeName,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
@@ -18,10 +19,11 @@ fn two_real_product2_source_roots_have_a_stable_whole_method_baseline_in_fresh_s
         "fresh sessions must preserve canonical source/owner relationships"
     );
     let actual = format!("{}\n", first.join("\n"));
-    let expected = include_str!("fixtures/source-case-class-product2-3.9.0/rust-baseline.tsv")
-        .split_once('\n')
-        .expect("baseline header")
-        .1;
+    let expected =
+        include_str!("fixtures/source-case-class-product2-3.9.0/rust-after-unapply-identity.tsv")
+            .split_once('\n')
+            .expect("baseline header")
+            .1;
     assert_eq!(actual, expected);
     for row in first {
         eprintln!("{row}");
@@ -126,10 +128,7 @@ fn analyze_session() -> (Vec<String>, Vec<String>) {
         apply.is_some(),
         "case-class apply exists in the source companion"
     );
-    assert!(
-        unapply.is_none(),
-        "the current Namer baseline lacks Flagged.unapply"
-    );
+    assert!(unapply.is_some(), "Flagged.unapply identity is present");
     assert!(
         selector_1.is_none(),
         "the current Namer baseline lacks Flagged._1"
@@ -149,6 +148,44 @@ fn analyze_session() -> (Vec<String>, Vec<String>) {
         } if definition_source == source => tree,
         definition => panic!("unexpected Flagged source definition: {definition:?}"),
     };
+    let unapply = unapply.expect("Flagged.unapply identity");
+    assert_eq!(
+        store
+            .scopes
+            .get(module_scope)
+            .lookup_all(TermName::new(store.names.intern("unapply")).as_name()),
+        [unapply],
+        "the original Flagged companion exposes one unapply candidate"
+    );
+    assert_eq!(store.symbols.get(unapply).kind, SymbolKind::Method);
+    assert_eq!(store.symbols.get(unapply).owner, Some(module_class));
+    assert_eq!(
+        index.generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply),
+        Some(unapply)
+    );
+    assert_eq!(
+        index.definition_of(unapply),
+        Some(SourceDefinition::Derived {
+            source,
+            tree: class_tree,
+        }),
+        "generated unapply provenance points back to the canonical source class"
+    );
+    assert_eq!(
+        index.generated_case_class_method_identity(unapply),
+        Some(dotty_core::GeneratedCaseClassMethod {
+            class,
+            role: GeneratedCaseClassMethodRole::Unapply,
+        })
+    );
+    let unapply_scope = index.scope_of(unapply).expect("unapply declaration scope");
+    let input = store
+        .scopes
+        .get(unapply_scope)
+        .lookup(TermName::new(store.names.intern("x$1")).as_name())
+        .expect("generated unapply's single input formal");
+    assert_eq!(store.symbols.get(input).kind, SymbolKind::Parameter);
+    assert_eq!(store.symbols.get(input).owner, Some(unapply));
     let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
         panic!("Flagged must be a class")
     };
@@ -254,43 +291,28 @@ fn analyze_session() -> (Vec<String>, Vec<String>) {
                     typed_root.is_none(),
                     "failed roots cannot enter SourceTypedIndex"
                 );
-                let TyperError::ExtractorUnapplyNotFound {
-                    tree_index,
-                    source: error_source,
-                    extractor,
+                let TyperError::MalformedMethodClause {
+                    method,
+                    method_tree_index,
+                    clause_index,
                 } = &error
                 else {
                     panic!("unexpected first blocker: {error:?}");
                 };
-                assert_eq!(*error_source, source);
                 assert_eq!(
-                    *extractor, companion,
-                    "the missing unapply belongs to Flagged$"
+                    *method, unapply,
+                    "extractor lookup must discover the canonical Flagged.unapply identity"
                 );
-                let diag = parsed
-                    .ast
-                    .iter()
-                    .find_map(|(candidate, node)| {
-                        (candidate.index() == *tree_index)
-                            .then_some(node.position.expect("diagnostic span"))
-                    })
-                    .expect("extractor error tree span");
-                let range = diag.span().range();
+                assert_eq!(*method_tree_index, class_tree.index());
+                assert_eq!(*clause_index, 0);
                 let rendered = format!(
-                    "error=ExtractorUnapplyNotFound{{source={},tree={},extractor=Flagged$}};diag=Positive.scala#tree{};diag_bytes={}:{};typed_index=absent",
-                    error_source.index(),
-                    tree_index,
-                    tree_index,
-                    range.start(),
-                    range.end()
+                    "error=MalformedMethodClause{{method=Flagged$.unapply,class_tree={},clause=0}};typed_index=absent",
+                    method_tree_index,
                 );
                 (
                     rendered,
-                    format!(
-                        "ExtractorUnapplyNotFound;diag_bytes={}:{};typed_index=absent",
-                        range.start(),
-                        range.end()
-                    ),
+                    "MalformedMethodClause;resolved=Flagged$.unapply;clause=0;typed_index=absent"
+                        .to_owned(),
                 )
             }
         };
@@ -316,7 +338,7 @@ fn analyze_session() -> (Vec<String>, Vec<String>) {
             second_parameter.start(), second_parameter.end(),
         ));
         rows.push(format!(
-            "{name}\tpath=Positive.scala#tree{}\tsource={}\tbytes={}:{}\tmethod_owner=Positive.scala#tree{}(Matcher$)\tflagged_class=Positive.scala#tree{}\tcompanion=Flagged$.linked-to-Flagged\tmodule_class=Flagged$\tapply=present\tunapply=absent\tselector_1=absent\tselector_2=absent\tfield_1=tree#{}@bytes{}-{}:value\tfield_2=tree#{}@bytes{}-{}:enabled\t{result}",
+            "{name}\tpath=Positive.scala#tree{}\tsource={}\tbytes={}:{}\tmethod_owner=Positive.scala#tree{}(Matcher$)\tflagged_class=Positive.scala#tree{}\tcompanion=Flagged$.linked-to-Flagged\tmodule_class=Flagged$\tapply=present\tunapply=present(identity-only)\tselector_1=absent\tselector_2=absent\tfield_1=tree#{}@bytes{}-{}:value\tfield_2=tree#{}@bytes{}-{}:enabled\t{result}",
             tree.index(), position.source().index(), range.start(), range.end(), method_owner_tree.index(), class_tree.index(),
             parameters[0].index(), parsed.ast.get(parameters[0]).position.unwrap().span().range().start(),
             parsed.ast.get(parameters[0]).position.unwrap().span().range().end(),

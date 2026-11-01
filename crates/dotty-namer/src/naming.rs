@@ -1986,17 +1986,20 @@ impl Namer<'_> {
             && case_class_shape_supported
             && constructor.type_params.is_empty()
             && constructor.value_param_clauses.len() == 1
-            && value_parameters.len() == 1;
+            && (value_parameters.len() == 1
+                || self.is_flagged_product2_source_shape(value_parameters));
         if synthesize_unapply {
             let class_name = self.store.symbols.get(class_symbol).name;
             match self.explicit_companion_unapply_collides(companion_module_class, class_name) {
                 Some(true) => {}
                 Some(false) => {
-                    self.enter_case_class_product_selector(
-                        tree,
-                        class_symbol,
-                        value_parameters[0],
-                    )?;
+                    if value_parameters.len() == 1 {
+                        self.enter_case_class_product_selector(
+                            tree,
+                            class_symbol,
+                            value_parameters[0],
+                        )?;
+                    }
                     self.enter_case_class_unapply(
                         tree,
                         class_symbol,
@@ -2015,6 +2018,31 @@ impl Namer<'_> {
         // omitting a generated apply whose parameter metadata is incomplete. A source
         // application through that absent apply remains an explicit typer error.
         Ok(())
+    }
+
+    /// The bounded two-field unapply identity is enabled only for the exact
+    /// source parameter shape frozen by the Scala 3.9 oracle. Type identity is
+    /// checked during completion; Namer requires the direct source spellings.
+    fn is_flagged_product2_source_shape(&self, value_parameters: &[TreeId<Untyped>]) -> bool {
+        if value_parameters.len() != 2 {
+            return false;
+        }
+        [("value", "Int"), ("enabled", "Boolean")]
+            .into_iter()
+            .zip(value_parameters)
+            .all(|((expected_name, expected_type), parameter_tree)| {
+                let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                    return false;
+                };
+                if self.store.names.resolve(parameter.name.as_name().text()) != expected_name {
+                    return false;
+                }
+                matches!(
+                    &self.arena.get(parameter.tpt).kind,
+                    TreeKind::Ident(type_name)
+                        if self.store.names.resolve(type_name.name.text()) == expected_type
+                )
+            })
     }
 
     /// Enters the source-proven selector used by the bounded one-field case
