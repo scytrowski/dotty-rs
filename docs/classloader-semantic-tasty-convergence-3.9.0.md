@@ -246,8 +246,19 @@ The address ledger was checked against both fixture indexes: `InfoBase` is
 | One-class `Open` adapter | Remains available as the existing #1928 opt-in regression | Existing `loader.rs` adapter tests |
 | Two-unit opt-in integration | Enter both units before completing parent/member references, reusing canonical package and class identity | #1929 loader integration tests |
 | Ordinary loader | Keeps legacy default TASTy output and resource priority | `tasty_loading.rs` and legacy parity tests |
-| Unsupported or malformed second unit | Return typed error and roll back only unpublished work | #1929 negative controls |
+| Pair resource selection | First classpath entry wins; a directory's TASTy resource wins over a competing class file | `info_pair_uses_first_tasty_resource_and_prefers_tasty_over_classfile` |
+| Declared root identity | Verify the decoded package and root name against the requested binary name before either declaration is entered | `info_pair_rejects_mismatched_root_before_entering_preexisting_package` |
+| Unit failure provenance | Keep failing binary name, selected `ClassOrigin`, `ClassFormat`, and nested typed cause/address | Base and wrapped malformed-resource tests; late child failure test |
+| Unsupported or malformed unit | Return typed error and roll back only unpublished work | `info_pair_fails_closed_for_an_unsupported_parent_reference`; malformed and late-failure controls |
+| Late second-unit failure and retry | Preserve a previously completed Object cache/origin and package/alias state; remove newly entered pair declarations and allow valid bytes to retry | `info_pair_late_child_failure_rolls_back_and_retries_with_original_bytes` |
+| Constructor and parameter projection | Normalize both classes' type parameters and constructor parameter types in both request orders | Pair graph comparison: `A`/empty constructor and `F`/`x:Int` |
 | Canonical Scala aliases during paired completion | Bind existing `Unit`, `Int`, `Any`, `Nothing`, and `Matchable` symbols; restore prior owners and package entries on failure | #1929 rollback control |
+
+The pinned pair has one directed cross-unit edge and no cycle. The unsupported
+dependency control mutates the child's parent reference to a same-length,
+unavailable name and verifies the loader fails closed with the selected child
+origin and no partial pair publication. A cyclic multi-unit fixture is outside
+this one-edge contract; no general cycle traversal is claimed.
 
 A first failure inside unpickler projection beyond the supported fixture
 contract is a prerequisite boundary. Record its original file, address, and
