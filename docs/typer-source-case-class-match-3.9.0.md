@@ -14,3 +14,5 @@ Focused negative tests reject a Boolean component, zero and two pattern argument
 | `classify` (`Positive.scala#tree36`, bytes 140–237) | `TypeNameNotFound(Product)`; no typed root | Complete `DefDef` → `Match` → ordered two `CaseDef`s; nested `0: Int`, second-case local `value: Int`; result `Int` |
 
 The exact machine-readable two-root receipt is `crates/dotty-typer/tests/fixtures/source-case-class-match-3.9.0/rust-before-after.tsv`. This increment does not add general reference LUBs, exhaustivity checking, pattern syntax, generated identities, JVM lowering, or TASTy emission.
+
+The pinned Scala oracle runner `crates/dotty-typer/tests/fixtures/source-case-class-match-3.9.0/run` passes with Scala revision `777528f19a58e794c9954a42f433373472ec57f8`, the eight SHA-256-verified Scala 3.9.0 runtime artifacts, and Temurin 21.0.8+9. It reports matching whole-source snapshots for `Positive.scala` and `SameSpelledExtractor.scala` and a matching bounded extractor acceptance matrix.
