@@ -199,6 +199,18 @@ impl SourceTyper<'_> {
         class_tree: TreeId<Untyped>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        let class_info = match *self.store.symbols.info(class) {
+            SymbolInfo::Complete(info) => info,
+            SymbolInfo::Missing => self.complete_symbol_inner(class, info_journal)?,
+            SymbolInfo::Deferred(_) => {
+                return Err(TyperError::DeferredSymbolCompletion { symbol: class });
+            }
+            SymbolInfo::Error => {
+                return Err(TyperError::SymbolAlreadyErrored { symbol: class });
+            }
+        };
+        self.validate_existing_class_info(class, class_info)?;
+
         let Some(TreeKind::TypeDef(class_definition)) =
             self.arena.try_get(class_tree).map(|node| &node.kind)
         else {

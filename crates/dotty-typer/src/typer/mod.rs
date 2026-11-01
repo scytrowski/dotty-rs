@@ -3950,6 +3950,100 @@ mod tests {
     }
 
     #[test]
+    fn generated_case_class_unapply_validates_and_rolls_back_source_class_info() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package matching { case class Broken(value: Int) extends MissingParent; case class Good(value: Int) }",
+        );
+        let broken = class_symbol(&parsed, &store, &index, source, "Broken");
+        let broken_unapply = index
+            .generated_case_class_method(broken, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .expect("canonical generated unapply for Broken");
+        let SourceDefinition::Canonical {
+            tree: broken_tree, ..
+        } = index.definition_of(broken).unwrap()
+        else {
+            panic!("Broken must retain its canonical source definition");
+        };
+        let broken_input = index
+            .derived_symbol_at(broken_unapply, source, broken_tree)
+            .expect("canonical generated formal for Broken.unapply");
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let checkpoint = typer.store().checkpoint();
+        let type_index_checkpoint = typer.type_index.checkpoint();
+        let first = typer
+            .complete_symbol(broken_unapply)
+            .expect_err("unapply must reject its source class with an unresolved parent");
+        assert!(
+            matches!(
+                first,
+                TyperError::TypeNameNotFound { name, .. }
+                    if typer.store().names.resolve(name.text()) == "MissingParent"
+            ),
+            "unexpected class completion error: {first:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        for (tree, _) in parsed.ast.iter() {
+            assert_eq!(
+                typer.type_index.type_at(source, tree),
+                type_index_checkpoint.type_at(source, tree)
+            );
+        }
+        assert_eq!(*typer.store().symbols.info(broken), SymbolInfo::Missing);
+        assert_eq!(
+            *typer.store().symbols.info(broken_unapply),
+            SymbolInfo::Missing
+        );
+        assert_eq!(
+            *typer.store().symbols.info(broken_input),
+            SymbolInfo::Missing
+        );
+
+        let retry = typer
+            .complete_symbol(broken_unapply)
+            .expect_err("retry must fail without retaining partial class or method state");
+        assert_eq!(format!("{retry:?}"), format!("{first:?}"));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        for (tree, _) in parsed.ast.iter() {
+            assert_eq!(
+                typer.type_index.type_at(source, tree),
+                type_index_checkpoint.type_at(source, tree)
+            );
+        }
+        assert_eq!(*typer.store().symbols.info(broken), SymbolInfo::Missing);
+        assert_eq!(
+            *typer.store().symbols.info(broken_unapply),
+            SymbolInfo::Missing
+        );
+        assert_eq!(
+            *typer.store().symbols.info(broken_input),
+            SymbolInfo::Missing
+        );
+
+        let good = class_symbol(&parsed, typer.store(), &index, source, "Good");
+        let good_unapply = typer
+            .index
+            .generated_case_class_method(good, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .expect("canonical generated unapply for Good");
+        let good_signature = typer
+            .complete_symbol(good_unapply)
+            .expect("a valid generated unapply can complete after the failed transaction");
+        let Type::Method(good_method) = typer.store().types.get(good_signature) else {
+            panic!("valid generated unapply must complete to a plain method type");
+        };
+        assert_eq!(good_method.params.len(), 1);
+        assert_eq!(type_symbol(typer.store(), good_method.params[0].ty), good);
+        assert_eq!(type_symbol(typer.store(), good_method.result), good);
+    }
+
+    #[test]
     fn unsupported_generated_case_class_unapply_shapes_defer_without_partial_signature() {
         let mut deferred_shapes = 0;
         for source_text in [
