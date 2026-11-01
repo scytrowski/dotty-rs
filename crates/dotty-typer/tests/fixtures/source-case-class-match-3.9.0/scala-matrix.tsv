@@ -1,0 +1,9 @@
+Wildcard	accepted
+WrongResult	rejected
+WrongArityZero	rejected
+WrongArityTwo	rejected
+WrongSelectorType	accepted_with_warning
+WrongConstructorType	rejected
+SameSpelledExtractor	accepted_with_warning
+ExplicitCompanion	accepted
+NonCaseControl	accepted

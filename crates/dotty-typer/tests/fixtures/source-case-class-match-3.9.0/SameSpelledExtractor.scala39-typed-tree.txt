@@ -1,0 +1,86 @@
+[[syntax trees at end of                     typer]] // SameSpelledExtractor.scala
+<package <<root>.this.matching:<root>.this.matching> {
+  case class Box([owner = constructor <init>]value: <root>.this.scala.Int)
+     extends <<<new Object:Object>.<init>:((): Object)>():Object>,
+    _root_.scala.Product, scala.this.package.Serializable {
+    [owner = class Box]val value: <root>.this.scala.Int
+    [owner = class Box]def copy(
+      [owner = method copy]value: <root>.this.scala.Int): matching.this.Box =
+      <
+        <<new matching.this.Box:matching.this.Box>.<init>:
+          ((value: <root>.this.scala.Int): matching.this.Box)>
+      (<value:<root>.this.scala.Int>):matching.this.Box>
+    [owner = class Box]def copy$default$1:
+      <root>.this.scala.Int @uncheckedVariance =
+      <Box.this.value:<root>.this.scala.Int>
+    [owner = class Box]def _1: <root>.this.scala.Int =
+      <<this:(Box.this : matching.this.Box)>.value:<root>.this.scala.Int>
+  }
+  [owner = package matching]final lazy module val Box: matching.this.Box$ =
+    <
+      <<new matching.this.Box$:matching.this.Box$>.<init>:
+        ((): matching.this.Box$)>
+    ():matching.this.Box$>
+  final module class Box$() extends <
+    <<new scala.this.AnyRef:scala.this.AnyRef>.<init>:((): Object)>():Object> {
+    this: matching.this.Box.type =>
+    [owner = object Box$]def apply(
+      [owner = method apply]value: <root>.this.scala.Int): matching.this.Box =
+      <
+        <<new matching.this.Box:matching.this.Box>.<init>:
+          ((value: <root>.this.scala.Int): matching.this.Box)>
+      (<value:<root>.this.scala.Int>):matching.this.Box>
+    [owner = object Box$]def unapply(
+      [owner = method unapply]x$1: matching.this.Box): matching.this.Box =
+      <x$1:matching.this.Box>
+    [owner = object Box$]override def toString: String =
+      <"Box":("Box" : String)>
+  }
+  [owner = package matching]final lazy module val OtherScope:
+    matching.this.OtherScope$ =
+    <
+      <<new matching.this.OtherScope$:matching.this.OtherScope$>.<init>:
+        ((): matching.this.OtherScope$)>
+    ():matching.this.OtherScope$>
+  final module class OtherScope$() extends <
+    <<new Object:Object>.<init>:((): Object)>():Object> {
+    this: matching.this.OtherScope.type =>
+    [owner = object OtherScope$]final lazy module val Box: OtherScope$.this.Box$
+       =
+      <
+        <<new OtherScope$.this.Box$:OtherScope$.this.Box$>.<init>:
+          ((): OtherScope$.this.Box$)>
+      ():OtherScope$.this.Box$>
+    final module class Box$() extends <<<new Object:Object>.<init>:((): Object)>
+      ():Object> { this: OtherScope$.this.Box.type =>
+      [owner = object Box$]def unapply(
+        [owner = method unapply]value: <root>.this.matching.Box):
+        <root>.this.scala.Option[<root>.this.scala.Int] =
+        <
+          <
+            <<<root>.this.scala.Some:<root>.this.scala.Some$>.apply:
+              ([A](value: A): <root>.this.scala.Some[A])>
+          [<root>.this.scala.Int^]:
+            ((value: <root>.this.scala.Int^):
+              <root>.this.scala.Some[<root>.this.scala.Int^])
+          >
+        (<<value:<root>.this.matching.Box>.value:<root>.this.scala.Int>):
+          <root>.this.scala.Some[<root>.this.scala.Int]>
+    }
+    [owner = object OtherScope$]def extract(
+      [owner = method extract]value: <root>.this.matching.Box):
+      <root>.this.scala.Int =
+      <<value:<root>.this.matching.Box> match
+        {
+          <case
+            <<OtherScope$.this.Box:OtherScope$.this.Box$>(
+              [owner = method extract]result @ <_:<root>.this.scala.Int>):
+              <root>.this.matching.Box>
+           =>
+            <<result:<root>.this.scala.Int> :<root>.this.scala.Int:
+              <root>.this.scala.Int>
+          :<root>.this.scala.Int>
+        }
+      :<root>.this.scala.Int>
+  }
+}:<root>.this.matching.type>
