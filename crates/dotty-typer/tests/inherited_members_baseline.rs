@@ -1,4 +1,4 @@
-use dotty_core::ast::{AstArena, TreeKind, Typed, Untyped};
+use dotty_core::ast::{AstArena, TreeKind, Typed, Untyped, UntypedNode};
 use dotty_core::types::{ClassInfo, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, Name, Namespace, Packages, SemanticStore, SourceId, SourceSemanticIndex,
@@ -1320,30 +1320,17 @@ fn analyze_candidate_session() -> Vec<String> {
                     } else {
                         parent_bias
                     };
-                    assert!(
-                        typer.typed_ast().iter().any(|(_, node)| matches!(
-                            typer.store().types.get(node.ty),
-                            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
-                                if *symbol == target
-                        )),
-                        "{name} must preserve its canonical Parent member reference"
-                    );
-                    let lambda_tree = source_rhs;
-                    let lambda = typer.source_typed_index().get(source, lambda_tree).unwrap();
-                    let TreeKind::Closure(closure) = &typer.typed_ast().get(lambda).kind else {
-                        panic!("{name} should map to a typed closure");
-                    };
-                    assert_eq!(closure.env.len(), 1);
-                    assert!(matches!(
-                        typer.store().types.get(typer.typed_ast().get(closure.env[0]).ty),
-                        Type::ThisType { class } if *class == child
-                    ));
-                    if name == "lifted" {
-                        "Parent.add"
-                    } else {
-                        "Parent.bias"
-                    }
-                    .to_owned()
+                    assert_closure_root_identity(
+                        &typer,
+                        &parsed.ast,
+                        source,
+                        source_rhs,
+                        child,
+                        parent,
+                        symbol,
+                        target,
+                        &name,
+                    )
                 };
                 let result_shape = match typer.store().symbols.info(symbol) {
                     SymbolInfo::Complete(info) => match typer.store().types.get(*info) {
@@ -1374,6 +1361,192 @@ fn analyze_candidate_session() -> Vec<String> {
         }
     }
     receipt
+}
+
+fn assert_closure_root_identity(
+    typer: &SourceTyper<'_>,
+    source_ast: &AstArena<Untyped>,
+    source: SourceId,
+    source_lambda: TreeId<Untyped>,
+    child: dotty_core::SymbolId,
+    parent: dotty_core::SymbolId,
+    root_symbol: dotty_core::SymbolId,
+    expected_member: dotty_core::SymbolId,
+    root_name: &str,
+) -> String {
+    let lambda = typer
+        .source_typed_index()
+        .get(source, source_lambda)
+        .expect("each source lambda must map within its own root");
+    let TreeKind::Closure(closure) = &typer.typed_ast().get(lambda).kind else {
+        panic!("{root_name} source lambda must map to its typed closure")
+    };
+    assert_eq!(
+        typer.typed_ast().get(lambda).position,
+        source_ast.get(source_lambda).position
+    );
+    assert_eq!(closure.env.len(), 1, "{root_name} captures Child.this");
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(closure.env[0]).ty),
+        Type::ThisType { class } if *class == child
+    ));
+
+    let closure_method = typer.typed_ast().get(closure.method);
+    let TreeKind::Ident(_) = &closure_method.kind else {
+        panic!("{root_name} closure must refer to a synthetic method symbol")
+    };
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(lambda_symbol),
+        ..
+    } = typer.store().types.get(closure_method.ty)
+    else {
+        panic!("{root_name} closure method reference must resolve to a synthetic symbol")
+    };
+    assert_eq!(
+        typer.store().symbols.get(*lambda_symbol).owner,
+        Some(root_symbol),
+        "{root_name} synthetic lambda method must be owned by its source root"
+    );
+    let method_tree = typer
+        .typed_ast()
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (definition.name.as_name() == &typer.store().symbols.get(*lambda_symbol).name)
+                .then_some(tree)
+        })
+        .expect("synthetic lambda method definition");
+    let TreeKind::DefDef(method) = &typer.typed_ast().get(method_tree).kind else {
+        unreachable!()
+    };
+    assert_eq!(method.value_param_clauses.len(), 1);
+    assert_eq!(method.value_param_clauses[0].len(), 1);
+    let TreeKind::PhaseSpecific(UntypedNode::Function(source_function)) =
+        &source_ast.get(source_lambda).kind
+    else {
+        panic!("{root_name} source root must be a lambda")
+    };
+    assert_eq!(source_function.params.len(), 1);
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .get(source, source_function.params[0]),
+        Some(method.value_param_clauses[0][0]),
+        "{root_name} source parameter maps to this synthetic method parameter"
+    );
+    let body = method.rhs.expect("synthetic lambda body");
+    let TreeKind::Apply(application) = &typer.typed_ast().get(body).kind else {
+        panic!("{root_name} synthetic lambda body must preserve its source application")
+    };
+    let local_references = std::iter::once(application.function)
+        .chain(application.args.iter().copied())
+        .filter(|tree| matches!(
+            typer.store().types.get(typer.typed_ast().get(*tree).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == expected_member
+        ))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        local_references.len(),
+        1,
+        "{root_name} synthetic method body must contain its own canonical Parent reference"
+    );
+    match typer.store().symbols.get(expected_member).kind {
+        SymbolKind::Method => {
+            let method_info = match *typer.store().symbols.info(expected_member) {
+                SymbolInfo::Complete(info) => info,
+                _ => panic!("{root_name} inherited method signature must be complete"),
+            };
+            let Type::Method(method_type) = typer.store().types.get(method_info) else {
+                panic!("{root_name} inherited method symbol must retain its method type")
+            };
+            assert_eq!(method_type.params.len(), 1);
+            assert_eq!(type_shape(typer.store(), method_type.params[0].ty), "Int");
+            assert_eq!(type_shape(typer.store(), method_type.result), "Int");
+            assert_eq!(typer.typed_ast().get(body).ty, method_type.result);
+        }
+        SymbolKind::Field => assert!(
+            matches!(
+                typer.store().types.get(typer.typed_ast().get(local_references[0]).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == expected_member
+            ),
+            "{root_name} inherited field reference must retain its canonical typed identity"
+        ),
+        other => panic!("unexpected inherited member kind {other:?}"),
+    }
+    assert_eq!(
+        typer.store().symbols.get(expected_member).owner,
+        Some(parent)
+    );
+
+    let body_source_tree = source_function.body;
+    let body_source_span = source_ast
+        .get(body_source_tree)
+        .position
+        .expect("source lambda body span")
+        .span();
+    let mapped_body = typer
+        .source_typed_index()
+        .get(source, body_source_tree)
+        .expect("source lambda application must have a root-local typed mapping");
+    assert_eq!(
+        mapped_body, body,
+        "source application maps to this closure method body"
+    );
+    assert_eq!(
+        typer
+            .typed_ast()
+            .get(body)
+            .position
+            .map(|position| position.span()),
+        Some(body_source_span)
+    );
+    let reference_span = typer
+        .typed_ast()
+        .get(local_references[0])
+        .position
+        .expect("mapped inherited reference span")
+        .span();
+    let source_reference = source_ast.iter().find_map(|(tree, node)| {
+            let span = node.position?.span();
+            (span == reference_span
+                && matches!(&node.kind, TreeKind::Ident(ident)
+                    if typer.store().names.resolve(ident.name.text()) == if root_name == "lifted" { "add" } else { "bias" }))
+            .then_some((tree, span))
+        }).expect("source inherited reference inside this lambda");
+    assert_eq!(
+        typer.source_typed_index().get(source, source_reference.0),
+        Some(local_references[0]),
+        "source inherited reference maps to this lambda body's canonical member"
+    );
+    assert_eq!(
+        typer
+            .typed_ast()
+            .get(local_references[0])
+            .position
+            .map(|position| position.span()),
+        Some(source_reference.1),
+        "inherited reference span remains attached to its original source node"
+    );
+
+    let owner = typer
+        .store()
+        .symbols
+        .get(expected_member)
+        .owner
+        .expect("inherited member owner");
+    format!(
+        "{}.{}",
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(owner).name.text()),
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(expected_member).name.text())
+    )
 }
 
 fn source_signature(name: &str) -> &'static str {
