@@ -1,5 +1,5 @@
 use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
-use dotty_core::ast::{AstArena, Typed, Untyped};
+use dotty_core::ast::{AstArena, TreeKind, Typed, Untyped};
 use dotty_core::{SourceId, SymbolId, TreeId};
 use dotty_tasty_pickler::{
     ClassStatePicklePlan, DirectFormalConstructorCallPairBinding, LocalValueBinding, PickleError,
@@ -149,6 +149,8 @@ fn direct_formal_pair_requires_the_exact_ordered_receipt_and_source_edges() {
             Err(PickleError::Unsupported { .. })
         ));
 
+        let mut coordinated_receipt = receipt;
+        coordinated_receipt.argument_formals[1] = receipt.method_formals[0];
         let mut typed_ast = AstArena::new();
         for (_, tree) in class.tasty_plan.plan().typed_ast.iter() {
             typed_ast.alloc(tree.clone());
@@ -160,11 +162,34 @@ fn direct_formal_pair_requires_the_exact_ordered_receipt_and_source_edges() {
                 class.tasty_plan,
                 source,
                 method,
-                receipt,
+                coordinated_receipt,
                 None,
                 Some(&typed_ast)
             ),
-            Err(PickleError::Unsupported { .. })
+            Err(PickleError::Unsupported { .. }) | Err(PickleError::Reference { .. })
+        ));
+
+        let mut mismatched_backquote_ast = AstArena::new();
+        for (_, tree) in class.tasty_plan.plan().typed_ast.iter() {
+            mismatched_backquote_ast.alloc(tree.clone());
+        }
+        let TreeKind::Ident(second_argument) = &mut mismatched_backquote_ast
+            .get_mut(receipt.typed_arguments[1])
+            .kind
+        else {
+            panic!("the second typed argument is an identifier")
+        };
+        second_argument.backquoted = !second_argument.backquoted;
+        assert!(matches!(
+            validate_with_typed_arena(
+                class.tasty_plan,
+                source,
+                method,
+                receipt,
+                None,
+                Some(&mismatched_backquote_ast)
+            ),
+            Err(PickleError::Unsupported { .. }) | Err(PickleError::Reference { .. })
         ));
 
         assert!(matches!(

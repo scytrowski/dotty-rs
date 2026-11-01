@@ -2853,6 +2853,32 @@ impl Validator<'_, '_> {
                     .ok_or(PickleError::InvalidTypedTree {
                         tree: argument_typed,
                     })?;
+            let (TreeKind::Ident(source_ident), TreeKind::Ident(typed_ident)) =
+                (&source_argument.kind, &typed_argument.kind)
+            else {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            };
+            let argument_formal = binding.argument_formals[index];
+            let Some(argument_formal_index) = binding
+                .method_formals
+                .iter()
+                .position(|formal| *formal == argument_formal)
+            else {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            };
+            let argument_formal_tree =
+                self.source_tree(binding.source_method_formals[argument_formal_index])?;
+            let TreeKind::ValDef(argument_formal_definition) = &argument_formal_tree.kind else {
+                return Err(PickleError::SourceShape {
+                    tree: binding.source_method_formals[argument_formal_index],
+                    expected: SourceRole::Parameter,
+                });
+            };
+            let argument_formal_record = self.symbol(argument_formal)?;
             self.charge(1)?;
             if !visited.insert(argument_typed) {
                 return Err(PickleError::RepeatedExpression {
@@ -2865,13 +2891,17 @@ impl Validator<'_, '_> {
                 typed_argument.position,
                 argument_typed,
             )?;
-            if !matches!(source_argument.kind, TreeKind::Ident(_))
-                || !matches!(typed_argument.kind, TreeKind::Ident(_))
+            if argument_formal_record.kind != SymbolKind::Parameter
+                || argument_formal_record.owner != Some(method.symbol)
+                || argument_formal_record.name != source_ident.name
+                || *argument_formal_definition.name.as_name() != source_ident.name
+                || typed_ident.name != source_ident.name
+                || typed_ident.backquoted != source_ident.backquoted
                 || !matches!(self.ty(typed_argument.ty)?, Type::TermRef {
                     prefix,
                     target: TermRefTarget::Symbol(target),
                 } if *prefix == p.definitions.no_prefix
-                    && *target == binding.argument_formals[index])
+                    && *target == argument_formal)
                 || !self
                     .same_planned_sibling_class_type(formal_type, constructor_parameters[index].ty)
             {
