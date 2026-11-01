@@ -768,10 +768,7 @@ fn frozen_cohort_is_complete_and_both_fresh_adapter_runs_are_deterministic() {
     }
     let expected =
         include_str!("../../../docs/classloader-semantic-tasty-convergence/comparison-1948.tsv");
-    assert_eq!(
-        first, expected,
-        "checked-in #1948 per-field measurement is stale"
-    );
+    assert_live_report_matches_frozen_with_selected_option_member_delta(&first, expected);
     let mut keys = HashSet::new();
     for row in first.lines().skip(1) {
         let cells = row.split('\t').collect::<Vec<_>>();
@@ -810,6 +807,75 @@ fn frozen_cohort_is_complete_and_both_fresh_adapter_runs_are_deterministic() {
         function1_type_parameters.contains(",R:"),
         "Function1's second declared parameter must be R: {function1_type_parameters}"
     );
+}
+
+fn assert_live_report_matches_frozen_with_selected_option_member_delta(
+    live: &str,
+    historical: &str,
+) {
+    let rows = |report: &str| {
+        report
+            .lines()
+            .map(|line| line.split('\t').map(str::to_owned).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    };
+    let live = rows(live);
+    let historical = rows(historical);
+    assert_eq!(
+        live.first(),
+        historical.first(),
+        "comparison schema changed"
+    );
+    assert_eq!(live.len(), 127, "the live comparison must retain 126 rows");
+    assert_eq!(
+        historical.len(),
+        127,
+        "the frozen comparison must retain its original 126 rows"
+    );
+
+    let changed = live
+        .iter()
+        .skip(1)
+        .zip(historical.iter().skip(1))
+        .filter(|(current, frozen)| current != frozen)
+        .collect::<Vec<_>>();
+    assert_eq!(changed.len(), 1, "only the selected member row may change");
+    let (current, frozen) = changed[0];
+    assert_eq!(
+        (current[0].as_str(), current[1].as_str()),
+        ("option", "member_signatures")
+    );
+    assert_eq!(current.len(), 11);
+    assert_eq!(frozen.len(), 11);
+    for column in 0..current.len() {
+        if column != 3 {
+            assert_eq!(
+                current[column], frozen[column],
+                "unapproved comparator column changed at {column}"
+            );
+        }
+    }
+    assert_eq!(current[2], "LOADER_UNSUPPORTED");
+    assert!(frozen[3].contains(
+        "getOrElse:Method:public:[B:None:bounds(scala.Option.A,Any)]=>(Error(unresolved .tasty member type: TASTy decoder could not reduce the declared type tree to a supported shape))Plain:ParamRef[0]"
+    ));
+    assert!(current[3].contains(
+        "getOrElse:Method:public:[B:None:bounds(scala.Option.A,Any)]=>(by-name(ParamRef[0]))Plain:ParamRef[0]"
+    ));
+    let current_members = current[3].split(';').collect::<Vec<_>>();
+    let frozen_members = frozen[3].split(';').collect::<Vec<_>>();
+    assert_eq!(current_members.len(), frozen_members.len());
+    let changed_members = current_members
+        .iter()
+        .zip(&frozen_members)
+        .filter(|(current, frozen)| current != frozen)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        changed_members.len(),
+        1,
+        "the member decoder change must not expand to neighboring Option signatures"
+    );
+    assert!(changed_members[0].0.starts_with("getOrElse:"));
 }
 
 #[derive(Debug, PartialEq, Eq)]

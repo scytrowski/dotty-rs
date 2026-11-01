@@ -269,3 +269,22 @@ error; do not broaden this loader increment into unrelated unpickler semantics.
 The next graph increment is deferred. This issue covers only the two files and
 single `InfoWrapped -> InfoBase` edge above. It makes no claim about general
 classpath traversal, arbitrary dependency fan-out, or inherited-member lookup.
+
+## Selected `Option.getOrElse` member projection (#1930)
+
+The bounded classloader member decoder preserves the `BYNAMETPT` wrapper for
+the frozen Scala 3.9 `Option.getOrElse` default parameter when its child is the
+method's own address-resolved `ParamRef`. The result remains that same
+method-local `ParamRef`, yielding
+`[B:None:bounds(scala.Option.A,Any)]=>(by-name(ParamRef[0]))Plain:ParamRef[0]`.
+The focused report records the fixture hash, original AST addresses, pinned
+source declaration, and negative binder cases:
+[`option-get-or-else-1930.md`](classloader-semantic-tasty-convergence/option-get-or-else-1930.md).
+
+The frozen 14-unit/126-row cohort, `comparison.tsv`, and
+`comparison-1948.tsv` are unchanged. A live run of the existing comparator
+twice in fresh sessions retained all 126 row keys; compared with the
+historical #1948 report, only the `option/member_signatures` legacy value
+changed. That row remains `LOADER_UNSUPPORTED` overall because other Option
+member signatures remain unsupported. This selected member improvement does
+not establish whole-class Option parity or general Option loading.
