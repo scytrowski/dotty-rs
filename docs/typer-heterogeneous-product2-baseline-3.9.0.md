@@ -1,7 +1,9 @@
 # Heterogeneous Product2 source baseline (Scala 3.9.0)
 
-This is an oracle and current first-blocker baseline for issue #1958. It does
-not change production Namer or Typer behavior. The immutable source is
+This document retains the frozen oracle and pre-identity baseline for issue
+#1958. The current Typer signature receipt is recorded in
+[`typer-generated-case-class-product2-unapply-signature-3.9.0.md`](typer-generated-case-class-product2-unapply-signature-3.9.0.md).
+The immutable source is
 `crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0/Positive.scala`
 (SHA-256 `4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31`).
 Its only numerator roots are `Positive.scala#tree24` (`Matcher.select`) and
@@ -58,19 +60,19 @@ explicit companion `unapply` with a tuple result and an unrelated same-spelled
 extractor are accepted with an exhaustivity warning. Those two cases are
 Scala-valid warning cases, not invalid controls.
 
-## Rust source baseline
+## Historical Rust source baseline
 
-The Rust test runs Lexer → Parser → Namer → `SourceTyper::type_method_definition`
-against the same source. Each source constructor parameter gets a distinct
-canonical field symbol with its own source tree and byte span. The source
-companion and `apply` exist, but the current Namer index has no generated
-`Flagged.unapply`, `_1`, or `_2` identity. Both whole-method attempts stop at
-the extractor with `ExtractorUnapplyNotFound`; neither method enters the
-source-to-typed index. This is the observed first blocker. Product identity or
-selector completion is downstream and is not inferred from the Scala oracle.
-The baseline uses the real source semantic store and current bootstrap
-definitions; no classpath Product identity is available in that source-session
-harness before the missing extractor blocks typing.
+The Rust test ran Lexer → Parser → Namer →
+`SourceTyper::type_method_definition` against the same source at the recorded
+baseline commit. Each constructor parameter had a distinct canonical field
+symbol, but Namer had not yet published generated `Flagged.unapply`, `_1`, or
+`_2` identities. Both whole-method attempts stopped at `ExtractorUnapplyNotFound`.
+That receipt is historical; later Namer work added the identities, and issue
+#1965 completes the generated unapply signature. The current source attempts
+now stop after unapply resolution at the missing `isEmpty` result-protocol
+member, recorded in `rust-after-product-selector-identities.tsv`. Product
+selector completion and whole Match typing remain outside that signature
+increment.
 
 The full `dotty-typer` Rust test suite passed with this fixture. Existing Box
 Match, lexical-closure, and inherited-method regressions remain in that suite;

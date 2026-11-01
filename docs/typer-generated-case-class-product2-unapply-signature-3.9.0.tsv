@@ -1,0 +1,3 @@
+phase	class	constructor_fields	generated_role	method_owner	method_type	method_info
+before	matching.Flagged	value:Int@Flagged;enabled:Boolean@Flagged	Unapply	matching.Flagged$	<no completed MethodType>	Missing; rejected by the one-field constructor-clause guard
+after	matching.Flagged	value:Int@Flagged;enabled:Boolean@Flagged	Unapply	matching.Flagged$	unapply(x$1: matching.Flagged): matching.Flagged; MethodKind::Plain; erased=false; varargs=false; input/result exact TypeRef(Symbol(matching.Flagged))	Complete; ordinary member lookup returns the same generated symbol
