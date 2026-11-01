@@ -147,9 +147,16 @@ impl SourceTyper<'_> {
             }
         };
         let callable = candidate.callable;
+        let authenticated_product_selector = member_name
+            == Name::new(self.store.names.intern("_1"), Namespace::Term)
+            && self
+                .source_case_class_product_selector_owner(candidate.symbol)
+                .is_some();
         let value_type = match self.store.types.try_get(callable) {
             Some(Type::Method(method))
-                if method.kind == MethodKind::Plain && method.params.is_empty() =>
+                if method.kind == MethodKind::Plain
+                    && method.params.is_empty()
+                    && authenticated_product_selector =>
             {
                 method.result
             }
@@ -2425,11 +2432,14 @@ mod tests {
     use crate::typer::{ExpressionContext, SourceTyper};
     use dotty_core::ast::{Ident, Tree};
     use dotty_core::{
-        Definitions, Name, Namespace, Packages, SemanticStore, SourceSemanticIndex, SourceText,
-        Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
+        Definitions, MemberRequest, Name, Namespace, Packages, ResolutionError, ResolverCheckpoint,
+        SemanticStore, SourceSemanticIndex, SourceText, Symbol, SymbolFlags, SymbolInfo,
+        SymbolKind, SymbolLinks, SymbolOrigin, SymbolResolver, Visibility,
     };
     use dotty_lexer::ContextualScanner;
     use dotty_namer::name_compilation_unit;
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     fn setup(
         source_text: &str,
@@ -2465,9 +2475,47 @@ mod tests {
         (parsed, store, packages, definitions, index, source)
     }
 
+    struct ProductResolver {
+        product: dotty_core::SymbolId,
+        should_fail: Rc<Cell<bool>>,
+        should_resolve: Rc<Cell<bool>>,
+    }
+
+    impl SymbolResolver for ProductResolver {
+        fn checkpoint(&self) -> ResolverCheckpoint {
+            ResolverCheckpoint::new(0)
+        }
+
+        fn rollback_to(&mut self, _store: &mut SemanticStore, _checkpoint: ResolverCheckpoint) {}
+
+        fn resolve_member(
+            &mut self,
+            store: &mut SemanticStore,
+            request: &MemberRequest,
+        ) -> Result<Option<dotty_core::SymbolId>, ResolutionError> {
+            if self.should_fail.get() {
+                return Err(ResolutionError::Malformed {
+                    reason: "scripted Product resolution failure".to_owned(),
+                });
+            }
+            if !self.should_resolve.get() {
+                return Ok(None);
+            }
+            Ok((store.names.resolve(request.name.text()) == "Product").then_some(self.product))
+        }
+
+        fn resolve_package(
+            &mut self,
+            _store: &mut SemanticStore,
+            _path: &[&str],
+        ) -> Result<Option<dotty_core::SymbolId>, ResolutionError> {
+            Ok(None)
+        }
+    }
+
     #[test]
     fn one_field_source_case_class_projects_its_canonical_product_selector() {
-        let source_text = "package scala { trait Product }; package matching { case class Box(value: Int); object Matcher { def unwrap(box: Box): Int = box match { case Box(value) => value } } }";
+        let source_text = "package matching { case class Box(value: Int); object Matcher { def unwrap(box: Box): Int = box match { case Box(value) => value } } }; package scala { trait Product }";
         let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
         let class = parsed
             .ast
@@ -2543,6 +2591,14 @@ mod tests {
         assert_eq!(members.len(), 1);
         let selector = members[0].symbol;
         assert_eq!(typer.store().symbols.get(selector).owner, Some(class));
+        let SymbolInfo::Complete(selector_info) = *typer.store().symbols.info(selector) else {
+            panic!("class-first completion should publish the generated selector");
+        };
+        let Some(Type::Method(selector_method)) = typer.store().types.try_get(selector_info) else {
+            panic!("expected the generated selector method type");
+        };
+        assert!(selector_method.params.is_empty());
+        assert_eq!(selector_method.result, definitions.int);
         let component = typer
             .run_expression_transaction(|typer, journal, _| {
                 typer.unary_extractor_component_type(result, parsed.root.index(), unapply, journal)
@@ -2550,6 +2606,107 @@ mod tests {
             .expect("existing unary product extractor path");
         assert_eq!(component, definitions.int);
         assert_eq!(typer.complete_symbol(class).unwrap(), class_info);
+    }
+
+    #[test]
+    fn product_selector_completes_first_and_retries_resolver_transactionally() {
+        let source_text = "package scala {}; package matching { case class Box(value: Int) }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let class_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Box" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let class = index.symbol_at(source, class_tree).unwrap();
+        let TreeKind::TypeDef(class_definition) = &parsed.ast.get(class_tree).kind else {
+            panic!("expected source Box declaration");
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+            panic!("expected source Box template");
+        };
+        let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+            panic!("expected Box primary constructor");
+        };
+        let parameter_tree = constructor.value_param_clauses[0][0];
+        let selector = index
+            .derived_symbol_at(class, source, parameter_tree)
+            .unwrap();
+        let scala = packages.symbol(&["scala"]).unwrap();
+        let product = store.symbols.alloc(Symbol {
+            name: Name::new(store.names.intern("Product"), Namespace::Type),
+            owner: Some(scala),
+            kind: SymbolKind::Trait,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Builtin,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let should_fail = Rc::new(Cell::new(true));
+        let should_resolve = Rc::new(Cell::new(false));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(ProductResolver {
+            product,
+            should_fail: should_fail.clone(),
+            should_resolve: should_resolve.clone(),
+        }));
+
+        let checkpoint = typer.store.checkpoint();
+        assert!(matches!(
+            typer.complete_symbol(selector),
+            Err(TyperError::SymbolResolution { .. })
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert_eq!(*typer.store.symbols.info(class), SymbolInfo::Missing);
+        assert_eq!(*typer.store.symbols.info(selector), SymbolInfo::Missing);
+
+        should_fail.set(false);
+        let checkpoint = typer.store.checkpoint();
+        assert!(matches!(
+            typer.complete_symbol(selector),
+            Err(TyperError::TypeNameNotFound { name, .. })
+                if typer.store.names.resolve(name.text()) == "Product"
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert_eq!(*typer.store.symbols.info(class), SymbolInfo::Missing);
+        assert_eq!(*typer.store.symbols.info(selector), SymbolInfo::Missing);
+
+        should_resolve.set(true);
+        let selector_info = typer
+            .complete_symbol(selector)
+            .expect("selector-first completion retries when Product resolves");
+        let Some(Type::Method(method)) = typer.store.types.try_get(selector_info) else {
+            panic!("expected a parameterless generated selector");
+        };
+        assert!(method.params.is_empty());
+        assert_eq!(method.result, definitions.int);
+
+        let SymbolInfo::Complete(class_info_id) = *typer.store.symbols.info(class) else {
+            panic!("selector-first completion should complete Box");
+        };
+        let Some(Type::ClassInfo(class_info)) = typer.store.types.try_get(class_info_id) else {
+            panic!("expected Box class metadata");
+        };
+        assert!(class_info.parents.iter().any(|parent| {
+            matches!(typer.store.types.try_get(*parent), Some(Type::TypeRef { target: TypeRefTarget::Symbol(found), .. }) if *found == product)
+        }));
+        assert_eq!(typer.complete_symbol(class).unwrap(), class_info_id);
     }
 
     #[test]
@@ -2616,6 +2773,139 @@ mod tests {
                 "{name} must not gain Product ancestry"
             );
         }
+    }
+
+    #[test]
+    fn malformed_ambiguous_and_foreign_product_identities_defer_transactionally() {
+        let source_text =
+            "package scala { class Product }; package matching { case class Box(value: Int) }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Box" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let checkpoint = typer.store.checkpoint();
+        assert!(matches!(
+            typer.complete_symbol(class),
+            Err(TyperError::SymbolResolution { .. })
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert_eq!(*typer.store.symbols.info(class), SymbolInfo::Missing);
+
+        let source_text =
+            "package scala { trait Product }; package matching { case class Box(value: Int) }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let scala = packages.symbol(&["scala"]).unwrap();
+        let scala_scope = packages.scope_of(scala).unwrap();
+        let duplicate = store.symbols.alloc(Symbol {
+            name: Name::new(store.names.intern("Product"), Namespace::Type),
+            owner: Some(scala),
+            kind: SymbolKind::Trait,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Builtin,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let duplicate_name = store.symbols.get(duplicate).name;
+        store
+            .scopes
+            .get_mut(scala_scope)
+            .enter(duplicate_name, duplicate);
+        let class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Box" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let checkpoint = typer.store.checkpoint();
+        assert!(matches!(
+            typer.complete_symbol(class),
+            Err(TyperError::SymbolResolution { .. })
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert_eq!(*typer.store.symbols.info(class), SymbolInfo::Missing);
+
+        let source_text =
+            "package scala {}; package foreign {}; package matching { case class Box(value: Int) }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Box" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let foreign = packages.symbol(&["foreign"]).unwrap();
+        let product = store.symbols.alloc(Symbol {
+            name: Name::new(store.names.intern("Product"), Namespace::Type),
+            owner: Some(foreign),
+            kind: SymbolKind::Trait,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Builtin,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(ProductResolver {
+            product,
+            should_fail: Rc::new(Cell::new(false)),
+            should_resolve: Rc::new(Cell::new(true)),
+        }));
+        let checkpoint = typer.store.checkpoint();
+        assert!(matches!(
+            typer.complete_symbol(class),
+            Err(TyperError::SymbolResolution { .. })
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert_eq!(*typer.store.symbols.info(class), SymbolInfo::Missing);
     }
 
     #[test]

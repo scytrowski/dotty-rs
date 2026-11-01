@@ -5,9 +5,14 @@ ordinary, explicitly typed constructor parameter and no explicit parents, the
 Namer enters a distinct class-owned `_1` method identity derived from the
 original constructor parameter. Typer completes that selector as a
 parameterless `Int` method and adds the canonical `scala.Product` parent when
-that exact Product symbol is available in the source/classpath package scope.
-The existing extractor path retrieves `_1` through normal member lookup and
-accepts its plain parameterless method result as the unary component type.
+that exact Product trait is found in the source package scope or through the
+existing symbol resolver. A resolved `scala` package with no unique Product
+defers completion transactionally, so a later resolution attempt can retry.
+The generated selector can also be completed first; that route authenticates
+its derived source identity and completes its owning class. The existing
+extractor path retrieves `_1` through normal member lookup and accepts its
+plain parameterless method result only for this authenticated generated
+selector, preserving empty-clause Option-like method rejection.
 
 This establishes the bounded product projection only. It does not claim full
 `Match` method typing: the fixture's standalone source session has no Scala
