@@ -28,12 +28,12 @@ fn multi_argument_factory_variation_matrix_records_first_paired_result() {
         (
             "renamed package-level identities",
             renamed,
-            "candidate method must have one plain formal clause",
+            "two-argument constructor receipt integration",
         ),
         (
             "reordered declarations",
             reordered,
-            "candidate method must have one plain formal clause",
+            "two-argument constructor receipt integration",
         ),
         (
             "swapped formal order",
@@ -41,7 +41,7 @@ fn multi_argument_factory_variation_matrix_records_first_paired_result() {
                 "create(first: Int, second: Int)",
                 "create(second: Int, first: Int)",
             ),
-            "candidate method must have one plain formal clause",
+            "two-argument constructor receipt integration",
         ),
         (
             "swapped nested expressions",
@@ -49,7 +49,7 @@ fn multi_argument_factory_variation_matrix_records_first_paired_result() {
                 "new Counter(first), new Counter(second)",
                 "new Counter(second), new Counter(first)",
             ),
-            "candidate method must have one plain formal clause",
+            "two-argument constructor receipt integration",
         ),
         (
             "third nested allocation",
@@ -57,7 +57,7 @@ fn multi_argument_factory_variation_matrix_records_first_paired_result() {
                 "new Counter(first), new Counter(second)",
                 "new Counter(new Counter(first).get()), new Counter(second)",
             ),
-            "candidate method must have one plain formal clause",
+            "nested Counter leaf must be an original factory formal",
         ),
         (
             "branch argument",
@@ -65,7 +65,33 @@ fn multi_argument_factory_variation_matrix_records_first_paired_result() {
                 "new Counter(first), new Counter(second)",
                 "new Counter(if first < 0 then second else first), new Counter(second)",
             ),
-            "candidate method must have one plain formal clause",
+            "nested Counter leaf must be an original factory formal",
+        ),
+        (
+            "legitimate repeated caller formal",
+            source.replace(
+                "new Counter(first), new Counter(second)",
+                "new Counter(first), new Counter(first)",
+            ),
+            "two-argument constructor receipt integration",
+        ),
+        (
+            "defaulted factory formal",
+            source.replace("create(first: Int, second: Int)", "create(first: Int = 0, second: Int)"),
+            "factory formals cannot have default values",
+        ),
+        (
+            "generic factory method",
+            source.replace("def create(", "def create[A]("),
+            "generic methods are unsupported",
+        ),
+        (
+            "overloaded factory method",
+            source.replace(
+                "    new Pair(new Counter(first), new Counter(second))",
+                "    new Pair(new Counter(first), new Counter(second))\n  def create(seed: String, other: Int): Pair =\n    new Pair(new Counter(0), new Counter(1))",
+            ),
+            "TypeNameNotFound",
         ),
         (
             "default constructor",
@@ -102,17 +128,22 @@ fn multi_argument_factory_variation_matrix_records_first_paired_result() {
         ),
     ];
     for (ordinal, (name, variant, expected)) in valid_controls.into_iter().enumerate() {
+        let mut callback_ran = false;
         let result = with_paired_jvm_tasty_batch_plan(
             &variant,
             "PairFactory.scala",
             SourceId::from_index(19130 + ordinal as u32),
-            |_| (),
+            |_| callback_ran = true,
         );
         let Err(error) = result else {
             panic!(
                 "Scala-valid but unsupported control unexpectedly passed paired planning: {name}"
             );
         };
+        assert!(
+            !callback_ran,
+            "pair rejection must precede producer callbacks: {name}"
+        );
         assert!(format!("{error:?}").contains(expected), "{name}: {error:?}");
     }
 
