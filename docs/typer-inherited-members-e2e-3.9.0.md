@@ -34,4 +34,6 @@ cargo +1.98.1 test -p dotty-typer --lib --locked lexical_closure_rollback -- --n
 
 The required [Typer focused audit workflow](https://github.com/scytrowski/dotty-rs/actions/workflows/typer-focused-audit.yml) now runs the pinned inherited-member oracle and exact Rust matrix. It uploads provenance, positive and negative receipts, cohort passes, and test logs. It fails on absent, skipped, malformed, duplicate, or mismatched evidence. Workflow run URL and reviewed head SHA are recorded with the PR checks.
 
+The first integrated run on `a0a870c334da5bafc14ab3adcd950511133f2e0c` passed [the Typer focused audit](https://github.com/scytrowski/dotty-rs/actions/runs/41257972670) and [general CI](https://github.com/scytrowski/dotty-rs/actions/runs/41257972675). The workflow artifacts record the full SHA as `pull_request_head_sha` alongside exact Scala/JDK/artifact provenance. The report-only follow-up commit adds these links; it does not change the accepted source roots or tests.
+
 Only the bounded four roots, the two unchanged 25-root cohorts, and focused controls run in hosted CI; the full Scala corpus is not run. If a later integrated run does not preserve 4/4 and the protected sets, report `SPRINT GOAL UNMET` and route the separate defect outside this acceptance gate.
