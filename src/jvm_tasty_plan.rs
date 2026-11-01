@@ -22,8 +22,9 @@ use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_d
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty_pickler::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, LocalValueBinding,
-    NestedConstructorCallBinding, PickleError, PlannedCallBinding, PrimaryConstructorInputPlan,
-    SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
+    NestedConstructorCallBinding, NestedConstructorCallPairBinding, PickleError,
+    PlannedCallBinding, PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
+    ValidatedClassStatePlan,
 };
 use dotty_typer::{SourceTyper, TyperError};
 
@@ -142,7 +143,7 @@ struct BatchSourceTypedBindings<'a> {
     planned_classes: Vec<SymbolId>,
     planned_methods: Vec<SymbolId>,
     nested_constructor_calls: Vec<(SourceId, SymbolId, NestedConstructorCallBinding)>,
-    nested_constructor_call_pairs: Vec<(SourceId, SymbolId, [NestedConstructorCallBinding; 2])>,
+    nested_constructor_call_pairs: Vec<(SourceId, SymbolId, NestedConstructorCallPairBinding)>,
     planned_calls: Vec<(SourceId, SymbolId, PlannedCallBinding)>,
     local_values: Vec<(SourceId, SymbolId, LocalValueBinding)>,
 }
@@ -180,7 +181,7 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
         &self,
         source: SourceId,
         method: SymbolId,
-    ) -> Option<[NestedConstructorCallBinding; 2]> {
+    ) -> Option<NestedConstructorCallPairBinding> {
         self.nested_constructor_call_pairs.iter().find_map(
             |(proof_source, proof_method, bindings)| {
                 (*proof_source == source && *proof_method == method).then_some(*bindings)
@@ -1254,16 +1255,6 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         phase: "cross-class constructor-call identity proof",
         reason: format!("{error:?}"),
     })?;
-    if constructor_call_proofs
-        .iter()
-        .any(|proof| proof.nested_argument_pair().is_some())
-    {
-        return Err(PairedPlanError::BatchUnit {
-            phase: "two-argument constructor receipt integration",
-            reason: "the paired producer still consumes singleton constructor argument bindings"
-                .to_owned(),
-        });
-    }
     let planned_classes = drafts
         .iter()
         .map(|draft| draft.source.class)
@@ -1310,24 +1301,28 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
             .iter()
             .filter_map(|proof| {
                 proof.nested_argument_pair().map(|pair| {
+                    let calls = pair.map(|nested| NestedConstructorCallBinding {
+                        source_apply: nested.source_outer_argument(),
+                        typed_apply: nested.typed_outer_argument(),
+                        source_select: nested.source_select(),
+                        source_new: nested.source_new(),
+                        source_argument: nested.source_argument(),
+                        typed_select: nested.typed_select(),
+                        typed_new: nested.typed_new(),
+                        typed_argument: nested.typed_argument(),
+                        class: nested.class(),
+                        constructor: nested.constructor(),
+                        formal: nested.formal(),
+                        formal_type: nested.formal_type(),
+                        result_type: nested.result_type(),
+                    });
                     (
                         proof.source_id(),
                         proof.method(),
-                        pair.map(|nested| NestedConstructorCallBinding {
-                            source_apply: nested.source_outer_argument(),
-                            typed_apply: nested.typed_outer_argument(),
-                            source_select: nested.source_select(),
-                            source_new: nested.source_new(),
-                            source_argument: nested.source_argument(),
-                            typed_select: nested.typed_select(),
-                            typed_new: nested.typed_new(),
-                            typed_argument: nested.typed_argument(),
-                            class: nested.class(),
-                            constructor: nested.constructor(),
-                            formal: nested.formal(),
-                            formal_type: nested.formal_type(),
-                            result_type: nested.result_type(),
-                        }),
+                        NestedConstructorCallPairBinding {
+                            calls,
+                            argument_formals: pair.map(|nested| nested.argument_formal()),
+                        },
                     )
                 })
             })

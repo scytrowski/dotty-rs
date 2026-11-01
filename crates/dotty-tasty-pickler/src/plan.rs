@@ -72,7 +72,7 @@ pub trait SourceTypedBindings {
         &self,
         _source: SourceId,
         _method: SymbolId,
-    ) -> Option<[NestedConstructorCallBinding; 2]> {
+    ) -> Option<NestedConstructorCallPairBinding> {
         None
     }
 
@@ -108,6 +108,15 @@ pub struct NestedConstructorCallBinding {
     pub formal: SymbolId,
     pub formal_type: TypeId,
     pub result_type: TypeId,
+}
+
+/// Ordered pair of singleton constructor receipts and the exact caller-method
+/// formals referenced by each original leaf. Keeping leaf identities outside
+/// `NestedConstructorCallBinding` preserves its existing singleton contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NestedConstructorCallPairBinding {
+    pub calls: [NestedConstructorCallBinding; 2],
+    pub argument_formals: [SymbolId; 2],
 }
 
 /// Exact provenance retained by the source frontend's opaque planned-call
