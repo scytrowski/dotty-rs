@@ -37,6 +37,7 @@ use std::fmt;
 
 use crate::ids::{SymbolId, TypeId};
 use crate::names::Name;
+use crate::packages::Packages;
 use crate::store::SemanticStore;
 
 /// Which member of the prefix a request names.
@@ -126,6 +127,32 @@ impl std::error::Error for ResolutionError {}
 /// Supplies symbols an adapter did not enter itself. See the module docs for
 /// the contract.
 pub trait SymbolResolver {
+    /// Whether this resolver currently has a canonical root package identity
+    /// in its session. Callers use this to reject conflicting authority
+    /// attachment before transferring any state.
+    fn has_package_root(&self) -> bool {
+        false
+    }
+
+    /// Transfers only the canonical package registry to a session that will
+    /// become its next mutation authority. Implementations that return a
+    /// rooted registry must also report `true` from [`has_package_root`](Self::has_package_root)
+    /// so callers can reject conflicting authority before consuming it.
+    /// Resolver implementations must keep
+    /// their positive identities, metadata, origins and undo journals intact.
+    /// `None` means the resolver does not own a package registry.
+    fn take_packages(&mut self) -> Option<Packages> {
+        None
+    }
+
+    /// Records a resolver checkpoint while the caller's canonical package
+    /// registry is available. Adapters that keep package identities in their
+    /// own session may use the default implementation; session-owning
+    /// resolvers can override the package-aware operations below.
+    fn checkpoint_with_packages(&self, _packages: &Packages) -> ResolverCheckpoint {
+        self.checkpoint()
+    }
+
     /// Returns the class's canonical type-parameter symbols in declaration
     /// order when this resolver owns the class. The order is semantic data:
     /// callers must not infer it from a name lookup scope, whose iteration
@@ -195,6 +222,20 @@ pub trait SymbolResolver {
     /// entries made since it.
     fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint);
 
+    /// Restores resolver-local state for a transaction that used the
+    /// caller-owned canonical package registry. Implementations must restore
+    /// resolver journals and package mutations before the caller truncates the
+    /// store. The default keeps existing resolver implementations compatible.
+    fn rollback_to_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        checkpoint: ResolverCheckpoint,
+        packages: &mut Packages,
+    ) {
+        self.rollback_to(store, checkpoint);
+        let _ = packages;
+    }
+
     /// The member of `request.prefix` the request names.
     ///
     /// Implementations make this call atomic. `Ok(Some(symbol))` may add
@@ -206,6 +247,19 @@ pub trait SymbolResolver {
         request: &MemberRequest,
     ) -> Result<Option<SymbolId>, ResolutionError>;
 
+    /// Resolves a member while borrowing the caller's canonical package
+    /// registry for this operation. Resolvers that materialize packages must
+    /// return with this same registry updated on success and unchanged on
+    /// failure. The default is for resolvers that never own package identity.
+    fn resolve_member_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        _packages: &mut Packages,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.resolve_member(store, request)
+    }
+
     /// The package named by `path`, outermost segment first, for a package the
     /// adapter has not entered. The same atomicity rules as
     /// [`resolve_member`](Self::resolve_member) apply.
@@ -214,6 +268,18 @@ pub trait SymbolResolver {
         store: &mut SemanticStore,
         path: &[&str],
     ) -> Result<Option<SymbolId>, ResolutionError>;
+
+    /// Resolves a package using the caller's canonical package registry.
+    /// Implementations must preserve it and return it to the caller on every
+    /// result path. The default is for resolvers that do not own packages.
+    fn resolve_package_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        _packages: &mut Packages,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.resolve_package(store, path)
+    }
 
     /// Enters a typer-created synthetic member into a package scope owned by
     /// this resolver. Returns `false` when the resolver does not own that

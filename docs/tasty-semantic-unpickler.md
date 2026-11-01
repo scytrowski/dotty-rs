@@ -42,9 +42,14 @@ The unpickler interprets TASTy that is already decoded. It does not:
   `Scope` and `ClassInfo` values of `dotty-core`.
 
 References absent from the entered state go through the `SymbolResolver`
-port of `dotty-core`. The port exists; `dotty-classloader` does not implement
-it yet. The unpickler never loads files itself and does not infer candidates
-from rendered names.
+port of `dotty-core`. `dotty-classloader` implements that port for bounded
+classpath package and member resolution. During a live resolver-backed
+session, `TastySession` owns the canonical `Packages` registry and retains the
+resolver's positive loading state across unit handoffs; the resolver receives
+that registry exclusively for each callback. See the
+[`classloader semantic TASTy session contract`](classloader-semantic-tasty-session-contract.md)
+for the ownership and rollback order. The unpickler never loads files itself
+and does not infer candidates from rendered names.
 
 ## 2. Multi-pass architecture
 
@@ -2168,12 +2173,13 @@ bugs, not for external input.
 ## 6. Relationship with `dotty-classloader`
 
 `dotty-classloader` loads `.class` and `.tasty` resources into its classpath
-model, but its `.tasty` path still uses the separate best-effort reader in
-`src/tasty_symbol.rs`. It does not implement `SymbolResolver` or lower its
-class metadata through `TastyUnpickler`. Keep this adapter until the canonical
-store path covers the metadata the loader consumes and has equivalent focused
-regression coverage; then migrate consumers and remove the legacy reader in a
-separate change.
+model. Its default `ClassLoader` `.tasty` path still uses the separate
+best-effort reader in `src/tasty_symbol.rs`; the classloader also implements
+`SymbolResolver` for caller-driven unpickler requests. It does not lower its
+legacy class metadata through `TastyUnpickler`. Keep the legacy loader adapter
+until the canonical store path covers the metadata it consumes and has
+equivalent focused regression coverage; then migrate consumers and remove the
+legacy reader in a separate change.
 
 The resolver API consumes the shared semantic store and may materialize
 canonical state into it. Each call is atomic: an unresolved or failed call

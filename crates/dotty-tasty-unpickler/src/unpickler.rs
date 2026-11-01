@@ -16,12 +16,15 @@ use crate::binders::PendingBinder;
 use crate::error::UnpickleError;
 use crate::index::TastySemanticIndex;
 use crate::packages::ScopeJournal;
-use crate::session::TastySession;
+use crate::session::{
+    ResolverAttachmentFailure, TastySession, TastySessionError, adopt_resolver_packages,
+};
 
 /// The marks of one public call, to roll it back.
 pub(crate) struct Transaction {
     checkpoint: StoreCheckpoint,
     resolver: ResolverCheckpoint,
+    packages: usize,
     types: usize,
     type_trees: usize,
     term_trees: usize,
@@ -65,6 +68,7 @@ pub struct TastyUnpickler<'file, 'bytes, 'store> {
     /// Asked for members the entered state does not hold. Owned, and given
     /// the store to read on each request; it never opens files here.
     pub(crate) resolver: Box<dyn SymbolResolver>,
+    resolver_attached: bool,
     /// Declarations made into scopes during the current `enter_symbols`.
     pub(crate) scope_journal: ScopeJournal,
     /// Binders reserved and published but not yet filled, innermost last.
@@ -136,6 +140,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             shared_scope_order: Vec::new(),
             pending_opaque_aliases: Vec::new(),
             resolver: Box::new(NoResolver),
+            resolver_attached: false,
             scope_journal: Vec::new(),
             pending_binders: Vec::new(),
             rec_this: HashMap::new(),
@@ -149,10 +154,27 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
     }
 
     /// Uses `resolver` for the name-based references the entered state cannot
-    /// resolve. Without one, [`NoResolver`] leaves them unresolved.
-    pub fn with_resolver(mut self, resolver: Box<dyn SymbolResolver>) -> Self {
+    /// resolve. Without one, [`NoResolver`] leaves them unresolved. Returns an
+    /// error if a resolver is already attached or both sides already own a
+    /// package root. On failure, [`ResolverAttachmentFailure::into_parts`]
+    /// returns this unchanged unpickler and the incoming resolver.
+    pub fn with_resolver(
+        mut self,
+        mut resolver: Box<dyn SymbolResolver>,
+    ) -> Result<Self, ResolverAttachmentFailure<Self>> {
+        if self.resolver_attached {
+            return Err(ResolverAttachmentFailure::new(
+                TastySessionError::ResolverAlreadyAttached,
+                self,
+                resolver,
+            ));
+        }
+        if let Err(reason) = adopt_resolver_packages(&mut self.packages, resolver.as_mut()) {
+            return Err(ResolverAttachmentFailure::new(reason, self, resolver));
+        }
         self.resolver = resolver;
-        self
+        self.resolver_attached = true;
+        Ok(self)
     }
 
     /// Prepares to enter a file in a session that shares package and class
@@ -163,10 +185,21 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
         definitions: Definitions,
         session: TastySession,
     ) -> Self {
-        let mut unpickler = Self::with_packages(file, store, definitions, session.packages);
-        unpickler.shared_scopes = session.owner_scopes;
-        unpickler.shared_scope_order = session.scope_order;
-        unpickler.pending_opaque_aliases = session.pending_opaque_aliases;
+        let TastySession {
+            packages,
+            owner_scopes,
+            scope_order,
+            pending_opaque_aliases,
+            resolver,
+        } = session;
+        let mut unpickler = Self::with_packages(file, store, definitions, packages);
+        unpickler.shared_scopes = owner_scopes;
+        unpickler.shared_scope_order = scope_order;
+        unpickler.pending_opaque_aliases = pending_opaque_aliases;
+        if let Some(resolver) = resolver {
+            unpickler.resolver = resolver;
+            unpickler.resolver_attached = true;
+        }
         unpickler
     }
 
@@ -213,8 +246,10 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
     }
 
     /// Consumes the unpickler, keeping the index for later passes and the
-    /// package registry. Use [`into_session_parts`](Self::into_session_parts)
-    /// when the next unit must also reuse entered class scopes.
+    /// package registry. This drops an attached resolver and its positive
+    /// loading state. Use [`into_session_parts`](Self::into_session_parts)
+    /// when the next unit must also reuse resolver state or entered class
+    /// scopes.
     pub fn into_parts(self) -> (TastySemanticIndex, Packages) {
         (self.index, self.packages)
     }
@@ -229,6 +264,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
                 owner_scopes: self.shared_scopes,
                 scope_order: self.shared_scope_order,
                 pending_opaque_aliases: self.pending_opaque_aliases,
+                resolver: self.resolver_attached.then_some(self.resolver),
             },
         )
     }
@@ -352,7 +388,8 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
     pub(crate) fn begin_transaction(&self) -> Transaction {
         Transaction {
             checkpoint: self.store.checkpoint(),
-            resolver: self.resolver.checkpoint(),
+            resolver: self.resolver.checkpoint_with_packages(&self.packages),
+            packages: self.packages.mark(),
             types: self.index.mark_types(),
             type_trees: self.index.mark_type_trees(),
             term_trees: self.index.mark_term_trees(),
@@ -390,7 +427,12 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
                     }
                 }
             }
-            self.resolver.rollback_to(self.store, transaction.resolver);
+            self.resolver.rollback_to_with_packages(
+                self.store,
+                transaction.resolver,
+                &mut self.packages,
+            );
+            self.packages.roll_back_to(self.store, transaction.packages);
             self.store.rollback_to(transaction.checkpoint);
             self.index.roll_back_types(transaction.types);
             self.index.roll_back_type_trees(transaction.type_trees);

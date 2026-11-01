@@ -428,7 +428,8 @@ impl<'u> Decoder<'u> {
         let file = TastyFile::parse_scala_3_9(&self.unit.bytes).unwrap();
         let mut unpickler =
             TastyUnpickler::new(&file, &mut self.session.store, self.session.definitions)
-                .with_resolver(Box::new(Scripted(Rc::clone(&self.script))));
+                .with_resolver(Box::new(Scripted(Rc::clone(&self.script))))
+                .unwrap();
         unpickler.enter_symbols().unwrap();
         let labels = Labels(
             DEFINITIONS
