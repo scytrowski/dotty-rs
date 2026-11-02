@@ -5,7 +5,7 @@ Status: completed for the two frozen inputs; the final CI gate remains.
 ## Frozen inputs and environment
 
 This audit is pinned to fresh `origin/main` commit
-`3a854831b9c074261e31e82d325c0350f606b95a`, Rust `1.98.1` (the repository
+`53b55d2126934da5f2d2ca0b4a0bea9e67f15bc6`, Rust `1.98.1` (the repository
 toolchain), and Temurin JDK `21.0.13+9` at
 `/home/vdrake6/.sdkman/candidates/java/current`. Scala fixture semantics are
 pinned to Scala 3.9.0 revision
