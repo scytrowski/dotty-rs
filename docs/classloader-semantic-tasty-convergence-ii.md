@@ -34,11 +34,16 @@ pre-measurement hashes are:
 | `docs/classloader-semantic-tasty-convergence/comparison-1948.tsv` | `a4b14bdf2ba921363358f568b8bce636e0e24453c2a3c6e57bd61478c231e6e0` |
 
 The earlier 14-unit / 126-row denominator and all its outputs remain out of
-scope for regeneration. This issue makes no fixture substitutions. Outcomes
+scope for regeneration. The two selected positive fixtures are unchanged; a
+single existing cohort fixture is used only for the bounded constructor probe.
+Outcomes
 are normalized by semantic role and qualified names, never by numeric
 `SymbolId` or `TypeId`; within each store, canonical symbol references,
 owner/visibility/flags, parent and signatures, constructor kind/owner/result,
-and origin are checked explicitly. Serialized constructor result and effective
+and origin are checked explicitly. The semantic constructor parent is compared
+to `Definitions::object_class`, its result to the exact entered class
+`SymbolId`, and the legacy constructor result to its canonical
+`Definitions::unit` `TypeId`. Serialized constructor result and effective
 constructor result remain separate observations.
 
 ## Audit procedure
@@ -70,14 +75,20 @@ identity role, class visibility, constructor owner/kind/visibility, and parent.
 The result does not claim exact signature parity: the constructor result
 representation differs as described above.
 
-Negative controls request each original class without the JDK module path
-(leaving `java.lang.Object` unavailable), request each class under a wrong
-package, and truncate each original TASTy by one byte. The loader errors are
-typed `NotFound` / `DependencyFailure`, no wrong-owner request aliases the
-frozen input, and store checkpoints are unchanged after failed loads. The
-TASTy parser rejects truncated input. No partial class is accepted and no
-`Any` or `Object` fallback is inferred. Existing malformed-input and
-missing-dependency regressions remain intact.
+Negative controls feed each original class through resolver-backed semantic
+completion without the JDK modules (leaving the external `java.lang.Object`
+dependency unavailable), present the same original bytes under a mismatched
+requested package, and truncate each original TASTy by one byte. Missing
+Object produces a typed `ResolverFailure` / `UnresolvedPackage`; completion
+rolls back the entered class to `Missing`, and the unpickler type count is
+unchanged. The requested-owner control compares the entered class path against
+the mismatched requested owner and returns a test-local typed
+`RequestedOwnerMismatch`; no class completion or partial info is published.
+Separate legacy controls still report typed
+`NotFound` / `DependencyFailure` and unchanged store checkpoints. The TASTy
+parser rejects truncated input. No partial class is accepted and no `Any` or
+`Object` fallback is inferred. Existing malformed-input and missing-dependency
+regressions remain intact.
 
 ## Result
 
@@ -89,12 +100,17 @@ visibility qualified to the containing package. This is semantic completion
 eligibility, not exact legacy signature parity: both rows retain the reported
 `Unit` versus owning-class constructor result delta.
 
-The first evidenced neighboring unsupported shape remains a non-empty
-constructor clause: the preserved #1927 comparison records a parameterized
-constructor as `<missing>` on the unpickler side. That historical observation
-defines the rejection boundary for this contract; this issue did not substitute
-that fixture or run a broader cohort. The 14-unit/126-row denominator remains
-unchanged. No production gate or reusable loader contract was changed.
+The historical #1927 `<missing>` observation does not establish a constructor
+failure because that comparison did not explicitly complete pending
+constructors. A bounded neighboring probe explicitly completes the existing
+`fields/Body(x: Int)` TASTy with the same resolver/bootstrap strategy; it
+succeeds with one `Int` parameter and the owning class as result. Therefore the
+first unsupported neighboring constructor shape remains unmeasured. Establishing
+it requires a separate frozen input with a constructor dependency or clause
+shape beyond this successful one-`Int` probe and an explicit completion attempt;
+the historical `<missing>` row is not used as a boundary. The two selected
+positive targets and the 14-unit/126-row denominator remain unchanged. No
+production gate or reusable loader contract was changed.
 
 Validation ran with the pinned toolchain and isolated temporary/build
 directories (`TMPDIR` under the issue worktree, JDK `java.io.tmpdir` under the

@@ -52,6 +52,23 @@ struct Observation {
     provenance: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct RequestedOwnerMismatch {
+    requested: String,
+    actual: String,
+}
+
+fn validate_requested_owner(requested: &str, actual: &str) -> Result<(), RequestedOwnerMismatch> {
+    if requested == actual {
+        Ok(())
+    } else {
+        Err(RequestedOwnerMismatch {
+            requested: requested.to_owned(),
+            actual: actual.to_owned(),
+        })
+    }
+}
+
 fn units() -> Vec<Unit> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -1216,6 +1233,32 @@ fn complete_visibility_constructor_once(unit_id: &str) -> Result<String, String>
     if store.symbols.get(constructor).owner != Some(class) {
         return Err("constructor owner is not the selected class".to_owned());
     }
+    let object_parent =
+        class_info
+            .parents
+            .iter()
+            .find_map(|parent| match store.types.get(*parent) {
+                Type::TypeRef { target, .. } => target.symbol(),
+                _ => None,
+            });
+    if object_parent != Some(definitions.object_class) {
+        return Err(format!(
+            "constructor class parent is not canonical java.lang.Object: {object_parent:?}"
+        ));
+    }
+    let result_class = match store.types.get(method.result) {
+        Type::TypeRef { target, .. } => target.symbol(),
+        other => {
+            return Err(format!(
+                "constructor result is not a class reference: {other:?}"
+            ));
+        }
+    };
+    if result_class != Some(class) {
+        return Err(format!(
+            "constructor result does not retain entered class identity: {result_class:?}"
+        ));
+    }
     let parents = class_info
         .parents
         .iter()
@@ -1244,7 +1287,102 @@ fn complete_visibility_constructor_once(unit_id: &str) -> Result<String, String>
     ))
 }
 
+#[test]
+fn semantic_negative_controls_use_original_bytes_and_resolver_transactions() {
+    use dotty_core::{SymbolInfo, SymbolKind};
+    use dotty_tasty_unpickler::tasty_unpickler::UnpickleError;
+
+    for unit_id in ["visibility-open", "visibility-private"] {
+        let unit = units()
+            .into_iter()
+            .find(|unit| unit.id == unit_id)
+            .expect("selected input is in frozen manifest");
+        let bytes = fs::read(&unit.path).expect("selected original fixture bytes");
+        let file = TastyFile::parse(&bytes).expect("selected original TASTy parses");
+        let simple_name = unit.lookup.rsplit('/').next().unwrap();
+
+        // Present each selected original TASTy to the resolver-backed semantic
+        // completion path without JDK modules. Completion must report a typed
+        // resolution error and roll back all dependency and class mutations.
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let resolver = ClasspathSymbolResolver::new(
+            classpath_without_jdk(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let session = TastySession::new()
+            .with_resolver(Box::new(resolver))
+            .expect("resolver attaches to a fresh TASTy session");
+        let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+        unpickler.enter_symbols().expect("enter selected symbols");
+        let class_address = root_definition_address(&file, &unpickler, simple_name)
+            .expect("selected root TYPEDEF exists");
+        let class = unpickler.index().symbol_at(class_address).unwrap();
+        let types_before_completion = unpickler.index().type_count();
+        let failure = unpickler
+            .complete_symbol(class_address)
+            .expect_err("class completion without JDK Object must fail closed");
+        assert!(
+            matches!(
+                failure,
+                UnpickleError::ResolverFailure { .. } | UnpickleError::UnresolvedPackage { .. }
+            ),
+            "missing Object must produce a typed resolver failure, got {failure:?}"
+        );
+        assert_eq!(unpickler.index().type_count(), types_before_completion);
+        assert_eq!(
+            unpickler.symbol_state_at(class_address),
+            Some((SymbolKind::Class, SymbolInfo::Missing)),
+            "failed semantic class completion restores the entered class"
+        );
+        drop(unpickler);
+        assert_eq!(
+            store.symbols.get(class).info,
+            SymbolInfo::Missing,
+            "failed completion must not publish partial class info"
+        );
+
+        // A requested binary owner is checked against the actual symbol
+        // entered from the original bytes; this specifically prevents the old
+        // absent-file lookup from standing in for an owner-mismatch control.
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let resolver =
+            ClasspathSymbolResolver::new(classpath(), definitions, LoadingSession::new());
+        let session = TastySession::new()
+            .with_resolver(Box::new(resolver))
+            .expect("resolver attaches to a fresh TASTy session");
+        let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+        unpickler.enter_symbols().expect("enter selected symbols");
+        let class_address = root_definition_address(&file, &unpickler, simple_name)
+            .expect("selected root TYPEDEF exists");
+        let class = unpickler.index().symbol_at(class_address).unwrap();
+        let class_state = unpickler.symbol_state_at(class_address);
+        drop(unpickler);
+        let actual_owner = symbol_path(&store, class);
+        let wrong_owner = format!("me.cytrowski.tastyfixtures.elsewhere.{simple_name}");
+        let outcome = validate_requested_owner(&wrong_owner, &actual_owner);
+        assert_eq!(
+            outcome,
+            Err(RequestedOwnerMismatch {
+                requested: wrong_owner,
+                actual: actual_owner,
+            }),
+            "typed requested-owner check must reject the original class identity"
+        );
+        assert_eq!(class_state, Some((SymbolKind::Class, SymbolInfo::Missing)));
+        assert_eq!(
+            store.symbols.get(class).info,
+            SymbolInfo::Missing,
+            "owner mismatch check does not complete or mutate the original class"
+        );
+    }
+}
+
 fn load_visibility_legacy_once(unit_id: &str) -> String {
+    use dotty_core::{SymbolInfo, SymbolKind};
+
     let unit = units()
         .into_iter()
         .find(|unit| unit.id == unit_id)
@@ -1256,8 +1394,51 @@ fn load_visibility_legacy_once(unit_id: &str) -> String {
     let requested = BinaryName::from_internal(unit.lookup);
     match loader.load_class(&requested) {
         Ok(class) => {
+            let object_class = loader
+                .load_class(&BinaryName::from_internal("java/lang/Object"))
+                .expect("canonical JDK Object dependency remains loaded");
             let origin = format!("{:?}", loader.origin(class));
             drop(loader);
+            let class_info_type = match store.symbols.get(class).info {
+                SymbolInfo::Complete(class_info_type) => class_info_type,
+                other => panic!("legacy class is not complete: {other:?}"),
+            };
+            let class_info = match store.types.get(class_info_type) {
+                Type::ClassInfo(info) => info,
+                other => panic!("legacy class info has unexpected type: {other:?}"),
+            };
+            let parent_symbols = class_info
+                .parents
+                .iter()
+                .filter_map(|parent| match store.types.get(*parent) {
+                    Type::TypeRef { target, .. } => target.symbol(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                parent_symbols,
+                vec![object_class],
+                "legacy parent must retain the resolver's canonical JDK Object identity"
+            );
+            let constructors = store
+                .scopes
+                .get(class_info.declarations)
+                .entered_symbols()
+                .filter(|symbol| store.symbols.get(*symbol).kind == SymbolKind::Constructor)
+                .collect::<Vec<_>>();
+            assert_eq!(constructors.len(), 1, "legacy class has one constructor");
+            let constructor_type = match store.symbols.get(constructors[0]).info {
+                SymbolInfo::Complete(ty) => ty,
+                other => panic!("legacy constructor is not complete: {other:?}"),
+            };
+            let method = match store.types.get(constructor_type) {
+                Type::Method(method) => method,
+                other => panic!("legacy constructor type is not a method: {other:?}"),
+            };
+            assert_eq!(
+                method.result, definitions.unit,
+                "legacy constructor must point at the canonical Unit TypeId"
+            );
             format!(
                 "outcome=CLASS_LOADED\torigin={origin}\t{}",
                 normalized_symbol(&store, class)
@@ -1316,6 +1497,85 @@ fn selected_visibility_classes_and_primary_constructors_are_explicitly_completed
     }
     if std::env::var_os("DOTTY_DUMP_VISIBILITY_AUDIT").is_some() {
         eprintln!("{receipt}");
+    }
+}
+
+#[test]
+fn neighboring_non_empty_constructor_is_explicitly_completed_as_a_bounded_probe() {
+    use dotty_core::{SymbolInfo, SymbolKind};
+    use dotty_tasty::tasty::{DEFDEF_TAG, StructuredNode};
+
+    let unit = units()
+        .into_iter()
+        .find(|unit| unit.id == "fields-body")
+        .expect("bounded neighboring fixture is in the frozen cohort");
+    let bytes = fs::read(&unit.path).expect("frozen Body bytes");
+    let file = TastyFile::parse(&bytes).expect("frozen Body TASTy parses");
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let resolver = ClasspathSymbolResolver::new(classpath(), definitions, LoadingSession::new());
+    let session = TastySession::new()
+        .with_resolver(Box::new(resolver))
+        .expect("resolver attaches to a fresh TASTy session");
+    let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    unpickler.enter_symbols().expect("enter Body symbols");
+    let class_address = root_definition_address(&file, &unpickler, "Body").expect("Body TYPEDEF");
+    unpickler
+        .complete_symbol(class_address)
+        .expect("complete Body class before its constructor");
+    let body_class = unpickler.index().symbol_at(class_address).unwrap();
+    let ast = file.ast_address_index().expect("Body address index");
+    let constructors = ast
+        .iter_nodes()
+        .filter(|node| node.tag == DEFDEF_TAG)
+        .filter_map(|node| u32::try_from(node.offset).ok())
+        .filter(|address| {
+            matches!(
+                unpickler.symbol_state_at(*address),
+                Some((SymbolKind::Constructor, _))
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(constructors.len(), 1, "Body has one primary constructor");
+    let constructor_address = constructors[0];
+    let constructor_node = ast
+        .get(constructor_address)
+        .unwrap()
+        .decode_structured()
+        .unwrap();
+    let StructuredNode::DefDef(body) = constructor_node else {
+        panic!("Body constructor is not a DEFDEF")
+    };
+    assert_eq!(
+        body.parameters.len(),
+        1,
+        "Body constructor has one parameter"
+    );
+    let result = unpickler
+        .complete_symbol(constructor_address)
+        .expect("bounded one-parameter constructor completes");
+    assert_eq!(
+        unpickler.symbol_state_at(constructor_address),
+        Some((SymbolKind::Constructor, SymbolInfo::Complete(result))),
+        "explicit completion records the constructor method type"
+    );
+    drop(unpickler);
+    let method = match store.types.get(result) {
+        Type::Method(method) => method,
+        other => panic!("Body constructor did not produce a method type: {other:?}"),
+    };
+    assert_eq!(method.params.len(), 1);
+    assert_eq!(type_repr(&store, method.params[0].ty), "Int");
+    let result_class = match store.types.get(method.result) {
+        Type::TypeRef { target, .. } => target.symbol(),
+        other => panic!("Body constructor result is not a class reference: {other:?}"),
+    };
+    assert_eq!(result_class, Some(body_class));
+    if std::env::var_os("DOTTY_DUMP_VISIBILITY_AUDIT").is_some() {
+        eprintln!(
+            "probe=fields-body\tconstructor_address={constructor_address}\tparameter_count={}\tresult=SUPPORTED(one Int parameter, owning class result)",
+            body.parameters.len()
+        );
     }
 }
 
