@@ -137,14 +137,16 @@ control; the foreign-owner check leaves its committed semantic state intact.
 
 ## Issue #1997 closeout
 
-**Verdict: PARTIAL.** The opt-in reusable loader met the two-class positive
-acceptance in two fresh stores, and all required Rust/JDK checks on the tested
-code head passed. The negative matrix has typed rollback and retry coverage for
-wrong package, module roots, parameterized class templates, malformed and
-unsupported-version TASTy, and a late failure after a prior class has committed.
-A dedicated real TASTy fixture for a secondary constructor was not available;
-the checked-in `CtorPlain.tasty` control exercises a parameterized primary
-constructor instead. I therefore do not count that negative case as proven.
+**Verdict: PARTIAL pending the secondary-constructor gate.** The opt-in
+reusable loader met the two-class positive acceptance in two fresh stores, and
+all required Rust/JDK checks on the tested code head passed. The negative matrix
+has typed rollback and retry coverage for wrong package, module roots,
+parameterized class templates, malformed and unsupported-version TASTy, and a
+late failure after a prior class has committed. A follow-up test-only extension
+adds a tiny pinned-Scala fixture with a secondary constructor and a mandatory
+JDK 21 workflow invocation that exercises the same loader and rollback
+assertions. The result for that final candidate is pending; the earlier
+`CtorPlain.tasty` control covered a parameterized primary constructor only.
 
 The integrated base was `53dd490de7acbc19120a75d74db8887c7181a6c1`; tested
 code head was `2a8d170ddbf5bb29e6b5522d6b0785b6f0a83136` in PR
@@ -174,9 +176,12 @@ unchanged. Existing loader regressions cover unsupported TASTy versions
 (`semantic_adapter_rejects_unsupported_tasty_version_without_mutation_and_retries`), malformed input, absent classpath resources, duplicate/pre-existing semantic identities and scopes, and the late partial-load rollback/retry path
 (`semantic_class_late_failure_preserves_prior_class_and_retries`). The existing
 nested-constructor structural regression verifies that a nested constructor is
-not mistaken for a direct template declaration. There is no dedicated compiled
-secondary-constructor TASTy fixture in this matrix; add one before claiming
-that specific negative is independently demonstrated.
+not mistaken for a direct template declaration. The new
+`semantic_class_loader_rejects_secondary_constructor_with_rollback` test
+compiles `tasty_secondary_constructor/SecondaryConstructor.scala` with the
+pinned Scala compiler, then asserts typed shape rejection and unchanged store,
+session, package, and cache checkpoints. The Scala consumer workflow invokes it
+with the required gate enabled; its final-CI result is pending.
 
 The default `ClassLoader::load_class` path is unchanged. Existing directory,
 JAR, and Info-pair tests continue to assert `.tasty` priority over a collocated

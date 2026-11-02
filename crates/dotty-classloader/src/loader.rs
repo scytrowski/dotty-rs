@@ -6884,8 +6884,10 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// The class's `Type::ClassInfo`, read back through its `Symbol`'s
     /// `SymbolInfo::Complete` — the sole path to a class's parents/
@@ -8917,6 +8919,71 @@ mod tests {
             assert!(loader.repository.get(&name).is_none());
             assert!(!loader.semantic_tasty_loaded.contains_key(&name));
         }
+    }
+
+    #[test]
+    fn semantic_class_loader_rejects_secondary_constructor_with_rollback() {
+        if std::env::var_os("DOTTY_REQUIRE_SCALA39_SECONDARY_CONSTRUCTOR_TEST").is_none() {
+            eprintln!("secondary-constructor TASTy fixture requires the pinned Scala CI gate");
+            return;
+        }
+
+        let scala_root = PathBuf::from(
+            std::env::var_os("SCALA39_ROOT").expect("pinned Scala source root is required"),
+        );
+        let scalac = scala_root.join("dist/target/universal/stage/bin/scalac");
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tasty_secondary_constructor/SecondaryConstructor.scala");
+        let work_dir = std::env::temp_dir().join(format!(
+            "dotty-secondary-constructor-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock is after UNIX epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&work_dir).expect("create isolated Scala output directory");
+        let output = Command::new(&scalac)
+            .args(["-release", "21", "-d"])
+            .arg(&work_dir)
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("run pinned Scala compiler {scalac:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "compile secondary-constructor fixture failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let name = BinaryName::from_internal("semantic/HasSecondary");
+        let tasty = fs::read(work_dir.join("semantic/HasSecondary.tasty"))
+            .expect("Scala compiler emitted the secondary-constructor TASTy file");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryTastyClassPath(HashMap::from([(name.clone(), tasty)])),
+            &mut store,
+        );
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+        let package_mark = loader.session.packages.checkpoint();
+
+        let error = loader
+            .load_semantic_class_with_tasty_unpickler(&name)
+            .expect_err("secondary constructors must be rejected as an unsupported root shape");
+        assert!(
+            matches!(&error, SemanticTastyLoadError::UnsupportedShape(_)),
+            "secondary constructor should fail with a typed shape error, got {error:?}"
+        );
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert_eq!(loader.session.packages.checkpoint(), package_mark);
+        assert!(loader.session.identified.is_empty());
+        assert!(loader.session.resolved.is_empty());
+        assert!(loader.repository.get(&name).is_none());
+        assert!(!loader.semantic_tasty_loaded.contains_key(&name));
+
+        fs::remove_dir_all(work_dir).expect("remove isolated Scala output directory");
     }
 
     #[test]
