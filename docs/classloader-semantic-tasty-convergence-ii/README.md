@@ -20,6 +20,69 @@ signature is normalized with a stable traversal-relative binder identity.
 `InfoWrapped.m` retains
 its method-local `F` application and returns canonical `F[Int]` semantics.
 
+## Issue #1997 integration freeze
+
+The acceptance baseline is integrated `main` at
+`53dd490de7acbc19120a75d74db8887c7181a6c1` (PR #2019 merge). The required
+prerequisites are present on that commit:
+
+| Issue | PR | Reviewed PR head | Merge commit |
+| --- | --- | --- | --- |
+| #1989 | #2002 | `8eb61572070a8344fc10b1050a59bcbfd0f593cb` | `bd90c1a82d89f315c7613570d6d5f518e0e76d8b` |
+| #1990 | #2004 | `e3ba851849becc29b6f42ad76d64455b6491ba12` | `02f666dcf794a24fd4ba3676380444461c8e0f72` |
+| #1991 | #2007 | `795d9106c72e459a9a45201c26aa3b0dbe43e0de` | `7943e8d495815ceef2b7e4a53baee7f6fcac949b` |
+| #1993 | #2009 | `bbc2d51671ebd0629963a54a17b21936b41efa0f` | `c7a9ad9894d9e7146c9fd934305243c12098d44f` |
+| #1995 | #2019 | `824e7bef2f18f69241addb3a1021cbcb727ff60b` | `53dd490de7acbc19120a75d74db8887c7181a6c1` |
+
+The pinned Scala source revision remains
+`777528f19a58e794c9954a42f433373472ec57f8`; both visibility TASTy fixtures
+are format 28.9, within the classloader's accepted 28.8/28.9 policy. The
+fixture receipt is:
+
+| Input | SHA-256 |
+| --- | --- |
+| `Visibility.scala` | `48e37c29b951d908ea60d031cd0bf0f2b909f860b142b47e33f7975a58d7d59d` |
+| `Open.tasty` | `49286e74a3d3693b08d2a29575f23089f6be5c486231390059f43c19a8929894` |
+| `PlainPrivate.tasty` | `db045c091f6bc71cdee1fef6c81cd09fe1f520f740f09fec008dd5f1fd98c4ba` |
+
+The test classpath is ordered as the pinned visibility fixture directory,
+then the configured JDK `jmods`. Within a directory or JAR, `.tasty` remains
+preferred over a collocated `.class`; the existing directory, JAR, and
+Info-pair loader regressions cover that selection rule. Expected class roles
+are `visibility.Open` (public class) and `visibility.PlainPrivate` (private
+within its source package); both have the canonical `java.lang.Object` parent,
+one zero-argument primary constructor returning the canonical class identity,
+and a TASTy origin from the visibility fixture directory.
+
+The local Rust toolchain is pinned by `rust-toolchain.toml` to `1.98.1`
+(`rustc 1.98.1`, `cargo 1.98.1`). The CI workflow installs Temurin
+`21.0.13+9.0.LTS`; the existing member audit records `java.base.jmod`
+SHA-256 `fad51abeafe6a1ecb0c2696a88684dc417cc534b74b5d865042df7381d9d0e91`
+for that runtime. The CI JDK install and mandatory JVM gate already exercise
+the workspace test path, so this issue adds no workflow wiring.
+
+Before this closeout test, `loader.rs` called the same private operation for
+both visibility roots in one store. Fresh-store tests exercised the direct
+unpickler path, not the reusable loader. The frozen parity test already ran
+its 14-unit/126-row comparison twice and checked determinism; the separate
+four-method audit already attempted exactly four members. The new loader test
+will close the two-session gap while keeping numeric arena IDs local to each
+store. The negative rollback cases remain separate, directly observable
+regressions in the loader suite; their final run receipts are recorded below.
+
+The frozen comparator artifacts remain untouched at these hashes:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `cohort.tsv` (14 units) | `bfa365d830a627ce46bb5682a93cad90e26dbc9a90ead76bcaa65a48539a8a95` |
+| `comparison.tsv` | `34097e61b691ff6ee9c16089336c495decc31241a10e448c1a1776849888aa4e` |
+| `comparison-1948.tsv` (126 comparison rows) | `a4b14bdf2ba921363358f568b8bce636e0e24453c2a3c6e57bd61478c231e6e0` |
+
+The configured nonempty issue trace is run
+`113f2c35-6b19-45e7-ab5c-1fab1ba58ba7`; it is preserved in place and is not
+copied into the PR. The historical #1931 `PARTIAL` report remains a historical
+measurement and is not rewritten by this integration closeout.
+
 ## Outcomes
 
 | Member | Explicit completion | Normalized finding |
