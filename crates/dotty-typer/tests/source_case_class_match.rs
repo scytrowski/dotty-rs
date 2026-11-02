@@ -4,7 +4,7 @@ use dotty_classloader::classloader::{
     ClassPathEntry, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, JdkClassPath,
     LoadingSession,
 };
-use dotty_core::ast::{Literal, TreeKind, TypedAst};
+use dotty_core::ast::{TreeKind, TypedAst};
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, GeneratedCaseClassMethodRole, Name, Namespace, Packages, SemanticStore, SourceId,
@@ -87,96 +87,6 @@ fn flagged_product2_whole_method_baseline() {
             println!("ISSUE1972_POSITIVE\t{session}\t{row}");
         }
     }
-}
-
-#[test]
-fn flagged_product2_late_case_failure_rolls_back_before_valid_sibling() {
-    let text = FLAGGED_SOURCE.replace(
-        "if enabled then value else 0",
-        "if enabled then true else 0",
-    );
-    let source = SourceId::from_index(1971);
-    let mut session = Session::new(&text, source);
-    let select = session.method_named("select");
-    let classify = session.method_named("classify");
-    let select_symbol = session.index.symbol_at(source, select).unwrap();
-    let then_branch = {
-        let TreeKind::DefDef(definition) = &session.parsed.ast.get(select).kind else {
-            panic!("select source method")
-        };
-        let TreeKind::Match(match_node) = &session.parsed.ast.get(definition.rhs.unwrap()).kind
-        else {
-            panic!("select source Match")
-        };
-        let TreeKind::CaseDef(case) = &session.parsed.ast.get(match_node.cases[0]).kind else {
-            panic!("select source CaseDef")
-        };
-        let TreeKind::Block(block) = &session.parsed.ast.get(case.body).kind else {
-            panic!("select source body block")
-        };
-        let TreeKind::If(if_node) = &session.parsed.ast.get(block.expr).kind else {
-            panic!("select source If")
-        };
-        if_node.then_branch
-    };
-    let class = flagged_class_symbol(&session, source);
-    let unapply = session
-        .index
-        .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
-        .unwrap();
-    session.with_typer(|_, _, index, _, typer| {
-        let before_store = typer.store().checkpoint();
-        let before_typed = typer.typed_ast().checkpoint();
-        let before_mappings = typer.source_typed_index().len();
-        let error = typer
-            .type_method_definition(select)
-            .expect_err("the Boolean then-branch violates the declared Int result");
-        assert!(matches!(
-            error,
-            TyperError::ExpectedExpressionTypeMismatch { .. }
-        ));
-        assert_eq!(typer.store().checkpoint(), before_store);
-        assert_eq!(typer.typed_ast().checkpoint(), before_typed);
-        assert_eq!(typer.source_typed_index().len(), before_mappings);
-        assert!(typer.source_typed_index().get(source, select).is_none());
-        assert_eq!(
-            *typer.store().symbols.info(select_symbol),
-            SymbolInfo::Missing
-        );
-        assert_eq!(*typer.store().symbols.info(unapply), SymbolInfo::Missing);
-        assert_eq!(
-            index.generated_case_class_method_identity(unapply),
-            Some(dotty_core::GeneratedCaseClassMethod {
-                class,
-                role: GeneratedCaseClassMethodRole::Unapply,
-            })
-        );
-    });
-    let broken_branch = session.parsed.ast.get_mut(then_branch);
-    broken_branch.kind = TreeKind::Literal(Literal {
-        value: Constant::Int(1),
-    });
-    session.with_typer(|_, _, _, _, typer| {
-        let retried = typer
-            .type_method_definition(select)
-            .expect("same semantic session retries after repairing the failing source node");
-        assert!(matches!(
-            typer.typed_ast().get(retried).kind,
-            TreeKind::DefDef(_)
-        ));
-        assert!(typer.source_typed_index().get(source, select).is_some());
-        assert!(matches!(
-            *typer.store().symbols.info(select_symbol),
-            SymbolInfo::Complete(_)
-        ));
-        let sibling = typer
-            .type_method_definition(classify)
-            .expect("valid sibling remains typeable after the successful retry");
-        assert!(matches!(
-            typer.typed_ast().get(sibling).kind,
-            TreeKind::DefDef(_)
-        ));
-    });
 }
 
 #[test]

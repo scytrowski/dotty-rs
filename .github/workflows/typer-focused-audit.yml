@@ -263,6 +263,9 @@ jobs:
           DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
         run: |
           set -euo pipefail
+          cargo +1.98.1 test -p dotty-typer --lib --locked \
+            issue_1972_failed_root_retries_with_same_typer_and_matches_clean_run -- --nocapture \
+            > "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-retry.log" 2>&1
           cargo +1.98.1 test -p dotty-typer --lib --locked unapply -- --nocapture \
             > "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-unapply.log" 2>&1
           cargo +1.98.1 test -p dotty-typer --lib --locked \
@@ -275,6 +278,7 @@ jobs:
             local_patdef_alias_over_extractor_binds_the_original_selector_type -- --nocapture \
             > "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-alias.log" 2>&1
           cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-unapply.log"
+          cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-retry.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-product.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-unary.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-alias.log"
@@ -298,6 +302,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" namer-log \
             "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-namer.log"
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" typer-log \
+            "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-retry.log" \
             "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-unapply.log" \
             "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-product.log" \
             "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-unary.log" \

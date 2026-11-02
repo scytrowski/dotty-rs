@@ -45,7 +45,6 @@ PRODUCT2_NEGATIVE_EVIDENCE = {
     "UnrelatedSameNameExtractor": ("accepted_with_warning", "identity_control", "unknown_explicit_unapply_parameter_identity_defers_generation_for_alias_contexts"),
 }
 RUST_TESTS = {
-    "flagged_product2_late_case_failure_rolls_back_before_valid_sibling",
     "flagged_product2_negative_matrix_rejects_without_publishing_roots",
     "flagged_product2_requires_canonical_product_identity",
     "flagged_product2_whole_method_baseline",
@@ -63,6 +62,7 @@ NAMER_TESTS = {
     "unknown_explicit_unapply_parameter_identity_defers_generation_for_alias_contexts",
 }
 TYPER_TESTS = {
+    "typer::tests::issue_1972_failed_root_retries_with_same_typer_and_matches_clean_run",
     "typer::expression::patterns::tests::binary_product_extractors_reject_wrong_selector_and_source_arities",
     "typer::expression::patterns::tests::boolean_extractor_types_zero_patterns_and_preserves_unapply_identity",
     "typer::expression::patterns::tests::erased_unapply_parameters_are_rejected_even_when_source_parsing_lacks_erased_params",
