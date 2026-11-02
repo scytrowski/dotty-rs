@@ -3839,7 +3839,7 @@ mod tests {
 
     #[test]
     fn failure_after_narrowing_rolls_back_and_same_session_retry_succeeds() {
-        let source_text = "package scala { trait Product }; package matching { trait Event; case class Created(id: Int) extends Event; object Matcher { def choose(event: Event): Int = event match { case Created(true) => 0; case Created(id) => id } } }";
+        let source_text = "package scala { trait Product }; package matching { trait Event; case class Created(id: Int) extends Event; object Matcher { def choose(event: Event): Int = event match { case Created(id) if id => 0; case Created(value) if true => value } } }";
         let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
         let symbol_named = |name: &str, kind: SymbolKind| {
             parsed
@@ -3862,6 +3862,7 @@ mod tests {
         };
         let event = symbol_named("Event", SymbolKind::Trait);
         let product = symbol_named("Product", SymbolKind::Trait);
+        let created = symbol_named("Created", SymbolKind::Class);
         let method = parsed
             .ast
             .iter()
@@ -3880,10 +3881,44 @@ mod tests {
             .filter_map(|(tree, node)| matches!(node.kind, TreeKind::CaseDef(_)).then_some(tree))
             .collect::<Vec<_>>();
         assert_eq!(cases.len(), 2);
-        let event_type = store.types.alloc(Type::TypeRef {
-            prefix: definitions.no_prefix,
-            target: TypeRefTarget::Symbol(event),
-        });
+        let created_unapply = index
+            .generated_case_class_method(created, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .unwrap();
+        let method_definition = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition) if index.symbol_at(source, tree) == Some(method) => {
+                    Some(definition)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let event_tpt = match &parsed
+            .ast
+            .get(method_definition.value_param_clauses[0][0])
+            .kind
+        {
+            TreeKind::ValDef(parameter) => parameter.tpt,
+            _ => unreachable!(),
+        };
+        let TreeKind::CaseDef(first_case) = &parsed.ast.get(cases[0]).kind else {
+            unreachable!()
+        };
+        let TreeKind::CaseDef(retry_case) = &parsed.ast.get(cases[1]).kind else {
+            unreachable!()
+        };
+        let first_case_pattern = first_case.pattern;
+        let first_case_guard = first_case.guard.unwrap();
+        let retry_case_pattern = retry_case.pattern;
+        let TreeKind::Apply(first_extractor) = &parsed.ast.get(first_case_pattern).kind else {
+            panic!("expected an extractor pattern")
+        };
+        let first_binder_tree = first_extractor.args[0];
+        let TreeKind::Apply(retry_extractor) = &parsed.ast.get(retry_case_pattern).kind else {
+            panic!("expected a retry extractor pattern")
+        };
+        let retry_binder_tree = retry_extractor.args[0];
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -3894,14 +3929,83 @@ mod tests {
         );
         let context = typer.expression_context_for(method).unwrap();
         typer.complete_symbol(product).unwrap();
-        let checkpoint = typer.store.checkpoint();
+        let selector_context = typer.expression_type_context(context).unwrap();
+        let event_type = typer
+            .type_of_tpt_inner_journaled(event_tpt, selector_context, &mut Vec::new())
+            .unwrap();
+        let store_checkpoint = typer.store.checkpoint();
+        let type_index_checkpoint = typer.type_index.checkpoint();
+        let symbol_snapshots = [event, product, created, created_unapply]
+            .map(|symbol| (symbol, *typer.store.symbols.info(symbol)));
+        let scope_ids = [event, created, method]
+            .map(|symbol| index.scope_of(symbol).expect("source symbol scope"));
+        let scope_snapshots = scope_ids.map(|scope| {
+            let mut entries = typer
+                .store
+                .scopes
+                .get(scope)
+                .entered_symbols()
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|symbol| symbol.index());
+            entries
+        });
+        let pattern_binding_checkpoint = typer.pattern_bindings.clone();
         let error = typer
             .run_expression_transaction(|typer, journal, mappings| {
                 typer.type_case_def(cases[0], event_type, context, journal, mappings)
             })
             .unwrap_err();
-        assert!(matches!(error, TyperError::PatternTypeMismatch { .. }));
-        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert!(
+            matches!(
+                error,
+                TyperError::ExpectedExpressionTypeMismatch {
+                    source: error_source,
+                    tree_index,
+                    actual,
+                    expected,
+                } if error_source == source
+                    && tree_index == first_case_guard.index()
+                    && actual == definitions.int
+                    && expected == definitions.boolean
+            ),
+            "expected the bound Int value to fail as a Boolean guard, got {error:?}"
+        );
+        assert_eq!(typer.store.checkpoint(), store_checkpoint);
+        for (symbol, expected_info) in symbol_snapshots {
+            assert_eq!(*typer.store.symbols.info(symbol), expected_info);
+        }
+        for (tree, _) in parsed.ast.iter() {
+            assert_eq!(
+                typer.type_index.type_at(source, tree),
+                type_index_checkpoint.type_at(source, tree),
+                "source type projection changed for {tree:?}"
+            );
+        }
+        for (scope, expected_entries) in scope_ids.into_iter().zip(scope_snapshots) {
+            let mut actual_entries = typer
+                .store
+                .scopes
+                .get(scope)
+                .entered_symbols()
+                .collect::<Vec<_>>();
+            actual_entries.sort_by_key(|symbol| symbol.index());
+            assert_eq!(
+                actual_entries, expected_entries,
+                "pre-existing scope {scope:?} changed"
+            );
+        }
+        assert_eq!(
+            typer.pattern_bindings.by_tree,
+            pattern_binding_checkpoint.by_tree
+        );
+        assert_eq!(
+            typer.pattern_bindings.scope_by_symbol,
+            pattern_binding_checkpoint.scope_by_symbol
+        );
+        assert_eq!(
+            typer.pattern_binding_symbol_at(source, first_binder_tree),
+            None
+        );
         assert!(typer.typed_arena.iter().next().is_none());
         assert!(typer.typed_index.is_empty());
 
@@ -3910,11 +4014,85 @@ mod tests {
                 typer.type_case_def(cases[1], event_type, context, journal, mappings)
             })
             .expect("a valid same-session retry succeeds after rollback");
+        let TreeKind::CaseDef(retried_case) = &typer.typed_arena.get(retried).kind else {
+            panic!("same-session retry returns a typed case")
+        };
+        let TreeKind::UnApply(retried_unapply) = &typer.typed_arena.get(retried_case.pattern).kind
+        else {
+            panic!("retry pattern retains typed UnApply")
+        };
         assert!(matches!(
-            typer.typed_arena.get(retried).kind,
-            TreeKind::CaseDef(_)
+            typer.store.types.get(typer.typed_arena.get(retried_unapply.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if *symbol == created_unapply
         ));
-        assert!(!typer.typed_index.is_empty());
+        assert_eq!(retried_unapply.patterns.len(), 1);
+        let typed_binder = retried_unapply.patterns[0];
+        let TreeKind::Bind(binding) = &typer.typed_arena.get(typed_binder).kind else {
+            panic!("retry retains its source binder")
+        };
+        assert_eq!(
+            binding.name,
+            Name::new(typer.store.names.intern("value"), Namespace::Term)
+        );
+        let binder_symbol = typer
+            .pattern_binding_symbol_at(source, retry_binder_tree)
+            .expect("retry publishes canonical binder identity");
+        let binder_scope = typer
+            .pattern_binding_scope(binder_symbol)
+            .expect("retry publishes the binder's case scope");
+        assert_eq!(
+            typer.store.scopes.get(binder_scope).lookup(&binding.name),
+            Some(binder_symbol)
+        );
+        assert_eq!(
+            typer.store.symbols.get(binder_symbol).info,
+            SymbolInfo::Complete(definitions.int)
+        );
+        assert!(matches!(
+            typer.store.types.get(typer.typed_arena.get(typed_binder).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if *symbol == binder_symbol
+        ));
+        assert!(matches!(
+            typer.store.types.get(typer.typed_arena.get(retried_case.body).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if *symbol == binder_symbol
+        ));
+        let unapply_info = typer.complete_symbol(created_unapply).unwrap();
+        assert_eq!(
+            index
+                .generated_case_class_method_identity(created_unapply)
+                .unwrap()
+                .class,
+            created
+        );
+        let Type::Method(unapply_method) = typer.store.types.get(unapply_info) else {
+            panic!("canonical generated unapply has a method type")
+        };
+        let selector_name = Name::new(typer.store.names.intern("_1"), Namespace::Term);
+        let selectors = typer
+            .lookup_overload_members_journaled(
+                unapply_method.result,
+                selector_name,
+                &mut Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(selectors.len(), 1);
+        let product_selector = selectors[0].symbol;
+        assert_eq!(
+            typer.store.symbols.get(product_selector).owner,
+            Some(created)
+        );
+        let SymbolInfo::Complete(selector_info) = *typer.store.symbols.info(product_selector)
+        else {
+            panic!("canonical Created._1 selector is complete after retry")
+        };
+        let Type::Method(selector_method) = typer.store.types.get(selector_info) else {
+            panic!("canonical Created._1 selector has a method type")
+        };
+        assert_eq!(selector_method.result, definitions.int);
+        assert!(typer.typed_index.get(source, retry_binder_tree).is_some());
     }
 
     #[test]
