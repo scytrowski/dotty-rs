@@ -75,12 +75,16 @@ has not completed the nested package/class target. The resolver must follow the
 package and class identities represented by the target tree instead of
 substituting a same-spelled alias or guessing a `Predef/String` resource.
 
-The wrong-owner control attempts the entered alias as if its owner were the
-`Predef` term object. It records `ForeignOwner { requested: "Predef", actual:
-"Predef$" }`, leaves the alias `Missing`, and does not complete it. The existing
-member-audit foreign-owner regression independently checks a Dog method address
-cannot be accepted as an Animal member. All controls fail closed without
-name-only substitution.
+The wrong-owner control compares the alias owner `SymbolId` with the canonical
+`ModuleClass` at TASTy address 128. It rejects the indexed `Predef` term object
+at address 107 and a distinct same-named `Predef$` `ModuleClass`, while
+accepting only the canonical indexed symbol. The diagnostic keeps names for
+readability (`ForeignOwner { requested: "Predef$", actual: "Predef" }` for the
+term-object case), while the check validates the expected owner's type
+namespace and module-class role. The alias remains `Missing` throughout. The
+existing member-audit foreign-owner regression independently checks a Dog
+method address cannot be accepted as an Animal member. All controls fail closed
+without name-only substitution.
 
 ## Bounded A2 / A3 contract
 

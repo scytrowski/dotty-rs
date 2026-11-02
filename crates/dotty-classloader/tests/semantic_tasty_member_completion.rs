@@ -459,7 +459,7 @@ fn complete_audit_request(
 fn verify_alias_owner(
     store: &SemanticStore,
     alias: SymbolId,
-    requested_owner: &str,
+    expected_owner: SymbolId,
 ) -> Result<SymbolId, AuditRequestError> {
     let symbol = store.symbols.get(alias);
     if symbol.kind != dotty_core::SymbolKind::TypeAlias
@@ -470,13 +470,21 @@ fn verify_alias_owner(
     let owner = symbol
         .owner
         .ok_or(AuditRequestError::InvalidOwnerIndex { address: 378 })?;
-    let actual = store.names.resolve(store.symbols.get(owner).name.text());
-    if actual == requested_owner {
+    let expected = store.symbols.get(expected_owner);
+    if expected.kind != dotty_core::SymbolKind::ModuleClass
+        || expected.name.namespace() != dotty_core::Namespace::Type
+    {
+        return Err(AuditRequestError::InvalidOwnerIndex { address: 378 });
+    }
+    if owner == expected_owner {
         Ok(alias)
     } else {
         Err(AuditRequestError::ForeignOwner(ForeignOwner {
-            requested: requested_owner.to_owned(),
-            actual: actual.to_owned(),
+            requested: store.names.resolve(expected.name.text()).to_owned(),
+            actual: store
+                .names
+                .resolve(store.symbols.get(owner).name.text())
+                .to_owned(),
         }))
     }
 }
@@ -1121,25 +1129,56 @@ fn predef_alias_probe(with_jdk: bool) -> (String, String, String) {
         .index()
         .symbol_at(378)
         .expect("String alias entered");
+    let object_id = identity_unpickler
+        .index()
+        .symbol_at(107)
+        .expect("Predef term object entered");
+    let canonical_module_class = identity_unpickler
+        .index()
+        .symbol_at(128)
+        .expect("canonical Predef module class entered");
     drop(identity_unpickler);
     assert_eq!(
         identity_store.symbols.get(alias_id).info,
         dotty_core::SymbolInfo::Missing
     );
-    let wrong_owner = verify_alias_owner(&identity_store, alias_id, "Predef")
+    let original_owner = identity_store.symbols.get(alias_id).owner;
+    assert_eq!(original_owner, Some(canonical_module_class));
+    identity_store.symbols.get_mut(alias_id).owner = Some(object_id);
+    let wrong_owner = verify_alias_owner(&identity_store, alias_id, canonical_module_class)
         .expect_err("the Predef term object cannot own this type alias");
     assert!(matches!(
         &wrong_owner,
         AuditRequestError::ForeignOwner(ForeignOwner { requested, actual })
-            if requested == "Predef" && actual == "Predef$"
+            if requested == "Predef$" && actual == "Predef"
     ));
+    identity_store.symbols.get_mut(alias_id).owner = original_owner;
     assert_eq!(
         identity_store.symbols.get(alias_id).info,
         dotty_core::SymbolInfo::Missing,
         "wrong-owner control is observational and leaves the alias pending"
     );
+    let mut foreign_owner = identity_store.symbols.get(canonical_module_class).clone();
+    foreign_owner.owner = None;
+    let foreign_owner_id = identity_store.symbols.alloc(foreign_owner);
+    assert_ne!(foreign_owner_id, canonical_module_class);
+    assert_eq!(
+        identity_store
+            .names
+            .resolve(identity_store.symbols.get(foreign_owner_id).name.text()),
+        "Predef$"
+    );
+    identity_store.symbols.get_mut(alias_id).owner = Some(foreign_owner_id);
+    let foreign_same_name = verify_alias_owner(&identity_store, alias_id, canonical_module_class)
+        .expect_err("a distinct same-named owner cannot own the indexed alias");
     assert!(matches!(
-        verify_alias_owner(&identity_store, alias_id, "Predef$"),
+        &foreign_same_name,
+        AuditRequestError::ForeignOwner(ForeignOwner { requested, actual })
+            if requested == "Predef$" && actual == "Predef$"
+    ));
+    identity_store.symbols.get_mut(alias_id).owner = original_owner;
+    assert!(matches!(
+        verify_alias_owner(&identity_store, alias_id, canonical_module_class),
         Ok(id) if id == alias_id
     ));
 
