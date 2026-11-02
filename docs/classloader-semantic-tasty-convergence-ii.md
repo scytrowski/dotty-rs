@@ -36,8 +36,7 @@ pre-measurement hashes are:
 The earlier 14-unit / 126-row denominator and all its outputs remain out of
 scope for regeneration. The two selected positive fixtures are unchanged; a
 single existing cohort fixture is used only for the bounded constructor probe.
-Outcomes
-are normalized by semantic role and qualified names, never by numeric
+Outcomes are normalized by semantic role and qualified names, never by numeric
 `SymbolId` or `TypeId`; within each store, canonical symbol references,
 owner/visibility/flags, parent and signatures, constructor kind/owner/result,
 and origin are checked explicitly. The semantic constructor parent is compared
@@ -102,15 +101,19 @@ eligibility, not exact legacy signature parity: both rows retain the reported
 
 The historical #1927 `<missing>` observation does not establish a constructor
 failure because that comparison did not explicitly complete pending
-constructors. A bounded neighboring probe explicitly completes the existing
-`fields/Body(x: Int)` TASTy with the same resolver/bootstrap strategy; it
-succeeds with one `Int` parameter and the owning class as result. Therefore the
-first unsupported neighboring constructor shape remains unmeasured. Establishing
-it requires a separate frozen input with a constructor dependency or clause
-shape beyond this successful one-`Int` probe and an explicit completion attempt;
-the historical `<missing>` row is not used as a boundary. The two selected
-positive targets and the 14-unit/126-row denominator remain unchanged. No
-production gate or reusable loader contract was changed.
+constructors. The bounded neighboring probe explicitly completed the existing
+`fields/Body(x: Int)` TASTy with the same resolver/bootstrap strategy:
+
+| Probe | Explicit completion result |
+| --- | --- |
+| `fields/Body(x: Int)` primary constructor | Supported; one `Int` parameter, owning class result |
+
+Therefore the first unsupported neighboring constructor shape remains
+unmeasured. Establishing it requires a separate frozen input with a constructor
+dependency or clause shape beyond this successful one-`Int` probe and an
+explicit completion attempt; the historical `<missing>` row is not used as a
+boundary. The two selected positive targets and the 14-unit/126-row denominator
+remain unchanged. No production gate or reusable loader contract was changed.
 
 Validation ran with the pinned toolchain and isolated temporary/build
 directories (`TMPDIR` under the issue worktree, JDK `java.io.tmpdir` under the
