@@ -403,6 +403,7 @@ impl SourceTyper<'_> {
             || template.parents.len() > 1
             || constructor.value_param_clauses.len() != 1
             || !matches!(constructor.value_param_clauses[0].len(), 1 | 2)
+            || (!template.parents.is_empty() && constructor.value_param_clauses[0].len() != 1)
         {
             return None;
         }

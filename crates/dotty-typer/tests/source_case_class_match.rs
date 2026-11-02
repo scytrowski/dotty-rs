@@ -41,12 +41,24 @@ type MatchRoots = (SymbolId, Vec<(TreeId<Untyped>, TreeId<Untyped>)>);
 
 #[test]
 fn source_trait_parent_product1_preserves_identity_in_both_completion_routes() {
-    let class_first = source_trait_product1_session(SourceId::from_index(1994), false);
-    let selector_first = source_trait_product1_session(SourceId::from_index(2994), true);
+    let class_first =
+        source_trait_product1_session(SourceId::from_index(1994), false, SOURCE_TRAIT_PRODUCT1);
+    let selector_first =
+        source_trait_product1_session(SourceId::from_index(2994), true, SOURCE_TRAIT_PRODUCT1);
     assert_eq!(class_first, selector_first);
     assert_eq!(class_first.len(), 2);
     assert!(class_first.iter().any(|row| row.starts_with("Created|")));
     assert!(class_first.iter().any(|row| row.starts_with("Deleted|")));
+    let reordered = SOURCE_TRAIT_PRODUCT1.replace(
+        "sealed trait Event\n\nfinal case class Created(id: Int) extends Event\nfinal case class Deleted(code: Int) extends Event",
+        "final case class Created(id: Int) extends Event\nfinal case class Deleted(code: Int) extends Event\n\nsealed trait Event",
+    );
+    assert_ne!(reordered, SOURCE_TRAIT_PRODUCT1);
+    assert_eq!(
+        source_trait_product1_session(SourceId::from_index(6994), false, &reordered),
+        class_first,
+        "the source trait declaration may follow its variants"
+    );
 }
 
 #[test]
@@ -156,6 +168,160 @@ fn source_trait_parent_product1_rejects_generic_and_class_parent_shapes() {
 }
 
 #[test]
+fn source_trait_parent_product1_defers_multi_parent_selector_shape() {
+    let source = SourceId::from_index(7994);
+    let text =
+        "package adt\ntrait Event\ntrait Other\ncase class Created(id: Int) extends Event, Other\n";
+    let mut session = Session::new(text, source);
+    let class = session
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if session
+                    .store
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    == "Created" =>
+            {
+                session.index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let selector = session
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, _)| session.index.derived_symbol_at(class, source, tree))
+        .unwrap();
+    session.with_typer(|_, _, _, _, typer| {
+        let class_info = typer
+            .complete_symbol(class)
+            .expect("ordinary multiple trait parent graph still completes");
+        let Some(Type::ClassInfo(info)) = typer.store().types.try_get(class_info) else {
+            panic!("ClassInfo")
+        };
+        assert!(
+            !info
+                .parents
+                .iter()
+                .any(|parent| match typer.store().types.try_get(*parent) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(symbol),
+                        ..
+                    }) => {
+                        typer
+                            .store()
+                            .names
+                            .resolve(typer.store().symbols.get(*symbol).name.text())
+                            == "Product"
+                    }
+                    _ => false,
+                })
+        );
+        assert!(matches!(
+            typer.complete_symbol(selector),
+            Err(TyperError::DeclarationContextMissing { .. })
+        ));
+        assert_eq!(*typer.store().symbols.info(selector), SymbolInfo::Missing);
+    });
+}
+
+#[test]
+fn source_trait_parent_does_not_enable_product2_completion() {
+    let source = SourceId::from_index(8995);
+    let text = "package adt\ntrait Event\ncase class Created(id: Int, code: Int) extends Event\n";
+    let mut session = Session::new(text, source);
+    let class = session
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if session
+                    .store
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    == "Created" =>
+            {
+                session.index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let selectors = session
+        .parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, _)| session.index.derived_symbol_at(class, source, tree))
+        .collect::<Vec<_>>();
+    session.with_typer(|_, _, _, _, typer| {
+        let class_info = typer
+            .complete_symbol(class)
+            .expect("ordinary two-field source class retains its parent graph");
+        let Some(Type::ClassInfo(info)) = typer.store().types.try_get(class_info) else {
+            panic!("ClassInfo")
+        };
+        assert!(
+            !info
+                .parents
+                .iter()
+                .any(|parent| match typer.store().types.try_get(*parent) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(symbol),
+                        ..
+                    }) => {
+                        typer
+                            .store()
+                            .names
+                            .resolve(typer.store().symbols.get(*symbol).name.text())
+                            == "Product"
+                    }
+                    _ => false,
+                })
+        );
+        assert!(
+            selectors.is_empty(),
+            "explicit-parent two-field classes do not acquire Product2 selectors"
+        );
+    });
+}
+
+#[test]
+fn source_trait_parent_product1_records_frozen_match_first_errors_only() {
+    let source = SourceId::from_index(8994);
+    let mut session = Session::new(SOURCE_TRAIT_PRODUCT1, source);
+    let roots = [
+        ("extract", session.method_named("extract"), 25),
+        ("classify", session.method_named("classify"), 43),
+    ];
+    session.with_typer(|_, parsed, _, _, typer| {
+        for (name, root, expected_tree) in roots {
+            let error = typer
+                .type_method_definition(root)
+                .expect_err("full Match typing remains beyond this bounded completion change");
+            let TyperError::ExtractorPatternConstraintDeferred {
+                tree_index,
+                ..
+            } = error
+            else {
+                panic!("first-error evidence moved unexpectedly: {error:?}");
+            };
+            assert_eq!(tree_index, expected_tree, "baseline diagnostic source tree");
+            let span = parsed.ast.get(root).position.unwrap().span().range();
+            eprintln!(
+                "ISSUE1994_FIRST_ERROR\t{name}\troot=tree{}\tspan={}:{}\terror=ExtractorPatternConstraintDeferred\tconstraint_tree={tree_index}",
+                root.index(),
+                span.start(),
+                span.end()
+            );
+        }
+    });
+}
+
+#[test]
 fn source_trait_product1_parent_is_authenticated_by_symbol_not_spelling() {
     let source = SourceId::from_index(5994);
     let text = "package adt\ntrait Event\ntrait Other\ncase class Created(id: Int) extends Other\n";
@@ -206,8 +372,12 @@ fn source_trait_product1_parent_is_authenticated_by_symbol_not_spelling() {
     });
 }
 
-fn source_trait_product1_session(source: SourceId, selector_first: bool) -> Vec<String> {
-    let source_text = SOURCE_TRAIT_PRODUCT1.replace(
+fn source_trait_product1_session(
+    source: SourceId,
+    selector_first: bool,
+    source_text: &str,
+) -> Vec<String> {
+    let source_text = source_text.replace(
         "object Matcher:",
         "object Matcher:\n  def accept(event: Event): Int = 0",
     );
@@ -306,6 +476,20 @@ fn source_trait_product1_session(source: SourceId, selector_first: bool) -> Vec<
                 })
                 .collect::<Vec<_>>();
             assert_eq!(product.len(), 1, "one canonical Product edge");
+            assert_eq!(typer.store().symbols.get(product[0]).kind, SymbolKind::Trait);
+            assert!(matches!(
+                typer.store().symbols.get(product[0]).origin,
+                SymbolOrigin::Tasty(_)
+            ));
+            let scala = typer.store().symbols.get(product[0]).owner.unwrap();
+            assert_eq!(typer.store().symbols.get(scala).kind, SymbolKind::Package);
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(scala).name.text()),
+                "scala"
+            );
             assert!(parent_symbols.contains(&definitions.object_class));
             let parent_names = parent_symbols
                 .iter()
@@ -319,6 +503,7 @@ fn source_trait_product1_session(source: SourceId, selector_first: bool) -> Vec<
                 .collect::<Vec<_>>();
             assert_eq!(parent_names, ["Object", "Event", "Product"]);
             assert_eq!(typer.store().symbols.get(class).kind, SymbolKind::Class);
+            assert_eq!(typer.store().symbols.get(class).origin, SymbolOrigin::Source(source));
             assert!(
                 typer
                     .store()
@@ -328,7 +513,21 @@ fn source_trait_product1_session(source: SourceId, selector_first: bool) -> Vec<
                     .contains(dotty_core::SymbolFlags::CASE)
             );
             assert_eq!(typer.store().symbols.get(field).owner, Some(class));
+            assert_eq!(typer.store().symbols.get(field).kind, SymbolKind::Field);
             assert_eq!(typer.store().symbols.get(selector).owner, Some(class));
+            assert_ne!(field, selector, "source field and derived selector keep distinct IDs");
+            let class_scope = index.scope_of(class).unwrap();
+            let selector_name = typer.store().symbols.get(selector).name;
+            assert_eq!(
+                typer.store().scopes.get(class_scope).lookup_all(&selector_name),
+                [selector],
+                "the class exposes exactly its own _1 selector"
+            );
+            assert_eq!(
+                index.derived_symbol_at(class, source, field_tree),
+                Some(selector),
+                "_1 remains derived from the original source constructor ValDef"
+            );
             let selector_info = typer.complete_symbol(selector).unwrap();
             let Some(Type::Method(method)) = typer.store().types.try_get(selector_info) else {
                 panic!("generated _1 must have method type")
@@ -339,6 +538,10 @@ fn source_trait_product1_session(source: SourceId, selector_first: bool) -> Vec<
             let unapply = index
                 .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
                 .unwrap();
+            let apply = index
+                .generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply)
+                .unwrap();
+            assert_ne!(apply, unapply);
             let unapply_info = typer.complete_symbol(unapply).unwrap();
             let Some(Type::Method(unapply_type)) = typer.store().types.try_get(unapply_info) else {
                 panic!("generated unapply must have a method type")
@@ -351,6 +554,22 @@ fn source_trait_product1_session(source: SourceId, selector_first: bool) -> Vec<
             let child_type = unapply_type.result;
             assert!(matches!(
                 typer.store().types.try_get(child_type),
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == class
+            ));
+            let companion = typer.store().symbols.get(class).links.companion.unwrap();
+            assert_eq!(typer.store().symbols.get(companion).kind, SymbolKind::Object);
+            assert_eq!(typer.store().symbols.get(companion).links.companion, Some(class));
+            let companion_class = typer.store().symbols.get(apply).owner.unwrap();
+            assert_eq!(typer.store().symbols.get(companion_class).kind, SymbolKind::ModuleClass);
+            assert_eq!(typer.store().symbols.get(unapply).owner, Some(companion_class));
+            let apply_info = typer.complete_symbol(apply).unwrap();
+            let Some(Type::Method(apply_type)) = typer.store().types.try_get(apply_info) else {
+                panic!("generated apply must have a method type")
+            };
+            assert_eq!(apply_type.params.len(), 1);
+            assert_eq!(apply_type.params[0].ty, definitions.int);
+            assert!(matches!(
+                typer.store().types.try_get(apply_type.result),
                 Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == class
             ));
             let accept = parsed
@@ -383,10 +602,12 @@ fn source_trait_product1_session(source: SourceId, selector_first: bool) -> Vec<
                 .store()
                 .names
                 .resolve(typer.store().symbols.get(class).name.text());
-            summaries.push(format!(
-                "{class_name}|{}|_1:Int|{class_name}$.unapply",
+            let row = format!(
+                "{class_name}|Class(CASE,source)|parents={}|_1:Int(source-field-derived)|apply=(Int):{class_name}|unapply=({class_name}):{class_name}|{class_name}<:Event=true|Event<:{class_name}=false",
                 parent_names.join(",")
-            ));
+            );
+            eprintln!("ISSUE1994_CLASS\t{row}");
+            summaries.push(row);
         }
     });
     summaries.sort();
