@@ -36,10 +36,14 @@ Compatibility reference: Scala 3.9.0 revision
 `777528f19a58e794c9954a42f433373472ec57f8`; frozen source SHA-256
 `a3554b9a764b612af5b6b73779839af82a5e448e909464e45cbc18fb8a86cba1`.
 The checked-in Scala oracle classifies `Event.scala` as accepted and records
-the original trait and case-class shapes. The oracle runner could not be
-re-executed in this environment because `SCALA39_ROOT`, `JAVA_HOME`, and a
-`java` executable are unavailable; this is recorded as an outstanding
-validation limit rather than a passing run. The preserved #1992 class-info
+the original trait and case-class shapes. The focused audit ran the exact
+`source-sealed-adt-match-3.9.0/run` runner at
+[Actions run 41432485669](https://github.com/scytrowski/dotty-rs/actions/runs/41432485669)
+with Scala revision `777528f19a58e794c9954a42f433373472ec57f8` and Temurin
+21.0.8+9; its Event oracle step passed and uploaded the typed-tree, diagnostics,
+and classification receipts. The local environment only has Temurin 21.0.13,
+so the exact pinned runner was verified on the focused hosted audit. The
+preserved #1992 class-info
 snapshot remains at
 [`rust-classinfo.tsv`](../crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/rust-classinfo.tsv);
 the current post-change metadata is recorded separately in
