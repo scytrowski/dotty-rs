@@ -327,6 +327,28 @@ fn owner_address(file: &TastyFile<'_>, name: &str) -> Option<u32> {
     (matches.len() == 1).then(|| matches[0])
 }
 
+fn member_owner_address(file: &TastyFile<'_>, address: u32) -> Option<u32> {
+    let index = file.ast_address_index().ok()?;
+    let mut node = index.get_node(address)?;
+    while let Some(parent) = index.parent_of(u32::try_from(node.offset).ok()?) {
+        if parent.tag == TYPEDEF_TAG {
+            return u32::try_from(parent.offset).ok();
+        }
+        node = parent;
+    }
+    None
+}
+
+fn type_def_name(file: &TastyFile<'_>, address: u32) -> Option<String> {
+    let index = file.ast_address_index().ok()?;
+    let StructuredNode::TypeDef(DefinitionBody::TypeDef { name, .. }) =
+        index.get(address)?.decode_structured().ok()?
+    else {
+        return None;
+    };
+    Some(file.names().get_utf8(name)?.to_owned())
+}
+
 fn owner_path(store: &SemanticStore, id: SymbolId) -> String {
     let mut parts = Vec::new();
     let mut current = Some(id);
@@ -351,18 +373,30 @@ struct ForeignOwner {
 #[derive(Debug)]
 enum AuditRequestError {
     ForeignOwner(ForeignOwner),
+    InvalidOwnerIndex { address: u32 },
     Completion(UnpickleError),
 }
 
 fn complete_audit_request(
+    file: &TastyFile<'_>,
     unpickler: &mut TastyUnpickler<'_, '_, '_>,
     address: u32,
     requested_owner: &str,
-    actual_owner: &str,
 ) -> Result<dotty_core::TypeId, AuditRequestError> {
     if unpickler.index().symbol_at(address).is_none() {
         return Err(AuditRequestError::Completion(
             UnpickleError::MissingEnteredSymbol { address },
+        ));
+    }
+    let actual_owner_address = member_owner_address(file, address)
+        .ok_or(AuditRequestError::InvalidOwnerIndex { address })?;
+    let actual_owner = type_def_name(file, actual_owner_address)
+        .ok_or(AuditRequestError::InvalidOwnerIndex { address })?;
+    if unpickler.index().symbol_at(actual_owner_address).is_none() {
+        return Err(AuditRequestError::Completion(
+            UnpickleError::MissingEnteredSymbol {
+                address: actual_owner_address,
+            },
         ));
     }
     if requested_owner == actual_owner {
@@ -372,7 +406,7 @@ fn complete_audit_request(
     } else {
         Err(AuditRequestError::ForeignOwner(ForeignOwner {
             requested: requested_owner.to_owned(),
-            actual: actual_owner.to_owned(),
+            actual: actual_owner,
         }))
     }
 }
@@ -594,7 +628,7 @@ fn run_once() -> String {
             dotty_core::SymbolKind::Method
         );
         let (outcome, signature, error) =
-            match complete_audit_request(&mut unpickler, address, owner_simple, owner_simple) {
+            match complete_audit_request(&file, &mut unpickler, address, owner_simple) {
                 Ok(signature) => ("COMPLETE".to_owned(), Some(signature), String::new()),
                 Err(AuditRequestError::Completion(error)) => (
                     classify(&error).to_owned(),
@@ -603,6 +637,9 @@ fn run_once() -> String {
                 ),
                 Err(AuditRequestError::ForeignOwner(error)) => {
                     panic!("unexpected owner mismatch: {error:?}")
+                }
+                Err(AuditRequestError::InvalidOwnerIndex { address }) => {
+                    panic!("member {address} has no indexed TYPEDEF owner")
                 }
             };
         drop(unpickler);
@@ -956,30 +993,19 @@ fn malformed_bytes_and_foreign_owner_controls_fail_closed() {
     dog_unpickler.enter_symbols().unwrap();
     let dog_address = member_address(&dog_file, "sound").unwrap();
     let before = dog_unpickler.symbol_state_at(dog_address).unwrap();
-    let error = complete_audit_request(
-        &mut dog_unpickler,
-        dog_address,
-        "me.cytrowski.tastyfixtures.Animal",
-        "me.cytrowski.tastyfixtures.Dog",
-    )
-    .expect_err("a real Dog.sound address cannot be requested as Animal.sound");
+    let error = complete_audit_request(&dog_file, &mut dog_unpickler, dog_address, "Animal")
+        .expect_err("a real Dog.sound address cannot be requested as Animal.sound");
     assert!(matches!(
         error,
         AuditRequestError::ForeignOwner(ForeignOwner { requested, actual })
-            if requested == "me.cytrowski.tastyfixtures.Animal"
-                && actual == "me.cytrowski.tastyfixtures.Dog"
+            if requested == "Animal" && actual == "Dog"
     ));
     assert_eq!(
         dog_unpickler.symbol_state_at(dog_address).unwrap(),
         before,
         "foreign-owner rejection leaves the committed method state unchanged"
     );
-    let retry = complete_audit_request(
-        &mut dog_unpickler,
-        dog_address,
-        "me.cytrowski.tastyfixtures.Dog",
-        "me.cytrowski.tastyfixtures.Dog",
-    );
+    let retry = complete_audit_request(&dog_file, &mut dog_unpickler, dog_address, "Dog");
     assert!(matches!(
         retry,
         Err(AuditRequestError::Completion(
