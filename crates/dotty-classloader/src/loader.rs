@@ -918,6 +918,22 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         })?;
         let selection = Self::validate_open_unit_shape(&file, name)?;
 
+        self.load_open_transaction(&file, name, &selection, resource.origin().clone(), false)
+    }
+
+    /// The bounded commit/rollback boundary for the one supported Open unit.
+    /// Its write plan is deliberately explicit: the classpath resolver may
+    /// enter packages/classes and update `Object`; the unpickler may enter the
+    /// selected root and bind canonical `Unit`. Other mutations are rejected
+    /// by `validate_open_unit_shape` before reaching this operation.
+    fn load_open_transaction(
+        &mut self,
+        file: &dotty_tasty::tasty::TastyFile<'_>,
+        name: &BinaryName,
+        selection: &TastyTopLevelSelection,
+        origin: ClassOrigin,
+        inject_late_failure: bool,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
         let aliases_before = self.snapshot_open_builtin_aliases();
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
@@ -926,16 +942,60 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .symbols
             .get(self.definitions.object_class)
             .clone();
-        let result = self.load_open_semantics(&file, name, &selection);
+        let mut materialized_class = None;
+        let result = self
+            .load_open_semantics(file, name, selection)
+            .and_then(|class| {
+                materialized_class = Some(class);
+                if inject_late_failure {
+                    #[cfg(test)]
+                    {
+                        let constructor_name =
+                            Name::new(self.store.names.intern("<init>"), Namespace::Term);
+                        let SymbolInfo::Complete(class_info) = self.store.symbols.get(class).info
+                        else {
+                            panic!("injected failure follows class completion");
+                        };
+                        let Type::ClassInfo(class_info) = self.store.types.get(class_info) else {
+                            panic!("completed Open class has class info");
+                        };
+                        let constructor = self
+                            .store
+                            .scopes
+                            .get(class_info.declarations)
+                            .lookup(&constructor_name)
+                            .expect("injected failure follows constructor completion");
+                        assert!(matches!(
+                            self.store.symbols.get(class).info,
+                            SymbolInfo::Complete(_)
+                        ));
+                        assert_eq!(self.store.symbols.get(constructor).owner, Some(class));
+                        assert!(matches!(
+                            self.store.symbols.get(constructor).info,
+                            SymbolInfo::Complete(_)
+                        ));
+                    }
+                    return Err(SemanticTastyLoadError::UnsupportedShape(
+                        "injected failure after Open class and constructor completion",
+                    ));
+                }
+                Ok(class)
+            });
         match result {
             Ok(class) => {
-                self.session.record_origin(class, resource.origin().clone());
+                self.session.record_origin(class, origin);
                 self.session.cache_resolved(name.clone(), class);
                 self.repository.mark_loaded(name.clone(), class);
                 self.semantic_tasty_loaded.insert(name.clone(), class);
                 Ok(class)
             }
             Err(error) => {
+                if let Some(class) = materialized_class {
+                    self.remove_open_root_from_package_scope(class);
+                }
+                // Restore surviving IDs and scope links before truncating any
+                // arena. Session rollback owns package declarations and the
+                // resolver's positive cache/sidecar journals.
                 self.session.rollback_to(self.store, session_checkpoint);
                 if self.store.symbols.contains(self.definitions.object_class) {
                     *self.store.symbols.get_mut(self.definitions.object_class) = object_before;
@@ -9942,6 +10002,31 @@ mod tests {
             .bind_open_builtin_unit()
             .expect("canonical Unit binding");
         let name = open_binary_name();
+
+        // A previously committed package and declaration must survive the
+        // failed Open operation unchanged.
+        let keep_package = loader
+            .session
+            .packages
+            .resolve_package(loader.store, "already/committed");
+        let keep_scope = loader.session.packages.scope_of(keep_package).unwrap();
+        let keep_symbol = loader.store.symbols.alloc(Symbol {
+            name: Name::new(loader.store.names.intern("Keep"), Namespace::Type),
+            owner: Some(keep_package),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let keep_name = Name::new(loader.store.names.intern("Keep"), Namespace::Type);
+        loader
+            .session
+            .packages
+            .enter_class(loader.store, keep_package, keep_name, keep_symbol);
         let store_mark = loader.store.checkpoint();
         let session_mark = loader.session.checkpoint();
         let package_mark = loader.session.packages.checkpoint();
@@ -9951,49 +10036,36 @@ mod tests {
             .get(loader.definitions.object_class)
             .clone();
 
-        let projected = loader
-            .load_open_with_tasty_unpickler(&name)
-            .expect("root and constructor should complete before injected late failure");
-        let constructor_name = Name::new(loader.store.names.intern("<init>"), Namespace::Term);
-        let declarations = class_info(loader.store, projected).declarations;
-        let constructor = loader
-            .store
-            .scopes
-            .get(declarations)
-            .lookup(&constructor_name)
-            .expect("projected constructor");
-        let Type::Method(method) =
+        let resource = loader
+            .class_path
+            .find_class(&name)
+            .expect("fixture lookup")
+            .expect("Open fixture");
+        let file = tasty_symbol::parse_classloader_tasty(resource.bytes()).expect("valid fixture");
+        let selection = ClassLoader::<CompositeClassPath>::validate_open_unit_shape(&file, &name)
+            .expect("supported Open shape");
+        assert!(matches!(
             loader
-                .store
-                .types
-                .get(match loader.store.symbols.get(constructor).info {
-                    SymbolInfo::Complete(ty) => ty,
-                    _ => panic!("constructor projection should be complete"),
-                })
-        else {
-            panic!("constructor projection should be a method");
-        };
-        assert_eq!(method.params.len(), 0);
-        assert_eq!(
-            unit_type_ref_target(loader.store, method.result),
-            Some(projected)
-        );
-
-        // Simulate an enclosing loader transaction rejecting a later phase
-        // after the adapter has performed real projection work.
-        let injected_late_failure: Result<(), &'static str> = Err("injected after projection");
-        assert_eq!(injected_late_failure, Err("injected after projection"));
-        loader.session.rollback_to(loader.store, session_mark);
-        *loader
-            .store
-            .symbols
-            .get_mut(loader.definitions.object_class) = object_before.clone();
-        loader.store.rollback_to(store_mark);
-        loader.repository.discard_rolled_back_symbols(loader.store);
-        loader.semantic_tasty_loaded.remove(&name);
+                .load_open_transaction(&file, &name, &selection, resource.origin().clone(), true,),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "injected failure after Open class and constructor completion"
+            ))
+        ));
         assert_eq!(loader.store.checkpoint(), store_mark);
         assert_eq!(loader.session.checkpoint(), session_mark);
         assert_eq!(loader.session.packages.checkpoint(), package_mark);
+        assert!(loader.store.symbols.contains(keep_symbol));
+        assert_eq!(
+            loader.store.symbols.get(keep_symbol).owner,
+            Some(keep_package)
+        );
+        assert_eq!(
+            loader.store.scopes.get(keep_scope).lookup_all(&Name::new(
+                loader.store.names.intern("Keep"),
+                Namespace::Type
+            )),
+            &[keep_symbol]
+        );
         let unit = unit_type_ref_target(loader.store, loader.definitions.unit).unwrap();
         let scala = loader.session.packages.get(&["scala"]).unwrap();
         assert_eq!(loader.store.symbols.get(unit).owner, Some(scala));
@@ -10020,8 +10092,8 @@ mod tests {
             .load_open_with_tasty_unpickler(&name)
             .expect("retry after rollback should complete the same shape");
         assert_eq!(
-            retried, projected,
-            "rollback should release ids for deterministic retry"
+            retried, loader.semantic_tasty_loaded[&name],
+            "retry should publish the canonical result"
         );
         assert!(matches!(
             loader.store.symbols.get(retried).info,

@@ -173,3 +173,41 @@ No fixture address is a production selection criterion. The Open and
 PlainPrivate fixture bytes and historical cohort artifacts remain unchanged.
 Constructor completion remains outside discovery; serialized `Unit` and the
 completed owning-class result retain their separate meanings described above.
+
+## Bounded Open semantic-load transaction (#1991)
+
+This contract is implemented from fresh `main` at
+`02f666dcf794a24fd4ba3676380444461c8e0f72`, after the #1990 merge. The
+existing Open control fixture remains byte-identical at SHA-256
+`49286e74a3d3693b08d2a29575f23089f6be5c486231390059f43c19a8929894`.
+
+The opt-in Open adapter now has one private operation boundary after classpath
+selection and structural preflight. It owns the store and `LoadingSession`
+checkpoints, canonical builtin snapshots, semantic projection, validation,
+and publication. The sole supported mutation plan is the existing one-class
+Open shape: classpath resolution may add package/class entries and complete
+the canonical `Object`; unpickling may enter the selected root and bind the
+existing canonical `Unit`. Shape preflight rejects other trees before this
+boundary begins. This is not an automatic transaction for arbitrary semantic
+store writes or a general multi-unit loader transaction.
+
+On success, the adapter records the selected resource origin and publishes
+`resolved`, repository `Loaded`, and semantic-TASTy cache entries only after
+class and constructor identity, ownership, and completion checks pass. On
+failure, any completed Open root is removed from its surviving package scope,
+then `LoadingSession` restores symbol updates, identity/module/resolution and
+sidecar journals, and package declarations. The canonical `Object` and
+builtin alias snapshots are restored next; only then are store arenas
+truncated and repository entries pointing at rolled-back symbols discarded.
+No negative classpath result is cached. A retry probes the same configured
+classpath resource and may safely materialize it again. Previously committed
+symbols, including canonical `Unit` and unrelated package declarations,
+remain intact.
+
+The focused negative test injects failure through this operation after the
+real Open class and constructor have completed. It asserts store/session
+checkpoints and surviving committed declarations are unchanged, confirms the
+class has no loaded/resolved cache entry, and retries the original resource in
+the same loader. Existing positive-shape and neighboring Info, Option, and
+default-loader paths retain their prior contracts; this transaction does not
+add any accepted class shape.
