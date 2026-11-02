@@ -277,6 +277,18 @@ jobs:
             > "$DOTTY_AUDIT_REPORT_DIR/source-sealed-adt-match-oracle.log" 2>&1
           cat "$DOTTY_AUDIT_REPORT_DIR/source-sealed-adt-match-oracle.log"
 
+      - name: Run pinned recursive Expr ADT Scala oracle
+        shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_RECURSIVE_ADT_TMP_ROOT: ${{ github.workspace }}/target/source-recursive-adt-match-oracle
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/run \
+            > "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-oracle.log" 2>&1
+          cat "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-oracle.log"
+
       - name: Run pinned sealed Event negative and rollback matrix
         shell: bash
         env:
@@ -306,6 +318,17 @@ jobs:
             --locked -- --nocapture \
             > "$DOTTY_AUDIT_REPORT_DIR/source-sealed-adt-match-rust.log" 2>&1
           cat "$DOTTY_AUDIT_REPORT_DIR/source-sealed-adt-match-rust.log"
+
+      - name: Run authentic two-session recursive Expr ADT Rust baseline
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          cargo +1.98.1 test -p dotty-typer --test source_recursive_adt_baseline \
+            --locked -- --nocapture \
+            > "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-rust.log" 2>&1
+          cat "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-rust.log"
 
       - name: Run exact source case-class Match Rust acceptance matrix
         shell: bash
@@ -536,5 +559,6 @@ jobs:
             ${{ github.workspace }}/target/source-case-class-product2-oracle/
             ${{ github.workspace }}/target/source-sealed-adt-match-oracle/
             ${{ github.workspace }}/target/source-sealed-adt-match-rollback-oracle/
+            ${{ github.workspace }}/target/source-recursive-adt-match-oracle/
           if-no-files-found: error
           retention-days: 30
