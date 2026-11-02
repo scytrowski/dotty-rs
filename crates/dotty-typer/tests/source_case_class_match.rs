@@ -4,7 +4,7 @@ use dotty_classloader::classloader::{
     ClassPathEntry, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, JdkClassPath,
     LoadingSession,
 };
-use dotty_core::ast::{TreeKind, TypedAst};
+use dotty_core::ast::{Literal, TreeKind, TypedAst};
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, GeneratedCaseClassMethodRole, Name, Namespace, Packages, SemanticStore, SourceId,
@@ -65,12 +65,28 @@ fn frozen_source_case_class_match_methods_type_as_whole_defdefs() {
 
 #[test]
 fn flagged_product2_whole_method_baseline() {
-    let first = flagged_positive_session(SourceId::from_index(1970));
-    let second = flagged_positive_session(SourceId::from_index(2970));
+    let first_source = SourceId::from_index(1970);
+    let second_source = SourceId::from_index(2970);
+    assert_ne!(
+        first_source, second_source,
+        "each receipt uses an independent source session"
+    );
+    let first = flagged_positive_session(first_source);
+    let second = flagged_positive_session(second_source);
     assert_eq!(
         first, second,
         "two independent source sessions normalize identically"
     );
+    assert_eq!(
+        first.len(),
+        2,
+        "only select and classify count as positive roots"
+    );
+    for (session, rows) in [("first", &first), ("second", &second)] {
+        for row in rows {
+            println!("ISSUE1972_POSITIVE\t{session}\t{row}");
+        }
+    }
 }
 
 #[test]
@@ -84,6 +100,25 @@ fn flagged_product2_late_case_failure_rolls_back_before_valid_sibling() {
     let select = session.method_named("select");
     let classify = session.method_named("classify");
     let select_symbol = session.index.symbol_at(source, select).unwrap();
+    let then_branch = {
+        let TreeKind::DefDef(definition) = &session.parsed.ast.get(select).kind else {
+            panic!("select source method")
+        };
+        let TreeKind::Match(match_node) = &session.parsed.ast.get(definition.rhs.unwrap()).kind
+        else {
+            panic!("select source Match")
+        };
+        let TreeKind::CaseDef(case) = &session.parsed.ast.get(match_node.cases[0]).kind else {
+            panic!("select source CaseDef")
+        };
+        let TreeKind::Block(block) = &session.parsed.ast.get(case.body).kind else {
+            panic!("select source body block")
+        };
+        let TreeKind::If(if_node) = &session.parsed.ast.get(block.expr).kind else {
+            panic!("select source If")
+        };
+        if_node.then_branch
+    };
     let class = flagged_class_symbol(&session, source);
     let unapply = session
         .index
@@ -116,9 +151,27 @@ fn flagged_product2_late_case_failure_rolls_back_before_valid_sibling() {
                 role: GeneratedCaseClassMethodRole::Unapply,
             })
         );
+    });
+    let broken_branch = session.parsed.ast.get_mut(then_branch);
+    broken_branch.kind = TreeKind::Literal(Literal {
+        value: Constant::Int(1),
+    });
+    session.with_typer(|_, _, _, _, typer| {
+        let retried = typer
+            .type_method_definition(select)
+            .expect("same semantic session retries after repairing the failing source node");
+        assert!(matches!(
+            typer.typed_ast().get(retried).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert!(typer.source_typed_index().get(source, select).is_some());
+        assert!(matches!(
+            *typer.store().symbols.info(select_symbol),
+            SymbolInfo::Complete(_)
+        ));
         let sibling = typer
             .type_method_definition(classify)
-            .expect("valid classify method remains typeable after rollback");
+            .expect("valid sibling remains typeable after the successful retry");
         assert!(matches!(
             typer.typed_ast().get(sibling).kind,
             TreeKind::DefDef(_)
@@ -258,6 +311,16 @@ fn flagged_positive_session(source: SourceId) -> Vec<String> {
         .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
         .expect("original generated Flagged.unapply");
     let class_scope = session.index.scope_of(class).expect("Flagged class scope");
+    let third_selector = Name::new(session.store.names.intern("_3"), Namespace::Term);
+    assert!(
+        session
+            .store
+            .scopes
+            .get(class_scope)
+            .lookup_all(&third_selector)
+            .is_empty(),
+        "the two-field source class has no _3 selector"
+    );
     let mut selectors = Vec::new();
     for (spelling, expected_tree, expected_span) in [("_1", 2, (37, 47)), ("_2", 4, (49, 65))] {
         let name = Name::new(session.store.names.intern(spelling), Namespace::Term);
@@ -311,16 +374,18 @@ fn flagged_positive_session(source: SourceId) -> Vec<String> {
         let Some(Type::ClassInfo(class_info)) = typer.store().types.try_get(class_info) else {
             panic!("Flagged has complete ClassInfo");
         };
-        let product = class_info
+        let products = class_info
             .parents
             .iter()
-            .find_map(|parent| match typer.store().types.try_get(*parent) {
+            .filter_map(|parent| match typer.store().types.try_get(*parent) {
                 Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. })
                     if typer.store().names.resolve(typer.store().symbols.get(*symbol).name.text()) == "Product"
                         && matches!(typer.store().symbols.get(*symbol).origin, SymbolOrigin::Tasty(_)) => Some(*symbol),
                 _ => None,
             })
-            .expect("canonical scala.Product TASTy parent");
+            .collect::<Vec<_>>();
+        assert_eq!(products.len(), 1, "Flagged has exactly one canonical Product parent");
+        let product = products[0];
         assert_eq!(typer.store().symbols.get(product).kind, SymbolKind::Trait);
         assert_eq!(typer.store().names.resolve(typer.store().symbols.get(product).name.text()), "Product");
         let unapply_type = typer.complete_symbol(unapply).expect("generated unapply signature");
@@ -472,10 +537,11 @@ fn flagged_positive_session(source: SourceId) -> Vec<String> {
                     _ => unreachable!("only the two frozen methods are expected"),
                 }
             }
-            let normalized = format!("{name}|Positive.scala#tree{}|{}:{}|typed#tree{}|matching.Flagged|matching.Matcher|(Flagged):Int|scala.Product|_1:Int@Flagged|_2:Boolean@Flagged|Flagged$.unapply|{}", expected.0, expected.1, expected.2, typed_method.index(), case_shapes.join(";"));
+            let normalized = format!("{name}\tPositive.scala#tree{}\t{}:{}\tmatching.Flagged\tmatching.Matcher\t(Flagged):Int\tscala.Product\t_1:Int@Flagged,_2:Boolean@Flagged\tFlagged$.unapply\t{}\tcomplete\tInt\ttrue\t4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31", expected.0, expected.1, expected.2, case_shapes.join(";"));
             summaries.push(normalized);
         }
         assert_eq!(selectors.len(), 2);
+        assert_ne!(selectors[0], selectors[1], "Product2 selectors have distinct identities");
         for (selector, expected_type) in selectors.into_iter().zip([definitions.int, definitions.boolean]) {
             let selector_info = typer.complete_symbol(selector).expect("complete canonical source selector");
             let Some(Type::Method(selector_type)) = typer.store().types.try_get(selector_info) else { panic!("selector is parameterless method") };
