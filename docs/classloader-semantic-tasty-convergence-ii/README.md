@@ -137,22 +137,22 @@ control; the foreign-owner check leaves its committed semantic state intact.
 
 ## Issue #1997 closeout
 
-**Verdict: PARTIAL pending the secondary-constructor gate.** The opt-in
-reusable loader met the two-class positive acceptance in two fresh stores, and
-all required Rust/JDK checks on the tested code head passed. The negative matrix
-has typed rollback and retry coverage for wrong package, module roots,
-parameterized class templates, malformed and unsupported-version TASTy, and a
-late failure after a prior class has committed. A follow-up test-only extension
-adds a tiny pinned-Scala fixture with a secondary constructor and a mandatory
-JDK 21 workflow invocation that exercises the same loader and rollback
-assertions. The result for that final candidate is pending; the earlier
-`CtorPlain.tasty` control covered a parameterized primary constructor only.
+**Verdict: SPRINT GOAL MET.** The opt-in reusable loader met the two-class
+positive acceptance in two fresh stores, and all required Rust/JDK checks
+passed. The negative matrix has typed rollback and retry coverage for wrong
+package, module roots, parameterized class templates, a real Scala 3.9
+secondary-constructor class, malformed and unsupported-version TASTy, and a late
+failure after a prior class has committed. The secondary-constructor fixture is
+compiled by the pinned Scala compiler and required by the JDK 21 consumer
+workflow; the same private loader returns `UnsupportedShape` and leaves store,
+session, package, and cache checkpoints unchanged.
 
 The integrated base was `53dd490de7acbc19120a75d74db8887c7181a6c1`; tested
-code head was `2a8d170ddbf5bb29e6b5522d6b0785b6f0a83136` in PR
+code head was `031bb7fe5c80947f74015df40c1049a9a7351994` in PR
 [#2022](https://github.com/scytrowski/dotty-rs/pull/2022). The implementation
-changes only tests and this report; production loader behavior and CI wiring
-are unchanged.
+changes only tests and documentation; production loader behavior is unchanged.
+CI adds a required command in the pinned Scala/JDK workflow for the dynamic
+secondary-constructor fixture.
 
 ### Positive acceptance
 
@@ -181,13 +181,15 @@ not mistaken for a direct template declaration. The new
 compiles `tasty_secondary_constructor/SecondaryConstructor.scala` with the
 pinned Scala compiler, then asserts typed shape rejection and unchanged store,
 session, package, and cache checkpoints. The Scala consumer workflow invokes it
-with the required gate enabled; its final-CI result is pending.
+with the required gate enabled; it passed with one test run, zero failures, and
+zero ignored tests.
 
 The default `ClassLoader::load_class` path is unchanged. Existing directory,
 JAR, and Info-pair tests continue to assert `.tasty` priority over a collocated
 `.class`. The adapter suite also retains the earlier `Open`, `InfoBase` /
-`InfoWrapped`, and `Option.getOrElse` coverage. No workflow wiring was needed:
-normal CI already runs the non-ignored classloader and unpickler tests.
+`InfoWrapped`, and `Option.getOrElse` coverage. Normal CI runs the non-ignored
+classloader and unpickler tests; the pinned Scala consumer workflow additionally
+requires the dynamic secondary-constructor regression.
 
 ### Frozen comparator and member audit
 
@@ -208,24 +210,25 @@ historical #1931 `PARTIAL` remains unchanged.
 
 ### Validation receipts
 
-All checks below were run against code head
-`2a8d170ddbf5bb29e6b5522d6b0785b6f0a83136`:
+All checks below were run against final code head
+`031bb7fe5c80947f74015df40c1049a9a7351994`:
 
 - Local: `cargo test -p dotty-classloader --lib --no-run --locked`, focused
   semantic-loader negative/visibility tests, `cargo fmt --all -- --check`,
   `python3 tools/check-frontend-boundaries.py`, Clippy, rustdoc, and
   `git diff --check` passed. The local host has no JDK, so full JDK-dependent
   tests were delegated to the required hosted JDK 21 gates.
-- [CI](https://github.com/scytrowski/dotty-rs/actions/runs/41496168783):
+- [CI](https://github.com/scytrowski/dotty-rs/actions/runs/41502299594):
   formatting, boundaries, Clippy, rustdoc, full
   `cargo test --workspace --all-targets --locked`, diff check, and the mandatory
   JDK 21 classfile/JVM gate passed.
-- [Focused semantic regression gate](https://github.com/scytrowski/dotty-rs/actions/runs/41496168865):
+- [Focused semantic regression gate](https://github.com/scytrowski/dotty-rs/actions/runs/41502299646):
   passed; it ran the focused acceptance matrices, frozen comparator/audit, and
   uploaded artifact `typer-focused-audit-f6ea7e251f6d55ba072e6292e4c47938f4ed313e`
   (SHA-256 `760cfa00517fe0fecf17fb452f1e72de1d39f9275f68265ca9a0450d2963e4e4`).
-- [Pinned Scala 3.9 factory TASTy consumer](https://github.com/scytrowski/dotty-rs/actions/runs/41496168863):
-  passed, including its mandatory Java 21 verifier/publisher gate.
+- [Pinned Scala 3.9 factory TASTy consumer](https://github.com/scytrowski/dotty-rs/actions/runs/41502299774):
+  passed, including the non-skipped secondary-constructor rejection test and
+  the mandatory Java 21 verifier/publisher gate.
 
 The configured trace `113f2c35-6b19-45e7-ab5c-1fab1ba58ba7` remains preserved
 in its original location and was not published separately.
