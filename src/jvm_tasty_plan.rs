@@ -23,8 +23,10 @@ use dotty_parser::parse_compilation_unit;
 use dotty_tasty_pickler::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
     DirectFormalConstructorCallPairBinding, LocalValueBinding, NestedConstructorCallBinding,
-    NestedConstructorCallPairBinding, PickleError, PlannedCallBinding, PrimaryConstructorInputPlan,
-    SourceMetadata, SourceTypedBindings, ValidatedClassStatePlan,
+    NestedConstructorCallPairBinding, OrderedConstructorCallArgumentBinding,
+    OrderedConstructorCallArgumentOrigin, OrderedConstructorCallArgumentPairBinding, PickleError,
+    PlannedCallBinding, PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
+    ValidatedClassStatePlan,
 };
 use dotty_typer::{SourceTyper, TyperError};
 
@@ -146,6 +148,11 @@ struct BatchSourceTypedBindings<'a> {
     nested_constructor_call_pairs: Vec<(SourceId, SymbolId, NestedConstructorCallPairBinding)>,
     direct_formal_constructor_call_pairs:
         Vec<(SourceId, SymbolId, DirectFormalConstructorCallPairBinding)>,
+    ordered_constructor_call_argument_pairs: Vec<(
+        SourceId,
+        SymbolId,
+        OrderedConstructorCallArgumentPairBinding,
+    )>,
     planned_calls: Vec<(SourceId, SymbolId, PlannedCallBinding)>,
     local_values: Vec<(SourceId, SymbolId, LocalValueBinding)>,
 }
@@ -201,6 +208,18 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
                 (*proof_source == source && *proof_method == method).then_some(*bindings)
             },
         )
+    }
+
+    fn ordered_constructor_call_argument_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<OrderedConstructorCallArgumentPairBinding> {
+        self.ordered_constructor_call_argument_pairs
+            .iter()
+            .find_map(|(proof_source, proof_method, bindings)| {
+                (*proof_source == source && *proof_method == method).then_some(*bindings)
+            })
     }
 
     fn planned_call(&self, source: SourceId, method: SymbolId) -> Option<PlannedCallBinding> {
@@ -1367,6 +1386,66 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                         },
                     ))
                 })
+            })
+            .collect(),
+        ordered_constructor_call_argument_pairs: constructor_call_proofs
+            .iter()
+            .filter_map(|proof| {
+                if proof.argument_proof().kind()
+                    != crate::jvm_tasty_cross_class::ConstructorArgumentProofKind::FormalNestedPair
+                {
+                    return None;
+                }
+                let pair = proof.argument_proof().ordered_pair()?;
+                let arguments = pair.arguments();
+                let map_argument = |argument: crate::jvm_tasty_cross_class::OrderedConstructorArgumentProofView| {
+                    let source_argument = argument.source_argument();
+                    let typed_argument = argument.typed_argument();
+                    let origin = if let Some(formal) = argument.formal() {
+                        OrderedConstructorCallArgumentOrigin::Formal {
+                            formal: formal.formal(),
+                            formal_type: formal.formal_type(),
+                            result_type: formal.result_type(),
+                        }
+                    } else {
+                        let nested = argument.nested_new()?;
+                        OrderedConstructorCallArgumentOrigin::NestedNew {
+                            call: NestedConstructorCallBinding {
+                                source_apply: nested.source_outer_argument(),
+                                typed_apply: nested.typed_outer_argument(),
+                                source_select: nested.source_select(),
+                                source_new: nested.source_new(),
+                                source_argument: nested.source_argument(),
+                                typed_select: nested.typed_select(),
+                                typed_new: nested.typed_new(),
+                                typed_argument: nested.typed_argument(),
+                                class: nested.class(),
+                                constructor: nested.constructor(),
+                                formal: nested.formal(),
+                                formal_type: nested.formal_type(),
+                                result_type: nested.result_type(),
+                            },
+                            argument_formal: nested.argument_formal(),
+                        }
+                    };
+                    Some(OrderedConstructorCallArgumentBinding {
+                        source_argument,
+                        typed_argument,
+                        origin,
+                    })
+                };
+                Some((
+                    proof.source_id(),
+                    proof.method(),
+                    OrderedConstructorCallArgumentPairBinding {
+                        source_method_formals: pair.source_method_formals(),
+                        method_formals: pair.method_formals(),
+                        arguments: [
+                            map_argument(arguments[0])?,
+                            map_argument(arguments[1])?,
+                        ],
+                    },
+                ))
             })
             .collect(),
         planned_calls: constructor_call_proofs

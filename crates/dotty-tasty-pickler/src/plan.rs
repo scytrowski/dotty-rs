@@ -86,6 +86,17 @@ pub trait SourceTypedBindings {
         None
     }
 
+    /// Ordered source/typed arguments and their proven origins for one
+    /// Formal + NestedNew constructor pair. Producers must derive the receipt
+    /// from the common ordered cross-class proof in this same session.
+    fn ordered_constructor_call_argument_pair(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<OrderedConstructorCallArgumentPairBinding> {
+        None
+    }
+
     /// Exact source/typed/symbol evidence for one same-instance planned method
     /// call used as a constructor argument. Producers must derive this from
     /// the same source/typed proof session as `typed_at`.
@@ -139,6 +150,40 @@ pub struct DirectFormalConstructorCallPairBinding {
     pub source_arguments: [TreeId<Untyped>; 2],
     pub typed_arguments: [TreeId<Typed>; 2],
     pub argument_formals: [SymbolId; 2],
+}
+
+/// Origin of one argument in the bounded mixed constructor pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderedConstructorCallArgumentOrigin {
+    /// An original method formal passed directly to the outer constructor.
+    Formal {
+        formal: SymbolId,
+        formal_type: TypeId,
+        result_type: TypeId,
+    },
+    /// An original one-level `new Counter(seed)` expression.
+    NestedNew {
+        call: NestedConstructorCallBinding,
+        argument_formal: SymbolId,
+    },
+}
+
+/// Exact source and typed roots plus the source-proven origin for one outer
+/// constructor argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OrderedConstructorCallArgumentBinding {
+    pub source_argument: TreeId<Untyped>,
+    pub typed_argument: TreeId<Typed>,
+    pub origin: OrderedConstructorCallArgumentOrigin,
+}
+
+/// Original method parameter roots and the two per-position source-proven
+/// origins for one mixed constructor application.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OrderedConstructorCallArgumentPairBinding {
+    pub source_method_formals: [TreeId<Untyped>; 2],
+    pub method_formals: [SymbolId; 2],
+    pub arguments: [OrderedConstructorCallArgumentBinding; 2],
 }
 
 /// Exact provenance retained by the source frontend's opaque planned-call

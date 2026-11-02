@@ -27249,21 +27249,11 @@ fn mixed_origin_pair_arguments_reach_jvm_and_report_the_proof_boundary() {
             |_| paired_callback_ran = true,
         );
         assert!(
-            !paired_callback_ran,
-            "the deferred body rejection prevents paired artifacts from reaching the callback"
+            paired_callback_ran,
+            "the validated paired batch reaches its consumer"
         );
         assert!(
-            matches!(
-                &paired,
-                Err(dotty::jvm_tasty_plan::PairedPlanError::BatchClass {
-                    class_index: 2,
-                    phase: "JVM/TASTy cross-contract validation",
-                    reason,
-                    ..
-                }) if reason.starts_with(
-                    "TastyPlan(Unsupported { feature: BodyExpression, symbol: Some("
-                )
-            ),
+            paired.is_ok(),
             "unexpected downstream paired result: {paired:?}"
         );
     }

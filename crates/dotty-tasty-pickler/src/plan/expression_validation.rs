@@ -2544,6 +2544,40 @@ impl Validator<'_, '_> {
         if argument_count == 2 {
             if let Some(binding) = p
                 .typed_bindings
+                .ordered_constructor_call_argument_pair(p.source.id, method.symbol)
+            {
+                if p.typed_bindings
+                    .direct_formal_constructor_call_pair(p.source.id, method.symbol)
+                    .is_some()
+                    || p.typed_bindings
+                        .nested_constructor_call_pair(p.source.id, method.symbol)
+                        .is_some()
+                    || p.typed_bindings
+                        .nested_constructor_call(p.source.id, method.symbol)
+                        .is_some()
+                    || p.typed_bindings
+                        .planned_call(p.source.id, method.symbol)
+                        .is_some()
+                    || !p
+                        .typed_bindings
+                        .local_value_bindings(p.source.id, method.symbol)
+                        .is_empty()
+                {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    );
+                }
+                return self.validate_ordered_constructor_call_argument_pair(
+                    binding,
+                    (source_apply.args.as_slice(), typed_apply.args.as_slice()),
+                    &constructor_signature.params,
+                    method,
+                    depth + 1,
+                    visited,
+                );
+            }
+            if let Some(binding) = p
+                .typed_bindings
                 .direct_formal_constructor_call_pair(p.source.id, method.symbol)
             {
                 if p.typed_bindings
@@ -2908,6 +2942,161 @@ impl Validator<'_, '_> {
                 return Err(
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                 );
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_ordered_constructor_call_argument_pair(
+        &mut self,
+        binding: crate::OrderedConstructorCallArgumentPairBinding,
+        arguments: (&[TreeId<Untyped>], &[TreeId<Typed>]),
+        constructor_parameters: &[dotty_core::MethodParam],
+        method: &MethodPicklePlan,
+        depth: usize,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<(), PickleError> {
+        use crate::OrderedConstructorCallArgumentOrigin as Origin;
+
+        let p = self.plan;
+        let (source_arguments, typed_arguments) = arguments;
+        if source_arguments.len() != 2
+            || typed_arguments.len() != 2
+            || constructor_parameters.len() != 2
+            || method.parameter_clauses.as_slice() != [binding.method_formals.as_slice()]
+            || binding.method_formals[0] == binding.method_formals[1]
+            || binding.arguments[0].source_argument == binding.arguments[1].source_argument
+            || binding.arguments[0].typed_argument == binding.arguments[1].typed_argument
+        {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        }
+        let Some(TreeKind::DefDef(source_method)) = p
+            .source_ast
+            .try_get(method.source_tree)
+            .map(|tree| &tree.kind)
+        else {
+            return Err(PickleError::SourceShape {
+                tree: method.source_tree,
+                expected: SourceRole::Method,
+            });
+        };
+        if source_method.value_param_clauses.as_slice()
+            != [binding.source_method_formals.as_slice()]
+        {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        }
+        let origins = binding.arguments.map(|argument| match argument.origin {
+            Origin::Formal { .. } => 0,
+            Origin::NestedNew { .. } => 1,
+        });
+        if origins != [0, 1] && origins != [1, 0] {
+            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+        }
+        for (index, argument) in binding.arguments.into_iter().enumerate() {
+            if argument.source_argument != source_arguments[index]
+                || argument.typed_argument != typed_arguments[index]
+            {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
+            let source_argument = self.source_tree(argument.source_argument)?;
+            let typed_argument = p.typed_ast.try_get(argument.typed_argument).ok_or(
+                PickleError::InvalidTypedTree {
+                    tree: argument.typed_argument,
+                },
+            )?;
+            self.charge(1)?;
+            if !visited.insert(argument.typed_argument) {
+                return Err(PickleError::RepeatedExpression {
+                    tree: argument.typed_argument,
+                });
+            }
+            self.source_typed_binding(argument.source_argument, argument.typed_argument)?;
+            self.paired_source_typed_span(
+                source_argument.position,
+                typed_argument.position,
+                argument.typed_argument,
+            )?;
+
+            match argument.origin {
+                Origin::Formal {
+                    formal,
+                    formal_type,
+                    result_type,
+                } => {
+                    let Some(formal_index) = binding
+                        .method_formals
+                        .iter()
+                        .position(|candidate| *candidate == formal)
+                    else {
+                        return Err(PickleError::SourceDefinition { symbol: formal });
+                    };
+                    let formal_tree = binding.source_method_formals[formal_index];
+                    if p.source_index.symbol_at(p.source.id, formal_tree) != Some(formal)
+                        || p.source_index.definition_of(formal)
+                            != Some(dotty_core::SourceDefinition::Canonical {
+                                source: p.source.id,
+                                tree: formal_tree,
+                            })
+                    {
+                        return Err(PickleError::SourceDefinition { symbol: formal });
+                    }
+                    let formal_record = self.symbol(formal)?;
+                    if formal_record.kind != SymbolKind::Parameter
+                        || formal_record.owner != Some(method.symbol)
+                        || self.complete(formal)? != formal_type
+                        || !self.same_planned_sibling_class_type(
+                            formal_type,
+                            constructor_parameters[index].ty,
+                        )
+                        || typed_argument.ty != result_type
+                    {
+                        return Err(PickleError::Reference {
+                            symbol: formal,
+                            reason: crate::ReferenceError::Owner,
+                        });
+                    }
+                    let (TreeKind::Ident(source_ident), TreeKind::Ident(typed_ident)) =
+                        (&source_argument.kind, &typed_argument.kind)
+                    else {
+                        return Err(self
+                            .unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+                    };
+                    if source_ident.name != formal_record.name
+                        || typed_ident.name != source_ident.name
+                        || typed_ident.backquoted != source_ident.backquoted
+                        || !matches!(self.ty(typed_argument.ty)?, Type::TermRef {
+                            prefix,
+                            target: TermRefTarget::Symbol(target),
+                        } if *prefix == p.definitions.no_prefix && *target == formal)
+                    {
+                        return Err(PickleError::Reference {
+                            symbol: formal,
+                            reason: crate::ReferenceError::Owner,
+                        });
+                    }
+                }
+                Origin::NestedNew {
+                    call,
+                    argument_formal,
+                } => {
+                    if call.source_apply != argument.source_argument
+                        || call.typed_apply != argument.typed_argument
+                        || !binding.method_formals.contains(&argument_formal)
+                    {
+                        return Err(self
+                            .unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+                    }
+                    self.validate_nested_constructor_argument(
+                        call,
+                        argument_formal,
+                        constructor_parameters[index].ty,
+                        method,
+                        depth + 1,
+                        visited,
+                    )?;
+                }
             }
         }
         Ok(())
