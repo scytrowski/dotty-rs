@@ -44,10 +44,10 @@ except (OSError, ValueError):
 scala_root = Path(os.environ.get("SCALA39_ROOT", ""))
 java_home = Path(os.environ.get("JAVA_HOME", ""))
 try:
-    jdk_version = next(
-        line for line in (java_home / "release").read_text().splitlines()
-        if line.startswith("JAVA_VERSION=")
-    )
+    release_fields = (java_home / "release").read_text().splitlines()
+    java_version = next(line for line in release_fields if line.startswith("JAVA_VERSION="))
+    implementor = next(line for line in release_fields if line.startswith("IMPLEMENTOR_VERSION="))
+    jdk_version = f"Eclipse Temurin {java_version.removeprefix('JAVA_VERSION=')} ({implementor})"
 except (OSError, StopIteration):
     jdk_version = "missing"
 
@@ -71,6 +71,7 @@ hashes = (
     ("Positive receipt SHA-256", Path("docs/typer-sealed-adt-e2e-positive-3.9.0.tsv")),
     ("Negative/rollback receipt SHA-256", Path("docs/typer-sealed-adt-e2e-negative-rollback-3.9.0.tsv")),
     ("Cohort contract SHA-256", Path("docs/typer-sealed-adt-e2e-cohorts-3.9.0.tsv")),
+    ("Committed per-root cohort receipt SHA-256", Path("docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv")),
     ("Two-pass cohort receipt SHA-256", REPORT_DIR / "source-case-class-match-cohorts.tsv"),
 )
 rows.extend((label, f"`{sha256(path)}`") for label, path in hashes)

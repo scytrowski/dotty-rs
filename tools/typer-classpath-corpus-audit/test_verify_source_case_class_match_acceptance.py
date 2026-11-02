@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -126,6 +127,31 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         gate.validate_sealed_rollback_sidecar(root)
         gate.validate_sealed_cohort_contract(root)
+        gate.validate_recorded_cohort_receipt(root)
+
+    def test_recorded_per_root_cohort_receipt_rejects_missing_and_changed_roots(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        paths = (
+            "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv",
+            "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv",
+            "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv",
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv",
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative in paths:
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(repository / relative, destination)
+            receipt = root / paths[0]
+            original = receipt.read_text(encoding="utf-8")
+            receipt.write_text("\n".join(original.splitlines()[:-1]) + "\n", encoding="utf-8")
+            with self.assertRaises(gate.ReceiptError):
+                gate.validate_recorded_cohort_receipt(root)
+            receipt.write_text(original.replace("library/src/scala/Option.scala#tree=118", "substituted#tree=118", 1), encoding="utf-8")
+            with self.assertRaises(gate.ReceiptError):
+                gate.validate_recorded_cohort_receipt(root)
 
     def test_rust_receipt_rejects_mismatched_tested_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

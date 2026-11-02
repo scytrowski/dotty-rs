@@ -154,6 +154,8 @@ jobs:
               "$(sha256sum docs/typer-sealed-adt-e2e-negative-rollback-3.9.0.tsv | cut -d' ' -f1)"
             printf 'sealed_adt_cohort_contract_sha256\t%s\n' \
               "$(sha256sum docs/typer-source-case-class-match-cohorts-3.9.0.tsv | cut -d' ' -f1)"
+            printf 'sealed_adt_cohort_receipt_sha256\t%s\n' \
+              "$(sha256sum docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv | cut -d' ' -f1)"
             printf 'sealed_adt_cohort_summary_sha256\t%s\n' \
               "$(sha256sum docs/typer-sealed-adt-e2e-cohorts-3.9.0.tsv | cut -d' ' -f1)"
             printf 'product2_positive_source_sha256\t%s\n' \
@@ -279,12 +281,19 @@ jobs:
         shell: bash
         env:
           COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
-          DOTTY_SEALED_ADT_TMP_ROOT: ${{ github.workspace }}/target/source-sealed-adt-match-rollback-oracle
+          DOTTY_SEALED_ADT_ROLLBACK_TMP_ROOT: ${{ github.workspace }}/target/source-sealed-adt-match-rollback-oracle
           DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
         run: |
           set -euo pipefail
           crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/run-rollback-matrix \
             > "$DOTTY_AUDIT_REPORT_DIR/source-sealed-adt-match-rollback-oracle.log" 2>&1
+          test -s "$DOTTY_SEALED_ADT_ROLLBACK_TMP_ROOT/scala-failure-matrix.tsv"
+          diff -u crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/scala-failure-matrix.tsv \
+            "$DOTTY_SEALED_ADT_ROLLBACK_TMP_ROOT/scala-failure-matrix.tsv"
+          test "$(find "$DOTTY_SEALED_ADT_ROLLBACK_TMP_ROOT" -maxdepth 1 -type f -name '*.out' | wc -l)" -eq 9
+          while IFS=$'\t' read -r case_name _; do
+            test -s "$DOTTY_SEALED_ADT_ROLLBACK_TMP_ROOT/$case_name.out"
+          done < <(tail -n +2 crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/scala-failure-matrix.tsv)
           cat "$DOTTY_AUDIT_REPORT_DIR/source-sealed-adt-match-rollback-oracle.log"
 
       - name: Run authentic two-session sealed Event Rust baseline
@@ -476,6 +485,7 @@ jobs:
               --report "$DOTTY_AUDIT_REPORT_DIR/main-cohort-second.tsv" \
               --report "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort-first.tsv" \
               --report "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort-second.tsv" \
+              --baseline-receipt docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv \
               --output "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-cohorts.tsv"
 
       - name: Run existing deterministic focused audit baseline

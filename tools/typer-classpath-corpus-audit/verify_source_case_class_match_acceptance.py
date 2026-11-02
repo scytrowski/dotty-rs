@@ -378,6 +378,7 @@ def validate_inputs(root: Path) -> None:
             raise ReceiptError(f"{cohort}: static source-tree/protected-set receipt changed")
     validate_sealed_rollback_sidecar(root)
     validate_sealed_cohort_contract(root)
+    validate_recorded_cohort_receipt(root)
 
 
 def passed_tests(text: str) -> set[str]:
@@ -476,6 +477,50 @@ def validate_sealed_cohort_contract(root: Path) -> None:
             or row["pass_requirement"] != requirement
         ):
             raise ReceiptError(f"{row['cohort']}: frozen protected roots or cohort provenance changed")
+
+
+def validate_recorded_cohort_receipt(root: Path) -> None:
+    path = root / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+    header, rows = read_tsv(path)
+    required_header = (
+        "cohort", "identity", "source_tree", "baseline_status", "gate", "first_status",
+        "second_status", "actual_result", "protected_success", "two_pass_equal",
+    )
+    if tuple(header) != required_header or len(rows) != 50:
+        raise ReceiptError("recorded ordinary cohort receipt must contain the exact 25 + 25 schema")
+    manifests = {
+        "main": root / "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv",
+        "analysis": root / "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv",
+    }
+    protected_paths = {
+        "main": root / "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv",
+        "analysis": root / "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv",
+    }
+    expected_rows = []
+    for cohort in ("main", "analysis"):
+        roots = read_tsv(manifests[cohort])[1]
+        protected_rows = read_tsv(protected_paths[cohort])[1]
+        protected = {row["identity"] for row in protected_rows}
+        if len(roots) != 25:
+            raise ReceiptError(f"{cohort}: frozen cohort must contain exactly 25 roots")
+        for frozen in roots:
+            identity = frozen["identity"]
+            baseline_status = frozen.get("baseline_status") or ("typed" if identity in protected else "not_protected")
+            gate = frozen.get("gate") or ("required_typed" if identity in protected else "observe")
+            expected_rows.append((cohort, identity, frozen.get("source_tree") or identity.rsplit("=", 1)[-1], baseline_status, gate))
+    identity_gate_rows = [
+        (row["cohort"], row["identity"], row["source_tree"], row["baseline_status"], row["gate"])
+        for row in rows
+    ]
+    if identity_gate_rows != expected_rows:
+        raise ReceiptError("recorded ordinary cohort receipt changed a frozen root identity, tree, or gate")
+    for row in rows:
+        if row["first_status"] != row["second_status"] or row["two_pass_equal"] != "true":
+            raise ReceiptError(f"{row['identity']}: recorded deterministic passes disagree")
+        if row["protected_success"] not in {"true", "false"}:
+            raise ReceiptError(f"{row['identity']}: protected-success status is malformed")
+        if row["gate"] == "required_typed" and (row["first_status"] != "typed" or row["protected_success"] != "true"):
+            raise ReceiptError(f"{row['identity']}: recorded protected root lost typed acceptance")
 
 
 def marker_lines(text: str, marker: str) -> list[str]:
@@ -682,7 +727,7 @@ def parse_ordinary_report(path: Path) -> dict[str, dict[str, str]]:
     return {row["method"]: row for row in rows}
 
 
-def validate_cohorts(root: Path, reports: list[Path], output: Path) -> None:
+def validate_cohorts(root: Path, reports: list[Path], output: Path, baseline_receipt: Path) -> None:
     if len(reports) != 4:
         raise ReceiptError("cohort receipt requires first/second main and analysis reports")
     manifests = {
@@ -740,6 +785,12 @@ def validate_cohorts(root: Path, reports: list[Path], output: Path) -> None:
         writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
         writer.writerow(header)
         writer.writerows(rows_out)
+    if not baseline_receipt.is_absolute():
+        baseline_receipt = root / baseline_receipt
+    recorded_header, recorded_rows = read_tsv(baseline_receipt)
+    expected = [dict(zip(header, row, strict=True)) for row in rows_out]
+    if recorded_header != list(header) or recorded_rows != expected:
+        raise ReceiptError("live 25 + 25 two-pass receipt differs from the committed per-root evidence")
 
 
 def main() -> int:
@@ -767,6 +818,7 @@ def main() -> int:
     cohorts.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
     cohorts.add_argument("--report", action="append", type=Path, required=True)
     cohorts.add_argument("--output", type=Path, required=True)
+    cohorts.add_argument("--baseline-receipt", type=Path, required=True)
     args = parser.parse_args()
     try:
         root = getattr(args, "repo_root", Path(__file__).resolve().parents[2])
@@ -799,7 +851,7 @@ def main() -> int:
             validate_named_test_log(args.log, SCOPE_ROLLBACK_TESTS)
             print("scope rollback regression passed without skips")
         else:
-            validate_cohorts(root, args.report, args.output)
+            validate_cohorts(root, args.report, args.output, args.baseline_receipt)
             print("all 25 + 25 deterministic ordinary roots and protected 16 + 15 receipt verified")
     except (OSError, KeyError, ValueError, ReceiptError, csv.Error) as error:
         print(f"source case-class Match gate failed: {error}", file=sys.stderr)
