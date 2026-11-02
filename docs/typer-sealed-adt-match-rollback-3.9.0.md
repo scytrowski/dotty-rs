@@ -33,15 +33,18 @@ expression scope frames with the pre-failure snapshot. The earlier successful
 root remains published, while the failed method and Match have no published
 mappings. Retrying produces the same diagnostic and unchanged snapshot.
 
-Rust-only structural corruptions are also exercised. A forged `Created`
-companion link fails, is retried with the same diagnostic, then is restored
-before `extract` and `classify` are typed in the same live `SourceTyper`; an
-earlier successful method remains published throughout. Assigning the generated
-`Created._1` selector to `Deleted` fails with `ExtractorResultMemberNotFound`
-and remains covered by the structural negative test. The parent graph matrix
-also rejects unrelated, duplicate, invalid, and missing parent `ClassInfo`
-entries in class-first and selector-first completion routes. A separate
-negative test retains the foreign `unapply` owner check.
+Rust-only structural corruptions also exercise complete source-method rollback.
+The private lifecycle test keeps a successful `prior` root, then corrupts the
+`Created` companion link, the generated `Created._1` owner, or the `Event`
+parent `ClassInfo` with an unrelated parent, duplicate edge, invalid `TypeId`,
+or missing parent edge. For every row it attempts and retries the complete
+`extract` `DefDef` in one live `SourceTyper`, compares the full semantic
+projection, restores the original structure without dropping that typer, then
+types both uncached `extract` and `classify` roots there. The
+[`rust-structural-lifecycle.tsv`](../crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/rust-structural-lifecycle.tsv)
+records each first diagnostic category and recovered roots. The separate
+parent-graph matrix still checks class-first and selector-first completion
+routes, and a negative test retains the foreign `unapply` owner check.
 
 The only transaction repair is in `Scope::remove`: removing the final symbol
 now deletes its empty name bucket. The failing extractor cases previously left

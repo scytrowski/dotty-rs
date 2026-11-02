@@ -37231,132 +37231,235 @@ mod tests {
 
     #[test]
     fn issue_1999_structural_corruption_restores_then_recovers_in_same_typer() {
-        let source_text =
-            include_str!("../../tests/fixtures/source-sealed-adt-match-3.9.0/Event.scala").replace(
+        let fixture_source =
+            include_str!("../../tests/fixtures/source-sealed-adt-match-3.9.0/Event.scala");
+        let source_text = fixture_source
+            .replace("sealed trait Event", "sealed trait Event\ntrait Other")
+            .replace(
                 "object Matcher:\n",
                 "object Matcher:\n  def prior(event: Event): Int = 1\n\n",
             );
-        let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name(&source_text);
-        let tree_named = |name: &str| {
-            parsed
-                .ast
-                .iter()
-                .find_map(|(tree, node)| match &node.kind {
-                    TreeKind::DefDef(definition)
-                        if store.names.resolve(definition.name.as_name().text()) == name =>
-                    {
-                        Some(tree)
-                    }
-                    _ => None,
-                })
-                .expect("source method")
-        };
-        let prior = tree_named("prior");
-        let extract = tree_named("extract");
-        let classify = tree_named("classify");
-        let created = parsed
-            .ast
-            .iter()
-            .find_map(|(tree, node)| match &node.kind {
-                TreeKind::TypeDef(definition)
-                    if store.names.resolve(definition.name.as_name().text()) == "Created" =>
-                {
-                    index.symbol_at(source, tree)
-                }
-                _ => None,
-            })
-            .expect("Created source class");
-        let deleted = parsed
-            .ast
-            .iter()
-            .find_map(|(tree, node)| match &node.kind {
-                TreeKind::TypeDef(definition)
-                    if store.names.resolve(definition.name.as_name().text()) == "Deleted" =>
-                {
-                    index.symbol_at(source, tree)
-                }
-                _ => None,
-            })
-            .expect("Deleted source class");
-        let deleted_companion = store.symbols.get(deleted).links.companion.unwrap();
-        let original_links = store.symbols.get(created).links;
-        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../dotty-tasty/tests/fixtures/scala3-library");
-        let java_home = std::env::var_os("JAVA_HOME").expect("JDK 21 is configured");
-        let classpath = dotty_classloader::classloader::CompositeClassPath::new(vec![
-            Box::new(dotty_classloader::classloader::DirectoryClassPath::new(
-                fixture,
-            )),
-            Box::new(
-                dotty_classloader::classloader::JdkClassPath::new(
-                    std::path::PathBuf::from(java_home).join("jmods"),
-                )
-                .expect("JDK module path"),
-            ),
-        ]);
-        let resolver = dotty_classloader::classloader::ClasspathSymbolResolver::new(
-            classpath,
-            definitions,
-            dotty_classloader::classloader::LoadingSession::new(),
-        );
-        let mut typer = SourceTyper::new(
-            &parsed.ast,
-            source,
-            &index,
-            &mut store,
-            definitions,
-            &packages,
-        )
-        .with_resolver(Box::new(resolver));
-        let prior_typed = typer
-            .type_method_definition(prior)
-            .expect("separate prior method types before structural failure");
+        let mut receipts = Vec::new();
+        for corruption in [
+            "forged companion",
+            "foreign _1 owner",
+            "unrelated parent",
+            "duplicate parent",
+            "invalid parent TypeId",
+            "missing parent ClassInfo",
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(&source_text);
+            let tree_named = |name: &str| {
+                parsed
+                    .ast
+                    .iter()
+                    .find_map(|(tree, node)| match &node.kind {
+                        TreeKind::DefDef(definition)
+                            if store.names.resolve(definition.name.as_name().text()) == name =>
+                        {
+                            Some(tree)
+                        }
+                        _ => None,
+                    })
+                    .expect("source method")
+            };
+            let prior = tree_named("prior");
+            let extract = tree_named("extract");
+            let classify = tree_named("classify");
+            let symbol_named = |name: &str| {
+                parsed
+                    .ast
+                    .iter()
+                    .find_map(|(tree, node)| match &node.kind {
+                        TreeKind::TypeDef(definition)
+                            if store.names.resolve(definition.name.as_name().text()) == name =>
+                        {
+                            index.symbol_at(source, tree)
+                        }
+                        _ => None,
+                    })
+                    .expect("source class symbol")
+            };
+            let event = symbol_named("Event");
+            let other = symbol_named("Other");
+            let created = symbol_named("Created");
+            let deleted = symbol_named("Deleted");
+            let created_links = store.symbols.get(created).links;
+            let deleted_companion = store.symbols.get(deleted).links.companion.unwrap();
+            let class_scope = index.scope_of(created).expect("Created scope");
+            let selector_name = store.names.intern("_1");
+            let selector = store
+                .scopes
+                .get(class_scope)
+                .lookup(&dotty_core::Name::new(
+                    selector_name,
+                    dotty_core::Namespace::Term,
+                ))
+                .expect("Created._1 selector");
+            let selector_owner = store.symbols.get(selector).owner;
+            let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library");
+            let java_home = std::env::var_os("JAVA_HOME").expect("JDK 21 is configured");
+            let classpath = dotty_classloader::classloader::CompositeClassPath::new(vec![
+                Box::new(dotty_classloader::classloader::DirectoryClassPath::new(
+                    fixture,
+                )),
+                Box::new(
+                    dotty_classloader::classloader::JdkClassPath::new(
+                        std::path::PathBuf::from(java_home).join("jmods"),
+                    )
+                    .expect("JDK module path"),
+                ),
+            ]);
+            let resolver = dotty_classloader::classloader::ClasspathSymbolResolver::new(
+                classpath,
+                definitions,
+                dotty_classloader::classloader::LoadingSession::new(),
+            );
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            )
+            .with_resolver(Box::new(resolver));
+            let prior_typed = typer
+                .type_method_definition(prior)
+                .expect("prior successful root is retained");
+            typer.complete_symbol(event).expect("canonical Event");
+            typer.complete_symbol(other).expect("canonical Other");
+            let SymbolInfo::Complete(original_event_info) = *typer.store.symbols.info(event) else {
+                panic!("Event ClassInfo precompleted")
+            };
+            let SymbolInfo::Complete(event_info_id) = *typer.store.symbols.info(event) else {
+                panic!("Event ClassInfo is complete")
+            };
+            let Some(Type::ClassInfo(mut event_info)) =
+                typer.store.types.try_get(event_info_id).cloned()
+            else {
+                panic!("Event is represented by ClassInfo")
+            };
 
-        typer.store.symbols.get_mut(created).links.companion = Some(deleted_companion);
-        let before = issue_1999_late_failure_projection(&typer, &parsed);
-        let error = typer
-            .type_method_definition(extract)
-            .expect_err("deliberately inconsistent semantic identity is rejected");
-        assert!(
-            matches!(
-                error,
-                TyperError::SymbolSourceKindMismatch { .. }
-                    | TyperError::ExtractorQualifierNotFound { .. }
-                    | TyperError::ExtractorQualifierNotValueLike { .. }
-                    | TyperError::ExtractorUnapplyNotFound { .. }
-                    | TyperError::ExtractorResultMemberNotFound { .. }
-                    | TyperError::DeclarationContextMissing { .. }
-            ),
-            "{error:?}"
-        );
-        assert_issue_1999_projection_unchanged(
-            &before,
-            &issue_1999_late_failure_projection(&typer, &parsed),
-            "forged companion: complete semantic rollback",
-        );
-        let retry = typer
-            .type_method_definition(extract)
-            .expect_err("retry remains rejected under the same deliberate corruption");
-        assert_eq!(format!("{retry:?}"), format!("{error:?}"));
-        assert_issue_1999_projection_unchanged(
-            &before,
-            &issue_1999_late_failure_projection(&typer, &parsed),
-            "forged companion: stable retry leaves all state intact",
-        );
-        typer.store.symbols.get_mut(created).links = original_links;
-        assert!(typer.source_typed_index().get(source, extract).is_none());
-        assert!(typer.source_typed_index().get(source, classify).is_none());
+            match corruption {
+                "forged companion" => {
+                    typer.store.symbols.get_mut(created).links.companion = Some(deleted_companion);
+                }
+                "foreign _1 owner" => {
+                    typer.store.symbols.get_mut(selector).owner = Some(deleted);
+                }
+                "unrelated parent" => {
+                    let parent = typer.store.types.alloc(Type::TypeRef {
+                        prefix: definitions.no_prefix,
+                        target: dotty_core::types::TypeRefTarget::Symbol(other),
+                    });
+                    event_info.parents = vec![parent];
+                }
+                "duplicate parent" => {
+                    event_info.parents = vec![definitions.object_type, definitions.object_type];
+                }
+                "invalid parent TypeId" => {
+                    event_info.parents = vec![typer.store.types.reserve().id()];
+                }
+                "missing parent ClassInfo" => event_info.parents.clear(),
+                _ => unreachable!(),
+            }
+            if corruption.contains("parent") || corruption == "missing parent ClassInfo" {
+                let malformed = typer.store.types.alloc(Type::ClassInfo(event_info));
+                typer
+                    .store
+                    .symbols
+                    .set_info(event, SymbolInfo::Complete(malformed));
+            }
+            let before = issue_1999_late_failure_projection(&typer, &parsed);
+            let error = typer
+                .type_method_definition(extract)
+                .expect_err("structural corruption rejects a whole source DefDef");
+            if corruption.contains("parent") || corruption == "missing parent ClassInfo" {
+                assert!(
+                    matches!(&error, TyperError::MalformedClassInfo { symbol, .. } if *symbol == event),
+                    "{corruption}: {error:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        error,
+                        TyperError::SymbolSourceKindMismatch { .. }
+                            | TyperError::ExtractorQualifierNotFound { .. }
+                            | TyperError::ExtractorQualifierNotValueLike { .. }
+                            | TyperError::ExtractorUnapplyNotFound { .. }
+                            | TyperError::ExtractorResultMemberNotFound { .. }
+                            | TyperError::DeclarationContextMissing { .. }
+                    ),
+                    "{corruption}: {error:?}"
+                );
+            }
+            assert_issue_1999_projection_unchanged(
+                &before,
+                &issue_1999_late_failure_projection(&typer, &parsed),
+                "structural whole-method rollback preserves prior root and all state",
+            );
+            let retry = typer
+                .type_method_definition(extract)
+                .expect_err("same complete source method fails on retry");
+            assert_eq!(format!("{retry:?}"), format!("{error:?}"));
+            assert_issue_1999_projection_unchanged(
+                &before,
+                &issue_1999_late_failure_projection(&typer, &parsed),
+                "structural whole-method retry leaves all state unchanged",
+            );
+
+            match corruption {
+                "forged companion" => typer.store.symbols.get_mut(created).links = created_links,
+                "foreign _1 owner" => typer.store.symbols.get_mut(selector).owner = selector_owner,
+                _ => typer
+                    .store
+                    .symbols
+                    .set_info(event, SymbolInfo::Complete(original_event_info)),
+            }
+            assert!(typer.source_typed_index().get(source, extract).is_none());
+            assert!(typer.source_typed_index().get(source, classify).is_none());
+            assert_eq!(
+                typer.source_typed_index().get(source, prior),
+                Some(prior_typed)
+            );
+            typer
+                .type_method_definition(extract)
+                .expect("restored uncached extract types in the same SourceTyper");
+            typer
+                .type_method_definition(classify)
+                .expect("restored uncached classify types in the same SourceTyper");
+            assert!(typer.source_typed_index().get(source, extract).is_some());
+            assert!(typer.source_typed_index().get(source, classify).is_some());
+            receipts.push(format!(
+                "{corruption}\t{}\textract+classify",
+                issue_1999_error_category(&error)
+            ));
+        }
         assert_eq!(
-            typer.source_typed_index().get(source, prior),
-            Some(prior_typed)
+            format!(
+                "corruption\tfirst error\trecovered roots\n{}\n",
+                receipts.join("\n")
+            ),
+            include_str!(
+                "../../tests/fixtures/source-sealed-adt-match-3.9.0/rust-structural-lifecycle.tsv"
+            )
         );
-        typer
-            .type_method_definition(extract)
-            .expect("restored extract types in the same SourceTyper");
-        typer
-            .type_method_definition(classify)
-            .expect("restored classify types in the same SourceTyper");
+    }
+
+    fn issue_1999_error_category(error: &TyperError) -> &'static str {
+        match error {
+            TyperError::MalformedClassInfo { .. } => "MalformedClassInfo",
+            TyperError::SymbolSourceKindMismatch { .. } => "SymbolSourceKindMismatch",
+            TyperError::ExtractorQualifierNotFound { .. } => "ExtractorQualifierNotFound",
+            TyperError::ExtractorQualifierNotValueLike { .. } => "ExtractorQualifierNotValueLike",
+            TyperError::ExtractorUnapplyNotFound { .. } => "ExtractorUnapplyNotFound",
+            TyperError::ExtractorResultMemberNotFound { .. } => "ExtractorResultMemberNotFound",
+            TyperError::DeclarationContextMissing { .. } => "DeclarationContextMissing",
+            other => panic!("unexpected structural lifecycle error: {other:?}"),
+        }
     }
 
     type Issue1972RetryProjection = (
