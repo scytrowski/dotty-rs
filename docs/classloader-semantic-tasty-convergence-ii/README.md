@@ -134,3 +134,93 @@ control; the foreign-owner check leaves its committed semantic state intact.
    chain from Scala 3.9.0 inputs before changing resolver behavior. This audit
    does not implement that change or claim broader Scala standard-library
    support.
+
+## Issue #1997 closeout
+
+**Verdict: PARTIAL.** The opt-in reusable loader met the two-class positive
+acceptance in two fresh stores, and all required Rust/JDK checks on the tested
+code head passed. The negative matrix has typed rollback and retry coverage for
+wrong package, module roots, parameterized class templates, malformed and
+unsupported-version TASTy, and a late failure after a prior class has committed.
+A dedicated real TASTy fixture for a secondary constructor was not available;
+the checked-in `CtorPlain.tasty` control exercises a parameterized primary
+constructor instead. I therefore do not count that negative case as proven.
+
+The integrated base was `53dd490de7acbc19120a75d74db8887c7181a6c1`; tested
+code head was `2a8d170ddbf5bb29e6b5522d6b0785b6f0a83136` in PR
+[#2022](https://github.com/scytrowski/dotty-rs/pull/2022). The implementation
+changes only tests and this report; production loader behavior and CI wiring
+are unchanged.
+
+### Positive acceptance
+
+| Class role | Fresh session 1 | Fresh session 2 | Assertions |
+| --- | --- | --- | --- |
+| `visibility.Open` | accepted | accepted | canonical package/class/constructor identities in the store; class and constructor kinds/owners; public visibility; canonical `java.lang.Object` parent; zero-argument constructor returning the class; fixture-directory TASTy origin; exact selected TASTy bytes; stable same-loader repeat and all three cache entries agree |
+| `visibility.PlainPrivate` | accepted | accepted | same identity, owner, parent, constructor, origin, selected resource, and repeat-cache checks; `PrivateWithin` points to its source package |
+
+Both roles use `load_semantic_class_with_tasty_unpickler` and the same
+`ClassLoader` instance within each session. IDs are compared only inside their
+own store; the two stores are checked by semantic roles. `Open.tasty` and
+`PlainPrivate.tasty` SHA-256 values are recorded above.
+
+### Negative controls and boundaries
+
+`semantic_class_loader_rejects_wrong_package_and_module_before_mutation`
+asserts exact `UnsupportedShape` errors for a wrong requested package, a
+module-only root, and `CtorPlain.tasty`'s parameterized primary-constructor
+shape, and checks store, package/session checkpoints, and caches remain
+unchanged. Existing loader regressions cover unsupported TASTy versions
+(`semantic_adapter_rejects_unsupported_tasty_version_without_mutation_and_retries`), malformed input, absent classpath resources, duplicate/pre-existing semantic identities and scopes, and the late partial-load rollback/retry path
+(`semantic_class_late_failure_preserves_prior_class_and_retries`). The existing
+nested-constructor structural regression verifies that a nested constructor is
+not mistaken for a direct template declaration. There is no dedicated compiled
+secondary-constructor TASTy fixture in this matrix; add one before claiming
+that specific negative is independently demonstrated.
+
+The default `ClassLoader::load_class` path is unchanged. Existing directory,
+JAR, and Info-pair tests continue to assert `.tasty` priority over a collocated
+`.class`. The adapter suite also retains the earlier `Open`, `InfoBase` /
+`InfoWrapped`, and `Option.getOrElse` coverage. No workflow wiring was needed:
+normal CI already runs the non-ignored classloader and unpickler tests.
+
+### Frozen comparator and member audit
+
+The original 14-unit and 126-row comparator artifacts were not modified. Their
+hashes remain the values recorded above; the deterministic comparator test ran
+twice in the CI audit. The two new class acceptances are not added to that
+historical denominator and do not establish global semantic parity.
+
+The separate four-member report remains four attempts: `Option.getOrElse` and
+`InfoWrapped.m` are `COMPLETE`; `Animal.sound` and `Dog.sound` are
+`UNRESOLVED_EXTERNAL`, with their distinct first errors at TASTy addresses 27
+and 41. Those unresolved method rows are not class-loader acceptance failures
+and are not counted as accepted members.
+
+No cold/warm timing was recorded: the existing bounded harness does not time
+both target classes as a pair, and no separate benchmark was added. The
+historical #1931 `PARTIAL` remains unchanged.
+
+### Validation receipts
+
+All checks below were run against code head
+`2a8d170ddbf5bb29e6b5522d6b0785b6f0a83136`:
+
+- Local: `cargo test -p dotty-classloader --lib --no-run --locked`, focused
+  semantic-loader negative/visibility tests, `cargo fmt --all -- --check`,
+  `python3 tools/check-frontend-boundaries.py`, Clippy, rustdoc, and
+  `git diff --check` passed. The local host has no JDK, so full JDK-dependent
+  tests were delegated to the required hosted JDK 21 gates.
+- [CI](https://github.com/scytrowski/dotty-rs/actions/runs/41496168783):
+  formatting, boundaries, Clippy, rustdoc, full
+  `cargo test --workspace --all-targets --locked`, diff check, and the mandatory
+  JDK 21 classfile/JVM gate passed.
+- [Focused semantic regression gate](https://github.com/scytrowski/dotty-rs/actions/runs/41496168865):
+  passed; it ran the focused acceptance matrices, frozen comparator/audit, and
+  uploaded artifact `typer-focused-audit-f6ea7e251f6d55ba072e6292e4c47938f4ed313e`
+  (SHA-256 `760cfa00517fe0fecf17fb452f1e72de1d39f9275f68265ca9a0450d2963e4e4`).
+- [Pinned Scala 3.9 factory TASTy consumer](https://github.com/scytrowski/dotty-rs/actions/runs/41496168863):
+  passed, including its mandatory Java 21 verifier/publisher gate.
+
+The configured trace `113f2c35-6b19-45e7-ab5c-1fab1ba58ba7` remains preserved
+in its original location and was not published separately.
