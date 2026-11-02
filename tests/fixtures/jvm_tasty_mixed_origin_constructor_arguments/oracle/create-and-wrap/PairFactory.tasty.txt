@@ -1,0 +1,134 @@
+<producer>/example/PairFactory.tasty
+<producer>/example/PairFactory.tasty
+--------------------------------------------------------------------------------
+Header:
+  version: 28.9.0
+  tooling: Scala 3.9.0-bin-SNAPSHOT-git-777528f
+     UUID: 0046b8db-c83c-ded3-001e-84ff57e30c20
+
+Names (348 bytes, starting from 60):
+     0: ASTs
+     1: example
+     2: PairFactory
+     3: <init>
+     4: java
+     5: lang
+     6: java[Qualified . lang]
+     7: Object
+     8: java[Qualified . lang][Qualified . Object]
+     9: <init>[Signed Signature(List(),java.lang.Object) @<init>]
+    10: Unit
+    11: scala
+    12: createAndWrap
+    13: existing
+    14: Counter
+    15: seed
+    16: Int
+    17: Pair
+    18: example[Qualified . Pair]
+    19: example[Qualified . Counter]
+    20: <init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]
+    21: scala[Qualified . Int]
+    22: <init>[Signed Signature(List(scala.Int),example.Counter) @<init>]
+    23: SourceFile
+    24: annotation
+    25: scala[Qualified . annotation]
+    26: internal
+    27: scala[Qualified . annotation][Qualified . internal]
+    28: scala[Qualified . annotation][Qualified . internal][Qualified . SourceFile]
+    29: String
+    30: java[Qualified . lang][Qualified . String]
+    31: <init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]
+    32: tests/fixtures/jvm_tasty_mixed_origin_constructor_arguments/create-and-wrap/PairFactory.scala
+    33: Positions
+    34: Comments
+    35: Attributes
+
+Trees (103 bytes, starting from 410):
+     0: PACKAGE(101)
+     2:   TERMREFpkg 1 [example]
+     4:   TYPEDEF(97) 2 [PairFactory]
+     7:     TEMPLATE(76)
+     9:       APPLY(10)
+    11:         SELECTin(8) 9 [<init>[Signed Signature(List(),java.lang.Object) @<init>]]
+    14:           NEW
+    15:             TYPEREF 7 [Object]
+    17:               TERMREFpkg 6 [java[Qualified . lang]]
+    19:           SHAREDtype 15
+    21:       DEFDEF(7) 3 [<init>]
+    24:         EMPTYCLAUSE
+    25:         TYPEREF 10 [Unit]
+    27:           TERMREFpkg 11 [scala]
+    29:         STABLE
+    30:       DEFDEF(53) 12 [createAndWrap]
+    33:         PARAM(7) 13 [existing]
+    36:           IDENTtpt 14 [Counter]
+    38:             TYPEREF 14 [Counter]
+    40:               TERMREFpkg 1 [example]
+    42:         PARAM(7) 15 [seed]
+    45:           IDENTtpt 16 [Int]
+    47:             TYPEREF 16 [Int]
+    49:               TERMREFpkg 11 [scala]
+    51:         IDENTtpt 17 [Pair]
+    53:           TYPEREF 17 [Pair]
+    55:             SHAREDtype 40
+    57:         APPLY(26)
+    59:           SELECTin(8) 20 [<init>[Signed Signature(List(example.Counter, example.Counter),example.Pair) @<init>]]
+    62:             NEW
+    63:               IDENTtpt 17 [Pair]
+    65:                 SHAREDtype 53
+    67:             SHAREDtype 53
+    69:           APPLY(12)
+    71:             SELECTin(8) 22 [<init>[Signed Signature(List(scala.Int),example.Counter) @<init>]]
+    74:               NEW
+    75:                 IDENTtpt 14 [Counter]
+    77:                   SHAREDtype 38
+    79:               SHAREDtype 38
+    81:             TERMREFdirect 42
+    83:           TERMREFdirect 33
+    85:     ANNOTATION(16)
+    87:       TYPEREF 23 [SourceFile]
+    89:         TERMREFpkg 27 [scala[Qualified . annotation][Qualified . internal]]
+    91:       APPLY(10)
+    93:         SELECTin(6) 31 [<init>[Signed Signature(List(java.lang.String),scala.annotation.internal.SourceFile) @<init>]]
+    96:           NEW
+    97:             SHAREDtype 87
+    99:           SHAREDtype 87
+   101:         STRINGconst 32 [tests/fixtures/jvm_tasty_mixed_origin_constructor_arguments/create-and-wrap/PairFactory.scala]
+   103:
+
+Positions (96 bytes, starting from 515):
+  lines: 17
+  line sizes:
+     15, 0, 26, 34, 26, 45, 0, 44, 35, 37, 35, 37, 0, 18, 57, 41, 0
+  positions:
+     0: 0 .. 465
+     4: 347 .. 465
+     7: 368 .. 465
+    15: 353 .. 353
+    21: 368 .. 368
+    25: 368 .. 368
+    30: 368 .. 465
+    33: 386 .. 403
+    36: 396 .. 403
+    42: 405 .. 414
+    45: 411 .. 414
+    51: 417 .. 421
+    57: 428 .. 465
+    63: 432 .. 436
+    69: 437 .. 454
+    75: 441 .. 448
+    81: 449 .. 453
+    83: 456 .. 464
+    91: 347 .. 465
+    97: 347 .. 347
+   101: 347 .. 347
+
+  source paths:
+     0: 32 [tests/fixtures/jvm_tasty_mixed_origin_constructor_arguments/create-and-wrap/PairFactory.scala]
+
+Attributes (2 bytes, starting from 615):
+  SOURCEFILEattr 32 [tests/fixtures/jvm_tasty_mixed_origin_constructor_arguments/create-and-wrap/PairFactory.scala]
+
+
+--------------------------------------------------------------------------------

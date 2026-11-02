@@ -1,0 +1,178 @@
+{
+  "schema_version": 1,
+  "purpose": "Scala 3.9-produced oracle only; this fixture does not assert Rust producer support or Scala/Rust interoperability.",
+  "baseline": "origin/main at 7943e8d495815ceef2b7e4a53baee7f6fcac949b",
+  "oracle": {
+    "scala_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+    "scala_expected_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+    "scalac_version": "3.9.0-bin-SNAPSHOT-git-777528f",
+    "jdk_version": "openjdk version \"21.0.13\" 2026-10-20 LTS",
+    "java_sha256": "9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155",
+    "javap_version": "21.0.13",
+    "classfile_major": 65,
+    "release": 21,
+    "tasty_version": "28.9.0",
+    "producer_artifact_counts_per_order": {
+      "class": 3,
+      "tasty": 3
+    },
+    "outputs": "Both order-specific producer directories are compiled from empty output; each consumer is compiled separately against its matching Scala producer directory and Scala runtime.",
+    "scalac_jar_sha256_informational": "b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f"
+  },
+  "orders": {
+    "wrap-and-create": {
+      "method": "wrapAndCreate",
+      "source": {
+        "path": "wrap-and-create/PairFactory.scala",
+        "sha256": "9232b0a536470a69041f399a23f2b4a0e80a9dcfeb28575f17a84d1f146f8935"
+      },
+      "consumer": {
+        "path": "Consumer.scala",
+        "sha256": "0694c78ae678da1575b14b136c2503b35ff038bd1f24624aa97b20c7fd83c035",
+        "compiled_against": "only the matching Scala-produced producer output and Scala 3.9 runtime",
+        "result": "passed: formal object identity, fresh nested allocation, repeated factory calls, signed seed, independent mutation"
+      },
+      "artifacts": [
+        {
+          "path": "scala39/wrap-and-create/example/Counter.class",
+          "size_bytes": 647,
+          "sha256": "4f081b67549914d0afc1669b233631f5741008a084a9ae22b7d76b132d661c3b",
+          "classfile_major": 65,
+          "linked_tasty_uuid": "00f35d440fd89fe800dd1db9146d2c1b"
+        },
+        {
+          "path": "scala39/wrap-and-create/example/Counter.tasty",
+          "size_bytes": 620,
+          "sha256": "dd3c0ed9c6fbc01ebf4a5df78fb87aebce498ef67c994e99f1614ea139034820",
+          "tasty_version": "28.9.0",
+          "uuid": "00f35d440fd89fe800dd1db9146d2c1b"
+        },
+        {
+          "path": "scala39/wrap-and-create/example/Pair.class",
+          "size_bytes": 771,
+          "sha256": "37dbf3a2157d7859ef16a1fb6103b63603143701e335220cb2422b8a6aadcb75",
+          "classfile_major": 65,
+          "linked_tasty_uuid": "0021e8a3dae862d3000ed281c7f69d5b"
+        },
+        {
+          "path": "scala39/wrap-and-create/example/Pair.tasty",
+          "size_bytes": 720,
+          "sha256": "f44f75778da0babaa758f7f85aa4ec90dc036286e718e9aabc0eeedf26bc8631",
+          "tasty_version": "28.9.0",
+          "uuid": "0021e8a3dae862d3000ed281c7f69d5b"
+        },
+        {
+          "path": "scala39/wrap-and-create/example/PairFactory.class",
+          "size_bytes": 717,
+          "sha256": "9cc0b010454a62b1d4182a35bc41f58d819fcc133da888621143f0bec1391155",
+          "classfile_major": 65,
+          "linked_tasty_uuid": "0051c438fbc891d30009cced07fe0220"
+        },
+        {
+          "path": "scala39/wrap-and-create/example/PairFactory.tasty",
+          "size_bytes": 617,
+          "sha256": "1c45aeeb025b462d4258eb10e403891680e83f0f53528c5b011a17e00993da4a",
+          "tasty_version": "28.9.0",
+          "uuid": "0051c438fbc891d30009cced07fe0220"
+        }
+      ],
+      "snapshots": {
+        "Counter.javap.txt": {
+          "sha256": "7adc8505b609c796a47c76c78bce7f4253b6c79761b4318a89a0b93851d9d7b4"
+        },
+        "Counter.tasty.txt": {
+          "sha256": "14cd078b0fe86307d78f984a048e4158e71ba479791850787d49e66d5b3ac27e"
+        },
+        "Pair.javap.txt": {
+          "sha256": "ec1960b6f2446b419751fd07b44b9fe49a556d6299d820045e45cd41e6a759e1"
+        },
+        "Pair.tasty.txt": {
+          "sha256": "1fd712261608793860e331a8d74430403a7f8d9897f3849e062ef327c3dcdfa0"
+        },
+        "PairFactory.javap.txt": {
+          "sha256": "76e56789e30eb63c7ff9b8cc0857974d6e70f86dc9e0281001a180a764d5025b"
+        },
+        "PairFactory.tasty.txt": {
+          "sha256": "089dfc8f2a7ca65af35a05f663a4597825d88bd0f73294cc8f7883ea06540c56"
+        }
+      }
+    },
+    "create-and-wrap": {
+      "method": "createAndWrap",
+      "source": {
+        "path": "create-and-wrap/PairFactory.scala",
+        "sha256": "0c14002f9915683fe60371ac53ea36bec77b24b8a04781152fbae020449ac95c"
+      },
+      "consumer": {
+        "path": "ConsumerReversed.scala",
+        "sha256": "4db1392a9548a7f9f6a6376c115870bf9dde0cac0bef4e61b45f29ebf9b22c04",
+        "compiled_against": "only the matching Scala-produced producer output and Scala 3.9 runtime",
+        "result": "passed: formal object identity, fresh nested allocation, repeated factory calls, signed seed, independent mutation"
+      },
+      "artifacts": [
+        {
+          "path": "scala39/create-and-wrap/example/Counter.class",
+          "size_bytes": 647,
+          "sha256": "4de9af963fa7f1b30172fc7271aefff8522b0fba1e27994b3dc2b8e706f7f3c2",
+          "classfile_major": 65,
+          "linked_tasty_uuid": "00e519545dce99e800dd1db9146d2c1b"
+        },
+        {
+          "path": "scala39/create-and-wrap/example/Counter.tasty",
+          "size_bytes": 620,
+          "sha256": "690b949f924856387897cb09bad82c04f66229ff6cda795b26fdeeee50e806e2",
+          "tasty_version": "28.9.0",
+          "uuid": "00e519545dce99e800dd1db9146d2c1b"
+        },
+        {
+          "path": "scala39/create-and-wrap/example/Pair.class",
+          "size_bytes": 771,
+          "sha256": "9d3c294a7b9c7a66d30edc44c1a783ce9a14668247cba58fe3133daeef212ef5",
+          "classfile_major": 65,
+          "linked_tasty_uuid": "0037acb388fe64d3000ed281c7f69d5b"
+        },
+        {
+          "path": "scala39/create-and-wrap/example/Pair.tasty",
+          "size_bytes": 720,
+          "sha256": "b30b84fb482aa45573097e50d7175c0e518d51eebbdb4c2b1223b3e84ca6d682",
+          "tasty_version": "28.9.0",
+          "uuid": "0037acb388fe64d3000ed281c7f69d5b"
+        },
+        {
+          "path": "scala39/create-and-wrap/example/PairFactory.class",
+          "size_bytes": 717,
+          "sha256": "c46b56837fefe87497fbb62f6a4c85a567cea18750513f5d617a81275869fbff",
+          "classfile_major": 65,
+          "linked_tasty_uuid": "0046b8dbc83cded3001e84ff57e30c20"
+        },
+        {
+          "path": "scala39/create-and-wrap/example/PairFactory.tasty",
+          "size_bytes": 617,
+          "sha256": "a6524216dbfd967d0b07a95023c2ffb5bac2542b4ecc7fbffc8af41323e9e484",
+          "tasty_version": "28.9.0",
+          "uuid": "0046b8dbc83cded3001e84ff57e30c20"
+        }
+      ],
+      "snapshots": {
+        "Counter.javap.txt": {
+          "sha256": "4614f2f19e4adb3cc08748c133d97d894c128eea74d87e901a9b3248501d1fa6"
+        },
+        "Counter.tasty.txt": {
+          "sha256": "553b9d86c9abe03252358aa385544c759c6a0029852d20c50502f6e3abab6ebc"
+        },
+        "Pair.javap.txt": {
+          "sha256": "b94b7aa196cf38e09c5bb1dd701fb4d95117b059402d07e2bd122f707693cb11"
+        },
+        "Pair.tasty.txt": {
+          "sha256": "ff8a6bb96c48b53a63ed03b22ac2e9535841744cca429828f59b12f63fd0fdba"
+        },
+        "PairFactory.javap.txt": {
+          "sha256": "cf0f1de53d156513c3de4e41afc697771feedca754481011845784567d127f5f"
+        },
+        "PairFactory.tasty.txt": {
+          "sha256": "0a56d42f2b64c0dee979966cc823939fabb40ef1c88dabd6ca764b0216499147"
+        }
+      }
+    }
+  }
+}

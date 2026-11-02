@@ -49,6 +49,12 @@ const REFERENCE_LOCAL_CONSTRUCTOR_FLOW_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala");
 const MULTI_ARGUMENT_FACTORY_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala");
+const MIXED_ORIGIN_WRAP_AND_CREATE_SOURCE: &str = include_str!(
+    "fixtures/jvm_tasty_mixed_origin_constructor_arguments/wrap-and-create/PairFactory.scala"
+);
+const MIXED_ORIGIN_CREATE_AND_WRAP_SOURCE: &str = include_str!(
+    "fixtures/jvm_tasty_mixed_origin_constructor_arguments/create-and-wrap/PairFactory.scala"
+);
 
 type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
@@ -26815,4 +26821,361 @@ fn direct_formal_pair_proof_preserves_names_order_reversal_and_aliasing() {
         ["first", "second"],
         ["first", "first"],
     );
+}
+
+#[test]
+fn mixed_origin_pair_arguments_reach_jvm_and_report_the_proof_boundary() {
+    for (variant, source, method_name, source_id) in [
+        (
+            "wrap-and-create",
+            MIXED_ORIGIN_WRAP_AND_CREATE_SOURCE,
+            "wrapAndCreate",
+            SourceId::from_index(20110),
+        ),
+        (
+            "create-and-wrap",
+            MIXED_ORIGIN_CREATE_AND_WRAP_SOURCE,
+            "createAndWrap",
+            SourceId::from_index(20111),
+        ),
+    ] {
+        let output = TestOutputDirectory::new("mixed-origin-jvm-only");
+        let mut observed = false;
+        let mut observed_proof_error = None;
+        let mut observe_source = |ast: &AstArena<Untyped>,
+                                  source_root: TreeId<Untyped>,
+                                  index: &SourceSemanticIndex,
+                                  source_typed_index: &SourceTypedIndex,
+                                  unit: &mut JvmCompilationUnit<'_>,
+                                  definitions: &Definitions| {
+            observed = true;
+            let counter = audit_class_named(unit, "Counter");
+            let pair = audit_class_named(unit, "Pair");
+            let factory = audit_class_named(unit, "PairFactory");
+            let (method_tree, method_definition) = ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if unit.store.names.resolve(definition.name.as_name().text())
+                            == method_name =>
+                    {
+                        Some((tree, definition))
+                    }
+                    _ => None,
+                })
+                .expect("the original source contains the requested factory method");
+            let method = index.symbol_at(source_id, method_tree).unwrap();
+            assert_eq!(unit.store.symbols.get(method).owner, Some(factory));
+            assert!(matches!(
+                index.definition_of(method),
+                Some(SourceDefinition::Canonical { source, tree })
+                    if source == source_id && tree == method_tree
+            ));
+            let [existing_tree, seed_tree] = method_definition.value_param_clauses[0].as_slice()
+            else {
+                panic!("factory has exactly two ordered formals")
+            };
+            let existing = index.symbol_at(source_id, *existing_tree).unwrap();
+            let seed = index.symbol_at(source_id, *seed_tree).unwrap();
+            assert_ne!(existing, seed);
+            assert_eq!(unit.store.symbols.get(existing).owner, Some(method));
+            assert_eq!(unit.store.symbols.get(seed).owner, Some(method));
+            assert_eq!(source_typed_index.get(source_id, *existing_tree), None);
+            assert_eq!(source_typed_index.get(source_id, *seed_tree), None);
+            let SymbolInfo::Complete(existing_type) = unit.store.symbols.get(existing).info else {
+                panic!("Counter formal type is completed")
+            };
+            assert!(matches!(
+                unit.store.types.get(existing_type),
+                Type::TypeRef { target: TypeRefTarget::Symbol(target), .. }
+                    if *target == counter
+            ));
+            assert!(matches!(
+                unit.store.symbols.get(seed).info,
+                SymbolInfo::Complete(ty) if ty == definitions.int
+            ));
+            let SymbolInfo::Complete(method_type) = unit.store.symbols.get(method).info else {
+                panic!("method signature is completed in the source session")
+            };
+            let Type::Method(signature) = unit.store.types.get(method_type) else {
+                panic!("factory method has an ordinary signature")
+            };
+            assert_eq!(signature.params.len(), 2);
+            assert_eq!(signature.params[0].ty, existing_type);
+            assert_eq!(signature.params[1].ty, definitions.int);
+            assert!(matches!(
+                unit.store.types.get(signature.result),
+                Type::TypeRef { target: TypeRefTarget::Symbol(target), .. }
+                    if *target == pair
+            ));
+
+            let source_rhs = method_definition.rhs.unwrap();
+            let TreeKind::Apply(source_outer) = &ast.get(source_rhs).kind else {
+                panic!("method body is the direct outer Pair application")
+            };
+            assert_eq!(source_outer.args.len(), 2);
+            let typed_rhs = source_typed_index.get(source_id, source_rhs).unwrap();
+            let TreeKind::Apply(typed_outer) = &unit.typed_ast.get(typed_rhs).kind else {
+                panic!("typed method body preserves the outer Apply")
+            };
+            assert_eq!(typed_outer.args.len(), 2);
+            let (formal_index, nested_index) = if method_name == "wrapAndCreate" {
+                (0, 1)
+            } else {
+                (1, 0)
+            };
+            let formal_tree = source_outer.args[formal_index];
+            assert!(matches!(ast.get(formal_tree).kind, TreeKind::Ident(_)));
+            let typed_formal_tree = source_typed_index.get(source_id, formal_tree).unwrap();
+            assert!(matches!(
+                unit.typed_ast.get(typed_formal_tree).kind,
+                TreeKind::Ident(_)
+            ));
+            assert!(matches!(
+                unit.store.types.get(unit.typed_ast.get(typed_formal_tree).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(target), .. }
+                    if *target == existing
+            ));
+
+            let nested_tree = source_outer.args[nested_index];
+            let TreeKind::Apply(nested_apply) = &ast.get(nested_tree).kind else {
+                panic!("the other argument is one nested Counter constructor application")
+            };
+            assert_eq!(nested_apply.args.len(), 1);
+            let typed_nested_tree = source_typed_index.get(source_id, nested_tree).unwrap();
+            let TreeKind::Apply(typed_nested_apply) = &unit.typed_ast.get(typed_nested_tree).kind
+            else {
+                panic!("the typed nested constructor application remains an Apply")
+            };
+            assert_eq!(typed_nested_apply.args.len(), 1);
+            let seed_argument = nested_apply.args[0];
+            assert_eq!(index.symbol_at(source_id, seed_argument), None);
+            let typed_seed_argument = source_typed_index.get(source_id, seed_argument).unwrap();
+            assert!(matches!(
+                unit.store.types.get(unit.typed_ast.get(typed_seed_argument).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(target), .. }
+                    if *target == seed
+            ));
+            let TreeKind::Select(nested_selection) = &ast.get(nested_apply.function).kind else {
+                panic!("nested constructor function is a source Select")
+            };
+            assert!(matches!(
+                ast.get(nested_selection.qualifier).kind,
+                TreeKind::New(_)
+            ));
+            let typed_nested_selection = source_typed_index
+                .get(source_id, nested_apply.function)
+                .unwrap();
+            let nested_constructor =
+                term_type_target(unit, unit.typed_ast.get(typed_nested_selection).ty)
+                    .expect("typed nested Select resolves the actual Counter constructor");
+            assert_eq!(
+                unit.store.symbols.get(nested_constructor).owner,
+                Some(counter)
+            );
+            assert_eq!(
+                unit.store
+                    .names
+                    .resolve(unit.store.symbols.get(nested_constructor).name.text()),
+                "<init>"
+            );
+            let TreeKind::Select(outer_selection) = &ast.get(source_outer.function).kind else {
+                panic!("Pair constructor function is a source Select")
+            };
+            assert!(matches!(
+                ast.get(outer_selection.qualifier).kind,
+                TreeKind::New(_)
+            ));
+            let typed_outer_selection = source_typed_index
+                .get(source_id, source_outer.function)
+                .unwrap();
+            let outer_constructor =
+                term_type_target(unit, unit.typed_ast.get(typed_outer_selection).ty)
+                    .expect("typed Pair Select resolves the actual Pair constructor");
+            assert_eq!(unit.store.symbols.get(outer_constructor).owner, Some(pair));
+            let typed_outer_new = source_typed_index
+                .get(source_id, outer_selection.qualifier)
+                .unwrap();
+            assert!(matches!(
+                unit.typed_ast.get(typed_outer_new).kind,
+                TreeKind::New(_)
+            ));
+            let SourceDefinition::Canonical {
+                source: pair_source,
+                tree: pair_tree,
+            } = index.definition_of(pair).unwrap()
+            else {
+                panic!("Pair has the canonical source definition")
+            };
+            assert_eq!(pair_source, source_id);
+            let TreeKind::TypeDef(pair_definition) = &ast.get(pair_tree).kind else {
+                panic!("Pair is a source class")
+            };
+            let TreeKind::Template(pair_template) = &ast.get(pair_definition.rhs).kind else {
+                panic!("Pair class has a source template")
+            };
+            let pair_constructor = index
+                .symbol_at(source_id, pair_template.constructor)
+                .unwrap();
+            let SourceDefinition::Canonical {
+                source: counter_source,
+                tree: counter_tree,
+            } = index.definition_of(counter).unwrap()
+            else {
+                panic!("Counter has the canonical source definition")
+            };
+            assert_eq!(counter_source, source_id);
+            let TreeKind::TypeDef(counter_definition) = &ast.get(counter_tree).kind else {
+                panic!("Counter is a source class")
+            };
+            let TreeKind::Template(counter_template) = &ast.get(counter_definition.rhs).kind else {
+                panic!("Counter class has a source template")
+            };
+            let counter_constructor = index
+                .symbol_at(source_id, counter_template.constructor)
+                .unwrap();
+            assert_eq!(outer_constructor, pair_constructor);
+            assert_eq!(nested_constructor, counter_constructor);
+            assert_eq!(
+                source_typed_index.get(source_id, source_outer.args[0]),
+                Some(typed_outer.args[0])
+            );
+            assert_eq!(
+                source_typed_index.get(source_id, source_outer.args[1]),
+                Some(typed_outer.args[1])
+            );
+            eprintln!(
+                "mixed-origin {variant}: source={source_id:?} classes=[Counter:{counter:?},Pair:{pair:?},PairFactory:{factory:?}] method_tree={method_tree:?} method={method:?} formals=[({existing_tree:?},{existing:?}:{existing_type:?}),({seed_tree:?},{seed:?}:Int)] constructors=[Counter:{counter_constructor:?},Pair:{pair_constructor:?}] outer={source_rhs:?}/{typed_rhs:?} pair_select={:?}/{typed_outer_selection:?} pair_new={:?}/{typed_outer_new:?} args={:?}/{:?} nested_apply={nested_tree:?}/{typed_nested_tree:?} nested_select={:?}/{typed_nested_selection:?} nested_new={:?}/{:?} seed={seed_argument:?}/{typed_seed_argument:?} spans=[{:?},{:?}]",
+                source_outer.function,
+                outer_selection.qualifier,
+                source_outer.args,
+                typed_outer.args,
+                nested_apply.function,
+                nested_selection.qualifier,
+                source_typed_index
+                    .get(source_id, nested_selection.qualifier)
+                    .unwrap(),
+                ast.get(source_outer.args[0]).position,
+                ast.get(source_outer.args[1]).position,
+            );
+
+            observed_proof_error = Some(
+                match validate_cross_class_constructor_call_proofs(
+                    CrossClassConstructorCallProofInput {
+                        source_id,
+                        source_root,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: unit.typed_ast,
+                        source_index: index,
+                        source_typed_index,
+                        jvm_unit: unit,
+                    },
+                ) {
+                    Err(error) => error,
+                    Ok(_) => panic!("mixed formal classes fail the current ordered-pair proof"),
+                },
+            );
+        };
+        let artifacts = compile_source_batch_with_source_observer(
+            source,
+            "PairFactory.scala",
+            output.path(),
+            source_id,
+            SourceUnitCardinality::AtLeastTwo,
+            &mut observe_source,
+        )
+        .expect("the JVM-only source pipeline accepts both mixed-origin methods");
+        assert!(
+            observed,
+            "proof measurements use the genuine frontend session"
+        );
+        assert_eq!(
+            artifacts
+                .iter()
+                .map(|artifact| artifact.class.internal_name())
+                .collect::<Vec<_>>(),
+            ["example/Counter", "example/Pair", "example/PairFactory"]
+        );
+        let factory_artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == "example/PairFactory")
+            .unwrap();
+        let emitted_factory = decode_emitted_class(factory_artifact);
+        let emitted_method = emitted_factory
+            .methods
+            .iter()
+            .find(|candidate| {
+                emitted_factory.constant_pool.utf8(candidate.name_index) == Ok(method_name)
+            })
+            .unwrap();
+        assert_eq!(
+            emitted_factory
+                .constant_pool
+                .utf8(emitted_method.descriptor_index),
+            Ok("(Lexample/Counter;I)Lexample/Pair;")
+        );
+        let [Attribute::Code(method_code)] = emitted_method.attributes.as_slice() else {
+            panic!("factory method has a Code attribute")
+        };
+        assert_eq!(
+            method_code.max_stack,
+            if method_name == "wrapAndCreate" { 6 } else { 5 }
+        );
+        assert_eq!(method_code.max_locals, 3);
+        let expected_opcodes = if method_name == "wrapAndCreate" {
+            [0xbb, 0x59, 0x2b, 0xbb, 0x59, 0x1c, 0xb7, 0xb7, 0xb0]
+        } else {
+            [0xbb, 0x59, 0xbb, 0x59, 0x1c, 0xb7, 0x2b, 0xb7, 0xb0]
+        };
+        assert_eq!(
+            decode_subset_instructions(method_code.code)
+                .into_iter()
+                .map(|(_, opcode)| opcode)
+                .collect::<Vec<_>>(),
+            expected_opcodes,
+            "JVM-only output evaluates the nested new at its source argument position"
+        );
+        assert_invocation_sequence(
+            &emitted_factory,
+            method_code.code,
+            &[
+                (0xb7, "example/Counter", "<init>", "(I)V"),
+                (
+                    0xb7,
+                    "example/Pair",
+                    "<init>",
+                    "(Lexample/Counter;Lexample/Counter;)V",
+                ),
+            ],
+        );
+        assert!(matches!(
+            observed_proof_error,
+            Some(
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SemanticIdentity(
+                    "both factory formals must retain the same canonical reference class"
+                )
+            )
+        ));
+
+        let mut paired_callback_ran = false;
+        let paired = dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan(
+            source,
+            "PairFactory.scala",
+            source_id,
+            |_| paired_callback_ran = true,
+        );
+        assert!(
+            !paired_callback_ran,
+            "proof error masks downstream paired stages"
+        );
+        assert!(matches!(
+            paired,
+            Err(dotty::jvm_tasty_plan::PairedPlanError::BatchUnit {
+                phase: "cross-class constructor-call identity proof",
+                reason,
+            }) if reason.contains("SemanticIdentity(\"both factory formals must retain the same canonical reference class\")")
+        ));
+    }
 }
