@@ -84,6 +84,23 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
             with self.assertRaises(gate.ReceiptError):
                 gate.validate_oracle_log(log)
 
+    def test_scala_matrix_requires_all_19_unique_controls_and_exact_classifications(self) -> None:
+        rows = [f"{name}\t{classification}" for name, classification in gate.SCALA_MATRIX_CASES.items()]
+        self.assertEqual(len(rows), 19)
+        gate.validate_scala_matrix(rows)
+        with self.assertRaises(gate.ReceiptError):
+            gate.validate_scala_matrix(rows[:-1])
+        with self.assertRaises(gate.ReceiptError):
+            gate.validate_scala_matrix([*rows, rows[0]])
+        with self.assertRaises(gate.ReceiptError):
+            gate.validate_scala_matrix([*rows, "Unreviewed\taccepted"])
+        changed_classification = [
+            "InputSupertype\trejected" if row.startswith("InputSupertype\t") else row
+            for row in rows
+        ]
+        with self.assertRaises(gate.ReceiptError):
+            gate.validate_scala_matrix(changed_classification)
+
     def product2_log(self, *, duplicate: bool = False, changed: bool = False) -> str:
         tests = sorted(gate.RUST_TESTS)
         lines = [f"test {name} ... ok" for name in tests]
