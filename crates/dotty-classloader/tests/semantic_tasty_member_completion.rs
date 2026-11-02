@@ -6,11 +6,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use dotty_classloader::classloader::{
-    BinaryName, ClassLoader, ClassPathEntry, ClasspathSymbolResolver, CompositeClassPath,
-    DirectoryClassPath, JdkClassPath, LoadingSession,
+    BinaryName, ClassLoader, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource,
+    ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, JdkClassPath, LoadingSession,
 };
+use dotty_core::names::Name;
+use dotty_core::packages::Packages;
+use dotty_core::resolution::{MemberRequest, ResolutionError, ResolverCheckpoint, SymbolResolver};
+use dotty_core::types::PolyType;
 use dotty_core::{Definitions, SemanticStore, SymbolId, SymbolInfo, Type, TypeParam, Visibility};
 use dotty_tasty::tasty::{DEFDEF_TAG, DefinitionBody, StructuredNode, TYPEDEF_TAG, TastyFile};
 use dotty_tasty_unpickler::tasty_unpickler::{TastySession, TastyUnpickler, UnpickleError};
@@ -96,6 +101,198 @@ fn classpath_with_extra(extra: Option<PathBuf>) -> CompositeClassPath {
     CompositeClassPath::new(entries)
 }
 
+struct TracingClassPath {
+    inner: CompositeClassPath,
+    trace: Arc<Mutex<Vec<String>>>,
+}
+
+impl ClassPathEntry for TracingClassPath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        let result = self.inner.find_class(name);
+        let entry = match &result {
+            Ok(Some(resource)) => format!(
+                "{}=selected:{:?}:{}",
+                name.as_internal(),
+                resource.format(),
+                origin_label(resource.origin())
+            ),
+            Ok(None) => format!("{}=missing", name.as_internal()),
+            Err(error) => format!("{}=error:{}", name.as_internal(), error.code()),
+        };
+        self.trace.lock().unwrap().push(entry);
+        result
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package(package)
+    }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package_prefix(package)
+    }
+}
+
+fn origin_label(origin: &ClassOrigin) -> String {
+    let (kind, path) = match origin {
+        ClassOrigin::Directory(path) => ("directory", path),
+        ClassOrigin::Jar(path) => ("jar", path),
+        ClassOrigin::Jmod(path) => ("jmod", path),
+        _ => return "other".into(),
+    };
+    format!(
+        "{kind}:{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown")
+    )
+}
+
+fn tracing_classpath(trace: Arc<Mutex<Vec<String>>>) -> CompositeClassPath {
+    CompositeClassPath::new(vec![Box::new(TracingClassPath {
+        inner: classpath_with_extra(None),
+        trace,
+    })])
+}
+
+struct TracingResolver {
+    inner: Box<dyn SymbolResolver>,
+    trace: Arc<Mutex<Vec<String>>>,
+}
+
+impl TracingResolver {
+    fn record_request(&self, store: &SemanticStore, request: &MemberRequest) {
+        self.trace.lock().unwrap().push(format!(
+            "request:prefix={};name={};namespace={:?};space={:?}",
+            type_repr(store, request.prefix),
+            store.names.resolve(request.name.text()),
+            request.name.namespace(),
+            request.space
+        ));
+    }
+}
+
+impl SymbolResolver for TracingResolver {
+    fn has_package_root(&self) -> bool {
+        self.inner.has_package_root()
+    }
+
+    fn take_packages(&mut self) -> Option<Packages> {
+        self.inner.take_packages()
+    }
+
+    fn checkpoint_with_packages(&self, packages: &Packages) -> ResolverCheckpoint {
+        self.inner.checkpoint_with_packages(packages)
+    }
+
+    fn class_type_parameters(
+        &self,
+        store: &SemanticStore,
+        class: SymbolId,
+    ) -> Option<Vec<SymbolId>> {
+        self.inner.class_type_parameters(store, class)
+    }
+
+    fn package_object_collision(
+        &mut self,
+        store: &mut SemanticStore,
+        package: SymbolId,
+        name: Name,
+    ) -> Result<bool, ResolutionError> {
+        self.inner.package_object_collision(store, package, name)
+    }
+
+    fn module_class_of_object(
+        &self,
+        store: &SemanticStore,
+        object: SymbolId,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner.module_class_of_object(store, object)
+    }
+
+    fn complete_module_class(
+        &mut self,
+        store: &mut SemanticStore,
+        module_class: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        self.inner.complete_module_class(store, module_class)
+    }
+
+    fn complete_class(
+        &mut self,
+        store: &mut SemanticStore,
+        symbol: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        self.inner.complete_class(store, symbol)
+    }
+
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        self.inner.checkpoint()
+    }
+
+    fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
+        self.inner.rollback_to(store, checkpoint)
+    }
+
+    fn rollback_to_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        checkpoint: ResolverCheckpoint,
+        packages: &mut Packages,
+    ) {
+        self.inner
+            .rollback_to_with_packages(store, checkpoint, packages)
+    }
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.record_request(store, request);
+        self.inner.resolve_member(store, request)
+    }
+
+    fn resolve_member_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.record_request(store, request);
+        self.inner
+            .resolve_member_with_packages(store, packages, request)
+    }
+
+    fn resolve_package(
+        &mut self,
+        store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner.resolve_package(store, path)
+    }
+
+    fn resolve_package_with_packages(
+        &mut self,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner
+            .resolve_package_with_packages(store, packages, path)
+    }
+
+    fn enter_synthetic_package_member(
+        &mut self,
+        store: &mut SemanticStore,
+        package: SymbolId,
+        name: Name,
+        member: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        self.inner
+            .enter_synthetic_package_member(store, package, name, member)
+    }
+}
+
 fn member_address(file: &TastyFile<'_>, name: &str) -> Option<u32> {
     let index = file.ast_address_index().ok()?;
     let mut matches = index
@@ -151,18 +348,56 @@ struct ForeignOwner {
     actual: String,
 }
 
-fn validate_owner(requested: &str, actual: &str) -> Result<(), ForeignOwner> {
-    if requested == actual {
-        Ok(())
+#[derive(Debug)]
+enum AuditRequestError {
+    ForeignOwner(ForeignOwner),
+    Completion(UnpickleError),
+}
+
+fn complete_audit_request(
+    unpickler: &mut TastyUnpickler<'_, '_, '_>,
+    address: u32,
+    requested_owner: &str,
+    actual_owner: &str,
+) -> Result<dotty_core::TypeId, AuditRequestError> {
+    if unpickler.index().symbol_at(address).is_none() {
+        return Err(AuditRequestError::Completion(
+            UnpickleError::MissingEnteredSymbol { address },
+        ));
+    }
+    if requested_owner == actual_owner {
+        unpickler
+            .complete_symbol(address)
+            .map_err(AuditRequestError::Completion)
     } else {
-        Err(ForeignOwner {
-            requested: requested.to_owned(),
-            actual: actual.to_owned(),
-        })
+        Err(AuditRequestError::ForeignOwner(ForeignOwner {
+            requested: requested_owner.to_owned(),
+            actual: actual_owner.to_owned(),
+        }))
+    }
+}
+
+#[derive(Default)]
+struct BinderNames {
+    ids: std::collections::HashMap<dotty_core::TypeId, usize>,
+}
+
+impl BinderNames {
+    fn identify(&mut self, id: dotty_core::TypeId) -> usize {
+        let next = self.ids.len();
+        *self.ids.entry(id).or_insert(next)
     }
 }
 
 fn type_repr(store: &SemanticStore, id: dotty_core::TypeId) -> String {
+    type_repr_inner(store, id, &mut BinderNames::default())
+}
+
+fn type_repr_inner(
+    store: &SemanticStore,
+    id: dotty_core::TypeId,
+    binders: &mut BinderNames,
+) -> String {
     match store.types.get(id) {
         Type::NoType => "NoType".into(),
         Type::NoPrefix => "NoPrefix".into(),
@@ -177,58 +412,91 @@ fn type_repr(store: &SemanticStore, id: dotty_core::TypeId) -> String {
             .unwrap_or_else(|| "unresolved-term-name".into()),
         Type::Applied { tycon, args } => format!(
             "{}[{}]",
-            type_repr(store, *tycon),
+            type_repr_inner(store, *tycon, binders),
             args.iter()
-                .map(|arg| type_repr(store, *arg))
+                .map(|arg| type_repr_inner(store, *arg, binders))
                 .collect::<Vec<_>>()
                 .join(",")
         ),
-        Type::Method(method) => format!(
-            "({}){:?}:{}",
-            method
-                .params
-                .iter()
-                .map(|param| type_repr(store, param.ty))
-                .collect::<Vec<_>>()
-                .join(","),
-            method.kind,
-            type_repr(store, method.result)
-        ),
-        Type::Poly(poly) => format!(
-            "[{}]=>{}",
-            type_params_repr(store, &poly.params),
-            type_repr(store, poly.result)
-        ),
+        Type::Method(method) => {
+            let binder = binders.identify(id);
+            format!(
+                "method[binder{binder}]({}){:?}:{}",
+                method
+                    .params
+                    .iter()
+                    .map(|param| type_repr_inner(store, param.ty, binders))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                method.kind,
+                type_repr_inner(store, method.result, binders)
+            )
+        }
+        Type::Poly(poly) => {
+            let binder = binders.identify(id);
+            format!(
+                "[binder{binder};{}]=>{}",
+                type_params_repr(store, &poly.params, binders),
+                type_repr_inner(store, poly.result, binders)
+            )
+        }
         Type::Bounds { low, high } => format!(
             "bounds({},{})",
-            type_repr(store, *low),
-            type_repr(store, *high)
+            type_repr_inner(store, *low, binders),
+            type_repr_inner(store, *high, binders)
         ),
-        Type::AliasingBounds { alias } => format!("alias({})", type_repr(store, *alias)),
-        Type::ByName { result } => format!("by-name({})", type_repr(store, *result)),
-        Type::Flexible { underlying } => format!("flexible({})", type_repr(store, *underlying)),
+        Type::AliasingBounds { alias } => {
+            format!("alias({})", type_repr_inner(store, *alias, binders))
+        }
+        Type::ByName { result } => format!("by-name({})", type_repr_inner(store, *result, binders)),
+        Type::Flexible { underlying } => {
+            format!("flexible({})", type_repr_inner(store, *underlying, binders))
+        }
         Type::And { left, right } => format!(
             "and({},{})",
-            type_repr(store, *left),
-            type_repr(store, *right)
+            type_repr_inner(store, *left, binders),
+            type_repr_inner(store, *right, binders)
         ),
         Type::Or { left, right } => format!(
             "or({},{})",
-            type_repr(store, *left),
-            type_repr(store, *right)
+            type_repr_inner(store, *left, binders),
+            type_repr_inner(store, *right, binders)
         ),
         Type::ThisType { class } => format!("this({})", owner_path(store, *class)),
-        Type::SuperType { super_type, .. } => format!("super({})", type_repr(store, *super_type)),
-        Type::JavaArray { element } => format!("Array[{}]", type_repr(store, *element)),
-        Type::Repeated { element } => format!("Repeated[{}]", type_repr(store, *element)),
-        Type::ParamRef { index, .. } => format!("ParamRef[{index}]"),
+        Type::SuperType { super_type, .. } => {
+            format!("super({})", type_repr_inner(store, *super_type, binders))
+        }
+        Type::JavaArray { element } => {
+            format!("Array[{}]", type_repr_inner(store, *element, binders))
+        }
+        Type::Repeated { element } => {
+            format!("Repeated[{}]", type_repr_inner(store, *element, binders))
+        }
+        Type::ParamRef { binder, index } => match binders.ids.get(binder) {
+            Some(identity) => format!("ParamRef[binder{identity};{index}]"),
+            None => format!("ParamRef[external-binder;{index}]"),
+        },
+        Type::TypeLambda(lambda) => {
+            let binder = binders.identify(id);
+            format!(
+                "type-lambda[binder{binder};{}]=>{}",
+                type_params_repr(store, &lambda.params, binders),
+                type_repr_inner(store, lambda.result, binders)
+            )
+        }
         Type::Constant(value) => format!("constant({value:?})"),
-        Type::Wildcard { bounds } => format!("Wildcard({})", type_repr(store, *bounds)),
+        Type::Wildcard { bounds } => {
+            format!("Wildcard({})", type_repr_inner(store, *bounds, binders))
+        }
         _ => "unknown-semantic-type-shape".into(),
     }
 }
 
-fn type_params_repr(store: &SemanticStore, params: &[TypeParam]) -> String {
+fn type_params_repr(
+    store: &SemanticStore,
+    params: &[TypeParam],
+    binders: &mut BinderNames,
+) -> String {
     params
         .iter()
         .map(|param| {
@@ -236,7 +504,7 @@ fn type_params_repr(store: &SemanticStore, params: &[TypeParam]) -> String {
                 "{}:{:?}:{}",
                 store.names.resolve(param.name.as_name().text()),
                 param.declared_variance,
-                type_repr(store, param.bounds)
+                type_repr_inner(store, param.bounds, binders)
             )
         })
         .collect::<Vec<_>>()
@@ -259,7 +527,7 @@ fn visibility(store: &SemanticStore, visibility: &Visibility) -> String {
 fn run_once() -> String {
     let root = workspace();
     let mut receipt = String::from(
-        "member\tpath\tsha256\ttasty_version\towner\towner_kind\towner_address\taddress\tnamespace\tkind\tvisibility\tlegacy_outcome\tlegacy_signature\tcompletion\tcanonical_signature\tcomparison\terror\n",
+        "member\tpath\tsha256\ttasty_version\towner\towner_kind\towner_address\taddress\tnamespace\tkind\tvisibility\tlegacy_outcome\tlegacy_signature\tcompletion\tcanonical_signature\tcomparison\tcanonical_request\tcanonical_resolution_trace\terror\n",
     );
     for (id, relpath, method, requested_address) in MEMBERS {
         let path = root.join(relpath);
@@ -289,8 +557,15 @@ fn run_once() -> String {
         assert_eq!(header.major_version, 28);
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
-        let resolver =
-            ClasspathSymbolResolver::new(classpath(), definitions, LoadingSession::new());
+        let resolution_trace = Arc::new(Mutex::new(Vec::new()));
+        let resolver = TracingResolver {
+            inner: Box::new(ClasspathSymbolResolver::new(
+                tracing_classpath(Arc::clone(&resolution_trace)),
+                definitions,
+                LoadingSession::new(),
+            )),
+            trace: Arc::clone(&resolution_trace),
+        };
         let session = TastySession::new()
             .with_resolver(Box::new(resolver))
             .expect("resolver-backed fresh session");
@@ -318,15 +593,49 @@ fn run_once() -> String {
             unpickler.symbol_state_at(address).unwrap().0,
             dotty_core::SymbolKind::Method
         );
-        let (outcome, signature, error) = match unpickler.complete_symbol(address) {
-            Ok(signature) => ("COMPLETE".to_owned(), Some(signature), String::new()),
-            Err(error) => (
-                classify(&error).to_owned(),
-                None,
-                normalize_error(&format!("{error:?}")),
-            ),
-        };
+        let (outcome, signature, error) =
+            match complete_audit_request(&mut unpickler, address, owner_simple, owner_simple) {
+                Ok(signature) => ("COMPLETE".to_owned(), Some(signature), String::new()),
+                Err(AuditRequestError::Completion(error)) => (
+                    classify(&error).to_owned(),
+                    None,
+                    normalize_error(&format!("{error:?}")),
+                ),
+                Err(AuditRequestError::ForeignOwner(error)) => {
+                    panic!("unexpected owner mismatch: {error:?}")
+                }
+            };
         drop(unpickler);
+        let trace = resolution_trace.lock().unwrap();
+        let canonical_request = trace
+            .iter()
+            .find(|entry| entry.starts_with("request:"))
+            .cloned()
+            .unwrap_or_default();
+        let canonical_resolution_trace = trace
+            .iter()
+            .filter(|entry| {
+                !entry.starts_with("request:")
+                    && (entry.starts_with("scala/Predef=")
+                        || entry == &"scala/Predef/String=missing"
+                        || entry == &"scala/Predef$String=missing")
+            })
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(";");
+        drop(trace);
+        if *id == "animal-sound" || *id == "dog-sound" {
+            assert!(canonical_request.contains("prefix=scala;name=Predef;namespace=Term"));
+            assert!(
+                canonical_resolution_trace
+                    .contains("scala/Predef=selected:Tasty:directory:scala3-library")
+            );
+            assert!(canonical_resolution_trace.contains("scala/Predef/String=missing"));
+            assert!(canonical_resolution_trace.contains("scala/Predef$String=missing"));
+            assert!(error.contains("UnresolvedMember"));
+        }
         let owner = store
             .symbols
             .get(member_id)
@@ -380,6 +689,8 @@ fn run_once() -> String {
                 &outcome,
                 &signature,
                 comparison,
+                &canonical_request,
+                &canonical_resolution_trace,
                 &error,
             ],
         );
@@ -531,6 +842,45 @@ fn four_frozen_members_are_explicitly_completed_in_fresh_deterministic_runs() {
 }
 
 #[test]
+fn normalized_param_refs_distinguish_their_binder() {
+    let mut store = SemanticStore::new();
+    let correct = store.types.reserve();
+    let other = store.types.reserve();
+    let correct_ref = store.types.alloc(Type::ParamRef {
+        binder: correct.id(),
+        index: 0,
+    });
+    let wrong_ref = store.types.alloc(Type::ParamRef {
+        binder: other.id(),
+        index: 0,
+    });
+    let correct_poly = store.types.fill(
+        correct,
+        Type::Poly(PolyType {
+            params: Vec::new(),
+            result: correct_ref,
+        }),
+    );
+    store.types.fill(
+        other,
+        Type::Poly(PolyType {
+            params: Vec::new(),
+            result: wrong_ref,
+        }),
+    );
+    assert_eq!(
+        type_repr(&store, correct_poly),
+        "[binder0;]=>ParamRef[binder0;0]"
+    );
+    let mut context = BinderNames::default();
+    context.identify(correct_poly);
+    assert_eq!(
+        type_repr_inner(&store, wrong_ref, &mut context),
+        "ParamRef[external-binder;0]"
+    );
+}
+
+#[test]
 fn unknown_method_address_is_typed_and_does_not_poison_a_valid_retry() {
     let (_, relpath, method, _) = MEMBERS[1];
     let path = workspace().join(relpath);
@@ -590,27 +940,50 @@ fn malformed_bytes_and_foreign_owner_controls_fail_closed() {
     unpickler
         .complete_symbol(address)
         .expect("original member remains completable after the malformed-input control");
-    let symbol = unpickler.index().symbol_at(address).unwrap();
     drop(unpickler);
-    let owner = store.symbols.get(symbol).owner.unwrap();
-    let actual_owner = owner_path(&store, owner);
-    let foreign = "scala.Option";
-    let committed = store.checkpoint();
+    let dog_path = workspace().join(MEMBERS[3].1);
+    let dog_bytes = fs::read(dog_path).unwrap();
+    let dog_file = TastyFile::parse_scala_3_9(&dog_bytes).unwrap();
+    let mut dog_store = SemanticStore::new();
+    let dog_definitions = Definitions::bootstrap(&mut dog_store);
+    let dog_resolver =
+        ClasspathSymbolResolver::new(classpath(), dog_definitions, LoadingSession::new());
+    let dog_session = TastySession::new()
+        .with_resolver(Box::new(dog_resolver))
+        .unwrap();
+    let mut dog_unpickler =
+        TastyUnpickler::with_session(&dog_file, &mut dog_store, dog_definitions, dog_session);
+    dog_unpickler.enter_symbols().unwrap();
+    let dog_address = member_address(&dog_file, "sound").unwrap();
+    let before = dog_unpickler.symbol_state_at(dog_address).unwrap();
+    let error = complete_audit_request(
+        &mut dog_unpickler,
+        dog_address,
+        "me.cytrowski.tastyfixtures.Animal",
+        "me.cytrowski.tastyfixtures.Dog",
+    )
+    .expect_err("a real Dog.sound address cannot be requested as Animal.sound");
+    assert!(matches!(
+        error,
+        AuditRequestError::ForeignOwner(ForeignOwner { requested, actual })
+            if requested == "me.cytrowski.tastyfixtures.Animal"
+                && actual == "me.cytrowski.tastyfixtures.Dog"
+    ));
     assert_eq!(
-        validate_owner(foreign, &actual_owner),
-        Err(ForeignOwner {
-            requested: foreign.to_owned(),
-            actual: actual_owner.clone()
-        }),
-        "same-named methods under a foreign owner fail with an explicit typed receipt"
+        dog_unpickler.symbol_state_at(dog_address).unwrap(),
+        before,
+        "foreign-owner rejection leaves the committed method state unchanged"
     );
-    assert_eq!(
-        store.checkpoint(),
-        committed,
-        "foreign-owner rejection leaves committed state usable"
+    let retry = complete_audit_request(
+        &mut dog_unpickler,
+        dog_address,
+        "me.cytrowski.tastyfixtures.Dog",
+        "me.cytrowski.tastyfixtures.Dog",
     );
-    assert_eq!(
-        owner_path(&store, owner),
-        "me.cytrowski.tastyfixtures.semantic.InfoWrapped"
-    );
+    assert!(matches!(
+        retry,
+        Err(AuditRequestError::Completion(
+            UnpickleError::UnresolvedMember { .. }
+        ))
+    ));
 }

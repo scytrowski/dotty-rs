@@ -15,17 +15,19 @@ The four TASTy inputs are format 28.9 and their byte hashes are recorded in
 compiler source fixtures in this repository are pinned to revision
 `777528f19a58e794c9954a42f433373472ec57f8`. Option's already-reviewed source
 contract is `getOrElse[B >: A](default: => B): B`; its output retains the
-method-local bound, by-name clause, and `B` result. `InfoWrapped.m` retains
+method-local bound, by-name clause, and `B` result; each `ParamRef` in that
+signature is normalized with a stable traversal-relative binder identity.
+`InfoWrapped.m` retains
 its method-local `F` application and returns canonical `F[Int]` semantics.
 
 ## Outcomes
 
 | Member | Explicit completion | Normalized finding |
 | --- | --- | --- |
-| `scala.Option.getOrElse` | `COMPLETE` at `DEFDEF@666` | Canonical and current legacy member signatures are equal, including `B >: Option.A` and the by-name parameter. This agrees with the reviewed #1930 source/typed contract. |
+| `scala.Option.getOrElse` | `COMPLETE` at `DEFDEF@666` | Canonical and current legacy member signatures are equal, including `B >: Option.A`, the by-name parameter, and both parameter/result references to the indexed method-local `B` binder. This agrees with the reviewed #1930 source/typed contract. |
 | `InfoWrapped.m` | `COMPLETE` at `DEFDEF@115` | Canonical and legacy projections are semantically equal. The normalized result is `ByName(InfoWrapped.F[Int])`, preserving the wrapper carried by this compiled TASTy; the source member is declared `m: F[Int]`. For the legacy comparison only, the test copies the original `InfoWrapped.tasty` and `InfoBase.tasty` bytes into a temporary package-relative classpath layout because the fixture generator stores them flat. No TASTy bytes are rewritten. |
-| `Animal.sound` | `UNRESOLVED_EXTERNAL` at `DEFDEF@22` | First typed error is `UnresolvedMember` for type member `String` at TASTy address 27. The configured TASTy/classpath and JDK 21 resolver lacks the `scala/Predef.String` alias path required by this member. This is a missing resolver prerequisite, so the method remains incomplete. |
-| `Dog.sound` | `UNRESOLVED_EXTERNAL` at `DEFDEF@36` | Independent original unit and owner; its first typed error is `UnresolvedMember` for `String` at address 41, with the same measured resolver miss. The failure is recorded separately and was not inferred from Animal. |
+| `Animal.sound` | `UNRESOLVED_EXTERNAL` at `DEFDEF@22` | Canonical resolver request is `Predef` in prefix `scala`; `scala/Predef.tasty` is selected from the Scala library fixture path. The test-only classpath trace then records both `scala/Predef/String` and `scala/Predef$String` as missing before the first typed error, `UnresolvedMember` for `String` at TASTy address 27. |
+| `Dog.sound` | `UNRESOLVED_EXTERNAL` at `DEFDEF@36` | Independent original unit and owner; the same measured canonical request selects `scala/Predef.tasty`, and both String resource paths are missing before its distinct first typed error at address 41. The failure is recorded separately and was not inferred from Animal. |
 
 The legacy outcomes are obtained by loading the owner through the existing
 `ClassLoader` member projection in a separate fresh store. `MATCH` means the
@@ -40,18 +42,21 @@ and their hashes are unchanged: `cohort.tsv` SHA-256
 Option row here reflects the current direct legacy projection; the historical
 class-root-only report remains a separate immutable artifact.
 
-The first unsupported dependency for Animal and Dog is specifically the
-`scala/Predef.String` alias lookup. The evidence does not establish whether
-the resolver should add alias loading or whether the canonical semantic model
-needs another type representation; it only establishes the first required
-missing lookup and its owning boundary (`dotty-classloader` resolver).
+The canonical request and classpath trace distinguish selecting the Predef
+TASTy resource from the subsequent missing `String` resource lookups. They do
+not establish whether the resolver should add alias loading or whether those
+resources are expected to exist as standalone classpath entries. The
+first typed cause remains the recorded `UnresolvedMember`; follow-up should
+trace the Scala 3.9.0 alias/dependency chain before changing resolver behavior.
 
 ## Negative controls
 
 The focused test checks that a one-byte-truncated original `InfoWrapped.tasty`
-is rejected before it can mutate the bootstrapped store; a foreign owner
-request for the same method name produces an explicit `ForeignOwner` value;
-and a dangling method address produces the exact typed
+is rejected before it can mutate the bootstrapped store; a mismatched
+`Animal.sound` request for the real `Dog.sound` address produces a typed
+`ForeignOwner` rejection through the audit request path, preserves the pending
+method state, and permits a valid-owner retry; and a dangling method address
+produces the exact typed
 `MissingEnteredSymbol { address: u32::MAX }`. The dangling-address control
 leaves the real method pending and that same method completes successfully on
 retry. `InfoWrapped.m` completes successfully after the malformed-input
