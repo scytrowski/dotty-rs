@@ -167,6 +167,37 @@ and
 [`jvm-tasty-multi-argument-constructor-calls.md`](jvm-tasty-multi-argument-constructor-calls.md).
 Those results do not imply support for the mixed-origin pair audited here.
 
+## Mixed method signature projection (#2013)
+
+The semantic pickler accepts the original ordinary method signature
+`wrapAndCreate(existing: Counter, seed: Int): Pair` when the method, `Counter`,
+and `Pair` have canonical declarations in the same source and package, and the
+two method formals retain their exact source-owned `SymbolId`s and declaration
+order. Its completed plain `MethodType` must agree with those symbols: the
+first formal is the exact planned `Counter` class reference, the second is
+Scala `Int`, and the result is the exact planned `Pair` class reference. The
+existing planned-class proof from #2012 authenticates the referenced classes;
+the validator also checks their source definitions, package prefix, names,
+ownership, and `ClassInfo`.
+
+`ValidatedClassStatePlan::method_signature_skeleton` projects the two distinct
+source `PARAM` declarations and the explicit `Counter`, `Int`, and `Pair` type
+syntax. The skeleton retains each original method body root in its
+`omitted_bodies` metadata and emits no RHS. It is a structural signature
+projection, not a complete or Scala-readable sidecar. The original body
+`new Pair(existing, new Counter(seed))` remains outside this increment and is
+expected to fail body serialization until #2014. Reversing the constructor
+argument expressions does not change method formal order. Source class order
+and package/class/method/formal spellings may vary without replacing semantic
+identity with name-based matching.
+
+The bounded new form is exactly `(same-source class, Int) => same-package
+class` in one plain value clause. Flipped `(Int, class)`, an added third formal,
+foreign or unplanned classes, other result classes, multiple clauses,
+erased/default/contextual/generic/overloaded signatures remain rejected. The
+pre-existing one-class-reference method signature and same-typed dual-formal
+signatures retain their earlier acceptance rules.
+
 ## Reproduction and validation
 
 The focused Rust audit regression is:

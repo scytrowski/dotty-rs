@@ -27250,18 +27250,19 @@ fn mixed_origin_pair_arguments_reach_jvm_and_report_the_proof_boundary() {
         );
         assert!(
             !paired_callback_ran,
-            "the proof-only issue does not make the separate mixed-signature pickler accept this plan"
+            "the deferred body rejection prevents paired artifacts from reaching the callback"
         );
         assert!(
             matches!(
-                paired,
+                &paired,
                 Err(dotty::jvm_tasty_plan::PairedPlanError::BatchClass {
+                    class_index: 2,
                     phase: "JVM/TASTy cross-contract validation",
-                    ref reason,
+                    reason,
                     ..
-                })
-                    if reason.contains("TastyPlan(MalformedType { ty: ")
-                        && reason.contains("role: Parameter")
+                }) if reason.starts_with(
+                    "TastyPlan(Unsupported { feature: BodyExpression, symbol: Some("
+                )
             ),
             "unexpected downstream paired result: {paired:?}"
         );

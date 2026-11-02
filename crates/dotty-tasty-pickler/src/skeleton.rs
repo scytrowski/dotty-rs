@@ -30,11 +30,11 @@ pub struct OmittedMethodBody {
 /// Scala expecting interoperability. Use `ValidatedPicklePlan::pickle` for complete literal-body emission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeclarationSkeleton {
-    bytes: Vec<u8>,
-    source: SourceMetadata,
-    intended_tasty_path: String,
-    declarations: Vec<SkeletonDeclaration>,
-    omitted_bodies: Vec<OmittedMethodBody>,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) source: SourceMetadata,
+    pub(crate) intended_tasty_path: String,
+    pub(crate) declarations: Vec<SkeletonDeclaration>,
+    pub(crate) omitted_bodies: Vec<OmittedMethodBody>,
 }
 
 /// Private common assembly result; completeness is selected before emission.
