@@ -1246,16 +1246,30 @@ fn sealed_event_case_local_negative_matrix_rejects_whole_methods() {
             source_text, SOURCE_TRAIT_PRODUCT1,
             "{label} mutation must apply"
         );
+        // Keep the malformed source unit intact for its failure diagnostics,
+        // and append an isolated copy of the canonical fixture. These two
+        // untouched positive roots must still be typed for the first time in
+        // this live SourceTyper after the failure and retry.
+        let mut source_text = source_text;
+        let original_source_len = source_text.len() as u32;
+        let canonical_fixture = SOURCE_TRAIT_PRODUCT1
+            .strip_prefix("package adt\n")
+            .expect("canonical fixture package header");
+        source_text.push_str(&format!(
+            "\npackage canonical {{\n{canonical_fixture}\n}}\n"
+        ));
         let source = SourceId::from_index(19_990 + offset as u32);
         let mut session = Session::new(&source_text, source);
         let failed_method = session.method_named(method_name);
-        let recovery_method = session.method_named(if label == "non_event_variant" {
+        let prior_method = session.method_named(if label == "non_event_variant" {
             "valid"
         } else if method_name == "extract" {
             "classify"
         } else {
             "extract"
         });
+        let canonical_extract = session.method_named_after("extract", original_source_len);
+        let canonical_classify = session.method_named_after("classify", original_source_len);
         let rhs = match &session.parsed.ast.get(failed_method).kind {
             TreeKind::DefDef(definition) => definition.rhs.unwrap(),
             _ => panic!("failed root is not a DefDef"),
@@ -1286,7 +1300,7 @@ fn sealed_event_case_local_negative_matrix_rejects_whole_methods() {
             .range();
         session.with_typer(|source, parsed, index, _definitions, typer| {
             let prior_typed = typer
-                .type_method_definition(recovery_method)
+                .type_method_definition(prior_method)
                 .expect("the other frozen method remains a valid whole-method root");
             let before = event_method_failure_projection(typer, source, parsed, index);
             let first = typer
@@ -1313,7 +1327,7 @@ fn sealed_event_case_local_negative_matrix_rejects_whole_methods() {
             assert!(changed.is_empty(), "{label}: changed {changed:?} after failure rollback");
             assert_eq!(typer.source_typed_index().get(source, failed_method), None);
             assert_eq!(
-                typer.source_typed_index().get(source, recovery_method),
+                typer.source_typed_index().get(source, prior_method),
                 Some(prior_typed),
                 "{label}: a previously successful sibling remains published"
             );
@@ -1324,23 +1338,26 @@ fn sealed_event_case_local_negative_matrix_rejects_whole_methods() {
             let after_retry = event_method_failure_projection(typer, source, parsed, index);
             let changed = event_method_failure_projection_changes(&before, &after_retry);
             assert!(changed.is_empty(), "{label}: changed {changed:?} before retry rollback");
-            let recovered = typer
-                .type_method_definition(recovery_method)
-                .expect("same-session positive root remains typeable after failure");
-            assert_eq!(recovered, prior_typed);
-            let same_session_identity =
-                event_recovery_identity(typer, source, parsed, index, recovery_method);
+            assert!(typer.source_typed_index().get(source, canonical_extract).is_none());
+            assert!(typer.source_typed_index().get(source, canonical_classify).is_none());
+            let same_session_identity = [canonical_extract, canonical_classify]
+                .map(|root| {
+                    typer
+                        .type_method_definition(root)
+                        .expect("canonical positive root types after failure and retry");
+                    event_recovery_identity(typer, source, parsed, index, root)
+                });
+            assert_eq!(
+                typer.source_typed_index().get(source, prior_method),
+                Some(prior_typed),
+                "the earlier successful root remains published alongside both new roots"
+            );
 
             let fresh_source = SourceId::from_index(29_990 + offset as u32);
             let mut fresh = Session::new(&source_text, fresh_source);
             let fresh_failed_method = fresh.method_named(method_name);
-            let fresh_recovery_method = fresh.method_named(if label == "non_event_variant" {
-                "valid"
-            } else if method_name == "extract" {
-                "classify"
-            } else {
-                "extract"
-            });
+            let fresh_extract = fresh.method_named_after("extract", original_source_len);
+            let fresh_classify = fresh.method_named_after("classify", original_source_len);
             fresh.with_typer(|fresh_source, fresh_parsed, fresh_index, _, fresh_typer| {
                 let fresh_error = fresh_typer
                     .type_method_definition(fresh_failed_method)
@@ -1366,25 +1383,20 @@ fn sealed_event_case_local_negative_matrix_rejects_whole_methods() {
                     })
                     .expect("fresh-session diagnostic source tree has span");
                 assert_eq!(fresh_range, diagnostic_range, "{label}: normalized diagnostic span");
-                let fresh_recovered = fresh_typer
-                    .type_method_definition(fresh_recovery_method)
-                    .expect("fresh session can type the valid sibling after failure");
-                assert_eq!(
+                let fresh_identity = [fresh_extract, fresh_classify].map(|root| {
+                    fresh_typer
+                        .type_method_definition(root)
+                        .expect("fresh session can type canonical roots after failure");
                     event_recovery_identity(
                         fresh_typer,
                         fresh_source,
                         fresh_parsed,
                         fresh_index,
-                        fresh_recovery_method,
-                    ),
-                    same_session_identity,
-                    "{label}: successful semantic identity matches after recovery"
-                );
-                assert!(fresh_typer
-                    .source_typed_index()
-                    .get(fresh_source, fresh_recovery_method)
-                    .is_some());
-                let _ = fresh_recovered;
+                        root,
+                    )
+                });
+                assert_eq!(fresh_identity, same_session_identity,
+                    "{label}: both canonical roots have fresh-session semantic parity");
             });
             matrix_receipts.push(format!(
                 "{label}\tEvent.scala#tree{}@{}..{}\tMatch#tree{}@{}..{}\tErrorTree#tree{diagnostic_tree}@{}..{}\t{expected_error}\tScala:{scala_status}\t{diagnostic}",
@@ -2787,6 +2799,25 @@ impl Session {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("source method {method_name} is missing"))
+    }
+
+    fn method_named_after(&self, method_name: &str, source_offset: u32) -> TreeId<Untyped> {
+        self.parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if self.store.names.resolve(definition.name.as_name().text())
+                        == method_name
+                        && node.position.is_some_and(|position| {
+                            position.span().range().start() >= source_offset
+                        }) =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("source method {method_name} after offset is missing"))
     }
 
     fn source_type_symbol(&self, expected: &str) -> SymbolId {

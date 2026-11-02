@@ -18,26 +18,30 @@ records each first Typer error, source method and Match trees, and byte spans.
 It covers both Boolean literals, zero/two extractor arities, late result
 conformance, cross-case binder escape, an unrelated `String` extractor, a
 foreign same-spelled `Created` extractor, and `Deleted` as a non-`Event`
-variant. Every malformed root is retried in the same `SourceTyper`; the other
-valid method is typed before and after the error. A fresh session must report
-the same normalized diagnostic tree/span and produce the same recovered
-semantic method receipt.
+variant. Each malformed root is retried in the same `SourceTyper`. Before the
+failure, a separate successful sibling is retained. After failure and retry,
+the test types both untouched canonical `extract` and `classify` roots for the
+first time in that same typer; a fresh session must report the same normalized
+diagnostic tree/span and produce matching receipts for both roots.
 
 The internal late-result test observes the transaction before rollback. Both
 case-local `Int` binders (`id`, `code`), both typed `CaseDef`s, and the typed
-`Match` exist when the declared `Boolean` result fails. Afterwards the store,
-resolver checkpoint, typed arena, source-to-typed index, local scopes, case
-binding index, and expression scope stack return to their earlier checkpoints;
-the failed method and Match have no published mappings.
+`Match` exist when the declared `Boolean` result fails. Afterwards the test
+compares all symbol infos, scope entries and buckets, types, resolver checkpoint,
+typed nodes, source-to-typed mappings, local scopes, pattern bindings, and
+expression scope frames with the pre-failure snapshot. The earlier successful
+root remains published, while the failed method and Match have no published
+mappings. Retrying produces the same diagnostic and unchanged snapshot.
 
 Rust-only structural corruptions are also exercised. A forged `Created`
-companion link fails with `ExtractorQualifierNotValueLike`; assigning the
-generated `Created._1` selector to `Deleted` fails with
-`ExtractorResultMemberNotFound`. The tests restore those exact identities and
-type `extract` successfully in the same session. The parent graph matrix also
-rejects unrelated, duplicate, invalid, and missing parent `ClassInfo` entries
-in class-first and selector-first completion routes. A separate negative test
-retains the foreign `unapply` owner check.
+companion link fails, is retried with the same diagnostic, then is restored
+before `extract` and `classify` are typed in the same live `SourceTyper`; an
+earlier successful method remains published throughout. Assigning the generated
+`Created._1` selector to `Deleted` fails with `ExtractorResultMemberNotFound`
+and remains covered by the structural negative test. The parent graph matrix
+also rejects unrelated, duplicate, invalid, and missing parent `ClassInfo`
+entries in class-first and selector-first completion routes. A separate
+negative test retains the foreign `unapply` owner check.
 
 The only transaction repair is in `Scope::remove`: removing the final symbol
 now deletes its empty name bucket. The failing extractor cases previously left
@@ -72,7 +76,7 @@ cargo +1.98.1 test -p dotty-core symbols::scope::tests::remove_drops_the_name_bu
 cargo +1.98.1 test -p dotty-typer --test source_case_class_match sealed_event_case_local_negative_matrix_rejects_whole_methods --locked -- --nocapture
 cargo +1.98.1 test -p dotty-typer --test source_case_class_match sealed_event_rejects_forged_companion_and_selector_ownership --locked
 cargo +1.98.1 test -p dotty-typer --test source_case_class_match precompleted_source_parent_graph_failures_roll_back_and_retry_in_both_routes --locked
-cargo +1.98.1 test -p dotty-typer issue_1999_late_event_result_failure_observes_both_cases_before_atomic_rollback --locked
+cargo +1.98.1 test -p dotty-typer --lib issue_1999 --locked
 ```
 
 The run scripts verify Scala revision `777528f19a58e794c9954a42f433373472ec57f8`,
