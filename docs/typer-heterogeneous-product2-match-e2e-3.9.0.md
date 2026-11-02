@@ -1,6 +1,6 @@
 # Heterogeneous Product2 source Match gate (Scala 3.9.0)
 
-**Status: UNMET — local whole-method typing is 2/2 in two fresh sessions; the pinned Scala oracle, complete cohort rerun, and hosted focused CI result remain required evidence.** The focused audit is fail-closed and publishes its environment, oracle logs, root receipts, negative matrix, and two-pass cohorts as the `typer-focused-audit-<sha>` artifact. This report must be updated with that successful run URL before the issue can be marked complete.
+**Acceptance gate: PASS. Overall PR Definition of Done: UNMET pending independent review and the remaining repository checks.** The pinned Scala/JDK oracle, exact two-session Product2 receipts, and protected-cohort replays passed in [hosted focused audit run 41366399491](https://github.com/scytrowski/dotty-rs/actions/runs/41366399491). The run published its environment, oracle logs, root receipts, negative matrix, and two-pass reports in artifact `typer-focused-audit-31c3ae54f6068387604f010e8710a178cedac0db`.
 
 ## Frozen source and tool provenance
 
@@ -10,6 +10,8 @@
 - Rust: `1.98.1` from `rust-toolchain.toml`; hosted gate records `rustc` and Cargo versions.
 - Positive source: `crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0/Positive.scala`, SHA-256 `4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31`.
 - All eight Scala runtime artifact digests are frozen in [`scala-artifacts.sha256.tsv`](../crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0/scala-artifacts.sha256.tsv); the workflow downloads and verifies each artifact before running the oracle.
+
+Hosted tool evidence: `rustc 1.98.1 (48a229cea 2026-09-01)`, `cargo 1.98.1 (797e8a9bc 2026-08-05)`, and `openjdk 21.0.8 2025-07-15 LTS`. SHA-256: JDK `release` `93b52921a5efb10ac0dcf9e3c955fa209fc83687df897d6ab034af967e2f5088`; JDK `bin/java` `90d0a6d25da103678013f193db078b90ed8aeb27b66ebe78e0149616c9c1b811`. The hosted environment records the exact test SHA, base SHA, run URL, artifact hashes, and fixture hashes.
 
 The merged prerequisites are [#1958 / PR #1973](https://github.com/scytrowski/dotty-rs/pull/1973), [#1959 / PR #1977](https://github.com/scytrowski/dotty-rs/pull/1977), [#1962 / PR #1978](https://github.com/scytrowski/dotty-rs/pull/1978), [#1965 / PR #1980](https://github.com/scytrowski/dotty-rs/pull/1980), [#1968 / PR #1983](https://github.com/scytrowski/dotty-rs/pull/1983), and [#1970 / PR #1985](https://github.com/scytrowski/dotty-rs/pull/1985).
 
@@ -21,7 +23,7 @@ The positive sidecar contains exactly four session/root receipts. Its normalized
 
 The negative sidecar preserves all ten pinned Scala classifications, including legal warning-only same-name and explicit-unapply cases. The Rust tests cover wrong arity, literal types, result type, ordinary non-case extraction, and rollback after partial case typing. The rollback test repairs the failed source node and successfully retries that root in the same session before typing its valid sibling. The existing focused matrix additionally covers selector mismatch, case-scope escape, explicit collisions, and deferred aliases. Scala-valid-but-Rust-deferred controls remain explicitly labeled.
 
-The cohort sidecar freezes all 25 main and 25 analysis roots and the protected sets. The workflow's two deterministic passes and strict verifier must retain Box **2/2**, closures **6/6**, inherited members **4/4**, and protected ordinary methods **16/25 main + 15/25 analysis**, comparing the exact manifests and root sets without editing them.
+The cohort sidecar records both deterministic statuses and actual results for all 25 main and 25 analysis roots, with the protected sets and hosted run provenance. The successful run retained Box **2/2**, closures **6/6**, inherited members **4/4**, and protected ordinary methods **16/25 main + 15/25 analysis**, comparing the exact manifests and root sets without editing them.
 
 ## Reproduction
 
@@ -32,4 +34,4 @@ cargo +1.98.1 test -p dotty-typer --test source_case_class_match \
   flagged_product2_whole_method_baseline --locked -- --nocapture
 ```
 
-Hosted focused audit run: **UNMET — pending PR CI**.
+Hosted focused audit run: [PASS — PR #1987, HEAD `a187e8aa692514d83cce6ce20c330e79c73b1af9`](https://github.com/scytrowski/dotty-rs/actions/runs/41366399491). The complete repository Rust/JVM CI jobs and independent review are tracked on the PR and remain pending at this report revision.

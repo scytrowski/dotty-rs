@@ -202,9 +202,20 @@ def validate_inputs(root: Path) -> None:
             or sidecar["source_tree"] != baseline["source_tree"]
             or sidecar["baseline_status"] != expected_status
             or sidecar["gate"] != expected_gate
-            or sidecar["protected_success"] != baseline["protected_success"]
+            or sidecar["protected_root"] != baseline["protected_success"]
             or sidecar["required_result"] != baseline["required_result"]
             or sidecar["integrated_source_sha"] != "3a854831b9c074261e31e82d325c0350f606b95a"
+            or sidecar["first_status"] != sidecar["second_status"]
+            or sidecar["two_pass_equal"] != "true"
+            or sidecar["github_actions_run"] != "https://github.com/scytrowski/dotty-rs/actions/runs/41366399491"
+            or sidecar["pull_request_url"] != "https://github.com/scytrowski/dotty-rs/pull/1987"
+            or (
+                sidecar["protected_root"] == "true"
+                and (
+                    sidecar["first_status"] != "typed"
+                    or sidecar["actual_result"] != sidecar["required_result"]
+                )
+            )
         ):
             raise ReceiptError("Product2 cohort sidecar changed a protected root or provenance")
     hashes = read_tsv(fixture / "source-hashes.tsv")[1]
