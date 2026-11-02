@@ -217,6 +217,16 @@ jobs:
             same_batch_reference_field_alias_targets_template_parameter_and_preserves_read \
             --locked -- --nocapture
 
+      - name: Run required semantic loader secondary-constructor rejection
+        env:
+          DOTTY_REQUIRE_SCALA39_SECONDARY_CONSTRUCTOR_TEST: '1'
+          TMPDIR: ${{ github.workspace }}/target/secondary-constructor-tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          cargo +1.98.1 test -p dotty-classloader --lib \
+            semantic_class_loader_rejects_secondary_constructor_with_rollback \
+            --locked -- --nocapture --test-threads=1
+
       - name: Run strict Scala reader for dual-reference forwarding
         env:
           DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_BATCH: '1'
