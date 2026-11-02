@@ -2284,7 +2284,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 if *tag == dotty_tasty::tasty::OBJECT_TAG || *tag == dotty_tasty::tasty::TRAIT_TAG)
         }) {
             return Err(SemanticTastyLoadError::UnsupportedShape(
-                "the TASTy unit must contain exactly one top-level class declaration",
+                "the requested top-level declaration must have a class template",
             ));
         }
         let template = match &type_or_template {
