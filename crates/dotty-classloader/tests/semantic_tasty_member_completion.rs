@@ -154,6 +154,25 @@ fn tracing_classpath(trace: Arc<Mutex<Vec<String>>>) -> CompositeClassPath {
     })])
 }
 
+fn tracing_classpath_without_jdk(trace: Arc<Mutex<Vec<String>>>) -> CompositeClassPath {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let inner = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(
+            root.join("tests/fixtures/tasty_sample"),
+        )),
+        Box::new(DirectoryClassPath::new(
+            root.join("../dotty-tasty/tests/fixtures/scala3-library"),
+        )),
+        Box::new(DirectoryClassPath::new(
+            root.join("../dotty-tasty/tests/fixtures/path_dependent"),
+        )),
+        Box::new(DirectoryClassPath::new(
+            root.join("../dotty-tasty-unpickler/tests/fixtures/semantic"),
+        )),
+    ]);
+    CompositeClassPath::new(vec![Box::new(TracingClassPath { inner, trace })])
+}
+
 struct TracingResolver {
     inner: Box<dyn SymbolResolver>,
     trace: Arc<Mutex<Vec<String>>>,
@@ -206,7 +225,23 @@ impl SymbolResolver for TracingResolver {
         store: &SemanticStore,
         object: SymbolId,
     ) -> Result<Option<SymbolId>, ResolutionError> {
-        self.inner.module_class_of_object(store, object)
+        let result = self.inner.module_class_of_object(store, object);
+        let object_path = owner_path(store, object);
+        let observation = match &result {
+            Ok(Some(module_class)) => {
+                format!(
+                    "module_class_of_object:{object_path}={}",
+                    owner_path(store, *module_class)
+                )
+            }
+            Ok(None) => format!("module_class_of_object:{object_path}=none"),
+            Err(error) => format!(
+                "module_class_of_object:{object_path}=error:{}",
+                normalize_error(&format!("{error:?}"))
+            ),
+        };
+        self.trace.lock().unwrap().push(observation);
+        result
     }
 
     fn complete_module_class(
@@ -214,7 +249,17 @@ impl SymbolResolver for TracingResolver {
         store: &mut SemanticStore,
         module_class: SymbolId,
     ) -> Result<bool, ResolutionError> {
-        self.inner.complete_module_class(store, module_class)
+        let path = owner_path(store, module_class);
+        let result = self.inner.complete_module_class(store, module_class);
+        let observation = match &result {
+            Ok(completed) => format!("complete_module_class:{path}={completed}"),
+            Err(error) => format!(
+                "complete_module_class:{path}=error:{}",
+                normalize_error(&format!("{error:?}"))
+            ),
+        };
+        self.trace.lock().unwrap().push(observation);
+        result
     }
 
     fn complete_class(
@@ -407,6 +452,39 @@ fn complete_audit_request(
         Err(AuditRequestError::ForeignOwner(ForeignOwner {
             requested: requested_owner.to_owned(),
             actual: actual_owner,
+        }))
+    }
+}
+
+fn verify_alias_owner(
+    store: &SemanticStore,
+    alias: SymbolId,
+    expected_owner: SymbolId,
+) -> Result<SymbolId, AuditRequestError> {
+    let symbol = store.symbols.get(alias);
+    if symbol.kind != dotty_core::SymbolKind::TypeAlias
+        || symbol.name.namespace() != dotty_core::Namespace::Type
+    {
+        return Err(AuditRequestError::InvalidOwnerIndex { address: 378 });
+    }
+    let owner = symbol
+        .owner
+        .ok_or(AuditRequestError::InvalidOwnerIndex { address: 378 })?;
+    let expected = store.symbols.get(expected_owner);
+    if expected.kind != dotty_core::SymbolKind::ModuleClass
+        || expected.name.namespace() != dotty_core::Namespace::Type
+    {
+        return Err(AuditRequestError::InvalidOwnerIndex { address: 378 });
+    }
+    if owner == expected_owner {
+        Ok(alias)
+    } else {
+        Err(AuditRequestError::ForeignOwner(ForeignOwner {
+            requested: store.names.resolve(expected.name.text()).to_owned(),
+            actual: store
+                .names
+                .resolve(store.symbols.get(owner).name.text())
+                .to_owned(),
         }))
     }
 }
@@ -1012,4 +1090,433 @@ fn malformed_bytes_and_foreign_owner_controls_fail_closed() {
             UnpickleError::UnresolvedMember { .. }
         ))
     ));
+}
+
+fn predef_alias_probe(with_jdk: bool) -> (String, String, String) {
+    let path =
+        workspace().join("crates/dotty-tasty/tests/fixtures/scala3-library/scala/Predef.tasty");
+    let bytes = fs::read(&path).expect("pinned Predef fixture");
+    let file = TastyFile::parse_and_validate_scala_3_9(&bytes).expect("Scala 3.9 Predef TASTy");
+    assert_eq!(
+        sha256_file(&path),
+        "2faef7420109c4e44074ab0385dce2c31e751fd992621fd1de312eed6c362fb2"
+    );
+    if with_jdk {
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME"));
+        assert_eq!(
+            sha256_file(&java_home.join("jmods/java.base.jmod")),
+            "fad51abeafe6a1ecb0c2696a88684dc417cc534b74b5d865042df7381d9d0e91"
+        );
+        let version = Command::new("java")
+            .arg("--version")
+            .output()
+            .expect("JDK 21 java");
+        assert!(version.status.success());
+        assert!(String::from_utf8_lossy(&version.stdout).contains("21.0.13"));
+    }
+    let mut identity_store = SemanticStore::new();
+    let identity_definitions = Definitions::bootstrap(&mut identity_store);
+    let mut identity_unpickler = TastyUnpickler::with_session(
+        &file,
+        &mut identity_store,
+        identity_definitions,
+        TastySession::new(),
+    );
+    identity_unpickler
+        .enter_symbols()
+        .expect("Predef identities entered");
+    let alias_id = identity_unpickler
+        .index()
+        .symbol_at(378)
+        .expect("String alias entered");
+    let object_id = identity_unpickler
+        .index()
+        .symbol_at(107)
+        .expect("Predef term object entered");
+    let canonical_module_class = identity_unpickler
+        .index()
+        .symbol_at(128)
+        .expect("canonical Predef module class entered");
+    drop(identity_unpickler);
+    assert_eq!(
+        identity_store.symbols.get(alias_id).info,
+        dotty_core::SymbolInfo::Missing
+    );
+    let original_owner = identity_store.symbols.get(alias_id).owner;
+    assert_eq!(original_owner, Some(canonical_module_class));
+    identity_store.symbols.get_mut(alias_id).owner = Some(object_id);
+    let wrong_owner = verify_alias_owner(&identity_store, alias_id, canonical_module_class)
+        .expect_err("the Predef term object cannot own this type alias");
+    assert!(matches!(
+        &wrong_owner,
+        AuditRequestError::ForeignOwner(ForeignOwner { requested, actual })
+            if requested == "Predef$" && actual == "Predef"
+    ));
+    identity_store.symbols.get_mut(alias_id).owner = original_owner;
+    assert_eq!(
+        identity_store.symbols.get(alias_id).info,
+        dotty_core::SymbolInfo::Missing,
+        "wrong-owner control is observational and leaves the alias pending"
+    );
+    let mut foreign_owner = identity_store.symbols.get(canonical_module_class).clone();
+    foreign_owner.owner = None;
+    let foreign_owner_id = identity_store.symbols.alloc(foreign_owner);
+    assert_ne!(foreign_owner_id, canonical_module_class);
+    assert_eq!(
+        identity_store
+            .names
+            .resolve(identity_store.symbols.get(foreign_owner_id).name.text()),
+        "Predef$"
+    );
+    identity_store.symbols.get_mut(alias_id).owner = Some(foreign_owner_id);
+    let foreign_same_name = verify_alias_owner(&identity_store, alias_id, canonical_module_class)
+        .expect_err("a distinct same-named owner cannot own the indexed alias");
+    assert!(matches!(
+        &foreign_same_name,
+        AuditRequestError::ForeignOwner(ForeignOwner { requested, actual })
+            if requested == "Predef$" && actual == "Predef$"
+    ));
+    identity_store.symbols.get_mut(alias_id).owner = original_owner;
+    assert!(matches!(
+        verify_alias_owner(&identity_store, alias_id, canonical_module_class),
+        Ok(id) if id == alias_id
+    ));
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let classpath = if with_jdk {
+        tracing_classpath(Arc::clone(&trace))
+    } else {
+        tracing_classpath_without_jdk(Arc::clone(&trace))
+    };
+    let resolver = TracingResolver {
+        inner: Box::new(ClasspathSymbolResolver::new(
+            classpath,
+            definitions,
+            LoadingSession::new(),
+        )),
+        trace: Arc::clone(&trace),
+    };
+    let session = TastySession::new()
+        .with_resolver(Box::new(resolver))
+        .expect("resolver-backed alias audit session");
+    let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    unpickler.enter_symbols().expect("Predef symbols entered");
+    assert_eq!(
+        unpickler.symbol_state_at(378),
+        Some((
+            dotty_core::SymbolKind::TypeAlias,
+            dotty_core::SymbolInfo::Missing
+        ))
+    );
+    let error = unpickler
+        .complete_symbol(378)
+        .expect_err("the bounded classpath resolver does not complete the java.lang target");
+    assert_eq!(
+        unpickler.symbol_state_at(378),
+        Some((
+            dotty_core::SymbolKind::TypeAlias,
+            dotty_core::SymbolInfo::Missing
+        )),
+        "failed target completion must leave the alias pending for a retry"
+    );
+    let error = normalize_error(&format!("{error:?}"));
+    let trace = trace.lock().expect("trace lock").join(";");
+    drop(unpickler);
+    let foreign = format!("{wrong_owner:?}");
+    (
+        foreign,
+        error,
+        if trace.is_empty() {
+            "-".to_owned()
+        } else {
+            trace
+        },
+    )
+}
+
+fn original_sound_probe(id: &str) -> (String, String, String, String) {
+    let (relpath, owner_name, expected_method, expected_address, expected_reference) = match id {
+        "animal-sound" => (
+            "crates/dotty-classloader/tests/fixtures/tasty_sample/me/cytrowski/tastyfixtures/Animal.tasty",
+            "Animal",
+            "sound",
+            22,
+            27,
+        ),
+        "dog-sound" => (
+            "crates/dotty-classloader/tests/fixtures/tasty_sample/Dog.tasty",
+            "Dog",
+            "sound",
+            36,
+            41,
+        ),
+        _ => panic!("unsupported frozen sound probe {id}"),
+    };
+    let path = workspace().join(relpath);
+    let bytes = fs::read(&path).expect("frozen sound fixture");
+    let file = TastyFile::parse_and_validate_scala_3_9(&bytes).expect("sound TASTy");
+    let address = member_address(&file, expected_method).expect("unique frozen sound method");
+    assert_eq!(address, expected_address);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let resolver = TracingResolver {
+        inner: Box::new(ClasspathSymbolResolver::new(
+            tracing_classpath(Arc::clone(&trace)),
+            definitions,
+            LoadingSession::new(),
+        )),
+        trace: Arc::clone(&trace),
+    };
+    let session = TastySession::new()
+        .with_resolver(Box::new(resolver))
+        .expect("resolver-backed fresh sound session");
+    let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    unpickler
+        .enter_symbols()
+        .expect("sound unit symbols entered");
+    let error = complete_audit_request(&file, &mut unpickler, address, owner_name)
+        .expect_err("frozen sound member is unresolved at Predef.String");
+    let AuditRequestError::Completion(error) = error else {
+        panic!("frozen owner identity must be accepted before member completion")
+    };
+    assert!(
+        matches!(&error, UnpickleError::UnresolvedMember { address, .. } if *address == expected_reference)
+    );
+    let error = normalize_error(&format!("{error:?}"));
+    drop(unpickler);
+    let observations = trace.lock().expect("trace lock").clone();
+    let request = observations
+        .iter()
+        .find(|entry| entry.starts_with("request:"))
+        .expect("canonical Predef request")
+        .clone();
+    let resources = observations
+        .iter()
+        .filter(|entry| {
+            entry.starts_with("scala/Predef=")
+                || entry.as_str() == "scala/Predef/String=missing"
+                || entry.as_str() == "scala/Predef$String=missing"
+        })
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(";");
+    let module_identity = observations
+        .iter()
+        .filter(|entry| {
+            entry.starts_with("module_class_of_object:")
+                || entry.starts_with("complete_module_class:")
+        })
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(";");
+    assert!(request.contains("prefix=scala;name=Predef;namespace=Term"));
+    assert!(resources.contains("scala/Predef=selected:Tasty:directory:scala3-library"));
+    assert!(resources.contains("scala/Predef/String=missing"));
+    assert!(resources.contains("scala/Predef$String=missing"));
+    (
+        request,
+        resources,
+        if module_identity.is_empty() {
+            "-".to_owned()
+        } else {
+            module_identity
+        },
+        error,
+    )
+}
+
+fn predef_alias_audit_once() -> String {
+    let root = workspace();
+    let predef_path =
+        root.join("crates/dotty-tasty/tests/fixtures/scala3-library/scala/Predef.tasty");
+    let predef_bytes = fs::read(&predef_path).expect("pinned Predef fixture");
+    assert_eq!(
+        sha256_file(&predef_path),
+        "2faef7420109c4e44074ab0385dce2c31e751fd992621fd1de312eed6c362fb2"
+    );
+    let predef = TastyFile::parse_and_validate_scala_3_9(&predef_bytes).expect("Predef TASTy");
+    assert_eq!(
+        (predef.header().major_version, predef.header().minor_version),
+        (28, 9)
+    );
+    let index = predef
+        .ast_address_index()
+        .expect("Predef AST address index");
+    let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+        name,
+        type_or_template,
+        tail,
+    }) = index
+        .get(378)
+        .expect("String alias address")
+        .decode_structured()
+        .expect("String alias node")
+    else {
+        panic!("TASTy address 378 must be the String TYPEDEF")
+    };
+    assert_eq!(predef.names().get_utf8(name), Some("String"));
+    assert!(
+        tail.is_empty(),
+        "the public source alias has no private/protected modifier"
+    );
+    let target = match type_or_template {
+        dotty_tasty::tasty::RawTree::NatAst {
+            tag: 113,
+            value: 68,
+            child,
+            ..
+        } => match *child {
+            dotty_tasty::tasty::RawTree::NatAst {
+                tag: 112,
+                value: 47,
+                child,
+                ..
+            } => match *child {
+                dotty_tasty::tasty::RawTree::Leaf(term)
+                    if matches!(term.value, dotty_tasty::tasty::TermValue::NameRef(46)) =>
+                {
+                    "java.lang.String"
+                }
+                other => panic!("unexpected alias target leaf: {other:?}"),
+            },
+            other => panic!("unexpected alias target prefix: {other:?}"),
+        },
+        other => panic!("unexpected alias target tree: {other:?}"),
+    };
+    assert_eq!(predef.names().get_utf8(46), Some("java"));
+    assert_eq!(predef.names().get_utf8(47), Some("lang"));
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut unpickler =
+        TastyUnpickler::with_session(&predef, &mut store, definitions, TastySession::new());
+    unpickler.enter_symbols().expect("Predef symbols enter");
+    let identities = [107, 128, 378].map(|address| {
+        let id = unpickler
+            .index()
+            .symbol_at(address)
+            .expect("frozen symbol address");
+        (address, id)
+    });
+    drop(unpickler);
+    let object = store.symbols.get(identities[0].1);
+    let module_class = store.symbols.get(identities[1].1);
+    let alias = store.symbols.get(identities[2].1);
+    assert_eq!(object.kind, dotty_core::SymbolKind::Object);
+    assert_eq!(store.names.resolve(object.name.text()), "Predef");
+    assert_eq!(store.names.resolve(module_class.name.text()), "Predef$");
+    assert_eq!(module_class.kind, dotty_core::SymbolKind::ModuleClass);
+    assert_eq!(store.names.resolve(alias.name.text()), "String");
+    assert_eq!(alias.kind, dotty_core::SymbolKind::TypeAlias);
+    assert_eq!(alias.name.namespace(), dotty_core::Namespace::Type);
+    assert_eq!(alias.owner, Some(identities[1].1));
+    assert_eq!(alias.visibility, Visibility::Public);
+    assert_eq!(object.name.namespace(), dotty_core::Namespace::Term);
+    assert_ne!(identities[0].1, identities[1].1);
+    assert_eq!(module_class.owner, object.owner);
+    assert_eq!(
+        object.owner,
+        alias.owner.and_then(|id| store.symbols.get(id).owner)
+    );
+    assert_eq!(
+        store
+            .names
+            .resolve(store.symbols.get(object.owner.unwrap()).name.text()),
+        "scala"
+    );
+    assert_eq!(
+        store
+            .names
+            .resolve(store.symbols.get(alias.owner.unwrap()).name.text()),
+        "Predef$"
+    );
+
+    let old = run_once();
+    let repeated = run_once();
+    assert_eq!(
+        old, repeated,
+        "both source method failures are deterministic in fresh stores"
+    );
+    let mut output = String::from(
+        "member\tfixture_sha256\ttasty_version\towner\towner_address\tmethod_address\tfirst_error\tcanonical_request\tresolver_resource_trace\tmodule_identity_trace\tpredef_chain\talias_namespace\talias_target\twrong_owner_control\twith_jdk_alias_error\twithout_jdk_alias_error\twith_jdk_trace\twithout_jdk_trace\n",
+    );
+    let (wrong_owner, with_jdk_error, with_jdk_trace) = predef_alias_probe(true);
+    let (_, without_jdk_error, without_jdk_trace) = predef_alias_probe(false);
+    for input_row in old.lines().skip(1) {
+        let cells = input_row.split('\t').collect::<Vec<_>>();
+        if !matches!(cells.first(), Some(&"animal-sound" | &"dog-sound")) {
+            continue;
+        }
+        let (request, resources, module_identity, error) = original_sound_probe(cells[0]);
+        assert_eq!(request, cells[16]);
+        assert_eq!(resources, cells[17]);
+        assert_eq!(error, cells[18]);
+        let chain = "scala/Predef:Object@107->scala/Predef$:ModuleClass@128->String:TypeAlias@378";
+        row(
+            &mut output,
+            &[
+                cells[0],
+                cells[2],
+                cells[3],
+                cells[4],
+                cells[6],
+                cells[7],
+                cells[18],
+                &request,
+                &resources,
+                &module_identity,
+                chain,
+                "Type",
+                target,
+                &wrong_owner,
+                &with_jdk_error,
+                &without_jdk_error,
+                &with_jdk_trace,
+                &without_jdk_trace,
+            ],
+        );
+    }
+    assert_eq!(
+        output.lines().count(),
+        3,
+        "exactly the two original sound members"
+    );
+    output
+}
+
+fn sha256_file(path: &Path) -> String {
+    let digest = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .expect("sha256sum available");
+    assert!(digest.status.success(), "{}", path.display());
+    String::from_utf8(digest.stdout)
+        .expect("sha256sum output is UTF-8")
+        .split_whitespace()
+        .next()
+        .expect("sha256sum digest")
+        .to_owned()
+}
+
+#[test]
+fn predef_string_alias_provenance_and_member_failures_are_frozen_and_deterministic() {
+    let first = predef_alias_audit_once();
+    let second = predef_alias_audit_once();
+    assert_eq!(
+        first, second,
+        "two independent fresh-store runs must be byte-identical"
+    );
+    assert_eq!(
+        first,
+        include_str!(
+            "../../../docs/classloader-semantic-tasty-convergence-iii/predef-alias-audit.tsv"
+        )
+    );
 }
