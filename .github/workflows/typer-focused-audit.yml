@@ -512,6 +512,9 @@ jobs:
           DOTTY_AUDIT_JOB_STATUS: ${{ job.status }}
           DOTTY_PR_URL: ${{ github.event.pull_request.html_url || '' }}
         run: |
+          # shellcheck disable=SC2016
+          # Report strings and the awk program below intentionally use literal
+          # `$` syntax; they are not shell expansions.
           set -euo pipefail
           mkdir -p "$DOTTY_AUDIT_REPORT_DIR"
           report="$DOTTY_AUDIT_REPORT_DIR/sealed-adt-e2e-report.md"
