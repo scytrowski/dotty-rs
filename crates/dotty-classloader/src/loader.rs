@@ -18234,4 +18234,98 @@ mod tests {
         assert_eq!(prefix_only, Visibility::Protected);
         assert_eq!(other, Visibility::Protected);
     }
+
+    #[test]
+    fn authentic_regular_constructor_is_rejected_before_semantic_loader_transaction() {
+        let bytes = fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty-unpickler/tests/fixtures/semantic/CtorPlain.tasty"),
+        )
+        .expect("unchanged Scala 3.9 CtorPlain fixture");
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for legacy Object load");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK modules");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            CompositeClassPath::new(vec![
+                Box::new(InMemoryTastyClassPath(HashMap::from([(
+                    name.clone(),
+                    bytes.clone(),
+                )]))),
+                Box::new(jdk),
+            ]),
+            &mut store,
+        );
+        let error = loader
+            .load_semantic_class_with_tasty_unpickler(&name)
+            .expect_err("ordinary constructor parameters remain outside the loader gate");
+        assert_eq!(
+            format!("{error:?}"),
+            "UnsupportedShape(\"the class template must have no parameters and one constructor declaration\")"
+        );
+        assert!(loader.semantic_tasty_loaded.is_empty());
+        drop(loader);
+
+        let mut legacy_store = SemanticStore::new();
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for legacy Object load");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK modules");
+        let mut legacy = ClassLoader::new(
+            CompositeClassPath::new(vec![
+                Box::new(InMemoryTastyClassPath(HashMap::from([(
+                    name.clone(),
+                    bytes.clone(),
+                )]))),
+                Box::new(jdk),
+            ]),
+            &mut legacy_store,
+        );
+        legacy
+            .load_class(&name)
+            .expect("legacy loader independently accepts the authentic class with JDK");
+
+        let wrong_owner = BinaryName::from_internal("other/package/CtorPlain");
+        let mut wrong_owner_store = SemanticStore::new();
+        let mut wrong_owner_loader = ClassLoader::new(
+            InMemoryTastyClassPath(HashMap::from([(wrong_owner.clone(), bytes.clone())])),
+            &mut wrong_owner_store,
+        );
+        assert!(matches!(
+            wrong_owner_loader.load_semantic_class_with_tasty_unpickler(&wrong_owner),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "the TASTy package must match the requested binary name"
+            ))
+        ));
+        assert!(wrong_owner_loader.semantic_tasty_loaded.is_empty());
+
+        let truncated_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Truncated");
+        let mut truncated_store = SemanticStore::new();
+        let mut truncated_loader = ClassLoader::new(
+            InMemoryTastyClassPath(HashMap::from([(
+                truncated_name.clone(),
+                bytes[..bytes.len() - 1].to_vec(),
+            )])),
+            &mut truncated_store,
+        );
+        assert!(matches!(
+            truncated_loader.load_semantic_class_with_tasty_unpickler(&truncated_name),
+            Err(SemanticTastyLoadError::ClassLoad(
+                ClassLoadError::InvalidTastyFile(_, _)
+            ))
+        ));
+        assert!(truncated_loader.semantic_tasty_loaded.is_empty());
+
+        let missing_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Missing");
+        let mut missing_store = SemanticStore::new();
+        let mut missing_loader =
+            ClassLoader::new(InMemoryTastyClassPath(HashMap::new()), &mut missing_store);
+        assert!(matches!(
+            missing_loader.load_semantic_class_with_tasty_unpickler(&missing_name),
+            Err(SemanticTastyLoadError::ClassLoad(ClassLoadError::NotFound(found)))
+                if found == missing_name
+        ));
+        assert!(missing_loader.semantic_tasty_loaded.is_empty());
+    }
 }
