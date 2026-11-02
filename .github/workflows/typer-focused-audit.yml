@@ -511,50 +511,7 @@ jobs:
           DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
           DOTTY_AUDIT_JOB_STATUS: ${{ job.status }}
           DOTTY_PR_URL: ${{ github.event.pull_request.html_url || '' }}
-        run: |
-          # shellcheck disable=SC2016
-          # Report strings and the awk program below intentionally use literal
-          # `$` syntax; they are not shell expansions.
-          set -euo pipefail
-          mkdir -p "$DOTTY_AUDIT_REPORT_DIR"
-          report="$DOTTY_AUDIT_REPORT_DIR/sealed-adt-e2e-report.md"
-          if [[ "$DOTTY_AUDIT_JOB_STATUS" == success ]]; then
-            disposition=PASS
-          else
-            disposition='SPRINT GOAL UNMET'
-          fi
-          {
-            printf '# Sealed Event acceptance run\n\n'
-            printf '**Disposition:** %s\n\n' "$disposition"
-            printf 'A failed job is UNMET; its first failing workflow step and full evidence logs identify the blocker.\n\n'
-            printf '| Evidence | Value |\n| --- | --- |\n'
-            printf '| Tested PR head | `%s` |\n' "$(git rev-parse HEAD)"
-            printf '| Integrated PR base | `%s` |\n' "$(awk -F '\t' '$1 == "pull_request_base_sha" {print $2}' "$DOTTY_AUDIT_REPORT_DIR/environment.tsv" 2>/dev/null || printf 'missing')"
-            printf '| Workflow run | %s/%s/actions/runs/%s |\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
-            printf '| Pull request | %s |\n' "$DOTTY_PR_URL"
-            printf '| Scala source revision | `%s` |\n' "$(git -C "$SCALA39_ROOT" rev-parse HEAD 2>/dev/null || printf 'missing')"
-            printf '| Rust toolchain | `%s` |\n' "$(rustc +1.98.1 --version 2>/dev/null || printf 'missing')"
-            printf '| JDK | `%s` |\n' "$(grep '^JAVA_VERSION=' "$JAVA_HOME/release" 2>/dev/null || printf 'missing')"
-            printf '| Event.scala SHA-256 | `%s` |\n' "$(sha256sum crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/Event.scala | cut -d' ' -f1)"
-            printf '| Positive receipt SHA-256 | `%s` |\n' "$(sha256sum docs/typer-sealed-adt-e2e-positive-3.9.0.tsv | cut -d' ' -f1)"
-            printf '| Negative/rollback receipt SHA-256 | `%s` |\n' "$(sha256sum docs/typer-sealed-adt-e2e-negative-rollback-3.9.0.tsv | cut -d' ' -f1)"
-            printf '| Cohort contract SHA-256 | `%s` |\n' "$(sha256sum docs/typer-sealed-adt-e2e-cohorts-3.9.0.tsv | cut -d' ' -f1)"
-            printf '| Two-pass cohort receipt SHA-256 | `%s` |\n' "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-cohorts.tsv" 2>/dev/null | cut -d' ' -f1 || printf 'missing')"
-            printf '| Positive roots | 2 original roots × 2 fresh sessions (4/4 required) |\n'
-            printf '| Negative matrix | 9 Scala-classified failures; 6 structural rollback controls |\n'
-            printf '| Protected earlier roots | Box 2/2 + Product2 2/2 + closures 6/6 + inherited 4/4 |\n'
-            printf '| Ordinary cohorts | main 16/25 + analysis 15/25; two deterministic passes |\n'
-            printf '| Full Scala corpus | not run on hosted CI |\n\n'
-            printf '## Eight pinned Scala artifacts\n\n```text\n'
-            if [[ -f "$DOTTY_AUDIT_REPORT_DIR/scala-artifacts.sha256.tsv" ]]; then
-              cat "$DOTTY_AUDIT_REPORT_DIR/scala-artifacts.sha256.tsv"
-            else
-              printf 'UNMET: pinned artifact manifest was not produced\n'
-            fi
-            printf '```\n\n'
-            printf 'The four normalized positive receipts are in `source-case-class-match-rust.log`;\n'
-            printf 'the negative, rollback, and two-pass cohort TSVs/logs are adjacent artifacts.\n'
-          } > "$report"
+        run: python3 tools/write-typer-focused-audit-report.py
 
       - name: Upload focused report, timings, and intermediates
         if: always()
