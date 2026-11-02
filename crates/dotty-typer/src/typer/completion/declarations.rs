@@ -277,6 +277,15 @@ impl SourceTyper<'_> {
                     tree_index: template.constructor.index(),
                 });
             }
+            if !template.parents.is_empty()
+                && selector_results.len() == 1
+                && selector_results[0].1 != self.definitions.int
+            {
+                return Err(TyperError::UnsupportedProduct1FieldType {
+                    class: symbol,
+                    tree_index: template.constructor.index(),
+                });
+            }
             for (selector, result) in selector_results {
                 let method_info = self.store.types.alloc(Type::Method(MethodType {
                     params: Vec::new(),

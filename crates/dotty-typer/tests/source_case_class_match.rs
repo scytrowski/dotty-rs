@@ -134,6 +134,10 @@ fn source_trait_parent_product1_rejects_generic_and_class_parent_shapes() {
             "class_parent",
             "package adt\nclass Base\ncase class Created(id: Int) extends Base\n",
         ),
+        (
+            "non_int_product1_field",
+            "package adt\ntrait Event\ncase class Created(id: Boolean) extends Event\n",
+        ),
     ];
     for (offset, (label, text)) in cases.into_iter().enumerate() {
         let source = SourceId::from_index(4994 + offset as u32);
@@ -155,14 +159,36 @@ fn source_trait_parent_product1_rejects_generic_and_class_parent_shapes() {
                 _ => None,
             })
             .unwrap();
+        let selector = session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| session.index.derived_symbol_at(class, source, tree))
+            .unwrap();
         session.with_typer(|_, _, _, _, typer| {
             let error = typer
                 .complete_symbol(class)
                 .expect_err("unsupported parent shape must not enter Product1 completion");
-            assert!(
-                matches!(error, TyperError::MalformedClassParent { .. }),
-                "{label}: {error:?}"
-            );
+            match label {
+                "non_int_product1_field" => assert!(
+                    matches!(error, TyperError::UnsupportedProduct1FieldType { .. }),
+                    "{label}: {error:?}"
+                ),
+                _ => assert!(
+                    matches!(error, TyperError::MalformedClassParent { .. }),
+                    "{label}: {error:?}"
+                ),
+            }
+            let retry = typer
+                .complete_symbol(selector)
+                .expect_err("selector-first route must reject the same unsupported shape");
+            match label {
+                "non_int_product1_field" => assert!(matches!(
+                    retry,
+                    TyperError::UnsupportedProduct1FieldType { .. }
+                )),
+                _ => assert!(matches!(retry, TyperError::MalformedClassParent { .. })),
+            }
         });
     }
 }
@@ -471,7 +497,6 @@ fn source_trait_product1_session(
                         .store()
                         .names
                         .resolve(typer.store().symbols.get(*symbol).name.text())
-                        .to_owned()
                         == "Product"
                 })
                 .collect::<Vec<_>>();
@@ -498,10 +523,10 @@ fn source_trait_product1_session(
                         .store()
                         .names
                         .resolve(typer.store().symbols.get(*symbol).name.text())
-                        .to_string()
                 })
-                .collect::<Vec<_>>();
-            assert_eq!(parent_names, ["Object", "Event", "Product"]);
+                .collect::<Vec<_>>()
+                .join(",");
+            assert_eq!(parent_names.as_str(), "Object,Event,Product");
             assert_eq!(typer.store().symbols.get(class).kind, SymbolKind::Class);
             assert_eq!(typer.store().symbols.get(class).origin, SymbolOrigin::Source(source));
             assert!(
@@ -603,8 +628,7 @@ fn source_trait_product1_session(
                 .names
                 .resolve(typer.store().symbols.get(class).name.text());
             let row = format!(
-                "{class_name}|Class(CASE,source)|parents={}|_1:Int(source-field-derived)|apply=(Int):{class_name}|unapply=({class_name}):{class_name}|{class_name}<:Event=true|Event<:{class_name}=false",
-                parent_names.join(",")
+                "{class_name}|Class(CASE,source)|parents={parent_names}|_1:Int(source-field-derived)|apply=(Int):{class_name}|unapply=({class_name}):{class_name}|{class_name}<:Event=true|Event<:{class_name}=false"
             );
             eprintln!("ISSUE1994_CLASS\t{row}");
             summaries.push(row);

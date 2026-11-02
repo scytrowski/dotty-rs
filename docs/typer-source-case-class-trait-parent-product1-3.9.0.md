@@ -5,8 +5,9 @@ Product1 completion to a case class with exactly one explicit parent when that
 parent is a canonical, source-owned, monomorphic trait in the same source
 semantic index. The parent is authenticated from the projected symbol identity,
 its canonical source definition and origin, its trait kind, and its completed
-`ClassInfo`. Generic/applied parents, class parents and multiple-parent shapes
-do not enter this Product1 path.
+`ClassInfo`. Its single source field must be `Int`. Generic/applied parents,
+class parents, non-`Int` fields and multiple-parent shapes do not enter this
+Product1 path.
 
 For the pinned `Event.scala` source, `Created` and `Deleted` retain their
 original distinct case-class identities and direct `Event` parent. Completion
@@ -38,4 +39,8 @@ The checked-in Scala oracle classifies `Event.scala` as accepted and records
 the original trait and case-class shapes. The oracle runner could not be
 re-executed in this environment because `SCALA39_ROOT`, `JAVA_HOME`, and a
 `java` executable are unavailable; this is recorded as an outstanding
-validation limit rather than a passing run.
+validation limit rather than a passing run. The preserved #1992 class-info
+snapshot remains at
+[`rust-classinfo.tsv`](../crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/rust-classinfo.tsv);
+the current post-change metadata is recorded separately in
+[`rust-after-product1.tsv`](../crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/rust-after-product1.tsv).
