@@ -62,6 +62,108 @@ fn source_trait_parent_product1_preserves_identity_in_both_completion_routes() {
 }
 
 #[test]
+fn precompleted_source_parent_graph_failures_roll_back_and_retry_in_both_routes() {
+    let source_text =
+        SOURCE_TRAIT_PRODUCT1.replace("sealed trait Event", "sealed trait Event\ntrait Other");
+    for (selector_first, malformed_graph) in [
+        (false, "unrelated parent"),
+        (true, "unrelated parent"),
+        (false, "duplicate edge"),
+        (true, "duplicate edge"),
+        (false, "invalid TypeId"),
+        (true, "invalid TypeId"),
+    ] {
+        let source = SourceId::from_index(7994 + u32::from(selector_first));
+        let mut session = Session::new(&source_text, source);
+        let event = session.source_type_symbol("Event");
+        let other = session.source_type_symbol("Other");
+        let created = session.source_type_symbol("Created");
+        let selector = session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| session.index.derived_symbol_at(created, source, tree))
+            .expect("Created._1 symbol");
+        session.with_typer(|_, _, _, _, typer| {
+            typer
+                .complete_symbol(event)
+                .expect("complete canonical Event");
+            typer
+                .complete_symbol(other)
+                .expect("complete canonical Other");
+        });
+
+        let (parent_info, canonical_info) = {
+            let SymbolInfo::Complete(parent_info) = *session.store.symbols.info(event) else {
+                panic!("Event is precompleted")
+            };
+            let Some(Type::ClassInfo(canonical_info)) = session.store.types.try_get(parent_info)
+            else {
+                panic!("Event has canonical ClassInfo")
+            };
+            (parent_info, canonical_info.clone())
+        };
+        let other_parent = session.store.types.alloc(Type::TypeRef {
+            prefix: session.definitions.no_prefix,
+            target: TypeRefTarget::Symbol(other),
+        });
+        let invalid_parent = session.store.types.reserve().id();
+        let mut corrupted = canonical_info.clone();
+        corrupted.parents = match malformed_graph {
+            "unrelated parent" => vec![other_parent],
+            "duplicate edge" => vec![
+                session.definitions.object_type,
+                session.definitions.object_type,
+            ],
+            "invalid TypeId" => vec![invalid_parent],
+            _ => unreachable!(),
+        };
+        let malformed_info = session.store.types.alloc(Type::ClassInfo(corrupted));
+        session
+            .store
+            .symbols
+            .set_info(event, SymbolInfo::Complete(malformed_info));
+        let before = session.store.checkpoint();
+        let error = if selector_first {
+            session.with_typer(|_, _, _, _, typer| typer.complete_symbol(selector))
+        } else {
+            session.with_typer(|_, _, _, _, typer| typer.complete_symbol(created))
+        }
+        .expect_err("forged or malformed parent graph is rejected");
+        assert!(
+            matches!(error, TyperError::MalformedClassInfo { symbol, info } if symbol == event && info == malformed_info),
+            "{malformed_graph}, selector_first={selector_first}: {error:?}"
+        );
+        assert_eq!(session.store.checkpoint(), before);
+        assert_eq!(*session.store.symbols.info(created), SymbolInfo::Missing);
+        assert_eq!(*session.store.symbols.info(selector), SymbolInfo::Missing);
+        assert_eq!(
+            *session.store.symbols.info(event),
+            SymbolInfo::Complete(malformed_info),
+            "rollback preserves preexisting metadata for repair"
+        );
+
+        session
+            .store
+            .symbols
+            .set_info(event, SymbolInfo::Complete(parent_info));
+        if selector_first {
+            session.with_typer(|_, _, _, _, typer| {
+                typer
+                    .complete_symbol(selector)
+                    .expect("valid same-store selector-first retry")
+            });
+        } else {
+            session.with_typer(|_, _, _, _, typer| {
+                typer
+                    .complete_symbol(created)
+                    .expect("valid same-store class-first retry")
+            });
+        }
+    }
+}
+
+#[test]
 fn source_trait_parent_product1_rolls_back_then_retries_sibling_in_same_session() {
     let source = SourceId::from_index(3994);
     let mut session = Session::new(SOURCE_TRAIT_PRODUCT1, source);
@@ -1746,6 +1848,21 @@ impl Session {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("source method {method_name} is missing"))
+    }
+
+    fn source_type_symbol(&self, expected: &str) -> SymbolId {
+        self.parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if self.store.names.resolve(definition.name.as_name().text()) == expected =>
+                {
+                    self.index.symbol_at(self.source, tree)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("source type {expected} is missing"))
     }
 
     fn with_typer<R>(
