@@ -908,6 +908,40 @@ fn sealed_adt_positive_session(source: SourceId) -> Vec<(String, String)> {
             };
             assert_eq!(typed_def.value_param_clauses.len(), 1);
             assert_eq!(typed_def.value_param_clauses[0].len(), 1);
+            let source_parameter = source_def.value_param_clauses[0][0];
+            let TreeKind::ValDef(source_parameter_def) = &parsed.ast.get(source_parameter).kind else {
+                panic!("source method parameter is a ValDef")
+            };
+            assert_mapping(typer.source_typed_index(), source, source_parameter);
+            let typed_parameter = typed_def.value_param_clauses[0][0];
+            assert_eq!(
+                typer.source_typed_index().get(source, source_parameter),
+                Some(typed_parameter),
+                "the returned DefDef parameter is the mapped source parameter"
+            );
+            let TreeKind::ValDef(typed_parameter_def) = &typer.typed_ast().get(typed_parameter).kind else {
+                panic!("typed method parameter is a ValDef")
+            };
+            let selector_parameter = index.symbol_at(source, source_parameter).unwrap();
+            assert!(matches!(
+                typer.store().types.try_get(typer.typed_ast().get(typed_parameter).ty),
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == event
+            ));
+            assert_eq!(typer.store().symbols.get(selector_parameter).kind, SymbolKind::Parameter);
+            assert_eq!(typer.store().symbols.get(selector_parameter).owner, Some(method_symbol));
+            assert_eq!(
+                typer.store().names.resolve(typed_parameter_def.name.as_name().text()),
+                typer.store().names.resolve(source_parameter_def.name.as_name().text())
+            );
+            assert_mapping(typer.source_typed_index(), source, source_parameter_def.tpt);
+            assert_eq!(
+                typer.source_typed_index().get(source, source_parameter_def.tpt),
+                Some(typed_parameter_def.tpt)
+            );
+            assert!(matches!(
+                typer.store().types.try_get(typer.typed_ast().get(typed_parameter_def.tpt).ty),
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == event
+            ));
             let signature = match *typer.store().symbols.info(method_symbol) {
                 SymbolInfo::Complete(signature) => signature,
                 other => panic!("{name} signature is incomplete: {other:?}"),
@@ -947,10 +981,15 @@ fn sealed_adt_positive_session(source: SourceId) -> Vec<(String, String)> {
             assert_eq!(source_cases.len(), if name == "extract" { 2 } else { 3 });
             assert_eq!(typed_match.cases.len(), source_cases.len());
             assert_mapping(typer.source_typed_index(), source, selector);
-            let selector_typed = typer.source_typed_index().get(source, selector).unwrap();
-            let selector_parameter = index.symbol_at(source, source_def.value_param_clauses[0][0]).unwrap();
+            let typed_selector = typed_match.selector;
+            assert_eq!(
+                typer.source_typed_index().get(source, selector),
+                Some(typed_selector),
+                "the returned Match selector is the mapped source selector"
+            );
+            assert_eq!(typed_symbol(typer.typed_ast(), typer.store(), typed_selector), selector_parameter);
             assert!(matches!(
-                typer.store().types.try_get(typer.typed_ast().get(selector_typed).ty),
+                typer.store().types.try_get(typer.typed_ast().get(typed_selector).ty),
                 Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == selector_parameter
             ));
             let SymbolInfo::Complete(selector_type) = *typer.store().symbols.info(selector_parameter) else {
@@ -974,7 +1013,13 @@ fn sealed_adt_positive_session(source: SourceId) -> Vec<(String, String)> {
                 assert_mapping(typer.source_typed_index(), source, source_case_node.pattern);
                 assert_eq!(typer.source_typed_index().get(source, source_case_node.pattern), Some(typed_case_node.pattern));
                 assert_mapping(typer.source_typed_index(), source, source_case_node.body);
-                let typed_body = typer.source_typed_index().get(source, source_case_node.body).unwrap();
+                let mapped_body = typer.source_typed_index().get(source, source_case_node.body).unwrap();
+                assert_eq!(
+                    typed_case_node.body,
+                    mapped_body,
+                    "the returned CaseDef body is the mapped source body"
+                );
+                let typed_body = typed_case_node.body;
                 let (variant, expected_binder) = match (name, case_index) {
                     ("extract", 0) | ("classify", 0 | 1) => (created, "id"),
                     ("extract", 1) => (deleted, "code"),
