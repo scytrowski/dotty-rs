@@ -1,0 +1,130 @@
+[[syntax trees at end of                     typer]] // Expr.scala
+<package <<root>.this.adt:<root>.this.adt> {
+  @Child[adt.this.Succ] @Child[adt.this.Num] sealed trait Expr() extends Object
+     {}
+  final case class Num([owner = constructor <init>]value: <root>.this.scala.Int)
+     extends <<<new Object:Object>.<init>:((): Object)>():Object>,
+    adt.this.Expr, _root_.scala.Product, scala.this.package.Serializable {
+    [owner = class Num]val value: <root>.this.scala.Int
+    [owner = class Num]def copy(
+      [owner = method copy]value: <root>.this.scala.Int): adt.this.Num =
+      <
+        <<new adt.this.Num:adt.this.Num>.<init>:
+          ((value: <root>.this.scala.Int): adt.this.Num)>
+      (<value:<root>.this.scala.Int>):adt.this.Num>
+    [owner = class Num]def copy$default$1:
+      <root>.this.scala.Int @uncheckedVariance =
+      <Num.this.value:<root>.this.scala.Int>
+    [owner = class Num]def _1: <root>.this.scala.Int =
+      <<this:(Num.this : adt.this.Num)>.value:<root>.this.scala.Int>
+  }
+  [owner = package adt]final lazy module val Num: adt.this.Num$ =
+    <<<new adt.this.Num$:adt.this.Num$>.<init>:((): adt.this.Num$)>():
+      adt.this.Num$>
+  final module class Num$() extends <
+    <<new scala.this.AnyRef:scala.this.AnyRef>.<init>:((): Object)>():Object> {
+    this: adt.this.Num.type =>
+    [owner = object Num$]def apply(
+      [owner = method apply]value: <root>.this.scala.Int): adt.this.Num =
+      <
+        <<new adt.this.Num:adt.this.Num>.<init>:
+          ((value: <root>.this.scala.Int): adt.this.Num)>
+      (<value:<root>.this.scala.Int>):adt.this.Num>
+    [owner = object Num$]def unapply([owner = method unapply]x$1: adt.this.Num)
+      : adt.this.Num = <x$1:adt.this.Num>
+    [owner = object Num$]override def toString: String =
+      <"Num":("Num" : String)>
+  }
+  final case class Succ([owner = constructor <init>]inner: adt.this.Expr)
+     extends <<<new Object:Object>.<init>:((): Object)>():Object>,
+    adt.this.Expr, _root_.scala.Product, scala.this.package.Serializable {
+    [owner = class Succ]val inner: adt.this.Expr
+    [owner = class Succ]def copy([owner = method copy]inner: adt.this.Expr):
+      adt.this.Succ =
+      <
+        <<new adt.this.Succ:adt.this.Succ>.<init>:
+          ((inner: adt.this.Expr): adt.this.Succ)>
+      (<inner:adt.this.Expr>):adt.this.Succ>
+    [owner = class Succ]def copy$default$1: adt.this.Expr @uncheckedVariance =
+      <Succ.this.inner:adt.this.Expr>
+    [owner = class Succ]def _1: adt.this.Expr =
+      <<this:(Succ.this : adt.this.Succ)>.inner:adt.this.Expr>
+  }
+  [owner = package adt]final lazy module val Succ: adt.this.Succ$ =
+    <<<new adt.this.Succ$:adt.this.Succ$>.<init>:((): adt.this.Succ$)>():
+      adt.this.Succ$>
+  final module class Succ$() extends <
+    <<new scala.this.AnyRef:scala.this.AnyRef>.<init>:((): Object)>():Object> {
+    this: adt.this.Succ.type =>
+    [owner = object Succ$]def apply([owner = method apply]inner: adt.this.Expr)
+      : adt.this.Succ =
+      <
+        <<new adt.this.Succ:adt.this.Succ>.<init>:
+          ((inner: adt.this.Expr): adt.this.Succ)>
+      (<inner:adt.this.Expr>):adt.this.Succ>
+    [owner = object Succ$]def unapply([owner = method unapply]x$1: adt.this.Succ
+      ): adt.this.Succ = <x$1:adt.this.Succ>
+    [owner = object Succ$]override def toString: String =
+      <"Succ":("Succ" : String)>
+  }
+  [owner = package adt]final lazy module val Evaluator: adt.this.Evaluator$ =
+    <
+      <<new adt.this.Evaluator$:adt.this.Evaluator$>.<init>:
+        ((): adt.this.Evaluator$)>
+    ():adt.this.Evaluator$>
+  final module class Evaluator$() extends <
+    <<new Object:Object>.<init>:((): Object)>():Object> {
+    this: adt.this.Evaluator.type =>
+    [owner = object Evaluator$]def unwrap(
+      [owner = method unwrap]expr: adt.this.Expr): adt.this.Expr =
+      <<expr:adt.this.Expr> match
+        {
+          <case
+            <
+              <<adt.this.Num:adt.this.Num$>(<_:<root>.this.scala.Int>):
+                adt.this.Num>
+             :adt.this.Num:adt.this.Num>
+           =>
+            <expr:adt.this.Expr>
+          :(expr : adt.this.Expr)>
+          <case
+            <
+              <<adt.this.Succ:adt.this.Succ$>(
+                [owner = method unwrap]inner @ <_:adt.this.Expr>):adt.this.Succ>
+               :adt.this.Succ:adt.this.Succ>
+           =>
+            <<inner:adt.this.Expr> :adt.this.Expr:adt.this.Expr>
+          :adt.this.Expr>
+        }
+      :adt.this.Expr>
+    [owner = object Evaluator$]def eval([owner = method eval]expr: adt.this.Expr
+      ): <root>.this.scala.Int =
+      <<expr:adt.this.Expr> match
+        {
+          <case
+            <
+              <<adt.this.Num:adt.this.Num$>(
+                [owner = method eval]value @ <_:<root>.this.scala.Int>):
+                adt.this.Num>
+             :adt.this.Num:adt.this.Num>
+           =>
+            <<value:<root>.this.scala.Int> :<root>.this.scala.Int:
+              <root>.this.scala.Int>
+          :<root>.this.scala.Int>
+          <case
+            <
+              <<adt.this.Succ:adt.this.Succ$>(
+                [owner = method eval]inner @ <_:adt.this.Expr>):adt.this.Succ>
+             :adt.this.Succ:adt.this.Succ>
+           =>
+            <
+              <
+                <Evaluator$.this.eval:
+                  ((expr: adt.this.Expr): <root>.this.scala.Int)>
+              (<inner:adt.this.Expr>):<root>.this.scala.Int>
+             + <1:(1 : scala.this.Int)>:<root>.this.scala.Int>
+          :<root>.this.scala.Int>
+        }
+      :<root>.this.scala.Int>
+  }
+}:<root>.this.adt.type>

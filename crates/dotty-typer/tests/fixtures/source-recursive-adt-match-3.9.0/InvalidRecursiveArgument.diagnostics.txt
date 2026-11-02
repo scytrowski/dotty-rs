@@ -1,0 +1,8 @@
+-- [E007] Type Mismatch Error: InvalidRecursiveArgument.scala:10:29 ------------
+10 |    case Succ(inner) => eval("bad") + 1
+   |                             ^^^^^
+   |                             Found:    ("bad" : String)
+   |                             Required: adtcontrol.Expr
+   |
+   | longer explanation available when compiling with `-explain`
+1 error found

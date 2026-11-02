@@ -1,0 +1,13 @@
+WrongSuccComponent	accepted
+UnwrapResultMismatch	rejected
+EvalResultMismatch	rejected
+UnrelatedReferenceClass	rejected
+WrongParent	rejected
+MissingParent	rejected
+ForeignSameSpelledExtractor	rejected
+WrongArityZero	rejected
+WrongArityTwo	rejected
+EscapedCaseBinder	rejected
+InvalidRecursiveArgument	rejected
+InferredRecursiveResult	rejected
+WarningOnly	accepted_with_warning

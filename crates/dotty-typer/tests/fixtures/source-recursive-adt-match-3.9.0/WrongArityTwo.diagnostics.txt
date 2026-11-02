@@ -1,0 +1,7 @@
+-- [E107] Syntax Error: WrongArityTwo.scala:9:13 -------------------------------
+9 |    case Succ(left, right) => left
+  |         ^^^^^^^^^^^^^^^^^
+  |Wrong number of argument patterns for adtcontrol.Succ; expected: (adtcontrol.Expr)
+  |
+  | longer explanation available when compiling with `-explain`
+1 error found

@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -euo pipefail
+fixture_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+repo_root="$(CDPATH= cd -- "$fixture_dir/../../../../.." && pwd)"
+scala_root="${SCALA39_ROOT:?set SCALA39_ROOT to pinned Scala 3.9.0 checkout}"
+java_home="${JAVA_HOME:?set JAVA_HOME to Temurin JDK 21.0.8+9}"
+maven_root="${COURSIER_MAVEN_ROOT:-$repo_root/target/coursier/v1/https/repo1.maven.org/maven2}"
+scratch="${DOTTY_RECURSIVE_ADT_TMP_ROOT:-$repo_root/target/source-recursive-adt-match-oracle}"
+expected_revision=777528f19a58e794c9954a42f433373472ec57f8
+test "$(git -C "$scala_root" rev-parse HEAD)" = "$expected_revision"
+grep -Fq 'JAVA_VERSION="21.0.8"' "$java_home/release"
+grep -Fq 'IMPLEMENTOR_VERSION="Temurin-21.0.8+9"' "$java_home/release"
+test -d "$java_home/jmods"
+python3 - "$maven_root" "$fixture_dir/scala-artifacts.sha256.tsv" <<'PY'
+from pathlib import Path
+import hashlib, sys
+root, manifest = Path(sys.argv[1]), Path(sys.argv[2])
+lines = manifest.read_text().splitlines()
+assert len(lines) == 8, f"expected exactly eight pinned artifacts, found {len(lines)}"
+for line in lines:
+    expected, relative = line.split("\t")
+    path = root / relative
+    assert path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == expected, relative
+print(f"verified all {len(lines)} pinned Scala 3.9.0 artifacts")
+PY
+python3 - "$fixture_dir" "$fixture_dir/source-hashes.tsv" <<'PY'
+from pathlib import Path
+import hashlib, sys
+root, manifest = Path(sys.argv[1]), Path(sys.argv[2])
+recorded = set()
+for line in manifest.read_text().splitlines()[1:]:
+    expected, relative = line.split("\t")
+    recorded.add(relative)
+    path = root / relative
+    assert path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == expected, relative
+assert recorded == {path.name for path in root.glob("*.scala")}, "source fixture inventory changed"
+print("verified frozen source SHA-256 manifest")
+PY
+python3 - "$fixture_dir/Expr.scala" <<'PY'
+from pathlib import Path
+import hashlib, sys
+path = Path(sys.argv[1])
+actual = hashlib.sha256(path.read_bytes()).hexdigest()
+expected = "073be43ad13b7518902a341d3e06b00254d990a325855c70738469c70c8e74ab"
+assert actual == expected, f"immutable Expr.scala changed: {actual}"
+print(f"verified immutable positive source SHA-256: {actual}")
+PY
+jar_paths=()
+while IFS=$'\t' read -r digest relative; do
+  test -n "$digest" && test -n "$relative"
+  jar_paths+=("$maven_root/$relative")
+done < "$fixture_dir/scala-artifacts.sha256.tsv"
+test "${#jar_paths[@]}" -eq 8
+test "${jar_paths[0]}" = "$maven_root/org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar"
+for jar in "${jar_paths[@]}"; do test -f "$jar"; done
+classpath="$(IFS=:; printf '%s' "${jar_paths[*]}")"
+mkdir -p "$scratch/tmp" "$scratch/classes"
+cd "$fixture_dir"
+"$java_home/bin/java" -XX:-UsePerfData -Xshare:off -Djava.io.tmpdir="$scratch/tmp" \
+  -cp "$classpath" dotty.tools.dotc.Main -classpath "$classpath" -d "$scratch/classes" \
+  -Vprint:typer -Xprint-types -Yprint-debug -Yprint-debug-owners -color:never \
+  Expr.scala > "$scratch/Expr.scala39-typed-tree.txt" 2> "$scratch/Expr.compiler-stderr.txt"
+python3 - "$scratch/Expr.scala39-typed-tree.txt" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().rstrip() + "\n")
+PY
+diff -u "$fixture_dir/Expr.scala39-typed-tree.txt" "$scratch/Expr.scala39-typed-tree.txt"
+python3 - "$scratch/Expr.compiler-stderr.txt" "$scratch/Expr.diagnostics.txt" <<'PY'
+from pathlib import Path
+import sys
+source, target = map(Path, sys.argv[1:])
+target.write_text("".join(line.rstrip(" \t\r\n") + "\n" for line in source.read_text().splitlines()))
+PY
+diff -u "$fixture_dir/Expr.diagnostics.txt" "$scratch/Expr.diagnostics.txt"
+matrix_output="$scratch/scala-matrix.current.tsv"
+: > "$matrix_output"
+while IFS=$'\t' read -r source expected; do
+  output="$scratch/$source.diagnostics.txt"
+  mkdir -p "$scratch/classes/$source"
+  if "$java_home/bin/java" -XX:-UsePerfData -Xshare:off -Djava.io.tmpdir="$scratch/tmp" \
+      -cp "$classpath" dotty.tools.dotc.Main -classpath "$classpath" \
+      -d "$scratch/classes/$source" -color:never "$source.scala" > "$output" 2>&1; then
+    if grep -Eq '[0-9]+ warning(s)? found' "$output"; then actual=accepted_with_warning; else actual=accepted; fi
+  else
+    actual=rejected
+  fi
+  python3 - "$output" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text("".join(line.rstrip(" \t\r\n") + "\n" for line in path.read_text().splitlines()))
+PY
+  printf '%s\t%s\n' "$source" "$actual" >> "$matrix_output"
+  test "$actual" = "$expected" || { cat "$output" >&2; exit 1; }
+  diff -u "$fixture_dir/$source.diagnostics.txt" "$output"
+done < "$fixture_dir/scala-matrix.tsv"
+diff -u "$fixture_dir/scala-matrix.tsv" "$matrix_output"
+python3 - "$scratch" "$fixture_dir/output-sha256.tsv" <<'PY'
+from pathlib import Path
+import hashlib, sys
+scratch, manifest = Path(sys.argv[1]), Path(sys.argv[2])
+for line in manifest.read_text().splitlines()[1:]:
+    expected, relative = line.split("\t")
+    path = scratch / relative
+    assert path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == expected, relative
+print("verified pinned oracle output hashes")
+PY
+printf 'Scala source revision: %s\n' "$expected_revision"
+printf 'JDK: %s; %s\n' "$(grep '^JAVA_VERSION=' "$java_home/release")" "$(grep '^IMPLEMENTOR_VERSION=' "$java_home/release")"
+printf 'Two-root typed snapshot and 13-case classification matrix match.\n'
