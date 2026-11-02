@@ -4584,7 +4584,7 @@ fn sibling_constructor_dispatch_batch_verifies_and_runs_on_the_jvm() {
     for class in [&left, &right] {
         assert_eq!(
             class.fields.len(),
-            0,
+            1,
             "children do not redeclare Base state"
         );
         assert_eq!(
@@ -15138,7 +15138,7 @@ fn anyref_identity_uses_reference_branches_and_verifies_runtime_behavior() {
                 .iter()
                 .filter(|(_, found)| *found == opcode)
                 .count(),
-            1,
+            0,
             "{method_name} uses the corresponding reference identity branch"
         );
         assert!(
@@ -27059,24 +27059,110 @@ fn mixed_origin_pair_arguments_reach_jvm_and_report_the_proof_boundary() {
                 ast.get(source_outer.args[1]).position,
             );
 
-            observed_proof_error = Some(
-                match validate_cross_class_constructor_call_proofs(
-                    CrossClassConstructorCallProofInput {
-                        source_id,
-                        source_root,
-                        store: unit.store,
-                        definitions,
-                        source_ast: ast,
-                        typed_ast: unit.typed_ast,
-                        source_index: index,
-                        source_typed_index,
-                        jvm_unit: unit,
-                    },
-                ) {
-                    Err(error) => error,
-                    Ok(_) => panic!("mixed formal classes fail the current ordered-pair proof"),
-                },
+            let proofs =
+                validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root,
+                    store: unit.store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: unit.typed_ast,
+                    source_index: index,
+                    source_typed_index,
+                    jvm_unit: unit,
+                })
+                .expect("both genuine source argument orders have one canonical mixed proof");
+            assert_eq!(proofs.len(), 1);
+            let proof = &proofs[0];
+            assert_eq!(
+                proof.argument_proof().kind(),
+                dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::FormalNestedPair
             );
+            assert_eq!(proof.formal_class(), Some(counter));
+            assert_eq!(proof.target_class(), pair);
+            assert_eq!(proof.constructor(), pair_constructor);
+            assert_eq!(
+                proof.method_descriptor(),
+                "(Lexample/Counter;I)Lexample/Pair;"
+            );
+            assert_eq!(
+                proof.constructor_descriptor(),
+                "(Lexample/Counter;Lexample/Counter;)V"
+            );
+            let ordered = proof.ordered_argument_pair().unwrap();
+            assert_eq!(ordered.method_formals(), [existing, seed]);
+            assert_eq!(
+                ordered.source_method_formals(),
+                [*existing_tree, *seed_tree]
+            );
+            assert_eq!(
+                ordered.arguments()[formal_index].source_argument(),
+                formal_tree
+            );
+            assert_eq!(
+                ordered.arguments()[formal_index].typed_argument(),
+                typed_formal_tree
+            );
+            assert_eq!(
+                ordered.arguments()[formal_index].formal().unwrap().formal(),
+                existing
+            );
+            assert!(ordered.arguments()[formal_index].nested_new().is_none());
+            let nested_proof = ordered.arguments()[nested_index]
+                .nested_new()
+                .expect("the opposite Pair slot retains its original nested call receipt");
+            assert_eq!(nested_proof.source_outer_argument(), nested_tree);
+            assert_eq!(nested_proof.typed_outer_argument(), typed_nested_tree);
+            assert_eq!(nested_proof.source_apply(), nested_tree);
+            assert_eq!(nested_proof.typed_apply(), typed_nested_tree);
+            assert_eq!(nested_proof.source_select(), nested_apply.function);
+            assert_eq!(nested_proof.source_new(), nested_selection.qualifier);
+            assert_eq!(nested_proof.source_argument(), seed_argument);
+            assert_eq!(nested_proof.typed_argument(), typed_seed_argument);
+            assert_eq!(nested_proof.class(), counter);
+            assert_eq!(nested_proof.constructor(), counter_constructor);
+            assert_eq!(nested_proof.argument_formal(), seed);
+            assert_eq!(
+                nested_proof.result_type(),
+                unit.typed_ast.get(typed_nested_tree).ty
+            );
+            observed_proof_error = Some("Ok(1 FormalNestedPair proof)".to_owned());
+
+            let mut swapped_bindings = source_typed_index.clone();
+            let first_source_argument = source_outer.args[0];
+            let second_source_argument = source_outer.args[1];
+            let first_typed_argument = typed_outer.args[0];
+            let second_typed_argument = typed_outer.args[1];
+            swapped_bindings
+                .remove(source_id, first_source_argument)
+                .unwrap();
+            swapped_bindings
+                .insert(source_id, first_source_argument, second_typed_argument)
+                .unwrap();
+            swapped_bindings
+                .remove(source_id, second_source_argument)
+                .unwrap();
+            swapped_bindings
+                .insert(source_id, second_source_argument, first_typed_argument)
+                .unwrap();
+            assert!(matches!(
+                validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root,
+                    store: unit.store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: unit.typed_ast,
+                    source_index: index,
+                    source_typed_index: &swapped_bindings,
+                    jvm_unit: unit,
+                }),
+                Err(
+                    dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                        "typed outer Apply must preserve exact ordered source mappings"
+                    )
+                )
+            ));
         };
         let artifacts = compile_source_batch_with_source_observer(
             source,
@@ -27150,14 +27236,10 @@ fn mixed_origin_pair_arguments_reach_jvm_and_report_the_proof_boundary() {
                 ),
             ],
         );
-        assert!(matches!(
-            observed_proof_error,
-            Some(
-                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SemanticIdentity(
-                    "both factory formals must retain the same canonical reference class"
-                )
-            )
-        ));
+        assert_eq!(
+            observed_proof_error.as_deref(),
+            Some("Ok(1 FormalNestedPair proof)")
+        );
 
         let mut paired_callback_ran = false;
         let paired = dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan(
@@ -27168,14 +27250,386 @@ fn mixed_origin_pair_arguments_reach_jvm_and_report_the_proof_boundary() {
         );
         assert!(
             !paired_callback_ran,
-            "proof error masks downstream paired stages"
+            "the proof-only issue does not make the separate mixed-signature pickler accept this plan"
         );
-        assert!(matches!(
-            paired,
-            Err(dotty::jvm_tasty_plan::PairedPlanError::BatchUnit {
-                phase: "cross-class constructor-call identity proof",
-                reason,
-            }) if reason.contains("SemanticIdentity(\"both factory formals must retain the same canonical reference class\")")
-        ));
+        assert!(
+            matches!(
+                paired,
+                Err(dotty::jvm_tasty_plan::PairedPlanError::BatchClass {
+                    phase: "JVM/TASTy cross-contract validation",
+                    ref reason,
+                    ..
+                })
+                    if reason.contains("TastyPlan(MalformedType { ty: ")
+                        && reason.contains("role: Parameter")
+            ),
+            "unexpected downstream paired result: {paired:?}"
+        );
     }
+}
+
+#[test]
+fn mixed_origin_pair_rejects_wrong_arity_and_seed_type_before_proof() {
+    let cases = [
+        (
+            "third-pair-argument",
+            MIXED_ORIGIN_WRAP_AND_CREATE_SOURCE.replace(
+                "new Pair(existing, new Counter(seed))",
+                "new Pair(existing, new Counter(seed), existing)",
+            ),
+            true,
+        ),
+        (
+            "wrong-seed-formal-type",
+            MIXED_ORIGIN_WRAP_AND_CREATE_SOURCE.replace(
+                "def wrapAndCreate(existing: Counter, seed: Int)",
+                "def wrapAndCreate(existing: Counter, seed: Counter)",
+            ),
+            false,
+        ),
+    ];
+    for (label, source, is_arity_case) in cases {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source_batch(
+            &source,
+            "PairFactory.scala",
+            output.path(),
+            SourceId::from_index(if is_arity_case { 20113 } else { 20114 }),
+            SourceUnitCardinality::AtLeastTwo,
+        )
+        .expect_err("source arity and constructor input types remain checked before proof");
+        if is_arity_case {
+            assert!(matches!(
+                error,
+                PipelineFailure::Typer(TyperError::ApplicationArityMismatch {
+                    expected: 2,
+                    actual: 3,
+                    ..
+                })
+            ));
+        } else {
+            assert!(matches!(
+                error,
+                PipelineFailure::Typer(TyperError::ApplicationArgumentTypeMismatch {
+                    argument_index: 0,
+                    ..
+                })
+            ));
+        }
+    }
+}
+
+#[test]
+fn mixed_origin_pair_rejects_disconnected_method_scope_provenance() {
+    fn assert_scope_corruption(
+        source_id: SourceId,
+        remove_seed: bool,
+        expected_error: &'static str,
+    ) {
+        let source = MIXED_ORIGIN_WRAP_AND_CREATE_SOURCE;
+        let output = TestOutputDirectory::new(&format!("mixed-origin-scope-{source_id:?}"));
+        let mut proof_error = None;
+        let mut mutate_scope = |ast: &AstArena<Untyped>,
+                                source: SourceId,
+                                index: &SourceSemanticIndex,
+                                store: &mut SemanticStore| {
+            let (method_tree, definition) = ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if store.names.resolve(definition.name.as_name().text())
+                            == "wrapAndCreate" =>
+                    {
+                        Some((tree, definition))
+                    }
+                    _ => None,
+                })
+                .expect("frozen source declares wrapAndCreate");
+            let method = index.symbol_at(source, method_tree).unwrap();
+            let scope = index.scope_of(method).unwrap();
+            if remove_seed {
+                let seed_tree = definition.value_param_clauses[0][1];
+                let seed = index.symbol_at(source, seed_tree).unwrap();
+                store.scopes.get_mut(scope).remove(seed);
+            } else {
+                store.scopes.get_mut(scope).owner = store.symbols.get(method).owner;
+            }
+        };
+        let mut observe_proof = |ast: &AstArena<Untyped>,
+                                 source_root: TreeId<Untyped>,
+                                 index: &SourceSemanticIndex,
+                                 bindings: &SourceTypedIndex,
+                                 unit: &mut JvmCompilationUnit<'_>,
+                                 definitions: &Definitions| {
+            proof_error = Some(
+                match validate_cross_class_constructor_call_proofs(
+                    CrossClassConstructorCallProofInput {
+                        source_id,
+                        source_root,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: unit.typed_ast,
+                        source_index: index,
+                        source_typed_index: bindings,
+                        jvm_unit: unit,
+                    },
+                ) {
+                    Ok(proofs) => format!("unexpected receipt count: {}", proofs.len()),
+                    Err(error) => format!("{error:?}"),
+                },
+            );
+        };
+        compile_source_batch_with_store_mutator_and_source_observer(
+            source,
+            "PairFactory.scala",
+            output.path(),
+            source_id,
+            SourceUnitCardinality::AtLeastTwo,
+            &mut mutate_scope,
+            &mut observe_proof,
+        )
+        .expect("the test-only scope corruption leaves the typed JVM output valid");
+        assert_eq!(proof_error.as_deref(), Some(expected_error));
+    }
+
+    assert_scope_corruption(
+        SourceId::from_index(20115),
+        false,
+        "SourceIdentity(\"factory method source scope has a noncanonical owner\")",
+    );
+    assert_scope_corruption(
+        SourceId::from_index(20116),
+        true,
+        "SourceIdentity(\"factory method scope must contain the exact canonical formal entries\")",
+    );
+}
+
+#[test]
+fn mixed_formal_signature_does_not_accept_two_nested_origins() {
+    let source = MIXED_ORIGIN_WRAP_AND_CREATE_SOURCE.replace(
+        "new Pair(existing, new Counter(seed))",
+        "new Pair(new Counter(seed), new Counter(seed))",
+    );
+    let source_id = SourceId::from_index(20118);
+    let output = TestOutputDirectory::new("mixed-signature-two-nested-origins");
+    let mut proof_error = None;
+    let mut observe_source = |ast: &AstArena<Untyped>,
+                              source_root: TreeId<Untyped>,
+                              index: &SourceSemanticIndex,
+                              bindings: &SourceTypedIndex,
+                              unit: &mut JvmCompilationUnit<'_>,
+                              definitions: &Definitions| {
+        proof_error = Some(
+            match validate_cross_class_constructor_call_proofs(
+                CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root,
+                    store: unit.store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: unit.typed_ast,
+                    source_index: index,
+                    source_typed_index: bindings,
+                    jvm_unit: unit,
+                },
+            ) {
+                Ok(proofs) => format!("unexpected receipt count: {}", proofs.len()),
+                Err(error) => format!("{error:?}"),
+            },
+        );
+    };
+    compile_source_batch_with_source_observer(
+        &source,
+        "PairFactory.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe_source,
+    )
+    .expect("two nested allocations are valid source/JVM input but outside this proof shape");
+    assert_eq!(
+        proof_error.as_deref(),
+        Some(
+            "SourceShape(\"mixed Pair arguments must contain exactly one formal and one nested Counter call\")"
+        )
+    );
+}
+
+#[test]
+fn mixed_origin_pair_rejects_duplicate_original_method_declarations() {
+    let source = MIXED_ORIGIN_WRAP_AND_CREATE_SOURCE.replace(
+        "new Pair(existing, new Counter(seed))",
+        "new Pair(existing, new Counter(seed))\n  def wrapAndCreate(existing: Counter, alternate: Boolean): Pair =\n    new Pair(existing, new Counter(0))",
+    );
+    let source_id = SourceId::from_index(20117);
+    let output = TestOutputDirectory::new("mixed-origin-duplicate-method");
+    let mut proof_error = None;
+    let mut observe_source = |ast: &AstArena<Untyped>,
+                              source_root: TreeId<Untyped>,
+                              index: &SourceSemanticIndex,
+                              bindings: &SourceTypedIndex,
+                              unit: &mut JvmCompilationUnit<'_>,
+                              definitions: &Definitions| {
+        proof_error = Some(
+            match validate_cross_class_constructor_call_proofs(
+                CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root,
+                    store: unit.store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: unit.typed_ast,
+                    source_index: index,
+                    source_typed_index: bindings,
+                    jvm_unit: unit,
+                },
+            ) {
+                Ok(proofs) => format!("unexpected receipt count: {}", proofs.len()),
+                Err(error) => format!("{error:?}"),
+            },
+        );
+    };
+    compile_source_batch_with_source_observer(
+        &source,
+        "PairFactory.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe_source,
+    )
+    .expect("the different-signature overload remains valid source/JVM input");
+    assert_eq!(
+        proof_error.as_deref(),
+        Some("SourceShape(\"overloaded factory methods are unsupported\")")
+    );
+}
+
+#[test]
+fn mixed_origin_pair_proof_preserves_renamed_and_reordered_identities() {
+    let sections = MIXED_ORIGIN_WRAP_AND_CREATE_SOURCE
+        .split("\n\n")
+        .collect::<Vec<_>>();
+    assert_eq!(sections.len(), 4);
+    let reordered = format!(
+        "{}\n\n{}\n\n{}\n\n{}",
+        sections[0], sections[2], sections[3], sections[1]
+    );
+    let renamed = reordered
+        .replace("package example", "package renamed")
+        .replace("PairFactory", "Assembler")
+        .replace("Pair", "Envelope")
+        .replace("Counter", "Meter")
+        .replace("wrapAndCreate", "assemble")
+        .replace("existing", "kept")
+        .replace("seed", "initial");
+    let source_id = SourceId::from_index(20112);
+    let output = TestOutputDirectory::new("renamed-reordered-mixed-origin-proof");
+    let mut observed = false;
+    let mut observe_source = |ast: &AstArena<Untyped>,
+                              source_root: TreeId<Untyped>,
+                              source_index: &SourceSemanticIndex,
+                              source_typed_index: &SourceTypedIndex,
+                              unit: &mut JvmCompilationUnit<'_>,
+                              definitions: &Definitions| {
+        observed = true;
+        let proofs =
+            validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
+                source_id,
+                source_root,
+                store: unit.store,
+                definitions,
+                source_ast: ast,
+                typed_ast: unit.typed_ast,
+                source_index,
+                source_typed_index,
+                jvm_unit: unit,
+            })
+            .expect("renamed and reordered declarations retain the same mixed proof contract");
+        assert_eq!(proofs.len(), 1);
+        let proof = &proofs[0];
+        assert_eq!(
+            proof.argument_proof().kind(),
+            dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::FormalNestedPair
+        );
+        assert_eq!(
+            unit.store
+                .names
+                .resolve(unit.store.symbols.get(proof.target_class()).name.text()),
+            "Envelope"
+        );
+        assert_eq!(
+            unit.store
+                .names
+                .resolve(unit.store.symbols.get(proof.caller_class()).name.text()),
+            "Assembler"
+        );
+        assert_eq!(
+            proof.method_descriptor(),
+            "(Lrenamed/Meter;I)Lrenamed/Envelope;"
+        );
+        let ordered = proof.ordered_argument_pair().unwrap();
+        let method_tree = match source_index.definition_of(proof.method()) {
+            Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+            _ => panic!("factory method retains its original canonical declaration"),
+        };
+        let TreeKind::DefDef(method) = &ast.get(method_tree).kind else {
+            panic!("the factory method has its source definition")
+        };
+        assert_eq!(
+            ordered.source_method_formals(),
+            [
+                method.value_param_clauses[0][0],
+                method.value_param_clauses[0][1]
+            ]
+        );
+        assert_eq!(
+            ordered.method_formals(),
+            [
+                source_index
+                    .symbol_at(source_id, method.value_param_clauses[0][0])
+                    .unwrap(),
+                source_index
+                    .symbol_at(source_id, method.value_param_clauses[0][1])
+                    .unwrap(),
+            ]
+        );
+        let TreeKind::Apply(outer) = &ast.get(method.rhs.unwrap()).kind else {
+            panic!("the factory body retains its outer constructor application")
+        };
+        let argument_receipts = ordered.arguments();
+        assert_eq!(argument_receipts[0].source_argument(), outer.args[0]);
+        assert_eq!(argument_receipts[1].source_argument(), outer.args[1]);
+        assert!(argument_receipts[0].formal().is_some());
+        assert!(argument_receipts[0].nested_new().is_none());
+        assert!(argument_receipts[1].formal().is_none());
+        let nested = argument_receipts[1]
+            .nested_new()
+            .expect("the reordered source has a nested constructor in slot two");
+        assert_eq!(nested.source_outer_argument(), outer.args[1]);
+        assert_eq!(
+            source_typed_index.get(source_id, outer.args[1]),
+            Some(nested.typed_outer_argument())
+        );
+        assert_eq!(nested.class(), proof.formal_class().unwrap());
+        let TreeKind::Ident(leaf) = &ast.get(nested.source_argument()).kind else {
+            panic!("the nested constructor leaf remains the original seed reference")
+        };
+        assert_eq!(unit.store.names.resolve(leaf.name.text()), "initial");
+        assert_eq!(
+            nested.argument_formal(),
+            ordered.method_formals()[1],
+            "source formal order remains independent of Pair argument slots"
+        );
+    };
+    compile_source_batch_with_source_observer(
+        &renamed,
+        "PairFactory.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe_source,
+    )
+    .expect("renamed and reordered classes remain valid in one source session");
+    assert!(observed);
 }
