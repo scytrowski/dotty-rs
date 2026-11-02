@@ -129,6 +129,8 @@ jobs:
               "$(sha256sum crates/dotty-typer/tests/fixtures/source-case-class-match-3.9.0/source-hashes.tsv | cut -d' ' -f1)"
             printf 'case_match_scala_matrix_sha256\t%s\n' \
               "$(sha256sum crates/dotty-typer/tests/fixtures/source-case-class-match-3.9.0/scala-matrix.tsv | cut -d' ' -f1)"
+            printf 'product2_positive_source_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0/Positive.scala | cut -d' ' -f1)"
             printf 'pull_request_url\t%s\n' "${{ github.event.pull_request.html_url || '' }}"
             printf 'inherited_source_sha256\t%s\n' \
               "$(sha256sum crates/dotty-typer/tests/fixtures/inherited-members-3.9.0/InheritedMembers.scala | cut -d' ' -f1)"
@@ -159,6 +161,12 @@ jobs:
             "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-negative-contract.tsv"
           cp docs/typer-source-case-class-match-cohorts-3.9.0.tsv \
             "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-cohort-contract.tsv"
+          cp docs/typer-heterogeneous-product2-match-positive-3.9.0.tsv \
+            "$DOTTY_AUDIT_REPORT_DIR/product2-positive-contract.tsv"
+          cp docs/typer-heterogeneous-product2-match-negative-3.9.0.tsv \
+            "$DOTTY_AUDIT_REPORT_DIR/product2-negative-contract.tsv"
+          cp docs/typer-heterogeneous-product2-match-cohorts-3.9.0.tsv \
+            "$DOTTY_AUDIT_REPORT_DIR/product2-cohort-contract.tsv"
 
       - name: Download and verify pinned Scala runtime artifacts
         shell: bash
@@ -216,6 +224,18 @@ jobs:
             > "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-oracle.log" 2>&1
           cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-oracle.log"
 
+      - name: Run pinned heterogeneous Product2 Scala oracle
+        shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_PRODUCT2_TMP_ROOT: ${{ github.workspace }}/target/source-case-class-product2-oracle
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0/run \
+            > "$DOTTY_AUDIT_REPORT_DIR/source-case-class-product2-oracle.log" 2>&1
+          cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-product2-oracle.log"
+
       - name: Run exact source case-class Match Rust acceptance matrix
         shell: bash
         env:
@@ -243,6 +263,9 @@ jobs:
           DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
         run: |
           set -euo pipefail
+          cargo +1.98.1 test -p dotty-typer --lib --locked \
+            issue_1972_failed_root_retries_with_same_typer_and_matches_clean_run -- --nocapture \
+            > "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-retry.log" 2>&1
           cargo +1.98.1 test -p dotty-typer --lib --locked unapply -- --nocapture \
             > "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-unapply.log" 2>&1
           cargo +1.98.1 test -p dotty-typer --lib --locked \
@@ -255,6 +278,7 @@ jobs:
             local_patdef_alias_over_extractor_binds_the_original_selector_type -- --nocapture \
             > "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-alias.log" 2>&1
           cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-unapply.log"
+          cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-retry.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-product.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-unary.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-alias.log"
@@ -269,11 +293,16 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" inputs
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" oracle-log \
             "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-oracle.log"
+          PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" product2-oracle-log \
+            "$DOTTY_AUDIT_REPORT_DIR/source-case-class-product2-oracle.log"
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" rust-log \
+            "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-rust.log"
+          PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" product2-log \
             "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-rust.log"
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" namer-log \
             "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-namer.log"
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" typer-log \
+            "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-retry.log" \
             "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-unapply.log" \
             "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-product.log" \
             "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-unary.log" \
@@ -399,5 +428,6 @@ jobs:
             ${{ github.workspace }}/target/typer-focused-intermediates/
             ${{ github.workspace }}/target/focused-audit-intermediates/
             ${{ github.workspace }}/target/lexical-closure-contract-oracle/
+            ${{ github.workspace }}/target/source-case-class-product2-oracle/
           if-no-files-found: error
           retention-days: 30

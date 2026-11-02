@@ -288,3 +288,148 @@ historical #1948 report, only the `option/member_signatures` legacy value
 changed. That row remains `LOADER_UNSUPPORTED` overall because other Option
 member signatures remain unsupported. This selected member improvement does
 not establish whole-class Option parity or general Option loading.
+
+## Integrated gate and closeout (#1931)
+
+The implementation baseline for this closeout is merged `main`
+`339f6f08203358a2dff566df566a7d9b4557d898` (PR #1982). Its reviewed
+predecessors are PR #1945 at `49bd2702ff284edcbf30ceb6df51f5e09dddf598`, PR
+#1957 at `fd090895e587852f9feca5599d4ddc55211ce81b`, PR #1975 at
+`771f74670d5deca3f800874571601c447886c0c1`, and PR #1982 at
+`339f6f08203358a2dff566df566a7d9b4557d898`. The earlier #1945 baseline and
+frozen selection and refreshed parity provenance remain as recorded above.
+The reference remains Scala 3.9.0 at
+`777528f19a58e794c9954a42f433373472ec57f8`, TASTy 28.8/28.9 under the cohort's
+per-fixture manifest, Rust `1.98.1 (48a229cea 2026-09-01)`, and Temurin
+`21.0.13+9` (the same pinned JDK as required Rust CI).
+
+The frozen denominator is unchanged: 14 input units and 126 per-field rows.
+Their immutable input manifest and measured-report hashes are:
+
+| Artifact | SHA-256 |
+|---|---|
+| `cohort.tsv` | `bfa365d830a627ce46bb5682a93cad90e26dbc9a90ead76bcaa65a48539a8a95` |
+| `comparison.tsv` | `34097e61b691ff6ee9c16089336c495decc31241a10e448c1a1776849888aa4e` |
+| `comparison-1948.tsv` | `a4b14bdf2ba921363358f568b8bce636e0e24453c2a3c6e57bd61478c231e6e0` |
+| `Open.tasty` | `49286e74a3d3693b08d2a29575f23089f6be5c486231390059f43c19a8929894` |
+
+The `frozen_cohort_is_complete_and_both_fresh_adapter_runs_are_deterministic`
+test was invoked twice independently with dump mode unset. Each invocation
+checked the pinned fixture hashes and versions, all 126 keys and the checked-in
+normalized result; the report hash remained identical. The test itself runs
+both adapters in fresh sessions and compares normalized output byte-for-byte.
+
+| Gate shape | Current evidence and boundary |
+|---|---|
+| One-class Open | Private opt-in semantic adapter, canonical Object dependency, class origin, constructor completion and repeat identity; legacy public loader remains the default. |
+| Two-unit graph | Private Info pair adapter enters the pinned InfoBase/InfoWrapped units in both request orders and checks the applied parent, direct member, canonical owner and cache identity. |
+| Selected member type | #1930 preserves the Option `getOrElse` by-name method binder with its address-resolved `ParamRef`; reported separately from the unchanged frozen denominator. |
+| Negative controls | Malformed, wrong TASTy version, unsupported, missing and mismatched resources/owners, selected origin and typed causes, late rollback, retry, and existing identities are covered by non-ignored loader unit tests. |
+| Frozen compatibility | 14 units / 126 rows; report remains byte-identical over two independent test invocations. Unsupported/unresolved fields remain explicitly classified. |
+| CI wiring | `cargo test --workspace --all-targets --locked` already runs these crate unit and integration tests as a required CI job; no extra workflow switch is needed. |
+| Performance | Test-local matched Open legacy/semantic cold and warm API measurements; coverage and sample statistics follow. |
+
+### Matched Open profile
+
+The mandatory unit test
+`loader::tests::open_legacy_and_semantic_loads_have_matched_cold_warm_profile_receipt`
+uses the same pinned `Open.tasty`, composite classpath, Rust process and
+Temurin 21.0.13+9 environment for both paths. It takes seven samples per
+mode/phase. Each cold sample creates a fresh store, loader and bootstrapped
+session; each warm sample repeats the same request through that loader and
+asserts the returned canonical symbol identity. Each of the 28 timed requests
+succeeded. The test emits attempt, success, failure and median wall-time
+receipts; medians from this run were:
+
+| Adapter | Phase | Attempts / successes / failures | Median wall time |
+|---|---|---:|---:|
+| Legacy | Cold | 7 / 7 / 0 | 0.776 ms |
+| Legacy | Warm | 7 / 7 / 0 | 0.0006 ms |
+| Semantic opt-in | Cold | 7 / 7 / 0 | 0.797 ms |
+| Semantic opt-in | Warm | 7 / 7 / 0 | 0.0002 ms |
+
+These are local wall-clock observations from one run, not a speedup claim or
+service-level threshold. They cover the public legacy `load_class` call and
+the private semantic adapter call end-to-end, including resource lookup and
+session cache behavior. Existing `ClassLoadProfile` exposes the legacy
+dependency profile; it does not instrument the private adapter's full
+projection, so no internal phase attribution is inferred from these values.
+No failed-load profile is included in the timing sample; fail-closed behavior
+and rollback are separately exercised by the negative controls above.
+The test captures the legacy root's available `ClassLoadProfile` counters and
+asserts that the semantic adapter does not publish those legacy decode
+profiles; both paths' top-level API attempts are counted independently.
+Across the seven legacy cold samples, the root profile consistently reported
+six resource lookups (all found), 109,766 resource bytes, one TASTy decode and
+five class-file decodes, including its Object dependency work.
+
+The mandatory
+`semantic_adapter_rejects_unsupported_tasty_version_without_mutation_and_retries`
+control starts with the pinned real `Open.tasty` 28.9.0 bytes, changes only
+the minor-version header to 28.7.0, and submits those bytes through
+`load_open_with_tasty_unpickler`. It asserts the exact typed
+`InvalidTastyFile(Open, UnsupportedClassloaderVersion { major: 28, minor: 7,
+experimental: 0 })` cause, unchanged store and session checkpoints, absent
+`scala`, `java.lang`, and requested Open package state, and no loader caches or
+repository entry. The same in-memory resource is then replaced with the
+original valid bytes; retry succeeds, preserves the fixture's selected origin,
+and a repeated request returns the cached canonical symbol. This test is not
+ignored and runs under the required workspace test job.
+
+### Verdict and limitations
+
+**PARTIAL — implementation evidence complete; independent PR review is
+pending.** The cohort is frozen, tested twice with deterministic normalized
+output, and remains explicitly honest about unsupported rows. The supported
+Open, Info pair, and selected Option shapes have focused crate tests;
+malformed and transaction-failure cases remain mandatory in the existing
+workspace test job. The small local profile establishes reproducible matched
+measurement coverage, not a general performance conclusion. Promote this to
+`SPRINT GOAL MET` only after the PR review and required checks are complete.
+
+The opt-in semantic adapters remain crate-private and bounded to their pinned
+fixture shapes. The legacy loader remains the default. Full semantic parity
+for Open's other forms, general dependency-graph traversal, inherited-member
+lookup, the frozen Animal/Dog external signatures, and the remaining
+unsupported cohort fields are not claimed. Any new semantic failure belongs
+in a separate focused follow-up rather than this test/report gate.
+
+The implementation run retained the supplied original trace at
+`target/issue-traces/a888fa69-b490-4e0c-91f7-ef3319378999/manifest.json`, whose
+run ID is `1acdbac2-fecf-4070-b126-0711cade31c7`. No replacement trace was
+created; final checks were run in a dedicated worktree rooted at the integrated
+main listed above.
+
+Implementation validation on that integrated main included:
+
+```text
+cargo test -p dotty-classloader --locked
+cargo test -p dotty-tasty-unpickler --locked
+cargo fmt --all -- --check
+python3 tools/check-frontend-boundaries.py
+cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
+cargo test --workspace --all-targets --locked
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +stable test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  --test jvm_tasty_artifacts \
+  --test jvm_tasty_dual_reference_identity \
+  --test jvm_stateful_class_contract --locked -- --nocapture
+git diff --check
+```
+
+This host exposes an open-file soft limit of 1024, which caused intermittent
+`TooManyOpenFiles` failures when parallel tests opened JDK modules. The full
+workspace and focused crate suites passed with the local soft limit raised to
+8192; the original failing case also passed in isolation. The separate JDK
+gate passed with installed Temurin
+`21.0.13+9`; local `JAVA_TOOL_OPTIONS` redirected Java's temporary files from
+the host's full `/tmp` tmpfs. The classloader-specific ignored
+`jdk21_classspecializer_speciesdata_resolves_its_outer_k_parameter` check was
+also run explicitly against the same JDK and passed. Frozen comparator
+reproduction used two separate invocations of
+`cargo test -p dotty-classloader --test semantic_tasty_parity
+frozen_cohort_is_complete_and_both_fresh_adapter_runs_are_deterministic
+--locked`; both passed.

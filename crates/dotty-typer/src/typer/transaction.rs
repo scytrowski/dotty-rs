@@ -114,6 +114,22 @@ impl SourceTyper<'_> {
         let mut info_journal = Vec::new();
         let mut new_mappings = Vec::new();
         let result = operation(self, &mut info_journal, &mut new_mappings);
+        #[cfg(test)]
+        let result = if outermost_transaction
+            && self.inject_failure_after_outermost_success
+            && result.is_ok()
+        {
+            self.inject_failure_after_outermost_success = false;
+            Err(TyperError::SymbolResolution {
+                source: self.source,
+                tree_index: 0,
+                error: ResolutionError::Malformed {
+                    reason: "test-injected failure after successful source typing".to_owned(),
+                },
+            })
+        } else {
+            result
+        };
         let committed = result.is_ok();
         #[cfg(test)]
         if !committed && let Some(observer) = self.transaction_failure_observer.clone() {
