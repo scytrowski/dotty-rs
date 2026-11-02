@@ -1,0 +1,12 @@
+-- [E030] Match case Unreachable Warning: MissingParent.scala:9:9 --------------
+9 |    case Succ(inner) => inner
+  |         ^^^^^^^^^^^
+  |         Unreachable case
+-- [E030] Match case Unreachable Error: MissingParent.scala:9:9 ----------------
+9 |    case Succ(inner) => inner
+  |         ^
+  |         Unreachable case
+  |
+  | longer explanation available when compiling with `-explain`
+1 warning found
+1 error found

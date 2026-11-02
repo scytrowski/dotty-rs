@@ -1,0 +1,15 @@
+-- [E007] Type Mismatch Error: UnwrapResultMismatch.scala:9:24 -----------------
+9 |    case Num(_)      => expr
+  |                        ^^^^
+  |                        Found:    (expr : adtcontrol.Expr)
+  |                        Required: String
+  |
+  | longer explanation available when compiling with `-explain`
+-- [E007] Type Mismatch Error: UnwrapResultMismatch.scala:10:24 ----------------
+10 |    case Succ(inner) => inner
+   |                        ^^^^^
+   |                        Found:    (inner : adtcontrol.Expr)
+   |                        Required: String
+   |
+   | longer explanation available when compiling with `-explain`
+2 errors found

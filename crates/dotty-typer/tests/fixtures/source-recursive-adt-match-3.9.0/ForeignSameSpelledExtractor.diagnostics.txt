@@ -1,0 +1,8 @@
+-- [E007] Type Mismatch Error: ForeignSameSpelledExtractor.scala:15:26 ---------
+15 |      case Succ(inner) => inner
+   |                          ^^^^^
+   |                          Found:    (inner : String)
+   |                          Required: adtcontrol.Expr
+   |
+   | longer explanation available when compiling with `-explain`
+1 error found

@@ -1,0 +1,9 @@
+-- [E044] Cyclic Error: InferredRecursiveResult.scala:10:24 --------------------
+10 |    case Succ(inner) => eval(inner) + 1
+   |                        ^
+   |                   Overloaded or recursive method eval needs return type
+   |
+   |                    Run with -explain-cyclic for more details.
+   |
+   | longer explanation available when compiling with `-explain`
+1 error found

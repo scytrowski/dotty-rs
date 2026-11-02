@@ -1,0 +1,16 @@
+-- [E029] Pattern Match Exhaustivity Warning: UnrelatedReferenceClass.scala:9:38
+9 |  def unrelated(expr: Expr): String = expr match
+  |                                      ^^^^
+  |      match may not be exhaustive.
+  |
+  |      It would fail on pattern case: adtcontrol.Num(_), adtcontrol.Succ(_)
+  |
+  | longer explanation available when compiling with `-explain`
+-- [E030] Match case Unreachable Error: UnrelatedReferenceClass.scala:10:9 -----
+10 |    case Other(value) => value
+   |         ^
+   |         Unreachable case
+   |
+   | longer explanation available when compiling with `-explain`
+1 warning found
+1 error found

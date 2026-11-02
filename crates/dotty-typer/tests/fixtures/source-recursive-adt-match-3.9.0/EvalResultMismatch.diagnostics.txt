@@ -1,0 +1,19 @@
+-- [E007] Type Mismatch Error: EvalResultMismatch.scala:9:24 -------------------
+9 |    case Num(value)  => value
+  |                        ^^^^^
+  |                        Found:    (value : Int)
+  |                        Required: adtcontrol.Expr
+  |
+  | longer explanation available when compiling with `-explain`
+-- [E008] Not Found Error: EvalResultMismatch.scala:10:36 ----------------------
+10 |    case Succ(inner) => eval(inner) + 1
+   |                        ^^^^^^^^^^^^^
+   |value + is not a member of adtcontrol.Expr, but could be made available as an extension method.
+   |
+   |One of the following imports might make progress towards fixing the problem:
+   |
+   |  import scala.math.Fractional.Implicits.infixFractionalOps
+   |  import scala.math.Integral.Implicits.infixIntegralOps
+   |  import scala.math.Numeric.Implicits.infixNumericOps
+   |
+2 errors found
