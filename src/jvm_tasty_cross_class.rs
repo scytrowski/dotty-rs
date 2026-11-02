@@ -106,6 +106,8 @@ pub enum ConstructorArgumentProofKind {
     NestedNewPair,
     /// The outer constructor receives two ordered original method formal references.
     DirectFormalPair,
+    /// The outer constructor receives one original method formal and one nested call.
+    FormalNestedPair,
     /// The outer constructor receives a same-instance planned method result.
     PlannedCall,
     /// The outer constructor receives one initialized immutable local val.
@@ -185,16 +187,16 @@ impl ConstructorArgumentProof {
             ConstructorArgumentProofShape::Formal(_) => ConstructorArgumentProofKind::Formal,
             ConstructorArgumentProofShape::NestedNew(_) => ConstructorArgumentProofKind::NestedNew,
             ConstructorArgumentProofShape::OrderedPair(proof) => {
-                if matches!(
-                    proof.arguments[0].origin,
-                    OrderedConstructorArgumentOrigin::NestedNew(_)
-                ) && matches!(
-                    proof.arguments[1].origin,
-                    OrderedConstructorArgumentOrigin::NestedNew(_)
-                ) {
-                    ConstructorArgumentProofKind::NestedNewPair
-                } else {
-                    ConstructorArgumentProofKind::DirectFormalPair
+                match (proof.arguments[0].origin, proof.arguments[1].origin) {
+                    (
+                        OrderedConstructorArgumentOrigin::NestedNew(_),
+                        OrderedConstructorArgumentOrigin::NestedNew(_),
+                    ) => ConstructorArgumentProofKind::NestedNewPair,
+                    (
+                        OrderedConstructorArgumentOrigin::Formal(_),
+                        OrderedConstructorArgumentOrigin::Formal(_),
+                    ) => ConstructorArgumentProofKind::DirectFormalPair,
+                    _ => ConstructorArgumentProofKind::FormalNestedPair,
                 }
             }
             ConstructorArgumentProofShape::PlannedCall(_) => {
@@ -1166,11 +1168,6 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         method_formal_types[index] = formal_type;
         method_formal_classes[index] = formal_class;
     }
-    if method_formal_classes[0] != method_formal_classes[1] {
-        return Err(semantic_error(
-            "both factory formals must retain the same canonical reference class",
-        ));
-    }
     let method_scope_id = source_index
         .scope_of(method)
         .ok_or_else(|| identity_error("factory method has no registered source scope"))?;
@@ -1646,6 +1643,14 @@ fn validate_two_argument_constructor_call_candidate<'session>(
             "Pair constructor formals must name the same distinct Counter class",
         ));
     }
+    let legacy_pair_signature = method_formal_classes[0] == method_formal_classes[1];
+    let formal_nested_signature = method_formal_classes[0] == Some(counter_class)
+        && method_formal_types[1] == definitions.int;
+    if !legacy_pair_signature && !formal_nested_signature {
+        return Err(semantic_error(
+            "factory formals must retain a supported ordered pair signature",
+        ));
+    }
     for index in 0..2 {
         let TreeKind::ValDef(parameter) = &source_ast.get(target_formal_trees[index]).kind else {
             return Err(source_error(
@@ -1852,10 +1857,135 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         }
     } else {
         let mut nested_proofs = Vec::with_capacity(2);
-        let mut target_formal_types = [definitions.int; 2];
-        for index in 0..2 {
+        for (index, typed_outer_argument) in typed_outer_args.iter().copied().enumerate() {
             let source_outer_argument = outer_apply.args[index];
-            let typed_outer_argument = typed_outer_args[index];
+            if matches!(
+                source_ast
+                    .try_get(source_outer_argument)
+                    .map(|node| &node.kind),
+                Some(TreeKind::Ident(_))
+            ) {
+                require_source_position(
+                    source_ast,
+                    source_id,
+                    source_outer_argument,
+                    if index == 0 {
+                        "first Pair argument has a foreign source position"
+                    } else {
+                        "second Pair argument has a foreign source position"
+                    },
+                )?;
+                let TreeKind::Ident(source_ident) = &source_ast
+                    .try_get(source_outer_argument)
+                    .ok_or_else(|| source_error("Pair argument source root is stale"))?
+                    .kind
+                else {
+                    unreachable!("the source argument was checked as Ident")
+                };
+                let typed_argument_node = typed_ast
+                    .try_get(typed_outer_argument)
+                    .ok_or_else(|| typed_error("Pair formal argument typed root is stale"))?;
+                if !matches!(typed_argument_node.kind, TreeKind::Ident(_)) {
+                    return Err(typed_error("Pair formal argument typed root must be Ident"));
+                }
+                let formal = match store.types.try_get(typed_argument_node.ty) {
+                    Some(Type::TermRef {
+                        target: TermRefTarget::Symbol(formal),
+                        ..
+                    }) => *formal,
+                    _ => {
+                        return Err(typed_error(
+                            "ordered Pair argument must retain its exact caller formal TermRef",
+                        ));
+                    }
+                };
+                let formal_index = method_formals
+                    .iter()
+                    .position(|candidate| *candidate == formal)
+                    .ok_or_else(|| typed_error("Pair argument TermRef is not a method formal"))?;
+                let source_formal_name = match &source_ast
+                    .try_get(method_formal_trees[formal_index])
+                    .ok_or_else(|| identity_error("method formal source tree is stale"))?
+                    .kind
+                {
+                    TreeKind::ValDef(parameter) => parameter.name.as_name().text(),
+                    _ => return Err(identity_error("method formal source tree is not ValDef")),
+                };
+                if store.names.resolve(source_ident.name.text())
+                    != store.names.resolve(source_formal_name)
+                    || method_formal_trees
+                        .iter()
+                        .enumerate()
+                        .any(|(other_index, tree)| {
+                            other_index != formal_index
+                                && matches!(
+                                    source_ast.try_get(*tree).map(|node| &node.kind),
+                                    Some(TreeKind::ValDef(parameter))
+                                        if store.names.resolve(parameter.name.as_name().text())
+                                            == store.names.resolve(source_ident.name.text())
+                                )
+                        })
+                {
+                    return Err(typed_error(
+                        "typed Pair argument target must match its unique original source formal",
+                    ));
+                }
+                if source_index.definition_of(formal)
+                    != Some(SourceDefinition::Canonical {
+                        source: source_id,
+                        tree: method_formal_trees[formal_index],
+                    })
+                    || !store.symbols.contains(formal)
+                    || store.symbols.get(formal).kind != SymbolKind::Parameter
+                    || store.symbols.get(formal).owner != Some(method)
+                    || !has_source_origin(store, formal, source_id)
+                    || store.symbols.get(formal).info
+                        != SymbolInfo::Complete(method_formal_types[formal_index])
+                    || !is_canonical_class_type_ref(
+                        store,
+                        method_formal_types[formal_index],
+                        counter_class,
+                        package_owner,
+                        definitions.no_prefix,
+                    )
+                {
+                    return Err(identity_error(
+                        "ordered direct argument must retain its exact caller formal and Pair parameter type",
+                    ));
+                }
+                if source_typed_index.get(source_id, source_outer_argument)
+                    != Some(typed_outer_argument)
+                {
+                    return Err(typed_error(
+                        "ordered Pair argument must retain its exact source-to-typed binding",
+                    ));
+                }
+                require_matching_source_typed_positions(
+                    source_ast,
+                    typed_ast,
+                    source_id,
+                    source_outer_argument,
+                    typed_outer_argument,
+                    if index == 0 {
+                        "first direct Pair argument"
+                    } else {
+                        "second direct Pair argument"
+                    },
+                )?;
+                let formal_proof = FormalConstructorArgumentProof {
+                    source_argument: source_outer_argument,
+                    typed_argument: typed_outer_argument,
+                    formal,
+                    formal_type: method_formal_types[formal_index],
+                    result_type: typed_argument_node.ty,
+                };
+                ordered_argument_proofs.push(OrderedConstructorArgumentProof {
+                    source_argument: source_outer_argument,
+                    typed_argument: typed_outer_argument,
+                    origin: OrderedConstructorArgumentOrigin::Formal(formal_proof),
+                });
+                continue;
+            }
             let TreeKind::Apply(inner_apply) = &source_ast
                 .try_get(source_outer_argument)
                 .ok_or_else(|| source_error("nested Counter Apply source root is stale"))?
@@ -2253,7 +2383,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                     "Counter metadata must retain its exact public primary constructor formal",
                 ));
             }
-            nested_proofs.push(NestedConstructorArgumentProof {
+            let nested_proof = NestedConstructorArgumentProof {
                 source_outer_argument,
                 typed_outer_argument,
                 source_apply: source_outer_argument,
@@ -2271,42 +2401,45 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                 formal_type: counter_formal_type,
                 argument_formal_type: method_formal_types[caller_formal_index],
                 result_type,
+            };
+            nested_proofs.push(nested_proof);
+            ordered_argument_proofs.push(OrderedConstructorArgumentProof {
+                source_argument: source_outer_argument,
+                typed_argument: typed_outer_argument,
+                origin: OrderedConstructorArgumentOrigin::NestedNew(nested_proof),
             });
-            target_formal_types[index] = pair_formal_types[index];
         }
-        let [nested_first, nested_second] =
-            <[NestedConstructorArgumentProof; 2]>::try_from(nested_proofs).map_err(|_| {
-                Error::SourceShape("exactly two nested constructor argument proofs are required")
-            })?;
-        if nested_first.class() != nested_second.class()
-            || nested_first.constructor() != nested_second.constructor()
-            || nested_first.source_outer_argument() == nested_second.source_outer_argument()
-            || nested_first.source_apply() == nested_second.source_apply()
-            || nested_first.source_select() == nested_second.source_select()
-            || nested_first.source_new() == nested_second.source_new()
-            || nested_first.source_argument() == nested_second.source_argument()
-            || nested_first.typed_outer_argument() == nested_second.typed_outer_argument()
-            || nested_first.typed_apply() == nested_second.typed_apply()
-            || nested_first.typed_select() == nested_second.typed_select()
-            || nested_first.typed_new() == nested_second.typed_new()
-            || nested_first.typed_argument() == nested_second.typed_argument()
+        if let [nested_first, nested_second] = nested_proofs.as_slice()
+            && (nested_first.class() != nested_second.class()
+                || nested_first.constructor() != nested_second.constructor()
+                || nested_first.source_outer_argument() == nested_second.source_outer_argument()
+                || nested_first.source_apply() == nested_second.source_apply()
+                || nested_first.source_select() == nested_second.source_select()
+                || nested_first.source_new() == nested_second.source_new()
+                || nested_first.source_argument() == nested_second.source_argument()
+                || nested_first.typed_outer_argument() == nested_second.typed_outer_argument()
+                || nested_first.typed_apply() == nested_second.typed_apply()
+                || nested_first.typed_select() == nested_second.typed_select()
+                || nested_first.typed_new() == nested_second.typed_new()
+                || nested_first.typed_argument() == nested_second.typed_argument())
         {
             return Err(typed_error(
                 "sibling constructor receipts must preserve distinct ordered call-site roots",
             ));
         }
-        ordered_argument_proofs.extend([
-            OrderedConstructorArgumentProof {
-                source_argument: nested_first.source_outer_argument(),
-                typed_argument: nested_first.typed_outer_argument(),
-                origin: OrderedConstructorArgumentOrigin::NestedNew(nested_first),
-            },
-            OrderedConstructorArgumentProof {
-                source_argument: nested_second.source_outer_argument(),
-                typed_argument: nested_second.typed_outer_argument(),
-                origin: OrderedConstructorArgumentOrigin::NestedNew(nested_second),
-            },
-        ]);
+    }
+    if formal_nested_signature
+        && ordered_argument_proofs
+            .iter()
+            .filter(|argument| {
+                matches!(argument.origin, OrderedConstructorArgumentOrigin::Formal(_))
+            })
+            .count()
+            != 1
+    {
+        return Err(source_error(
+            "mixed Pair arguments must contain exactly one formal and one nested Counter call",
+        ));
     }
     let ordered_argument_proofs = <[OrderedConstructorArgumentProof; 2]>::try_from(
         ordered_argument_proofs,
@@ -2314,6 +2447,10 @@ fn validate_two_argument_constructor_call_candidate<'session>(
     .map_err(|_| {
         source_error("exactly two authenticated ordered constructor arguments are required")
     })?;
+    let formal_class = ordered_argument_proofs
+        .iter()
+        .any(|argument| matches!(argument.origin, OrderedConstructorArgumentOrigin::Formal(_)))
+        .then_some(counter_class);
     let result_type = typed_root.ty;
     if !matches!(
         store.types.try_get(result_type),
@@ -2337,7 +2474,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         caller_class,
         method,
         method_formal: method_formals[0],
-        formal_class: direct_formal_arguments.then_some(counter_class),
+        formal_class,
         target_class,
         constructor: target_constructor,
         source_rhs,

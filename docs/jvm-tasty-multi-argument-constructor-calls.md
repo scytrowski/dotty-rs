@@ -113,6 +113,69 @@ and the full workspace suite passed. The workspace suite used two test
 threads after the host's file-descriptor limit caused nine unrelated
 classloader failures at default parallelism.
 
+## Ordered formal plus nested proof (#2012)
+
+Issue [#2012](https://github.com/scytrowski/dotty-rs/issues/2012) extends the
+same opaque `OrderedConstructorArgumentPairProof` to one direct caller formal
+and one nested `new Counter(seed)` argument, in either Pair constructor slot.
+The only accepted caller signature for this mixed shape is one plain
+`(Counter, Int): Pair` method; the two source methods use the existing frozen
+`wrapAndCreate(existing, seed)` and `createAndWrap(existing, seed)` producers.
+The ordered receipt keeps both original outer source/typed roots and assigns a
+`Formal` or `NestedNew` origin to each slot independently. The descriptive
+`ConstructorArgumentProofKind::FormalNestedPair` reports the mixed case;
+`DirectFormalPair`, `NestedNewPair`, `nested_pair()`, and
+`nested_pair_context()` retain their previous homogeneous behavior.
+
+The formal slot authenticates the original method-owned `Counter` parameter
+through its `TermRef`, canonical source definition, type, source position and
+exact `SourceTypedIndex` edge. The nested slot authenticates the original
+`Counter` `Apply(Select(New(...)), ...)`, selected same-source primary
+constructor, original method-owned `Int` seed leaf, result `Counter` type,
+and each corresponding source/typed edge. Slot choice comes from the source
+expression shape; both method signature order and Pair constructor order remain
+separately checked. No constructor or class bytes are emitted by this proof.
+
+The real-session regression proves both frozen argument orders and asserts the
+formal and nested receipts against their exact source and typed roots, symbols,
+types and outer positions. Swapping the two source-to-typed argument bindings
+fails first with
+`TypedBinding("typed outer Apply must preserve exact ordered source mappings")`.
+Missing nested Select, New, or leaf mappings fail respectively at
+`TypedBinding("nested Counter Select has no exact typed binding")`,
+`TypedBinding("nested Counter New has no exact typed binding")`, and
+`TypedBinding("nested Counter leaf has no exact typed binding")`. A disconnected
+typed leaf fails at
+`TypedBinding("nested Counter typed Apply must preserve exact original Select, New, and leaf roots")`.
+Forging the nested selection as the Pair constructor fails at
+`SemanticIdentity("nested Select must choose a source constructor owned by the exact Counter class")`;
+changing the Pair New type to Counter fails at
+`SemanticIdentity("factory signature result must retain the exact Pair TypeRef")`.
+A foreign constructor `TermRef` in the direct formal slot fails at
+`TypedBinding("Pair argument TermRef is not a method formal")`. The method
+scope owner and exact formal-entry corruptions fail at their existing
+`SourceIdentity` scope gates. A third Pair argument and a non-Int seed fail at
+source typing; a same-name second factory declaration fails at
+`SourceShape("overloaded factory methods are unsupported")`. The mixed
+`(Counter, Int)` signature also rejects two nested allocations at
+`SourceShape("mixed Pair arguments must contain exactly one formal and one nested Counter call")`.
+The paired planner now passes the constructor-call proof and then reaches its
+separate `JVM/TASTy cross-contract validation` stage, where the mixed method
+signature remains rejected as `TastyPlan(MalformedType { role: Parameter })`;
+pickler signature validation is outside this proof-only increment. The existing
+JVM output tests still assert that each nested allocation occurs at its source
+argument position. A renamed package/classes/method with reordered class
+declarations also retains the same origin order and original formal identities.
+
+Focused validation for this increment:
+
+```sh
+cargo fmt --all -- --check
+cargo test -p dotty --test jvm_tasty_constructor_call_proofs --locked
+cargo test -p dotty --test jvm_source_compilation mixed_origin --locked
+cargo test -p dotty --test jvm_source_compilation direct_formal_pair_proof_preserves_names_order_reversal_and_aliasing --locked -- --nocapture
+```
+
 ## Direct-formal PairFactory body TASTy (#1964)
 
 Issue [#1964](https://github.com/scytrowski/dotty-rs/issues/1964) carries the

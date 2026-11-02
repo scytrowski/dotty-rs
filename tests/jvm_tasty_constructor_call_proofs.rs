@@ -21,6 +21,9 @@ const SOURCE: &str =
     include_str!("fixtures/jvm_tasty_reference_constructor_calls/CounterOwnerFactory.scala");
 const TWO_ARGUMENT_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala");
+const MIXED_ORIGIN_SOURCE: &str = include_str!(
+    "fixtures/jvm_tasty_mixed_origin_constructor_arguments/wrap-and-create/PairFactory.scala"
+);
 
 fn clone_arena<P: AstPhase + Clone>(source: &AstArena<P>) -> AstArena<P> {
     let mut cloned = AstArena::new();
@@ -1326,6 +1329,195 @@ fn renamed_reordered_constructor_proof_ignores_class_and_method_names() {
         declarations[0], declarations[3], declarations[2], declarations[1]
     );
     assert_generic_proof(&reordered, 1795, "(Lexample/Widget;)Lexample/WidgetHolder;");
+}
+
+#[test]
+fn mixed_origin_pair_receipt_keeps_both_ordered_source_and_typed_origins() {
+    with_two_argument_proof(
+        MIXED_ORIGIN_SOURCE,
+        20120,
+        |proof,
+         store,
+         source_ast,
+         typed_ast,
+         _index,
+         bindings,
+         source_id,
+         _root,
+         definitions,
+         unit| {
+            use dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind;
+
+            assert_eq!(
+                proof.argument_proof().kind(),
+                ConstructorArgumentProofKind::FormalNestedPair
+            );
+            assert_eq!(
+                proof.method_descriptor(),
+                "(Lexample/Counter;I)Lexample/Pair;"
+            );
+            assert_eq!(
+                proof.constructor_descriptor(),
+                "(Lexample/Counter;Lexample/Counter;)V"
+            );
+            let ordered = proof.argument_proof().ordered_pair().unwrap();
+            let method_formals = ordered.method_formals();
+            let method_formal_trees = ordered.source_method_formals();
+            assert_ne!(method_formals[0], method_formals[1]);
+            assert!(matches!(
+                store.types.get(ordered.method_formal_types()[0]),
+                Type::TypeRef { .. }
+            ));
+            assert_eq!(ordered.method_formal_types()[1], definitions.int);
+            let (proof_store, proof_source, proof_typed, _, proof_bindings, _) =
+                proof.session_inputs();
+            assert!(std::ptr::eq(proof_store, store));
+            assert!(std::ptr::eq(proof_source, source_ast));
+            assert!(std::ptr::eq(proof_typed, typed_ast));
+            assert!(std::ptr::eq(proof_bindings, bindings));
+            let source_method = proof.source_rhs();
+            let TreeKind::Apply(outer) = &source_ast.get(source_method).kind else {
+                panic!("factory RHS is the original outer Apply")
+            };
+            let typed_method = proof.typed_rhs();
+            let TreeKind::Apply(typed_outer) = &typed_ast.get(typed_method).kind else {
+                panic!("factory typed RHS preserves the outer Apply")
+            };
+            let arguments = ordered.arguments();
+            assert_eq!(arguments.len(), 2);
+            let formal = arguments[0]
+                .formal()
+                .expect("slot zero retains the original Counter formal");
+            assert_eq!(formal.formal(), method_formals[0]);
+            assert_eq!(formal.source_argument(), outer.args[0]);
+            assert_eq!(formal.typed_argument(), typed_outer.args[0]);
+            assert_eq!(
+                bindings.get(source_id, outer.args[0]),
+                Some(typed_outer.args[0])
+            );
+            assert!(arguments[0].nested_new().is_none());
+            let nested = arguments[1]
+                .nested_new()
+                .expect("slot one retains the original nested Counter application");
+            assert_eq!(nested.source_outer_argument(), outer.args[1]);
+            assert_eq!(nested.typed_outer_argument(), typed_outer.args[1]);
+            assert_eq!(nested.source_apply(), outer.args[1]);
+            assert_eq!(nested.typed_apply(), typed_outer.args[1]);
+            assert_eq!(
+                bindings.get(source_id, outer.args[1]),
+                Some(typed_outer.args[1])
+            );
+            assert_eq!(nested.argument_formal(), method_formals[1]);
+            assert_eq!(
+                nested.argument_formal_type(),
+                ordered.method_formal_types()[1]
+            );
+            assert_eq!(nested.class(), proof.formal_class().unwrap());
+            assert_ne!(method_formal_trees[0], method_formal_trees[1]);
+
+            let TreeKind::Apply(inner_apply) = &source_ast.get(outer.args[1]).kind else {
+                panic!("nested argument is the original Counter Apply")
+            };
+            let source_select = inner_apply.function;
+            let TreeKind::Select(selection) = &source_ast.get(source_select).kind else {
+                panic!("nested constructor function is the original Select")
+            };
+            let source_new = selection.qualifier;
+            let source_leaf = inner_apply.args[0];
+            let result_for =
+                |typed_ast: &dotty_core::ast::TypedAst,
+                 source_typed_index: &dotty_core::SourceTypedIndex| {
+                    let jvm_unit = JvmCompilationUnit {
+                        store,
+                        typed_ast,
+                        classes: unit.classes.clone(),
+                    };
+                    match validate_cross_class_constructor_call_proofs(
+                        CrossClassConstructorCallProofInput {
+                            source_id,
+                            source_root: _root,
+                            store,
+                            definitions,
+                            source_ast,
+                            typed_ast,
+                            source_index: _index,
+                            source_typed_index,
+                            jvm_unit: &jvm_unit,
+                        },
+                    ) {
+                        Ok(proofs) => format!("Ok({} proofs)", proofs.len()),
+                        Err(error) => format!("Err({error:?})"),
+                    }
+                };
+            for (tree, expected) in [
+                (
+                    source_select,
+                    "Err(TypedBinding(\"nested Counter Select has no exact typed binding\"))",
+                ),
+                (
+                    source_new,
+                    "Err(TypedBinding(\"nested Counter New has no exact typed binding\"))",
+                ),
+                (
+                    source_leaf,
+                    "Err(TypedBinding(\"nested Counter leaf has no exact typed binding\"))",
+                ),
+            ] {
+                let mut missing_binding = bindings.clone();
+                missing_binding.remove(source_id, tree).unwrap();
+                assert_eq!(result_for(typed_ast, &missing_binding), expected);
+            }
+
+            let typed_leaf = bindings.get(source_id, source_leaf).unwrap();
+            let mut disconnected_ast = clone_arena(typed_ast);
+            let disconnected_leaf = disconnected_ast.alloc(typed_ast.get(typed_leaf).clone());
+            let mut disconnected_binding = bindings.clone();
+            disconnected_binding.remove(source_id, source_leaf).unwrap();
+            disconnected_binding
+                .insert(source_id, source_leaf, disconnected_leaf)
+                .unwrap();
+            assert_eq!(
+                result_for(&disconnected_ast, &disconnected_binding),
+                "Err(TypedBinding(\"nested Counter typed Apply must preserve exact original Select, New, and leaf roots\"))"
+            );
+
+            let mut forged_constructor_ast = clone_arena(typed_ast);
+            let typed_nested_select = bindings.get(source_id, source_select).unwrap();
+            let typed_outer_select = bindings.get(source_id, outer.function).unwrap();
+            forged_constructor_ast.get_mut(typed_nested_select).ty =
+                typed_ast.get(typed_outer_select).ty;
+            assert_eq!(
+                result_for(&forged_constructor_ast, bindings),
+                "Err(SemanticIdentity(\"nested Select must choose a source constructor owned by the exact Counter class\"))"
+            );
+
+            let TreeKind::Select(outer_selection) = &source_ast.get(outer.function).kind else {
+                panic!("outer constructor function is Select")
+            };
+            let TreeKind::New(outer_new) = &source_ast.get(outer_selection.qualifier).kind else {
+                panic!("outer constructor receiver is New")
+            };
+            let typed_outer_type = bindings.get(source_id, outer_new.tpt).unwrap();
+            let TreeKind::New(inner_new) = &source_ast.get(selection.qualifier).kind else {
+                panic!("nested constructor receiver is New")
+            };
+            let typed_inner_type = bindings.get(source_id, inner_new.tpt).unwrap();
+            let mut wrong_pair_type_ast = clone_arena(typed_ast);
+            wrong_pair_type_ast.get_mut(typed_outer_type).ty = typed_ast.get(typed_inner_type).ty;
+            assert_eq!(
+                result_for(&wrong_pair_type_ast, bindings),
+                "Err(SemanticIdentity(\"factory signature result must retain the exact Pair TypeRef\"))"
+            );
+
+            let mut foreign_formal_ast = clone_arena(typed_ast);
+            foreign_formal_ast.get_mut(typed_outer.args[0]).ty =
+                typed_ast.get(typed_nested_select).ty;
+            assert_eq!(
+                result_for(&foreign_formal_ast, bindings),
+                "Err(TypedBinding(\"Pair argument TermRef is not a method formal\"))"
+            );
+        },
+    );
 }
 
 #[test]
