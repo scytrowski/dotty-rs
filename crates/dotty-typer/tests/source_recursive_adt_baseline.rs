@@ -8,7 +8,7 @@ use dotty_core::ast::TreeKind;
 use dotty_core::types::{Type, TypeRefTarget};
 use dotty_core::{
     Definitions, GeneratedCaseClassMethodRole, Packages, SemanticStore, SourceId, SourceText,
-    SymbolKind, SymbolOrigin, TypeName,
+    SymbolFlags, SymbolKind, SymbolOrigin, TypeName,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
@@ -112,6 +112,8 @@ fn characterize_classes(source: SourceId) -> Vec<String> {
 
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../dotty-tasty/tests/fixtures/scala3-library");
+    let product_fixture = fixture.join("scala/Product.tasty");
+    assert!(product_fixture.is_file());
     let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required");
     let classpath = CompositeClassPath::new(vec![
         Box::new(DirectoryClassPath::new(fixture)) as Box<dyn ClassPathEntry>,
@@ -149,6 +151,7 @@ fn characterize_classes(source: SourceId) -> Vec<String> {
         "source parent resolves to the canonical Expr trait"
     );
     let mut rows = Vec::new();
+    let mut generated_formals = Vec::new();
     rows.push(format!(
         "Expr\ttree={}\tsymbol={expr_symbol:?}\tkind=Trait\torigin=Source\tsealed={}",
         expr_tree.index(),
@@ -211,12 +214,45 @@ fn characterize_classes(source: SourceId) -> Vec<String> {
             .expect("canonical generated unapply identity");
         assert_ne!(unapply, class);
         assert_eq!(typer.store().symbols.get(unapply).owner, Some(module_class));
+        let formal = index
+            .derived_symbol_at(unapply, source, tree)
+            .expect("canonical generated unapply formal derived from case-class tree");
+        let formal_symbol = typer.store().symbols.get(formal);
+        assert_eq!(formal_symbol.kind, SymbolKind::Parameter);
+        assert!(formal_symbol.flags.contains(SymbolFlags::SYNTHETIC));
+        assert_eq!(formal_symbol.owner, Some(unapply));
+        assert_eq!(formal_symbol.origin, SymbolOrigin::Source(source));
+        assert_ne!(formal, unapply);
+        assert_ne!(formal, class);
+        assert!(!generated_formals.contains(&formal));
+        generated_formals.push(formal);
+        let unapply_scope = index
+            .scope_of(unapply)
+            .expect("generated unapply parameter scope");
+        assert_eq!(
+            typer
+                .store()
+                .scopes
+                .get(unapply_scope)
+                .lookup(&formal_symbol.name),
+            Some(formal),
+            "the generated unapply formal resolves to its canonical derived identity"
+        );
         let unapply_shape = match typer.complete_symbol(unapply) {
             Ok(ty) => match typer.store().types.get(ty) {
                 Type::Method(method) => {
-                    let arg = type_symbol_name(&typer, method.params[0].ty);
-                    let result = type_symbol_name(&typer, method.result);
-                    format!("({arg}):{result}")
+                    assert_eq!(method.params.len(), 1);
+                    let arg = type_ref_symbol(&typer, method.params[0].ty);
+                    let result = type_ref_symbol(&typer, method.result);
+                    assert_eq!(
+                        arg, class,
+                        "generated formal input targets canonical case class"
+                    );
+                    assert_eq!(
+                        result, class,
+                        "generated unapply result targets canonical case class"
+                    );
+                    format!("({arg:?}):{result:?}")
                 }
                 other => format!("unexpected={other:?}"),
             },
@@ -234,6 +270,7 @@ fn characterize_classes(source: SourceId) -> Vec<String> {
             .expect("source constructor field");
         assert_eq!(typer.store().symbols.get(field).kind, SymbolKind::Field);
         assert_eq!(typer.store().symbols.get(field).owner, Some(class));
+        assert_eq!(field, index.symbol_at(source, field_tree).unwrap());
         let field_name = typer
             .store()
             .names
@@ -247,9 +284,20 @@ fn characterize_classes(source: SourceId) -> Vec<String> {
             selector, field,
             "source field and synthetic _1 stay distinct"
         );
+        assert_ne!(
+            formal, field,
+            "generated unapply formal is not the source field"
+        );
         let selector_shape = match typer.complete_symbol(selector) {
             Ok(ty) => match typer.store().types.get(ty) {
-                Type::Method(method) => format!("_1:{}", type_symbol_name(&typer, method.result)),
+                Type::Method(method) => {
+                    let result = type_ref_symbol(&typer, method.result);
+                    if name == "Num" {
+                        let int = type_ref_symbol(&typer, definitions.int);
+                        assert_eq!(result, int, "Num._1 targets canonical scala.Int");
+                    }
+                    format!("_1:{result:?}")
+                }
                 other => format!("unexpected={other:?}"),
             },
             Err(error) => format!("error={error:?}"),
@@ -257,37 +305,66 @@ fn characterize_classes(source: SourceId) -> Vec<String> {
         let class_info = match typer.complete_symbol(class) {
             Ok(ty) => match typer.store().types.get(ty) {
                 Type::ClassInfo(info) => {
-                    let parent_names = info
+                    let parent_symbols = info
                         .parents
                         .iter()
-                        .map(|parent| type_symbol_name(&typer, *parent))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    format!("parents={parent_names}")
+                        .map(|parent| type_ref_symbol(&typer, *parent))
+                        .collect::<Vec<_>>();
+                    if name == "Num" {
+                        assert_eq!(parent_symbols.len(), 3);
+                        assert_eq!(parent_symbols[0], definitions.object_class);
+                        assert_eq!(parent_symbols[1], expr_symbol);
+                        let product = parent_symbols[2];
+                        let product_symbol = typer.store().symbols.get(product);
+                        assert_eq!(
+                            typer.store().names.resolve(product_symbol.name.text()),
+                            "Product"
+                        );
+                        assert!(matches!(product_symbol.origin, SymbolOrigin::Tasty(_)));
+                    }
+                    format!("parents={parent_symbols:?}")
                 }
                 other => format!("unexpected={other:?}"),
             },
             Err(error) => format!("error={error:?}"),
         };
         rows.push(format!(
-            "{name}\ttree={}\tsymbol={class:?}\tkind=CASE-Class\torigin=Source\tparent=Expr@tree{}=>{source_parent:?}\tcompanion={companion:?}\tmodule_class={module_class:?}\tunapply={unapply:?},owner={name}$,type={unapply_shape}\tfield={field_name}:{field:?}\tselector={selector:?},{selector_shape}\tclass_info={class_info}",
-            tree.index(), template.parents[0].index()
+            "{name}\ttree={}\tsymbol={class:?}\tkind=CASE-Class\torigin=Source\tparent=Expr@tree{}=>{source_parent:?}\tcompanion={companion:?}\tmodule_class={module_class:?}\tunapply={unapply:?},owner={name}$,formal=x$1:{formal:?},formal_identity=Derived({unapply:?},source,{})\tformal_kind=Parameter,formal_synthetic=true,formal_origin=Source\ttype={unapply_shape}\tfield={field_name}:{field:?}\tselector={selector:?},{selector_shape}\tclass_info={class_info}",
+            tree.index(), template.parents[0].index(), tree.index()
         ));
+        if name == "Succ" {
+            let field_type_tree = match &parsed.ast.get(field_tree).kind {
+                TreeKind::ValDef(field) => field.tpt,
+                _ => unreachable!(),
+            };
+            let TreeKind::Ident(field_type) = &parsed.ast.get(field_type_tree).kind else {
+                panic!("Succ.inner type is not a simple source type reference");
+            };
+            assert_eq!(field_type.name, *expr_name.as_name());
+            let field_type_target = typer
+                .store()
+                .scopes
+                .get(package_scope)
+                .lookup(&field_type.name)
+                .expect("canonical Expr target of source Succ.inner type");
+            assert_eq!(field_type_target, expr_symbol);
+            assert_eq!(typer.store().symbols.get(field).owner, Some(class));
+            rows.push(format!(
+                "Succ.inner_type\ttree{}=>{field_type_target:?}\tfield={field:?}\tfield_owner={class:?}\ttype_completion=deferred_before_field_completion",
+                field_type_tree.index()
+            ));
+        }
     }
     rows
 }
 
-fn type_symbol_name(typer: &SourceTyper<'_>, ty: dotty_core::TypeId) -> String {
+fn type_ref_symbol(typer: &SourceTyper<'_>, ty: dotty_core::TypeId) -> dotty_core::SymbolId {
     match typer.store().types.get(ty) {
         Type::TypeRef {
             target: TypeRefTarget::Symbol(symbol),
             ..
-        } => typer
-            .store()
-            .names
-            .resolve(typer.store().symbols.get(*symbol).name.text())
-            .to_owned(),
-        other => format!("{other:?}"),
+        } => *symbol,
+        other => panic!("expected canonical symbol TypeRef, got {other:?}"),
     }
 }
 
