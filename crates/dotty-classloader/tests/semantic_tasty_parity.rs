@@ -1211,6 +1211,7 @@ fn complete_authentic_constructor_once(simple_name: &str) -> AuthenticConstructo
         ))
     );
     let semantic_index = unpickler.into_index();
+    assert_eq!(store.symbols.get(constructor).owner, Some(class));
     let constructor_owned_formal_symbols = formal_symbols
         .iter()
         .filter(|symbol| store.symbols.get(**symbol).owner == Some(constructor))
@@ -1237,12 +1238,14 @@ fn complete_authentic_constructor_once(simple_name: &str) -> AuthenticConstructo
         .get(definitions.int)
         .reference_symbol()
         .expect("bootstrapped canonical Int reference");
+    assert_eq!(parameter_symbol, canonical_int);
     let parameter_type = if parameter_symbol == canonical_int {
         "scala.Int".to_owned()
     } else {
         symbol_path(&store, parameter_symbol)
     };
     let result = reference_symbol(method.result).expect("effective class result");
+    assert_eq!(result, class);
     let asts = file.asts().expect("package tree");
     let package = asts.get(0).expect("root package");
     let package = package.decode_package().expect("package structure");
