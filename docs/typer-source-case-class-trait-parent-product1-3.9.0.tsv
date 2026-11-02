@@ -1,0 +1,5 @@
+kind	subject	before	after
+class	Created	parents=Object,Event;Product=absent;_1=DeclarationContextMissing;unapply=(Created):Created	parents=Object,Event,Product;_1:Int(source-field-derived);apply=(Int):Created;unapply=(Created):Created;Created<:Event=true;Event<:Created=false
+class	Deleted	parents=Object,Event;Product=absent;_1=DeclarationContextMissing;unapply=(Deleted):Deleted	parents=Object,Event,Product;_1:Int(source-field-derived);apply=(Int):Deleted;unapply=(Deleted):Deleted;Deleted<:Event=true;Event<:Deleted=false
+root	extract	ExtractorPatternConstraintDeferred(tree=25);typed_root=absent	ExtractorPatternConstraintDeferred(tree=25);typed_root=absent
+root	classify	ExtractorPatternConstraintDeferred(tree=43);typed_root=absent	ExtractorPatternConstraintDeferred(tree=43);typed_root=absent

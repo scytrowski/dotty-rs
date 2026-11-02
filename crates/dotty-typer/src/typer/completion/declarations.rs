@@ -238,6 +238,14 @@ impl SourceTyper<'_> {
         }
         let product_selector =
             self.source_case_class_product_selector(symbol, kind, &template, constructor);
+        if product_selector.is_some() && template.parents.len() == 1 {
+            self.validate_source_case_class_trait_parent(
+                symbol,
+                template.parents[0],
+                parents[0],
+                info_journal,
+            )?;
+        }
         let mut product_type_to_add = None;
         if let Some(selectors) = product_selector {
             let mut selector_results = Vec::with_capacity(selectors.len());
@@ -265,6 +273,15 @@ impl SourceTyper<'_> {
                     || selector_results[1].1 != self.definitions.boolean)
             {
                 return Err(TyperError::UnsupportedProduct2FieldTypes {
+                    class: symbol,
+                    tree_index: template.constructor.index(),
+                });
+            }
+            if !template.parents.is_empty()
+                && selector_results.len() == 1
+                && selector_results[0].1 != self.definitions.int
+            {
+                return Err(TyperError::UnsupportedProduct1FieldType {
                     class: symbol,
                     tree_index: template.constructor.index(),
                 });
@@ -392,9 +409,10 @@ impl SourceTyper<'_> {
             )
             || !class_symbol.flags.contains(SymbolFlags::CASE)
             || !self.source_class_type_parameters(class).ok()?.is_empty()
-            || !template.parents.is_empty()
+            || template.parents.len() > 1
             || constructor.value_param_clauses.len() != 1
             || !matches!(constructor.value_param_clauses[0].len(), 1 | 2)
+            || (!template.parents.is_empty() && constructor.value_param_clauses[0].len() != 1)
         {
             return None;
         }
@@ -460,6 +478,179 @@ impl SourceTyper<'_> {
             projection.push((*parameter_tree, selector));
         }
         Some(projection)
+    }
+
+    fn validate_source_case_class_trait_parent(
+        &mut self,
+        class: SymbolId,
+        parent_tree: TreeId<Untyped>,
+        parent_type: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        let Some(Type::TypeRef {
+            target: dotty_core::TypeRefTarget::Symbol(parent),
+            ..
+        }) = self.store.types.try_get(parent_type)
+        else {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            });
+        };
+        let parent = *parent;
+        if !self.store.symbols.contains(parent)
+            || self.store.symbols.get(parent).kind != SymbolKind::Trait
+            || self.store.symbols.get(parent).origin != SymbolOrigin::Source(self.source)
+            || !matches!(
+                self.index.definition_of(parent),
+                Some(SourceDefinition::Canonical { source, tree })
+                    if source == self.source && self.index.symbol_at(source, tree) == Some(parent)
+            )
+            || !self
+                .source_class_type_parameters(parent)
+                .is_ok_and(|parameters| parameters.is_empty())
+        {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            });
+        }
+
+        let parent_info = match *self.store.symbols.info(parent) {
+            SymbolInfo::Complete(info) => info,
+            SymbolInfo::Missing => self.complete_symbol_inner(parent, info_journal)?,
+            SymbolInfo::Deferred(_) => {
+                return Err(TyperError::DeferredSymbolCompletion { symbol: parent });
+            }
+            SymbolInfo::Error => return Err(TyperError::SymbolAlreadyErrored { symbol: parent }),
+        };
+        self.validate_existing_class_info(parent, parent_info)?;
+        self.validate_source_parent_graph(parent, parent_info, info_journal)?;
+        if self.store.symbols.get(class).kind != SymbolKind::Class {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_source_parent_graph(
+        &mut self,
+        parent: SymbolId,
+        parent_info: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        let malformed = || TyperError::MalformedClassInfo {
+            symbol: parent,
+            info: parent_info,
+        };
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(parent)
+        else {
+            return Err(malformed());
+        };
+        if source != self.source || self.index.symbol_at(source, tree) != Some(parent) {
+            return Err(malformed());
+        }
+        let Some(TreeKind::TypeDef(definition)) = self.arena.try_get(tree).map(|node| &node.kind)
+        else {
+            return Err(malformed());
+        };
+        let Some(TreeKind::Template(template)) =
+            self.arena.try_get(definition.rhs).map(|node| &node.kind)
+        else {
+            return Err(malformed());
+        };
+        let Some(Type::ClassInfo(info)) = self.store.types.try_get(parent_info).cloned() else {
+            return Err(malformed());
+        };
+        let context = self
+            .index
+            .declaration_context_of(parent)
+            .ok_or_else(malformed)?;
+
+        let mut expected = Vec::with_capacity(template.parents.len().max(1));
+        for parent_tree in &template.parents {
+            expected.push(self.project_parent_type(*parent_tree, context, 0, info_journal)?);
+        }
+        if expected.is_empty() {
+            expected.push(self.definitions.object_type);
+        } else if self.parent_is_trait(expected[0], tree.index(), info_journal)? {
+            expected.insert(0, self.definitions.object_type);
+        }
+        if expected.len() != info.parents.len() {
+            return Err(malformed());
+        }
+        let mut edge_symbols = Vec::with_capacity(info.parents.len());
+        for (actual, canonical) in info.parents.iter().zip(expected) {
+            let Some(edge) = self.authenticated_parent_edge(*actual, 0) else {
+                return Err(malformed());
+            };
+            if edge_symbols.contains(&edge) || !self.same_parent_type(*actual, canonical, 0) {
+                return Err(malformed());
+            }
+            edge_symbols.push(edge);
+        }
+        Ok(())
+    }
+
+    fn authenticated_parent_edge(&self, ty: TypeId, depth: usize) -> Option<SymbolId> {
+        if depth > 64 {
+            return None;
+        }
+        match self.store.types.try_get(ty)? {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } if self.store.symbols.contains(*symbol) => Some(*symbol),
+            Type::Applied { tycon, .. } => self.authenticated_parent_edge(*tycon, depth + 1),
+            _ => None,
+        }
+    }
+
+    fn same_parent_type(&self, actual: TypeId, expected: TypeId, depth: usize) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        match (
+            self.store.types.try_get(actual),
+            self.store.types.try_get(expected),
+        ) {
+            (
+                Some(Type::TypeRef {
+                    prefix: actual_prefix,
+                    target: actual_target,
+                }),
+                Some(Type::TypeRef {
+                    prefix: expected_prefix,
+                    target: expected_target,
+                }),
+            ) => {
+                actual_target == expected_target
+                    && self.same_parent_type(*actual_prefix, *expected_prefix, depth + 1)
+            }
+            (
+                Some(Type::Applied {
+                    tycon: actual_tycon,
+                    args: actual_args,
+                }),
+                Some(Type::Applied {
+                    tycon: expected_tycon,
+                    args: expected_args,
+                }),
+            ) => {
+                actual_args.len() == expected_args.len()
+                    && self.same_parent_type(*actual_tycon, *expected_tycon, depth + 1)
+                    && actual_args
+                        .iter()
+                        .zip(expected_args)
+                        .all(|(actual, expected)| {
+                            self.same_parent_type(*actual, *expected, depth + 1)
+                        })
+            }
+            (Some(Type::NoPrefix), Some(Type::NoPrefix)) => true,
+            _ => false,
+        }
     }
 
     pub(in crate::typer) fn source_case_class_product_selector_owner(

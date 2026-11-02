@@ -52,6 +52,14 @@ RUST_TESTS = {
     "frozen_source_case_class_match_methods_type_as_whole_defdefs",
     "late_body_error_rolls_back_extractor_and_case_binder_state_before_retry",
     "ordinary_classes_wrong_method_results_and_case_binder_escape_are_rejected",
+    "precompleted_source_parent_graph_failures_roll_back_and_retry_in_both_routes",
+    "source_trait_parent_does_not_enable_product2_completion",
+    "source_trait_parent_product1_defers_multi_parent_selector_shape",
+    "source_trait_parent_product1_preserves_identity_in_both_completion_routes",
+    "source_trait_parent_product1_records_frozen_match_first_errors_only",
+    "source_trait_parent_product1_rejects_generic_and_class_parent_shapes",
+    "source_trait_parent_product1_rolls_back_then_retries_sibling_in_same_session",
+    "source_trait_product1_parent_is_authenticated_by_symbol_not_spelling",
     "wrong_component_type_and_wrong_extractor_arities_are_rejected",
 }
 NAMER_TESTS = {

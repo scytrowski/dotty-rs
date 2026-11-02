@@ -35,7 +35,710 @@ const WRONG_CONSTRUCTOR_TYPE: &str =
     include_str!("fixtures/source-case-class-match-3.9.0/WrongConstructorType.scala");
 const EXPLICIT_UNAPPLY_WRONG_RESULT: &str =
     include_str!("fixtures/source-case-class-match-3.9.0/ExplicitUnapplyWrongResult.scala");
+const SOURCE_TRAIT_PRODUCT1: &str =
+    include_str!("fixtures/source-sealed-adt-match-3.9.0/Event.scala");
 type MatchRoots = (SymbolId, Vec<(TreeId<Untyped>, TreeId<Untyped>)>);
+
+#[test]
+fn source_trait_parent_product1_preserves_identity_in_both_completion_routes() {
+    let class_first =
+        source_trait_product1_session(SourceId::from_index(1994), false, SOURCE_TRAIT_PRODUCT1);
+    let selector_first =
+        source_trait_product1_session(SourceId::from_index(2994), true, SOURCE_TRAIT_PRODUCT1);
+    assert_eq!(class_first, selector_first);
+    assert_eq!(class_first.len(), 2);
+    assert!(class_first.iter().any(|row| row.starts_with("Created|")));
+    assert!(class_first.iter().any(|row| row.starts_with("Deleted|")));
+    let reordered = SOURCE_TRAIT_PRODUCT1.replace(
+        "sealed trait Event\n\nfinal case class Created(id: Int) extends Event\nfinal case class Deleted(code: Int) extends Event",
+        "final case class Created(id: Int) extends Event\nfinal case class Deleted(code: Int) extends Event\n\nsealed trait Event",
+    );
+    assert_ne!(reordered, SOURCE_TRAIT_PRODUCT1);
+    assert_eq!(
+        source_trait_product1_session(SourceId::from_index(6994), false, &reordered),
+        class_first,
+        "the source trait declaration may follow its variants"
+    );
+}
+
+#[test]
+fn precompleted_source_parent_graph_failures_roll_back_and_retry_in_both_routes() {
+    let source_text =
+        SOURCE_TRAIT_PRODUCT1.replace("sealed trait Event", "sealed trait Event\ntrait Other");
+    for (selector_first, malformed_graph) in [
+        (false, "unrelated parent"),
+        (true, "unrelated parent"),
+        (false, "duplicate edge"),
+        (true, "duplicate edge"),
+        (false, "invalid TypeId"),
+        (true, "invalid TypeId"),
+    ] {
+        let source = SourceId::from_index(7994 + u32::from(selector_first));
+        let mut session = Session::new(&source_text, source);
+        let event = session.source_type_symbol("Event");
+        let other = session.source_type_symbol("Other");
+        let created = session.source_type_symbol("Created");
+        let selector = session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| session.index.derived_symbol_at(created, source, tree))
+            .expect("Created._1 symbol");
+        session.with_typer(|_, _, _, _, typer| {
+            typer
+                .complete_symbol(event)
+                .expect("complete canonical Event");
+            typer
+                .complete_symbol(other)
+                .expect("complete canonical Other");
+        });
+
+        let (parent_info, canonical_info) = {
+            let SymbolInfo::Complete(parent_info) = *session.store.symbols.info(event) else {
+                panic!("Event is precompleted")
+            };
+            let Some(Type::ClassInfo(canonical_info)) = session.store.types.try_get(parent_info)
+            else {
+                panic!("Event has canonical ClassInfo")
+            };
+            (parent_info, canonical_info.clone())
+        };
+        let other_parent = session.store.types.alloc(Type::TypeRef {
+            prefix: session.definitions.no_prefix,
+            target: TypeRefTarget::Symbol(other),
+        });
+        let invalid_parent = session.store.types.reserve().id();
+        let mut corrupted = canonical_info.clone();
+        corrupted.parents = match malformed_graph {
+            "unrelated parent" => vec![other_parent],
+            "duplicate edge" => vec![
+                session.definitions.object_type,
+                session.definitions.object_type,
+            ],
+            "invalid TypeId" => vec![invalid_parent],
+            _ => unreachable!(),
+        };
+        let malformed_info = session.store.types.alloc(Type::ClassInfo(corrupted));
+        session
+            .store
+            .symbols
+            .set_info(event, SymbolInfo::Complete(malformed_info));
+        let before = session.store.checkpoint();
+        let error = if selector_first {
+            session.with_typer(|_, _, _, _, typer| typer.complete_symbol(selector))
+        } else {
+            session.with_typer(|_, _, _, _, typer| typer.complete_symbol(created))
+        }
+        .expect_err("forged or malformed parent graph is rejected");
+        assert!(
+            matches!(error, TyperError::MalformedClassInfo { symbol, info } if symbol == event && info == malformed_info),
+            "{malformed_graph}, selector_first={selector_first}: {error:?}"
+        );
+        assert_eq!(session.store.checkpoint(), before);
+        assert_eq!(*session.store.symbols.info(created), SymbolInfo::Missing);
+        assert_eq!(*session.store.symbols.info(selector), SymbolInfo::Missing);
+        assert_eq!(
+            *session.store.symbols.info(event),
+            SymbolInfo::Complete(malformed_info),
+            "rollback preserves preexisting metadata for repair"
+        );
+
+        session
+            .store
+            .symbols
+            .set_info(event, SymbolInfo::Complete(parent_info));
+        if selector_first {
+            session.with_typer(|_, _, _, _, typer| {
+                typer
+                    .complete_symbol(selector)
+                    .expect("valid same-store selector-first retry")
+            });
+        } else {
+            session.with_typer(|_, _, _, _, typer| {
+                typer
+                    .complete_symbol(created)
+                    .expect("valid same-store class-first retry")
+            });
+        }
+    }
+}
+
+#[test]
+fn source_trait_parent_product1_rolls_back_then_retries_sibling_in_same_session() {
+    let source = SourceId::from_index(3994);
+    let mut session = Session::new(SOURCE_TRAIT_PRODUCT1, source);
+    let class = session
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if session
+                    .store
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    == "Created" =>
+            {
+                session.index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let selector = session
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, _)| session.index.derived_symbol_at(class, source, tree))
+        .unwrap();
+    session.with_typer_without_resolver(|_, _, _, _, typer| {
+        let before = typer.store().checkpoint();
+        let error = typer
+            .complete_symbol(class)
+            .expect_err("Product absence fails after source-parent and selector work");
+        assert!(matches!(error, TyperError::TypeNameNotFound { name, .. } if typer.store().names.resolve(name.text()) == "Product"));
+        assert_eq!(typer.store().checkpoint(), before, "all semantic mutations roll back");
+        assert_eq!(*typer.store().symbols.info(class), SymbolInfo::Missing);
+        assert_eq!(*typer.store().symbols.info(selector), SymbolInfo::Missing);
+    });
+
+    let sibling = session
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if session
+                    .store
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    == "Deleted" =>
+            {
+                session.index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+        .unwrap();
+    session.with_typer(|_, _, _, _, typer| {
+        typer
+            .complete_symbol(sibling)
+            .expect("valid sibling completes after failed transaction in same session");
+    });
+}
+
+#[test]
+fn source_trait_parent_product1_rejects_generic_and_class_parent_shapes() {
+    let cases = [
+        (
+            "generic_parent",
+            "package adt\ntrait Event[A]\ncase class Created(id: Int) extends Event[Int]\n",
+        ),
+        (
+            "class_parent",
+            "package adt\nclass Base\ncase class Created(id: Int) extends Base\n",
+        ),
+        (
+            "non_int_product1_field",
+            "package adt\ntrait Event\ncase class Created(id: Boolean) extends Event\n",
+        ),
+    ];
+    for (offset, (label, text)) in cases.into_iter().enumerate() {
+        let source = SourceId::from_index(4994 + offset as u32);
+        let mut session = Session::new(text, source);
+        let class = session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if session
+                        .store
+                        .names
+                        .resolve(definition.name.as_name().text())
+                        == "Created" =>
+                {
+                    session.index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let selector = session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| session.index.derived_symbol_at(class, source, tree))
+            .unwrap();
+        session.with_typer(|_, _, _, _, typer| {
+            let error = typer
+                .complete_symbol(class)
+                .expect_err("unsupported parent shape must not enter Product1 completion");
+            match label {
+                "non_int_product1_field" => assert!(
+                    matches!(error, TyperError::UnsupportedProduct1FieldType { .. }),
+                    "{label}: {error:?}"
+                ),
+                _ => assert!(
+                    matches!(error, TyperError::MalformedClassParent { .. }),
+                    "{label}: {error:?}"
+                ),
+            }
+            let retry = typer
+                .complete_symbol(selector)
+                .expect_err("selector-first route must reject the same unsupported shape");
+            match label {
+                "non_int_product1_field" => assert!(matches!(
+                    retry,
+                    TyperError::UnsupportedProduct1FieldType { .. }
+                )),
+                _ => assert!(matches!(retry, TyperError::MalformedClassParent { .. })),
+            }
+        });
+    }
+}
+
+#[test]
+fn source_trait_parent_product1_defers_multi_parent_selector_shape() {
+    let source = SourceId::from_index(7994);
+    let text =
+        "package adt\ntrait Event\ntrait Other\ncase class Created(id: Int) extends Event, Other\n";
+    let mut session = Session::new(text, source);
+    let class = session
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if session
+                    .store
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    == "Created" =>
+            {
+                session.index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let selector = session
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, _)| session.index.derived_symbol_at(class, source, tree))
+        .unwrap();
+    session.with_typer(|_, _, _, _, typer| {
+        let class_info = typer
+            .complete_symbol(class)
+            .expect("ordinary multiple trait parent graph still completes");
+        let Some(Type::ClassInfo(info)) = typer.store().types.try_get(class_info) else {
+            panic!("ClassInfo")
+        };
+        assert!(
+            !info
+                .parents
+                .iter()
+                .any(|parent| match typer.store().types.try_get(*parent) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(symbol),
+                        ..
+                    }) => {
+                        typer
+                            .store()
+                            .names
+                            .resolve(typer.store().symbols.get(*symbol).name.text())
+                            == "Product"
+                    }
+                    _ => false,
+                })
+        );
+        assert!(matches!(
+            typer.complete_symbol(selector),
+            Err(TyperError::DeclarationContextMissing { .. })
+        ));
+        assert_eq!(*typer.store().symbols.info(selector), SymbolInfo::Missing);
+    });
+}
+
+#[test]
+fn source_trait_parent_does_not_enable_product2_completion() {
+    let source = SourceId::from_index(8995);
+    let text = "package adt\ntrait Event\ncase class Created(id: Int, code: Int) extends Event\n";
+    let mut session = Session::new(text, source);
+    let class = session
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if session
+                    .store
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    == "Created" =>
+            {
+                session.index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let selectors = session
+        .parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, _)| session.index.derived_symbol_at(class, source, tree))
+        .collect::<Vec<_>>();
+    session.with_typer(|_, _, _, _, typer| {
+        let class_info = typer
+            .complete_symbol(class)
+            .expect("ordinary two-field source class retains its parent graph");
+        let Some(Type::ClassInfo(info)) = typer.store().types.try_get(class_info) else {
+            panic!("ClassInfo")
+        };
+        assert!(
+            !info
+                .parents
+                .iter()
+                .any(|parent| match typer.store().types.try_get(*parent) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(symbol),
+                        ..
+                    }) => {
+                        typer
+                            .store()
+                            .names
+                            .resolve(typer.store().symbols.get(*symbol).name.text())
+                            == "Product"
+                    }
+                    _ => false,
+                })
+        );
+        assert!(
+            selectors.is_empty(),
+            "explicit-parent two-field classes do not acquire Product2 selectors"
+        );
+    });
+}
+
+#[test]
+fn source_trait_parent_product1_records_frozen_match_first_errors_only() {
+    let source = SourceId::from_index(8994);
+    let mut session = Session::new(SOURCE_TRAIT_PRODUCT1, source);
+    let roots = [
+        ("extract", session.method_named("extract"), 25),
+        ("classify", session.method_named("classify"), 43),
+    ];
+    session.with_typer(|_, parsed, _, _, typer| {
+        for (name, root, expected_tree) in roots {
+            let error = typer
+                .type_method_definition(root)
+                .expect_err("full Match typing remains beyond this bounded completion change");
+            let TyperError::ExtractorPatternConstraintDeferred {
+                tree_index,
+                ..
+            } = error
+            else {
+                panic!("first-error evidence moved unexpectedly: {error:?}");
+            };
+            assert_eq!(tree_index, expected_tree, "baseline diagnostic source tree");
+            let span = parsed.ast.get(root).position.unwrap().span().range();
+            eprintln!(
+                "ISSUE1994_FIRST_ERROR\t{name}\troot=tree{}\tspan={}:{}\terror=ExtractorPatternConstraintDeferred\tconstraint_tree={tree_index}",
+                root.index(),
+                span.start(),
+                span.end()
+            );
+        }
+    });
+}
+
+#[test]
+fn source_trait_product1_parent_is_authenticated_by_symbol_not_spelling() {
+    let source = SourceId::from_index(5994);
+    let text = "package adt\ntrait Event\ntrait Other\ncase class Created(id: Int) extends Other\n";
+    let mut session = Session::new(text, source);
+    let symbols = ["Event", "Other", "Created"].map(|expected| {
+        session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if session
+                        .store
+                        .names
+                        .resolve(definition.name.as_name().text())
+                        == expected =>
+                {
+                    session.index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap()
+    });
+    session.with_typer(|_, _, index, _, typer| {
+        let info = typer
+            .complete_symbol(symbols[2])
+            .expect("canonical source trait parent");
+        let Some(Type::ClassInfo(info)) = typer.store().types.try_get(info) else {
+            panic!("source class info")
+        };
+        let parents = info
+            .parents
+            .iter()
+            .filter_map(|parent| match typer.store().types.try_get(*parent) {
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                }) => Some(*symbol),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(parents.contains(&symbols[1]));
+        assert!(!parents.contains(&symbols[0]));
+        assert!(matches!(
+            index.definition_of(symbols[1]),
+            Some(dotty_core::SourceDefinition::Canonical { source: found, .. }) if found == source
+        ));
+    });
+}
+
+fn source_trait_product1_session(
+    source: SourceId,
+    selector_first: bool,
+    source_text: &str,
+) -> Vec<String> {
+    let source_text = source_text.replace(
+        "object Matcher:",
+        "object Matcher:\n  def accept(event: Event): Int = 0",
+    );
+    let mut session = Session::new(&source_text, source);
+    let symbols = ["Event", "Created", "Deleted"].map(|expected| {
+        session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if session
+                        .store
+                        .names
+                        .resolve(definition.name.as_name().text())
+                        == expected =>
+                {
+                    session.index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing source symbol {expected}"))
+    });
+    let [event, created, deleted] = symbols;
+    let mut summaries = Vec::new();
+    session.with_typer(|_, parsed, index, definitions, typer| {
+        assert_ne!(created, deleted, "variants retain distinct source identities");
+        assert_eq!(typer.store().symbols.get(event).kind, SymbolKind::Trait);
+        assert!(typer
+            .store()
+            .symbols
+            .get(event)
+            .flags
+            .contains(dotty_core::SymbolFlags::SEALED));
+        for class in [created, deleted] {
+            let class_tree = match index.definition_of(class).unwrap() {
+                dotty_core::SourceDefinition::Canonical { tree, .. } => tree,
+                other => panic!("class lost source identity: {other:?}"),
+            };
+            let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
+                panic!("class source root must remain a TypeDef")
+            };
+            let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+                panic!("class source body must remain a Template")
+            };
+            let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+                panic!("case-class primary constructor must remain a DefDef")
+            };
+            let field_tree = constructor.value_param_clauses[0][0];
+            let field = index.symbol_at(source, field_tree).unwrap();
+            let selector = index.derived_symbol_at(class, source, field_tree).unwrap();
+            if selector_first {
+                typer
+                    .complete_symbol(selector)
+                    .expect("selector-first completion");
+            }
+            let class_info = typer
+                .complete_symbol(class)
+                .expect("complete source variant");
+            if !selector_first {
+                typer
+                    .complete_symbol(selector)
+                    .expect("class-first selector completion");
+            }
+            let Some(Type::ClassInfo(info)) = typer.store().types.try_get(class_info) else {
+                panic!("variant must publish ClassInfo")
+            };
+            let parent_symbols = info
+                .parents
+                .iter()
+                .filter_map(|parent| match typer.store().types.try_get(*parent) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(symbol),
+                        ..
+                    }) => Some(*symbol),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                parent_symbols
+                    .iter()
+                    .filter(|symbol| **symbol == event)
+                    .count(),
+                1
+            );
+            let product = parent_symbols
+                .iter()
+                .copied()
+                .filter(|symbol| {
+                    typer
+                        .store()
+                        .names
+                        .resolve(typer.store().symbols.get(*symbol).name.text())
+                        == "Product"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(product.len(), 1, "one canonical Product edge");
+            assert_eq!(typer.store().symbols.get(product[0]).kind, SymbolKind::Trait);
+            assert!(matches!(
+                typer.store().symbols.get(product[0]).origin,
+                SymbolOrigin::Tasty(_)
+            ));
+            let scala = typer.store().symbols.get(product[0]).owner.unwrap();
+            assert_eq!(typer.store().symbols.get(scala).kind, SymbolKind::Package);
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(scala).name.text()),
+                "scala"
+            );
+            assert!(parent_symbols.contains(&definitions.object_class));
+            let parent_names = parent_symbols
+                .iter()
+                .map(|symbol| {
+                    typer
+                        .store()
+                        .names
+                        .resolve(typer.store().symbols.get(*symbol).name.text())
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            assert_eq!(parent_names.as_str(), "Object,Event,Product");
+            assert_eq!(typer.store().symbols.get(class).kind, SymbolKind::Class);
+            assert_eq!(typer.store().symbols.get(class).origin, SymbolOrigin::Source(source));
+            assert!(
+                typer
+                    .store()
+                    .symbols
+                    .get(class)
+                    .flags
+                    .contains(dotty_core::SymbolFlags::CASE)
+            );
+            assert_eq!(typer.store().symbols.get(field).owner, Some(class));
+            assert_eq!(typer.store().symbols.get(field).kind, SymbolKind::Field);
+            assert_eq!(typer.store().symbols.get(selector).owner, Some(class));
+            assert_ne!(field, selector, "source field and derived selector keep distinct IDs");
+            let class_scope = index.scope_of(class).unwrap();
+            let selector_name = typer.store().symbols.get(selector).name;
+            assert_eq!(
+                typer.store().scopes.get(class_scope).lookup_all(&selector_name),
+                [selector],
+                "the class exposes exactly its own _1 selector"
+            );
+            assert_eq!(
+                index.derived_symbol_at(class, source, field_tree),
+                Some(selector),
+                "_1 remains derived from the original source constructor ValDef"
+            );
+            let selector_info = typer.complete_symbol(selector).unwrap();
+            let Some(Type::Method(method)) = typer.store().types.try_get(selector_info) else {
+                panic!("generated _1 must have method type")
+            };
+            assert!(method.params.is_empty());
+            assert_eq!(method.result, definitions.int);
+            assert_eq!(typer.complete_symbol(class).unwrap(), class_info);
+            let unapply = index
+                .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
+                .unwrap();
+            let apply = index
+                .generated_case_class_method(class, GeneratedCaseClassMethodRole::Apply)
+                .unwrap();
+            assert_ne!(apply, unapply);
+            let unapply_info = typer.complete_symbol(unapply).unwrap();
+            let Some(Type::Method(unapply_type)) = typer.store().types.try_get(unapply_info) else {
+                panic!("generated unapply must have a method type")
+            };
+            assert_eq!(unapply_type.params.len(), 1);
+            assert!(matches!(
+                typer.store().types.try_get(unapply_type.params[0].ty),
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == class
+            ));
+            let child_type = unapply_type.result;
+            assert!(matches!(
+                typer.store().types.try_get(child_type),
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == class
+            ));
+            let companion = typer.store().symbols.get(class).links.companion.unwrap();
+            assert_eq!(typer.store().symbols.get(companion).kind, SymbolKind::Object);
+            assert_eq!(typer.store().symbols.get(companion).links.companion, Some(class));
+            let companion_class = typer.store().symbols.get(apply).owner.unwrap();
+            assert_eq!(typer.store().symbols.get(companion_class).kind, SymbolKind::ModuleClass);
+            assert_eq!(typer.store().symbols.get(unapply).owner, Some(companion_class));
+            let apply_info = typer.complete_symbol(apply).unwrap();
+            let Some(Type::Method(apply_type)) = typer.store().types.try_get(apply_info) else {
+                panic!("generated apply must have a method type")
+            };
+            assert_eq!(apply_type.params.len(), 1);
+            assert_eq!(apply_type.params[0].ty, definitions.int);
+            assert!(matches!(
+                typer.store().types.try_get(apply_type.result),
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == class
+            ));
+            let accept = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if typer
+                            .store()
+                            .names
+                            .resolve(definition.name.as_name().text())
+                            == "accept" =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let accept_info = typer.complete_symbol(accept).unwrap();
+            let Some(Type::Method(accept_type)) = typer.store().types.try_get(accept_info) else {
+                panic!("accept must have a method type")
+            };
+            let parent_type = accept_type.params[0].ty;
+            let parent_relation = typer.is_subtype(child_type, parent_type);
+            assert!(parent_relation.expect("nominal parent relation"));
+            assert!(!typer
+                .is_subtype(parent_type, child_type)
+                .expect("reverse nominal relation"));
+            let class_name = typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(class).name.text());
+            let row = format!(
+                "{class_name}|Class(CASE,source)|parents={parent_names}|_1:Int(source-field-derived)|apply=(Int):{class_name}|unapply=({class_name}):{class_name}|{class_name}<:Event=true|Event<:{class_name}=false"
+            );
+            eprintln!("ISSUE1994_CLASS\t{row}");
+            summaries.push(row);
+        }
+    });
+    summaries.sort();
+    summaries
+}
 
 #[test]
 fn frozen_source_case_class_match_methods_type_as_whole_defdefs() {
@@ -1145,6 +1848,21 @@ impl Session {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("source method {method_name} is missing"))
+    }
+
+    fn source_type_symbol(&self, expected: &str) -> SymbolId {
+        self.parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if self.store.names.resolve(definition.name.as_name().text()) == expected =>
+                {
+                    self.index.symbol_at(self.source, tree)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("source type {expected} is missing"))
     }
 
     fn with_typer<R>(

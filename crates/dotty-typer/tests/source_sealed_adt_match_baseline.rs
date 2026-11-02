@@ -34,7 +34,7 @@ fn sealed_event_two_real_method_roots_have_a_stable_first_blocker_baseline() {
     }
     let class_info = class_info_evidence(SourceId::from_index(3992));
     let expected_class_info =
-        include_str!("fixtures/source-sealed-adt-match-3.9.0/rust-classinfo.tsv")
+        include_str!("fixtures/source-sealed-adt-match-3.9.0/rust-after-product1.tsv")
             .split_once('\n')
             .expect("class metadata header")
             .1;
@@ -428,8 +428,9 @@ fn analyze_session(source: SourceId) -> Vec<String> {
                 let error_range = error_node.position.unwrap().span().range();
                 assert!(typer.store().types.try_get(*selector).is_none());
                 assert!(typer.store().types.try_get(*input).is_none());
+                let nested = if nested.is_some() { "present" } else { "none" };
                 format!(
-                    "first_error=ExtractorPatternConstraintDeferred(error_tree=Event.scala#tree{},error_bytes={}:{},selector_type=Event,extractor_input=rolled_back({input:?}),nested={nested:?});typed_index=absent",
+                    "first_error=ExtractorPatternConstraintDeferred(error_tree=Event.scala#tree{},error_bytes={}:{},selector_type=Event,extractor_input=rolled_back(Type),nested={nested});typed_index=absent",
                     error_tree.index(),
                     error_range.start(),
                     error_range.end(),

@@ -262,6 +262,12 @@ pub enum TyperError {
         class: SymbolId,
         tree_index: u32,
     },
+    /// An explicit-parent Product1 case class does not have its bounded `Int`
+    /// source field type.
+    UnsupportedProduct1FieldType {
+        class: SymbolId,
+        tree_index: u32,
+    },
     /// A `new` type tree is a template; anonymous-class lowering is deferred.
     AnonymousClassInstantiationDeferred {
         source: SourceId,
