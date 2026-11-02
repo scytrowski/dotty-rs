@@ -15,11 +15,13 @@ python3 - "$maven_root" "$fixture_dir/scala-artifacts.sha256.tsv" <<'PY'
 from pathlib import Path
 import hashlib, sys
 root, manifest = Path(sys.argv[1]), Path(sys.argv[2])
-for line in manifest.read_text().splitlines()[1:]:
+lines = manifest.read_text().splitlines()
+assert len(lines) == 8, f"expected exactly eight pinned artifacts, found {len(lines)}"
+for line in lines:
     expected, relative = line.split("\t")
     path = root / relative
     assert path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == expected, relative
-print("verified pinned Scala 3.9.0 artifacts")
+print(f"verified all {len(lines)} pinned Scala 3.9.0 artifacts")
 PY
 python3 - "$fixture_dir" "$fixture_dir/source-hashes.tsv" <<'PY'
 from pathlib import Path
@@ -35,7 +37,13 @@ assert recorded == {path.name for path in root.glob("*.scala")}, "source fixture
 print("verified frozen source SHA-256 manifest")
 PY
 jar_paths=()
-while IFS= read -r line; do jar_paths+=("$maven_root/${line#*$'\t'}"); done < <(tail -n +2 "$fixture_dir/scala-artifacts.sha256.tsv")
+while IFS=$'\t' read -r digest relative; do
+  test -n "$digest" && test -n "$relative"
+  jar_paths+=("$maven_root/$relative")
+done < "$fixture_dir/scala-artifacts.sha256.tsv"
+test "${#jar_paths[@]}" -eq 8
+test "${jar_paths[0]}" = "$maven_root/org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar"
+for jar in "${jar_paths[@]}"; do test -f "$jar"; done
 classpath="$(IFS=:; printf '%s' "${jar_paths[*]}")"
 mkdir -p "$scratch/tmp" "$scratch/classes"
 cd "$fixture_dir"
