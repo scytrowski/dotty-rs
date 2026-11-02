@@ -4584,7 +4584,7 @@ fn sibling_constructor_dispatch_batch_verifies_and_runs_on_the_jvm() {
     for class in [&left, &right] {
         assert_eq!(
             class.fields.len(),
-            1,
+            0,
             "children do not redeclare Base state"
         );
         assert_eq!(
@@ -15138,7 +15138,7 @@ fn anyref_identity_uses_reference_branches_and_verifies_runtime_behavior() {
                 .iter()
                 .filter(|(_, found)| *found == opcode)
                 .count(),
-            0,
+            1,
             "{method_name} uses the corresponding reference identity branch"
         );
         assert!(
