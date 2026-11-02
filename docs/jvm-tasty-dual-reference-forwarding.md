@@ -152,3 +152,71 @@ cargo test -p dotty --test jvm_tasty_dual_reference_forwarding source_variants_r
 The strict Rust test reruns the Scala producer build, independent consumer, all Scala validity controls, and byte-for-byte artifact comparisons. The fixture tests also verify class/TASTy UUID links, version numbers, exact constructor descriptors and source/typed identity relationships. The checked-in oracle artifacts are Scala outputs only.
 
 Issue #1960's required final gates remain the pinned Scala/JDK gates plus `cargo fmt --all -- --check`, `python3 tools/check-frontend-boundaries.py`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`, `cargo test --workspace --all-targets --locked`, the mandatory `DOTTY_CLASSFILE_REQUIRE_JDK=1` test command, and `git diff --check`.
+
+## Original Rust factory identity proof (#1967)
+
+Issue [#1967](https://github.com/scytrowski/dotty-rs/issues/1967) checks the runtime behavior of the unchanged source above, from one call to `emit_paired_jvm_tasty_batch` through the genuine Rust frontend. This run starts from `origin/main` `3a854831b9c074261e31e82d325c0350f606b95a`, uses source SHA-256 `48e4ab7b3038eda26f9070a5879a9cd71d4eb51f69277d1eafcff53bda28610e`, Rust `1.98.1`, and Temurin `21.0.13+9`. The isolated batch contains only the three original producer classes and their three linked TASTy sidecars. A separate Java harness is compiled with `javac --release 21`; runtime classpath order is harness classes followed by that Rust batch. There are no Scala-produced artifacts in the JVM path. The TASTy files are included and hashed as producer outputs, but this test makes no independent Scala interoperability claim.
+
+The Rust classfile decoder and `javap -v -p -c` both observe `PairFactory.wrap(LCounter;LCounter;)LPair;` with `max_stack=4`, `max_locals=3`, classfile major 65, and exactly this code. Program counters below are parsed from the actual `javap` output and asserted by the focused test:
+
+| PC | Instruction |
+| ---: | --- |
+| 0 | `new example/Pair` |
+| 3 | `dup` |
+| 4 | `aload_1` |
+| 5 | `aload_2` |
+| 6 | `invokespecial example/Pair.<init>(Lexample/Counter;Lexample/Counter;)V` |
+| 9 | `areturn` |
+
+The Rust CFG analyzer independently accepts that sequence and reports the same stack and local maxima. The selected invocation is the exact two-reference `Pair.<init>` Methodref. `wrap` contains one `new`, no `Counter` allocation, and no call to a `Counter` constructor.
+
+Under `java -Xverify:all -ea`, the separate harness reflects `Pair.left` and `Pair.right` and compares them by `==` to the original `Counter` arguments. It observed `7/3`, then `42/3`, then `42/-9`; `wrap(b,a)` retained positional reversal; repeated calls through multiple `PairFactory` instances returned separate `Pair` objects while retaining the same passed `Counter`s. For the intentional alias case, `wrap(a,a)` stored that identical object in both fields, and after `a.set(100)` both reads were `100`. The harness output was:
+
+```text
+forward=7/3,42/3,42/-9;reverse=-9/42;repeat=true;alias=100/100
+```
+
+All six Rust artifacts were SHA-256 hashed before the Java compile and remained byte-for-byte unchanged after both compilation and execution. The digests from this source-session run are:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `example/Counter.class` | `a8c1b47ebb17a6b7d72d2041f4cfa9afd195f1805258b6e01b44f767c1ead68f` |
+| `example/Counter.tasty` | `461335e32408077e7374cd3ead0ad3813d3d0867be11f1aecf281aba0aff6d9f` |
+| `example/Pair.class` | `430ce593e9e101801f0e4d4026ad8601686748c39312ead81b3846ff81724ce2` |
+| `example/Pair.tasty` | `0af41688c6cb8071d2070a45c75257a7965ff02cc4a3702934dd6b4593461abd` |
+| `example/PairFactory.class` | `b9fa30d3591ec3ced684d54260d8fd5bde1467a310a3d99c9422225ea1f20f14` |
+| `example/PairFactory.tasty` | `2738a0acb64dc0da9dadba366ac01a03ad43b90d2ae5bfc397988e58ecd390d6` |
+
+Negative tests use isolated modified copies and report the first actual rejecting layer. In particular, swapped same-typed loads are valid bytecode and pass verification; they fail only when the runtime reflection identity assertion checks the positional contract.
+
+| Modified copy | First observed rejection |
+| --- | --- |
+| Swap `aload_1` and `aload_2` | Runtime identity assertion: `left` is not the original first argument |
+| Load local 1 twice | Runtime identity assertion: `right` is not the original second argument |
+| Change the selected constructor owner to `java/lang/Object` | JVM verifier: `VerifyError: Call to wrong <init> method` |
+| Change the selected constructor descriptor to `()V` | JVM verifier: `VerifyError: Bad operand type when invoking <init>` |
+| Remove `Pair.new` | JVM verifier: `VerifyError: Bad type on operand stack` |
+| Insert a second `Pair.new` before return | JVM verifier: `VerifyError: Bad return type` |
+| Remove the selected `invokespecial` | JVM verifier: `VerifyError: Operand stack overflow` |
+| Insert a second selected `invokespecial` after initialization | JVM verifier: `VerifyError: Bad type on operand stack` |
+| Remove `dup` before constructor initialization | JVM verifier: `VerifyError: Operand stack underflow` |
+| Set `max_stack` to 3 | JVM verifier: `VerifyError: Operand stack overflow` |
+| Set `max_locals` to 2 | JVM classfile loading: `ClassFormatError: Arguments can't fit into locals` |
+| Omit `Counter.class` | JVM linkage: `NoClassDefFoundError: example/Counter` |
+| Omit `Pair.class` | JVM linkage: `NoClassDefFoundError: example/Pair` |
+
+Reproduce the runtime proof from the repository root with the pinned JDK. `TMPDIR` and `CARGO_TARGET_DIR` must point to persistent worktree-local directories:
+
+```sh
+export JAVA_HOME=/path/to/temurin-21.0.13
+export PATH="$JAVA_HOME/bin:$PATH"
+export TMPDIR="$PWD/.issue1967-tmp"
+export CARGO_TARGET_DIR="$PWD/.issue1967-target"
+export CARGO_BUILD_JOBS=2
+export DOTTY_CLASSFILE_REQUIRE_JDK=1
+export JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=$TMPDIR -XX:-UsePerfData"
+
+cargo test -p dotty --test jvm_tasty_dual_reference_identity \
+  dual_reference_factory_preserves_forwarded_argument_identity_on_strict_jdk21 \
+  --locked -- --nocapture
+```
