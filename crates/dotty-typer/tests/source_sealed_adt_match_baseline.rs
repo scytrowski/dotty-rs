@@ -18,19 +18,20 @@ const SOURCE: &str = include_str!("fixtures/source-sealed-adt-match-3.9.0/Event.
 const ROOTS: [&str; 2] = ["extract", "classify"];
 
 #[test]
-fn sealed_event_two_real_method_roots_have_a_stable_first_blocker_baseline() {
+fn sealed_event_two_real_method_roots_record_first_error_movement() {
     let first = analyze_session(SourceId::from_index(1992));
     let second = analyze_session(SourceId::from_index(2992));
     assert_eq!(first, second, "fresh source sessions normalize identically");
     assert_eq!(first.len(), 2, "only the original two DefDef roots count");
     let actual = format!("{}\n", first.join("\n"));
-    let expected = include_str!("fixtures/source-sealed-adt-match-3.9.0/rust-baseline.tsv")
-        .split_once('\n')
-        .expect("baseline header")
-        .1;
+    let expected =
+        include_str!("fixtures/source-sealed-adt-match-3.9.0/rust-after-extractor-narrowing.tsv")
+            .split_once('\n')
+            .expect("post-narrowing receipt header")
+            .1;
     assert_eq!(actual, expected);
     for row in first {
-        println!("ISSUE1992_ROOT\t{row}");
+        println!("ISSUE1996_ROOT\t{row}");
     }
     let class_info = class_info_evidence(SourceId::from_index(3992));
     let expected_class_info =

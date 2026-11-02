@@ -418,35 +418,41 @@ fn source_trait_parent_does_not_enable_product2_completion() {
 }
 
 #[test]
-fn source_trait_parent_product1_records_frozen_match_first_errors_only() {
+fn source_trait_parent_product1_records_frozen_match_first_error_movement() {
     let source = SourceId::from_index(8994);
     let mut session = Session::new(SOURCE_TRAIT_PRODUCT1, source);
     let roots = [
         ("extract", session.method_named("extract"), 25),
         ("classify", session.method_named("classify"), 43),
     ];
+    let mut rows = Vec::new();
     session.with_typer(|_, parsed, _, _, typer| {
         for (name, root, expected_tree) in roots {
-            let error = typer
+            let typed = typer
                 .type_method_definition(root)
-                .expect_err("full Match typing remains beyond this bounded completion change");
-            let TyperError::ExtractorPatternConstraintDeferred {
-                tree_index,
-                ..
-            } = error
-            else {
-                panic!("first-error evidence moved unexpectedly: {error:?}");
-            };
-            assert_eq!(tree_index, expected_tree, "baseline diagnostic source tree");
+                .unwrap_or_else(|error| panic!("root no longer reaches its post-change outcome: {error:?}"));
+            assert_eq!(typer.source_typed_index().get(source, root), Some(typed));
             let span = parsed.ast.get(root).position.unwrap().span().range();
-            eprintln!(
-                "ISSUE1994_FIRST_ERROR\t{name}\troot=tree{}\tspan={}:{}\terror=ExtractorPatternConstraintDeferred\tconstraint_tree={tree_index}",
+            rows.push(format!(
+                "{name}\troot=tree{}\tspan={}:{}\tbefore=ExtractorPatternConstraintDeferred@tree{expected_tree}\tafter=complete=typed#tree{}",
                 root.index(),
                 span.start(),
-                span.end()
-            );
+                span.end(),
+                typed.index()
+            ));
         }
     });
+    let actual = format!("{}\n", rows.join("\n"));
+    let expected = include_str!(
+        "fixtures/source-sealed-adt-match-3.9.0/rust-product1-first-error-movement.tsv"
+    )
+    .split_once('\n')
+    .expect("first-error movement receipt header")
+    .1;
+    assert_eq!(actual, expected);
+    for row in rows {
+        println!("ISSUE1996_FIRST_ERROR_MOVEMENT\t{row}");
+    }
 }
 
 #[test]

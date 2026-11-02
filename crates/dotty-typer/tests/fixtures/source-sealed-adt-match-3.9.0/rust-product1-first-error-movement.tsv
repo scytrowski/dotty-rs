@@ -1,0 +1,3 @@
+root	outcome
+extract	root=tree36	span=150:262	before=ExtractorPatternConstraintDeferred@tree25	after=complete=typed#tree21
+classify	root=tree60	span=266:400	before=ExtractorPatternConstraintDeferred@tree43	after=complete=typed#tree49

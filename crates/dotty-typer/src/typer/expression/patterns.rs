@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use super::{ExpressionContext, SourceTyper, TyperError};
+use crate::TypeRelationError;
 use crate::typer::{
     ExtractorMethodShapeIssue, ExtractorPatternArgumentIssue, ExtractorProductIssue,
     ExtractorResultMemberIssue, PatternKind, TuplePatternResolutionIssue,
@@ -1302,18 +1303,34 @@ impl SourceTyper<'_> {
                 result: result_type,
             });
         }
-        let conforms = self.conforms(selector_type, input_type);
+        let conforms =
+            self.extractor_selector_conforms_to_input(selector_type, input_type, info_journal);
         let unapply_type = match conforms {
             Ok(true) if selector_type == self.definitions.nothing_type => input_type,
             Ok(true) => selector_type,
             Ok(false) => {
-                return Err(TyperError::ExtractorPatternConstraintDeferred {
-                    source: self.source,
-                    tree_index: pattern.index(),
-                    selector: selector_type,
-                    input: input_type,
-                    error: None,
-                });
+                match self.extractor_input_narrows_selector(input_type, selector_type, info_journal)
+                {
+                    Ok(true) => input_type,
+                    Ok(false) => {
+                        return Err(TyperError::ExtractorPatternConstraintDeferred {
+                            source: self.source,
+                            tree_index: pattern.index(),
+                            selector: selector_type,
+                            input: input_type,
+                            error: None,
+                        });
+                    }
+                    Err(error) => {
+                        return Err(TyperError::ExtractorPatternConstraintDeferred {
+                            source: self.source,
+                            tree_index: pattern.index(),
+                            selector: selector_type,
+                            input: input_type,
+                            error: Some(Box::new(error)),
+                        });
+                    }
+                }
             }
             Err(error) => {
                 return Err(TyperError::ExtractorPatternConstraintDeferred {
@@ -1344,6 +1361,97 @@ impl SourceTyper<'_> {
             unapply_type,
             source_patterns: application.args.clone(),
         })
+    }
+
+    /// Allows the bounded reverse relation needed by nominal extractor patterns
+    /// only when both the extractor input and selector are direct class or
+    /// trait references. Global conformance deliberately remains unchanged;
+    /// applied, union, intersection, and other non-nominal shapes stay deferred.
+    fn extractor_input_narrows_selector(
+        &mut self,
+        input_type: TypeId,
+        selector_type: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<bool, TypeRelationError> {
+        let direct_nominal_symbol = |ty: TypeId| match self.store.types.try_get(ty) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            }) => Some(*symbol),
+            _ => None,
+        };
+        let (Some(input), Some(selector)) = (
+            direct_nominal_symbol(input_type),
+            direct_nominal_symbol(selector_type),
+        ) else {
+            return Err(TypeRelationError::UnsupportedType {
+                found: input_type,
+                expected: selector_type,
+            });
+        };
+        for symbol in [input, selector] {
+            if self.store.symbols.contains(symbol)
+                && !matches!(
+                    self.store.symbols.get(symbol).kind,
+                    SymbolKind::Class | SymbolKind::Trait
+                )
+            {
+                return Err(TypeRelationError::UnsupportedType {
+                    found: input_type,
+                    expected: selector_type,
+                });
+            }
+        }
+        self.complete_typed_pattern_relation_class(input_type, info_journal)
+            .map_err(|error| TypeRelationError::ParentTypeAdaptation {
+                symbol: input,
+                error,
+            })?;
+        self.complete_typed_pattern_relation_class(selector_type, info_journal)
+            .map_err(|error| TypeRelationError::ParentTypeAdaptation {
+                symbol: selector,
+                error,
+            })?;
+        self.is_subtype(input_type, selector_type)
+    }
+
+    fn extractor_selector_conforms_to_input(
+        &mut self,
+        selector_type: TypeId,
+        input_type: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<bool, TypeRelationError> {
+        let relation = self.conforms(selector_type, input_type);
+        if !matches!(
+            relation,
+            Err(TypeRelationError::ClassInfoUnavailable {
+                state: crate::types::SymbolInfoState::Missing,
+                ..
+            })
+        ) {
+            return relation;
+        }
+        for ty in [selector_type, input_type] {
+            let Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            }) = self.store.types.try_get(ty)
+            else {
+                return relation;
+            };
+            let symbol = *symbol;
+            if !self.store.symbols.contains(symbol)
+                || !matches!(
+                    self.store.symbols.get(symbol).kind,
+                    SymbolKind::Class | SymbolKind::Trait
+                )
+            {
+                return relation;
+            }
+            self.complete_typed_pattern_relation_class(ty, info_journal)
+                .map_err(|error| TypeRelationError::ParentTypeAdaptation { symbol, error })?;
+        }
+        self.conforms(selector_type, input_type)
     }
 
     fn is_sequence_wildcard_pattern(&self, pattern: TreeId<Untyped>) -> bool {
@@ -3416,6 +3524,397 @@ mod tests {
             typer.store.types.try_get(typer.typed_arena.get(plan.function).ty),
             Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == unapply_symbol
         ));
+        let forward_supertype_plan = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.resolve_extractor_pattern_plan(
+                    pattern,
+                    &application,
+                    definitions.int,
+                    context,
+                    journal,
+                    mappings,
+                )
+            })
+            .unwrap();
+        assert_eq!(forward_supertype_plan.input_type, plan.input_type);
+        assert_eq!(
+            forward_supertype_plan.unapply_type, definitions.int,
+            "selector-to-unapply-supertype cases retain the original selector prototype"
+        );
+    }
+
+    #[test]
+    fn nominal_subtype_extractor_patterns_narrow_only_the_pattern_prototype() {
+        let source_text = "package scala { trait Product }; package matching { trait Event; case class Created(id: Int) extends Event; case class Deleted(code: Int) extends Event; object Matcher { def extract(event: Event): Int = event match { case Created(id) => id; case Deleted(code) => code } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let symbol_named = |name: &str, kind: SymbolKind| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == name
+                            && store
+                                .symbols
+                                .get(index.symbol_at(source, tree).unwrap())
+                                .kind
+                                == kind =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing {kind:?} {name}"))
+        };
+        let product = symbol_named("Product", SymbolKind::Trait);
+        let event = symbol_named("Event", SymbolKind::Trait);
+        let created = symbol_named("Created", SymbolKind::Class);
+        let deleted = symbol_named("Deleted", SymbolKind::Class);
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "extract" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let match_selector = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Match(expression) => Some(expression.selector),
+                _ => None,
+            })
+            .unwrap();
+        let cases = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| match &node.kind {
+                TreeKind::CaseDef(_) => Some(tree),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(cases.len(), 2);
+        let event_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(event),
+        });
+        let created_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(created),
+        });
+        let deleted_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(deleted),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        typer.complete_symbol(product).unwrap();
+        let typed_selector = typer.type_expression(match_selector, context).unwrap();
+        let selector_parameter = match typer
+            .store
+            .types
+            .get(typer.typed_arena.get(typed_selector).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("unexpected source Match selector type {other:?}"),
+        };
+        let SymbolInfo::Complete(selector_parameter_type) =
+            *typer.store.symbols.info(selector_parameter)
+        else {
+            panic!("source Match selector parameter has a completed type")
+        };
+        assert!(matches!(
+            typer.store.types.try_get(selector_parameter_type),
+            Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. })
+                if *symbol == event
+        ));
+        let created_unapply = index
+            .generated_case_class_method(created, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .unwrap();
+        let deleted_unapply = index
+            .generated_case_class_method(deleted, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .unwrap();
+        let canonical_int = match typer.store.types.get(definitions.int) {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("unexpected canonical Int type {other:?}"),
+        };
+        let selector_name = Name::new(typer.store.names.intern("_1"), Namespace::Term);
+        let mut binder_symbols = Vec::new();
+
+        for (case_tree, expected_class, expected_unapply, binder) in [
+            (cases[0], created, created_unapply, "id"),
+            (cases[1], deleted, deleted_unapply, "code"),
+        ] {
+            let typed_case = typer
+                .run_expression_transaction(|typer, journal, mappings| {
+                    typer.type_case_def(case_tree, event_type, context, journal, mappings)
+                })
+                .unwrap();
+            let TreeKind::CaseDef(case_def) = &typer.typed_arena.get(typed_case).kind else {
+                panic!("expected typed case definition")
+            };
+            let typed = case_def.pattern;
+            let node = typer.typed_arena.get(typed);
+            assert!(
+                matches!(
+                    typer.store.types.try_get(node.ty),
+                    Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. })
+                        if *symbol == expected_class
+                ),
+                "the pattern prototype is the authentic narrowed variant"
+            );
+            let TreeKind::UnApply(unapply) = &node.kind else {
+                panic!("expected typed UnApply, found {:?}", node.kind)
+            };
+            let TreeKind::Select(selection) = &typer.typed_arena.get(unapply.function).kind else {
+                panic!("expected selected unapply method")
+            };
+            let selected_name = selection.name;
+            assert!(matches!(
+                typer.store.types.try_get(typer.typed_arena.get(unapply.function).ty),
+                Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. })
+                    if *symbol == expected_unapply
+            ));
+            let owner = typer.store.symbols.get(expected_unapply).owner.unwrap();
+            assert_eq!(typer.store.symbols.get(owner).kind, SymbolKind::ModuleClass);
+            assert_eq!(
+                index
+                    .generated_case_class_method_identity(expected_unapply)
+                    .unwrap()
+                    .class,
+                expected_class,
+                "the source-generated extractor owner remains variant-specific"
+            );
+            assert_eq!(unapply.patterns.len(), 1);
+            let TreeKind::Bind(binding) = &typer.typed_arena.get(unapply.patterns[0]).kind else {
+                panic!("expected nested binder")
+            };
+            assert_eq!(typer.store.names.resolve(binding.name.text()), binder);
+            let binder_type = typer.typed_arena.get(unapply.patterns[0]).ty;
+            let selector_symbol = match typer.store.types.get(binder_type) {
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } => *symbol,
+                other => panic!("unexpected extractor component type {other:?}"),
+            };
+            assert_eq!(typer.store.symbols.get(selector_symbol).owner, Some(method));
+            binder_symbols.push(selector_symbol);
+            let SymbolInfo::Complete(binding_info) = *typer.store.symbols.info(selector_symbol)
+            else {
+                panic!("nested binder has a completed semantic type")
+            };
+            let binding_int = match typer.store.types.get(binding_info) {
+                Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                } => *symbol,
+                other => panic!("unexpected nested binder type {other:?}"),
+            };
+            assert_eq!(binding_int, canonical_int);
+            let unapply_info = typer.complete_symbol(expected_unapply).unwrap();
+            let Type::Method(unapply_method) = typer.store.types.get(unapply_info) else {
+                panic!("generated unapply method has a method type")
+            };
+            let selectors = typer
+                .lookup_overload_members_journaled(
+                    unapply_method.result,
+                    selector_name,
+                    &mut Vec::new(),
+                )
+                .unwrap();
+            assert_eq!(selectors.len(), 1);
+            let product_selector = selectors[0].symbol;
+            assert_eq!(
+                typer.store.symbols.get(product_selector).owner,
+                Some(expected_class),
+                "the selected `_1` declaration belongs to the matching variant"
+            );
+            let SymbolInfo::Complete(selector_info) = *typer.store.symbols.info(product_selector)
+            else {
+                panic!("the matching variant's `_1` selector is complete")
+            };
+            let Type::Method(selector_method) = typer.store.types.get(selector_info) else {
+                panic!("the matching `_1` selector is a method")
+            };
+            assert!(selector_method.params.is_empty());
+            assert_eq!(selector_method.result, definitions.int);
+            assert_eq!(typer.store.names.resolve(selected_name.text()), "unapply");
+        }
+        assert_ne!(binder_symbols[0], binder_symbols[1]);
+        assert!(!typer.conforms(event_type, created_type).unwrap());
+        assert!(typer.conforms(created_type, event_type).unwrap());
+        assert!(!typer.conforms(event_type, deleted_type).unwrap());
+        assert!(typer.conforms(deleted_type, event_type).unwrap());
+    }
+
+    #[test]
+    fn unrelated_extractor_input_stays_deferred_after_nominal_narrowing_attempt() {
+        let source_text = "package scala { trait Product }; package matching { trait Event; class Foreign; object ForeignExtractor { def unapply(value: Foreign): Int = 1 }; object Matcher { def choose(event: Event): Int = event match { case ForeignExtractor(_) => 1 } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let class_symbol = |name: &str| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == name =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let event = class_symbol("Event");
+        let product = class_symbol("Product");
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "choose" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let case_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::CaseDef(_)).then_some(tree))
+            .unwrap();
+        let event_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(event),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        typer.complete_symbol(product).unwrap();
+        let checkpoint = typer.store.checkpoint();
+        let error = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_case_def(case_tree, event_type, context, journal, mappings)
+            })
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            TyperError::ExtractorPatternConstraintDeferred {
+                selector,
+                input: _,
+                error: None,
+                ..
+            } if selector == event_type
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert!(typer.typed_arena.iter().next().is_none());
+        assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn failure_after_narrowing_rolls_back_and_same_session_retry_succeeds() {
+        let source_text = "package scala { trait Product }; package matching { trait Event; case class Created(id: Int) extends Event; object Matcher { def choose(event: Event): Int = event match { case Created(true) => 0; case Created(id) => id } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let symbol_named = |name: &str, kind: SymbolKind| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == name
+                            && store
+                                .symbols
+                                .get(index.symbol_at(source, tree).unwrap())
+                                .kind
+                                == kind =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let event = symbol_named("Event", SymbolKind::Trait);
+        let product = symbol_named("Product", SymbolKind::Trait);
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "choose" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let cases = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| matches!(node.kind, TreeKind::CaseDef(_)).then_some(tree))
+            .collect::<Vec<_>>();
+        assert_eq!(cases.len(), 2);
+        let event_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(event),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        typer.complete_symbol(product).unwrap();
+        let checkpoint = typer.store.checkpoint();
+        let error = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_case_def(cases[0], event_type, context, journal, mappings)
+            })
+            .unwrap_err();
+        assert!(matches!(error, TyperError::PatternTypeMismatch { .. }));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert!(typer.typed_arena.iter().next().is_none());
+        assert!(typer.typed_index.is_empty());
+
+        let retried = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_case_def(cases[1], event_type, context, journal, mappings)
+            })
+            .expect("a valid same-session retry succeeds after rollback");
+        assert!(matches!(
+            typer.typed_arena.get(retried).kind,
+            TreeKind::CaseDef(_)
+        ));
+        assert!(!typer.typed_index.is_empty());
     }
 
     #[test]
