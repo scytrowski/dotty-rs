@@ -1,6 +1,6 @@
 # Semantic TASTy convergence II: bounded single-class audit
 
-Status: inputs frozen; semantic measurement has not started.
+Status: completed for the two frozen inputs; the final CI gate remains.
 
 ## Frozen inputs and environment
 
@@ -35,7 +35,7 @@ pre-measurement hashes are:
 
 The earlier 14-unit / 126-row denominator and all its outputs remain out of
 scope for regeneration. This issue makes no fixture substitutions. Outcomes
-will be normalized by semantic role and qualified names, never by numeric
+are normalized by semantic role and qualified names, never by numeric
 `SymbolId` or `TypeId`; within each store, canonical symbol references,
 owner/visibility/flags, parent and signatures, constructor kind/owner/result,
 and origin are checked explicitly. Serialized constructor result and effective
@@ -43,25 +43,67 @@ constructor result remain separate observations.
 
 ## Audit procedure
 
-After this freeze checkpoint, inspect each original TASTy tree and address
-index, then measure each selected class and its discovered primary constructor
-in two independent fresh `SemanticStore` / one-`Definitions::bootstrap` runs
-through the existing classpath resolver and `TastySession`. Run the legacy
-`ClassLoader::load_class` comparison independently. Each attempt records the
-exact first typed error and classifies it as semantic unsupported, unresolved
-classpath input, or harness/infrastructure failure. No successful root-only
-completion counts as acceptance; no partial class is accepted, and no `Any` or
-`Object` fallback is inferred.
+The regression in `crates/dotty-classloader/tests/semantic_tasty_parity.rs`
+discovers the class `TYPEDEF` and primary constructor `DEFDEF` structurally in
+each original TASTy tree, records addresses as fixture evidence only, and
+explicitly completes both nodes through the existing resolver-backed
+`TastySession`. Each run uses a new `SemanticStore`, exactly one
+`Definitions::bootstrap`, and the frozen classpath. It repeats this for two
+independent sessions per class and compares normalized receipts byte for byte.
+It separately invokes legacy `ClassLoader::load_class` in fresh stores and
+checks repeatability. The compact per-fixture receipt is in [the result TSV]
+(classloader-semantic-tasty-convergence-ii-results.tsv).
 
-Negative controls cover wrong requested package/owner, a missing dependency,
-and a malformed or unsupported fixture variant. These controls must fail
-closed. The two normalized semantic receipts must be byte-identical across
-fresh runs before the report makes an eligibility claim.
+Both unpickler runs complete the class and constructor. For both fixtures the
+original constructor `DEFDEF@21` has one empty clause and serializes its result
+as `scala.Unit`; effective semantic completion gives a plain zero-argument
+constructor whose result is its owning class. The legacy loader reports
+`()Plain:Unit`. This is an observed constructor-signature semantic delta, not a
+load failure. `PlainPrivate` is represented as
+`PrivateWithin(me.cytrowski.tastyfixtures.visibility)`, matching its Scala
+`private` source declaration under Scala 3.9.0 semantics.
+
+The legacy loader loads both classes from the frozen visibility fixture
+directory, assigns public visibility to both constructors, and completes
+`java.lang.Object` as the sole parent. The unpickler produces the same class
+identity role, class visibility, constructor owner/kind/visibility, and parent.
+The result does not claim exact signature parity: the constructor result
+representation differs as described above.
+
+Negative controls request each original class without the JDK module path
+(leaving `java.lang.Object` unavailable), request each class under a wrong
+package, and truncate each original TASTy by one byte. The loader errors are
+typed `NotFound` / `DependencyFailure`, no wrong-owner request aliases the
+frozen input, and store checkpoints are unchanged after failed loads. The
+TASTy parser rejects truncated input. No partial class is accepted and no
+`Any` or `Object` fallback is inferred. Existing malformed-input and
+missing-dependency regressions remain intact.
 
 ## Result
 
-Pending measurement. The final section will state the bounded accepted class
-shape, the first unsupported neighboring shape, and whether the preselected
-2/2 target is feasible. If `PlainPrivate` cannot be accepted with the current
-semantics, the result will say `AUDIT TARGET BLOCKED` and name one atomic
-prerequisite without implementing it.
+**2/2 frozen classes are eligible for explicit class and primary-constructor
+completion** through one narrow shape: a top-level class with one empty
+primary-constructor clause, no type parameters or declared members, and a
+resolvable `java.lang.Object` parent, with either public visibility or private
+visibility qualified to the containing package. This is semantic completion
+eligibility, not exact legacy signature parity: both rows retain the reported
+`Unit` versus owning-class constructor result delta.
+
+The first evidenced neighboring unsupported shape remains a non-empty
+constructor clause: the preserved #1927 comparison records a parameterized
+constructor as `<missing>` on the unpickler side. That historical observation
+defines the rejection boundary for this contract; this issue did not substitute
+that fixture or run a broader cohort. The 14-unit/126-row denominator remains
+unchanged. No production gate or reusable loader contract was changed.
+
+Focused validation ran with the pinned toolchain and isolated temporary/build
+directories:
+
+```text
+cargo test -p dotty-classloader --test semantic_tasty_parity --locked
+cargo fmt --all -- --check
+```
+
+Repository-wide checks and the JDK 21 gate are recorded in the PR validation
+summary. Final hashes confirm all three historical artifacts above remain
+unchanged.

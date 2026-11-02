@@ -1070,6 +1070,322 @@ fn complete_open_constructor_once() -> OpenConstructorObservation {
     }
 }
 
+fn complete_visibility_constructor_once(unit_id: &str) -> Result<String, String> {
+    use dotty_core::{SymbolInfo, SymbolKind};
+    use dotty_tasty::tasty::{
+        DEFDEF_TAG, DefinitionBody, RawTree, StructuredNode, StructuredTree, TermValue,
+    };
+
+    let unit = units()
+        .into_iter()
+        .find(|unit| unit.id == unit_id)
+        .unwrap_or_else(|| panic!("missing frozen unit {unit_id}"));
+    let bytes = fs::read(&unit.path).map_err(|error| format!("fixture read: {error}"))?;
+    let file = TastyFile::parse(&bytes).map_err(|error| format!("TASTy parse: {error:?}"))?;
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let resolver = ClasspathSymbolResolver::new(classpath(), definitions, LoadingSession::new());
+    let mut unpickler = TastyUnpickler::with_session(
+        &file,
+        &mut store,
+        definitions,
+        TastySession::new()
+            .with_resolver(Box::new(resolver))
+            .map_err(|error| format!("attach resolver: {error:?}"))?,
+    );
+    unpickler
+        .enter_symbols()
+        .map_err(|error| format!("enter symbols: {error:?}"))?;
+    let simple_name = unit.lookup.rsplit('/').next().unwrap_or(unit.lookup);
+    let class_address = root_definition_address(&file, &unpickler, simple_name)
+        .ok_or_else(|| format!("no indexed TYPEDEF for {simple_name}"))?;
+    let class = unpickler
+        .index()
+        .symbol_at(class_address)
+        .ok_or_else(|| "class TYPEDEF has no symbol".to_owned())?;
+    let class_type = unpickler
+        .complete_symbol(class_address)
+        .map_err(|error| format!("complete class TYPEDEF@{class_address}: {error:?}"))?;
+    if !matches!(
+        unpickler.symbol_state_at(class_address),
+        Some((SymbolKind::Class, SymbolInfo::Complete(_)))
+    ) {
+        return Err(format!("class TYPEDEF@{class_address} is not complete"));
+    }
+
+    let ast = file
+        .ast_address_index()
+        .map_err(|error| format!("AST address index: {error:?}"))?;
+    let constructors = ast
+        .iter_nodes()
+        .filter(|node| node.tag == DEFDEF_TAG)
+        .filter_map(|node| u32::try_from(node.offset).ok())
+        .filter(|address| {
+            matches!(
+                unpickler.symbol_state_at(*address),
+                Some((SymbolKind::Constructor, _))
+            )
+        })
+        .collect::<Vec<_>>();
+    if constructors.len() != 1 {
+        return Err(format!(
+            "expected one indexed primary constructor DEFDEF for {simple_name}; found {} at {:?}",
+            constructors.len(),
+            constructors
+        ));
+    }
+    let constructor_address = constructors[0];
+    let constructor_node = ast
+        .get(constructor_address)
+        .ok_or_else(|| format!("missing original constructor DEFDEF@{constructor_address}"))?
+        .decode_structured()
+        .map_err(|error| format!("decode original constructor DEFDEF: {error:?}"))?;
+    let (serialized_clause_count, serialized_result, constructor_tail) = match constructor_node {
+        StructuredNode::DefDef(body) => {
+            let result = body
+                .return_type
+                .decode_structured()
+                .map_err(|error| format!("decode serialized constructor result: {error:?}"))?;
+            let result_name = match result {
+                StructuredTree::Reference(reference) => {
+                    let name = file
+                        .names()
+                        .get_utf8(reference.reference)
+                        .unwrap_or("<name>");
+                    let qualifier = match reference.qualifier {
+                        RawTree::Leaf(term) => match term.value {
+                            TermValue::NameRef(name) => file.names().get_utf8(name).unwrap_or(""),
+                            _ => "",
+                        },
+                        _ => "",
+                    };
+                    if qualifier.is_empty() {
+                        name.to_owned()
+                    } else {
+                        format!("{qualifier}.{name}")
+                    }
+                }
+                _ => "<non-reference-result-tree>".to_owned(),
+            };
+            (body.clauses.len(), result_name, format!("{:?}", body.tail))
+        }
+        other => return Err(format!("constructor address decoded as {other:?}")),
+    };
+    let class_node = ast
+        .get(class_address)
+        .ok_or_else(|| format!("missing original class TYPEDEF@{class_address}"))?
+        .decode_structured()
+        .map_err(|error| format!("decode original class TYPEDEF: {error:?}"))?;
+    let class_tail = match class_node {
+        StructuredNode::TypeDef(DefinitionBody::TypeDef { tail, .. }) => format!("{tail:?}"),
+        other => return Err(format!("class address decoded as {other:?}")),
+    };
+    let constructor = unpickler
+        .index()
+        .symbol_at(constructor_address)
+        .ok_or_else(|| format!("constructor DEFDEF@{constructor_address} has no symbol"))?;
+    if !matches!(
+        unpickler.symbol_state_at(constructor_address),
+        Some((SymbolKind::Constructor, SymbolInfo::Missing))
+    ) {
+        return Err(format!(
+            "constructor DEFDEF@{constructor_address} was not pending before explicit completion"
+        ));
+    }
+    let constructor_type = unpickler
+        .complete_symbol(constructor_address)
+        .map_err(|error| format!("complete constructor DEFDEF@{constructor_address}: {error:?}"))?;
+    if !matches!(
+        unpickler.symbol_state_at(constructor_address),
+        Some((SymbolKind::Constructor, SymbolInfo::Complete(_)))
+    ) {
+        return Err(format!(
+            "constructor DEFDEF@{constructor_address} is not complete"
+        ));
+    }
+    drop(unpickler);
+
+    let class_info = match store.types.get(class_type) {
+        Type::ClassInfo(info) => info,
+        other => return Err(format!("class result is not ClassInfo: {other:?}")),
+    };
+    let method = match store.types.get(constructor_type) {
+        Type::Method(method) => method,
+        other => return Err(format!("constructor result is not Method: {other:?}")),
+    };
+    if store.symbols.get(constructor).owner != Some(class) {
+        return Err("constructor owner is not the selected class".to_owned());
+    }
+    let parents = class_info
+        .parents
+        .iter()
+        .map(|id| type_repr(&store, *id))
+        .collect::<Vec<_>>()
+        .join("&");
+    let result = type_repr(&store, method.result);
+    Ok(format!(
+        "fixture={unit_id}\tclass_address={class_address}\tconstructor_address={constructor_address}\tclass={}\tclass_kind={:?}\tclass_visibility={}\tclass_flags={}\tclass_modifiers={class_tail}\tparents={parents}\tconstructor={}\tconstructor_owner={}\tconstructor_kind={:?}\tconstructor_visibility={}\tconstructor_modifiers={constructor_tail}\tserialized_clause_count={serialized_clause_count}\tconstructor_signature={}\tserialized_result={serialized_result}\teffective_result={result}",
+        symbol_path(&store, class),
+        store.symbols.get(class).kind,
+        visibility(&store, &store.symbols.get(class).visibility),
+        flags(store.symbols.get(class).flags),
+        symbol_path(&store, constructor),
+        symbol_path(
+            &store,
+            store
+                .symbols
+                .get(constructor)
+                .owner
+                .ok_or_else(|| "constructor has no owner".to_owned())?
+        ),
+        store.symbols.get(constructor).kind,
+        visibility(&store, &store.symbols.get(constructor).visibility),
+        type_repr(&store, constructor_type)
+    ))
+}
+
+fn load_visibility_legacy_once(unit_id: &str) -> String {
+    let unit = units()
+        .into_iter()
+        .find(|unit| unit.id == unit_id)
+        .unwrap_or_else(|| panic!("missing frozen unit {unit_id}"));
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut loader =
+        ClassLoader::with_definitions(classpath(), &mut store, definitions, LoadingSession::new());
+    let requested = BinaryName::from_internal(unit.lookup);
+    match loader.load_class(&requested) {
+        Ok(class) => {
+            let origin = format!("{:?}", loader.origin(class));
+            drop(loader);
+            format!(
+                "outcome=CLASS_LOADED\torigin={origin}\t{}",
+                normalized_symbol(&store, class)
+            )
+        }
+        Err(error) => format!(
+            "outcome=ERROR\terror={:?}",
+            normalize_allocation_ids(&format!("{error:?}"))
+        ),
+    }
+}
+
+#[test]
+fn selected_visibility_classes_and_primary_constructors_are_explicitly_completed() {
+    let mut receipt = String::from(
+        "fixture\tclass_address\tconstructor_address\tclass\tclass_kind\tclass_visibility\tclass_flags\tparents\tconstructor\tconstructor_owner\tconstructor_kind\tconstructor_visibility\tconstructor_signature\tserialized_result\teffective_result\n",
+    );
+    for unit_id in ["visibility-open", "visibility-private"] {
+        let first = complete_visibility_constructor_once(unit_id).unwrap_or_else(|error| {
+            format!("fixture={unit_id}\toutcome=UNSUPPORTED\terror={error}")
+        });
+        let second = complete_visibility_constructor_once(unit_id).unwrap_or_else(|error| {
+            format!("fixture={unit_id}\toutcome=UNSUPPORTED\terror={error}")
+        });
+        assert_eq!(first, second, "fresh sessions differ for {unit_id}");
+        let legacy_first = load_visibility_legacy_once(unit_id);
+        assert_eq!(
+            legacy_first,
+            load_visibility_legacy_once(unit_id),
+            "legacy results differ across fresh sessions for {unit_id}"
+        );
+        assert!(legacy_first.contains("outcome=CLASS_LOADED"));
+        assert!(legacy_first.contains("origin=Some(Directory("));
+        assert!(legacy_first.contains("tests/fixtures/tasty_visibility\"))"));
+        assert!(legacy_first.contains("parameter_clauses=<init>:Constructor:public:()Plain:Unit"));
+        assert!(legacy_first.contains("hierarchy=java.lang.Object"));
+        assert!(first.contains("constructor_owner=me.cytrowski.tastyfixtures.visibility."));
+        assert!(first.contains("constructor_visibility=public"));
+        assert!(
+            first.contains("constructor_signature=()Plain:me.cytrowski.tastyfixtures.visibility.")
+        );
+        assert!(first.contains("parents=java.lang.Object"));
+        assert!(first.contains("serialized_result=scala.Unit"));
+        assert!(first.contains("effective_result=me.cytrowski.tastyfixtures.visibility."));
+        match unit_id {
+            "visibility-open" => assert!(first.contains("class_visibility=public")),
+            "visibility-private" => {
+                assert!(first.contains(
+                    "class_visibility=private-within:me.cytrowski.tastyfixtures.visibility"
+                ))
+            }
+            _ => unreachable!(),
+        }
+        receipt.push_str(&first);
+        receipt.push('\n');
+    }
+    if std::env::var_os("DOTTY_DUMP_VISIBILITY_AUDIT").is_some() {
+        eprintln!("{receipt}");
+    }
+}
+
+#[test]
+fn selected_visibility_loads_fail_closed_for_wrong_owner_and_missing_object() {
+    for unit_id in ["visibility-open", "visibility-private"] {
+        let unit = units()
+            .into_iter()
+            .find(|unit| unit.id == unit_id)
+            .expect("selected input is in frozen manifest");
+        let requested = BinaryName::from_internal(unit.lookup);
+
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let checkpoint = store.checkpoint();
+        let failure = {
+            let mut loader = ClassLoader::with_definitions(
+                classpath_without_jdk(),
+                &mut store,
+                definitions,
+                LoadingSession::new(),
+            );
+            loader
+                .load_class(&requested)
+                .expect_err("without the JDK, java.lang.Object must remain unresolved")
+        };
+        let error = format!("{failure:?}");
+        assert!(
+            error.contains("NotFound") || error.contains("DependencyFailure"),
+            "missing java.lang.Object must be an explicit classpath error: {error}"
+        );
+        assert_eq!(
+            store.checkpoint(),
+            checkpoint,
+            "failed dependency load must not leave a partial {unit_id}"
+        );
+
+        let wrong_owner = if unit_id == "visibility-open" {
+            "me/cytrowski/tastyfixtures/elsewhere/Open"
+        } else {
+            "me/cytrowski/tastyfixtures/elsewhere/PlainPrivate"
+        };
+        let failure = {
+            let mut loader = ClassLoader::with_definitions(
+                classpath(),
+                &mut store,
+                definitions,
+                LoadingSession::new(),
+            );
+            loader
+                .load_class(&BinaryName::from_internal(wrong_owner))
+                .expect_err("wrong requested package/owner must not alias the fixture")
+        };
+        let error = format!("{failure:?}");
+        assert!(error.contains("NotFound"), "wrong owner error: {error}");
+        assert_eq!(
+            store.checkpoint(),
+            checkpoint,
+            "wrong-owner lookup must not leave a partial {unit_id}"
+        );
+
+        let bytes = fs::read(&unit.path).expect("selected original fixture bytes");
+        assert!(
+            TastyFile::parse(&bytes[..bytes.len() - 1]).is_err(),
+            "truncated {unit_id} must be rejected as malformed"
+        );
+        assert_eq!(store.checkpoint(), checkpoint);
+    }
+}
+
 #[test]
 fn frozen_open_constructor_is_explicitly_completed_with_real_dependencies() {
     let first = complete_open_constructor_once();
