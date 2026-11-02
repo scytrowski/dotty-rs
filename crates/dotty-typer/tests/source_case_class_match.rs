@@ -65,65 +65,28 @@ fn frozen_source_case_class_match_methods_type_as_whole_defdefs() {
 
 #[test]
 fn flagged_product2_whole_method_baseline() {
-    let first = flagged_positive_session(SourceId::from_index(1970));
-    let second = flagged_positive_session(SourceId::from_index(2970));
+    let first_source = SourceId::from_index(1970);
+    let second_source = SourceId::from_index(2970);
+    assert_ne!(
+        first_source, second_source,
+        "each receipt uses an independent source session"
+    );
+    let first = flagged_positive_session(first_source);
+    let second = flagged_positive_session(second_source);
     assert_eq!(
         first, second,
         "two independent source sessions normalize identically"
     );
-}
-
-#[test]
-fn flagged_product2_late_case_failure_rolls_back_before_valid_sibling() {
-    let text = FLAGGED_SOURCE.replace(
-        "if enabled then value else 0",
-        "if enabled then true else 0",
+    assert_eq!(
+        first.len(),
+        2,
+        "only select and classify count as positive roots"
     );
-    let source = SourceId::from_index(1971);
-    let mut session = Session::new(&text, source);
-    let select = session.method_named("select");
-    let classify = session.method_named("classify");
-    let select_symbol = session.index.symbol_at(source, select).unwrap();
-    let class = flagged_class_symbol(&session, source);
-    let unapply = session
-        .index
-        .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
-        .unwrap();
-    session.with_typer(|_, _, index, _, typer| {
-        let before_store = typer.store().checkpoint();
-        let before_typed = typer.typed_ast().checkpoint();
-        let before_mappings = typer.source_typed_index().len();
-        let error = typer
-            .type_method_definition(select)
-            .expect_err("the Boolean then-branch violates the declared Int result");
-        assert!(matches!(
-            error,
-            TyperError::ExpectedExpressionTypeMismatch { .. }
-        ));
-        assert_eq!(typer.store().checkpoint(), before_store);
-        assert_eq!(typer.typed_ast().checkpoint(), before_typed);
-        assert_eq!(typer.source_typed_index().len(), before_mappings);
-        assert!(typer.source_typed_index().get(source, select).is_none());
-        assert_eq!(
-            *typer.store().symbols.info(select_symbol),
-            SymbolInfo::Missing
-        );
-        assert_eq!(*typer.store().symbols.info(unapply), SymbolInfo::Missing);
-        assert_eq!(
-            index.generated_case_class_method_identity(unapply),
-            Some(dotty_core::GeneratedCaseClassMethod {
-                class,
-                role: GeneratedCaseClassMethodRole::Unapply,
-            })
-        );
-        let sibling = typer
-            .type_method_definition(classify)
-            .expect("valid classify method remains typeable after rollback");
-        assert!(matches!(
-            typer.typed_ast().get(sibling).kind,
-            TreeKind::DefDef(_)
-        ));
-    });
+    for (session, rows) in [("first", &first), ("second", &second)] {
+        for row in rows {
+            println!("ISSUE1972_POSITIVE\t{session}\t{row}");
+        }
+    }
 }
 
 #[test]
@@ -258,6 +221,16 @@ fn flagged_positive_session(source: SourceId) -> Vec<String> {
         .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
         .expect("original generated Flagged.unapply");
     let class_scope = session.index.scope_of(class).expect("Flagged class scope");
+    let third_selector = Name::new(session.store.names.intern("_3"), Namespace::Term);
+    assert!(
+        session
+            .store
+            .scopes
+            .get(class_scope)
+            .lookup_all(&third_selector)
+            .is_empty(),
+        "the two-field source class has no _3 selector"
+    );
     let mut selectors = Vec::new();
     for (spelling, expected_tree, expected_span) in [("_1", 2, (37, 47)), ("_2", 4, (49, 65))] {
         let name = Name::new(session.store.names.intern(spelling), Namespace::Term);
@@ -311,16 +284,18 @@ fn flagged_positive_session(source: SourceId) -> Vec<String> {
         let Some(Type::ClassInfo(class_info)) = typer.store().types.try_get(class_info) else {
             panic!("Flagged has complete ClassInfo");
         };
-        let product = class_info
+        let products = class_info
             .parents
             .iter()
-            .find_map(|parent| match typer.store().types.try_get(*parent) {
+            .filter_map(|parent| match typer.store().types.try_get(*parent) {
                 Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. })
                     if typer.store().names.resolve(typer.store().symbols.get(*symbol).name.text()) == "Product"
                         && matches!(typer.store().symbols.get(*symbol).origin, SymbolOrigin::Tasty(_)) => Some(*symbol),
                 _ => None,
             })
-            .expect("canonical scala.Product TASTy parent");
+            .collect::<Vec<_>>();
+        assert_eq!(products.len(), 1, "Flagged has exactly one canonical Product parent");
+        let product = products[0];
         assert_eq!(typer.store().symbols.get(product).kind, SymbolKind::Trait);
         assert_eq!(typer.store().names.resolve(typer.store().symbols.get(product).name.text()), "Product");
         let unapply_type = typer.complete_symbol(unapply).expect("generated unapply signature");
@@ -472,10 +447,11 @@ fn flagged_positive_session(source: SourceId) -> Vec<String> {
                     _ => unreachable!("only the two frozen methods are expected"),
                 }
             }
-            let normalized = format!("{name}|Positive.scala#tree{}|{}:{}|typed#tree{}|matching.Flagged|matching.Matcher|(Flagged):Int|scala.Product|_1:Int@Flagged|_2:Boolean@Flagged|Flagged$.unapply|{}", expected.0, expected.1, expected.2, typed_method.index(), case_shapes.join(";"));
+            let normalized = format!("{name}\tPositive.scala#tree{}\t{}:{}\tmatching.Flagged\tmatching.Matcher\t(Flagged):Int\tscala.Product\t_1:Int@Flagged,_2:Boolean@Flagged\tFlagged$.unapply\t{}\tcomplete\tInt\ttrue\t4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31", expected.0, expected.1, expected.2, case_shapes.join(";"));
             summaries.push(normalized);
         }
         assert_eq!(selectors.len(), 2);
+        assert_ne!(selectors[0], selectors[1], "Product2 selectors have distinct identities");
         for (selector, expected_type) in selectors.into_iter().zip([definitions.int, definitions.boolean]) {
             let selector_info = typer.complete_symbol(selector).expect("complete canonical source selector");
             let Some(Type::Method(selector_type)) = typer.store().types.try_get(selector_info) else { panic!("selector is parameterless method") };

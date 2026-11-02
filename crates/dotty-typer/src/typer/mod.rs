@@ -140,6 +140,8 @@ pub struct SourceTyper<'a> {
     synthetic_class_member_entries: Vec<(ScopeId, SymbolId)>,
     #[cfg(test)]
     transaction_failure_observer: Option<TransactionFailureObserver<'a>>,
+    #[cfg(test)]
+    inject_failure_after_outermost_success: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -302,6 +304,8 @@ impl<'a> SourceTyper<'a> {
             synthetic_class_member_entries: Vec::new(),
             #[cfg(test)]
             transaction_failure_observer: None,
+            #[cfg(test)]
+            inject_failure_after_outermost_success: false,
         }
     }
 
@@ -36671,5 +36675,260 @@ mod tests {
             Err(TyperError::DependentMethodApplicationDeferred { binder, result, .. })
                 if binder == callable && result == dependent
         ));
+    }
+
+    #[test]
+    fn issue_1972_failed_root_retries_with_same_typer_and_matches_clean_run() {
+        let source_text = "package scala { trait Product }; package matching { case class Flagged(value: Int, enabled: Boolean); object Matcher { def select(item: Flagged): Int = item match { case Flagged(value, enabled) => if (enabled) value else 0 }; def classify(item: Flagged): Int = item match { case Flagged(0, true) => 0; case Flagged(value, _) => value } } }";
+        let (clean_parsed, mut clean_store, clean_packages, definitions, clean_index, source) =
+            parse_and_name(source_text);
+        let method_tree =
+            |parsed: &dotty_parser::ParseResult, store: &SemanticStore, name: &str| {
+                parsed
+                    .ast
+                    .iter()
+                    .find_map(|(tree, node)| match &node.kind {
+                        TreeKind::DefDef(definition)
+                            if store.names.resolve(definition.name.as_name().text()) == name =>
+                        {
+                            Some(tree)
+                        }
+                        _ => None,
+                    })
+                    .expect("requested source method")
+            };
+        let clean_select = method_tree(&clean_parsed, &clean_store, "select");
+        let clean_classify = method_tree(&clean_parsed, &clean_store, "classify");
+        let mut clean_typer = SourceTyper::new(
+            &clean_parsed.ast,
+            source,
+            &clean_index,
+            &mut clean_store,
+            definitions,
+            &clean_packages,
+        );
+        clean_typer
+            .type_method_definition(clean_select)
+            .expect("clean select method types");
+        clean_typer
+            .type_method_definition(clean_classify)
+            .expect("clean sibling method types");
+        let clean_projection =
+            issue_1972_retry_projection(&clean_parsed, source, definitions, &clean_typer);
+
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let select = method_tree(&parsed, &store, "select");
+        let classify = method_tree(&parsed, &store, "classify");
+        let select_symbol = index.symbol_at(source, select).unwrap();
+        let class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Flagged" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("source Flagged class");
+        let unapply = index
+            .generated_case_class_method(class, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .expect("generated Flagged.unapply identity");
+        let before_store = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let before_typed = typer.typed_ast().checkpoint();
+        let before_mappings = typer.source_typed_index().len();
+        let observed_bindings = Rc::new(RefCell::new(None));
+        let observation = Rc::clone(&observed_bindings);
+        let parsed_ref = &parsed;
+        typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+            let bindings = parsed_ref
+                .ast
+                .iter()
+                .filter_map(|(tree, node)| {
+                    let symbol = typer.pattern_binding_symbol_at(source, tree)?;
+                    let name = match &node.kind {
+                        TreeKind::Ident(ident) => typer.store.names.resolve(ident.name.text()),
+                        TreeKind::Bind(binding) => typer.store.names.resolve(binding.name.text()),
+                        other => {
+                            panic!("pattern binder source node has unexpected shape: {other:?}")
+                        }
+                    };
+                    Some((
+                        tree.index(),
+                        name.to_owned(),
+                        issue_1972_symbol_type(typer.store, symbol, definitions),
+                        issue_1972_symbol_owner(typer.store, symbol),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                bindings
+                    .iter()
+                    .map(|binding| (binding.1.as_str(), binding.2.as_str()))
+                    .collect::<Vec<_>>(),
+                [("value", "Int"), ("enabled", "Boolean")],
+                "failure is injected after both extractor binders were entered"
+            );
+            assert_ne!(
+                typer.typed_ast().checkpoint(),
+                before_typed,
+                "the failing transaction had built typed expression state"
+            );
+            assert!(
+                typer.source_typed_index().get(source, select).is_some(),
+                "the failing transaction had published the root mapping before rollback"
+            );
+            *observation.borrow_mut() = Some(bindings);
+        }));
+        typer.inject_failure_after_outermost_success = true;
+        let error = typer
+            .type_method_definition(select)
+            .expect_err("the one-shot test failure is injected after typing the whole root");
+        assert!(matches!(
+            error,
+            TyperError::SymbolResolution {
+                error: ResolutionError::Malformed { .. },
+                ..
+            }
+        ));
+        assert!(
+            observed_bindings.borrow().is_some(),
+            "the rollback observer saw partial case state before cleanup"
+        );
+        assert!(!typer.inject_failure_after_outermost_success);
+        assert_eq!(typer.store.checkpoint(), before_store);
+        assert_eq!(typer.typed_ast().checkpoint(), before_typed);
+        assert_eq!(typer.source_typed_index().len(), before_mappings);
+        assert!(typer.source_typed_index().get(source, select).is_none());
+        assert_eq!(
+            *typer.store.symbols.info(select_symbol),
+            SymbolInfo::Missing
+        );
+        assert_eq!(*typer.store.symbols.info(unapply), SymbolInfo::Missing);
+        for (tree, _) in parsed.ast.iter() {
+            assert!(typer.pattern_binding_symbol_at(source, tree).is_none());
+        }
+
+        typer
+            .type_method_definition(select)
+            .expect("the same live SourceTyper retries successfully after rollback");
+        typer
+            .type_method_definition(classify)
+            .expect("the valid sibling remains typeable on that same SourceTyper");
+        assert_eq!(
+            issue_1972_retry_projection(&parsed, source, definitions, &typer),
+            clean_projection,
+            "successful source-to-typed mappings and case bindings match a clean session"
+        );
+    }
+
+    type Issue1972RetryProjection = (
+        Vec<(u32, String, String)>,
+        Vec<(u32, String, String, String)>,
+    );
+
+    fn issue_1972_retry_projection(
+        parsed: &dotty_parser::ParseResult,
+        source: SourceId,
+        definitions: Definitions,
+        typer: &SourceTyper<'_>,
+    ) -> Issue1972RetryProjection {
+        let mappings = parsed
+            .ast
+            .iter()
+            .filter_map(|(source_tree, _)| {
+                let typed_tree = typer.source_typed_index().get(source, source_tree)?;
+                let typed_node = typer.typed_ast().get(typed_tree);
+                Some((
+                    source_tree.index(),
+                    format!("{:?}", std::mem::discriminant(&typed_node.kind)),
+                    issue_1972_type_label(typer.store, typed_node.ty, definitions),
+                ))
+            })
+            .collect();
+        let bindings = parsed
+            .ast
+            .iter()
+            .filter_map(|(source_tree, source_node)| {
+                let symbol = typer.pattern_binding_symbol_at(source, source_tree)?;
+                let name = match &source_node.kind {
+                    TreeKind::Ident(ident) => typer.store.names.resolve(ident.name.text()),
+                    TreeKind::Bind(binding) => typer.store.names.resolve(binding.name.text()),
+                    other => panic!("pattern binder source node has unexpected shape: {other:?}"),
+                };
+                Some((
+                    source_tree.index(),
+                    name.to_owned(),
+                    issue_1972_symbol_type(typer.store, symbol, definitions),
+                    issue_1972_symbol_owner(typer.store, symbol),
+                ))
+            })
+            .collect();
+        (mappings, bindings)
+    }
+
+    fn issue_1972_type_label(
+        store: &SemanticStore,
+        ty: TypeId,
+        definitions: Definitions,
+    ) -> String {
+        if ty == definitions.int {
+            "Int".to_owned()
+        } else if ty == definitions.boolean {
+            "Boolean".to_owned()
+        } else if ty == definitions.unit {
+            "Unit".to_owned()
+        } else {
+            store
+                .types
+                .try_get(ty)
+                .map(|ty| format!("{:?}", std::mem::discriminant(ty)))
+                .unwrap_or_else(|| "missing".to_owned())
+        }
+    }
+
+    fn issue_1972_symbol_type(
+        store: &SemanticStore,
+        symbol: SymbolId,
+        definitions: Definitions,
+    ) -> String {
+        match *store.symbols.info(symbol) {
+            SymbolInfo::Complete(ty) => issue_1972_type_label(store, ty, definitions),
+            SymbolInfo::Missing => "Missing".to_owned(),
+            _ => "Incomplete".to_owned(),
+        }
+    }
+
+    fn issue_1972_symbol_owner(store: &SemanticStore, symbol: SymbolId) -> String {
+        let entry = store.symbols.get(symbol);
+        let owner = entry
+            .owner
+            .map(|owner| {
+                store
+                    .names
+                    .resolve(store.symbols.get(owner).name.text())
+                    .to_owned()
+            })
+            .unwrap_or_else(|| "<none>".to_owned());
+        let origin = match entry.origin {
+            SymbolOrigin::Source(_) => "Source",
+            SymbolOrigin::Classfile(_) => "Classfile",
+            SymbolOrigin::Tasty(_) => "Tasty",
+            SymbolOrigin::Synthetic => "Synthetic",
+            SymbolOrigin::Builtin => "Builtin",
+        };
+        format!(
+            "{}|{owner}|{origin}",
+            store.names.resolve(entry.name.text())
+        )
     }
 }

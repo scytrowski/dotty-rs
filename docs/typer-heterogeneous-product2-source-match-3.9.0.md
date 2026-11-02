@@ -44,9 +44,13 @@ Focused Rust regressions reject wrong literal/component types, extractor
 arities one and three, a declared result mismatch, a cross-case binder escape,
 a non-case class without the original generated extractor identity, and a
 resolver-free `scala.Product` identity. Each failure leaves the typed arena,
-semantic store, and source-to-typed index unchanged. A late Boolean result
-failure after pattern binders are created rolls back before the valid sibling
-`classify` method is typed in the same session.
+semantic store, and source-to-typed index unchanged. The Issue #1972 retry
+regression injects a one-shot test-only failure after the whole `select` root
+has typed both pattern binders but before its transaction commits. The same
+live `SourceTyper` then retries `select`, types sibling `classify`, and matches
+every source-to-typed mapping and pattern binding in a clean run. Its observer
+verifies both binders exist before rollback; the failed root, typed arena,
+mappings, store, and generated `unapply` state return to their checkpoints.
 
 The pinned Scala 3.9.0 Product2 runner was executed for this change with source
 revision `777528f19a58e794c9954a42f433373472ec57f8`, all eight SHA-256-verified

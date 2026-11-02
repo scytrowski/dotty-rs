@@ -41,7 +41,9 @@ The negative receipt is
 It distinguishes Scala-invalid controls from valid Scala forms that this Rust
 subset explicitly defers. Failed cases must leave the semantic store, typed
 arena, and source mappings unchanged. The rollback test also retries a valid
-sibling method in the same session. Exact companion collision/alias tests and
+sibling method on the same live `SourceTyper` after retrying the failed root.
+It compares the successful mappings and pattern bindings with a clean run.
+Exact companion collision/alias tests and
 the existing focused Typer extractor regressions run in the pinned workflow.
 
 The 25 main and 25 analysis ordinary-method cohort contracts are recorded in
