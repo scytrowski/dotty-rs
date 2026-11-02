@@ -87,6 +87,45 @@ struct TastyTopLevelSelection {
     constructor_address: u32,
 }
 
+fn is_compiler_source_file_annotation(
+    file: &dotty_tasty::tasty::TastyFile<'_>,
+    annotation: &dotty_tasty::tasty::RawNode<'_>,
+) -> bool {
+    let Ok(annotation) = annotation.decode_annotation() else {
+        return false;
+    };
+    let Ok(reference) = annotation.tycon.decode_reference() else {
+        return false;
+    };
+    let dotty_tasty::tasty::RawTree::Leaf(qualifier) = reference.qualifier else {
+        return false;
+    };
+    let dotty_tasty::tasty::TermValue::NameRef(package) = qualifier.value else {
+        return false;
+    };
+    reference.tag == dotty_tasty::tasty::TYPEREF_TAG
+        && qualifier.tag == dotty_tasty::tasty::TERMREFPKG_TAG
+        && file.names().get_utf8(reference.reference) == Some("SourceFile")
+        && file.render_name(package).ok().as_deref() == Some("scala.annotation.internal")
+}
+
+fn has_unsupported_definition_annotations(tail: &[dotty_tasty::tasty::DefinitionTail<'_>]) -> bool {
+    tail.iter()
+        .any(|entry| matches!(entry, dotty_tasty::tasty::DefinitionTail::Annotation(_)))
+}
+
+fn has_unsupported_class_annotations(
+    file: &dotty_tasty::tasty::TastyFile<'_>,
+    tail: &[dotty_tasty::tasty::DefinitionTail<'_>],
+) -> bool {
+    tail.iter().any(|entry| match entry {
+        dotty_tasty::tasty::DefinitionTail::Annotation(annotation) => {
+            !is_compiler_source_file_annotation(file, annotation)
+        }
+        _ => false,
+    })
+}
+
 fn symbols_for_tasty_selection(
     index: &TastySemanticIndex,
     selection: &TastyTopLevelSelection,
@@ -879,13 +918,21 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.collect_load_profiles = enabled;
     }
 
-    /// Opt-in semantic projection for the two frozen visibility TASTy inputs.
-    /// The ordinary `load_class` path continues to use the legacy
-    /// classloader decoder. This path first materializes the canonical JDK
-    /// `Object` through the classpath resolver, then lets the unpickler resolve
-    /// only from the package/member identities already entered in this store.
+    /// Compatibility entry point retained for existing Open regressions.
     #[allow(dead_code)]
     pub(crate) fn load_open_with_tasty_unpickler(
+        &mut self,
+        name: &BinaryName,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        self.load_semantic_class_with_tasty_unpickler(name)
+    }
+
+    /// Opt-in semantic projection for the audited simple top-level class
+    /// subset. The ordinary `load_class` path remains the legacy decoder.
+    /// Structural eligibility is validated before the bounded transaction;
+    /// class identity and origin are published only after completion succeeds.
+    #[allow(dead_code)]
+    pub(crate) fn load_semantic_class_with_tasty_unpickler(
         &mut self,
         name: &BinaryName,
     ) -> Result<SymbolId, SemanticTastyLoadError> {
@@ -916,17 +963,23 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let file = tasty_symbol::parse_classloader_tasty(resource.bytes()).map_err(|error| {
             SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(name.clone(), error))
         })?;
-        let selection = Self::validate_open_unit_shape(&file, name)?;
+        let selection = Self::validate_semantic_class_shape(&file, name)?;
 
-        self.load_open_transaction(&file, name, &selection, resource.origin().clone(), false)
+        self.load_semantic_class_transaction(
+            &file,
+            name,
+            &selection,
+            resource.origin().clone(),
+            false,
+        )
     }
 
-    /// The bounded commit/rollback boundary for the one supported Open unit.
+    /// The bounded commit/rollback boundary for the audited simple class.
     /// Its write plan is deliberately explicit: the classpath resolver may
     /// enter packages/classes and update `Object`; the unpickler may enter the
     /// selected root and bind canonical `Unit`. Other mutations are rejected
-    /// by `validate_open_unit_shape` before reaching this operation.
-    fn load_open_transaction(
+    /// by `validate_semantic_class_shape` before reaching this operation.
+    fn load_semantic_class_transaction(
         &mut self,
         file: &dotty_tasty::tasty::TastyFile<'_>,
         name: &BinaryName,
@@ -944,7 +997,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .clone();
         let mut materialized_class = None;
         let result = self
-            .load_open_semantics(file, name, selection)
+            .load_semantic_class_semantics(file, name, selection)
             .and_then(|class| {
                 materialized_class = Some(class);
                 if inject_late_failure {
@@ -976,7 +1029,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         ));
                     }
                     return Err(SemanticTastyLoadError::UnsupportedShape(
-                        "injected failure after Open class and constructor completion",
+                        "injected failure after class and constructor completion",
                     ));
                 }
                 Ok(class)
@@ -2136,10 +2189,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         !self.store.scopes.get(scope).lookup_all(&name).is_empty()
     }
 
-    /// The opt-in path accepts only the frozen one-class fixture shape. This
+    /// The opt-in path accepts only the audited simple-class shape. This
     /// check happens before the unpickler enters package scopes, so a
     /// multi-declaration unit cannot publish partially supported siblings.
-    fn validate_open_unit_shape(
+    fn validate_semantic_class_shape(
         file: &dotty_tasty::tasty::TastyFile<'_>,
         name: &BinaryName,
     ) -> Result<TastyTopLevelSelection, SemanticTastyLoadError> {
@@ -2215,6 +2268,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "the top-level definition must be a class",
             ));
         };
+        // SourceFile is a file-level attribute, not a definition annotation;
+        // it remains allowed while user annotations fail closed.
+        if has_unsupported_class_annotations(file, &tail) {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "user annotations on the selected class are unsupported",
+            ));
+        }
         if !matches!(
             type_or_template,
             dotty_tasty::tasty::RawTree::LengthNode(ref template)
@@ -2349,6 +2409,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         if file.names().get_utf8(constructor.name) != Some("<init>") {
             return Err(SemanticTastyLoadError::UnsupportedShape(
                 "the class template's sole direct method must be its primary constructor",
+            ));
+        }
+        if has_unsupported_definition_annotations(&constructor.tail) {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "user annotations on the primary constructor are unsupported",
             ));
         }
         if !constructor.parameters.is_empty()
@@ -2489,7 +2554,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     }
 
     #[allow(dead_code)]
-    fn load_open_semantics(
+    fn load_semantic_class_semantics(
         &mut self,
         file: &dotty_tasty::tasty::TastyFile<'_>,
         name: &BinaryName,
@@ -2609,15 +2674,41 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 return Err(error);
             }
         };
+        let class_symbol = self.store.symbols.get(class);
+        let constructor_symbol = self.store.symbols.get(constructor);
+        let supported_visibility = match class_symbol.visibility {
+            Visibility::Public => true,
+            Visibility::PrivateWithin(owner) => class_symbol.owner == Some(owner),
+            _ => false,
+        };
+        let supported_hierarchy = match class_symbol.info {
+            SymbolInfo::Complete(info) => matches!(
+                self.store.types.get(info),
+                Type::ClassInfo(class_info)
+                    if class_info.parents.len() == 1
+                        && type_ref_symbol(self.store, class_info.parents[0])
+                            == Some(self.definitions.object_class)
+            ),
+            _ => false,
+        };
+        let supported_constructor = match constructor_symbol.info {
+            SymbolInfo::Complete(info) if constructor_symbol.visibility == Visibility::Public => {
+                matches!(
+                    self.store.types.get(info),
+                    Type::Method(method)
+                        if method.params.is_empty()
+                            && type_ref_symbol(self.store, method.result) == Some(class)
+                )
+            }
+            _ => false,
+        };
         if !symbol_matches_binary_name(self.store, class, name)
-            || self.store.symbols.get(class).kind != SymbolKind::Class
-            || self.store.symbols.get(constructor).kind != SymbolKind::Constructor
-            || self.store.symbols.get(constructor).owner != Some(class)
-            || !matches!(self.store.symbols.get(class).info, SymbolInfo::Complete(_))
-            || !matches!(
-                self.store.symbols.get(constructor).info,
-                SymbolInfo::Complete(_)
-            )
+            || class_symbol.kind != SymbolKind::Class
+            || constructor_symbol.kind != SymbolKind::Constructor
+            || constructor_symbol.owner != Some(class)
+            || !supported_visibility
+            || !supported_hierarchy
+            || !supported_constructor
         {
             self.remove_open_root_from_package_scope(class);
             return Err(SemanticTastyLoadError::UnsupportedShape(
@@ -8456,12 +8547,12 @@ mod tests {
                 .expect("pinned visibility TASTy fixture");
             let file = tasty_symbol::parse_classloader_tasty(&bytes).expect("valid TASTy");
             let first =
-                ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&file, &requested)
+                ClassLoader::<InMemoryClassPath>::validate_semantic_class_shape(&file, &requested)
                     .unwrap_or_else(|error| {
                         panic!("structural selection for {simple_name}: {error:?}")
                     });
             let second =
-                ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&file, &requested)
+                ClassLoader::<InMemoryClassPath>::validate_semantic_class_shape(&file, &requested)
                     .expect("repeat structural selection");
             assert_eq!(
                 first, second,
@@ -8508,7 +8599,7 @@ mod tests {
         let file = tasty_symbol::parse_classloader_tasty(&bytes).expect("valid TASTy");
         let wrong_package = BinaryName::from_internal("other/package/Open");
         assert!(matches!(
-            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&file, &wrong_package),
+            ClassLoader::<InMemoryClassPath>::validate_semantic_class_shape(&file, &wrong_package),
             Err(SemanticTastyLoadError::UnsupportedShape(_))
         ));
 
@@ -8532,7 +8623,7 @@ mod tests {
         let split_file = tasty_symbol::parse_classloader_tasty(&split_clause)
             .expect("SPLITCLAUSE variant remains structurally decodable");
         assert!(matches!(
-            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&split_file, &name),
+            ClassLoader::<InMemoryClassPath>::validate_semantic_class_shape(&split_file, &name),
             Err(SemanticTastyLoadError::UnsupportedShape(_))
         ));
 
@@ -8541,7 +8632,7 @@ mod tests {
         // class's primary constructor.
         let original_file = tasty_symbol::parse_classloader_tasty(&bytes).expect("valid TASTy");
         let selection =
-            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&original_file, &name)
+            ClassLoader::<InMemoryClassPath>::validate_semantic_class_shape(&original_file, &name)
                 .expect("original constructor selection");
         let ast_index = original_file
             .ast_address_index()
@@ -8563,7 +8654,7 @@ mod tests {
         let unbound_file = tasty_symbol::parse_classloader_tasty(&unbound_constructor)
             .expect("renamed direct definition remains structurally decodable");
         assert!(matches!(
-            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&unbound_file, &name),
+            ClassLoader::<InMemoryClassPath>::validate_semantic_class_shape(&unbound_file, &name),
             Err(SemanticTastyLoadError::UnsupportedShape(_))
         ));
     }
@@ -8643,13 +8734,26 @@ mod tests {
     }
 
     #[test]
-    fn semantic_adapter_loads_plain_private_from_its_declared_package() {
+    fn semantic_adapter_loads_open_and_plain_private_through_one_operation() {
+        let open_name = open_binary_name();
         let name = plain_private_binary_name();
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let open = loader
+            .load_semantic_class_with_tasty_unpickler(&open_name)
+            .expect("Open should use the shared semantic loading operation");
         let class = loader
-            .load_open_with_tasty_unpickler(&name)
-            .expect("PlainPrivate should use the same structural selection algorithm");
+            .load_semantic_class_with_tasty_unpickler(&name)
+            .expect("PlainPrivate should use the same shared operation");
+        assert_ne!(open, class);
+        assert_eq!(
+            loader.store.symbols.get(open).owner,
+            loader.store.symbols.get(class).owner
+        );
+        assert_eq!(loader.semantic_tasty_loaded[&open_name], open);
+        assert_eq!(loader.semantic_tasty_loaded[&name], class);
+        assert_eq!(class_info(loader.store, open).parents.len(), 1);
+        assert_eq!(class_info(loader.store, class).parents.len(), 1);
         assert!(symbol_matches_binary_name(loader.store, class, &name));
         let package = loader.store.symbols.get(class).owner.unwrap();
         assert!(matches!(
@@ -9306,12 +9410,231 @@ mod tests {
         assert_eq!(after, baseline);
     }
 
+    fn tasty_with_annotated_root(bytes: &[u8]) -> Vec<u8> {
+        use dotty_tasty::tasty::{
+            AnnotationNode, DefinitionBody, DefinitionTail, EncodedSection, RawNodes,
+            StandardSection, TastyFile, TastyFileBuilder, Writer,
+        };
+
+        let original = TastyFile::parse(bytes).expect("original fixture parses");
+        let roots = original.asts().expect("original ASTs");
+        let mut package = roots
+            .get(0)
+            .expect("package root")
+            .decode_package()
+            .unwrap();
+        let class = package.stats.get(0).expect("single class definition");
+        let mut class_body = class.decode_definition_body().expect("class body");
+        let DefinitionBody::TypeDef { tail, .. } = &mut class_body else {
+            panic!("Open fixture root is a class");
+        };
+        let source_file = tail
+            .iter()
+            .find_map(|entry| match entry {
+                DefinitionTail::Annotation(annotation)
+                    if is_compiler_source_file_annotation(&original, annotation) =>
+                {
+                    Some(annotation)
+                }
+                _ => None,
+            })
+            .expect("positive class carries the compiler SourceFile annotation");
+        let source_file = source_file
+            .decode_annotation()
+            .expect("SourceFile annotation shape");
+        let source_file_type = source_file
+            .tycon
+            .decode_reference()
+            .expect("SourceFile type reference");
+        let open_name = original
+            .names()
+            .find_utf8("Open")
+            .expect("Open is in the name table");
+        let tycon = match source_file.tycon {
+            dotty_tasty::tasty::RawTree::NatAst {
+                tag, offset, child, ..
+            } => dotty_tasty::tasty::RawTree::NatAst {
+                tag,
+                offset,
+                value: open_name,
+                child,
+            },
+            _ => panic!("compiler SourceFile type uses a name reference"),
+        };
+        let user_annotation = AnnotationNode {
+            tycon,
+            full_annotation: source_file.full_annotation,
+        };
+        let mut writer = Writer::new();
+        user_annotation
+            .encode(&mut writer)
+            .expect("well-formed annotation encoding");
+        let annotation_bytes = writer.into_inner();
+        let mut reader = dotty_tasty::tasty::Reader::new(&annotation_bytes);
+        let user_annotation = RawNodes::decode(&mut reader)
+            .expect("encoded annotation node")
+            .get(0)
+            .expect("one encoded annotation")
+            .clone();
+        assert_eq!(
+            original.names().get_utf8(source_file_type.reference),
+            Some("SourceFile")
+        );
+        assert!(user_annotation.decode_annotation().is_ok());
+        assert!(!is_compiler_source_file_annotation(
+            &original,
+            &user_annotation
+        ));
+        tail.push(DefinitionTail::Annotation(user_annotation));
+
+        let mut writer = Writer::new();
+        class_body
+            .encode_self(&mut writer)
+            .expect("annotated class encoding");
+        let class_bytes = writer.into_inner();
+        let mut reader = dotty_tasty::tasty::Reader::new(&class_bytes);
+        package.stats = RawNodes::decode(&mut reader).expect("encoded class node");
+
+        let mut writer = Writer::new();
+        package
+            .encode(&mut writer)
+            .expect("annotated package encoding");
+        let package_bytes = writer.into_inner();
+        let mut reader = dotty_tasty::tasty::Reader::new(&package_bytes);
+        let package_node = RawNodes::decode(&mut reader)
+            .expect("encoded package node")
+            .get(0)
+            .expect("one encoded package")
+            .clone();
+        let annotated_roots = RawNodes::from_entries(vec![package_node]).expect("root list");
+
+        let mut builder =
+            TastyFileBuilder::new(original.header().clone(), original.names().clone());
+        for section in original.sections().iter() {
+            if section.standard_kind(original.names()) == Some(StandardSection::Asts) {
+                builder.push_section(
+                    EncodedSection::asts(section.name, &annotated_roots)
+                        .expect("annotated AST section"),
+                );
+            } else {
+                builder.push_section(EncodedSection::raw(section.name, section.payload.to_vec()));
+            }
+        }
+        builder.encode().expect("annotated TASTy file encoding")
+    }
+
     #[test]
-    fn adapter_rejects_annotated_root_before_entering_existing_package() {
-        let annotated =
-            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/SymbolAnnotated");
-        let open = open_binary_name();
-        let bytes = semantic_unpickler_fixture_bytes("SymbolAnnotated.tasty");
+    fn definition_annotation_predicate_covers_class_and_constructor_tails() {
+        let open_bytes =
+            own_fixture_bytes("tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty");
+        let annotated_bytes = tasty_with_annotated_root(&open_bytes);
+        let file = tasty_symbol::parse_classloader_tasty(&annotated_bytes).unwrap();
+        let package = file
+            .asts()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .decode_package()
+            .unwrap();
+        let class_body = package
+            .stats
+            .get(0)
+            .unwrap()
+            .decode_definition_body()
+            .unwrap();
+        let dotty_tasty::tasty::DefinitionBody::TypeDef { tail, .. } = class_body else {
+            panic!("Open fixture root is a class");
+        };
+        assert!(has_unsupported_class_annotations(&file, &tail));
+        let original = tasty_symbol::parse_classloader_tasty(&open_bytes).unwrap();
+        let original_package = original
+            .asts()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .decode_package()
+            .unwrap();
+        let original_body = original_package
+            .stats
+            .get(0)
+            .unwrap()
+            .decode_definition_body()
+            .unwrap();
+        let dotty_tasty::tasty::DefinitionBody::TypeDef {
+            tail: original_tail,
+            ..
+        } = original_body
+        else {
+            panic!("original Open fixture root is a class");
+        };
+        assert!(!has_unsupported_class_annotations(
+            &original,
+            &original_tail
+        ));
+        let user_annotation = tail
+            .iter()
+            .find_map(|entry| match entry {
+                dotty_tasty::tasty::DefinitionTail::Annotation(annotation)
+                    if !is_compiler_source_file_annotation(&file, annotation) =>
+                {
+                    Some(annotation.clone())
+                }
+                _ => None,
+            })
+            .expect("synthetic user annotation");
+        assert!(user_annotation.decode_annotation().is_ok());
+        let constructor_tail = [dotty_tasty::tasty::DefinitionTail::Annotation(
+            user_annotation,
+        )];
+        assert!(has_unsupported_definition_annotations(&constructor_tail));
+        assert!(!has_unsupported_definition_annotations(&[]));
+    }
+
+    #[test]
+    fn adapter_rejects_annotation_only_root_before_entering_existing_package() {
+        let annotated = open_binary_name();
+        let original_bytes =
+            own_fixture_bytes("tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty");
+        let annotated_bytes = tasty_with_annotated_root(&original_bytes);
+        let positive_file = tasty_symbol::parse_classloader_tasty(&original_bytes).unwrap();
+        let annotated_file = tasty_symbol::parse_classloader_tasty(&annotated_bytes).unwrap();
+        assert_eq!(
+            positive_file.source_file().unwrap(),
+            Some("Visibility.scala")
+        );
+        assert_eq!(
+            annotated_file.source_file().unwrap(),
+            Some("Visibility.scala")
+        );
+        let annotated_package = annotated_file
+            .asts()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .decode_package()
+            .unwrap();
+        let annotated_class = annotated_package
+            .stats
+            .get(0)
+            .unwrap()
+            .decode_definition_body()
+            .unwrap();
+        let dotty_tasty::tasty::DefinitionBody::TypeDef { tail, .. } = annotated_class else {
+            panic!("annotated Open root remains a class");
+        };
+        assert_eq!(
+            tail.iter()
+                .filter(|entry| matches!(entry, dotty_tasty::tasty::DefinitionTail::Annotation(_)))
+                .count(),
+            2,
+            "the synthetic input adds one annotation to the compiler SourceFile annotation"
+        );
+        assert_eq!(
+            annotated_package.stats.len(),
+            1,
+            "annotation is the only shape difference"
+        );
+
         let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for Object");
         let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
             .expect("real JDK classpath");
@@ -9320,7 +9643,7 @@ mod tests {
         let class_path = CompositeClassPath::new(vec![
             Box::new(InMemoryTastyClassPath(HashMap::from([(
                 annotated.clone(),
-                bytes,
+                annotated_bytes,
             )]))),
             Box::new(crate::class_path::DirectoryClassPath::new(fixture_root)),
             Box::new(jdk),
@@ -9330,56 +9653,41 @@ mod tests {
         let package = loader
             .session
             .packages
-            .resolve_package(loader.store, "me/cytrowski/tastyfixtures/semantic");
+            .resolve_package(loader.store, "me/cytrowski/tastyfixtures/visibility");
         let scope = loader.session.packages.scope_of(package).unwrap();
-        let mut baseline = loader
+        let baseline = loader
             .store
             .scopes
             .get(scope)
             .entered_symbols()
             .collect::<Vec<_>>();
-        baseline.sort_by_key(|symbol| symbol.index());
         let store_mark = loader.store.checkpoint();
         let session_mark = loader.session.checkpoint();
 
         let error = loader
-            .load_open_with_tasty_unpickler(&annotated)
-            .expect_err("SymbolAnnotated is outside the supported unannotated class shape");
-        assert!(matches!(error, SemanticTastyLoadError::UnsupportedShape(_)));
+            .load_semantic_class_with_tasty_unpickler(&annotated)
+            .expect_err("the annotation is the only unsupported class-shape feature");
+        assert!(matches!(
+            error,
+            SemanticTastyLoadError::UnsupportedShape(
+                "user annotations on the selected class are unsupported"
+            )
+        ));
         assert_eq!(loader.store.checkpoint(), store_mark);
         assert_eq!(loader.session.checkpoint(), session_mark);
         assert_eq!(
             loader
-                .session
-                .packages
-                .get(&["me", "cytrowski", "tastyfixtures", "semantic"]),
-            Some(package)
+                .store
+                .scopes
+                .get(scope)
+                .entered_symbols()
+                .collect::<Vec<_>>(),
+            baseline,
+            "unsupported annotation must not enter a partial class"
         );
-        let mut after = loader
-            .store
-            .scopes
-            .get(scope)
-            .entered_symbols()
-            .collect::<Vec<_>>();
-        after.sort_by_key(|symbol| symbol.index());
-        assert_eq!(after, baseline);
         assert!(loader.repository.get(&annotated).is_none());
+        assert!(!loader.session.resolved.contains_key(&annotated));
         assert!(!loader.semantic_tasty_loaded.contains_key(&annotated));
-
-        let loaded = loader
-            .load_open_with_tasty_unpickler(&open)
-            .expect("the pinned Open unit retries successfully after preflight rejection");
-        assert_eq!(symbol_name(loader.store, loaded), "Open");
-        assert!(loader.store.symbols.contains(loaded));
-        let mut after_retry = loader
-            .store
-            .scopes
-            .get(scope)
-            .entered_symbols()
-            .collect::<Vec<_>>();
-        after_retry.sort_by_key(|symbol| symbol.index());
-        assert_eq!(after_retry, baseline);
-        assert!(!baseline.contains(&loaded));
     }
 
     #[test]
@@ -9995,16 +10303,17 @@ mod tests {
     }
 
     #[test]
-    fn unit_experiment_late_failure_rolls_back_projection_and_retries() {
+    fn semantic_class_late_failure_preserves_prior_class_and_retries() {
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
-        let _unit = loader
-            .bind_open_builtin_unit()
-            .expect("canonical Unit binding");
-        let name = open_binary_name();
+        let prior_name = open_binary_name();
+        let prior_class = loader
+            .load_semantic_class_with_tasty_unpickler(&prior_name)
+            .expect("first fixture should be committed before the injected failure");
+        let name = plain_private_binary_name();
 
         // A previously committed package and declaration must survive the
-        // failed Open operation unchanged.
+        // failed PlainPrivate operation unchanged.
         let keep_package = loader
             .session
             .packages
@@ -10040,20 +10349,28 @@ mod tests {
             .class_path
             .find_class(&name)
             .expect("fixture lookup")
-            .expect("Open fixture");
+            .expect("PlainPrivate fixture");
         let file = tasty_symbol::parse_classloader_tasty(resource.bytes()).expect("valid fixture");
-        let selection = ClassLoader::<CompositeClassPath>::validate_open_unit_shape(&file, &name)
-            .expect("supported Open shape");
+        let selection =
+            ClassLoader::<CompositeClassPath>::validate_semantic_class_shape(&file, &name)
+                .expect("supported PlainPrivate shape");
         assert!(matches!(
-            loader
-                .load_open_transaction(&file, &name, &selection, resource.origin().clone(), true,),
+            loader.load_semantic_class_transaction(
+                &file,
+                &name,
+                &selection,
+                resource.origin().clone(),
+                true,
+            ),
             Err(SemanticTastyLoadError::UnsupportedShape(
-                "injected failure after Open class and constructor completion"
+                "injected failure after class and constructor completion"
             ))
         ));
         assert_eq!(loader.store.checkpoint(), store_mark);
         assert_eq!(loader.session.checkpoint(), session_mark);
         assert_eq!(loader.session.packages.checkpoint(), package_mark);
+        assert!(loader.store.symbols.contains(prior_class));
+        assert_eq!(loader.semantic_tasty_loaded[&prior_name], prior_class);
         assert!(loader.store.symbols.contains(keep_symbol));
         assert_eq!(
             loader.store.symbols.get(keep_symbol).owner,
@@ -10089,7 +10406,7 @@ mod tests {
         assert!(!loader.semantic_tasty_loaded.contains_key(&name));
 
         let retried = loader
-            .load_open_with_tasty_unpickler(&name)
+            .load_semantic_class_with_tasty_unpickler(&name)
             .expect("retry after rollback should complete the same shape");
         assert_eq!(
             retried, loader.semantic_tasty_loaded[&name],
