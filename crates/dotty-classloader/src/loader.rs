@@ -2152,7 +2152,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "the requested top-level declaration must have a class template",
             ));
         }
-        let template = match type_or_template {
+        let template = match &type_or_template {
             dotty_tasty::tasty::RawTree::LengthNode(template) => template,
             _ => unreachable!("class template shape checked above"),
         };
@@ -2181,50 +2181,119 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 tasty_symbol::TastyDecodeError::Parse(error),
             ))
         })?;
-        let roots = address_index
-            .iter_nodes()
-            .filter_map(|node| {
-                let address = u32::try_from(node.offset).ok()?;
-                let definition = address_index.get(address)?.decode_structured().ok()?;
-                matches!(definition,
-                    dotty_tasty::tasty::StructuredNode::TypeDef(
-                        dotty_tasty::tasty::DefinitionBody::TypeDef { name: ref id, .. }
-                    ) if file.names().get_utf8(*id) == Some(name.simple_name()))
-                .then_some(address)
-            })
-            .collect::<Vec<_>>();
-        let constructors = address_index
-            .iter_nodes()
-            .filter_map(|node| {
-                let address = u32::try_from(node.offset).ok()?;
-                let definition = address_index.get(address)?.decode_structured().ok()?;
-                matches!(definition,
-                    dotty_tasty::tasty::StructuredNode::DefDef(ref body)
-                    if file.names().get_utf8(body.name) == Some("<init>"))
-                .then_some(address)
-            })
-            .collect::<Vec<_>>();
-        if roots.len() != 1 || constructors.len() != 1 {
+        let class_node = address_index.iter().find(|node| {
+            node.tag == dotty_tasty::tasty::TYPEDEF_TAG
+                && node.payload.as_ptr() == root.payload.as_ptr()
+                && node.payload.len() == root.payload.len()
+                && matches!(
+                    node.decode_structured(),
+                    Ok(dotty_tasty::tasty::StructuredNode::TypeDef(
+                        dotty_tasty::tasty::DefinitionBody::TypeDef { name: id, .. }
+                    )) if file.names().get_utf8(id) == Some(name.simple_name())
+                )
+        });
+        let Some(class_node) = class_node else {
             return Err(SemanticTastyLoadError::UnsupportedShape(
-                "the top-level class must have one indexed definition and one primary constructor",
+                "the package's top-level class is missing from the AST address index",
+            ));
+        };
+        let class_address = u32::try_from(class_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the top-level class address exceeds the supported wire range",
+            )
+        })?;
+        let class_tree_node = address_index.get_node(class_address).ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the top-level class is missing from the structural address index",
+            ),
+        )?;
+        if !address_index
+            .parent_of(class_address)
+            .is_some_and(|parent| parent.tag == dotty_tasty::tasty::PACKAGE_TAG)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected top-level class is not a direct package declaration",
             ));
         }
-        let constructor_node = address_index
-            .get(constructors[0])
-            .and_then(|node| node.decode_structured().ok());
-        if !matches!(
-            constructor_node,
-            Some(dotty_tasty::tasty::StructuredNode::DefDef(ref body))
-                if body.parameters.is_empty() && body.clauses.len() == 1
-        ) {
+        let dotty_tasty::tasty::RawTree::LengthNode(template) = &type_or_template else {
+            unreachable!("class template shape checked above")
+        };
+        let template_node = address_index.iter().find(|node| {
+            node.tag == dotty_tasty::tasty::TEMPLATE_TAG
+                && node.payload.as_ptr() == template.payload.as_ptr()
+                && node.payload.len() == template.payload.len()
+                && address_index.parent_of(node.offset as u32) == Some(class_tree_node)
+        });
+        let Some(template_node) = template_node else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected template is not a direct child of the top-level class",
+            ));
+        };
+        let template_address = u32::try_from(template_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the class template address exceeds the supported wire range",
+            )
+        })?;
+        let template_tree_node = address_index.get_node(template_address).ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the class template is missing from the structural address index",
+            ),
+        )?;
+        let Some(dotty_tasty::tasty::RawTree::LengthNode(direct_stat)) =
+            template_shape.stats.first()
+        else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the class template's sole stat must be a constructor definition",
+            ));
+        };
+        let constructor_node = address_index.iter().find(|node| {
+            node.tag == direct_stat.tag
+                && node.payload.as_ptr() == direct_stat.payload.as_ptr()
+                && node.payload.len() == direct_stat.payload.len()
+                && address_index.parent_of(node.offset as u32) == Some(template_tree_node)
+        });
+        let Some(constructor_node) = constructor_node else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected constructor is not a direct template stat",
+            ));
+        };
+        let constructor_address = u32::try_from(constructor_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the primary constructor address exceeds the supported wire range",
+            )
+        })?;
+        if direct_stat.tag != dotty_tasty::tasty::DEFDEF_TAG
+            || address_index.parent_of(constructor_address) != Some(template_tree_node)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected primary constructor must be a direct template definition",
+            ));
+        }
+        let constructor = constructor_node.decode_defdef_body().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?;
+        if file.names().get_utf8(constructor.name) != Some("<init>") {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the class template's sole direct method must be its primary constructor",
+            ));
+        }
+        if !constructor.parameters.is_empty()
+            || constructor.header_items
+                != [dotty_tasty::tasty::DefDefHeaderItem::Clause(
+                    dotty_tasty::tasty::EMPTYCLAUSE_TAG,
+                )]
+        {
             return Err(SemanticTastyLoadError::UnsupportedShape(
                 "the primary constructor must have one empty parameter clause",
             ));
         }
         Ok(TastyTopLevelSelection {
             binary_name: name.clone(),
-            class_address: roots[0],
-            constructor_address: constructors[0],
+            class_address,
+            constructor_address,
         })
     }
 
@@ -8329,6 +8398,19 @@ mod tests {
             );
             assert_eq!(first.binary_name, requested);
             assert_ne!(first.class_address, first.constructor_address);
+            let ast_index = file.ast_address_index().expect("global AST index");
+            let class_node = ast_index
+                .get_node(first.class_address)
+                .expect("selected top-level class tree node");
+            let template_node = ast_index
+                .iter_nodes_with_tag(dotty_tasty::tasty::TEMPLATE_TAG)
+                .find(|node| ast_index.parent_of(node.offset as u32) == Some(class_node))
+                .expect("class template child");
+            assert_eq!(
+                ast_index.parent_of(first.constructor_address),
+                Some(template_node),
+                "selected constructor must be a direct child of the selected template"
+            );
 
             let mut store = SemanticStore::new();
             let definitions = Definitions::bootstrap(&mut store);
@@ -8361,6 +8443,58 @@ mod tests {
 
         let truncated = tasty_symbol::parse_classloader_tasty(&bytes[..bytes.len() - 1]);
         assert!(truncated.is_err(), "truncated TASTy must fail parsing");
+    }
+
+    #[test]
+    fn structural_visibility_selection_rejects_split_and_unbound_constructor_shapes() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty",
+        );
+        let bytes = fs::read(&fixture).expect("pinned Open fixture");
+        let name = open_binary_name();
+
+        // This pinned wire byte is the constructor's EMPTYCLAUSE marker. A
+        // SPLITCLAUSE marker is a boundary, not an empty parameter clause.
+        let mut split_clause = bytes.clone();
+        assert_eq!(split_clause[296], dotty_tasty::tasty::EMPTYCLAUSE_TAG);
+        split_clause[296] = dotty_tasty::tasty::SPLITCLAUSE_TAG;
+        let split_file = tasty_symbol::parse_classloader_tasty(&split_clause)
+            .expect("SPLITCLAUSE variant remains structurally decodable");
+        assert!(matches!(
+            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&split_file, &name),
+            Err(SemanticTastyLoadError::UnsupportedShape(_))
+        ));
+
+        // Keep the same direct DEFDEF node and wire lengths, but give it an
+        // ordinary method name. A direct method cannot stand in for the
+        // class's primary constructor.
+        let original_file = tasty_symbol::parse_classloader_tasty(&bytes).expect("valid TASTy");
+        let selection =
+            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&original_file, &name)
+                .expect("original constructor selection");
+        let ast_index = original_file
+            .ast_address_index()
+            .expect("AST address index");
+        let constructor = ast_index
+            .get(selection.constructor_address)
+            .expect("constructor node");
+        let asts = original_file
+            .section(dotty_tasty::tasty::StandardSection::Asts)
+            .expect("AST section");
+        let payload_offset = constructor.payload.as_ptr() as usize - asts.payload.as_ptr() as usize;
+        let ordinary_name = original_file
+            .names()
+            .find_utf8("Open")
+            .expect("one-byte alternate name reference");
+        assert!(ordinary_name < 0x80);
+        let mut unbound_constructor = bytes.clone();
+        unbound_constructor[asts.offset + payload_offset] = ordinary_name as u8;
+        let unbound_file = tasty_symbol::parse_classloader_tasty(&unbound_constructor)
+            .expect("renamed direct definition remains structurally decodable");
+        assert!(matches!(
+            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&unbound_file, &name),
+            Err(SemanticTastyLoadError::UnsupportedShape(_))
+        ));
     }
 
     #[test]

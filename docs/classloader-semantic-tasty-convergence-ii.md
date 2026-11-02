@@ -159,6 +159,12 @@ resolve in the retained `TastySemanticIndex` to a class and constructor, and
 the completed constructor must be owned by that class. The post-entry class
 identity is also checked against the requested package path.
 
+The constructor clause preflight requires the literal `EMPTYCLAUSE` marker;
+`SPLITCLAUSE` is only a boundary and does not establish an empty parameter
+clause. The AST address index must also link the selected class to its template
+and the template to its one direct `<init>` stat. A nested or unrelated
+constructor elsewhere in the unit cannot satisfy that selection.
+
 The same pinned root and constructor addresses were removed from the
 InfoBase/InfoWrapped adapter. That pair validates its package and root kind
 from source structure, then discovers each root, constructor and the wrapped
