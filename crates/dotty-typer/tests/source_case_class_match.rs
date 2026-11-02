@@ -8,8 +8,8 @@ use dotty_core::ast::{TreeKind, TypedAst};
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, GeneratedCaseClassMethodRole, Name, Namespace, Packages, SemanticStore, SourceId,
-    SourceText, SourceTypedIndex, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TreeId, Typed,
-    Untyped,
+    SourceText, SourceTypedIndex, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin,
+    TreeId, Typed, Untyped,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
@@ -796,6 +796,374 @@ fn flagged_product2_whole_method_baseline() {
             println!("ISSUE1972_POSITIVE\t{session}\t{row}");
         }
     }
+}
+
+#[test]
+fn sealed_event_extract_and_classify_are_complete_owned_methods() {
+    let first = sealed_adt_positive_session(SourceId::from_index(1998));
+    let second = sealed_adt_positive_session(SourceId::from_index(2998));
+    assert_eq!(first, second, "fresh source sessions normalize identically");
+    assert_eq!(first.len(), 2, "only the two original methods are roots");
+    assert_eq!(first[0].0, "extract");
+    assert_eq!(first[1].0, "classify");
+    let actual = first
+        .iter()
+        .map(|(name, receipt)| {
+            let first_error = if name == "extract" {
+                "ExtractorPatternConstraintDeferred@tree25:210:221"
+            } else {
+                "ExtractorPatternConstraintDeferred@tree43:327:337"
+            };
+            format!("{name}\t{first_error}\t{receipt}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        format!("{actual}\n"),
+        include_str!("fixtures/source-sealed-adt-match-3.9.0/rust-complete-methods.tsv")
+            .split_once('\n')
+            .expect("two-root before/after receipt header")
+            .1
+    );
+    for (name, receipt) in first {
+        println!("ISSUE1998_COMPLETE_ROOT\t{name}\t{receipt}");
+    }
+}
+
+fn sealed_adt_positive_session(source: SourceId) -> Vec<(String, String)> {
+    let mut session = Session::new(SOURCE_TRAIT_PRODUCT1, source);
+    let event = session.source_type_symbol("Event");
+    let created = session.source_type_symbol("Created");
+    let deleted = session.source_type_symbol("Deleted");
+    let methods = ["extract", "classify"].map(|name| (name, session.method_named(name)));
+    let selector_name = Name::new(session.store.names.intern("_1"), Namespace::Term);
+    session.with_typer(|source, parsed, index, definitions, typer| {
+        assert_eq!(typer.store().symbols.get(event).kind, SymbolKind::Trait);
+        assert!(typer.store().symbols.get(event).flags.contains(SymbolFlags::SEALED));
+        assert!(matches!(typer.store().symbols.get(event).origin, SymbolOrigin::Source(id) if id == source));
+        assert_ne!(created, deleted);
+        for variant in [created, deleted] {
+            let class_info = typer.complete_symbol(variant).expect("complete source variant");
+            let Some(Type::ClassInfo(class_info)) = typer.store().types.try_get(class_info) else {
+                panic!("source variant has complete ClassInfo")
+            };
+            assert!(class_info.parents.iter().any(|parent| matches!(
+                typer.store().types.try_get(*parent),
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == event
+            )), "variant retains its direct source Event parent");
+            let companion = typer.store().symbols.get(variant).links.companion.unwrap();
+            let unapply = index.generated_case_class_method(variant, GeneratedCaseClassMethodRole::Unapply).unwrap();
+            let unapply_owner = typer.store().symbols.get(unapply).owner.unwrap();
+            assert_eq!(typer.store().symbols.get(companion).kind, SymbolKind::Object);
+            assert_eq!(typer.store().symbols.get(unapply_owner).kind, SymbolKind::ModuleClass);
+            let unapply_type = typer.complete_symbol(unapply).expect("complete canonical unapply");
+            let Some(Type::Method(unapply_type)) = typer.store().types.try_get(unapply_type) else {
+                panic!("generated unapply is a method")
+            };
+            assert_eq!(unapply_type.params.len(), 1);
+            for ty in [unapply_type.params[0].ty, unapply_type.result] {
+                assert!(matches!(
+                    typer.store().types.try_get(ty),
+                    Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == variant
+                ), "unapply input and result preserve their authentic variant identity");
+            }
+            let class_scope = index.scope_of(variant).unwrap();
+            let selector = typer.store().scopes.get(class_scope).lookup(&selector_name).unwrap();
+            assert_eq!(typer.store().symbols.get(selector).owner, Some(variant));
+            let selector_type = typer.complete_symbol(selector).expect("complete source Product._1 selector");
+            let Some(Type::Method(selector_type)) = typer.store().types.try_get(selector_type) else {
+                panic!("variant _1 selector is a method")
+            };
+            assert!(selector_type.params.is_empty());
+            assert_eq!(selector_type.result, definitions.int);
+        }
+        let mut receipts = Vec::new();
+        let mut binders = Vec::new();
+        let mut typed_roots = Vec::new();
+
+        for (name, method) in methods {
+            let method_symbol = index.symbol_at(source, method).unwrap();
+            let matcher = typer.store().symbols.get(method_symbol).owner.unwrap();
+            assert_eq!(typer.store().symbols.get(matcher).kind, SymbolKind::ModuleClass);
+            assert_eq!(typer.store().names.resolve(typer.store().symbols.get(matcher).name.text()), "Matcher$");
+            let typed_method = typer.type_method_definition(method).unwrap_or_else(|error| {
+                panic!("frozen {name} method must type completely after the prerequisites: {error:?}")
+            });
+            typed_roots.push((method, typed_method));
+            assert_mapping(typer.source_typed_index(), source, method);
+            let source_def = match &parsed.ast.get(method).kind {
+                TreeKind::DefDef(definition) => definition,
+                other => panic!("source root is not a DefDef: {other:?}"),
+            };
+            let method_range = parsed.ast.get(method).position.unwrap().span().range();
+            let (expected_tree, expected_range) = if name == "extract" {
+                (36, (150, 262))
+            } else {
+                (60, (266, 400))
+            };
+            assert_eq!(method.index(), expected_tree, "frozen original DefDef identity");
+            assert_eq!((method_range.start(), method_range.end()), expected_range, "frozen original source span");
+            let TreeKind::DefDef(typed_def) = &typer.typed_ast().get(typed_method).kind else {
+                panic!("typed root is not a DefDef")
+            };
+            assert_eq!(typed_def.value_param_clauses.len(), 1);
+            assert_eq!(typed_def.value_param_clauses[0].len(), 1);
+            let source_parameter = source_def.value_param_clauses[0][0];
+            let TreeKind::ValDef(source_parameter_def) = &parsed.ast.get(source_parameter).kind else {
+                panic!("source method parameter is a ValDef")
+            };
+            assert_mapping(typer.source_typed_index(), source, source_parameter);
+            let typed_parameter = typed_def.value_param_clauses[0][0];
+            assert_eq!(
+                typer.source_typed_index().get(source, source_parameter),
+                Some(typed_parameter),
+                "the returned DefDef parameter is the mapped source parameter"
+            );
+            let TreeKind::ValDef(typed_parameter_def) = &typer.typed_ast().get(typed_parameter).kind else {
+                panic!("typed method parameter is a ValDef")
+            };
+            let selector_parameter = index.symbol_at(source, source_parameter).unwrap();
+            assert!(matches!(
+                typer.store().types.try_get(typer.typed_ast().get(typed_parameter).ty),
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == event
+            ));
+            assert_eq!(typer.store().symbols.get(selector_parameter).kind, SymbolKind::Parameter);
+            assert_eq!(typer.store().symbols.get(selector_parameter).owner, Some(method_symbol));
+            assert_eq!(
+                typer.store().names.resolve(typed_parameter_def.name.as_name().text()),
+                typer.store().names.resolve(source_parameter_def.name.as_name().text())
+            );
+            assert_mapping(typer.source_typed_index(), source, source_parameter_def.tpt);
+            assert_eq!(
+                typer.source_typed_index().get(source, source_parameter_def.tpt),
+                Some(typed_parameter_def.tpt)
+            );
+            assert!(matches!(
+                typer.store().types.try_get(typer.typed_ast().get(typed_parameter_def.tpt).ty),
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == event
+            ));
+            let signature = match *typer.store().symbols.info(method_symbol) {
+                SymbolInfo::Complete(signature) => signature,
+                other => panic!("{name} signature is incomplete: {other:?}"),
+            };
+            let Some(Type::Method(method_type)) = typer.store().types.try_get(signature) else {
+                panic!("{name} signature is not a method type")
+            };
+            assert_eq!(method_type.params.len(), 1);
+            assert!(matches!(
+                typer.store().types.try_get(method_type.params[0].ty),
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == event
+            ));
+            assert_eq!(method_type.result, definitions.int);
+            assert_mapping(typer.source_typed_index(), source, source_def.tpt);
+            assert_eq!(typer.source_typed_index().get(source, source_def.tpt), Some(typed_def.tpt));
+            assert_eq!(typer.typed_ast().get(typed_def.tpt).ty, definitions.int);
+            let source_rhs = source_def.rhs.unwrap();
+            let typed_rhs = typed_def.rhs.expect("complete typed method body");
+            assert_mapping(typer.source_typed_index(), source, source_rhs);
+            assert_eq!(typer.source_typed_index().get(source, source_rhs), Some(typed_rhs));
+            assert_eq!(typer.typed_ast().get(typed_rhs).ty, definitions.int);
+            let (selector, source_cases) = match &parsed.ast.get(source_rhs).kind {
+                TreeKind::Match(matched) => (matched.selector, matched.cases.clone()),
+                other => panic!("{name} source body is not a Match: {other:?}"),
+            };
+            let rhs_range = parsed.ast.get(source_rhs).position.unwrap().span().range();
+            for (tree, node) in parsed.ast.iter() {
+                let Some(position) = node.position else { continue };
+                let range = position.span().range();
+                if range.start() >= rhs_range.start() && range.end() <= rhs_range.end() {
+                    assert_mapping(typer.source_typed_index(), source, tree);
+                }
+            }
+            let TreeKind::Match(typed_match) = &typer.typed_ast().get(typed_rhs).kind else {
+                panic!("{name} typed body is not a Match")
+            };
+            assert_eq!(source_cases.len(), if name == "extract" { 2 } else { 3 });
+            assert_eq!(typed_match.cases.len(), source_cases.len());
+            assert_mapping(typer.source_typed_index(), source, selector);
+            let typed_selector = typed_match.selector;
+            assert_eq!(
+                typer.source_typed_index().get(source, selector),
+                Some(typed_selector),
+                "the returned Match selector is the mapped source selector"
+            );
+            assert_eq!(typed_symbol(typer.typed_ast(), typer.store(), typed_selector), selector_parameter);
+            assert!(matches!(
+                typer.store().types.try_get(typer.typed_ast().get(typed_selector).ty),
+                Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == selector_parameter
+            ));
+            let SymbolInfo::Complete(selector_type) = *typer.store().symbols.info(selector_parameter) else {
+                panic!("{name} selector parameter type is complete")
+            };
+            assert!(matches!(
+                typer.store().types.try_get(selector_type),
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == event
+            ));
+
+            let mut case_receipts = Vec::new();
+            for (case_index, (source_case, typed_case)) in source_cases.iter().zip(&typed_match.cases).enumerate() {
+                assert_mapping(typer.source_typed_index(), source, *source_case);
+                assert_eq!(typer.source_typed_index().get(source, *source_case), Some(*typed_case));
+                let TreeKind::CaseDef(source_case_node) = &parsed.ast.get(*source_case).kind else {
+                    panic!("source branch is not a CaseDef")
+                };
+                let TreeKind::CaseDef(typed_case_node) = &typer.typed_ast().get(*typed_case).kind else {
+                    panic!("typed branch is not a CaseDef")
+                };
+                assert_mapping(typer.source_typed_index(), source, source_case_node.pattern);
+                assert_eq!(typer.source_typed_index().get(source, source_case_node.pattern), Some(typed_case_node.pattern));
+                assert_mapping(typer.source_typed_index(), source, source_case_node.body);
+                let mapped_body = typer.source_typed_index().get(source, source_case_node.body).unwrap();
+                assert_eq!(
+                    typed_case_node.body,
+                    mapped_body,
+                    "the returned CaseDef body is the mapped source body"
+                );
+                let typed_body = typed_case_node.body;
+                let (variant, expected_binder) = match (name, case_index) {
+                    ("extract", 0) | ("classify", 0 | 1) => (created, "id"),
+                    ("extract", 1) => (deleted, "code"),
+                    ("classify", 2) => (deleted, "_"),
+                    _ => panic!("unexpected source case {name}[{case_index}]"),
+                };
+                let TreeKind::UnApply(unapply_node) = &typer.typed_ast().get(typed_case_node.pattern).kind else {
+                    panic!("{name} case must retain an UnApply")
+                };
+                assert_mapping(typer.source_typed_index(), source, source_case_node.pattern);
+                let TreeKind::Apply(source_extractor) = &parsed.ast.get(source_case_node.pattern).kind else {
+                    panic!("frozen source extractor pattern remains an Apply")
+                };
+                assert_eq!(source_extractor.args.len(), 1);
+                let expected_unapply = index.generated_case_class_method(variant, GeneratedCaseClassMethodRole::Unapply).unwrap();
+                assert_eq!(
+                    typer.source_typed_index().get(source, source_extractor.function),
+                    Some(match &typer.typed_ast().get(unapply_node.function).kind {
+                        TreeKind::Select(selection) => selection.qualifier,
+                        other => panic!("typed extractor function is not selected: {other:?}"),
+                    }),
+                    "each source extractor name maps to its authentic companion qualifier"
+                );
+                assert_eq!(typed_symbol(typer.typed_ast(), typer.store(), unapply_node.function), expected_unapply);
+                assert_eq!(index.generated_case_class_method_identity(expected_unapply), Some(dotty_core::GeneratedCaseClassMethod { class: variant, role: GeneratedCaseClassMethodRole::Unapply }));
+                let unapply_owner = typer.store().symbols.get(expected_unapply).owner.unwrap();
+                assert_eq!(typer.store().symbols.get(unapply_owner).kind, SymbolKind::ModuleClass);
+                assert_eq!(typer.store().names.resolve(typer.store().symbols.get(unapply_owner).name.text()), if variant == created { "Created$" } else { "Deleted$" });
+                let TreeKind::Select(selected) = &typer.typed_ast().get(unapply_node.function).kind else {
+                    panic!("UnApply function must be the authentic selected extractor")
+                };
+                let companion = typer.store().symbols.get(variant).links.companion.unwrap();
+                assert!(matches!(
+                    typer.store().types.try_get(typer.typed_ast().get(selected.qualifier).ty),
+                    Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == companion
+                ));
+                assert_eq!(unapply_node.patterns.len(), 1);
+                let nested = unapply_node.patterns[0];
+                assert_eq!(typer.source_typed_index().get(source, source_extractor.args[0]), Some(nested));
+                assert!(matches!(
+                    typer.store().types.try_get(typer.typed_ast().get(typed_case_node.pattern).ty),
+                    Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == variant
+                ), "the pattern prototype is narrowed to its authentic source variant");
+                if expected_binder == "_" {
+                    let TreeKind::Ident(wildcard) = &typer.typed_ast().get(nested).kind else {
+                        panic!("wildcard remains an identifier-shaped pattern")
+                    };
+                    assert_eq!(typer.store().names.resolve(wildcard.name.text()), "_");
+                    assert_eq!(typer.typed_ast().get(nested).ty, definitions.int);
+                    assert!(matches!(
+                        typer.store().types.try_get(typer.typed_ast().get(typed_case_node.body).ty),
+                        Some(Type::Constant(Constant::Int(0)))
+                    ));
+                    case_receipts.push("Deleted(_)");
+                } else if name == "classify" && case_index == 0 {
+                    assert!(matches!(typer.typed_ast().get(nested).kind, TreeKind::Literal(_)));
+                    assert!(matches!(
+                        typer.store().types.try_get(typer.typed_ast().get(nested).ty),
+                        Some(Type::Constant(Constant::Int(0)))
+                    ));
+                    assert!(matches!(
+                        typer.store().types.try_get(typer.typed_ast().get(typed_case_node.body).ty),
+                        Some(Type::Constant(Constant::Int(0)))
+                    ));
+                    case_receipts.push("Created(0)");
+                } else {
+                    let TreeKind::Bind(binding) = &typer.typed_ast().get(nested).kind else {
+                        panic!("nested extractor argument must be a binder")
+                    };
+                    let binder = typed_symbol(typer.typed_ast(), typer.store(), nested);
+                    assert_eq!(typer.store().symbols.get(binder).kind, SymbolKind::Local);
+                    assert_eq!(typer.store().symbols.get(binder).owner, Some(method_symbol));
+                    assert_eq!(typer.store().symbols.get(binder).origin, SymbolOrigin::Source(source));
+                    assert_eq!(typer.store().names.resolve(binding.name.text()), expected_binder);
+                    assert_eq!(*typer.store().symbols.info(binder), SymbolInfo::Complete(definitions.int));
+                    assert!(matches!(typer.typed_ast().get(binding.body).kind, TreeKind::Ident(_)));
+                    assert_eq!(typed_symbol(typer.typed_ast(), typer.store(), typed_body), binder);
+                    assert_ne!(binder, selector_parameter);
+                    binders.push(binder);
+                    case_receipts.push(if variant == created { "Created(id)" } else { "Deleted(code)" });
+                }
+            }
+            assert_eq!(
+                case_receipts,
+                if name == "extract" { vec!["Created(id)", "Deleted(code)"] } else { vec!["Created(0)", "Created(id)", "Deleted(_)"] }
+            );
+            let (extractors, binders) = if name == "extract" {
+                ("Created$.unapply,Deleted$.unapply", "Created:id:Int,Deleted:code:Int")
+            } else {
+                ("Created$.unapply,Created$.unapply,Deleted$.unapply", "Created:id:Int")
+            };
+            receipts.push((name.to_owned(), format!(
+                "Event.scala#tree{}|{}:{}|signature=(Event):Int|owner=Matcher$|selector=Event|cases={}|extractors={extractors}|binders={binders}|typed=complete DefDef+Match|mappings=all source RHS trees",
+                method.index(), method_range.start(), method_range.end(), case_receipts.join(",")
+            )));
+        }
+        assert_eq!(binders.len(), 3);
+        for (index, binder) in binders.iter().enumerate() {
+            assert!(!binders[..index].contains(binder), "each case receives a distinct binder symbol");
+        }
+        for (source_root, typed_root) in typed_roots {
+            assert_eq!(typer.source_typed_index().get(source, source_root), Some(typed_root));
+            assert!(matches!(typer.typed_ast().get(typed_root).kind, TreeKind::DefDef(_)));
+        }
+        receipts
+    })
+}
+
+#[test]
+fn sealed_event_rejects_variant_extractor_with_a_foreign_owner() {
+    let mut session = Session::new(SOURCE_TRAIT_PRODUCT1, SourceId::from_index(3998));
+    let created = session.source_type_symbol("Created");
+    let deleted = session.source_type_symbol("Deleted");
+    let method = session.method_named("extract");
+    let created_unapply = session
+        .index
+        .generated_case_class_method(created, GeneratedCaseClassMethodRole::Unapply)
+        .unwrap();
+    let deleted_unapply = session
+        .index
+        .generated_case_class_method(deleted, GeneratedCaseClassMethodRole::Unapply)
+        .unwrap();
+    let foreign_owner = session.store.symbols.get(deleted_unapply).owner.unwrap();
+    session.store.symbols.get_mut(created_unapply).owner = Some(foreign_owner);
+    let source = session.source;
+    session.with_typer(|_, _, _, _, typer| {
+        let error = typer
+            .type_method_definition(method)
+            .expect_err("a Created extractor cannot be authenticated by Deleted$ ownership");
+        assert!(matches!(
+            error,
+            TyperError::SymbolSourceKindMismatch {
+                tree_index: 11,
+                symbol,
+                kind: SymbolKind::Method,
+                ..
+            } if symbol == created_unapply
+        ));
+        assert!(typer.source_typed_index().get(source, method).is_none());
+        assert!(
+            typer.typed_ast().iter().next().is_none(),
+            "failed source method publishes no typed trees"
+        );
+    });
 }
 
 #[test]

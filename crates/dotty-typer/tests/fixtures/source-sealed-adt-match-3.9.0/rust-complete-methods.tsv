@@ -1,0 +1,3 @@
+root	before	complete_method_receipt
+extract	ExtractorPatternConstraintDeferred@tree25:210:221	Event.scala#tree36|150:262|signature=(Event):Int|owner=Matcher$|selector=Event|cases=Created(id),Deleted(code)|extractors=Created$.unapply,Deleted$.unapply|binders=Created:id:Int,Deleted:code:Int|typed=complete DefDef+Match|mappings=all source RHS trees
+classify	ExtractorPatternConstraintDeferred@tree43:327:337	Event.scala#tree60|266:400|signature=(Event):Int|owner=Matcher$|selector=Event|cases=Created(0),Created(id),Deleted(_)|extractors=Created$.unapply,Created$.unapply,Deleted$.unapply|binders=Created:id:Int|typed=complete DefDef+Match|mappings=all source RHS trees

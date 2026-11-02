@@ -74,6 +74,8 @@ RUST_TESTS = {
     "late_body_error_rolls_back_extractor_and_case_binder_state_before_retry",
     "ordinary_classes_wrong_method_results_and_case_binder_escape_are_rejected",
     "precompleted_source_parent_graph_failures_roll_back_and_retry_in_both_routes",
+    "sealed_event_extract_and_classify_are_complete_owned_methods",
+    "sealed_event_rejects_variant_extractor_with_a_foreign_owner",
     "source_trait_parent_does_not_enable_product2_completion",
     "source_trait_parent_product1_defers_multi_parent_selector_shape",
     "source_trait_parent_product1_preserves_identity_in_both_completion_routes",
