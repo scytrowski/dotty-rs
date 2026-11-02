@@ -310,6 +310,7 @@ pub(crate) fn validate_class_state_method(
     methods: &[MethodPicklePlan],
     local_values: &[LocalValueBinding],
     reference_fields: &[SymbolId],
+    signature_only: bool,
 ) -> Result<(), PickleError> {
     let constructor = DefaultConstructorPlan {
         symbol: class.constructor.symbol,
@@ -358,7 +359,7 @@ pub(crate) fn validate_class_state_method(
         }
     }
     for method in methods {
-        validator.method(method)?;
+        validator.method(method, signature_only)?;
     }
     if validator.seen_local_bindings.len() != local_values.len() {
         let binding = local_values
@@ -985,7 +986,7 @@ impl<'a> Validator<'_, 'a> {
             ));
         }
         for method in p.methods {
-            self.method(method)?;
+            self.method(method, false)?;
         }
         if self.seen_local_bindings.len() != p.local_values.len() {
             let binding = p
@@ -1360,7 +1361,11 @@ impl<'a> Validator<'_, 'a> {
         Ok(reference_parameters == 2)
     }
 
-    fn method(&mut self, method: &MethodPicklePlan) -> Result<(), PickleError> {
+    fn method(
+        &mut self,
+        method: &MethodPicklePlan,
+        signature_only: bool,
+    ) -> Result<(), PickleError> {
         self.visible_locals.clear();
         self.charge(1)?;
         let p = self.plan;
@@ -1459,6 +1464,15 @@ impl<'a> Validator<'_, 'a> {
                     .count();
                 if planned_class_parameters != 0
                     && !((planned_class_parameters == 1 && signature.params.len() == 1)
+                        || (planned_class_parameters == 1
+                            && signature.params.len() == 2
+                            && self.is_planned_sibling_class_type(signature.params[0].ty, None)
+                            && signature.params[1].ty == p.definitions.int
+                            && self.is_planned_sibling_class_type(signature.result, None)
+                            && !self.same_planned_sibling_class_type(
+                                signature.params[0].ty,
+                                signature.result,
+                            ))
                         || (planned_class_parameters == 2
                             && signature.params.len() == 2
                             && self.same_planned_sibling_class_type(
@@ -1530,6 +1544,15 @@ impl<'a> Validator<'_, 'a> {
                 role: TypeRole::MethodResult,
             });
         }
-        self.validate_method_expression(definition.rhs, method.body, method, result_type)
+        if signature_only {
+            if definition.rhs.is_none() || method.body.is_none() {
+                return Err(PickleError::MissingBody {
+                    method: method.symbol,
+                });
+            }
+            Ok(())
+        } else {
+            self.validate_method_expression(definition.rhs, method.body, method, result_type)
+        }
     }
 }

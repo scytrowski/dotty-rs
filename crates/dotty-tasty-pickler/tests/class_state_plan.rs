@@ -15,11 +15,16 @@ use dotty_typer::SourceTyper;
 struct Bindings(
     HashMap<(SourceId, TreeId<Untyped>), TreeId<Typed>>,
     HashMap<(SourceId, SymbolId), Vec<LocalValueBinding>>,
+    Vec<SymbolId>,
 );
 
 impl SourceTypedBindings for Bindings {
     fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
         self.0.get(&(source, tree)).copied()
+    }
+
+    fn planned_class_symbols(&self) -> &[SymbolId] {
+        &self.2
     }
 
     fn local_value_bindings(&self, source: SourceId, method: SymbolId) -> Vec<LocalValueBinding> {
@@ -248,6 +253,14 @@ fn class_state_plan<'a>(
         }
     }
     let _ = source_name;
+    bindings.2 = ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            matches!(node.kind, TreeKind::TypeDef(_))
+                .then(|| index.symbol_at(source, tree))
+                .flatten()
+        })
+        .collect();
     (class, members, constructor, bindings)
 }
 
@@ -765,6 +778,36 @@ fn emit_class_state_source(
     source_name: &str,
     corruption: Option<TestCorruption>,
 ) -> Result<PickledTasty, PickleError> {
+    match emit_class_state_source_internal(source_text, class_name, source_name, corruption, false)?
+    {
+        ClassStateEmission::Complete(output) => Ok(output),
+        ClassStateEmission::Skeleton(_) => unreachable!(),
+    }
+}
+
+fn emit_class_state_signature_source(
+    source_text: &str,
+    class_name: &str,
+    source_name: &str,
+) -> Result<DeclarationSkeleton, PickleError> {
+    match emit_class_state_source_internal(source_text, class_name, source_name, None, true)? {
+        ClassStateEmission::Skeleton(output) => Ok(output),
+        ClassStateEmission::Complete(_) => unreachable!(),
+    }
+}
+
+enum ClassStateEmission {
+    Complete(PickledTasty),
+    Skeleton(DeclarationSkeleton),
+}
+
+fn emit_class_state_source_internal(
+    source_text: &str,
+    class_name: &str,
+    source_name: &str,
+    corruption: Option<TestCorruption>,
+    signature_only: bool,
+) -> Result<ClassStateEmission, PickleError> {
     with_frontend(source_text, |ast, source, index, definitions, typer| {
         let (class, members, constructor, mut bindings) = class_state_plan(
             ast,
@@ -934,7 +977,7 @@ fn emit_class_state_source(
         }
 
         let class_tree = class_tree_for(ast, source, index, class);
-        ClassStatePicklePlan {
+        let plan = ClassStatePicklePlan {
             store: typer.store(),
             definitions,
             source_ast: &source_ast,
@@ -949,9 +992,15 @@ fn emit_class_state_source(
             class_tree,
             constructor,
             members: &members,
+        };
+        let validated = plan.validate()?;
+        if signature_only {
+            Ok(ClassStateEmission::Skeleton(
+                validated.method_signature_skeleton()?,
+            ))
+        } else {
+            Ok(ClassStateEmission::Complete(validated.pickle()?))
         }
-        .validate()?
-        .pickle()
     })
 }
 
@@ -1067,6 +1116,122 @@ fn class_state_reuses_canonical_parameter_and_forward_method_validation() {
         .collect::<Vec<_>>();
     assert_eq!(methods.len(), 2);
     assert_eq!(raw_tree_tag(methods[0].rhs.as_ref().unwrap()), SELECT_TAG);
+}
+
+#[test]
+fn mixed_counter_int_method_signatures_project_ordered_params_without_bodies() {
+    let first = "package example\nclass Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\nclass Pair(first: Counter, second: Counter):\n  private val left: Counter = first\n  private val right: Counter = second\n  def leftValue(): Int = left.get()\n  def rightValue(): Int = right.get()\nclass PairFactory:\n  def wrapAndCreate(existing: Counter, seed: Int): Pair =\n    new Pair(existing, new Counter(seed))\n";
+    let reverse = "package demo\nclass PairFactory:\n  def createAndWrap(prior: Counter, initial: Int): Pair =\n    new Pair(new Counter(initial), prior)\nclass Pair(first: Counter, second: Counter):\n  private val left: Counter = first\n  private val right: Counter = second\nclass Counter(start: Int):\n  private var current: Int = start\n";
+
+    for (source, method_name, parameter_names, parameter_types) in [
+        (
+            first,
+            "wrapAndCreate",
+            ["existing", "seed"],
+            ["Counter", "Int"],
+        ),
+        (
+            reverse,
+            "createAndWrap",
+            ["prior", "initial"],
+            ["Counter", "Int"],
+        ),
+    ] {
+        let skeleton = emit_class_state_signature_source(source, "PairFactory", "Factory.scala")
+            .expect("the real mixed signature should validate and project without its body");
+        assert_eq!(skeleton.omitted_bodies().len(), 1);
+        let file = TastyFile::parse_and_validate_scala_3_9(skeleton.provisional_bytes()).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let method = skeleton
+            .declarations()
+            .iter()
+            .find_map(|declaration| {
+                let node = index.get(declaration.address)?;
+                let body = node.decode_defdef_body().ok()?;
+                (file.render_name(body.name).ok()?.as_str() == method_name).then_some(body)
+            })
+            .expect("method declaration is present");
+        assert_eq!(
+            method.rhs, None,
+            "signature projection must omit body syntax"
+        );
+        assert_eq!(method.parameters.len(), 2);
+        assert_eq!(
+            method
+                .parameters
+                .iter()
+                .map(|parameter| file.render_name(parameter.name()).unwrap())
+                .collect::<Vec<_>>(),
+            parameter_names
+        );
+        assert_eq!(
+            method
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    let body = parameter.decode_body().unwrap();
+                    assert_eq!(raw_tree_tag(&body.type_tree), IDENTTPT_TAG);
+                    let StructuredTree::Ident(ident) = body.type_tree.decode_structured().unwrap()
+                    else {
+                        panic!("parameter type uses source identifier syntax")
+                    };
+                    file.render_name(ident.name).unwrap()
+                })
+                .collect::<Vec<_>>(),
+            parameter_types
+        );
+        assert_eq!(raw_tree_tag(&method.return_type), IDENTTPT_TAG);
+        let StructuredTree::Ident(result_type) = method.return_type.decode_structured().unwrap()
+        else {
+            panic!("method result uses source identifier syntax")
+        };
+        assert_eq!(file.render_name(result_type.name).unwrap(), "Pair");
+        let method_symbol = skeleton
+            .declarations()
+            .iter()
+            .find(|declaration| {
+                index
+                    .get(declaration.address)
+                    .and_then(|node| node.decode_defdef_body().ok())
+                    .is_some_and(|body| {
+                        file.render_name(body.name).ok().as_deref() == Some(method_name)
+                    })
+            })
+            .unwrap()
+            .symbol;
+        let parameter_symbols = skeleton
+            .declarations()
+            .iter()
+            .filter(|declaration| declaration.owner == method_symbol)
+            .map(|declaration| declaration.symbol)
+            .collect::<Vec<_>>();
+        assert_eq!(parameter_symbols.len(), 2);
+        assert_ne!(parameter_symbols[0], parameter_symbols[1]);
+    }
+
+    let unsupported = [
+        "package example\nclass Counter(start: Int)\nclass Pair(first: Counter, second: Counter)\nclass PairFactory:\n  def reverse(seed: Int, existing: Counter): Pair = new Pair(existing, new Counter(seed))\n",
+        "package example\nclass Counter(start: Int)\nclass Pair(first: Counter, second: Counter)\nclass PairFactory:\n  def extra(existing: Counter, seed: Int, tail: Boolean): Pair = new Pair(existing, new Counter(seed))\n",
+    ];
+    for source in unsupported {
+        assert!(
+            matches!(
+                emit_class_state_signature_source(source, "PairFactory", "Factory.scala"),
+                Err(PickleError::MalformedType {
+                    role: TypeRole::Parameter,
+                    ..
+                })
+            ),
+            "mixed formals in unsupported declaration order/arity must reject"
+        );
+    }
+    assert!(matches!(
+        emit_class_state_source(first, "PairFactory", "Factory.scala", None),
+        Err(PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -1412,7 +1577,7 @@ fn unsupported_visibility_order_and_missing_bindings_are_rejected() {
             ty: definitions.int,
         });
         stale_bindings.insert((source, source_rhs), stale_tree);
-        let stale_bindings = Bindings(stale_bindings, HashMap::new());
+        let stale_bindings = Bindings(stale_bindings, HashMap::new(), Vec::new());
         let mut stale_members = members.clone();
         let ClassMemberPicklePlan::Field(field) = &mut stale_members[0] else {
             unreachable!()

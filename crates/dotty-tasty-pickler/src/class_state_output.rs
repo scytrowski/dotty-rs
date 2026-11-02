@@ -4,7 +4,7 @@ use dotty_core::ast::{DefParamClauseOrder, TreeKind};
 use dotty_core::{MethodKind, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, Type};
 use dotty_tasty::tasty::*;
 
-use crate::skeleton::Assembly;
+use crate::skeleton::{Assembly, DeclarationSkeleton, OmittedMethodBody};
 use crate::{
     ClassMemberPicklePlan, EncodingContext, LimitKind, MethodPicklePlan, PickleError, PickleLimits,
     PickledTasty, SkeletonDeclaration, TypeRole, UnsupportedFeature, ValidatedClassStatePlan,
@@ -316,7 +316,7 @@ pub(crate) fn validate_class_state_method_bodies(
         .iter()
         .flat_map(|(_, locals)| locals.iter().copied())
         .collect::<Vec<_>>();
-    crate::plan::validate_class_state_method(p, &methods, &local_values, reference_fields)
+    crate::plan::validate_class_state_method(p, &methods, &local_values, reference_fields, false)
 }
 
 impl ValidatedClassStatePlan<'_, '_> {
@@ -337,11 +337,41 @@ impl ValidatedClassStatePlan<'_, '_> {
 
     /// Apply the standard projection and whole-file limits to class-state output.
     pub fn pickle_with_limits(&self, limits: PickleLimits) -> Result<PickledTasty, PickleError> {
-        let output = self.assemble_class_state(limits)?;
+        let output = self.assemble_class_state(limits, false)?;
         Ok(PickledTasty::from_assembly(output))
     }
 
-    fn assemble_class_state(&self, limits: PickleLimits) -> Result<Assembly, PickleError> {
+    /// Emit a structurally inspectable declaration projection containing the
+    /// validated method signatures while retaining each real body root as
+    /// explicitly omitted metadata. This is not a complete Scala artifact.
+    pub fn method_signature_skeleton(&self) -> Result<DeclarationSkeleton, PickleError> {
+        self.method_signature_skeleton_with_limits(PickleLimits::default())
+    }
+
+    /// Apply whole-file and projection limits to signature-only output.
+    pub fn method_signature_skeleton_with_limits(
+        &self,
+        limits: PickleLimits,
+    ) -> Result<DeclarationSkeleton, PickleError> {
+        let output = self.assemble_class_state(limits, true)?;
+        Ok(DeclarationSkeleton {
+            bytes: output.bytes,
+            source: output.source,
+            intended_tasty_path: output.intended_tasty_path,
+            declarations: output.declarations,
+            omitted_bodies: output
+                .bodies
+                .into_iter()
+                .map(|(method, typed_root)| OmittedMethodBody { method, typed_root })
+                .collect(),
+        })
+    }
+
+    fn assemble_class_state(
+        &self,
+        limits: PickleLimits,
+        signature_only: bool,
+    ) -> Result<Assembly, PickleError> {
         let p = self.plan();
         let constructor_tree = p.source_ast.try_get(p.constructor.source_tree).ok_or(
             PickleError::InvalidSourceTree {
@@ -393,7 +423,13 @@ impl ValidatedClassStatePlan<'_, '_> {
             .same_batch_reference_fields()
             .map(|field| field.field())
             .collect::<Vec<_>>();
-        crate::plan::validate_class_state_method(p, &methods, &local_values, &reference_fields)?;
+        crate::plan::validate_class_state_method(
+            p,
+            &methods,
+            &local_values,
+            &reference_fields,
+            signature_only,
+        )?;
 
         let mut context = EncodingContext::new(
             p.store,
@@ -1007,16 +1043,18 @@ impl ValidatedClassStatePlan<'_, '_> {
                     // `method_input` ran the shared recursive source/typed
                     // validator before any body is lowered, including nested
                     // bindings, literal payloads, spans, and local identities.
-                    let body = crate::expression::lower_expression(
-                        p.store,
-                        p.typed_ast,
-                        body_root,
-                        symbol,
-                        &parameter_ids,
-                        limits.projection,
-                        &mut context,
-                    )?;
-                    method_fields.push(AstField::Tree(body));
+                    if !signature_only {
+                        let body = crate::expression::lower_expression(
+                            p.store,
+                            p.typed_ast,
+                            body_root,
+                            symbol,
+                            &parameter_ids,
+                            limits.projection,
+                            &mut context,
+                        )?;
+                        method_fields.push(AstField::Tree(body));
+                    }
                     context.bind_declaration(
                         symbol,
                         AstNode::Length {
