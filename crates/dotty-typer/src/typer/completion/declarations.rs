@@ -238,6 +238,14 @@ impl SourceTyper<'_> {
         }
         let product_selector =
             self.source_case_class_product_selector(symbol, kind, &template, constructor);
+        if product_selector.is_some() && template.parents.len() == 1 {
+            self.validate_source_case_class_trait_parent(
+                symbol,
+                template.parents[0],
+                parents[0],
+                info_journal,
+            )?;
+        }
         let mut product_type_to_add = None;
         if let Some(selectors) = product_selector {
             let mut selector_results = Vec::with_capacity(selectors.len());
@@ -392,7 +400,7 @@ impl SourceTyper<'_> {
             )
             || !class_symbol.flags.contains(SymbolFlags::CASE)
             || !self.source_class_type_parameters(class).ok()?.is_empty()
-            || !template.parents.is_empty()
+            || template.parents.len() > 1
             || constructor.value_param_clauses.len() != 1
             || !matches!(constructor.value_param_clauses[0].len(), 1 | 2)
         {
@@ -460,6 +468,60 @@ impl SourceTyper<'_> {
             projection.push((*parameter_tree, selector));
         }
         Some(projection)
+    }
+
+    fn validate_source_case_class_trait_parent(
+        &mut self,
+        class: SymbolId,
+        parent_tree: TreeId<Untyped>,
+        parent_type: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        let Some(Type::TypeRef {
+            target: dotty_core::TypeRefTarget::Symbol(parent),
+            ..
+        }) = self.store.types.try_get(parent_type)
+        else {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            });
+        };
+        let parent = *parent;
+        if !self.store.symbols.contains(parent)
+            || self.store.symbols.get(parent).kind != SymbolKind::Trait
+            || self.store.symbols.get(parent).origin != SymbolOrigin::Source(self.source)
+            || !matches!(
+                self.index.definition_of(parent),
+                Some(SourceDefinition::Canonical { source, tree })
+                    if source == self.source && self.index.symbol_at(source, tree) == Some(parent)
+            )
+            || !self
+                .source_class_type_parameters(parent)
+                .is_ok_and(|parameters| parameters.is_empty())
+        {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            });
+        }
+
+        let parent_info = match *self.store.symbols.info(parent) {
+            SymbolInfo::Complete(info) => info,
+            SymbolInfo::Missing => self.complete_symbol_inner(parent, info_journal)?,
+            SymbolInfo::Deferred(_) => {
+                return Err(TyperError::DeferredSymbolCompletion { symbol: parent });
+            }
+            SymbolInfo::Error => return Err(TyperError::SymbolAlreadyErrored { symbol: parent }),
+        };
+        self.validate_existing_class_info(parent, parent_info)?;
+        if self.store.symbols.get(class).kind != SymbolKind::Class {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            });
+        }
+        Ok(())
     }
 
     pub(in crate::typer) fn source_case_class_product_selector_owner(
