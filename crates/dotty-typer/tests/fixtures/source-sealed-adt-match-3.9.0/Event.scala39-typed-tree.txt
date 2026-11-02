@@ -1,0 +1,139 @@
+[[syntax trees at end of                     typer]] // Event.scala
+<package <<root>.this.adt:<root>.this.adt> {
+  @Child[adt.this.Deleted] @Child[adt.this.Created] sealed trait Event() extends
+     Object {}
+  final case class Created([owner = constructor <init>]id: <root>.this.scala.Int
+    ) extends <<<new Object:Object>.<init>:((): Object)>():Object>,
+    adt.this.Event, _root_.scala.Product, scala.this.package.Serializable {
+    [owner = class Created]val id: <root>.this.scala.Int
+    [owner = class Created]def copy(
+      [owner = method copy]id: <root>.this.scala.Int): adt.this.Created =
+      <
+        <<new adt.this.Created:adt.this.Created>.<init>:
+          ((id: <root>.this.scala.Int): adt.this.Created)>
+      (<id:<root>.this.scala.Int>):adt.this.Created>
+    [owner = class Created]def copy$default$1:
+      <root>.this.scala.Int @uncheckedVariance =
+      <Created.this.id:<root>.this.scala.Int>
+    [owner = class Created]def _1: <root>.this.scala.Int =
+      <<this:(Created.this : adt.this.Created)>.id:<root>.this.scala.Int>
+  }
+  [owner = package adt]final lazy module val Created: adt.this.Created$ =
+    <<<new adt.this.Created$:adt.this.Created$>.<init>:((): adt.this.Created$)>(
+      ):adt.this.Created$>
+  final module class Created$() extends <
+    <<new scala.this.AnyRef:scala.this.AnyRef>.<init>:((): Object)>():Object> {
+    this: adt.this.Created.type =>
+    [owner = object Created$]def apply(
+      [owner = method apply]id: <root>.this.scala.Int): adt.this.Created =
+      <
+        <<new adt.this.Created:adt.this.Created>.<init>:
+          ((id: <root>.this.scala.Int): adt.this.Created)>
+      (<id:<root>.this.scala.Int>):adt.this.Created>
+    [owner = object Created$]def unapply(
+      [owner = method unapply]x$1: adt.this.Created): adt.this.Created =
+      <x$1:adt.this.Created>
+    [owner = object Created$]override def toString: String =
+      <"Created":("Created" : String)>
+  }
+  final case class Deleted(
+    [owner = constructor <init>]code: <root>.this.scala.Int) extends
+    <<<new Object:Object>.<init>:((): Object)>():Object>, adt.this.Event,
+    _root_.scala.Product, scala.this.package.Serializable {
+    [owner = class Deleted]val code: <root>.this.scala.Int
+    [owner = class Deleted]def copy(
+      [owner = method copy]code: <root>.this.scala.Int): adt.this.Deleted =
+      <
+        <<new adt.this.Deleted:adt.this.Deleted>.<init>:
+          ((code: <root>.this.scala.Int): adt.this.Deleted)>
+      (<code:<root>.this.scala.Int>):adt.this.Deleted>
+    [owner = class Deleted]def copy$default$1:
+      <root>.this.scala.Int @uncheckedVariance =
+      <Deleted.this.code:<root>.this.scala.Int>
+    [owner = class Deleted]def _1: <root>.this.scala.Int =
+      <<this:(Deleted.this : adt.this.Deleted)>.code:<root>.this.scala.Int>
+  }
+  [owner = package adt]final lazy module val Deleted: adt.this.Deleted$ =
+    <<<new adt.this.Deleted$:adt.this.Deleted$>.<init>:((): adt.this.Deleted$)>(
+      ):adt.this.Deleted$>
+  final module class Deleted$() extends <
+    <<new scala.this.AnyRef:scala.this.AnyRef>.<init>:((): Object)>():Object> {
+    this: adt.this.Deleted.type =>
+    [owner = object Deleted$]def apply(
+      [owner = method apply]code: <root>.this.scala.Int): adt.this.Deleted =
+      <
+        <<new adt.this.Deleted:adt.this.Deleted>.<init>:
+          ((code: <root>.this.scala.Int): adt.this.Deleted)>
+      (<code:<root>.this.scala.Int>):adt.this.Deleted>
+    [owner = object Deleted$]def unapply(
+      [owner = method unapply]x$1: adt.this.Deleted): adt.this.Deleted =
+      <x$1:adt.this.Deleted>
+    [owner = object Deleted$]override def toString: String =
+      <"Deleted":("Deleted" : String)>
+  }
+  [owner = package adt]final lazy module val Matcher: adt.this.Matcher$ =
+    <<<new adt.this.Matcher$:adt.this.Matcher$>.<init>:((): adt.this.Matcher$)>(
+      ):adt.this.Matcher$>
+  final module class Matcher$() extends <
+    <<new Object:Object>.<init>:((): Object)>():Object> {
+    this: adt.this.Matcher.type =>
+    [owner = object Matcher$]def extract(
+      [owner = method extract]event: adt.this.Event): <root>.this.scala.Int =
+      <<event:adt.this.Event> match
+        {
+          <case
+            <
+              <<adt.this.Created:adt.this.Created$>(
+                [owner = method extract]id @ <_:<root>.this.scala.Int>):
+                adt.this.Created>
+             :adt.this.Created:adt.this.Created>
+           =>
+            <<id:<root>.this.scala.Int> :<root>.this.scala.Int:
+              <root>.this.scala.Int>
+          :<root>.this.scala.Int>
+          <case
+            <
+              <<adt.this.Deleted:adt.this.Deleted$>(
+                [owner = method extract]code @ <_:<root>.this.scala.Int>):
+                adt.this.Deleted>
+             :adt.this.Deleted:adt.this.Deleted>
+           =>
+            <<code:<root>.this.scala.Int> :<root>.this.scala.Int:
+              <root>.this.scala.Int>
+          :<root>.this.scala.Int>
+        }
+      :<root>.this.scala.Int>
+    [owner = object Matcher$]def classify(
+      [owner = method classify]event: adt.this.Event): <root>.this.scala.Int =
+      <<event:adt.this.Event> match
+        {
+          <case
+            <
+              <<adt.this.Created:adt.this.Created$>(<0:(0 : scala.this.Int)>):
+                adt.this.Created>
+             :adt.this.Created:adt.this.Created>
+           =>
+            <0:(0 : scala.this.Int)>
+          :(0 : scala.this.Int)>
+          <case
+            <
+              <<adt.this.Created:adt.this.Created$>(
+                [owner = method classify]id @ <_:<root>.this.scala.Int>):
+                adt.this.Created>
+             :adt.this.Created:adt.this.Created>
+           =>
+            <<id:<root>.this.scala.Int> :<root>.this.scala.Int:
+              <root>.this.scala.Int>
+          :<root>.this.scala.Int>
+          <case
+            <
+              <<adt.this.Deleted:adt.this.Deleted$>(<_:<root>.this.scala.Int>):
+                adt.this.Deleted>
+             :adt.this.Deleted:adt.this.Deleted>
+           =>
+            <0:(0 : scala.this.Int)>
+          :(0 : scala.this.Int)>
+        }
+      :<root>.this.scala.Int>
+  }
+}:<root>.this.adt.type>

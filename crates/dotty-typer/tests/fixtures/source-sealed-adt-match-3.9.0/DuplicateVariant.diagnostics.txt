@@ -1,0 +1,5 @@
+-- [E030] Match case Unreachable Warning: DuplicateVariant.scala:18:11 ---------
+18 |      case Created(other) => other
+   |           ^^^^^^^^^^^^^^
+   |           Unreachable case
+1 warning found

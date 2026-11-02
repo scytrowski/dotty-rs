@@ -1,0 +1,22 @@
+-- [E007] Type Mismatch Error: WrongResult.scala:16:26 -------------------------
+16 |      case Created(0)  => 0
+   |                          ^
+   |                          Found:    (0 : Int)
+   |                          Required: String
+   |
+   | longer explanation available when compiling with `-explain`
+-- [E007] Type Mismatch Error: WrongResult.scala:17:26 -------------------------
+17 |      case Created(id) => id
+   |                          ^^
+   |                          Found:    (id : Int)
+   |                          Required: String
+   |
+   | longer explanation available when compiling with `-explain`
+-- [E007] Type Mismatch Error: WrongResult.scala:18:26 -------------------------
+18 |      case Deleted(_)  => 0
+   |                          ^
+   |                          Found:    (0 : Int)
+   |                          Required: String
+   |
+   | longer explanation available when compiling with `-explain`
+3 errors found

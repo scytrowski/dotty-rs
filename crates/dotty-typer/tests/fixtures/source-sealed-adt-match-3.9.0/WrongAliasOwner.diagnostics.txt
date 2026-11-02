@@ -1,0 +1,17 @@
+-- [E029] Pattern Match Exhaustivity Warning: WrongAliasOwner.scala:13:4 -------
+13 |    event match
+   |    ^^^^^
+   |    match may not be exhaustive.
+   |
+   |    It would fail on pattern case: adt.Created(_)
+   |
+   | longer explanation available when compiling with `-explain`
+-- [E029] Pattern Match Exhaustivity Warning: WrongAliasOwner.scala:18:4 -------
+18 |    event match
+   |    ^^^^^
+   |    match may not be exhaustive.
+   |
+   |    It would fail on pattern case: adt.Foreign.Created(_)
+   |
+   | longer explanation available when compiling with `-explain`
+2 warnings found

@@ -1,0 +1,5 @@
+-- [E172] Type Error: WrongConstructorLiteral.scala:16:19 ----------------------
+16 |      case Created(true)  => 0
+   |                   ^^^^
+   |        Values of types Boolean and Int cannot be compared with == or !=
+1 error found
