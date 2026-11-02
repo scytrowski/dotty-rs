@@ -36831,6 +36831,159 @@ mod tests {
         );
     }
 
+    #[test]
+    fn issue_1999_late_event_result_failure_observes_both_cases_before_atomic_rollback() {
+        let source_text =
+            include_str!("../../tests/fixtures/source-sealed-adt-match-3.9.0/Event.scala").replace(
+                "def extract(event: Event): Int",
+                "def extract(event: Event): Boolean",
+            );
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(&source_text);
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "extract" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .expect("mutated extract root");
+        let (rhs, cases) = match &parsed.ast.get(method).kind {
+            TreeKind::DefDef(definition) => {
+                let rhs = definition.rhs.expect("extract has a body");
+                let TreeKind::Match(matched) = &parsed.ast.get(rhs).kind else {
+                    panic!("extract body remains a Match")
+                };
+                (rhs, matched.cases.clone())
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(cases.len(), 2);
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JDK 21 is configured");
+        let classpath = dotty_classloader::classloader::CompositeClassPath::new(vec![
+            Box::new(dotty_classloader::classloader::DirectoryClassPath::new(
+                fixture,
+            )),
+            Box::new(
+                dotty_classloader::classloader::JdkClassPath::new(
+                    std::path::PathBuf::from(java_home).join("jmods"),
+                )
+                .expect("JDK module path"),
+            ),
+        ]);
+        let resolver = dotty_classloader::classloader::ClasspathSymbolResolver::new(
+            classpath,
+            definitions,
+            dotty_classloader::classloader::LoadingSession::new(),
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let before_store = typer.store().checkpoint();
+        let before_resolver = typer.resolver.checkpoint();
+        let before_typed = typer.typed_ast().checkpoint();
+        let before_index = typer.source_typed_index().len();
+        let before_local_scopes = typer.local_scopes.len();
+        let before_pattern_bindings = typer.pattern_bindings.by_tree.len();
+        let before_pattern_scope_bindings = typer.pattern_bindings.scope_by_symbol.len();
+        let before_expression_scopes = typer.expression_scopes.len();
+        let observed = Rc::new(RefCell::new(None));
+        let observation = Rc::clone(&observed);
+        let parsed_ref = &parsed;
+        let observed_cases = cases.clone();
+        typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+            if typer.source_typed_index().get(source, rhs).is_none() {
+                return;
+            }
+            let bindings = parsed_ref
+                .ast
+                .iter()
+                .filter_map(|(tree, node)| {
+                    let symbol = typer.pattern_binding_symbol_at(source, tree)?;
+                    let name = match &node.kind {
+                        TreeKind::Bind(binding) => typer.store.names.resolve(binding.name.text()),
+                        TreeKind::Ident(ident) => typer.store.names.resolve(ident.name.text()),
+                        other => {
+                            panic!("Event pattern binding has unexpected source shape: {other:?}")
+                        }
+                    };
+                    Some((
+                        name.to_owned(),
+                        issue_1972_symbol_type(typer.store, symbol, definitions),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                bindings,
+                [
+                    ("id".to_owned(), "Int".to_owned()),
+                    ("code".to_owned(), "Int".to_owned())
+                ]
+            );
+            let typed_cases = observed_cases
+                .iter()
+                .filter_map(|case| typer.source_typed_index().get(source, *case))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                typed_cases.len(),
+                2,
+                "both case roots were typed before result conformance failed"
+            );
+            assert!(
+                typer.source_typed_index().get(source, rhs).is_some(),
+                "the Match was typed before result conformance failed"
+            );
+            assert!(
+                typer.typed_ast().checkpoint() != before_typed,
+                "the failing transaction built typed nodes"
+            );
+            *observation.borrow_mut() = Some((bindings, typed_cases.len()));
+        }));
+
+        let error = typer
+            .type_method_definition(method)
+            .expect_err("the wrong declared result fails after Match typing");
+        assert!(
+            matches!(error, TyperError::ExpectedExpressionTypeMismatch { .. }),
+            "{error:?}"
+        );
+        assert_eq!(observed.borrow().as_ref().map(|(_, count)| *count), Some(2));
+        assert_eq!(typer.store().checkpoint(), before_store);
+        assert_eq!(typer.resolver.checkpoint(), before_resolver);
+        assert_eq!(typer.typed_ast().checkpoint(), before_typed);
+        assert_eq!(typer.source_typed_index().len(), before_index);
+        assert_eq!(typer.local_scopes.len(), before_local_scopes);
+        assert_eq!(
+            typer.pattern_bindings.by_tree.len(),
+            before_pattern_bindings
+        );
+        assert_eq!(
+            typer.pattern_bindings.scope_by_symbol.len(),
+            before_pattern_scope_bindings
+        );
+        assert_eq!(typer.expression_scopes.len(), before_expression_scopes);
+        assert!(typer.source_typed_index().get(source, method).is_none());
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
+        for case in cases {
+            assert!(typer.source_typed_index().get(source, case).is_none());
+        }
+        for (tree, _) in parsed.ast.iter() {
+            assert!(typer.pattern_binding_symbol_at(source, tree).is_none());
+        }
+    }
+
     type Issue1972RetryProjection = (
         Vec<(u32, String, String)>,
         Vec<(u32, String, String, String)>,
