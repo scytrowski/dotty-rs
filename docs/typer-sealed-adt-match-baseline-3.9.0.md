@@ -71,7 +71,7 @@ diagnostic file byte-for-byte after whitespace normalization:
 | `NonSealedEvent` | accepted |
 | `WrongConstructorLiteral` | rejected |
 | `WrongResult` | rejected |
-| `UnrelatedExtractorType` | accepted with warning |
+| `UnrelatedExtractorType` | rejected |
 | `MissingParent` | rejected |
 | `WrongParent` | rejected |
 | `InvalidFieldShape` | rejected |
@@ -80,6 +80,8 @@ diagnostic file byte-for-byte after whitespace normalization:
 | `NonExhaustive` | accepted with warning |
 | `WrongAliasOwner` | accepted with warning |
 
+The unrelated-extractor control declares `Text.unapply(String)` while matching
+an `Event`; Scala 3.9 reports the case as unreachable and rejects the source.
 The source and expected diagnostic digests are checked by the fixture
 manifests. The matrix constrains the pinned Scala classification boundary; it
 does not claim Rust compatibility for those controls.

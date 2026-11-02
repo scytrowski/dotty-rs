@@ -6,7 +6,7 @@ final case class Created(id: Int) extends Event
 final case class Deleted(code: Int) extends Event
 
 object Text:
-  def unapply(value: Event): Option[String] = None
+  def unapply(value: String): Option[String] = None
 
 object Matcher:
   def extract(event: Event): Int =

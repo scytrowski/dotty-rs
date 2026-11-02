@@ -2,7 +2,7 @@ Event	accepted
 NonSealedEvent	accepted
 WrongConstructorLiteral	rejected
 WrongResult	rejected
-UnrelatedExtractorType	accepted_with_warning
+UnrelatedExtractorType	rejected
 MissingParent	rejected
 WrongParent	rejected
 InvalidFieldShape	rejected
