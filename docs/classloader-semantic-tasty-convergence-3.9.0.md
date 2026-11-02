@@ -324,7 +324,7 @@ both adapters in fresh sessions and compares normalized output byte-for-byte.
 | One-class Open | Private opt-in semantic adapter, canonical Object dependency, class origin, constructor completion and repeat identity; legacy public loader remains the default. |
 | Two-unit graph | Private Info pair adapter enters the pinned InfoBase/InfoWrapped units in both request orders and checks the applied parent, direct member, canonical owner and cache identity. |
 | Selected member type | #1930 preserves the Option `getOrElse` by-name method binder with its address-resolved `ParamRef`; reported separately from the unchanged frozen denominator. |
-| Negative controls | Malformed, unsupported, missing and mismatched resources/owners, selected origin and typed causes, late rollback, retry, and existing identities are covered by loader unit tests. |
+| Negative controls | Malformed, wrong TASTy version, unsupported, missing and mismatched resources/owners, selected origin and typed causes, late rollback, retry, and existing identities are covered by non-ignored loader unit tests. |
 | Frozen compatibility | 14 units / 126 rows; report remains byte-identical over two independent test invocations. Unsupported/unresolved fields remain explicitly classified. |
 | CI wiring | `cargo test --workspace --all-targets --locked` already runs these crate unit and integration tests as a required CI job; no extra workflow switch is needed. |
 | Performance | Test-local matched Open legacy/semantic cold and warm API measurements; coverage and sample statistics follow. |
@@ -362,6 +362,19 @@ profiles; both paths' top-level API attempts are counted independently.
 Across the seven legacy cold samples, the root profile consistently reported
 six resource lookups (all found), 109,766 resource bytes, one TASTy decode and
 five class-file decodes, including its Object dependency work.
+
+The mandatory
+`semantic_adapter_rejects_unsupported_tasty_version_without_mutation_and_retries`
+control starts with the pinned real `Open.tasty` 28.9.0 bytes, changes only
+the minor-version header to 28.7.0, and submits those bytes through
+`load_open_with_tasty_unpickler`. It asserts the exact typed
+`InvalidTastyFile(Open, UnsupportedClassloaderVersion { major: 28, minor: 7,
+experimental: 0 })` cause, unchanged store and session checkpoints, absent
+`scala`, `java.lang`, and requested Open package state, and no loader caches or
+repository entry. The same in-memory resource is then replaced with the
+original valid bytes; retry succeeds, preserves the fixture's selected origin,
+and a repeated request returns the cached canonical symbol. This test is not
+ignored and runs under the required workspace test job.
 
 ### Verdict and limitations
 

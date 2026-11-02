@@ -9214,6 +9214,83 @@ mod tests {
     }
 
     #[test]
+    fn semantic_adapter_rejects_unsupported_tasty_version_without_mutation_and_retries() {
+        let name = open_binary_name();
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty",
+        );
+        let valid_bytes = fs::read(fixture_path).expect("pinned Open TASTy fixture");
+        let mut unsupported_bytes = valid_bytes.clone();
+        // Open is pinned at 28.9.0. Keep its valid TASTy body and change only
+        // the one-byte minor-version header to the unvalidated 28.7.0 version.
+        unsupported_bytes[5] = 7 | 0x80;
+        let resources = Arc::new(std::sync::Mutex::new(HashMap::from([(
+            name.clone(),
+            unsupported_bytes,
+        )])));
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for Object");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK classpath");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(SharedTastyClassPath(resources.clone())),
+            Box::new(jdk),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+
+        let error = loader
+            .load_open_with_tasty_unpickler(&name)
+            .expect_err("unsupported semantic-adapter TASTy version must fail closed");
+        match error {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                actual_name,
+                tasty_symbol::TastyDecodeError::UnsupportedClassloaderVersion {
+                    major,
+                    minor,
+                    experimental,
+                },
+            )) => {
+                assert_eq!(actual_name, name);
+                assert_eq!((major, minor, experimental), (28, 7, 0));
+            }
+            other => panic!("unexpected semantic-adapter version error: {other:?}"),
+        }
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert!(loader.session.packages.get(&["scala"]).is_none());
+        assert!(loader.session.packages.get(&["java", "lang"]).is_none());
+        assert!(
+            loader
+                .session
+                .packages
+                .get(&["me", "cytrowski", "tastyfixtures", "visibility"])
+                .is_none()
+        );
+        assert!(!loader.session.identified.contains_key(&name));
+        assert!(!loader.session.resolved.contains_key(&name));
+        assert!(loader.repository.get(&name).is_none());
+        assert!(!loader.semantic_tasty_loaded.contains_key(&name));
+
+        resources.lock().unwrap().insert(name.clone(), valid_bytes);
+        let open = loader
+            .load_open_with_tasty_unpickler(&name)
+            .expect("valid 28.9 fixture should succeed after same-loader retry");
+        assert_eq!(
+            loader
+                .load_open_with_tasty_unpickler(&name)
+                .expect("successful retry is cached"),
+            open
+        );
+        assert!(loader.repository.get(&name).is_some());
+        assert_eq!(
+            loader.origin(open),
+            Some(&ClassOrigin::Directory(PathBuf::from("/pair-fixtures")))
+        );
+    }
+
+    #[test]
     fn unit_experiment_records_bootstrap_identity_and_unbound_baseline() {
         let mut store = SemanticStore::new();
         let loader = ClassLoader::new(open_test_class_path(), &mut store);
