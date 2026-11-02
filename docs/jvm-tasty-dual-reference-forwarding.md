@@ -181,12 +181,12 @@ All six Rust artifacts were SHA-256 hashed before the Java compile and remained 
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` |
-| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` |
-| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` |
-| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` |
-| `example/PairFactory.class` | `13adef3d34ffbf9af3bf39cc996a29e1a45d8e76c0082012fcee898efd323dae` |
-| `example/PairFactory.tasty` | `4df88f35f03867ae637ed6131e4fca4e7c264bf10db2b9165c213ee85eec0fdb` |
+| `example/Counter.class` | `a8c1b47ebb17a6b7d72d2041f4cfa9afd195f1805258b6e01b44f767c1ead68f` |
+| `example/Counter.tasty` | `461335e32408077e7374cd3ead0ad3813d3d0867be11f1aecf281aba0aff6d9f` |
+| `example/Pair.class` | `430ce593e9e101801f0e4d4026ad8601686748c39312ead81b3846ff81724ce2` |
+| `example/Pair.tasty` | `0af41688c6cb8071d2070a45c75257a7965ff02cc4a3702934dd6b4593461abd` |
+| `example/PairFactory.class` | `b9fa30d3591ec3ced684d54260d8fd5bde1467a310a3d99c9422225ea1f20f14` |
+| `example/PairFactory.tasty` | `2738a0acb64dc0da9dadba366ac01a03ad43b90d2ae5bfc397988e58ecd390d6` |
 
 Negative tests use isolated modified copies and report the first actual rejecting layer. In particular, swapped same-typed loads are valid bytecode and pass verification; they fail only when the runtime reflection identity assertion checks the positional contract.
 
