@@ -34,7 +34,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21.0.13+9'
+          java-version: '21.0.13+9.0.LTS'
 
       - name: Lint GitHub Actions workflows
         run: tools/check-workflows.sh
@@ -83,7 +83,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21.0.13+9'
+          java-version: '21.0.13+9.0.LTS'
 
       - name: Install stable Rust toolchain
         run: rustup toolchain install stable --profile minimal
