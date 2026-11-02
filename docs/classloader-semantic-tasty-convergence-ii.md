@@ -234,8 +234,13 @@ primary constructor with a single empty clause, no other declared members or
 secondary constructors, resolvable `java.lang.Object`, and the already audited
 public or package-qualified private visibility cases. Nested, module, trait,
 generic, multi-declaration, arbitrary member, and unsupported dependency
-shapes fail closed before symbol publication. The `Open` compatibility method
-is a thin delegation; `ClassLoader::load_class` remains the legacy default.
+shapes fail closed before symbol publication. Scala 3.9 also writes a
+compiler-injected `scala.annotation.internal.SourceFile` annotation on each
+class; the eligibility check recognizes that exact class-tail annotation and
+continues to preserve the separate file-level `SourceFile` attribute. Other
+class annotations and every constructor annotation fail before symbol entry.
+The `Open` compatibility method is a thin delegation;
+`ClassLoader::load_class` remains the legacy default.
 
 Success records origin, repository state, resolved identity, and semantic
 cache only after class and constructor completion and identity checks. Loading
@@ -245,7 +250,12 @@ failure the transaction restores the package/session/store state before arena
 truncation, discards rolled-back repository entries, and permits retry. The
 focused loader regressions cover both fixtures, repeated identity, missing
 Object, mismatched requested owner, malformed bytes, duplicate identity,
-unsupported shape, rollback, and retry. Existing InfoWrapped/InfoBase,
+unsupported shape, rollback, and retry. The annotation regression derives a
+wire-valid class from the original Open input by adding one non-SourceFile
+annotation while retaining its compiler annotation and file-level metadata;
+it proves the class shape is otherwise unchanged. A neighboring predicate
+regression covers annotations on the primary constructor. Existing
+InfoWrapped/InfoBase,
 Option.getOrElse, legacy loading, and historical 14-unit/126-row artifacts are
 unchanged. The full locked workspace tests, classloader tests, format,
 Clippy, rustdoc, dependency-boundary check, diff check, and ignored JDK 21
