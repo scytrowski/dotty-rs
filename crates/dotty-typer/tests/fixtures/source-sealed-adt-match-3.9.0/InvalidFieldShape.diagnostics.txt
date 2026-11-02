@@ -1,0 +1,19 @@
+-- [E107] Syntax Error: InvalidFieldShape.scala:11:18 --------------------------
+11 |      case Created(id)   => id
+   |           ^^^^^^^^^^^
+   | Wrong number of argument patterns for adt.Created; expected: (Int, Int)
+   |
+   | longer explanation available when compiling with `-explain`
+-- [E107] Syntax Error: InvalidFieldShape.scala:16:18 --------------------------
+16 |      case Created(0)  => 0
+   |           ^^^^^^^^^^
+   | Wrong number of argument patterns for adt.Created; expected: (Int, Int)
+   |
+   | longer explanation available when compiling with `-explain`
+-- [E107] Syntax Error: InvalidFieldShape.scala:17:18 --------------------------
+17 |      case Created(id) => id
+   |           ^^^^^^^^^^^
+   | Wrong number of argument patterns for adt.Created; expected: (Int, Int)
+   |
+   | longer explanation available when compiling with `-explain`
+3 errors found

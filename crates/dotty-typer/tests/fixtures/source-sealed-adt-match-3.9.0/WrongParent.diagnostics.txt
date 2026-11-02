@@ -1,0 +1,26 @@
+-- [E030] Match case Unreachable Warning: WrongParent.scala:12:11 --------------
+12 |      case Created(id)   => id
+   |           ^^^^^^^^^^^
+   |           Unreachable case
+-- [E030] Match case Unreachable Warning: WrongParent.scala:17:11 --------------
+17 |      case Created(0)  => 0
+   |           ^^^^^^^^^^
+   |           Unreachable case
+-- [E030] Match case Unreachable Warning: WrongParent.scala:18:11 --------------
+18 |      case Created(id) => id
+   |           ^^^^^^^^^^^
+   |           Unreachable case
+-- [E030] Match case Unreachable Error: WrongParent.scala:12:11 ----------------
+12 |      case Created(id)   => id
+   |           ^
+   |           Unreachable case
+   |
+   | longer explanation available when compiling with `-explain`
+-- [E030] Match case Unreachable Error: WrongParent.scala:17:11 ----------------
+17 |      case Created(0)  => 0
+   |           ^
+   |           Unreachable case
+   |
+   | longer explanation available when compiling with `-explain`
+3 warnings found
+2 errors found

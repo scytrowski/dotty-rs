@@ -236,6 +236,29 @@ jobs:
             > "$DOTTY_AUDIT_REPORT_DIR/source-case-class-product2-oracle.log" 2>&1
           cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-product2-oracle.log"
 
+      - name: Run pinned sealed Event Scala oracle
+        shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_SEALED_ADT_TMP_ROOT: ${{ github.workspace }}/target/source-sealed-adt-match-oracle
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/run \
+            > "$DOTTY_AUDIT_REPORT_DIR/source-sealed-adt-match-oracle.log" 2>&1
+          cat "$DOTTY_AUDIT_REPORT_DIR/source-sealed-adt-match-oracle.log"
+
+      - name: Run authentic two-session sealed Event Rust baseline
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          cargo +1.98.1 test -p dotty-typer --test source_sealed_adt_match_baseline \
+            --locked -- --nocapture \
+            > "$DOTTY_AUDIT_REPORT_DIR/source-sealed-adt-match-rust.log" 2>&1
+          cat "$DOTTY_AUDIT_REPORT_DIR/source-sealed-adt-match-rust.log"
+
       - name: Run exact source case-class Match Rust acceptance matrix
         shell: bash
         env:
@@ -429,5 +452,6 @@ jobs:
             ${{ github.workspace }}/target/focused-audit-intermediates/
             ${{ github.workspace }}/target/lexical-closure-contract-oracle/
             ${{ github.workspace }}/target/source-case-class-product2-oracle/
+            ${{ github.workspace }}/target/source-sealed-adt-match-oracle/
           if-no-files-found: error
           retention-days: 30

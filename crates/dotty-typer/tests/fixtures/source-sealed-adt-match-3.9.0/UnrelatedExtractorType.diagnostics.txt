@@ -1,0 +1,9 @@
+-- [E029] Pattern Match Exhaustivity Warning: UnrelatedExtractorType.scala:13:4
+13 |    event match
+   |    ^^^^^
+   |    match may not be exhaustive.
+   |
+   |    It would fail on pattern case: adt.Created(_)
+   |
+   | longer explanation available when compiling with `-explain`
+1 warning found

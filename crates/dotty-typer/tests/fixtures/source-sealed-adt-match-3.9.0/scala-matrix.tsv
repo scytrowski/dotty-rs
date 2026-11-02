@@ -1,0 +1,12 @@
+Event	accepted
+NonSealedEvent	accepted
+WrongConstructorLiteral	rejected
+WrongResult	rejected
+UnrelatedExtractorType	accepted_with_warning
+MissingParent	rejected
+WrongParent	rejected
+InvalidFieldShape	rejected
+BinderEscape	rejected
+DuplicateVariant	accepted_with_warning
+NonExhaustive	accepted_with_warning
+WrongAliasOwner	accepted_with_warning

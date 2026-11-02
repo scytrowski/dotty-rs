@@ -1,0 +1,7 @@
+-- [E006] Not Found Error: MissingParent.scala:5:42 ----------------------------
+5 |final case class Created(id: Int) extends MissingEvent
+  |                                          ^^^^^^^^^^^^
+  |                                          Not found: type MissingEvent
+  |
+  | longer explanation available when compiling with `-explain`
+1 error found

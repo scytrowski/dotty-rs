@@ -1,0 +1,17 @@
+-- [E029] Pattern Match Exhaustivity Warning: NonExhaustive.scala:10:4 ---------
+10 |    event match
+   |    ^^^^^
+   |    match may not be exhaustive.
+   |
+   |    It would fail on pattern case: adt.Deleted(_)
+   |
+   | longer explanation available when compiling with `-explain`
+-- [E029] Pattern Match Exhaustivity Warning: NonExhaustive.scala:14:4 ---------
+14 |    event match
+   |    ^^^^^
+   |    match may not be exhaustive.
+   |
+   |    It would fail on pattern case: adt.Deleted(_)
+   |
+   | longer explanation available when compiling with `-explain`
+2 warnings found

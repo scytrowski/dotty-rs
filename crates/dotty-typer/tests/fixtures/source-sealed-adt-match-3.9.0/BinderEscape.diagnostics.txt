@@ -1,0 +1,7 @@
+-- [E006] Not Found Error: BinderEscape.scala:12:28 ----------------------------
+12 |      case Deleted(code) => id
+   |                            ^^
+   |                            Not found: id
+   |
+   | longer explanation available when compiling with `-explain`
+1 error found
