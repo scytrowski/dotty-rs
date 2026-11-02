@@ -879,13 +879,21 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.collect_load_profiles = enabled;
     }
 
-    /// Opt-in semantic projection for the two frozen visibility TASTy inputs.
-    /// The ordinary `load_class` path continues to use the legacy
-    /// classloader decoder. This path first materializes the canonical JDK
-    /// `Object` through the classpath resolver, then lets the unpickler resolve
-    /// only from the package/member identities already entered in this store.
+    /// Compatibility entry point retained for existing Open regressions.
     #[allow(dead_code)]
     pub(crate) fn load_open_with_tasty_unpickler(
+        &mut self,
+        name: &BinaryName,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        self.load_semantic_class_with_tasty_unpickler(name)
+    }
+
+    /// Opt-in semantic projection for the audited simple top-level class
+    /// subset. The ordinary `load_class` path remains the legacy decoder.
+    /// Structural eligibility is validated before the bounded transaction;
+    /// class identity and origin are published only after completion succeeds.
+    #[allow(dead_code)]
+    pub(crate) fn load_semantic_class_with_tasty_unpickler(
         &mut self,
         name: &BinaryName,
     ) -> Result<SymbolId, SemanticTastyLoadError> {
@@ -916,17 +924,23 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let file = tasty_symbol::parse_classloader_tasty(resource.bytes()).map_err(|error| {
             SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(name.clone(), error))
         })?;
-        let selection = Self::validate_open_unit_shape(&file, name)?;
+        let selection = Self::validate_semantic_class_shape(&file, name)?;
 
-        self.load_open_transaction(&file, name, &selection, resource.origin().clone(), false)
+        self.load_semantic_class_transaction(
+            &file,
+            name,
+            &selection,
+            resource.origin().clone(),
+            false,
+        )
     }
 
-    /// The bounded commit/rollback boundary for the one supported Open unit.
+    /// The bounded commit/rollback boundary for the audited simple class.
     /// Its write plan is deliberately explicit: the classpath resolver may
     /// enter packages/classes and update `Object`; the unpickler may enter the
     /// selected root and bind canonical `Unit`. Other mutations are rejected
-    /// by `validate_open_unit_shape` before reaching this operation.
-    fn load_open_transaction(
+    /// by `validate_semantic_class_shape` before reaching this operation.
+    fn load_semantic_class_transaction(
         &mut self,
         file: &dotty_tasty::tasty::TastyFile<'_>,
         name: &BinaryName,
@@ -944,7 +958,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .clone();
         let mut materialized_class = None;
         let result = self
-            .load_open_semantics(file, name, selection)
+            .load_semantic_class_semantics(file, name, selection)
             .and_then(|class| {
                 materialized_class = Some(class);
                 if inject_late_failure {
@@ -976,7 +990,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         ));
                     }
                     return Err(SemanticTastyLoadError::UnsupportedShape(
-                        "injected failure after Open class and constructor completion",
+                        "injected failure after class and constructor completion",
                     ));
                 }
                 Ok(class)
@@ -2136,10 +2150,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         !self.store.scopes.get(scope).lookup_all(&name).is_empty()
     }
 
-    /// The opt-in path accepts only the frozen one-class fixture shape. This
+    /// The opt-in path accepts only the audited simple-class shape. This
     /// check happens before the unpickler enters package scopes, so a
     /// multi-declaration unit cannot publish partially supported siblings.
-    fn validate_open_unit_shape(
+    fn validate_semantic_class_shape(
         file: &dotty_tasty::tasty::TastyFile<'_>,
         name: &BinaryName,
     ) -> Result<TastyTopLevelSelection, SemanticTastyLoadError> {
@@ -2489,7 +2503,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     }
 
     #[allow(dead_code)]
-    fn load_open_semantics(
+    fn load_semantic_class_semantics(
         &mut self,
         file: &dotty_tasty::tasty::TastyFile<'_>,
         name: &BinaryName,
@@ -2609,15 +2623,41 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 return Err(error);
             }
         };
+        let class_symbol = self.store.symbols.get(class);
+        let constructor_symbol = self.store.symbols.get(constructor);
+        let supported_visibility = match class_symbol.visibility {
+            Visibility::Public => true,
+            Visibility::PrivateWithin(owner) => class_symbol.owner == Some(owner),
+            _ => false,
+        };
+        let supported_hierarchy = match class_symbol.info {
+            SymbolInfo::Complete(info) => matches!(
+                self.store.types.get(info),
+                Type::ClassInfo(class_info)
+                    if class_info.parents.len() == 1
+                        && type_ref_symbol(self.store, class_info.parents[0])
+                            == Some(self.definitions.object_class)
+            ),
+            _ => false,
+        };
+        let supported_constructor = match constructor_symbol.info {
+            SymbolInfo::Complete(info) if constructor_symbol.visibility == Visibility::Public => {
+                matches!(
+                    self.store.types.get(info),
+                    Type::Method(method)
+                        if method.params.is_empty()
+                            && type_ref_symbol(self.store, method.result) == Some(class)
+                )
+            }
+            _ => false,
+        };
         if !symbol_matches_binary_name(self.store, class, name)
-            || self.store.symbols.get(class).kind != SymbolKind::Class
-            || self.store.symbols.get(constructor).kind != SymbolKind::Constructor
-            || self.store.symbols.get(constructor).owner != Some(class)
-            || !matches!(self.store.symbols.get(class).info, SymbolInfo::Complete(_))
-            || !matches!(
-                self.store.symbols.get(constructor).info,
-                SymbolInfo::Complete(_)
-            )
+            || class_symbol.kind != SymbolKind::Class
+            || constructor_symbol.kind != SymbolKind::Constructor
+            || constructor_symbol.owner != Some(class)
+            || !supported_visibility
+            || !supported_hierarchy
+            || !supported_constructor
         {
             self.remove_open_root_from_package_scope(class);
             return Err(SemanticTastyLoadError::UnsupportedShape(
@@ -8456,12 +8496,12 @@ mod tests {
                 .expect("pinned visibility TASTy fixture");
             let file = tasty_symbol::parse_classloader_tasty(&bytes).expect("valid TASTy");
             let first =
-                ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&file, &requested)
+                ClassLoader::<InMemoryClassPath>::validate_semantic_class_shape(&file, &requested)
                     .unwrap_or_else(|error| {
                         panic!("structural selection for {simple_name}: {error:?}")
                     });
             let second =
-                ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&file, &requested)
+                ClassLoader::<InMemoryClassPath>::validate_semantic_class_shape(&file, &requested)
                     .expect("repeat structural selection");
             assert_eq!(
                 first, second,
@@ -8508,7 +8548,7 @@ mod tests {
         let file = tasty_symbol::parse_classloader_tasty(&bytes).expect("valid TASTy");
         let wrong_package = BinaryName::from_internal("other/package/Open");
         assert!(matches!(
-            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&file, &wrong_package),
+            ClassLoader::<InMemoryClassPath>::validate_semantic_class_shape(&file, &wrong_package),
             Err(SemanticTastyLoadError::UnsupportedShape(_))
         ));
 
@@ -8532,7 +8572,7 @@ mod tests {
         let split_file = tasty_symbol::parse_classloader_tasty(&split_clause)
             .expect("SPLITCLAUSE variant remains structurally decodable");
         assert!(matches!(
-            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&split_file, &name),
+            ClassLoader::<InMemoryClassPath>::validate_semantic_class_shape(&split_file, &name),
             Err(SemanticTastyLoadError::UnsupportedShape(_))
         ));
 
@@ -8541,7 +8581,7 @@ mod tests {
         // class's primary constructor.
         let original_file = tasty_symbol::parse_classloader_tasty(&bytes).expect("valid TASTy");
         let selection =
-            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&original_file, &name)
+            ClassLoader::<InMemoryClassPath>::validate_semantic_class_shape(&original_file, &name)
                 .expect("original constructor selection");
         let ast_index = original_file
             .ast_address_index()
@@ -8563,7 +8603,7 @@ mod tests {
         let unbound_file = tasty_symbol::parse_classloader_tasty(&unbound_constructor)
             .expect("renamed direct definition remains structurally decodable");
         assert!(matches!(
-            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&unbound_file, &name),
+            ClassLoader::<InMemoryClassPath>::validate_semantic_class_shape(&unbound_file, &name),
             Err(SemanticTastyLoadError::UnsupportedShape(_))
         ));
     }
@@ -8643,13 +8683,26 @@ mod tests {
     }
 
     #[test]
-    fn semantic_adapter_loads_plain_private_from_its_declared_package() {
+    fn semantic_adapter_loads_open_and_plain_private_through_one_operation() {
+        let open_name = open_binary_name();
         let name = plain_private_binary_name();
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let open = loader
+            .load_semantic_class_with_tasty_unpickler(&open_name)
+            .expect("Open should use the shared semantic loading operation");
         let class = loader
-            .load_open_with_tasty_unpickler(&name)
-            .expect("PlainPrivate should use the same structural selection algorithm");
+            .load_semantic_class_with_tasty_unpickler(&name)
+            .expect("PlainPrivate should use the same shared operation");
+        assert_ne!(open, class);
+        assert_eq!(
+            loader.store.symbols.get(open).owner,
+            loader.store.symbols.get(class).owner
+        );
+        assert_eq!(loader.semantic_tasty_loaded[&open_name], open);
+        assert_eq!(loader.semantic_tasty_loaded[&name], class);
+        assert_eq!(class_info(loader.store, open).parents.len(), 1);
+        assert_eq!(class_info(loader.store, class).parents.len(), 1);
         assert!(symbol_matches_binary_name(loader.store, class, &name));
         let package = loader.store.symbols.get(class).owner.unwrap();
         assert!(matches!(
@@ -9995,16 +10048,17 @@ mod tests {
     }
 
     #[test]
-    fn unit_experiment_late_failure_rolls_back_projection_and_retries() {
+    fn semantic_class_late_failure_preserves_prior_class_and_retries() {
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
-        let _unit = loader
-            .bind_open_builtin_unit()
-            .expect("canonical Unit binding");
-        let name = open_binary_name();
+        let prior_name = open_binary_name();
+        let prior_class = loader
+            .load_semantic_class_with_tasty_unpickler(&prior_name)
+            .expect("first fixture should be committed before the injected failure");
+        let name = plain_private_binary_name();
 
         // A previously committed package and declaration must survive the
-        // failed Open operation unchanged.
+        // failed PlainPrivate operation unchanged.
         let keep_package = loader
             .session
             .packages
@@ -10040,20 +10094,28 @@ mod tests {
             .class_path
             .find_class(&name)
             .expect("fixture lookup")
-            .expect("Open fixture");
+            .expect("PlainPrivate fixture");
         let file = tasty_symbol::parse_classloader_tasty(resource.bytes()).expect("valid fixture");
-        let selection = ClassLoader::<CompositeClassPath>::validate_open_unit_shape(&file, &name)
-            .expect("supported Open shape");
+        let selection =
+            ClassLoader::<CompositeClassPath>::validate_semantic_class_shape(&file, &name)
+                .expect("supported PlainPrivate shape");
         assert!(matches!(
-            loader
-                .load_open_transaction(&file, &name, &selection, resource.origin().clone(), true,),
+            loader.load_semantic_class_transaction(
+                &file,
+                &name,
+                &selection,
+                resource.origin().clone(),
+                true,
+            ),
             Err(SemanticTastyLoadError::UnsupportedShape(
-                "injected failure after Open class and constructor completion"
+                "injected failure after class and constructor completion"
             ))
         ));
         assert_eq!(loader.store.checkpoint(), store_mark);
         assert_eq!(loader.session.checkpoint(), session_mark);
         assert_eq!(loader.session.packages.checkpoint(), package_mark);
+        assert!(loader.store.symbols.contains(prior_class));
+        assert_eq!(loader.semantic_tasty_loaded[&prior_name], prior_class);
         assert!(loader.store.symbols.contains(keep_symbol));
         assert_eq!(
             loader.store.symbols.get(keep_symbol).owner,
@@ -10089,7 +10151,7 @@ mod tests {
         assert!(!loader.semantic_tasty_loaded.contains_key(&name));
 
         let retried = loader
-            .load_open_with_tasty_unpickler(&name)
+            .load_semantic_class_with_tasty_unpickler(&name)
             .expect("retry after rollback should complete the same shape");
         assert_eq!(
             retried, loader.semantic_tasty_loaded[&name],

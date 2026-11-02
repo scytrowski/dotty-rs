@@ -1,6 +1,6 @@
 # Semantic TASTy convergence II: bounded single-class audit
 
-Status: completed for the two frozen inputs; the final CI gate remains.
+Status: base audit complete; the #1993 reusable-loader increment and its validation are recorded below.
 
 ## Frozen inputs and environment
 
@@ -211,3 +211,57 @@ class has no loaded/resolved cache entry, and retries the original resource in
 the same loader. Existing positive-shape and neighboring Info, Option, and
 default-loader paths retain their prior contracts; this transaction does not
 add any accepted class shape.
+
+
+## Reusable single-class operation (#1993)
+
+Fresh integrated `main` for this increment is
+`7943e8d495815ceef2b7e4a53baee7f6fcac949b` (including #1991). The original
+Scala 3.9 inputs remain pinned by the manifest above: `Open.tasty` SHA-256
+`49286e74a3d3693b08d2a29575f23089f6be5c486231390059f43c19a8929894` and
+`PlainPrivate.tasty` SHA-256
+`db045c091f6bc71cdee1fef6c81cd09fe1f520f740f09fec008dd5f1fd98c4ba`.
+Their source declarations remain `class Open` and `private class PlainPrivate`
+in `Visibility.scala`; Scala 3.9 represents the latter as
+`PrivateWithin(me.cytrowski.tastyfixtures.visibility)`.
+
+Both requests now use the crate-private
+`load_semantic_class_with_tasty_unpickler(BinaryName)` operation. It retains
+classpath first-match and TASTy selection behavior, performs structural name
+and indexed-address checks, then reuses the #1991 transaction. The supported
+subset is one genuine top-level ordinary non-generic class, one original
+primary constructor with a single empty clause, no other declared members or
+secondary constructors, resolvable `java.lang.Object`, and the already audited
+public or package-qualified private visibility cases. Nested, module, trait,
+generic, multi-declaration, arbitrary member, and unsupported dependency
+shapes fail closed before symbol publication. The `Open` compatibility method
+is a thin delegation; `ClassLoader::load_class` remains the legacy default.
+
+Success records origin, repository state, resolved identity, and semantic
+cache only after class and constructor completion and identity checks. Loading
+Open and then PlainPrivate through the shared operation reuses the same
+package authority while publishing distinct canonical class IDs. On a late
+failure the transaction restores the package/session/store state before arena
+truncation, discards rolled-back repository entries, and permits retry. The
+focused loader regressions cover both fixtures, repeated identity, missing
+Object, mismatched requested owner, malformed bytes, duplicate identity,
+unsupported shape, rollback, and retry. Existing InfoWrapped/InfoBase,
+Option.getOrElse, legacy loading, and historical 14-unit/126-row artifacts are
+unchanged. The full locked workspace tests, classloader tests, format,
+Clippy, rustdoc, dependency-boundary check, diff check, and ignored JDK 21
+gate passed on this increment; test suites ran serially because the host's
+file-descriptor limit made some parallel classpath tests flaky.
+
+Issue validation commands run from the isolated issue worktree, with
+`CARGO_TARGET_DIR=.target-issue-1993` and `TMPDIR=.tmp-issue-1993`:
+
+```text
+cargo test -p dotty-classloader --locked -- --test-threads=1
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo test --workspace --all-targets --locked -- --test-threads=1
+git diff --check
+python3 tools/check-frontend-boundaries.py
+DOTTY_JDK21_HOME="$JAVA_HOME" cargo test -p dotty-classloader --test real_jdk_class_path --locked -- --ignored --test-threads=1
+```
