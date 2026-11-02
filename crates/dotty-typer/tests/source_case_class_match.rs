@@ -839,6 +839,7 @@ fn sealed_event_extract_and_classify_are_complete_owned_methods() {
     for (name, receipt) in first {
         println!("ISSUE1998_COMPLETE_ROOT\t{name}\t{receipt}");
     }
+    run_sealed_event_case_local_negative_matrix();
 }
 
 fn sealed_adt_positive_session(source: SourceId) -> Vec<(String, String)> {
@@ -1139,8 +1140,7 @@ fn sealed_adt_positive_session(source: SourceId) -> Vec<(String, String)> {
     })
 }
 
-#[test]
-fn sealed_event_case_local_negative_matrix_rejects_whole_methods() {
+fn run_sealed_event_case_local_negative_matrix() {
     let unrelated_extractor = SOURCE_TRAIT_PRODUCT1
         .replace(
             "object Matcher:",
@@ -1651,10 +1651,10 @@ fn sealed_event_rejects_variant_extractor_with_a_foreign_owner() {
             "failed source method publishes no typed trees"
         );
     });
+    run_sealed_event_rejects_forged_companion_and_selector_ownership();
 }
 
-#[test]
-fn sealed_event_rejects_forged_companion_and_selector_ownership() {
+fn run_sealed_event_rejects_forged_companion_and_selector_ownership() {
     for (offset, corruption) in ["forged companion link", "foreign _1 owner"]
         .into_iter()
         .enumerate()
