@@ -1,0 +1,4 @@
+session	declaration
+Expr	tree=4	symbol=SymbolId(40)	kind=Trait	origin=Source	sealed=true
+Num	tree=11	symbol=SymbolId(41)	kind=CASE-Class	origin=Source	parent=Expr@tree7=>SymbolId(40)	companion=SymbolId(46)	module_class=SymbolId(47)	unapply=SymbolId(51),owner=Num$,type=(Num):Num	field=value:SymbolId(53)	selector=SymbolId(50),_1:Int	class_info=parents=Object,Expr,Product
+Succ	tree=18	symbol=SymbolId(42)	kind=CASE-Class	origin=Source	parent=Expr@tree14=>SymbolId(40)	companion=SymbolId(56)	module_class=SymbolId(57)	unapply=SymbolId(61),owner=Succ$,type=error=UnsupportedProduct1FieldType { class: SymbolId(42), tree_index: 16 }	field=inner:SymbolId(63)	selector=SymbolId(60),error=UnsupportedProduct1FieldType { class: SymbolId(42), tree_index: 16 }	class_info=error=UnsupportedProduct1FieldType { class: SymbolId(42), tree_index: 16 }
