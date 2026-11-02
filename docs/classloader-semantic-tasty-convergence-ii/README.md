@@ -184,6 +184,29 @@ session, package, and cache checkpoints. The Scala consumer workflow invokes it
 with the required gate enabled; it passed with one test run, zero failures, and
 zero ignored tests.
 
+`semantic_class_first_load_late_failure_rolls_back_builtin_bindings_and_retries`
+injects failure after a structurally valid first `Open` load has completed its
+class and constructor in a fresh session. It verifies canonical builtin
+bindings are absent after rollback, the pre-existing `scala` package survives,
+the Object symbol and store/session/package checkpoints are restored, loader
+caches remain empty, and the same loader can retry successfully. The injected
+failure asserts that the Unit alias was bound before rollback, so the test
+exercises restoration of a newly created alias.
+
+`semantic_class_missing_object_rolls_back_and_retries_after_dependency_is_added`
+provides valid `Open.tasty` bytes and positive `java.lang` package evidence
+while withholding `java.lang.Object`. It asserts the precise typed
+`UnsupportedShape("the configured classpath cannot resolve java.lang.Object")`
+error, full store/session/package and Object-symbol rollback, empty loader
+caches and unchanged canonical builtin symbols, then supplies a classfile
+Object resource and retries in the same loader.
+
+`semantic_class_loader_rejects_nested_root_without_mutation_and_retries` loads
+the real Scala 3.9 `CtorOuter.tasty` fixture, whose class template contains a
+nested class. It asserts the exact typed shape rejection, unchanged store,
+session, package and cache state, then successfully loads `Open` in that same
+session. This complements the helper-level nested-constructor address check.
+
 The default `ClassLoader::load_class` path is unchanged. Existing directory,
 JAR, and Info-pair tests continue to assert `.tasty` priority over a collocated
 `.class`. The adapter suite also retains the earlier `Open`, `InfoBase` /
