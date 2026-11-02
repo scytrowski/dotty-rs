@@ -1,8 +1,8 @@
 use dotty::jvm_tasty_artifacts::emit_paired_jvm_tasty_batch;
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::bytecode::{
-    CfgCodeAnalyzer, CodeSequence, ConstantPoolIndexOperand, ControlFlowGraph, FieldReference,
-    Instruction, LocalIndex, VirtualMethodReference,
+    CfgCodeAnalyzer, ClassReference, CodeSequence, ConstantPoolIndexOperand, ControlFlowGraph,
+    FieldReference, Instruction, LocalIndex, SpecialMethodReference, VirtualMethodReference,
 };
 use dotty_classfile::classfile::{ClassFile, Reader};
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
@@ -10,6 +10,433 @@ use dotty_core::SourceId;
 use std::process::Command;
 
 const SOURCE: &str = include_str!("fixtures/jvm_tasty_dual_reference_constructors/Pair.scala");
+const FACTORY_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala");
+
+#[test]
+fn dual_reference_factory_preserves_forwarded_argument_identity_on_strict_jdk21() {
+    if !require_jdk_21() {
+        return;
+    }
+
+    let batch = emit_paired_jvm_tasty_batch(
+        FACTORY_SOURCE,
+        "tests/fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala",
+        SourceId::from_index(19671),
+    )
+    .expect("one original Rust frontend session emits the complete factory batch");
+    assert_eq!(
+        batch
+            .classes()
+            .iter()
+            .map(|artifact| artifact.classfile_path())
+            .collect::<Vec<_>>(),
+        [
+            "example/Counter.class",
+            "example/Pair.class",
+            "example/PairFactory.class"
+        ]
+    );
+
+    let scratch = TestDirectory::new("dual-reference-factory-identity");
+    let original = scratch.path().join("original-rust-artifacts");
+    write_classes(&original, &batch, None);
+    let files = batch
+        .classes()
+        .iter()
+        .flat_map(|artifact| [artifact.classfile_path(), artifact.tasty_path()])
+        .map(|relative| original.join(relative))
+        .collect::<Vec<_>>();
+    assert_eq!(files.len(), 6);
+    let hashes = files.iter().map(|path| sha256sum(path)).collect::<Vec<_>>();
+    eprintln!("dual-reference-factory-original-sha256-before {hashes:?}");
+
+    let factory_bytes = batch.classes()[2].classfile_bytes();
+    let factory = decode(factory_bytes);
+    assert_eq!((factory.version.major, factory.version.minor), (65, 0));
+    let wrap = method(
+        &factory,
+        "wrap",
+        "(Lexample/Counter;Lexample/Counter;)Lexample/Pair;",
+    );
+    let wrap_code = code(wrap);
+    assert_eq!((wrap_code.max_stack, wrap_code.max_locals), (4, 3));
+    let pair_class = find_class(&factory, factory_bytes, "example/Pair");
+    let constructor = find_methodref(
+        &factory,
+        factory_bytes,
+        "example/Pair",
+        "<init>",
+        "(Lexample/Counter;Lexample/Counter;)V",
+    );
+    let expected_wrap = [
+        0xbb,
+        (pair_class.0 >> 8) as u8,
+        pair_class.0 as u8,
+        0x59,
+        0x2b,
+        0x2c,
+        0xb7,
+        (constructor.0 >> 8) as u8,
+        constructor.0 as u8,
+        0xb0,
+    ];
+    assert_eq!(wrap_code.code, expected_wrap);
+    assert_eq!(
+        wrap_code
+            .code
+            .iter()
+            .filter(|opcode| **opcode == 0xbb)
+            .count(),
+        1,
+        "wrap allocates only Pair"
+    );
+    let cp_operand =
+        |index: ConstantPoolIndex| ConstantPoolIndexOperand::try_from(index.0).unwrap();
+    let mut sequence = CodeSequence::new();
+    sequence
+        .instruction(Instruction::New(ClassReference::new(cp_operand(
+            pair_class,
+        ))))
+        .instruction(Instruction::Dup)
+        .instruction(Instruction::ALoad(LocalIndex::new(1)))
+        .instruction(Instruction::ALoad(LocalIndex::new(2)))
+        .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+            cp_operand(constructor),
+        )))
+        .instruction(Instruction::AReturn);
+    let graph = ControlFlowGraph::build(&sequence).expect("wrap bytecode decodes");
+    let analysis = CfgCodeAnalyzer::analyze_with_current_class(
+        &graph,
+        "wrap",
+        "(Lexample/Counter;Lexample/Counter;)Lexample/Pair;",
+        false,
+        &factory.constant_pool,
+        factory.this_class,
+    )
+    .expect("Rust bytecode analysis accepts ordered initialized Pair return");
+    assert_eq!((analysis.max_stack, analysis.max_locals), (4, 3));
+    let dump = javap(&original, "example.PairFactory");
+    for expected in [
+        "major version: 65",
+        "descriptor: (Lexample/Counter;Lexample/Counter;)Lexample/Pair;",
+        "stack=4, locals=3",
+        "aload_1",
+        "aload_2",
+        "Method example/Pair.\"<init>\":(Lexample/Counter;Lexample/Counter;)V",
+        "areturn",
+    ] {
+        assert!(
+            dump.contains(expected),
+            "javap omitted {expected:?}:\n{dump}"
+        );
+    }
+    let wrap_dump = dump
+        .split("public example.Pair wrap(example.Counter, example.Counter);")
+        .nth(1)
+        .expect("javap prints the forwarding method")
+        .split("  public ")
+        .next()
+        .unwrap();
+    let pcs = wrap_dump
+        .lines()
+        .filter_map(|line| {
+            let instruction = line.trim();
+            let (pc, opcode) = instruction.split_once(": ")?;
+            Some((
+                pc.parse::<usize>().ok()?,
+                opcode.split_whitespace().next()?.to_owned(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pcs,
+        [
+            (0, "new".to_owned()),
+            (3, "dup".to_owned()),
+            (4, "aload_1".to_owned()),
+            (5, "aload_2".to_owned()),
+            (6, "invokespecial".to_owned()),
+            (9, "areturn".to_owned()),
+        ],
+        "assert program counters reported by javap for the original classfile"
+    );
+
+    let harness = scratch.path().join("PairFactoryForwardingHarness.java");
+    let harness_classes = scratch.path().join("harness-classes");
+    std::fs::create_dir(&harness_classes).unwrap();
+    std::fs::write(&harness, FACTORY_HARNESS).unwrap();
+    let javac = Command::new("javac")
+        .args(["--release", "21", "-classpath"])
+        .arg(&original)
+        .arg("-d")
+        .arg(&harness_classes)
+        .arg(&harness)
+        .output()
+        .expect("start JDK 21 javac for the independent Java harness");
+    assert!(
+        javac.status.success(),
+        "javac --release 21 rejected harness:\n{}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    assert_hashes(&files, &hashes, "factory javac");
+    let classpath = std::env::join_paths([harness_classes.as_path(), original.as_path()]).unwrap();
+    let java = run_java(&classpath, "PairFactoryForwardingHarness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected original Rust artifacts:\n{}\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "forward=7/3,42/3,42/-9;reverse=-9/42;repeat=true;alias=100/100"
+    );
+    assert_hashes(&files, &hashes, "factory runtime");
+
+    for (path, expected_hash) in files.iter().zip(&hashes) {
+        assert_eq!(sha256sum(path), *expected_hash);
+    }
+
+    let run_factory_negative = |label: &str,
+                                changed_factory: Option<&[u8]>,
+                                omitted_class: Option<&str>,
+                                expected: &str| {
+        let root = scratch.path().join(label);
+        for (index, artifact) in batch.classes().iter().enumerate() {
+            if omitted_class == Some(artifact.classfile_path()) {
+                continue;
+            }
+            let destination = root.join(artifact.classfile_path());
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            let class_bytes = if index == 2 {
+                changed_factory.unwrap_or(artifact.classfile_bytes())
+            } else {
+                artifact.classfile_bytes()
+            };
+            std::fs::write(destination, class_bytes).unwrap();
+            let tasty_destination = root.join(artifact.tasty_path());
+            std::fs::create_dir_all(tasty_destination.parent().unwrap()).unwrap();
+            std::fs::write(tasty_destination, artifact.tasty_bytes()).unwrap();
+        }
+        let negative_cp =
+            std::env::join_paths([harness_classes.as_path(), root.as_path()]).unwrap();
+        let rejected = run_java(&negative_cp, "PairFactoryForwardingHarness");
+        assert!(!rejected.status.success(), "JVM/harness accepted {label}");
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&rejected.stdout),
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(
+            output.contains(expected),
+            "{label} failed at an unexpected first layer; expected {expected:?}:\n{output}"
+        );
+        let layer = if expected.starts_with("AssertionError") {
+            "runtime identity assertion"
+        } else if expected.contains("NoClassDefFoundError") {
+            "JVM linkage"
+        } else {
+            "JVM verifier/classfile"
+        };
+        let evidence = output
+            .lines()
+            .find(|line| line.contains(expected.split(':').next().unwrap()))
+            .unwrap_or("expected rejection observed");
+        eprintln!(
+            "dual-reference-factory-negative {label} first-layer={layer} evidence={evidence}"
+        );
+    };
+
+    let wrap_start = code_offset(factory_bytes, wrap_code.code);
+    let mut swapped_loads = factory_bytes.to_vec();
+    swapped_loads.swap(wrap_start + 4, wrap_start + 5);
+    run_factory_negative(
+        "factory-swapped-reference-loads",
+        Some(&swapped_loads),
+        None,
+        "AssertionError: left must preserve the original argument object",
+    );
+    let mut repeated_first_load = factory_bytes.to_vec();
+    repeated_first_load[wrap_start + 5] = 0x2b;
+    run_factory_negative(
+        "factory-load-first-formal-twice",
+        Some(&repeated_first_load),
+        None,
+        "AssertionError: right must preserve the original argument object",
+    );
+
+    let mut wrong_owner = factory.clone();
+    let wrong_constructor_owner = find_class(&factory, factory_bytes, "java/lang/Object");
+    replace_methodref_class(
+        &mut wrong_owner,
+        factory_bytes,
+        constructor,
+        wrong_constructor_owner,
+    );
+    run_factory_negative(
+        "factory-wrong-pair-constructor-owner",
+        Some(&wrong_owner.encode().unwrap()),
+        None,
+        "VerifyError",
+    );
+    let no_args_void = find_utf8(&factory, factory_bytes, "()V");
+    let mut wrong_descriptor = factory.clone();
+    replace_methodref_descriptor(
+        &mut wrong_descriptor,
+        factory_bytes,
+        constructor,
+        no_args_void,
+    );
+    run_factory_negative(
+        "factory-wrong-pair-constructor-descriptor",
+        Some(&wrong_descriptor.encode().unwrap()),
+        None,
+        "VerifyError",
+    );
+
+    let mut missing_allocation = factory_bytes.to_vec();
+    missing_allocation[wrap_start] = 0x00;
+    run_factory_negative(
+        "factory-missing-pair-new",
+        Some(&missing_allocation),
+        None,
+        "VerifyError",
+    );
+    let mut duplicate_allocation = factory_bytes.to_vec();
+    duplicate_allocation.splice(
+        wrap_start + 9..wrap_start + 9,
+        [0xbb, (pair_class.0 >> 8) as u8, pair_class.0 as u8],
+    );
+    let old_code_length = u32_at(&duplicate_allocation, wrap_start - 4);
+    set_u32(
+        &mut duplicate_allocation,
+        wrap_start - 4,
+        old_code_length + 3,
+    );
+    let old_attribute_length = u32_at(&duplicate_allocation, wrap_start - 12);
+    set_u32(
+        &mut duplicate_allocation,
+        wrap_start - 12,
+        old_attribute_length + 3,
+    );
+    run_factory_negative(
+        "factory-duplicate-pair-new",
+        Some(&duplicate_allocation),
+        None,
+        "VerifyError",
+    );
+    let mut missing_constructor_call = factory_bytes.to_vec();
+    missing_constructor_call[wrap_start + 6] = 0x00;
+    run_factory_negative(
+        "factory-missing-pair-invokespecial",
+        Some(&missing_constructor_call),
+        None,
+        "VerifyError",
+    );
+    let mut duplicate_constructor_call = factory_bytes.to_vec();
+    duplicate_constructor_call.splice(
+        wrap_start + 9..wrap_start + 9,
+        [0xb7, (constructor.0 >> 8) as u8, constructor.0 as u8],
+    );
+    let old_code_length = u32_at(&duplicate_constructor_call, wrap_start - 4);
+    set_u32(
+        &mut duplicate_constructor_call,
+        wrap_start - 4,
+        old_code_length + 3,
+    );
+    let old_attribute_length = u32_at(&duplicate_constructor_call, wrap_start - 12);
+    set_u32(
+        &mut duplicate_constructor_call,
+        wrap_start - 12,
+        old_attribute_length + 3,
+    );
+    run_factory_negative(
+        "factory-duplicate-pair-invokespecial",
+        Some(&duplicate_constructor_call),
+        None,
+        "VerifyError",
+    );
+    let mut illegal_uninitialized_flow = factory_bytes.to_vec();
+    illegal_uninitialized_flow[wrap_start + 3] = 0x00;
+    run_factory_negative(
+        "factory-missing-dup-before-pair-init",
+        Some(&illegal_uninitialized_flow),
+        None,
+        "VerifyError",
+    );
+    let mut insufficient_stack = factory_bytes.to_vec();
+    set_u16(&mut insufficient_stack, wrap_start - 8, 3);
+    run_factory_negative(
+        "factory-insufficient-max-stack",
+        Some(&insufficient_stack),
+        None,
+        "VerifyError",
+    );
+    let mut insufficient_locals = factory_bytes.to_vec();
+    set_u16(&mut insufficient_locals, wrap_start - 6, 2);
+    run_factory_negative(
+        "factory-insufficient-max-locals",
+        Some(&insufficient_locals),
+        None,
+        "ClassFormatError",
+    );
+    run_factory_negative(
+        "factory-missing-counter-class",
+        None,
+        Some("example/Counter.class"),
+        "NoClassDefFoundError: example/Counter",
+    );
+    run_factory_negative(
+        "factory-missing-pair-class",
+        None,
+        Some("example/Pair.class"),
+        "NoClassDefFoundError: example/Pair",
+    );
+}
+
+const FACTORY_HARNESS: &str = r#"
+import java.lang.reflect.Field;
+
+public final class PairFactoryForwardingHarness {
+    public static void main(String[] args) throws Exception {
+        example.Counter a = new example.Counter(7);
+        example.Counter b = new example.Counter(3);
+        example.PairFactory firstFactory = new example.PairFactory();
+        example.PairFactory secondFactory = new example.PairFactory();
+        example.Pair pair = firstFactory.wrap(a, b);
+        identity(pair, "left", a); identity(pair, "right", b);
+        expect(pair.leftValue(), 7); expect(pair.rightValue(), 3);
+        a.set(42); expect(pair.leftValue(), 42); expect(pair.rightValue(), 3);
+        b.set(-9); expect(pair.leftValue(), 42); expect(pair.rightValue(), -9);
+
+        example.Pair reverse = secondFactory.wrap(b, a);
+        identity(reverse, "left", b); identity(reverse, "right", a);
+        expect(reverse.leftValue(), -9); expect(reverse.rightValue(), 42);
+        example.Pair repeated = new example.PairFactory().wrap(a, b);
+        identity(repeated, "left", a); identity(repeated, "right", b);
+        if (repeated == pair || firstFactory == secondFactory)
+            throw new AssertionError("separate calls and factory instances remain independent");
+
+        example.Pair alias = secondFactory.wrap(a, a);
+        identity(alias, "left", a); identity(alias, "right", a);
+        a.set(100); expect(alias.leftValue(), 100); expect(alias.rightValue(), 100);
+        expect(pair.leftValue(), 100); expect(pair.rightValue(), -9);
+        expect(reverse.leftValue(), -9); expect(reverse.rightValue(), 100);
+        System.out.println("forward=7/3,42/3,42/-9;reverse=-9/42;repeat=true;alias=100/100");
+    }
+    private static void identity(example.Pair pair, String fieldName, example.Counter expected)
+        throws Exception {
+        Field field = example.Pair.class.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        if (field.get(pair) != expected)
+            throw new AssertionError(fieldName + " must preserve the original argument object");
+    }
+    private static void expect(int actual, int expected) {
+        if (actual != expected) throw new AssertionError("expected " + expected + ", got " + actual);
+    }
+}
+"#;
 
 #[test]
 fn dual_reference_pair_preserves_original_argument_identity_on_strict_jdk21() {
@@ -631,8 +1058,14 @@ fn code_offset(class_bytes: &[u8], code: &[u8]) -> usize {
 fn u16_at(bytes: &[u8], offset: usize) -> u16 {
     u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
 }
+fn u32_at(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
 fn set_u16(bytes: &mut [u8], offset: usize, value: u16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+}
+fn set_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
 }
 
 fn javap(root: &std::path::Path, name: &str) -> String {
@@ -917,7 +1350,7 @@ fn assert_hashes(paths: &[std::path::PathBuf], expected: &[String], stage: &str)
     let actual = paths.iter().map(|path| sha256sum(path)).collect::<Vec<_>>();
     assert_eq!(
         actual, expected,
-        "the four original Rust artifacts changed during {stage}"
+        "the original Rust artifacts changed during {stage}"
     );
     eprintln!("dual-reference-original-hashes-after-{stage} {actual:?}");
 }
