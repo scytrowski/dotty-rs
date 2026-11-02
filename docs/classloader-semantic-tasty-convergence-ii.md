@@ -96,14 +96,21 @@ defines the rejection boundary for this contract; this issue did not substitute
 that fixture or run a broader cohort. The 14-unit/126-row denominator remains
 unchanged. No production gate or reusable loader contract was changed.
 
-Focused validation ran with the pinned toolchain and isolated temporary/build
-directories:
+Validation ran with the pinned toolchain and isolated temporary/build
+directories (`TMPDIR` under the issue worktree, JDK `java.io.tmpdir` under the
+same worktree):
 
 ```text
-cargo test -p dotty-classloader --test semantic_tasty_parity --locked
 cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo test --workspace --all-targets --locked
+cargo test -p dotty-classloader --test semantic_tasty_parity --locked
+cargo test -p dotty-tasty-unpickler --locked
+cargo test -p dotty-classloader --test real_jdk_class_path --locked -- --ignored
+git diff --check
 ```
 
-Repository-wide checks and the JDK 21 gate are recorded in the PR validation
-summary. Final hashes confirm all three historical artifacts above remain
+All commands passed; the explicit real-JDK gate passed its three ignored JDK
+21 tests. Final hashes confirm all three historical artifacts above remain
 unchanged.
