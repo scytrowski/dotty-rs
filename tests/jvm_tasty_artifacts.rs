@@ -26,7 +26,8 @@ use dotty_classfile::bytecode::{
     analyze as analyze_instructions,
 };
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 const COUNTER: &str = include_str!("fixtures/jvm_tasty_interop/Counter.scala");
 const COUNTER_GAUGE: &str = include_str!("fixtures/jvm_tasty_multiclass/CounterGauge.scala");
@@ -4997,6 +4998,27 @@ fn sha256sum(path: &std::path::Path) -> String {
         .to_owned()
 }
 
+fn sha256sum_bytes(bytes: &[u8]) -> String {
+    let mut child = Command::new("sha256sum")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("start sha256sum for Rust output bytes");
+    child
+        .stdin
+        .take()
+        .expect("sha256sum stdin is piped")
+        .write_all(bytes)
+        .expect("write bytes to sha256sum");
+    let output = child.wait_with_output().expect("finish sha256sum");
+    assert!(output.status.success(), "sha256sum accepts byte input");
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .expect("sha256sum prints a digest")
+        .to_owned()
+}
+
 fn classfile_constant_pool_entry_offset(classfile: &[u8], wanted: ConstantPoolIndex) -> usize {
     let count = usize::from(u16::from_be_bytes([classfile[8], classfile[9]]));
     let mut index = 1usize;
@@ -5612,6 +5634,20 @@ fn dual_reference_forwarding_emits_six_linked_artifacts_with_ordered_formal_load
     }
     assert_eq!(first.classes().len(), 3);
     assert_eq!(second.classes().len(), 3);
+    eprintln!(
+        "integrated dual-reference six-artifact inventory source_sha256={}",
+        sha256sum_bytes(DUAL_REFERENCE_FORWARDING_BATCH.as_bytes())
+    );
+    for artifact in first.classes() {
+        let tasty = TastyFile::parse_and_validate_scala_3_9(artifact.tasty_bytes()).unwrap();
+        eprintln!(
+            "integrated dual-reference artifact path={} class_sha256={} tasty_sha256={} uuid={:02x?}",
+            artifact.classfile_path(),
+            sha256sum_bytes(artifact.classfile_bytes()),
+            sha256sum_bytes(artifact.tasty_bytes()),
+            tasty.header().uuid,
+        );
+    }
     let expected = [
         ("example/Counter.class", "example/Counter.tasty"),
         ("example/Pair.class", "example/Pair.tasty"),

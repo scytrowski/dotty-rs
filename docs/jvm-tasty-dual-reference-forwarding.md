@@ -74,8 +74,8 @@ The source-bound classfile check requires `PairFactory.wrap` to retain the metho
 
 | Rust output | SHA-256 | TASTy UUID |
 | --- | --- | --- |
-| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008047c3c00968ac0000000000008193` |
-| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008047c3c00968ac0000000000008193` |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3c00968ac0000000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008071c3c00968ac0000000000008193` |
 | `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d7441c7f00000000000008198` |
 | `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d7441c7f00000000000008198` |
 | `example/PairFactory.class` | `13adef3d34ffbf9af3bf39cc996a29e1a45d8e76c0082012fcee898efd323dae` | `00f0b42f44fbadc80000000000008195` |
@@ -155,7 +155,8 @@ Issue #1960's required final gates remain the pinned Scala/JDK gates plus `cargo
 
 ## Original Rust factory identity proof (#1967)
 
-Issue [#1967](https://github.com/scytrowski/dotty-rs/issues/1967) checks the runtime behavior of the unchanged source above, from one call to `emit_paired_jvm_tasty_batch` through the genuine Rust frontend. This run starts from `origin/main` `3a854831b9c074261e31e82d325c0350f606b95a`, uses source SHA-256 `48e4ab7b3038eda26f9070a5879a9cd71d4eb51f69277d1eafcff53bda28610e`, Rust `1.98.1`, and Temurin `21.0.13+9`. The isolated batch contains only the three original producer classes and their three linked TASTy sidecars. A separate Java harness is compiled with `javac --release 21`; runtime classpath order is harness classes followed by that Rust batch. There are no Scala-produced artifacts in the JVM path. The TASTy files are included and hashed as producer outputs, but this test makes no independent Scala interoperability claim.
+
+Issue [#1967](https://github.com/scytrowski/dotty-rs/issues/1967) checks the runtime behavior of the unchanged source above, from one call to `emit_paired_jvm_tasty_batch` through the genuine Rust frontend. This historical run starts from `origin/main` `3a854831b9c074261e31e82d325c0350f606b95a`, uses source SHA-256 `48e4ab7b3038eda26f9070a5879a9cd71d4eb51f69277d1eafcff53bda28610e`, Rust `1.98.1`, and Temurin `21.0.13+9`. The #1967 test passed the full fixture path `tests/fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala` as the producer `source_name`. Its artifact hashes below are the original #1967 receipt and remain historical evidence. The integrated #1971 rerun uses the canonical producer source name `PairFactory.scala`; this producer-name change, rather than the Java client's filename, changes the emitted TASTy UUIDs and artifact hashes, which are listed separately in the integrated ledger. To reproduce the original #1967 hashes, use the #1967 reviewed head `0c654d1cda7cac11b79a2703bc2a087f0a7189af`; the current test uses the canonical producer source name and emits the separate #1971 hashes. The isolated batch contains only the three original producer classes and their three linked TASTy sidecars. A separate Java harness is compiled with `javac --release 21`; runtime classpath order is harness classes followed by that Rust batch. There are no Scala-produced artifacts in the JVM path. The TASTy files are included and hashed as producer outputs, but this test makes no independent Scala interoperability claim.
 
 The Rust classfile decoder and `javap -v -p -c` both observe `PairFactory.wrap(LCounter;LCounter;)LPair;` with `max_stack=4`, `max_locals=3`, classfile major 65, and exactly this code. Program counters below are parsed from the actual `javap` output and asserted by the focused test:
 
@@ -229,8 +230,8 @@ The Rust producer source SHA-256 is `48e4ab7b3038eda26f9070a5879a9cd71d4eb51f692
 
 | Original Rust artifact | SHA-256 | Linked TASTy UUID |
 | --- | --- | --- |
-| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008047c3-c009-68ac-0000-000000008193` |
-| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008047c3-c009-68ac-0000-000000008193` |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3-c009-68ac-0000-000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008071c3-c009-68ac-0000-000000008193` |
 | `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d-7441-c7f0-0000-000000008198` |
 | `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d-7441-c7f0-0000-000000008198` |
 | `example/PairFactory.class` | `13adef3d34ffbf9af3bf39cc996a29e1a45d8e76c0082012fcee898efd323dae` | `00f0b42f-44fb-adc8-0000-000000008195` |
@@ -264,5 +265,72 @@ export CARGO_BUILD_JOBS=2
 export DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_CONSUMER=1
 
 cargo +1.98.1 test --test jvm_tasty_dual_reference_forwarding_scala_consumer \
+  --locked -- --nocapture --test-threads=1
+```
+
+## Final integrated release gate (#1971)
+
+The integrated gate used clean merged `main` at `bd90c1a82d89f315c7613570d6d5f518e0e76d8b` as its baseline and ran the updated tests from implementation revision `f33e46470e6d7d342d000c5f7dcd7eb5553da03a` in PR #2006. Thus the local receipts below are evidence from the PR implementation tree, not claims that the post-baseline fixture changes existed at `bd90c1a`. The seven reviewed prerequisites are ancestors of that baseline. Their final PR heads had exact-head `READY_FOR_MERGE` receipts and successful CI and pinned Scala workflow runs:
+
+| Issue / PR | Reviewed head | Merge commit | CI run | Pinned Scala run |
+| --- | --- | --- | --- | --- |
+| [#1960 / #1974](https://github.com/scytrowski/dotty-rs/pull/1974) | `bc5a87f2ea59b2053da5a2083889330dee4a3bb5` | `148883c222d86cdc2a90bb50ccc7114acd69c99d` | [41333012628](https://github.com/scytrowski/dotty-rs/actions/runs/41333012628) | [41333012689](https://github.com/scytrowski/dotty-rs/actions/runs/41333012689) |
+| [#1961 / #1976](https://github.com/scytrowski/dotty-rs/pull/1976) | `93883f7d90416b4860073f92668e370785d4e9a6` | `f24adf9b7bfaccabd6c8085a76b4aa63aba8b7e5` | [41338223952](https://github.com/scytrowski/dotty-rs/actions/runs/41338223952) | [41338223943](https://github.com/scytrowski/dotty-rs/actions/runs/41338223943) |
+| [#1963 / #1979](https://github.com/scytrowski/dotty-rs/pull/1979) | `e8277c49bc714a3f3e904f3f1c6dfcef6f075b5e` | `15a8558c59f07df95c4291662f2baa73ea8919d0` | [41343829750](https://github.com/scytrowski/dotty-rs/actions/runs/41343829750) | [41343829748](https://github.com/scytrowski/dotty-rs/actions/runs/41343829748) |
+| [#1964 / #1981](https://github.com/scytrowski/dotty-rs/pull/1981) | `0b13ea24761f27272f316f2823446d73437c9c33` | `4591bcab5388fb21b1630f87884a6e46affff7bb` | [41354616230](https://github.com/scytrowski/dotty-rs/actions/runs/41354616230) | [41354616180](https://github.com/scytrowski/dotty-rs/actions/runs/41354616180) |
+| [#1966 / #1984](https://github.com/scytrowski/dotty-rs/pull/1984) | `a35f5556827b89aad12487941b04cd9381f7ba2d` | `52411c8c5ca96e031c99e18ae8d3c7c3e7205f50` | [41362348601](https://github.com/scytrowski/dotty-rs/actions/runs/41362348601) | [41362348633](https://github.com/scytrowski/dotty-rs/actions/runs/41362348633) |
+| [#1967 / #1988](https://github.com/scytrowski/dotty-rs/pull/1988) | `0c654d1cda7cac11b79a2703bc2a087f0a7189af` | `8b638784b57a02bfbd8f2a467d472029cb3657f9` | [41366981803](https://github.com/scytrowski/dotty-rs/actions/runs/41366981803) | [41366981799](https://github.com/scytrowski/dotty-rs/actions/runs/41366981799) |
+| [#1969 / #2001](https://github.com/scytrowski/dotty-rs/pull/2001) | `8c4ec2356f68ee53dbaaf8a8833b1912f7b59d0d` | `1c23213e3716fc137a2fee16d6f4d0541961fa70` | [41414695839](https://github.com/scytrowski/dotty-rs/actions/runs/41414695839) | [41414695978](https://github.com/scytrowski/dotty-rs/actions/runs/41414695978) |
+
+Issue #1961 remains administratively open, but PR #1976 is merged and its reviewed head and workflow receipts are recorded above. These prerequisite receipts are not counted as the fresh integrated-main runs below.
+
+### AC1–AC10 integrated evidence
+
+| AC | Integrated evidence rerun from `bd90c1a` at PR implementation revision `f33e464` |
+| --- | --- |
+| 1. Provenance | Original Rust source [`PairFactory.scala`](../tests/fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala), SHA-256 `48e4ab7b3038eda26f9070a5879a9cd71d4eb51f69277d1eafcff53bda28610e`, passed to the producer as `PairFactory.scala`. The separate Java client source [`JavaConsumer.java`](../tests/fixtures/jvm_tasty_dual_reference_forwarding/JavaConsumer.java), SHA-256 `d6d09ce17fc8b2e4d048dd03bb34e05bb439b08365f0932d7843045e75f16d82`, is written to `PairFactoryForwardingHarness.java` for `javac`; it is a consumer and does not affect producer artifact hashes. Separate Scala client `rust-consumer/Consumer.scala`, SHA-256 `eee2e18901dfa37d29570d81c92098e93ab2f1a36534970241013e06feea66ec`. Rust/Cargo `1.98.1`; Scala source revision `777528f19a58e794c9954a42f433373472ec57f8`, compiler reports `3.9.0-bin-SNAPSHOT-git-777528f`; the staged `with_compiler.jar` hash observed in this run is `8f41217ebb685b05084242c6664f3543c573f08f20cc0638714101c8ed92e614` (provenance only, not a stable pin). This host used `JAVA_HOME=/home/vdrake6/.sdkman/candidates/java/21.0.13.0+9-tem`, whose `release` file reports `JAVA_VERSION="21.0.13"`; `java -version` reports Temurin `21.0.13+9`, and its `bin/java` SHA-256 is `9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`. `-release 21` yields major version 65; sidecars are TASTy 28.9.0. Approved runtime hashes are listed above. |
+| 2. One authentic frontend session | `dual_reference_forwarding_emits_six_linked_artifacts_with_ordered_formal_loads` emitted the unchanged source in two fresh sessions with `SourceId(19660)` and `SourceId(19661)`. `dual_reference_factory_wrap_records_the_genuine_source_session_and_first_proof_error` retains the source and typed roots, semantic indexes, original method-owned `first` and `second` symbols, selected `Pair` constructor, and direct argument `Ident` trees. The caller formals remain distinct from `Pair`'s constructor-owned formals. |
+| 3. TASTy proof | `rust_pair_factory_tasty_emits_ordered_direct_formal_constructor_arguments` and the strict Scala reader assert two ordered `PARAM` roots in `wrap`, one `APPLY(SELECTin(NEW(Pair)))`, and direct `TERMREF`s to the corresponding original method formals. `Pair.tasty` retains its two constructor parameters and separate immutable aliases. Scala `-decompile`, `-print-tasty`, and `-from-tasty` read the original Rust sidecars. |
+| 4. Six artifacts and determinism | The two fresh sessions produced the same paths, all six byte arrays and UUIDs. The source-bound test also checks classfile major 65, TASTy 28.9, sidecar UUID links, descriptors, method body and exact source-order loads. The current integrated inventory follows. |
+| 5. JVM lowering | `PairFactory.wrap(LCounter;LCounter;)LPair;` has `max_stack=4`, `max_locals=3`, and symbolic instructions `new Pair; dup; aload_1; aload_2; invokespecial Pair.<init>(LCounter;LCounter;)V; areturn`. The wrapper creates no `Counter`. `Pair.<init>` stores its own first and second formals into distinct `left` and `right` fields. |
+| 6. Java 21 runtime | The separate Java client source `JavaConsumer.java` is embedded in the test and written as `PairFactoryForwardingHarness.java`, matching its public class name, then compiled with `javac --release 21` against only the original Rust batch and run with `java -Xverify:all -ea`. Output: `forward=7/3,42/3,42/-9;reverse=-9/42;repeat=true;alias=100/100`. It checks reflected identity, separate mutations, reversed positions, repeated calls, distinct factory instances and intentional aliasing. The six current integrated hashes below were unchanged before compilation, after compilation and after runtime. |
+| 7. Scala 3.9 runtime and lookup | The strict Scala client compiled against the six original Rust artifacts and the two approved runtime jars, then ran the unchanged Rust classes with output `rust-dual-reference-forwarding=7/3,42/-9,-9/42; alias=true`. It verifies `Counter.get/set`, `Pair.leftValue/rightValue` and its constructor, and `PairFactory.wrap` using TASTy-only lookup plus matched classfile-only failures. The six hashes remained unchanged after compilation, runtime, decompile and negative probes. `-from-tasty` outputs are inspection-only and absent from the positive runtime classpath. |
+| 8. First-failure and publisher negatives | Proof tests reject stale provenance, wrong types and arity at the source/proof layer. A same-typed positional swap is valid bytecode and fails the runtime identity assertion. Wrong constructor owners/descriptors, missing or duplicate allocation/calls, invalid stack/local bounds and missing classes fail at the JVM verifier, classfile loader or linker. Scala controls cover malformed, missing, misplaced and UUID-mismatched TASTy, wrong owner/type/result, wrong arity, missing members, malformed TERMREF ownership, and the one-formal producer with its matched classfile-only control. The six-file publisher test injects handled failures after every staged write and before/after promotion; no partial destination is accepted and an existing sentinel is preserved. This is not a crash-atomicity claim. |
+| 9. Required gates | The inherited strict Scala group passed with every required consumer variable set to `1`, including `DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_CONSUMER=1`, `DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_BATCH=1`, and `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`. The separate pickler alias-oracle test passed. The mandatory `DOTTY_CLASSFILE_REQUIRE_JDK=1` verifier/JVM/source/paired/publisher gate passed. `cargo fmt`, the frontend boundary guard, Clippy, Rustdoc, all workspace tests and `git diff --check` also passed. These are integrated-baseline reruns, distinct from predecessor workflow receipts. |
+| 10. Evidence and limits | This ledger records the common baseline, prerequisite receipts, pinned source/client/runtime inputs, artifacts, runtime results, first failures and strict commands. No producer semantics were added. Mixed argument expressions, more than two arguments, generic/default/overloaded/contextual constructors, external ABI composition and public compiler APIs remain outside this release gate. |
+
+| Rust artifact path | Classfile SHA-256 | TASTy SHA-256 | Linked UUID |
+| --- | --- | --- | --- |
+| `example/Counter.class` / `.tasty` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008071c3-c009-68ac-0000-000000008193` |
+| `example/Pair.class` / `.tasty` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| `example/PairFactory.class` / `.tasty` | `13adef3d34ffbf9af3bf39cc996a29e1a45d8e76c0082012fcee898efd323dae` | `4df88f35f03867ae637ed6131e4fca4e7c264bf10db2b9165c213ee85eec0fdb` | `00f0b42f-44fb-adc8-0000-000000008195` |
+
+`PairFactory.tasty` has distinct direct roots for `PARAM first` and `PARAM second` (addresses 32 and 41 in the checked Rust batch); the `APPLY` arguments are direct `TERMREF`s targeting those respective roots. The classfile `TASTY` attribute and sidecar header share the UUID listed for each class.
+
+### Integrated reproduction
+
+`TMPDIR`, Cargo outputs, Scala compiler targets, Maven artifacts and oracle outputs were task-local and outside shared `/tmp`. The successful local strict runs used `JAVA_HOME=/home/vdrake6/.sdkman/candidates/java/21.0.13.0+9-tem` and put `$JAVA_HOME/bin` first on `PATH`; this matches the workflow's Temurin 21.0.13 requirement. All published Scala compiler/runtime dependency JARs were checked against the pinned workflow SHA-256 manifest. The strict Scala group used the pinned workflow's 22 test targets and required variables, plus `--locked -- --nocapture --test-threads=1`; the rerun passed all 22 targets. The strict Java identity rerun passed with `DOTTY_CLASSFILE_REQUIRE_JDK=1` and the same JDK. The mandatory JDK command was:
+
+```sh
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +1.98.1 test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  -p dotty --test jvm_tasty_artifacts \
+  -p dotty --test jvm_stateful_class_contract \
+  --locked -- --nocapture
+```
+
+The focused integrated gates were:
+
+```sh
+DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_BATCH=1 \
+cargo +1.98.1 test -p dotty --test jvm_tasty_artifacts \
+  dual_reference_forwarding_emits_six_linked_artifacts_with_ordered_formal_loads \
+  --locked -- --nocapture --test-threads=1
+
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +1.98.1 test -p dotty \
+  --test jvm_tasty_dual_reference_identity \
+  dual_reference_factory_preserves_forwarded_argument_identity_on_strict_jdk21 \
   --locked -- --nocapture --test-threads=1
 ```
