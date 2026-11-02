@@ -8388,6 +8388,103 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn open_legacy_and_semantic_loads_have_matched_cold_warm_profile_receipt() {
+        use std::time::Instant;
+
+        const SAMPLES: usize = 7;
+        let name = open_binary_name();
+        let mut observations = BTreeMap::<(&str, &str), Vec<u128>>::new();
+        let mut outcomes = BTreeMap::<(&str, &str), (usize, usize)>::new();
+
+        for mode in ["legacy", "semantic"] {
+            for _sample in 0..SAMPLES {
+                let mut store = SemanticStore::new();
+                let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+                loader.set_load_profile_collection(true);
+                let cold_start = Instant::now();
+                let cold = if mode == "legacy" {
+                    loader
+                        .load_class(&name)
+                        .map_err(|error| format!("{error:?}"))
+                } else {
+                    loader
+                        .load_open_with_tasty_unpickler(&name)
+                        .map_err(|error| format!("{error:?}"))
+                };
+                let cold_elapsed = cold_start.elapsed().as_nanos();
+                let cold_success = cold.is_ok();
+                assert!(cold_success, "{mode} cold Open load failed: {cold:?}");
+                observations
+                    .entry((mode, "cold"))
+                    .or_default()
+                    .push(cold_elapsed);
+
+                let dependency_profiles = loader.take_load_profiles();
+                if mode == "legacy" {
+                    assert_eq!(dependency_profiles.len(), 1);
+                    let profile = &dependency_profiles[0];
+                    assert_eq!(profile.root, name.to_string());
+                    assert!(profile.completed_classes.contains(&name.to_string()));
+                    eprintln!(
+                        "semantic-tasty-profile-detail mode=legacy phase=cold profile_records=1 resource_calls={} resources_found={} resource_bytes={} tasty_decode_calls={} classfile_decode_calls={} uncached_ns={}",
+                        profile.resource_lookup_calls,
+                        profile.resources_found,
+                        profile.resource_bytes,
+                        profile.tasty_decode_calls,
+                        profile.classfile_decode_calls,
+                        profile.load_uncached_inclusive_ns
+                    );
+                } else {
+                    assert!(dependency_profiles.is_empty());
+                }
+                let cold_counts = outcomes.entry((mode, "cold")).or_default();
+                cold_counts.0 += 1;
+                cold_counts.1 += usize::from(cold_success);
+
+                let open = cold.expect("checked successful cold load");
+                let warm_start = Instant::now();
+                let warm = if mode == "legacy" {
+                    loader
+                        .load_class(&name)
+                        .map_err(|error| format!("{error:?}"))
+                } else {
+                    loader
+                        .load_open_with_tasty_unpickler(&name)
+                        .map_err(|error| format!("{error:?}"))
+                };
+                let warm_elapsed = warm_start.elapsed().as_nanos();
+                assert_eq!(
+                    warm,
+                    Ok(open),
+                    "{mode} warm load changed canonical identity"
+                );
+                observations
+                    .entry((mode, "warm"))
+                    .or_default()
+                    .push(warm_elapsed);
+                let _warm_dependency_profiles = loader.take_load_profiles();
+                let warm_counts = outcomes.entry((mode, "warm")).or_default();
+                warm_counts.0 += 1;
+                warm_counts.1 += 1;
+            }
+        }
+
+        let median = |mut samples: Vec<u128>| {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        };
+        for mode in ["legacy", "semantic"] {
+            for phase in ["cold", "warm"] {
+                let (attempts, successes) = outcomes[&(mode, phase)];
+                eprintln!(
+                    "semantic-tasty-profile mode={mode} phase={phase} fixture=Open.tasty samples={SAMPLES} attempts={attempts} successes={successes} failures=0 median_ns={}",
+                    median(observations[&(mode, phase)].clone())
+                );
+            }
+        }
+    }
+
     fn unit_type_ref_target(store: &SemanticStore, ty: TypeId) -> Option<SymbolId> {
         store.types.get(ty).reference_symbol()
     }
