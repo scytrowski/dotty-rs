@@ -8388,6 +8388,103 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn open_legacy_and_semantic_loads_have_matched_cold_warm_profile_receipt() {
+        use std::time::Instant;
+
+        const SAMPLES: usize = 7;
+        let name = open_binary_name();
+        let mut observations = BTreeMap::<(&str, &str), Vec<u128>>::new();
+        let mut outcomes = BTreeMap::<(&str, &str), (usize, usize)>::new();
+
+        for mode in ["legacy", "semantic"] {
+            for _sample in 0..SAMPLES {
+                let mut store = SemanticStore::new();
+                let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+                loader.set_load_profile_collection(true);
+                let cold_start = Instant::now();
+                let cold = if mode == "legacy" {
+                    loader
+                        .load_class(&name)
+                        .map_err(|error| format!("{error:?}"))
+                } else {
+                    loader
+                        .load_open_with_tasty_unpickler(&name)
+                        .map_err(|error| format!("{error:?}"))
+                };
+                let cold_elapsed = cold_start.elapsed().as_nanos();
+                let cold_success = cold.is_ok();
+                assert!(cold_success, "{mode} cold Open load failed: {cold:?}");
+                observations
+                    .entry((mode, "cold"))
+                    .or_default()
+                    .push(cold_elapsed);
+
+                let dependency_profiles = loader.take_load_profiles();
+                if mode == "legacy" {
+                    assert_eq!(dependency_profiles.len(), 1);
+                    let profile = &dependency_profiles[0];
+                    assert_eq!(profile.root, name.to_string());
+                    assert!(profile.completed_classes.contains(&name.to_string()));
+                    eprintln!(
+                        "semantic-tasty-profile-detail mode=legacy phase=cold profile_records=1 resource_calls={} resources_found={} resource_bytes={} tasty_decode_calls={} classfile_decode_calls={} uncached_ns={}",
+                        profile.resource_lookup_calls,
+                        profile.resources_found,
+                        profile.resource_bytes,
+                        profile.tasty_decode_calls,
+                        profile.classfile_decode_calls,
+                        profile.load_uncached_inclusive_ns
+                    );
+                } else {
+                    assert!(dependency_profiles.is_empty());
+                }
+                let cold_counts = outcomes.entry((mode, "cold")).or_default();
+                cold_counts.0 += 1;
+                cold_counts.1 += usize::from(cold_success);
+
+                let open = cold.expect("checked successful cold load");
+                let warm_start = Instant::now();
+                let warm = if mode == "legacy" {
+                    loader
+                        .load_class(&name)
+                        .map_err(|error| format!("{error:?}"))
+                } else {
+                    loader
+                        .load_open_with_tasty_unpickler(&name)
+                        .map_err(|error| format!("{error:?}"))
+                };
+                let warm_elapsed = warm_start.elapsed().as_nanos();
+                assert_eq!(
+                    warm,
+                    Ok(open),
+                    "{mode} warm load changed canonical identity"
+                );
+                observations
+                    .entry((mode, "warm"))
+                    .or_default()
+                    .push(warm_elapsed);
+                let _warm_dependency_profiles = loader.take_load_profiles();
+                let warm_counts = outcomes.entry((mode, "warm")).or_default();
+                warm_counts.0 += 1;
+                warm_counts.1 += 1;
+            }
+        }
+
+        let median = |mut samples: Vec<u128>| {
+            samples.sort_unstable();
+            samples[samples.len() / 2]
+        };
+        for mode in ["legacy", "semantic"] {
+            for phase in ["cold", "warm"] {
+                let (attempts, successes) = outcomes[&(mode, phase)];
+                eprintln!(
+                    "semantic-tasty-profile mode={mode} phase={phase} fixture=Open.tasty samples={SAMPLES} attempts={attempts} successes={successes} failures=0 median_ns={}",
+                    median(observations[&(mode, phase)].clone())
+                );
+            }
+        }
+    }
+
     fn unit_type_ref_target(store: &SemanticStore, ty: TypeId) -> Option<SymbolId> {
         store.types.get(ty).reference_symbol()
     }
@@ -9114,6 +9211,83 @@ mod tests {
         ));
         assert_eq!(duplicate_loader.store.checkpoint(), duplicate_mark);
         assert_eq!(duplicate_loader.load_class(&name).unwrap(), legacy);
+    }
+
+    #[test]
+    fn semantic_adapter_rejects_unsupported_tasty_version_without_mutation_and_retries() {
+        let name = open_binary_name();
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty",
+        );
+        let valid_bytes = fs::read(fixture_path).expect("pinned Open TASTy fixture");
+        let mut unsupported_bytes = valid_bytes.clone();
+        // Open is pinned at 28.9.0. Keep its valid TASTy body and change only
+        // the one-byte minor-version header to the unvalidated 28.7.0 version.
+        unsupported_bytes[5] = 7 | 0x80;
+        let resources = Arc::new(std::sync::Mutex::new(HashMap::from([(
+            name.clone(),
+            unsupported_bytes,
+        )])));
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for Object");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK classpath");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(SharedTastyClassPath(resources.clone())),
+            Box::new(jdk),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+
+        let error = loader
+            .load_open_with_tasty_unpickler(&name)
+            .expect_err("unsupported semantic-adapter TASTy version must fail closed");
+        match error {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                actual_name,
+                tasty_symbol::TastyDecodeError::UnsupportedClassloaderVersion {
+                    major,
+                    minor,
+                    experimental,
+                },
+            )) => {
+                assert_eq!(actual_name, name);
+                assert_eq!((major, minor, experimental), (28, 7, 0));
+            }
+            other => panic!("unexpected semantic-adapter version error: {other:?}"),
+        }
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert!(loader.session.packages.get(&["scala"]).is_none());
+        assert!(loader.session.packages.get(&["java", "lang"]).is_none());
+        assert!(
+            loader
+                .session
+                .packages
+                .get(&["me", "cytrowski", "tastyfixtures", "visibility"])
+                .is_none()
+        );
+        assert!(!loader.session.identified.contains_key(&name));
+        assert!(!loader.session.resolved.contains_key(&name));
+        assert!(loader.repository.get(&name).is_none());
+        assert!(!loader.semantic_tasty_loaded.contains_key(&name));
+
+        resources.lock().unwrap().insert(name.clone(), valid_bytes);
+        let open = loader
+            .load_open_with_tasty_unpickler(&name)
+            .expect("valid 28.9 fixture should succeed after same-loader retry");
+        assert_eq!(
+            loader
+                .load_open_with_tasty_unpickler(&name)
+                .expect("successful retry is cached"),
+            open
+        );
+        assert!(loader.repository.get(&name).is_some());
+        assert_eq!(
+            loader.origin(open),
+            Some(&ClassOrigin::Directory(PathBuf::from("/pair-fixtures")))
+        );
     }
 
     #[test]
