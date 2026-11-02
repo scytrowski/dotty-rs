@@ -18,8 +18,9 @@ full Scala corpus stays disabled on hosted CI.
 Three TSV evidence sets accompany the run: the committed four-row
 [`positive receipt`](typer-sealed-adt-e2e-positive-3.9.0.tsv), the committed
 Scala-classified [`negative and rollback matrix`](typer-sealed-adt-e2e-negative-rollback-3.9.0.tsv),
-and the two-pass 25+25 `source-case-class-match-cohorts.tsv` emitted into the
-workflow artifact. The workflow also uploads
+and the committed [`25+25 cohort contract`](typer-sealed-adt-e2e-cohorts-3.9.0.tsv).
+The complete per-root, two-pass `source-case-class-match-cohorts.tsv` is emitted
+into the workflow artifact. The workflow also uploads
 `sealed-adt-e2e-report.md`, which binds PASS or SPRINT GOAL UNMET to the tested
 PR head, Actions run URL, pinned Scala/JDK/Rust versions, source hashes, and all
 eight Scala artifact hashes. A report is PASS only when the whole focused audit

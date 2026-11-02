@@ -122,6 +122,11 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
         with self.assertRaises(gate.ReceiptError):
             gate.validate_sealed_adt_receipts(self.sealed_adt_log(changed=True))
 
+    def test_sealed_rollback_and_cohort_sidecars_match_frozen_inputs(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        gate.validate_sealed_rollback_sidecar(root)
+        gate.validate_sealed_cohort_contract(root)
+
     def test_rust_receipt_rejects_mismatched_tested_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = self.write_log(Path(directory) / "rust.log", "")

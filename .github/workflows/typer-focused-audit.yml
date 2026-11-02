@@ -154,6 +154,8 @@ jobs:
               "$(sha256sum docs/typer-sealed-adt-e2e-negative-rollback-3.9.0.tsv | cut -d' ' -f1)"
             printf 'sealed_adt_cohort_contract_sha256\t%s\n' \
               "$(sha256sum docs/typer-source-case-class-match-cohorts-3.9.0.tsv | cut -d' ' -f1)"
+            printf 'sealed_adt_cohort_summary_sha256\t%s\n' \
+              "$(sha256sum docs/typer-sealed-adt-e2e-cohorts-3.9.0.tsv | cut -d' ' -f1)"
             printf 'product2_positive_source_sha256\t%s\n' \
               "$(sha256sum crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0/Positive.scala | cut -d' ' -f1)"
             printf 'pull_request_url\t%s\n' "${{ github.event.pull_request.html_url || '' }}"
@@ -533,6 +535,7 @@ jobs:
             printf '| Event.scala SHA-256 | `%s` |\n' "$(sha256sum crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/Event.scala | cut -d' ' -f1)"
             printf '| Positive receipt SHA-256 | `%s` |\n' "$(sha256sum docs/typer-sealed-adt-e2e-positive-3.9.0.tsv | cut -d' ' -f1)"
             printf '| Negative/rollback receipt SHA-256 | `%s` |\n' "$(sha256sum docs/typer-sealed-adt-e2e-negative-rollback-3.9.0.tsv | cut -d' ' -f1)"
+            printf '| Cohort contract SHA-256 | `%s` |\n' "$(sha256sum docs/typer-sealed-adt-e2e-cohorts-3.9.0.tsv | cut -d' ' -f1)"
             printf '| Two-pass cohort receipt SHA-256 | `%s` |\n' "$(sha256sum "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-cohorts.tsv" 2>/dev/null | cut -d' ' -f1 || printf 'missing')"
             printf '| Positive roots | 2 original roots × 2 fresh sessions (4/4 required) |\n'
             printf '| Negative matrix | 9 Scala-classified failures; 6 structural rollback controls |\n'

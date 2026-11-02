@@ -377,6 +377,7 @@ def validate_inputs(root: Path) -> None:
         if actual_rows != expected_rows:
             raise ReceiptError(f"{cohort}: static source-tree/protected-set receipt changed")
     validate_sealed_rollback_sidecar(root)
+    validate_sealed_cohort_contract(root)
 
 
 def passed_tests(text: str) -> set[str]:
@@ -439,6 +440,42 @@ def validate_sealed_rollback_sidecar(root: Path) -> None:
     }
     if len(sidecar) != 15 or actual != expected:
         raise ReceiptError("sealed Event negative/rollback sidecar differs from frozen Rust/Scala matrices")
+
+
+def validate_sealed_cohort_contract(root: Path) -> None:
+    expected = {
+        "main": (
+            16,
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv",
+            "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv",
+            "two deterministic passes retain all 16 exact protected roots and results",
+        ),
+        "analysis": (
+            15,
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv",
+            "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv",
+            "two deterministic passes retain all 15 exact protected roots and results",
+        ),
+    }
+    rows = read_tsv(root / "docs/typer-sealed-adt-e2e-cohorts-3.9.0.tsv")[1]
+    if len(rows) != 2 or {row["cohort"] for row in rows} != set(expected):
+        raise ReceiptError("sealed Event cohort contract must list main and analysis exactly once")
+    for row in rows:
+        count, protected_path, cohort_path, requirement = expected[row["cohort"]]
+        protected = root / protected_path
+        cohort = root / cohort_path
+        protected_rows = read_tsv(protected)[1]
+        cohort_rows = read_tsv(cohort)[1]
+        if (
+            row["denominator"] != "25"
+            or row["protected_success_count"] != str(count)
+            or len(protected_rows) != count
+            or len(cohort_rows) != 25
+            or row["protected_manifest_sha256"] != hashlib.sha256(protected.read_bytes()).hexdigest()
+            or row["cohort_manifest_sha256"] != hashlib.sha256(cohort.read_bytes()).hexdigest()
+            or row["pass_requirement"] != requirement
+        ):
+            raise ReceiptError(f"{row['cohort']}: frozen protected roots or cohort provenance changed")
 
 
 def marker_lines(text: str, marker: str) -> list[str]:
