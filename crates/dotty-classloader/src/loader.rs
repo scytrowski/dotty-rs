@@ -2284,7 +2284,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 if *tag == dotty_tasty::tasty::OBJECT_TAG || *tag == dotty_tasty::tasty::TRAIT_TAG)
         }) {
             return Err(SemanticTastyLoadError::UnsupportedShape(
-                "the requested top-level declaration must have a class template",
+                "the TASTy unit must contain exactly one top-level class declaration",
             ));
         }
         let template = match &type_or_template {
@@ -8734,40 +8734,189 @@ mod tests {
     }
 
     #[test]
-    fn semantic_adapter_loads_open_and_plain_private_through_one_operation() {
+    fn semantic_adapter_loads_both_visibility_roots_in_two_fresh_sessions() {
         let open_name = open_binary_name();
-        let name = plain_private_binary_name();
-        let mut store = SemanticStore::new();
-        let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
-        let open = loader
-            .load_semantic_class_with_tasty_unpickler(&open_name)
-            .expect("Open should use the shared semantic loading operation");
-        let class = loader
-            .load_semantic_class_with_tasty_unpickler(&name)
-            .expect("PlainPrivate should use the same shared operation");
-        assert_ne!(open, class);
-        assert_eq!(
-            loader.store.symbols.get(open).owner,
-            loader.store.symbols.get(class).owner
-        );
-        assert_eq!(loader.semantic_tasty_loaded[&open_name], open);
-        assert_eq!(loader.semantic_tasty_loaded[&name], class);
-        assert_eq!(class_info(loader.store, open).parents.len(), 1);
-        assert_eq!(class_info(loader.store, class).parents.len(), 1);
-        assert!(symbol_matches_binary_name(loader.store, class, &name));
-        let package = loader.store.symbols.get(class).owner.unwrap();
-        assert!(matches!(
-            loader.store.symbols.get(class).visibility,
-            Visibility::PrivateWithin(owner) if owner == package
-        ));
-        let constructor_name = Name::new(loader.store.names.intern("<init>"), Namespace::Term);
-        let constructor = loader
-            .store
-            .scopes
-            .get(class_info(loader.store, class).declarations)
-            .lookup(&constructor_name)
-            .expect("primary constructor");
-        assert_eq!(loader.store.symbols.get(constructor).owner, Some(class));
+        let private_name = plain_private_binary_name();
+        let fixture_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility");
+
+        // Compare semantic roles inside each store. Arena IDs are deliberately
+        // not compared across these independent sessions.
+        for session_index in 0..2 {
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+            let definitions = loader.definitions();
+
+            for (name, simple_name) in [(&open_name, "Open"), (&private_name, "PlainPrivate")] {
+                let fixture = fixture_root
+                    .join("me/cytrowski/tastyfixtures/visibility")
+                    .join(format!("{simple_name}.tasty"));
+                let fixture_bytes = fs::read(&fixture).expect("pinned visibility fixture");
+                let selected = loader
+                    .class_path
+                    .find_class(name)
+                    .expect("fixture lookup")
+                    .expect("fixture resource");
+                assert_eq!(selected.format(), ClassFormat::Tasty, "{simple_name}");
+                assert_eq!(selected.bytes(), fixture_bytes, "{simple_name}");
+                assert_eq!(
+                    selected.origin(),
+                    &ClassOrigin::Directory(fixture_root.clone()),
+                    "{simple_name} resource provenance"
+                );
+
+                let class = loader
+                    .load_semantic_class_with_tasty_unpickler(name)
+                    .unwrap_or_else(|error| {
+                        panic!("session {session_index} {simple_name} load failed: {error:?}")
+                    });
+                let repeated = loader
+                    .load_semantic_class_with_tasty_unpickler(name)
+                    .expect("same-loader repeat reuses the completed symbol");
+                assert_eq!(repeated, class, "{simple_name} cache identity");
+                assert_eq!(loader.semantic_tasty_loaded.get(name), Some(&class));
+                assert_eq!(loader.session.resolved.get(name), Some(&class));
+                assert_eq!(
+                    loader.repository.get(name).and_then(ClassEntry::symbol),
+                    Some(class)
+                );
+                assert_eq!(
+                    loader.origin(class),
+                    Some(&ClassOrigin::Directory(fixture_root.clone()))
+                );
+
+                assert!(symbol_matches_binary_name(loader.store, class, name));
+                let symbol = loader.store.symbols.get(class);
+                assert_eq!(symbol_name(loader.store, class), simple_name);
+                assert_eq!(symbol.kind, SymbolKind::Class);
+                let package = symbol.owner.expect("canonical package owner");
+                assert_eq!(loader.store.symbols.get(package).kind, SymbolKind::Package);
+                assert_eq!(
+                    loader.store.symbols.get(package).owner,
+                    Some(
+                        loader
+                            .session
+                            .packages
+                            .get(&["me", "cytrowski", "tastyfixtures"])
+                            .expect("canonical parent package")
+                    )
+                );
+                match (simple_name, symbol.visibility) {
+                    ("Open", Visibility::Public) => {}
+                    ("PlainPrivate", Visibility::PrivateWithin(owner)) => {
+                        assert_eq!(owner, package, "private qualifier is its source package");
+                    }
+                    (_, actual) => panic!("unexpected {simple_name} visibility: {actual:?}"),
+                }
+                let info = class_info(loader.store, class);
+                assert_eq!(info.parents.len(), 1, "{simple_name} parent count");
+                assert_eq!(
+                    parent_symbol(loader.store, info.parents[0]),
+                    definitions.object_class,
+                    "{simple_name} canonical Object parent"
+                );
+                let declarations = info.declarations;
+                let constructor_name =
+                    Name::new(loader.store.names.intern("<init>"), Namespace::Term);
+                let constructor = loader
+                    .store
+                    .scopes
+                    .get(declarations)
+                    .lookup(&constructor_name)
+                    .expect("primary constructor");
+                assert_eq!(
+                    loader.store.symbols.get(constructor).kind,
+                    SymbolKind::Constructor
+                );
+                assert_eq!(loader.store.symbols.get(constructor).owner, Some(class));
+                let SymbolInfo::Complete(constructor_type) =
+                    loader.store.symbols.get(constructor).info
+                else {
+                    panic!("{simple_name} constructor is complete");
+                };
+                let Type::Method(method) = loader.store.types.get(constructor_type) else {
+                    panic!("{simple_name} constructor has a method signature");
+                };
+                assert!(method.params.is_empty(), "{simple_name} constructor arity");
+                assert_eq!(
+                    unit_type_ref_target(loader.store, method.result),
+                    Some(class),
+                    "{simple_name} constructor result identity"
+                );
+            }
+
+            let open = loader.semantic_tasty_loaded[&open_name];
+            let private = loader.semantic_tasty_loaded[&private_name];
+            assert_ne!(
+                open, private,
+                "distinct source declarations have distinct IDs"
+            );
+            assert_eq!(
+                loader.store.symbols.get(open).owner,
+                loader.store.symbols.get(private).owner,
+                "both declarations use the same canonical package"
+            );
+            assert_eq!(loader.semantic_tasty_loaded.len(), 2);
+        }
+    }
+
+    #[test]
+    fn semantic_class_loader_rejects_wrong_package_and_module_before_mutation() {
+        let wrong_package_name = BinaryName::from_internal("other/package/Open");
+        let module_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Holder");
+        let parameterized_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+        let cases = [
+            (
+                wrong_package_name,
+                fs::read(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+                        "tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty",
+                    ),
+                )
+                .expect("pinned Open fixture"),
+                "the TASTy package must match the requested binary name",
+            ),
+            (
+                module_name,
+                fs::read(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+                        "tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Holder.tasty",
+                    ),
+                )
+                .expect("pinned module fixture"),
+                "the TASTy unit must contain exactly one top-level class declaration",
+            ),
+            (
+                parameterized_name,
+                semantic_unpickler_fixture_bytes("CtorPlain.tasty"),
+                "the class template must have no parameters and one constructor declaration",
+            ),
+        ];
+
+        for (name, bytes, expected_error) in cases {
+            let class_path = InMemoryTastyClassPath(HashMap::from([(name.clone(), bytes)]));
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(class_path, &mut store);
+            let store_mark = loader.store.checkpoint();
+            let session_mark = loader.session.checkpoint();
+            let package_mark = loader.session.packages.checkpoint();
+
+            let error = loader
+                .load_semantic_class_with_tasty_unpickler(&name)
+                .expect_err("unsupported root must fail before semantic entry");
+            let SemanticTastyLoadError::UnsupportedShape(message) = &error else {
+                panic!("{name} should fail with UnsupportedShape, got {error:?}");
+            };
+            assert_eq!(*message, expected_error, "unexpected error for {name}");
+            assert_eq!(loader.store.checkpoint(), store_mark);
+            assert_eq!(loader.session.checkpoint(), session_mark);
+            assert_eq!(loader.session.packages.checkpoint(), package_mark);
+            assert!(loader.session.identified.is_empty());
+            assert!(loader.session.resolved.is_empty());
+            assert!(loader.repository.get(&name).is_none());
+            assert!(!loader.semantic_tasty_loaded.contains_key(&name));
+        }
     }
 
     #[test]
