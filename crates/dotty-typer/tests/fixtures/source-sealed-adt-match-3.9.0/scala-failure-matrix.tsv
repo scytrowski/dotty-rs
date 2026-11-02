@@ -1,0 +1,10 @@
+case	Scala result	first diagnostic	severity	line:column
+created_bool_literal	rejected	E172 Type Error	Error	11:19
+deleted_bool_literal	rejected	E172 Type Error	Error	12:19
+created_zero_arity	rejected	E107 Syntax Error	Error	11:18
+deleted_two_arity	rejected	E107 Syntax Error	Error	12:18
+wrong_declared_result_after_cases	rejected	E007 Type Mismatch Error	Error	11:28
+cross_case_binder_escape	rejected	E006 Not Found Error	Error	12:28
+unrelated_string_extractor	rejected	E030 Match case Unreachable Warning	Warning	14:11
+same_spelling_wrong_unapply_input	rejected	E029 Pattern Match Exhaustivity Warning	Warning	13:4
+non_event_variant	rejected	E030 Match case Unreachable Warning	Warning	13:11

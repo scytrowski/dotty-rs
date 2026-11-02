@@ -37,9 +37,10 @@ impl Scope {
 
     /// Removes `symbol` from every name it was entered under.
     pub fn remove(&mut self, symbol: SymbolId) {
-        for bucket in self.entries.values_mut() {
+        self.entries.retain(|_, bucket| {
             bucket.retain(|&entered| entered != symbol);
-        }
+            !bucket.is_empty()
+        });
     }
 
     /// Returns the first symbol entered under `name`, if any.
@@ -159,6 +160,19 @@ mod tests {
 
         assert_eq!(scope.lookup_all(&name(1)), &[second]);
         assert_eq!(scope.lookup(&name(1)), Some(second));
+    }
+
+    #[test]
+    fn remove_drops_the_name_bucket_after_its_last_symbol() {
+        let mut scope = Scope::new(None);
+        let symbol = SymbolId::new(1);
+        scope.enter(name(1), symbol);
+
+        scope.remove(symbol);
+
+        assert_eq!(scope.lookup_all(&name(1)), &[]);
+        assert_eq!(scope.entered_symbols().count(), 0);
+        assert!(scope.entries.is_empty());
     }
 
     #[test]
