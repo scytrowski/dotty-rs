@@ -104,6 +104,21 @@ fn symbols_for_tasty_selection(
     Ok((class, constructor))
 }
 
+fn direct_template_stat_address(
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    template: dotty_tasty::tasty::AstTreeNode,
+    stat: &dotty_tasty::tasty::RawNode<'_>,
+) -> Option<u32> {
+    index.iter().find_map(|node| {
+        (node.tag == stat.tag
+            && node.payload.as_ptr() == stat.payload.as_ptr()
+            && node.payload.len() == stat.payload.len()
+            && index.parent_of(node.offset as u32) == Some(template))
+        .then(|| u32::try_from(node.offset).ok())
+        .flatten()
+    })
+}
+
 #[allow(dead_code)]
 struct BorrowedClassPath<'a, E>(&'a E);
 
@@ -2246,22 +2261,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "the class template's sole stat must be a constructor definition",
             ));
         };
-        let constructor_node = address_index.iter().find(|node| {
-            node.tag == direct_stat.tag
-                && node.payload.as_ptr() == direct_stat.payload.as_ptr()
-                && node.payload.len() == direct_stat.payload.len()
-                && address_index.parent_of(node.offset as u32) == Some(template_tree_node)
-        });
-        let Some(constructor_node) = constructor_node else {
+        let Some(constructor_address) =
+            direct_template_stat_address(&address_index, template_tree_node, direct_stat)
+        else {
             return Err(SemanticTastyLoadError::UnsupportedShape(
                 "the selected constructor is not a direct template stat",
             ));
         };
-        let constructor_address = u32::try_from(constructor_node.offset).map_err(|_| {
-            SemanticTastyLoadError::UnsupportedShape(
-                "the primary constructor address exceeds the supported wire range",
-            )
-        })?;
         if direct_stat.tag != dotty_tasty::tasty::DEFDEF_TAG
             || address_index.parent_of(constructor_address) != Some(template_tree_node)
         {
@@ -2269,6 +2275,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "the selected primary constructor must be a direct template definition",
             ));
         }
+        let constructor_node = address_index.get(constructor_address).ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the selected constructor is missing from the AST address index",
+            ),
+        )?;
         let constructor = constructor_node.decode_defdef_body().map_err(|error| {
             SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
                 name.clone(),
@@ -8495,6 +8506,80 @@ mod tests {
             ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&unbound_file, &name),
             Err(SemanticTastyLoadError::UnsupportedShape(_))
         ));
+    }
+
+    #[test]
+    fn nested_constructor_is_not_a_direct_stat_of_its_enclosing_class_template() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-typer/tests/fixtures/issue-1173/a/consumer/b/Local.tasty");
+        let bytes = fs::read(fixture).expect("pinned nested-class TASTy fixture");
+        let file = tasty_symbol::parse_classloader_tasty(&bytes).expect("valid TASTy");
+        let asts = file.asts().expect("top-level ASTs");
+        let package = asts
+            .get(0)
+            .expect("package tree")
+            .decode_package()
+            .expect("package node");
+        let top_level = package
+            .stats
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.decode_definition_body(),
+                    Ok(dotty_tasty::tasty::DefinitionBody::TypeDef {
+                        type_or_template: dotty_tasty::tasty::RawTree::LengthNode(template),
+                        ..
+                    }) if template.tag == dotty_tasty::tasty::TEMPLATE_TAG
+                )
+            })
+            .expect("top-level class type");
+        let dotty_tasty::tasty::DefinitionBody::TypeDef {
+            type_or_template: dotty_tasty::tasty::RawTree::LengthNode(template),
+            ..
+        } = top_level.decode_definition_body().expect("type definition")
+        else {
+            panic!("top-level definition must have a class template");
+        };
+        let ast_index = file.ast_address_index().expect("global AST index");
+        let class_index_node = ast_index
+            .iter()
+            .find(|node| {
+                node.tag == dotty_tasty::tasty::TYPEDEF_TAG
+                    && node.payload.as_ptr() == top_level.payload.as_ptr()
+                    && node.payload.len() == top_level.payload.len()
+            })
+            .expect("top-level class index node");
+        let class_tree_node = ast_index
+            .get_node(class_index_node.offset as u32)
+            .expect("top-level class tree node");
+        let template_tree_node = ast_index
+            .iter_nodes_with_tag(dotty_tasty::tasty::TEMPLATE_TAG)
+            .find(|node| ast_index.parent_of(node.offset as u32) == Some(class_tree_node))
+            .expect("top-level template node");
+        let nested_constructor = ast_index
+            .iter_nodes_with_tag(dotty_tasty::tasty::DEFDEF_TAG)
+            .find(|node| {
+                let address = node.offset as u32;
+                let Some(parent) = ast_index.parent_of(address) else {
+                    return false;
+                };
+                parent.tag == dotty_tasty::tasty::TEMPLATE_TAG
+                    && parent != template_tree_node
+                    && ast_index
+                        .get(address)
+                        .and_then(|raw| raw.decode_defdef_body().ok())
+                        .is_some_and(|body| file.names().get_utf8(body.name) == Some("<init>"))
+            })
+            .expect("fixture contains a nested class constructor");
+        let nested_constructor = ast_index
+            .get(nested_constructor.offset as u32)
+            .expect("nested constructor node");
+        assert_eq!(
+            direct_template_stat_address(&ast_index, template_tree_node, nested_constructor),
+            None,
+            "a nested class constructor cannot satisfy the enclosing template's direct stat"
+        );
+        assert_eq!(template.tag, dotty_tasty::tasty::TEMPLATE_TAG);
     }
 
     #[test]
