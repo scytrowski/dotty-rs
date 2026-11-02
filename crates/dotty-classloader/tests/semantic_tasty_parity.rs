@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use dotty_classloader::classloader::{
     BinaryName, ClassLoader, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath,
@@ -1085,6 +1086,270 @@ fn complete_open_constructor_once() -> OpenConstructorObservation {
         constructor_address,
         graph,
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AuthenticConstructorObservation {
+    class_address: u32,
+    constructor_address: u32,
+    class_path: String,
+    constructor_owner: String,
+    regular_clause: bool,
+    parameter_count: usize,
+    constructor_owned_formal_symbols: usize,
+    parameter_type: String,
+    serialized_result_name_refs: String,
+    effective_result: String,
+    class_template_parameters: usize,
+    class_template_stats: usize,
+    header_field_and_constructor_formal_are_distinct: bool,
+}
+
+fn complete_authentic_constructor_once(simple_name: &str) -> AuthenticConstructorObservation {
+    use dotty_core::types::MethodKind;
+    use dotty_core::{SymbolInfo, SymbolKind};
+    use dotty_tasty::tasty::{DEFDEF_TAG, PARAM_TAG, TEMPLATE_TAG};
+
+    let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dotty-tasty-unpickler/tests/fixtures/semantic");
+    let bytes = fs::read(fixture_dir.join(format!("{simple_name}.tasty")))
+        .expect("original Scala 3.9 semantic fixture");
+    let fixture_root = std::env::temp_dir().join(format!(
+        "dotty-rs-constructor-audit-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    let package_dir = fixture_root.join("me/cytrowski/tastyfixtures/semantic");
+    fs::create_dir_all(&package_dir).expect("test-local package-relative classpath");
+    fs::write(package_dir.join(format!("{simple_name}.tasty")), &bytes)
+        .expect("copy original TASTy bytes without modification");
+    let file = TastyFile::parse(&bytes).expect("fixture parses");
+    assert_eq!(file.header().major_version, 28);
+    assert_eq!(file.header().minor_version, 9);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let resolver = ClasspathSymbolResolver::new(
+        CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(&fixture_root)),
+            Box::new(classpath()),
+        ]),
+        definitions,
+        LoadingSession::new(),
+    );
+    let mut unpickler = TastyUnpickler::with_session(
+        &file,
+        &mut store,
+        definitions,
+        TastySession::new()
+            .with_resolver(Box::new(resolver))
+            .expect("fresh resolver-backed session"),
+    );
+    unpickler.enter_symbols().expect("enter original symbols");
+    let address_index = file.ast_address_index().expect("original AST addresses");
+    let class_address = root_definition_address(&file, &unpickler, simple_name)
+        .expect("original class TYPEDEF address");
+    let class = unpickler
+        .index()
+        .symbol_at(class_address)
+        .expect("class symbol");
+    let constructor_addresses = address_index
+        .iter_nodes()
+        .filter(|node| node.tag == DEFDEF_TAG)
+        .filter_map(|node| u32::try_from(node.offset).ok())
+        .filter(|address| {
+            matches!(
+                unpickler.symbol_state_at(*address),
+                Some((SymbolKind::Constructor, _))
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(constructor_addresses.len(), 1);
+    let constructor_address = constructor_addresses[0];
+    let neighboring_roles_are_distinct = if simple_name == "CtorWithVal" {
+        let field = unpickler
+            .index()
+            .symbol_at(9)
+            .expect("header field at original AST address 9");
+        let constructor_formal = unpickler
+            .index()
+            .symbol_at(31)
+            .expect("constructor's own formal at original AST address 31");
+        assert_ne!(field, constructor_formal);
+        true
+    } else {
+        false
+    };
+
+    let _class_info = unpickler
+        .complete_symbol(class_address)
+        .expect("complete class");
+    let constructor_type = unpickler
+        .complete_symbol(constructor_address)
+        .expect("complete primary constructor");
+    let constructor = unpickler
+        .index()
+        .symbol_at(constructor_address)
+        .expect("entered constructor symbol");
+    let formal_symbols = address_index
+        .iter_nodes()
+        .filter(|node| node.tag == PARAM_TAG)
+        .filter_map(|node| u32::try_from(node.offset).ok())
+        .filter_map(|address| unpickler.index().symbol_at(address))
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        unpickler.symbol_state_at(class_address),
+        Some((SymbolKind::Class, SymbolInfo::Complete(_)))
+    ));
+    assert_eq!(
+        unpickler.symbol_state_at(constructor_address),
+        Some((
+            SymbolKind::Constructor,
+            SymbolInfo::Complete(constructor_type)
+        ))
+    );
+    let semantic_index = unpickler.into_index();
+    let constructor_owned_formal_symbols = formal_symbols
+        .iter()
+        .filter(|symbol| store.symbols.get(**symbol).owner == Some(constructor))
+        .count();
+    assert_eq!(constructor_owned_formal_symbols, 1);
+    drop(semantic_index);
+    fs::remove_dir_all(&fixture_root).expect("remove test-local classpath after resolution");
+
+    let method = match store.types.get(constructor_type) {
+        Type::Method(method) => method,
+        other => panic!("constructor must be a regular Method type: {other:?}"),
+    };
+    let reference_symbol = |type_id| match store.types.get(type_id) {
+        Type::TypeRef { target, .. } => target.symbol(),
+        _ => None,
+    };
+    let parameter_symbol = method
+        .params
+        .first()
+        .and_then(|param| reference_symbol(param.ty))
+        .expect("constructor formal must resolve to a named type");
+    let canonical_int = store
+        .types
+        .get(definitions.int)
+        .reference_symbol()
+        .expect("bootstrapped canonical Int reference");
+    let parameter_type = if parameter_symbol == canonical_int {
+        "scala.Int".to_owned()
+    } else {
+        symbol_path(&store, parameter_symbol)
+    };
+    let result = reference_symbol(method.result).expect("effective class result");
+    let asts = file.asts().expect("package tree");
+    let package = asts.get(0).expect("root package");
+    let package = package.decode_package().expect("package structure");
+    let class_root = package.stats.get(0).expect("top-level class");
+    let DefinitionBody::TypeDef {
+        type_or_template, ..
+    } = class_root.decode_definition_body().expect("package body")
+    else {
+        panic!("root package must decode as a package")
+    };
+    let dotty_tasty::tasty::RawTree::LengthNode(template) = type_or_template else {
+        panic!("class template is a length node")
+    };
+    assert_eq!(template.tag, TEMPLATE_TAG);
+    let template_shape = template
+        .decode_template_structure()
+        .expect("template structure");
+    let constructor_node = address_index
+        .get(constructor_address)
+        .expect("indexed original constructor DEFDEF");
+    let serialized_return = constructor_node
+        .decode_defdef_body()
+        .expect("constructor DEFDEF body")
+        .return_type;
+    let dotty_tasty::tasty::RawTree::NatAst { value, .. } = serialized_return else {
+        panic!("constructor result is encoded as a named package type")
+    };
+    let serialized_result = file
+        .render_name(value)
+        .expect("render serialized result name");
+
+    AuthenticConstructorObservation {
+        class_address,
+        constructor_address,
+        class_path: symbol_path(&store, class),
+        constructor_owner: symbol_path(&store, store.symbols.get(constructor).owner.unwrap()),
+        regular_clause: method.kind == MethodKind::Plain,
+        parameter_count: method.params.len(),
+        constructor_owned_formal_symbols,
+        parameter_type,
+        serialized_result_name_refs: serialized_result,
+        effective_result: symbol_path(&store, result),
+        class_template_parameters: template_shape.term_params.len(),
+        class_template_stats: template_shape.stats.len(),
+        header_field_and_constructor_formal_are_distinct: neighboring_roles_are_distinct,
+    }
+}
+
+#[test]
+fn authentic_plain_constructor_is_completed_repeatably_and_val_neighbor_is_distinct() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dotty-tasty-unpickler/tests/fixtures/semantic");
+    for (name, expected) in [
+        (
+            "Constructors.scala",
+            "ee054964fa24c1e2084350b257b0875d2c9c38038b73750b7eefb12b70ffcd63",
+        ),
+        (
+            "CtorPlain.tasty",
+            "0d2f01cc5444bda30ae6a920162b3eb89fd2a5a7aefc84a1e22bef8a35120ddb",
+        ),
+        (
+            "CtorWithVal.tasty",
+            "53d335f857224d38559335eaf1efba92006a55ad9ed8e74d1f58a9e77f8a0192",
+        ),
+    ] {
+        let output = Command::new("sha256sum")
+            .arg(root.join(name))
+            .output()
+            .expect("sha256sum for frozen compiler fixtures");
+        assert!(output.status.success());
+        let output = String::from_utf8(output.stdout).expect("sha256sum UTF-8");
+        assert_eq!(
+            output.split_whitespace().next(),
+            Some(expected),
+            "{name} hash"
+        );
+    }
+    let source = fs::read_to_string(root.join("Constructors.scala")).expect("Scala source");
+    assert!(source.contains("class CtorPlain(x: Int)"));
+    assert!(source.contains("class CtorWithVal(val x: Int)"));
+
+    let first = complete_authentic_constructor_once("CtorPlain");
+    let second = complete_authentic_constructor_once("CtorPlain");
+    assert_eq!(first, second, "fresh-store normalized receipts are stable");
+    assert_eq!(first.class_address, 4);
+    assert_eq!(first.constructor_address, 30);
+    assert_eq!(
+        first.class_path,
+        "me.cytrowski.tastyfixtures.semantic.CtorPlain"
+    );
+    assert_eq!(first.constructor_owner, first.class_path);
+    assert!(first.regular_clause);
+    assert_eq!(first.parameter_count, 1);
+    assert_eq!(first.constructor_owned_formal_symbols, 1);
+    assert_eq!(first.parameter_type, "scala.Int");
+    assert_eq!(first.effective_result, first.class_path);
+    assert_eq!(first.serialized_result_name_refs, "Unit");
+    assert_eq!(first.class_template_parameters, 1);
+    assert_eq!(first.class_template_stats, 1);
+
+    let with_val = complete_authentic_constructor_once("CtorWithVal");
+    assert_eq!(with_val.class_address, 4);
+    assert_eq!(with_val.constructor_address, 28);
+    assert_eq!(with_val.class_template_parameters, 1);
+    assert_eq!(with_val.class_template_stats, 1);
+    assert!(with_val.header_field_and_constructor_formal_are_distinct);
 }
 
 fn complete_visibility_constructor_once(unit_id: &str) -> Result<String, String> {
