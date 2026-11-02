@@ -152,3 +152,49 @@ cargo test -p dotty --test jvm_tasty_dual_reference_forwarding source_variants_r
 The strict Rust test reruns the Scala producer build, independent consumer, all Scala validity controls, and byte-for-byte artifact comparisons. The fixture tests also verify class/TASTy UUID links, version numbers, exact constructor descriptors and source/typed identity relationships. The checked-in oracle artifacts are Scala outputs only.
 
 Issue #1960's required final gates remain the pinned Scala/JDK gates plus `cargo fmt --all -- --check`, `python3 tools/check-frontend-boundaries.py`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`, `cargo test --workspace --all-targets --locked`, the mandatory `DOTTY_CLASSFILE_REQUIRE_JDK=1` test command, and `git diff --check`.
+
+## Official Scala source consumer of the original Rust batch (#1969)
+
+[`Consumer.scala`](../tests/fixtures/jvm_tasty_dual_reference_forwarding/rust-consumer/Consumer.scala) is compiled separately from the unchanged Rust producer source and against the exact six-file batch from #1966. It checks `PairFactory.wrap(first, second)`, the original `Counter` and `Pair` members, values `7/3`, independent mutation to `42/-9`, positional reversal, and intentional `wrap(a, a)` identity through reflection of the existing private `left` and `right` fields. The Java process uses `-Xverify:all -ea`; its output is `rust-dual-reference-forwarding=7/3,42/-9,-9/42; alias=true`.
+
+The Rust producer source SHA-256 is `48e4ab7b3038eda26f9070a5879a9cd71d4eb51f69277d1eafcff53bda28610e`; the separate Scala consumer source SHA-256 is `eee2e18901dfa37d29570d81c92098e93ab2f1a36534970241013e06feea66ec`. Two fresh source sessions emit byte-identical classfiles and sidecars. The strict test records every original artifact hash before compiling the client and checks all six hashes again after compilation, runtime, Scala inspection, member lookup probes, and negative controls.
+
+| Original Rust artifact | SHA-256 | Linked TASTy UUID |
+| --- | --- | --- |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008047c3-c009-68ac-0000-000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008047c3-c009-68ac-0000-000000008193` |
+| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| `example/PairFactory.class` | `13adef3d34ffbf9af3bf39cc996a29e1a45d8e76c0082012fcee898efd323dae` | `00f0b42f-44fb-adc8-0000-000000008195` |
+| `example/PairFactory.tasty` | `4df88f35f03867ae637ed6131e4fca4e7c264bf10db2b9165c213ee85eec0fdb` | `00f0b42f-44fb-adc8-0000-000000008195` |
+
+The strict Scala gate used source revision `777528f19a58e794c9954a42f433373472ec57f8`, compiler `3.9.0-bin-SNAPSHOT-git-777528f`, and Temurin `21.0.13+9`. The local staged compiler JAR hash observed during this run was `172c8b8384e75ee24d327fce5ec788582bf314f66bf9983ba57e0cac6c3ff498`; staged sbt artifacts are build outputs and this hash is provenance, not a reproducibility assertion. The approved published runtime jars were:
+
+| Published runtime | SHA-256 |
+| --- | --- |
+| `scala3-library_3-3.9.0.jar` | `9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba` |
+| `scala-library-3.9.0.jar` | `b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd` |
+
+The client runtime classpath contained, in order, the compiled `Consumer.scala` output, the original Rust batch directory, `scala3-library_3-3.9.0.jar`, and `scala-library-3.9.0.jar`. It excluded every masked control and `-from-tasty` reconstruction directory. Official `-decompile`, `-print-tasty`, and `-from-tasty` all accepted the original sidecars. The Factory TASTy has distinct `PARAM first` and `PARAM second` nodes (addresses 32 and 41 as direct declaration roots); its original `APPLY` invokes the signed `Pair.<init>(Counter, Counter)` and its two direct `TERMREF`s target those corresponding method parameters. No synthetic `Counter` allocation appears in the body.
+
+Compilation-only member probes masked each selected classfile member while preserving its genuine sidecar, then paired it with a classfile-only copy whose matching `.tasty` and `TASTY` link were removed. Scala accepted TASTy lookup for `Counter.get`, `Counter.set`, `Pair.leftValue`, `Pair.rightValue`, `Pair.<init>(Counter, Counter)`, and `PairFactory.wrap(Counter, Counter): Pair`. The matched classfile-only controls rejected the methods with `[E008] Not Found Error`; the constructor-only control rejected with `[E173] Reference Error`. Masked files never entered the runtime classpath.
+
+The strict negative controls observed these first failures: each class's missing or misplaced sidecar failed with Scala's “`.tasty` file is missing” binary-reader diagnostic; each truncated sidecar failed at `error while loading <class>,`; each UUID mismatch was reported as that classfile being out of sync with its TASTy file (promoted to failure by `-Werror`). Wrong Pair-constructor and `wrap` arities failed with `[E171] Type Error`; foreign same-spelled `Counter` ownership and a wrong `wrap` result type failed with `[E007] Type Mismatch Error`; an absent package/class failed with `[E006] Not Found Error`; and an absent method or renamed TASTy member failed with `[E008] Not Found Error`. The malformed direct formal target was accepted during lazy signature lookup but official `-decompile` forced the body read and failed with `TreeWithoutOwner`. A type-correct swap of the two TASTy formal references was accepted by Scala and decompiled as `new example.Pair(second, first)`, so the original-source proof and positional runtime assertions remain the evidence for order.
+
+Changing the Factory constructor `Methodref` to the existing `java.lang.Object.<init>()V` reference and changing the Pair constructor descriptor were compilation-only classfile mutations: the genuine TASTy still supplied source lookup, while the runtime controls failed with `VerifyError: Bad operand type when invoking <init>` and `VerifyError: Bad local variable type`, respectively. Removing the original Counter classfile still allowed TASTy source compilation and then failed at runtime with `NoClassDefFoundError: example/Counter`. Original hashes remained unchanged. A separate package/class/method/formal rename and a class declaration reorder each compiled and ran; fresh sessions for each variant byte-matched all six outputs. The renamed producer and consumer source hashes were `6127fcfacf89bd83c666119b0a32ba507f8bf0ce3b3659ece1d228f1fb1e044c` and `a1bbdb00316bf1ae7b35317d499e315af929379c5d435db88652ba6699cbe9c6`; the reordered producer and consumer hashes were `090c49424ce60229bd5370cd24728ba021037766f04d7b194cedc18f738fdf6d` and `eee2e18901dfa37d29570d81c92098e93ab2f1a36534970241013e06feea66ec`.
+
+The pinned workflow requires `DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_CONSUMER=1` and runs `jvm_tasty_dual_reference_forwarding_scala_consumer` with the inherited Scala, JDK, and cache checks. Required mode fails when the compiler checkout, JDK, runtime cache, or dedicated `TMPDIR` is absent; task output stays outside `/tmp`. Reproduce the strict test with:
+
+```sh
+export SCALA39_ROOT=/path/to/scala3-at-777528f19a58e794c9954a42f433373472ec57f8
+export JAVA_HOME=/path/to/temurin-21
+export PATH="$JAVA_HOME/bin:$PATH"
+export COURSIER_MAVEN_ROOT=/path/to/pinned-maven-cache
+export TMPDIR="$PWD/.issue1969-tmp"
+export CARGO_TARGET_DIR="$PWD/.issue1969-target"
+export CARGO_BUILD_JOBS=2
+export DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_CONSUMER=1
+
+cargo +1.98.1 test --test jvm_tasty_dual_reference_forwarding_scala_consumer \
+  --locked -- --nocapture --test-threads=1
+```
