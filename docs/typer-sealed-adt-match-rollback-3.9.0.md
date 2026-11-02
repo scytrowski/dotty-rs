@@ -76,8 +76,8 @@ Run from the repository root with `SCALA39_ROOT` at the pinned checkout and
 crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/run
 crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/run-rollback-matrix
 cargo +1.98.1 test -p dotty-core symbols::scope::tests::remove_drops_the_name_bucket_after_its_last_symbol --locked
-cargo +1.98.1 test -p dotty-typer --test source_case_class_match sealed_event_case_local_negative_matrix_rejects_whole_methods --locked -- --nocapture
-cargo +1.98.1 test -p dotty-typer --test source_case_class_match sealed_event_rejects_forged_companion_and_selector_ownership --locked
+cargo +1.98.1 test -p dotty-typer --test source_case_class_match sealed_event_extract_and_classify_are_complete_owned_methods --locked -- --nocapture
+cargo +1.98.1 test -p dotty-typer --test source_case_class_match sealed_event_rejects_variant_extractor_with_a_foreign_owner --locked
 cargo +1.98.1 test -p dotty-typer --test source_case_class_match precompleted_source_parent_graph_failures_roll_back_and_retry_in_both_routes --locked
 cargo +1.98.1 test -p dotty-typer --lib issue_1999 --locked
 ```
