@@ -366,6 +366,31 @@ fn create_formal_addresses(tasty_bytes: &[u8]) -> (u32, u32) {
     (parameters[0], parameters[1])
 }
 
+fn wrap_formal_count(tasty_bytes: &[u8]) -> usize {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).unwrap();
+    let index = tasty.ast_address_index().unwrap();
+    let wrap = index
+        .iter_nodes_with_tag(DEFDEF_TAG)
+        .find_map(|node| {
+            let body = index.get(node.offset as u32)?.decode_defdef_body().ok()?;
+            (tasty.names().render(body.name).ok()?.as_str() == "wrap").then_some(node.offset as u32)
+        })
+        .expect("PairFactory TASTy declares wrap");
+    index
+        .iter_nodes_with_tag(PARAM_TAG)
+        .filter(|candidate| {
+            let mut parent = Some(*candidate);
+            while let Some(node) = parent {
+                if node.offset as u32 == wrap {
+                    return true;
+                }
+                parent = index.parent_of(node.offset as u32);
+            }
+            false
+        })
+        .count()
+}
+
 fn direct_termref_bytes(address: u32) -> Vec<u8> {
     let mut writer = Writer::default();
     writer.write_nat(address);
@@ -976,6 +1001,111 @@ fn negative_reader_probes(
         );
         eprintln!("SCALA_NEGATIVE_FIRST_FAILURE {label}: {diagnostic}");
     }
+
+    let missing_formal_root = root.join("producer-missing-wrap-formal");
+    let one_formal_classes = missing_formal_root.join("one-formal-producer");
+    let source_out = missing_formal_root.join("producer-classes");
+    fs::create_dir_all(&source_out).unwrap();
+    let two_formal_wrap =
+        "def wrap(first: Counter, second: Counter): Pair =\n    new Pair(first, second)";
+    let one_formal_wrap = "def wrap(first: Counter): Pair =\n    new Pair(first, first)";
+    let one_formal_source = SOURCE.replace(two_formal_wrap, one_formal_wrap);
+    assert_ne!(one_formal_source, SOURCE, "producer lost one wrap formal");
+    let source_path = missing_formal_root.join("PairFactory.scala");
+    fs::write(&source_path, &one_formal_source).unwrap();
+    scala.compile(&scala.libraries, &source_out, &source_path);
+    let factory_tasty = source_out.join("example/PairFactory.tasty");
+    assert_eq!(
+        wrap_formal_count(&fs::read(&factory_tasty).unwrap()),
+        1,
+        "producer source variant's TASTy declaration has exactly one wrap PARAM"
+    );
+    fs::create_dir_all(one_formal_classes.join("example")).unwrap();
+    for entry in fs::read_dir(source_out.join("example")).unwrap() {
+        let entry = entry.unwrap();
+        fs::copy(
+            entry.path(),
+            one_formal_classes.join("example").join(entry.file_name()),
+        )
+        .unwrap();
+    }
+    let one_formal_descriptor = "(Lexample/Counter;)Lexample/Pair;";
+    let with_tasty_class = one_formal_classes.join("example/PairFactory.class");
+    fs::write(
+        &with_tasty_class,
+        without_method(
+            &fs::read(&with_tasty_class).unwrap(),
+            "wrap",
+            one_formal_descriptor,
+        ),
+    )
+    .unwrap();
+    let client_path = missing_formal_root.join("Probe.scala");
+    fs::write(
+        &client_path,
+        "package example\nobject Probe { val selected = new PairFactory().wrap(new Counter(1), new Counter(2)) }\n",
+    )
+    .unwrap();
+    let with_tasty_out = missing_formal_root.join("with-tasty-out");
+    fs::create_dir_all(&with_tasty_out).unwrap();
+    let with_tasty = scala.compile_result(
+        &format!("{}:{}", one_formal_classes.display(), scala.libraries),
+        &with_tasty_out,
+        &client_path,
+    );
+    assert!(
+        !with_tasty.status.success(),
+        "Scala accepted two actual arguments for a producer TASTy declaration with one formal"
+    );
+    let missing_formal_diagnostic = first_error(&with_tasty);
+    assert!(
+        missing_formal_diagnostic.contains("[E007] Type Mismatch Error"),
+        "unexpected first producer-formal rejection: {missing_formal_diagnostic}"
+    );
+    eprintln!(
+        "SCALA_NEGATIVE_FIRST_FAILURE producer-missing-wrap-formal: {missing_formal_diagnostic}"
+    );
+
+    let classfile_only = missing_formal_root.join("classfile-only");
+    fs::create_dir_all(classfile_only.join("example")).unwrap();
+    for entry in fs::read_dir(source_out.join("example")).unwrap() {
+        let entry = entry.unwrap();
+        fs::copy(
+            entry.path(),
+            classfile_only.join("example").join(entry.file_name()),
+        )
+        .unwrap();
+    }
+    let classfile_only_factory = classfile_only.join("example/PairFactory.class");
+    fs::write(
+        &classfile_only_factory,
+        without_tasty_marker(&without_method(
+            &fs::read(&classfile_only_factory).unwrap(),
+            "wrap",
+            one_formal_descriptor,
+        )),
+    )
+    .unwrap();
+    fs::remove_file(classfile_only.join("example/PairFactory.tasty")).unwrap();
+    let classfile_only_out = missing_formal_root.join("classfile-only-out");
+    fs::create_dir_all(&classfile_only_out).unwrap();
+    let classfile_only_result = scala.compile_result(
+        &format!("{}:{}", classfile_only.display(), scala.libraries),
+        &classfile_only_out,
+        &client_path,
+    );
+    assert!(
+        !classfile_only_result.status.success(),
+        "classfile-only control unexpectedly resolves a removed wrap method"
+    );
+    let classfile_only_diagnostic = first_error(&classfile_only_result);
+    assert!(
+        classfile_only_diagnostic.contains("[E006] Not Found Error"),
+        "unexpected first classfile-only rejection: {classfile_only_diagnostic}"
+    );
+    eprintln!(
+        "SCALA_NEGATIVE_FIRST_FAILURE producer-missing-wrap-formal-classfile-only: {classfile_only_diagnostic}"
+    );
 
     let unknown_root = root.join("altered-method-name");
     let unknown_classes = unknown_root.join("classes");
