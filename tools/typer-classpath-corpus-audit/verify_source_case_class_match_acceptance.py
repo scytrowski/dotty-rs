@@ -37,6 +37,20 @@ SCALA_MATRIX_CASES = {
     "NonCaseMissingExtractor": "rejected",
     "CaseBinderEscape": "rejected",
 }
+SEALED_ADT_SCALA_CASES = {
+    "Event": "accepted",
+    "NonSealedEvent": "accepted",
+    "WrongConstructorLiteral": "rejected",
+    "WrongResult": "rejected",
+    "UnrelatedExtractorType": "rejected",
+    "MissingParent": "rejected",
+    "WrongParent": "rejected",
+    "InvalidFieldShape": "rejected",
+    "BinderEscape": "rejected",
+    "DuplicateVariant": "accepted_with_warning",
+    "NonExhaustive": "accepted_with_warning",
+    "WrongAliasOwner": "accepted_with_warning",
+}
 PRODUCT2_CASES = {
     "WrongArityOne": "rejected",
     "WrongArityThree": "rejected",
@@ -109,11 +123,25 @@ TYPER_TESTS = {
     "typer::tests::non_case_classes_and_explicit_unapply_collisions_have_no_generated_role",
     "typer::tests::unsupported_generated_case_class_unapply_shapes_defer_without_partial_signature",
 }
+ISSUE1999_TESTS = {
+    "typer::tests::issue_1999_late_event_result_failure_observes_both_cases_before_atomic_rollback",
+    "typer::tests::issue_1999_structural_corruption_restores_then_recovers_in_same_typer",
+}
+SCOPE_ROLLBACK_TESTS = {
+    "symbols::scope::tests::remove_drops_the_name_bucket_after_its_last_symbol",
+}
 POSITIVE = {
     ("first", "unwrap", "Positive.scala#tree18", "64:136", "matching.Box", "matching.Matcher", "(Box):Int", "scala.Product", "_1:Int@Box", "Box$.unapply", "Bind(value:Int)", "Int", "complete", "true"),
     ("first", "classify", "Positive.scala#tree36", "140:237", "matching.Box", "matching.Matcher", "(Box):Int", "scala.Product", "_1:Int@Box", "Box$.unapply", "Literal(0:Int),Bind(value:Int)", "Int", "complete", "true"),
     ("second", "unwrap", "Positive.scala#tree18", "64:136", "matching.Box", "matching.Matcher", "(Box):Int", "scala.Product", "_1:Int@Box", "Box$.unapply", "Bind(value:Int)", "Int", "complete", "true"),
     ("second", "classify", "Positive.scala#tree36", "140:237", "matching.Box", "matching.Matcher", "(Box):Int", "scala.Product", "_1:Int@Box", "Box$.unapply", "Literal(0:Int),Bind(value:Int)", "Int", "complete", "true"),
+}
+SEALED_ADT_POSITIVE = {
+    (session, "extract", "Event.scala#tree36|150:262|signature=(Event):Int|owner=Matcher$|selector=Event|cases=Created(id),Deleted(code)|extractors=Created$.unapply,Deleted$.unapply|binders=Created:id:Int,Deleted:code:Int|typed=complete DefDef+Match|mappings=all source RHS trees")
+    for session in ("first", "second")
+} | {
+    (session, "classify", "Event.scala#tree60|266:400|signature=(Event):Int|owner=Matcher$|selector=Event|cases=Created(0),Created(id),Deleted(_)|extractors=Created$.unapply,Created$.unapply,Deleted$.unapply|binders=Created:id:Int|typed=complete DefDef+Match|mappings=all source RHS trees")
+    for session in ("first", "second")
 }
 NEGATIVE = {
     "wrong_declared_result": ("result_type_mismatch", "scala_invalid", "WrongResult.scala#tree18", "66:138"),
@@ -191,6 +219,19 @@ def validate_inputs(root: Path) -> None:
     source = fixture / "Positive.scala"
     if hashlib.sha256(source.read_bytes()).hexdigest() != SOURCE_SHA256:
         raise ReceiptError("frozen two-root Positive.scala hash changed")
+    sealed_fixture = root / "crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0"
+    sealed_hashes = read_tsv(sealed_fixture / "source-hashes.tsv")[1]
+    if not sealed_hashes or len({row["path"] for row in sealed_hashes}) != len(sealed_hashes):
+        raise ReceiptError("sealed Event source hash manifest is empty or duplicated")
+    for row in sealed_hashes:
+        path = sealed_fixture / row["path"]
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != row["sha256"]:
+            raise ReceiptError(f"frozen sealed Event Scala source hash mismatch: {row['path']}")
+    sealed_matrix = [line.split("\t") for line in (sealed_fixture / "scala-matrix.tsv").read_text(encoding="utf-8").splitlines()]
+    if len(sealed_matrix) != len(SEALED_ADT_SCALA_CASES) or any(len(row) != 2 for row in sealed_matrix):
+        raise ReceiptError("sealed Event Scala matrix is malformed or incomplete")
+    if dict(sealed_matrix) != SEALED_ADT_SCALA_CASES or len({row[0] for row in sealed_matrix}) != len(SEALED_ADT_SCALA_CASES):
+        raise ReceiptError("sealed Event Scala classifications changed or contain duplicate controls")
     product2_source = root / PRODUCT2_FIXTURE / "Positive.scala"
     if hashlib.sha256(product2_source.read_bytes()).hexdigest() != PRODUCT2_SOURCE_SHA256:
         raise ReceiptError("frozen Product2 Positive.scala hash changed")
@@ -335,6 +376,9 @@ def validate_inputs(root: Path) -> None:
         }
         if actual_rows != expected_rows:
             raise ReceiptError(f"{cohort}: static source-tree/protected-set receipt changed")
+    validate_sealed_rollback_sidecar(root)
+    validate_sealed_cohort_contract(root)
+    validate_recorded_cohort_receipt(root)
 
 
 def passed_tests(text: str) -> set[str]:
@@ -358,6 +402,127 @@ def passed_tests(text: str) -> set[str]:
     return passed
 
 
+def validate_sealed_rollback_sidecar(root: Path) -> None:
+    fixture = root / "crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0"
+    rust_failures = read_tsv(fixture / "rust-failure-matrix.tsv")[1]
+    scala_failures = read_tsv(fixture / "scala-failure-matrix.tsv")[1]
+    structural = read_tsv(fixture / "rust-structural-lifecycle.tsv")[1]
+    scala_by_case = {row["case"]: row for row in scala_failures}
+    if len(rust_failures) != 9 or len(scala_by_case) != 9 or len(structural) != 6:
+        raise ReceiptError("sealed Event rollback fixture inventory changed")
+    expected = set()
+    for row in rust_failures:
+        case = row["case"]
+        scala = scala_by_case.get(case)
+        if scala is None or scala["Scala result"] != "rejected":
+            raise ReceiptError(f"{case}: Rust and Scala rollback controls do not align")
+        transaction = (
+            "partial Match and id/code binders observed; full rollback, stable retry, and both roots recovered"
+            if case == "wrong_declared_result_after_cases"
+            else "failed root retried; both canonical roots recovered in the same typer"
+        )
+        expected.add((
+            case, row["method root"], row["Typer diagnostic"],
+            scala["Scala result"], scala["severity"], transaction,
+        ))
+    for row in structural:
+        expected.add((
+            f"structural:{row['corruption']}", "Event.scala#tree36+tree60",
+            row["first error"], "not applicable", "not applicable",
+            f"recovered roots: {row['recovered roots']}",
+        ))
+    sidecar = read_tsv(root / "docs/typer-sealed-adt-e2e-negative-rollback-3.9.0.tsv")[1]
+    actual = {
+        (
+            row["case"], row["source_root"], row["rust_first_error"],
+            row["scala_result"], row["scala_first_severity"], row["rollback_and_retry"],
+        )
+        for row in sidecar
+    }
+    if len(sidecar) != 15 or actual != expected:
+        raise ReceiptError("sealed Event negative/rollback sidecar differs from frozen Rust/Scala matrices")
+
+
+def validate_sealed_cohort_contract(root: Path) -> None:
+    expected = {
+        "main": (
+            16,
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv",
+            "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv",
+            "two deterministic passes retain all 16 exact protected roots and results",
+        ),
+        "analysis": (
+            15,
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv",
+            "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv",
+            "two deterministic passes retain all 15 exact protected roots and results",
+        ),
+    }
+    rows = read_tsv(root / "docs/typer-sealed-adt-e2e-cohorts-3.9.0.tsv")[1]
+    if len(rows) != 2 or {row["cohort"] for row in rows} != set(expected):
+        raise ReceiptError("sealed Event cohort contract must list main and analysis exactly once")
+    for row in rows:
+        count, protected_path, cohort_path, requirement = expected[row["cohort"]]
+        protected = root / protected_path
+        cohort = root / cohort_path
+        protected_rows = read_tsv(protected)[1]
+        cohort_rows = read_tsv(cohort)[1]
+        if (
+            row["denominator"] != "25"
+            or row["protected_success_count"] != str(count)
+            or len(protected_rows) != count
+            or len(cohort_rows) != 25
+            or row["protected_manifest_sha256"] != hashlib.sha256(protected.read_bytes()).hexdigest()
+            or row["cohort_manifest_sha256"] != hashlib.sha256(cohort.read_bytes()).hexdigest()
+            or row["pass_requirement"] != requirement
+        ):
+            raise ReceiptError(f"{row['cohort']}: frozen protected roots or cohort provenance changed")
+
+
+def validate_recorded_cohort_receipt(root: Path) -> None:
+    path = root / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv"
+    header, rows = read_tsv(path)
+    required_header = (
+        "cohort", "identity", "source_tree", "baseline_status", "gate", "first_status",
+        "second_status", "actual_result", "protected_success", "two_pass_equal",
+    )
+    if tuple(header) != required_header or len(rows) != 50:
+        raise ReceiptError("recorded ordinary cohort receipt must contain the exact 25 + 25 schema")
+    manifests = {
+        "main": root / "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv",
+        "analysis": root / "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv",
+    }
+    protected_paths = {
+        "main": root / "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv",
+        "analysis": root / "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv",
+    }
+    expected_rows = []
+    for cohort in ("main", "analysis"):
+        roots = read_tsv(manifests[cohort])[1]
+        protected_rows = read_tsv(protected_paths[cohort])[1]
+        protected = {row["identity"] for row in protected_rows}
+        if len(roots) != 25:
+            raise ReceiptError(f"{cohort}: frozen cohort must contain exactly 25 roots")
+        for frozen in roots:
+            identity = frozen["identity"]
+            baseline_status = frozen.get("baseline_status") or ("typed" if identity in protected else "not_protected")
+            gate = frozen.get("gate") or ("required_typed" if identity in protected else "observe")
+            expected_rows.append((cohort, identity, frozen.get("source_tree") or identity.rsplit("=", 1)[-1], baseline_status, gate))
+    identity_gate_rows = [
+        (row["cohort"], row["identity"], row["source_tree"], row["baseline_status"], row["gate"])
+        for row in rows
+    ]
+    if identity_gate_rows != expected_rows:
+        raise ReceiptError("recorded ordinary cohort receipt changed a frozen root identity, tree, or gate")
+    for row in rows:
+        if row["first_status"] != row["second_status"] or row["two_pass_equal"] != "true":
+            raise ReceiptError(f"{row['identity']}: recorded deterministic passes disagree")
+        if row["protected_success"] not in {"true", "false"}:
+            raise ReceiptError(f"{row['identity']}: protected-success status is malformed")
+        if row["gate"] == "required_typed" and (row["first_status"] != "typed" or row["protected_success"] != "true"):
+            raise ReceiptError(f"{row['identity']}: recorded protected root lost typed acceptance")
+
+
 def marker_lines(text: str, marker: str) -> list[str]:
     return [line[line.index(marker):] for line in text.splitlines() if marker in line]
 
@@ -376,6 +541,10 @@ def require_test_log(path: Path, expected: set[str]) -> str:
     if len(summary) != 1 or summary[0][0] != str(len(expected)) or summary[0][1:3] != ("0", "0"):
         raise ReceiptError(f"{path}: not all {len(expected)} required tests passed without skips")
     return text
+
+
+def validate_named_test_log(path: Path, expected: set[str]) -> None:
+    require_test_log(path, expected)
 
 
 def require_test_logs(paths: list[Path], expected: set[str]) -> None:
@@ -398,12 +567,45 @@ def require_test_logs(paths: list[Path], expected: set[str]) -> None:
         raise ReceiptError(f"Typer regressions executed {sorted(actual_all)!r}, expected {sorted(expected)!r}")
 
 
-def validate_rust_log(path: Path) -> None:
+def validate_sealed_adt_receipts(text: str) -> None:
+    sealed_lines = marker_lines(text, "ISSUE2000_POSITIVE\t")
+    sealed_positive = {tuple(line.split("\t")[1:]) for line in sealed_lines}
+    if len(sealed_lines) != 4 or sealed_positive != SEALED_ADT_POSITIVE:
+        raise ReceiptError("sealed Event receipt must contain exactly extract/classify in two fresh sessions")
+    sealed_rows = read_tsv(Path("docs/typer-sealed-adt-e2e-positive-3.9.0.tsv"))[1]
+    expected_sealed_rows = set()
+    for session, root, receipt in SEALED_ADT_POSITIVE:
+        source_tree, span, *_ = receipt.split("|")
+        expected_sealed_rows.add((
+            session, root, source_tree, span,
+            hashlib.sha256(f"{root}\t{receipt}".encode()).hexdigest(),
+            "complete DefDef+Match; Event selector; sealed variants; Product._1; canonical unapply; typed binders; all source RHS mappings",
+        ))
+    actual_sealed_rows = {
+        (
+            row["session"], row["root"], row["source_path_tree"], row["source_span"],
+            row["normalized_receipt_sha256"], row["proof"],
+        )
+        for row in sealed_rows
+    }
+    if len(sealed_rows) != 4 or actual_sealed_rows != expected_sealed_rows:
+        raise ReceiptError("committed sealed Event sidecar differs from the four executed fresh-session receipts")
+
+
+def validate_rust_log(path: Path, tested_sha: str, expected_sha: str) -> None:
+    if not re.fullmatch(r"[0-9a-f]{40}", tested_sha) or not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
+        raise ReceiptError("tested and expected source revisions must be full lowercase Git SHAs")
+    if tested_sha != expected_sha:
+        raise ReceiptError(f"audited checkout {tested_sha} does not match expected PR head {expected_sha}")
     text = require_test_log(path, RUST_TESTS)
+    revision_rows = marker_lines(text, "ISSUE2000_TESTED_SHA\t")
+    if revision_rows != [f"ISSUE2000_TESTED_SHA\t{tested_sha}"]:
+        raise ReceiptError("Rust evidence does not contain the exact tested source SHA")
     positive_lines = marker_lines(text, "ISSUE1938_POSITIVE\t")
     actual_positive = {tuple(line.split("\t")[1:]) for line in positive_lines}
     if len(positive_lines) != 4 or actual_positive != POSITIVE:
         raise ReceiptError("positive receipt must contain the exact two roots in two sessions")
+    validate_sealed_adt_receipts(text)
     committed = read_tsv(Path("docs/typer-source-case-class-match-positive-3.9.0.tsv"))[1]
     committed_rows = {
         (
@@ -525,7 +727,7 @@ def parse_ordinary_report(path: Path) -> dict[str, dict[str, str]]:
     return {row["method"]: row for row in rows}
 
 
-def validate_cohorts(root: Path, reports: list[Path], output: Path) -> None:
+def validate_cohorts(root: Path, reports: list[Path], output: Path, baseline_receipt: Path) -> None:
     if len(reports) != 4:
         raise ReceiptError("cohort receipt requires first/second main and analysis reports")
     manifests = {
@@ -583,6 +785,12 @@ def validate_cohorts(root: Path, reports: list[Path], output: Path) -> None:
         writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
         writer.writerow(header)
         writer.writerows(rows_out)
+    if not baseline_receipt.is_absolute():
+        baseline_receipt = root / baseline_receipt
+    recorded_header, recorded_rows = read_tsv(baseline_receipt)
+    expected = [dict(zip(header, row, strict=True)) for row in rows_out]
+    if recorded_header != list(header) or recorded_rows != expected:
+        raise ReceiptError("live 25 + 25 two-pass receipt differs from the committed per-root evidence")
 
 
 def main() -> int:
@@ -593,6 +801,13 @@ def main() -> int:
     for command, tests in (("rust-log", RUST_TESTS), ("namer-log", NAMER_TESTS), ("typer-log", TYPER_TESTS)):
         item = sub.add_parser(command)
         item.add_argument("log", type=Path, nargs="+" if command == "typer-log" else None)
+        if command == "rust-log":
+            item.add_argument("--tested-sha", required=True)
+            item.add_argument("--expected-sha", required=True)
+    issue1999 = sub.add_parser("issue1999-rust-log")
+    issue1999.add_argument("log", type=Path)
+    scope_rollback = sub.add_parser("scope-rollback-rust-log")
+    scope_rollback.add_argument("log", type=Path)
     oracle = sub.add_parser("oracle-log")
     oracle.add_argument("log", type=Path)
     product2_oracle = sub.add_parser("product2-oracle-log")
@@ -603,15 +818,16 @@ def main() -> int:
     cohorts.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
     cohorts.add_argument("--report", action="append", type=Path, required=True)
     cohorts.add_argument("--output", type=Path, required=True)
+    cohorts.add_argument("--baseline-receipt", type=Path, required=True)
     args = parser.parse_args()
     try:
         root = getattr(args, "repo_root", Path(__file__).resolve().parents[2])
         validate_inputs(root)
         if args.command == "inputs":
-            print("frozen Box sources, Scala classifications, and compact receipts verified")
+            print("frozen Box and sealed Event sources, classifications, and receipts verified")
         elif args.command == "rust-log":
-            validate_rust_log(args.log)
-            print("exact two-root/two-session and nine-case negative Typer receipt verified")
+            validate_rust_log(args.log, args.tested_sha, args.expected_sha)
+            print("exact Box and sealed Event roots, negative matrix, and tested SHA verified")
         elif args.command == "oracle-log":
             validate_oracle_log(args.log)
             print("pinned Scala 3.9.0 oracle, snapshots, hashes, and all 19 frozen matrix controls verified")
@@ -628,8 +844,14 @@ def main() -> int:
             else:
                 require_test_logs(args.log, expected)
             print(f"all {len(expected)} exact {args.command[:-4]} extractor regressions passed")
+        elif args.command == "issue1999-rust-log":
+            validate_named_test_log(args.log, ISSUE1999_TESTS)
+            print("both exact #1999 partial-Match rollback tests passed without skips")
+        elif args.command == "scope-rollback-rust-log":
+            validate_named_test_log(args.log, SCOPE_ROLLBACK_TESTS)
+            print("scope rollback regression passed without skips")
         else:
-            validate_cohorts(root, args.report, args.output)
+            validate_cohorts(root, args.report, args.output, args.baseline_receipt)
             print("all 25 + 25 deterministic ordinary roots and protected 16 + 15 receipt verified")
     except (OSError, KeyError, ValueError, ReceiptError, csv.Error) as error:
         print(f"source case-class Match gate failed: {error}", file=sys.stderr)

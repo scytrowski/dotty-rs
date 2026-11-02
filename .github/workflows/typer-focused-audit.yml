@@ -13,6 +13,8 @@ on:
       - 'crates/dotty-classfile/**'
       - 'crates/dotty-classloader/**'
       - 'crates/dotty-namer/**'
+      - 'crates/dotty-lexer/**'
+      - 'crates/dotty-parser/**'
       - 'crates/dotty-tasty/**'
       - 'crates/dotty-tasty-unpickler/**'
       - 'crates/dotty-typer/**'
@@ -44,6 +46,7 @@ jobs:
       SCALA39_ROOT: ${{ github.workspace }}/scala39-source
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       TMPDIR: ${{ github.workspace }}/target/tmp
+      DOTTY_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
     steps:
       - name: Prepare worktree-local scratch
@@ -51,6 +54,8 @@ jobs:
 
       - name: Check out dotty-rs
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Run audit tooling unit tests
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/typer-classpath-corpus-audit -p 'test_*.py'
@@ -104,6 +109,7 @@ jobs:
           DOTTY_INHERITED_MEMBERS_TMP_ROOT: ${{ github.workspace }}/target/inherited-members-oracle
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$DOTTY_EXPECTED_SOURCE_SHA"
           test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = "777528f19a58e794c9954a42f433373472ec57f8"
           grep -q '^JAVA_VERSION="21.0.8"$' "$JAVA_HOME/release"
           test -d "$JAVA_HOME/jmods"
@@ -112,6 +118,7 @@ jobs:
             printf 'dotty-rs_commit\t%s\n' "$(git rev-parse HEAD)"
             printf 'scala3_commit\t%s\n' "$(git -C "$SCALA39_ROOT" rev-parse HEAD)"
             printf 'pull_request_head_sha\t%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
+            printf 'tested_source_sha\t%s\n' "$(git rev-parse HEAD)"
             printf 'pull_request_base_sha\t%s\n' "${{ github.event.pull_request.base.sha || github.sha }}"
             printf 'github_actions_run\t%s/%s/actions/runs/%s\n' \
               "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
@@ -129,6 +136,28 @@ jobs:
               "$(sha256sum crates/dotty-typer/tests/fixtures/source-case-class-match-3.9.0/source-hashes.tsv | cut -d' ' -f1)"
             printf 'case_match_scala_matrix_sha256\t%s\n' \
               "$(sha256sum crates/dotty-typer/tests/fixtures/source-case-class-match-3.9.0/scala-matrix.tsv | cut -d' ' -f1)"
+            printf 'sealed_adt_source_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/Event.scala | cut -d' ' -f1)"
+            printf 'sealed_adt_source_manifest_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/source-hashes.tsv | cut -d' ' -f1)"
+            printf 'sealed_adt_scala_matrix_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/scala-matrix.tsv | cut -d' ' -f1)"
+            printf 'sealed_adt_rust_failure_matrix_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/rust-failure-matrix.tsv | cut -d' ' -f1)"
+            printf 'sealed_adt_scala_failure_matrix_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/scala-failure-matrix.tsv | cut -d' ' -f1)"
+            printf 'sealed_adt_structural_lifecycle_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/rust-structural-lifecycle.tsv | cut -d' ' -f1)"
+            printf 'sealed_adt_positive_receipt_sha256\t%s\n' \
+              "$(sha256sum docs/typer-sealed-adt-e2e-positive-3.9.0.tsv | cut -d' ' -f1)"
+            printf 'sealed_adt_negative_receipt_sha256\t%s\n' \
+              "$(sha256sum docs/typer-sealed-adt-e2e-negative-rollback-3.9.0.tsv | cut -d' ' -f1)"
+            printf 'sealed_adt_cohort_contract_sha256\t%s\n' \
+              "$(sha256sum docs/typer-source-case-class-match-cohorts-3.9.0.tsv | cut -d' ' -f1)"
+            printf 'sealed_adt_cohort_receipt_sha256\t%s\n' \
+              "$(sha256sum docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv | cut -d' ' -f1)"
+            printf 'sealed_adt_cohort_summary_sha256\t%s\n' \
+              "$(sha256sum docs/typer-sealed-adt-e2e-cohorts-3.9.0.tsv | cut -d' ' -f1)"
             printf 'product2_positive_source_sha256\t%s\n' \
               "$(sha256sum crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0/Positive.scala | cut -d' ' -f1)"
             printf 'pull_request_url\t%s\n' "${{ github.event.pull_request.html_url || '' }}"
@@ -248,6 +277,25 @@ jobs:
             > "$DOTTY_AUDIT_REPORT_DIR/source-sealed-adt-match-oracle.log" 2>&1
           cat "$DOTTY_AUDIT_REPORT_DIR/source-sealed-adt-match-oracle.log"
 
+      - name: Run pinned sealed Event negative and rollback matrix
+        shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_SEALED_ADT_ROLLBACK_TMP_ROOT: ${{ github.workspace }}/target/source-sealed-adt-match-rollback-oracle
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/run-rollback-matrix \
+            > "$DOTTY_AUDIT_REPORT_DIR/source-sealed-adt-match-rollback-oracle.log" 2>&1
+          test -s "$DOTTY_SEALED_ADT_ROLLBACK_TMP_ROOT/scala-failure-matrix.tsv"
+          diff -u crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/scala-failure-matrix.tsv \
+            "$DOTTY_SEALED_ADT_ROLLBACK_TMP_ROOT/scala-failure-matrix.tsv"
+          test "$(find "$DOTTY_SEALED_ADT_ROLLBACK_TMP_ROOT" -maxdepth 1 -type f -name '*.out' | wc -l)" -eq 9
+          while IFS=$'\t' read -r case_name _; do
+            test -s "$DOTTY_SEALED_ADT_ROLLBACK_TMP_ROOT/$case_name.out"
+          done < <(tail -n +2 crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/scala-failure-matrix.tsv)
+          cat "$DOTTY_AUDIT_REPORT_DIR/source-sealed-adt-match-rollback-oracle.log"
+
       - name: Run authentic two-session sealed Event Rust baseline
         shell: bash
         env:
@@ -268,6 +316,8 @@ jobs:
           cargo +1.98.1 test -p dotty-typer --test source_case_class_match \
             --locked -- --nocapture \
             > "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-rust.log" 2>&1
+          printf 'ISSUE2000_TESTED_SHA\t%s\n' "$(git rev-parse HEAD)" \
+            >> "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-rust.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-rust.log"
 
       - name: Run exact Namer companion identity regressions
@@ -306,6 +356,26 @@ jobs:
           cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-unary.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-typer-alias.log"
 
+      - name: Run exact #1999 failure-atomic rollback and scope regressions
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          cargo +1.98.1 test -p dotty-typer --lib --locked issue_1999 -- --nocapture \
+            > "$DOTTY_AUDIT_REPORT_DIR/issue-1999-rust.log" 2>&1
+          cargo +1.98.1 test -p dotty-core --lib --locked \
+            remove_drops_the_name_bucket_after_its_last_symbol -- --nocapture \
+            > "$DOTTY_AUDIT_REPORT_DIR/issue-1999-scope-rust.log" 2>&1
+          cat "$DOTTY_AUDIT_REPORT_DIR/issue-1999-rust.log"
+          cat "$DOTTY_AUDIT_REPORT_DIR/issue-1999-scope-rust.log"
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            tools/typer-classpath-corpus-audit/verify_source_case_class_match_acceptance.py \
+            issue1999-rust-log "$DOTTY_AUDIT_REPORT_DIR/issue-1999-rust.log"
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            tools/typer-classpath-corpus-audit/verify_source_case_class_match_acceptance.py \
+            scope-rollback-rust-log "$DOTTY_AUDIT_REPORT_DIR/issue-1999-scope-rust.log"
+
       - name: Verify exact case-class Match receipts and two-pass cohorts
         shell: bash
         env:
@@ -319,7 +389,9 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" product2-oracle-log \
             "$DOTTY_AUDIT_REPORT_DIR/source-case-class-product2-oracle.log"
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" rust-log \
-            "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-rust.log"
+            "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-rust.log" \
+            --tested-sha "$(git rev-parse HEAD)" \
+            --expected-sha "$DOTTY_EXPECTED_SOURCE_SHA"
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" product2-log \
             "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-rust.log"
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" namer-log \
@@ -413,6 +485,7 @@ jobs:
               --report "$DOTTY_AUDIT_REPORT_DIR/main-cohort-second.tsv" \
               --report "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort-first.tsv" \
               --report "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort-second.tsv" \
+              --baseline-receipt docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv \
               --output "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-cohorts.tsv"
 
       - name: Run existing deterministic focused audit baseline
@@ -441,6 +514,15 @@ jobs:
           printf 'Focused-only coverage: 3 files / 31 methods; not a full-corpus result.\n' \
             > "$DOTTY_AUDIT_REPORT_DIR/focused-status.txt"
 
+      - name: Write run-bound sealed Event acceptance report
+        if: always()
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+          DOTTY_AUDIT_JOB_STATUS: ${{ job.status }}
+          DOTTY_PR_URL: ${{ github.event.pull_request.html_url || '' }}
+        run: python3 tools/write-typer-focused-audit-report.py
+
       - name: Upload focused report, timings, and intermediates
         if: always()
         uses: actions/upload-artifact@v4
@@ -453,5 +535,6 @@ jobs:
             ${{ github.workspace }}/target/lexical-closure-contract-oracle/
             ${{ github.workspace }}/target/source-case-class-product2-oracle/
             ${{ github.workspace }}/target/source-sealed-adt-match-oracle/
+            ${{ github.workspace }}/target/source-sealed-adt-match-rollback-oracle/
           if-no-files-found: error
           retention-days: 30

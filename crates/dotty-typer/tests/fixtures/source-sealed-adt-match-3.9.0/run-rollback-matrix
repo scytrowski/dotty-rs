@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+fixture_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+repo_root="$(CDPATH= cd -- "$fixture_dir/../../../../.." && pwd)"
+scala_root="${SCALA39_ROOT:?set SCALA39_ROOT to pinned Scala 3.9.0 checkout}"
+java_home="${JAVA_HOME:?set JAVA_HOME to Temurin JDK 21.0.8+9}"
+maven_root="${COURSIER_MAVEN_ROOT:-$repo_root/target/coursier/v1/https/repo1.maven.org/maven2}"
+scratch="${DOTTY_SEALED_ADT_ROLLBACK_TMP_ROOT:-$repo_root/target/source-sealed-adt-rollback-oracle}"
+expected_revision=777528f19a58e794c9954a42f433373472ec57f8
+test "$(git -C "$scala_root" rev-parse HEAD)" = "$expected_revision"
+grep -Fq 'JAVA_VERSION="21.0.8"' "$java_home/release"
+grep -Fq 'IMPLEMENTOR_VERSION="Temurin-21.0.8+9"' "$java_home/release"
+python3 - "$fixture_dir" "$maven_root" <<'PY'
+from pathlib import Path
+import hashlib, sys
+fixture, maven = Path(sys.argv[1]), Path(sys.argv[2])
+source = fixture / "Event.scala"
+assert hashlib.sha256(source.read_bytes()).hexdigest() == "a3554b9a764b612af5b6b73779839af82a5e448e909464e45cbc18fb8a86cba1"
+for line in (fixture / "scala-artifacts.sha256.tsv").read_text().splitlines():
+    digest, relative = line.split("\t")
+    path = maven / relative
+    assert path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == digest, relative
+PY
+python3 - "$fixture_dir/Event.scala" "$scratch/cases" <<'PY'
+from pathlib import Path
+import sys
+source, target = Path(sys.argv[1]).read_text(), Path(sys.argv[2])
+target.mkdir(parents=True, exist_ok=True)
+def replace(text, old, new):
+    assert text.count(old) == 1, old
+    return text.replace(old, new)
+cases = {
+    "created_bool_literal": replace(source, "case Created(id)   => id", "case Created(true) => 0"),
+    "deleted_bool_literal": replace(source, "case Deleted(code) => code", "case Deleted(true) => 0"),
+    "created_zero_arity": replace(source, "case Created(id)   => id", "case Created() => 0"),
+    "deleted_two_arity": replace(source, "case Deleted(code) => code", "case Deleted(left, right) => left"),
+    "wrong_declared_result_after_cases": replace(source, "def extract(event: Event): Int", "def extract(event: Event): Boolean"),
+    "cross_case_binder_escape": replace(source, "case Deleted(code) => code", "case Deleted(code) => id"),
+    "unrelated_string_extractor": replace(replace(source, "object Matcher:", "object Text:\n  def unapply(value: String): Option[String] = None\n\nobject Matcher:"), "case Created(id)   => id", "case Text(name) => 0\n      case Created(id)   => id"),
+    "same_spelling_wrong_unapply_input": replace(replace(source, "object Matcher:", "object Foreign:\n  final case class Created(id: Int)\n\nobject Matcher:"), "case Created(id)   => id", "case Foreign.Created(id) => id"),
+    "non_event_variant": replace(replace(source, "sealed trait Event", "sealed trait Event\ntrait Other"), "final case class Deleted(code: Int) extends Event", "final case class Deleted(code: Int) extends Other"),
+}
+for name, text in cases.items():
+    (target / f"{name}.scala").write_text(text)
+PY
+classpath=""
+while IFS=$'\t' read -r digest relative; do
+  test -n "$digest" && test -n "$relative"
+  path="$maven_root/$relative"
+  if [ -z "$classpath" ]; then classpath="$path"; else classpath="$classpath:$path"; fi
+done < "$fixture_dir/scala-artifacts.sha256.tsv"
+mkdir -p "$scratch/classes" "$scratch/tmp"
+actual="$scratch/scala-failure-matrix.tsv"
+printf 'case\tScala result\tfirst diagnostic\tseverity\tline:column\n' > "$actual"
+while IFS=$'\t' read -r name expected_status expected_code expected_severity expected_location; do
+  test -n "$name" && test -n "$expected_status"
+  source="$scratch/cases/$name.scala"
+  output="$scratch/$name.out"
+  mkdir -p "$scratch/classes/$name"
+  if (cd "$scratch/cases" && "$java_home/bin/java" -XX:-UsePerfData -Xshare:off -Djava.io.tmpdir="$scratch/tmp" -cp "$classpath" dotty.tools.dotc.Main -classpath "$classpath" -d "$scratch/classes/$name" -color:never "$name.scala") > "$output" 2>&1; then
+    if grep -Eq '[0-9]+ warning(s)? found' "$output"; then status=accepted_with_warning; else status=accepted; fi
+  else status=rejected; fi
+  python3 - "$name" "$status" "$output" >> "$actual" <<'PY'
+import re, sys
+name, status, path = sys.argv[1:]
+text = open(path).read()
+match = re.search(r"-- \[(E\d+)\] (.*?): .*?\.scala:(\d+):(\d+)", text)
+assert match, f"missing first Scala diagnostic in {path}"
+code, message, line, column = match.groups()
+severity = "Warning" if "Warning" in message else "Error"
+print(f"{name}\t{status}\t{code} {message}\t{severity}\t{line}:{column}")
+PY
+done < <(tail -n +2 "$fixture_dir/scala-failure-matrix.tsv")
+diff -u "$fixture_dir/scala-failure-matrix.tsv" "$actual"
+printf 'Scala source revision: %s\n' "$expected_revision"
+printf 'JDK: %s; %s\n' "$(grep '^JAVA_VERSION=' "$java_home/release")" "$(grep '^IMPLEMENTOR_VERSION=' "$java_home/release")"
+printf 'Nine mutated Event roots match their pinned Scala result and first diagnostic.\n'

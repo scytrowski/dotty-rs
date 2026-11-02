@@ -72,6 +72,8 @@ fn precompleted_source_parent_graph_failures_roll_back_and_retry_in_both_routes(
         (true, "duplicate edge"),
         (false, "invalid TypeId"),
         (true, "invalid TypeId"),
+        (false, "missing parent ClassInfo"),
+        (true, "missing parent ClassInfo"),
     ] {
         let source = SourceId::from_index(7994 + u32::from(selector_first));
         let mut session = Session::new(&source_text, source);
@@ -116,6 +118,7 @@ fn precompleted_source_parent_graph_failures_roll_back_and_retry_in_both_routes(
                 session.definitions.object_type,
             ],
             "invalid TypeId" => vec![invalid_parent],
+            "missing parent ClassInfo" => Vec::new(),
             _ => unreachable!(),
         };
         let malformed_info = session.store.types.alloc(Type::ClassInfo(corrupted));
@@ -131,7 +134,7 @@ fn precompleted_source_parent_graph_failures_roll_back_and_retry_in_both_routes(
         }
         .expect_err("forged or malformed parent graph is rejected");
         assert!(
-            matches!(error, TyperError::MalformedClassInfo { symbol, info } if symbol == event && info == malformed_info),
+            matches!(&error, TyperError::MalformedClassInfo { symbol, info } if *symbol == event && *info == malformed_info),
             "{malformed_graph}, selector_first={selector_first}: {error:?}"
         );
         assert_eq!(session.store.checkpoint(), before);
@@ -142,6 +145,14 @@ fn precompleted_source_parent_graph_failures_roll_back_and_retry_in_both_routes(
             SymbolInfo::Complete(malformed_info),
             "rollback preserves preexisting metadata for repair"
         );
+        let retry = if selector_first {
+            session.with_typer(|_, _, _, _, typer| typer.complete_symbol(selector))
+        } else {
+            session.with_typer(|_, _, _, _, typer| typer.complete_symbol(created))
+        }
+        .expect_err("the malformed parent graph fails stably on retry");
+        assert_eq!(format!("{retry:?}"), format!("{error:?}"));
+        assert_eq!(session.store.checkpoint(), before);
 
         session
             .store
@@ -825,9 +836,15 @@ fn sealed_event_extract_and_classify_are_complete_owned_methods() {
             .expect("two-root before/after receipt header")
             .1
     );
+    for (session, rows) in [("first", &first), ("second", &second)] {
+        for (name, receipt) in rows {
+            println!("ISSUE2000_POSITIVE\t{session}\t{name}\t{receipt}");
+        }
+    }
     for (name, receipt) in first {
         println!("ISSUE1998_COMPLETE_ROOT\t{name}\t{receipt}");
     }
+    run_sealed_event_case_local_negative_matrix();
 }
 
 fn sealed_adt_positive_session(source: SourceId) -> Vec<(String, String)> {
@@ -1128,6 +1145,481 @@ fn sealed_adt_positive_session(source: SourceId) -> Vec<(String, String)> {
     })
 }
 
+fn run_sealed_event_case_local_negative_matrix() {
+    let unrelated_extractor = SOURCE_TRAIT_PRODUCT1
+        .replace(
+            "object Matcher:",
+            "object Text:\n  def unapply(value: String): Option[String] = None\n\nobject Matcher:",
+        )
+        .replace(
+            "      case Created(id)   => id",
+            "      case Text(name)   => 0\n      case Created(id)   => id",
+        );
+    let unrelated_same_spelling = SOURCE_TRAIT_PRODUCT1
+        .replace(
+            "object Matcher:",
+            "object Foreign:\n  final case class Created(id: Int)\n\nobject Matcher:",
+        )
+        .replace(
+            "      case Created(id)   => id",
+            "      case Foreign.Created(id)   => id",
+        );
+    let non_event_variant = SOURCE_TRAIT_PRODUCT1
+        .replace("sealed trait Event", "sealed trait Event\ntrait Other")
+        .replace("final case class Deleted(code: Int) extends Event", "final case class Deleted(code: Int) extends Other")
+        .replace(
+            "      case Deleted(_)  => 0",
+            "      case Deleted(_)  => 0\n\n  def valid(event: Event): Int =\n    event match\n      case Created(_) => 1\n      case _ => 0",
+        );
+    let cases = [
+        (
+            "created_bool_literal",
+            SOURCE_TRAIT_PRODUCT1.replace("case Created(0)", "case Created(true)"),
+            "classify",
+            "PatternTypeMismatch",
+            "rejected",
+        ),
+        (
+            "deleted_bool_literal",
+            SOURCE_TRAIT_PRODUCT1.replace("case Deleted(_)  => 0", "case Deleted(true)  => 0"),
+            "classify",
+            "PatternTypeMismatch",
+            "rejected",
+        ),
+        (
+            "created_zero_arity",
+            SOURCE_TRAIT_PRODUCT1.replace("case Created(id)   => id", "case Created()   => 0"),
+            "extract",
+            "ExtractorPatternArityUnsupported",
+            "rejected",
+        ),
+        (
+            "deleted_two_arity",
+            SOURCE_TRAIT_PRODUCT1.replace(
+                "case Deleted(code) => code",
+                "case Deleted(left, right) => left",
+            ),
+            "extract",
+            "ExtractorProductSelectorCountMismatch",
+            "rejected",
+        ),
+        (
+            "wrong_declared_result_after_cases",
+            SOURCE_TRAIT_PRODUCT1.replace(
+                "def extract(event: Event): Int",
+                "def extract(event: Event): Boolean",
+            ),
+            "extract",
+            "ExpectedExpressionTypeMismatch",
+            "rejected",
+        ),
+        (
+            "cross_case_binder_escape",
+            SOURCE_TRAIT_PRODUCT1.replace("case Deleted(code) => code", "case Deleted(code) => id"),
+            "extract",
+            "TermNameNotFound",
+            "rejected",
+        ),
+        (
+            "unrelated_string_extractor",
+            unrelated_extractor,
+            "extract",
+            "ExtractorPatternConstraintDeferred",
+            "rejected",
+        ),
+        (
+            "same_spelling_wrong_unapply_input",
+            unrelated_same_spelling,
+            "extract",
+            "ExtractorUnapplyNotFound",
+            "rejected",
+        ),
+        (
+            "non_event_variant",
+            non_event_variant,
+            "extract",
+            "ExtractorPatternConstraintDeferred",
+            "rejected",
+        ),
+    ];
+
+    let mut matrix_receipts = Vec::new();
+    for (offset, (label, source_text, method_name, expected_error, scala_status)) in
+        cases.into_iter().enumerate()
+    {
+        assert_ne!(
+            source_text, SOURCE_TRAIT_PRODUCT1,
+            "{label} mutation must apply"
+        );
+        // Keep the malformed source unit intact for its failure diagnostics,
+        // and append an isolated copy of the canonical fixture. These two
+        // untouched positive roots must still be typed for the first time in
+        // this live SourceTyper after the failure and retry.
+        let mut source_text = source_text;
+        let original_source_len = source_text.len() as u32;
+        let canonical_fixture = SOURCE_TRAIT_PRODUCT1
+            .strip_prefix("package adt\n")
+            .expect("canonical fixture package header");
+        source_text.push_str(&format!(
+            "\npackage canonical {{\n{canonical_fixture}\n}}\n"
+        ));
+        let source = SourceId::from_index(19_990 + offset as u32);
+        let mut session = Session::new(&source_text, source);
+        let failed_method = session.method_named(method_name);
+        let prior_method = session.method_named(if label == "non_event_variant" {
+            "valid"
+        } else if method_name == "extract" {
+            "classify"
+        } else {
+            "extract"
+        });
+        let canonical_extract = session.method_named_after("extract", original_source_len);
+        let canonical_classify = session.method_named_after("classify", original_source_len);
+        let rhs = match &session.parsed.ast.get(failed_method).kind {
+            TreeKind::DefDef(definition) => definition.rhs.unwrap(),
+            _ => panic!("failed root is not a DefDef"),
+        };
+        let match_tree = session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                (tree == rhs && matches!(node.kind, TreeKind::Match(_))).then_some(tree)
+            })
+            .expect("frozen root body is one Match");
+        let root_range = session
+            .parsed
+            .ast
+            .get(failed_method)
+            .position
+            .unwrap()
+            .span()
+            .range();
+        let match_range = session
+            .parsed
+            .ast
+            .get(match_tree)
+            .position
+            .unwrap()
+            .span()
+            .range();
+        session.with_typer(|source, parsed, index, _definitions, typer| {
+            let prior_typed = typer
+                .type_method_definition(prior_method)
+                .expect("the other frozen method remains a valid whole-method root");
+            let before = event_method_failure_projection(typer, source, parsed, index);
+            let first = typer
+                .type_method_definition(failed_method)
+                .expect_err("the malformed whole method is rejected");
+            let diagnostic = format!("{first:?}");
+            assert!(diagnostic.starts_with(expected_error), "{label}: {diagnostic}");
+            let diagnostic_tree = diagnostic
+                .split_once("tree_index: ")
+                .and_then(|(_, suffix)| suffix.split_once([',', '}']))
+                .and_then(|(index, _)| index.parse::<u32>().ok())
+                .expect("typer diagnostic includes its source tree index");
+            let diagnostic_range = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    (tree.index() == diagnostic_tree)
+                        .then(|| node.position.map(|position| position.span().range()))
+                        .flatten()
+                })
+                .expect("first diagnostic source tree has a span");
+            let after_first = event_method_failure_projection(typer, source, parsed, index);
+            let changed = event_method_failure_projection_changes(&before, &after_first);
+            assert!(changed.is_empty(), "{label}: changed {changed:?} after failure rollback");
+            assert_eq!(typer.source_typed_index().get(source, failed_method), None);
+            assert_eq!(
+                typer.source_typed_index().get(source, prior_method),
+                Some(prior_typed),
+                "{label}: a previously successful sibling remains published"
+            );
+            let retry = typer
+                .type_method_definition(failed_method)
+                .expect_err("retry remains rejected");
+            assert_eq!(format!("{retry:?}"), diagnostic, "{label}: retry is stable");
+            let after_retry = event_method_failure_projection(typer, source, parsed, index);
+            let changed = event_method_failure_projection_changes(&before, &after_retry);
+            assert!(changed.is_empty(), "{label}: changed {changed:?} before retry rollback");
+            assert!(typer.source_typed_index().get(source, canonical_extract).is_none());
+            assert!(typer.source_typed_index().get(source, canonical_classify).is_none());
+            let same_session_identity = [canonical_extract, canonical_classify]
+                .map(|root| {
+                    typer
+                        .type_method_definition(root)
+                        .expect("canonical positive root types after failure and retry");
+                    event_recovery_identity(typer, source, parsed, index, root)
+                });
+            assert_eq!(
+                typer.source_typed_index().get(source, prior_method),
+                Some(prior_typed),
+                "the earlier successful root remains published alongside both new roots"
+            );
+
+            let fresh_source = SourceId::from_index(29_990 + offset as u32);
+            let mut fresh = Session::new(&source_text, fresh_source);
+            let fresh_failed_method = fresh.method_named(method_name);
+            let fresh_extract = fresh.method_named_after("extract", original_source_len);
+            let fresh_classify = fresh.method_named_after("classify", original_source_len);
+            fresh.with_typer(|fresh_source, fresh_parsed, fresh_index, _, fresh_typer| {
+                let fresh_error = fresh_typer
+                    .type_method_definition(fresh_failed_method)
+                    .expect_err("fresh session rejects the same whole method");
+                let fresh_diagnostic = format!("{fresh_error:?}");
+                assert!(
+                    fresh_diagnostic.starts_with(expected_error),
+                    "{label}: fresh-session diagnostic {fresh_diagnostic}"
+                );
+                let fresh_tree = fresh_diagnostic
+                    .split_once("tree_index: ")
+                    .and_then(|(_, suffix)| suffix.split_once([',', '}']))
+                    .and_then(|(tree, _)| tree.parse::<u32>().ok())
+                    .expect("fresh-session diagnostic has source tree index");
+                assert_eq!(fresh_tree, diagnostic_tree, "{label}: normalized error tree");
+                let fresh_range = fresh_parsed
+                    .ast
+                    .iter()
+                    .find_map(|(tree, node)| {
+                        (tree.index() == fresh_tree)
+                            .then(|| node.position.map(|position| position.span().range()))
+                            .flatten()
+                    })
+                    .expect("fresh-session diagnostic source tree has span");
+                assert_eq!(fresh_range, diagnostic_range, "{label}: normalized diagnostic span");
+                let fresh_identity = [fresh_extract, fresh_classify].map(|root| {
+                    fresh_typer
+                        .type_method_definition(root)
+                        .expect("fresh session can type canonical roots after failure");
+                    event_recovery_identity(
+                        fresh_typer,
+                        fresh_source,
+                        fresh_parsed,
+                        fresh_index,
+                        root,
+                    )
+                });
+                assert_eq!(fresh_identity, same_session_identity,
+                    "{label}: both canonical roots have fresh-session semantic parity");
+            });
+            matrix_receipts.push(format!(
+                "{label}\tEvent.scala#tree{}@{}..{}\tMatch#tree{}@{}..{}\tErrorTree#tree{diagnostic_tree}@{}..{}\t{expected_error}\tScala:{scala_status}\t{diagnostic}",
+                failed_method.index(),
+                root_range.start(),
+                root_range.end(),
+                match_tree.index(),
+                match_range.start(),
+                match_range.end(),
+                diagnostic_range.start(),
+                diagnostic_range.end(),
+            ));
+        });
+    }
+    assert_eq!(
+        format!(
+            "case\tmethod root\tMatch\tfirst error tree\tTyper diagnostic\tScala\tTyper detail\n{}\n",
+            matrix_receipts.join("\n")
+        ),
+        include_str!("fixtures/source-sealed-adt-match-3.9.0/rust-failure-matrix.tsv")
+    );
+}
+
+fn event_recovery_identity(
+    typer: &SourceTyper<'_>,
+    source: SourceId,
+    parsed: &dotty_parser::ParseResult,
+    index: &dotty_core::SourceSemanticIndex,
+    method: TreeId<Untyped>,
+) -> String {
+    let typed_root = typer
+        .source_typed_index()
+        .get(source, method)
+        .expect("recovered method root is published");
+    let method_symbol = index.symbol_at(source, method).expect("method symbol");
+    let signature = match *typer.store().symbols.info(method_symbol) {
+        SymbolInfo::Complete(signature) => signature,
+        other => panic!("recovered method has complete signature: {other:?}"),
+    };
+    let Type::Method(signature) = typer.store().types.get(signature) else {
+        panic!("recovered method has MethodType signature")
+    };
+    let source_definition = match &parsed.ast.get(method).kind {
+        TreeKind::DefDef(definition) => definition,
+        _ => panic!("recovered source root is DefDef"),
+    };
+    let typed_definition = match &typer.typed_ast().get(typed_root).kind {
+        TreeKind::DefDef(definition) => definition,
+        _ => panic!("recovered typed root is DefDef"),
+    };
+    let source_rhs = source_definition.rhs.expect("recovered method has RHS");
+    let typed_rhs = typed_definition.rhs.expect("typed method has RHS");
+    let (TreeKind::Match(source_match), TreeKind::Match(typed_match)) = (
+        &parsed.ast.get(source_rhs).kind,
+        &typer.typed_ast().get(typed_rhs).kind,
+    ) else {
+        panic!("recovered method body is Match")
+    };
+    let mut cases = Vec::new();
+    for (source_case, typed_case) in source_match.cases.iter().zip(&typed_match.cases) {
+        let TreeKind::CaseDef(source_case) = &parsed.ast.get(*source_case).kind else {
+            panic!("recovered source branch is CaseDef")
+        };
+        let TreeKind::CaseDef(typed_case) = &typer.typed_ast().get(*typed_case).kind else {
+            panic!("recovered typed branch is CaseDef")
+        };
+        match &typer.typed_ast().get(typed_case.pattern).kind {
+            TreeKind::UnApply(unapply) => {
+                let extractor = typed_symbol(typer.typed_ast(), typer.store(), unapply.function);
+                let extractor_owner = typer.store().symbols.get(extractor).owner.unwrap();
+                let extractor_owner_name = typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(extractor_owner).name.text());
+                let binders = unapply
+                    .patterns
+                    .iter()
+                    .filter_map(|pattern| match &typer.typed_ast().get(*pattern).kind {
+                        TreeKind::Bind(binding) => {
+                            let symbol = typed_symbol(typer.typed_ast(), typer.store(), *pattern);
+                            let ty = match *typer.store().symbols.info(symbol) {
+                                SymbolInfo::Complete(ty) => type_display_name(typer, ty),
+                                other => panic!("case binder has complete type: {other:?}"),
+                            };
+                            Some(format!(
+                                "{}:{ty}",
+                                typer.store().names.resolve(binding.name.text())
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                cases.push(format!("{extractor_owner_name}({})", binders.join(",")));
+            }
+            TreeKind::Ident(ident) => {
+                cases.push(typer.store().names.resolve(ident.name.text()).to_owned())
+            }
+            other => panic!("recovered pattern is supported UnApply or Ident: {other:?}"),
+        }
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, source_case.pattern)
+                .is_some()
+        );
+    }
+    let param_types = signature
+        .params
+        .iter()
+        .map(|parameter| type_display_name(typer, parameter.ty))
+        .collect::<Vec<_>>();
+    format!(
+        "owner={};params={param_types:?};result={};cases={cases:?};mapped={}",
+        typer.store().names.resolve(
+            typer
+                .store()
+                .symbols
+                .get(typer.store().symbols.get(method_symbol).owner.unwrap())
+                .name
+                .text()
+        ),
+        type_display_name(typer, signature.result),
+        source_match.cases.len(),
+    )
+}
+
+fn type_display_name(typer: &SourceTyper<'_>, ty: dotty_core::TypeId) -> String {
+    match typer.store().types.try_get(ty) {
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        }) => typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(*symbol).name.text())
+            .to_owned(),
+        Some(other) => format!("{:?}", std::mem::discriminant(other)),
+        None => "missing".to_owned(),
+    }
+}
+
+fn event_method_failure_projection(
+    typer: &SourceTyper<'_>,
+    source: SourceId,
+    parsed: &dotty_parser::ParseResult,
+    index: &dotty_core::SourceSemanticIndex,
+) -> Vec<(&'static str, String)> {
+    let mappings = parsed
+        .ast
+        .iter()
+        .map(|(tree, _)| (tree.index(), typer.source_typed_index().get(source, tree)))
+        .collect::<Vec<_>>();
+    let binders = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            matches!(node.kind, TreeKind::Bind(_))
+                .then_some((tree.index(), typer.pattern_binding_symbol_at(source, tree)))
+        })
+        .collect::<Vec<_>>();
+    let typed_nodes = typer
+        .typed_ast()
+        .iter()
+        .map(|(tree, node)| (tree.index(), node.clone()))
+        .collect::<Vec<_>>();
+    let mut scopes = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, _)| index.symbol_at(source, tree))
+        .filter_map(|symbol| index.scope_of(symbol).map(|scope| (symbol, scope)))
+        .map(|(symbol, scope)| {
+            let mut members = typer
+                .store()
+                .scopes
+                .get(scope)
+                .entered_symbols()
+                .map(|member| member.index())
+                .collect::<Vec<_>>();
+            members.sort_unstable();
+            format!(
+                "symbol={};scope={};members={members:?}",
+                symbol.index(),
+                scope.index()
+            )
+        })
+        .collect::<Vec<_>>();
+    scopes.sort();
+    scopes.dedup();
+    vec![
+        ("store", format!("{:?}", typer.store().checkpoint())),
+        ("symbols", format!("{:?}", typer.store().symbols)),
+        ("types", format!("{:?}", typer.store().types)),
+        ("source scopes", format!("{scopes:?}")),
+        (
+            "typed checkpoint",
+            format!("{:?}", typer.typed_ast().checkpoint()),
+        ),
+        ("typed nodes", format!("{typed_nodes:?}")),
+        (
+            "source typed index length",
+            format!("{}", typer.source_typed_index().len()),
+        ),
+        ("source typed mappings", format!("{mappings:?}")),
+        ("case-local binders", format!("{binders:?}")),
+    ]
+}
+
+fn event_method_failure_projection_changes(
+    before: &[(&'static str, String)],
+    after: &[(&'static str, String)],
+) -> Vec<&'static str> {
+    before
+        .iter()
+        .zip(after)
+        .filter_map(|((name, before), (_, after))| (before != after).then_some(*name))
+        .collect()
+}
+
 #[test]
 fn sealed_event_rejects_variant_extractor_with_a_foreign_owner() {
     let mut session = Session::new(SOURCE_TRAIT_PRODUCT1, SourceId::from_index(3998));
@@ -1164,6 +1656,96 @@ fn sealed_event_rejects_variant_extractor_with_a_foreign_owner() {
             "failed source method publishes no typed trees"
         );
     });
+    run_sealed_event_rejects_forged_companion_and_selector_ownership();
+}
+
+fn run_sealed_event_rejects_forged_companion_and_selector_ownership() {
+    for (offset, corruption) in ["forged companion link", "foreign _1 owner"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut session = Session::new(
+            SOURCE_TRAIT_PRODUCT1,
+            SourceId::from_index(4_000 + offset as u32),
+        );
+        let source = session.source;
+        let created = session.source_type_symbol("Created");
+        let deleted = session.source_type_symbol("Deleted");
+        let method = session.method_named("extract");
+        let created_unapply = session
+            .index
+            .generated_case_class_method(created, GeneratedCaseClassMethodRole::Unapply)
+            .unwrap();
+        let deleted_companion = session.store.symbols.get(deleted).links.companion.unwrap();
+        let created_links = session.store.symbols.get(created).links;
+        let class_scope = session.index.scope_of(created).unwrap();
+        let selector_name = Name::new(session.store.names.intern("_1"), Namespace::Term);
+        let selector = session
+            .store
+            .scopes
+            .get(class_scope)
+            .lookup(&selector_name)
+            .unwrap();
+        let selector_owner = session.store.symbols.get(selector).owner;
+        match corruption {
+            "forged companion link" => {
+                session.store.symbols.get_mut(created).links.companion = Some(deleted_companion);
+            }
+            "foreign _1 owner" => {
+                session.store.symbols.get_mut(selector).owner = Some(deleted);
+            }
+            _ => unreachable!(),
+        }
+        session.with_typer(|_, parsed, index, _, typer| {
+            let before = event_method_failure_projection(typer, source, parsed, index);
+            let error = typer
+                .type_method_definition(method)
+                .expect_err("forged source companion or selector ownership is rejected");
+            assert!(
+                matches!(
+                    &error,
+                    TyperError::SymbolSourceKindMismatch { .. }
+                        | TyperError::ExtractorQualifierNotFound { .. }
+                        | TyperError::ExtractorQualifierNotValueLike { .. }
+                        | TyperError::ExtractorUnapplyNotFound { .. }
+                        | TyperError::ExtractorResultMemberNotFound { .. }
+                        | TyperError::DeclarationContextMissing { .. }
+                ),
+                "{corruption}: {error:?}"
+            );
+            assert_eq!(
+                event_method_failure_projection(typer, source, parsed, index),
+                before,
+                "{corruption}: failure leaves the deliberate corruption and all other state intact"
+            );
+            assert!(typer.source_typed_index().get(source, method).is_none());
+            let retry = typer
+                .type_method_definition(method)
+                .expect_err("the structural corruption fails stably on retry");
+            assert_eq!(format!("{retry:?}"), format!("{error:?}"));
+            assert_eq!(
+                event_method_failure_projection(typer, source, parsed, index),
+                before,
+                "{corruption}: stable failure still rolls back to the same state"
+            );
+            println!("ISSUE1999_STRUCTURAL\t{corruption}\t{error:?}");
+        });
+        match corruption {
+            "forged companion link" => {
+                session.store.symbols.get_mut(created).links = created_links;
+            }
+            "foreign _1 owner" => {
+                session.store.symbols.get_mut(selector).owner = selector_owner;
+            }
+            _ => unreachable!(),
+        }
+        session.with_typer(|_, _, _, _, typer| {
+            typer
+                .type_method_definition(method)
+                .expect("restored canonical identities recover in the same session");
+        });
+        assert_ne!(created_unapply, deleted_companion);
+    }
 }
 
 #[test]
@@ -2222,6 +2804,25 @@ impl Session {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("source method {method_name} is missing"))
+    }
+
+    fn method_named_after(&self, method_name: &str, source_offset: u32) -> TreeId<Untyped> {
+        self.parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if self.store.names.resolve(definition.name.as_name().text())
+                        == method_name
+                        && node.position.is_some_and(|position| {
+                            position.span().range().start() >= source_offset
+                        }) =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("source method {method_name} after offset is missing"))
     }
 
     fn source_type_symbol(&self, expected: &str) -> SymbolId {
