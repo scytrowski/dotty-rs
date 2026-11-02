@@ -80,6 +80,45 @@ struct OpenBuiltinAliasSnapshot {
     scala_scope: Option<ScopeId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TastyTopLevelSelection {
+    binary_name: BinaryName,
+    class_address: u32,
+    constructor_address: u32,
+}
+
+fn symbols_for_tasty_selection(
+    index: &TastySemanticIndex,
+    selection: &TastyTopLevelSelection,
+) -> Result<(SymbolId, SymbolId), SemanticTastyLoadError> {
+    let class = index.symbol_at(selection.class_address).ok_or(
+        SemanticTastyLoadError::UnsupportedShape(
+            "the selected class address is absent from the entered semantic index",
+        ),
+    )?;
+    let constructor = index.symbol_at(selection.constructor_address).ok_or(
+        SemanticTastyLoadError::UnsupportedShape(
+            "the selected constructor address is absent from the entered semantic index",
+        ),
+    )?;
+    Ok((class, constructor))
+}
+
+fn direct_template_stat_address(
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    template: dotty_tasty::tasty::AstTreeNode,
+    stat: &dotty_tasty::tasty::RawNode<'_>,
+) -> Option<u32> {
+    index.iter().find_map(|node| {
+        (node.tag == stat.tag
+            && node.payload.as_ptr() == stat.payload.as_ptr()
+            && node.payload.len() == stat.payload.len()
+            && index.parent_of(node.offset as u32) == Some(template))
+        .then(|| u32::try_from(node.offset).ok())
+        .flatten()
+    })
+}
+
 #[allow(dead_code)]
 struct BorrowedClassPath<'a, E>(&'a E);
 
@@ -840,8 +879,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.collect_load_profiles = enabled;
     }
 
-    /// Opt-in semantic projection for the single pinned `Open.tasty` adapter
-    /// proof. The ordinary `load_class` path continues to use the legacy
+    /// Opt-in semantic projection for the two frozen visibility TASTy inputs.
+    /// The ordinary `load_class` path continues to use the legacy
     /// classloader decoder. This path first materializes the canonical JDK
     /// `Object` through the classpath resolver, then lets the unpickler resolve
     /// only from the package/member identities already entered in this store.
@@ -877,7 +916,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let file = tasty_symbol::parse_classloader_tasty(resource.bytes()).map_err(|error| {
             SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(name.clone(), error))
         })?;
-        Self::validate_open_unit_shape(&file, name)?;
+        let selection = Self::validate_open_unit_shape(&file, name)?;
 
         let aliases_before = self.snapshot_open_builtin_aliases();
         let store_checkpoint = self.store.checkpoint();
@@ -887,7 +926,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .symbols
             .get(self.definitions.object_class)
             .clone();
-        let result = self.load_open_semantics(&file, name);
+        let result = self.load_open_semantics(&file, name, &selection);
         match result {
             Ok(class) => {
                 self.session.record_origin(class, resource.origin().clone());
@@ -1428,6 +1467,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let mut indexes: HashMap<BinaryName, TastySemanticIndex> = HashMap::new();
         let mut constructor_addresses = HashMap::new();
         let mut root_addresses = HashMap::new();
+        let mut member_addresses = HashMap::new();
         let mut wrapped_file = None;
         for is_base in order {
             if !is_base && wrapped_file.is_none() {
@@ -1487,12 +1527,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     .iter_nodes()
                     .filter_map(|node| u32::try_from(node.offset).ok())
                     .find(|address| {
-                        index.symbol_at(*address).is_some_and(|symbol| {
-                            let symbol = self.store.symbols.get(symbol);
-                            matches!(symbol.kind, SymbolKind::Class | SymbolKind::Trait)
-                                && self.store.names.resolve(symbol.name.text())
-                                    == name.simple_name()
-                        })
+                        nodes
+                            .get(*address)
+                            .is_some_and(|node| node.tag == dotty_tasty::tasty::TYPEDEF_TAG)
+                            && index.symbol_at(*address).is_some_and(|symbol| {
+                                let symbol = self.store.symbols.get(symbol);
+                                matches!(symbol.kind, SymbolKind::Class | SymbolKind::Trait)
+                                    && self.store.names.resolve(symbol.name.text())
+                                        == name.simple_name()
+                            })
                     })
             });
             let Some(root_address) = root_address else {
@@ -1509,21 +1552,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     ),
                 ));
             };
-            let (expected_root, expected_constructor) = if is_base { (4, 28) } else { (5, 80) };
-            if root_address != expected_root {
-                self.restore_tasty_pair_packages(file, session);
-                return Err(SemanticTastyLoadError::for_pair_unit(
-                    name,
-                    if is_base {
-                        base_resource
-                    } else {
-                        wrapped_resource
-                    },
-                    SemanticTastyLoadError::UnsupportedShape(
-                        "a pair root address differs from its pinned retained-index ledger",
-                    ),
-                ));
-            }
             root_addresses.insert(name.clone(), root_address);
             let constructors = file
                 .ast_address_index()
@@ -1539,7 +1567,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            if constructors.len() != 1 || constructors[0] != expected_constructor {
+            if constructors.len() != 1 {
                 self.restore_tasty_pair_packages(file, session);
                 return Err(SemanticTastyLoadError::for_pair_unit(
                     name,
@@ -1554,6 +1582,36 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 ));
             }
             constructor_addresses.insert(name.clone(), constructors[0]);
+            if !is_base {
+                let class = index.symbol_at(root_address);
+                let direct_members = file
+                    .ast_address_index()
+                    .map(|nodes| {
+                        nodes
+                            .iter_nodes()
+                            .filter(|node| node.tag == dotty_tasty::tasty::DEFDEF_TAG)
+                            .filter_map(|node| u32::try_from(node.offset).ok())
+                            .filter(|address| {
+                                index.symbol_at(*address).is_some_and(|symbol| {
+                                    let symbol = self.store.symbols.get(symbol);
+                                    symbol.kind == SymbolKind::Method && symbol.owner == class
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if direct_members.len() != 1 {
+                    self.restore_tasty_pair_packages(file, session);
+                    return Err(SemanticTastyLoadError::for_pair_unit(
+                        name,
+                        wrapped_resource,
+                        SemanticTastyLoadError::UnsupportedShape(
+                            "InfoWrapped must have exactly one direct method member",
+                        ),
+                    ));
+                }
+                member_addresses.insert(name.clone(), direct_members[0]);
+            }
             tasty_session = session;
             indexes.insert(name.clone(), index);
         }
@@ -1569,6 +1627,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let index = indexes.remove(name).expect("both units entered");
             let root = root_addresses[name];
             let constructor_address = constructor_addresses[name];
+            let member_address = member_addresses.get(name).copied();
             let resource = if is_base {
                 base_resource
             } else {
@@ -1636,27 +1695,28 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let method = if is_base {
                 None
             } else {
-                let Some(method) = unpickler.index().symbol_at(115) else {
+                let method_address = member_address.expect("InfoWrapped member was selected");
+                let Some(method) = unpickler.index().symbol_at(method_address) else {
                     restore_tasty_and_return!(
                         file,
                         SemanticTastyLoadError::for_pair_unit(
                             name,
                             resource,
                             SemanticTastyLoadError::UnsupportedShape(
-                                "InfoWrapped has no direct member at DEFDEF@115",
+                                "InfoWrapped's selected direct member is absent from its index",
                             ),
                         ),
                         unpickler
                     );
                 };
-                if let Err(error) = unpickler.complete_symbol(115) {
+                if let Err(error) = unpickler.complete_symbol(method_address) {
                     restore_tasty_and_return!(
                         file,
                         SemanticTastyLoadError::for_pair_unit(
                             name,
                             resource,
                             SemanticTastyLoadError::Unpickle {
-                                address: 115,
+                                address: method_address,
                                 error
                             },
                         ),
@@ -1910,21 +1970,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "InfoBase must be a trait and InfoWrapped must be a class",
             ));
         }
-        let index = file.ast_address_index().map_err(|error| {
-            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
-                name.clone(),
-                tasty_symbol::TastyDecodeError::Parse(error),
-            ))
-        })?;
-        if has_direct_member
-            && index
-                .get(115)
-                .is_none_or(|member| member.tag != dotty_tasty::tasty::DEFDEF_TAG)
-        {
-            return Err(SemanticTastyLoadError::UnsupportedShape(
-                "InfoWrapped is missing its pinned DEFDEF@115 member",
-            ));
-        }
         Ok(())
     }
 
@@ -2037,7 +2082,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     fn validate_open_unit_shape(
         file: &dotty_tasty::tasty::TastyFile<'_>,
         name: &BinaryName,
-    ) -> Result<(), SemanticTastyLoadError> {
+    ) -> Result<TastyTopLevelSelection, SemanticTastyLoadError> {
         let asts = file.asts().map_err(|error| {
             SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
                 name.clone(),
@@ -2063,6 +2108,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     tasty_symbol::TastyDecodeError::Ast(error),
                 ))
             })?;
+        let declared_package = package
+            .path_name()
+            .and_then(|reference| file.render_name(reference).ok());
+        let expected_package = name.package_path().replace('/', ".");
+        if declared_package.as_deref() != Some(expected_package.as_str()) {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the TASTy package must match the requested binary name",
+            ));
+        }
         if package.stats.len() != 1
             || package
                 .stats
@@ -2073,24 +2127,185 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "the TASTy unit must contain exactly one top-level class declaration",
             ));
         }
+        let root = package.stats.get(0).expect("single root checked");
+        let definition = root.decode_definition().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?;
+        if file.names().get_utf8(definition.name()) != Some(name.simple_name()) {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the top-level declaration must match the requested binary name",
+            ));
+        }
+        let body = root.decode_definition_body().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?;
+        let dotty_tasty::tasty::DefinitionBody::TypeDef {
+            type_or_template,
+            tail,
+            ..
+        } = body
+        else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the top-level definition must be a class",
+            ));
+        };
+        if !matches!(
+            type_or_template,
+            dotty_tasty::tasty::RawTree::LengthNode(ref template)
+                if template.tag == dotty_tasty::tasty::TEMPLATE_TAG
+        ) || tail.iter().any(|modifier| {
+            matches!(modifier, dotty_tasty::tasty::DefinitionTail::Modifier(tag)
+                if *tag == dotty_tasty::tasty::OBJECT_TAG || *tag == dotty_tasty::tasty::TRAIT_TAG)
+        }) {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the requested top-level declaration must have a class template",
+            ));
+        }
+        let template = match &type_or_template {
+            dotty_tasty::tasty::RawTree::LengthNode(template) => template,
+            _ => unreachable!("class template shape checked above"),
+        };
+        let template_shape = template.decode_template_structure().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?;
+        if !template_shape.type_params.is_empty()
+            || !template_shape.term_params.is_empty()
+            || template_shape.stats.len() != 1
+            || !matches!(
+                template_shape.stats.first(),
+                Some(dotty_tasty::tasty::RawTree::LengthNode(node))
+                    if node.tag == dotty_tasty::tasty::DEFDEF_TAG
+            )
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the class template must have no parameters and one constructor declaration",
+            ));
+        }
         let address_index = file.ast_address_index().map_err(|error| {
             SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
                 name.clone(),
                 tasty_symbol::TastyDecodeError::Parse(error),
             ))
         })?;
-        if address_index
-            .get(4)
-            .is_none_or(|definition| definition.tag != dotty_tasty::tasty::TYPEDEF_TAG)
-            || address_index
-                .get(21)
-                .is_none_or(|constructor| constructor.tag != dotty_tasty::tasty::DEFDEF_TAG)
+        let class_node = address_index.iter().find(|node| {
+            node.tag == dotty_tasty::tasty::TYPEDEF_TAG
+                && node.payload.as_ptr() == root.payload.as_ptr()
+                && node.payload.len() == root.payload.len()
+                && matches!(
+                    node.decode_structured(),
+                    Ok(dotty_tasty::tasty::StructuredNode::TypeDef(
+                        dotty_tasty::tasty::DefinitionBody::TypeDef { name: id, .. }
+                    )) if file.names().get_utf8(id) == Some(name.simple_name())
+                )
+        });
+        let Some(class_node) = class_node else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the package's top-level class is missing from the AST address index",
+            ));
+        };
+        let class_address = u32::try_from(class_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the top-level class address exceeds the supported wire range",
+            )
+        })?;
+        let class_tree_node = address_index.get_node(class_address).ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the top-level class is missing from the structural address index",
+            ),
+        )?;
+        if !address_index
+            .parent_of(class_address)
+            .is_some_and(|parent| parent.tag == dotty_tasty::tasty::PACKAGE_TAG)
         {
             return Err(SemanticTastyLoadError::UnsupportedShape(
-                "the TASTy unit must have its class at TYPEDEF@4 and constructor at DEFDEF@21",
+                "the selected top-level class is not a direct package declaration",
             ));
         }
-        Ok(())
+        let dotty_tasty::tasty::RawTree::LengthNode(template) = &type_or_template else {
+            unreachable!("class template shape checked above")
+        };
+        let template_node = address_index.iter().find(|node| {
+            node.tag == dotty_tasty::tasty::TEMPLATE_TAG
+                && node.payload.as_ptr() == template.payload.as_ptr()
+                && node.payload.len() == template.payload.len()
+                && address_index.parent_of(node.offset as u32) == Some(class_tree_node)
+        });
+        let Some(template_node) = template_node else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected template is not a direct child of the top-level class",
+            ));
+        };
+        let template_address = u32::try_from(template_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the class template address exceeds the supported wire range",
+            )
+        })?;
+        let template_tree_node = address_index.get_node(template_address).ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the class template is missing from the structural address index",
+            ),
+        )?;
+        let Some(dotty_tasty::tasty::RawTree::LengthNode(direct_stat)) =
+            template_shape.stats.first()
+        else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the class template's sole stat must be a constructor definition",
+            ));
+        };
+        let Some(constructor_address) =
+            direct_template_stat_address(&address_index, template_tree_node, direct_stat)
+        else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected constructor is not a direct template stat",
+            ));
+        };
+        if direct_stat.tag != dotty_tasty::tasty::DEFDEF_TAG
+            || address_index.parent_of(constructor_address) != Some(template_tree_node)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected primary constructor must be a direct template definition",
+            ));
+        }
+        let constructor_node = address_index.get(constructor_address).ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the selected constructor is missing from the AST address index",
+            ),
+        )?;
+        let constructor = constructor_node.decode_defdef_body().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?;
+        if file.names().get_utf8(constructor.name) != Some("<init>") {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the class template's sole direct method must be its primary constructor",
+            ));
+        }
+        if !constructor.parameters.is_empty()
+            || constructor.header_items
+                != [dotty_tasty::tasty::DefDefHeaderItem::Clause(
+                    dotty_tasty::tasty::EMPTYCLAUSE_TAG,
+                )]
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the primary constructor must have one empty parameter clause",
+            ));
+        }
+        Ok(TastyTopLevelSelection {
+            binary_name: name.clone(),
+            class_address,
+            constructor_address,
+        })
     }
 
     fn snapshot_open_builtin_aliases(&mut self) -> OpenBuiltinAliasSnapshot {
@@ -2218,6 +2433,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         &mut self,
         file: &dotty_tasty::tasty::TastyFile<'_>,
         name: &BinaryName,
+        selection: &TastyTopLevelSelection,
     ) -> Result<SymbolId, SemanticTastyLoadError> {
         // Materialize the one external class the frozen fixture requires. The
         // borrowed classpath keeps resource precedence identical to the
@@ -2274,30 +2490,44 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let packages = self.session.packages.take_packages();
         let mut unpickler =
             TastyUnpickler::with_packages(file, self.store, self.definitions, packages);
+        let mut entered_root_address = None;
         let result = (|| {
             unpickler
                 .enter_symbols()
-                .map_err(|error| SemanticTastyLoadError::Unpickle { address: 4, error })?;
-            // Open.tasty's frozen root and constructor addresses are the
-            // identity anchors; names are checked only after index lookup.
-            let root_address = 4;
-            let constructor_address = 21;
-            let class = unpickler.index().symbol_at(root_address).ok_or(
-                SemanticTastyLoadError::UnsupportedShape(
-                    "Open.tasty has no class definition at TYPEDEF@4",
-                ),
-            )?;
+                .map_err(|error| SemanticTastyLoadError::Unpickle { address: 0, error })?;
+            // The receipt contains only wire addresses. Resolve them through
+            // this unit's retained semantic index after normal symbol entry.
+            if selection.binary_name != *name {
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "the structural selection is for a different requested binary name",
+                ));
+            }
+            let root_address = selection.class_address;
+            let (class, constructor) = symbols_for_tasty_selection(unpickler.index(), selection)?;
+            if !matches!(
+                unpickler.symbol_state_at(root_address),
+                Some((SymbolKind::Class, _))
+            ) {
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "the selected top-level definition is not an entered class",
+                ));
+            }
+            entered_root_address = Some(root_address);
+            let constructor_address = selection.constructor_address;
+            if !matches!(
+                unpickler.symbol_state_at(constructor_address),
+                Some((SymbolKind::Constructor, _))
+            ) {
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "the selected DEFDEF is not the entered class constructor",
+                ));
+            }
             unpickler.complete_symbol(root_address).map_err(|error| {
                 SemanticTastyLoadError::Unpickle {
                     address: root_address,
                     error,
                 }
             })?;
-            let constructor = unpickler.index().symbol_at(constructor_address).ok_or(
-                SemanticTastyLoadError::UnsupportedShape(
-                    "Open.tasty has no constructor definition at DEFDEF@21",
-                ),
-            )?;
             unpickler
                 .complete_symbol(constructor_address)
                 .map_err(|error| SemanticTastyLoadError::Unpickle {
@@ -2311,16 +2541,16 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let (class, constructor) = match result {
             Ok(identities) => identities,
             Err(error) => {
-                if let Some(class) = index.symbol_at(4) {
+                if let Some(class) =
+                    entered_root_address.and_then(|address| index.symbol_at(address))
+                {
                     self.remove_open_root_from_package_scope(class);
                 }
                 return Err(error);
             }
         };
-        if index.symbol_at(4) != Some(class)
-            || index.symbol_at(21) != Some(constructor)
+        if !symbol_matches_binary_name(self.store, class, name)
             || self.store.symbols.get(class).kind != SymbolKind::Class
-            || !symbol_matches_binary_name(self.store, class, name)
             || self.store.symbols.get(constructor).kind != SymbolKind::Constructor
             || self.store.symbols.get(constructor).owner != Some(class)
             || !matches!(self.store.symbols.get(class).info, SymbolInfo::Complete(_))
@@ -8150,6 +8380,232 @@ mod tests {
         BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open")
     }
 
+    fn plain_private_binary_name() -> BinaryName {
+        BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/PlainPrivate")
+    }
+
+    #[test]
+    fn structural_visibility_selection_is_repeatable_for_both_frozen_roots() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility");
+        for (simple_name, requested) in [
+            ("Open", open_binary_name()),
+            ("PlainPrivate", plain_private_binary_name()),
+        ] {
+            let bytes = fs::read(root.join(format!("{simple_name}.tasty")))
+                .expect("pinned visibility TASTy fixture");
+            let file = tasty_symbol::parse_classloader_tasty(&bytes).expect("valid TASTy");
+            let first =
+                ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&file, &requested)
+                    .unwrap_or_else(|error| {
+                        panic!("structural selection for {simple_name}: {error:?}")
+                    });
+            let second =
+                ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&file, &requested)
+                    .expect("repeat structural selection");
+            assert_eq!(
+                first, second,
+                "selection must be deterministic for {simple_name}"
+            );
+            assert_eq!(first.binary_name, requested);
+            assert_ne!(first.class_address, first.constructor_address);
+            let ast_index = file.ast_address_index().expect("global AST index");
+            let class_node = ast_index
+                .get_node(first.class_address)
+                .expect("selected top-level class tree node");
+            let template_node = ast_index
+                .iter_nodes_with_tag(dotty_tasty::tasty::TEMPLATE_TAG)
+                .find(|node| ast_index.parent_of(node.offset as u32) == Some(class_node))
+                .expect("class template child");
+            assert_eq!(
+                ast_index.parent_of(first.constructor_address),
+                Some(template_node),
+                "selected constructor must be a direct child of the selected template"
+            );
+
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
+            unpickler.enter_symbols().expect("enter frozen unit");
+            assert!(symbols_for_tasty_selection(unpickler.index(), &first).is_ok());
+            let stale = TastyTopLevelSelection {
+                constructor_address: u32::MAX,
+                ..first
+            };
+            assert!(matches!(
+                symbols_for_tasty_selection(unpickler.index(), &stale),
+                Err(SemanticTastyLoadError::UnsupportedShape(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn structural_visibility_selection_rejects_wrong_package_and_malformed_input() {
+        let bytes = fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty",
+        ))
+        .expect("pinned Open fixture");
+        let file = tasty_symbol::parse_classloader_tasty(&bytes).expect("valid TASTy");
+        let wrong_package = BinaryName::from_internal("other/package/Open");
+        assert!(matches!(
+            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&file, &wrong_package),
+            Err(SemanticTastyLoadError::UnsupportedShape(_))
+        ));
+
+        let truncated = tasty_symbol::parse_classloader_tasty(&bytes[..bytes.len() - 1]);
+        assert!(truncated.is_err(), "truncated TASTy must fail parsing");
+    }
+
+    #[test]
+    fn structural_visibility_selection_rejects_split_and_unbound_constructor_shapes() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty",
+        );
+        let bytes = fs::read(&fixture).expect("pinned Open fixture");
+        let name = open_binary_name();
+
+        // This pinned wire byte is the constructor's EMPTYCLAUSE marker. A
+        // SPLITCLAUSE marker is a boundary, not an empty parameter clause.
+        let mut split_clause = bytes.clone();
+        assert_eq!(split_clause[296], dotty_tasty::tasty::EMPTYCLAUSE_TAG);
+        split_clause[296] = dotty_tasty::tasty::SPLITCLAUSE_TAG;
+        let split_file = tasty_symbol::parse_classloader_tasty(&split_clause)
+            .expect("SPLITCLAUSE variant remains structurally decodable");
+        assert!(matches!(
+            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&split_file, &name),
+            Err(SemanticTastyLoadError::UnsupportedShape(_))
+        ));
+
+        // Keep the same direct DEFDEF node and wire lengths, but give it an
+        // ordinary method name. A direct method cannot stand in for the
+        // class's primary constructor.
+        let original_file = tasty_symbol::parse_classloader_tasty(&bytes).expect("valid TASTy");
+        let selection =
+            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&original_file, &name)
+                .expect("original constructor selection");
+        let ast_index = original_file
+            .ast_address_index()
+            .expect("AST address index");
+        let constructor = ast_index
+            .get(selection.constructor_address)
+            .expect("constructor node");
+        let asts = original_file
+            .section(dotty_tasty::tasty::StandardSection::Asts)
+            .expect("AST section");
+        let payload_offset = constructor.payload.as_ptr() as usize - asts.payload.as_ptr() as usize;
+        let ordinary_name = original_file
+            .names()
+            .find_utf8("Open")
+            .expect("one-byte alternate name reference");
+        assert!(ordinary_name < 0x80);
+        let mut unbound_constructor = bytes.clone();
+        unbound_constructor[asts.offset + payload_offset] = ordinary_name as u8;
+        let unbound_file = tasty_symbol::parse_classloader_tasty(&unbound_constructor)
+            .expect("renamed direct definition remains structurally decodable");
+        assert!(matches!(
+            ClassLoader::<InMemoryClassPath>::validate_open_unit_shape(&unbound_file, &name),
+            Err(SemanticTastyLoadError::UnsupportedShape(_))
+        ));
+    }
+
+    #[test]
+    fn nested_constructor_is_not_a_direct_stat_of_its_enclosing_class_template() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-typer/tests/fixtures/issue-1173/a/consumer/b/Local.tasty");
+        let bytes = fs::read(fixture).expect("pinned nested-class TASTy fixture");
+        let file = tasty_symbol::parse_classloader_tasty(&bytes).expect("valid TASTy");
+        let asts = file.asts().expect("top-level ASTs");
+        let package = asts
+            .get(0)
+            .expect("package tree")
+            .decode_package()
+            .expect("package node");
+        let top_level = package
+            .stats
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.decode_definition_body(),
+                    Ok(dotty_tasty::tasty::DefinitionBody::TypeDef {
+                        type_or_template: dotty_tasty::tasty::RawTree::LengthNode(template),
+                        ..
+                    }) if template.tag == dotty_tasty::tasty::TEMPLATE_TAG
+                )
+            })
+            .expect("top-level class type");
+        let dotty_tasty::tasty::DefinitionBody::TypeDef {
+            type_or_template: dotty_tasty::tasty::RawTree::LengthNode(template),
+            ..
+        } = top_level.decode_definition_body().expect("type definition")
+        else {
+            panic!("top-level definition must have a class template");
+        };
+        let ast_index = file.ast_address_index().expect("global AST index");
+        let class_index_node = ast_index
+            .iter()
+            .find(|node| {
+                node.tag == dotty_tasty::tasty::TYPEDEF_TAG
+                    && node.payload.as_ptr() == top_level.payload.as_ptr()
+                    && node.payload.len() == top_level.payload.len()
+            })
+            .expect("top-level class index node");
+        let class_tree_node = ast_index
+            .get_node(class_index_node.offset as u32)
+            .expect("top-level class tree node");
+        let template_tree_node = ast_index
+            .iter_nodes_with_tag(dotty_tasty::tasty::TEMPLATE_TAG)
+            .find(|node| ast_index.parent_of(node.offset as u32) == Some(class_tree_node))
+            .expect("top-level template node");
+        let nested_constructor = ast_index
+            .iter_nodes_with_tag(dotty_tasty::tasty::DEFDEF_TAG)
+            .find(|node| {
+                let address = node.offset as u32;
+                let Some(parent) = ast_index.parent_of(address) else {
+                    return false;
+                };
+                parent.tag == dotty_tasty::tasty::TEMPLATE_TAG
+                    && parent != template_tree_node
+                    && ast_index
+                        .get(address)
+                        .and_then(|raw| raw.decode_defdef_body().ok())
+                        .is_some_and(|body| file.names().get_utf8(body.name) == Some("<init>"))
+            })
+            .expect("fixture contains a nested class constructor");
+        let nested_constructor = ast_index
+            .get(nested_constructor.offset as u32)
+            .expect("nested constructor node");
+        assert_eq!(
+            direct_template_stat_address(&ast_index, template_tree_node, nested_constructor),
+            None,
+            "a nested class constructor cannot satisfy the enclosing template's direct stat"
+        );
+        assert_eq!(template.tag, dotty_tasty::tasty::TEMPLATE_TAG);
+    }
+
+    #[test]
+    fn semantic_adapter_loads_plain_private_from_its_declared_package() {
+        let name = plain_private_binary_name();
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+        let class = loader
+            .load_open_with_tasty_unpickler(&name)
+            .expect("PlainPrivate should use the same structural selection algorithm");
+        assert!(symbol_matches_binary_name(loader.store, class, &name));
+        let package = loader.store.symbols.get(class).owner.unwrap();
+        assert!(matches!(
+            loader.store.symbols.get(class).visibility,
+            Visibility::PrivateWithin(owner) if owner == package
+        ));
+        let constructor_name = Name::new(loader.store.names.intern("<init>"), Namespace::Term);
+        let constructor = loader
+            .store
+            .scopes
+            .get(class_info(loader.store, class).declarations)
+            .lookup(&constructor_name)
+            .expect("primary constructor");
+        assert_eq!(loader.store.symbols.get(constructor).owner, Some(class));
+    }
+
     #[test]
     fn open_semantic_adapter_completes_root_constructor_and_repeat_identity() {
         let mut store = SemanticStore::new();
@@ -8791,7 +9247,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_rejects_noncanonical_root_address_before_entering_existing_package() {
+    fn adapter_rejects_annotated_root_before_entering_existing_package() {
         let annotated =
             BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/SymbolAnnotated");
         let open = open_binary_name();
@@ -8828,13 +9284,8 @@ mod tests {
 
         let error = loader
             .load_open_with_tasty_unpickler(&annotated)
-            .expect_err("SymbolAnnotated roots at TYPEDEF@5, outside the frozen adapter shape");
-        assert!(matches!(
-            error,
-            SemanticTastyLoadError::UnsupportedShape(
-                "the TASTy unit must have its class at TYPEDEF@4 and constructor at DEFDEF@21"
-            )
-        ));
+            .expect_err("SymbolAnnotated is outside the supported unannotated class shape");
+        assert!(matches!(error, SemanticTastyLoadError::UnsupportedShape(_)));
         assert_eq!(loader.store.checkpoint(), store_mark);
         assert_eq!(loader.session.checkpoint(), session_mark);
         assert_eq!(

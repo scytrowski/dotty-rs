@@ -137,3 +137,39 @@ git diff --check
 All commands passed; the explicit real-JDK gate passed its three ignored JDK
 21 tests. Final hashes confirm all three historical artifacts above remain
 unchanged.
+
+## Structural selection contract (#1990)
+
+This change is based on `origin/main` commit
+`bd90c1a82d89f315c7613570d6d5f518e0e76d8b` (including merged prerequisite
+#2002). The positive inputs remain the exact frozen fixtures: Open
+`49286e74a3d3693b08d2a29575f23089f6be5c486231390059f43c19a8929894` and
+PlainPrivate
+`db045c091f6bc71cdee1fef6c81cd09fe1f520f740f09fec008dd5f1fd98c4ba`.
+
+The opt-in top-level TASTy adapter now derives its selection receipt directly
+from the original decoded unit and its AST address index. The receipt contains
+the requested binary name plus the authentic `TYPEDEF` and primary-constructor
+wire addresses; it contains no allocated semantic IDs. Preflight requires one
+package tree, a declared package and class name matching the requested binary
+name, one class template (not an object or trait) without extra declarations,
+and exactly one `<init>` definition with one empty parameter clause.
+Unsupported structures are rejected before symbol entry. After entry, both original addresses must
+resolve in the retained `TastySemanticIndex` to a class and constructor, and
+the completed constructor must be owned by that class. The post-entry class
+identity is also checked against the requested package path.
+
+The constructor clause preflight requires the literal `EMPTYCLAUSE` marker;
+`SPLITCLAUSE` is only a boundary and does not establish an empty parameter
+clause. The AST address index must also link the selected class to its template
+and the template to its one direct `<init>` stat. A nested or unrelated
+constructor elsewhere in the unit cannot satisfy that selection.
+
+The same pinned root and constructor addresses were removed from the
+InfoBase/InfoWrapped adapter. That pair validates its package and root kind
+from source structure, then discovers each root, constructor and the wrapped
+class's sole direct method from the entered index and store-owned identities.
+No fixture address is a production selection criterion. The Open and
+PlainPrivate fixture bytes and historical cohort artifacts remain unchanged.
+Constructor completion remains outside discovery; serialized `Unit` and the
+completed owning-class result retain their separate meanings described above.
