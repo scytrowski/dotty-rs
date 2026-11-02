@@ -1,4 +1,5 @@
 use dotty::jvm_tasty_artifacts::{PairedJvmTastyBatchArtifacts, emit_paired_jvm_tasty_batch};
+use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
@@ -18,6 +19,12 @@ const SCALA_REVISION: &str = "777528f19a58e794c9954a42f433373472ec57f8";
 const SOURCE: &str = include_str!("fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala");
 const CLIENT: &str =
     include_str!("fixtures/jvm_tasty_dual_reference_forwarding/rust-consumer/Consumer.scala");
+const MIXED_FORWARD: &str = include_str!(
+    "fixtures/jvm_tasty_mixed_origin_constructor_arguments/wrap-and-create/PairFactory.scala"
+);
+const MIXED_REVERSE: &str = include_str!(
+    "fixtures/jvm_tasty_mixed_origin_constructor_arguments/create-and-wrap/PairFactory.scala"
+);
 
 fn required() -> bool {
     match std::env::var(REQUIRE).as_deref() {
@@ -222,6 +229,35 @@ fn write_batch(root: &Path, batch: &PairedJvmTastyBatchArtifacts) {
             fs::create_dir_all(target.parent().unwrap()).unwrap();
             fs::write(target, bytes).unwrap();
         }
+    }
+}
+
+fn emit_mixed_sidecars(source: &str, source_id: u32) -> Vec<(String, Vec<u8>)> {
+    with_paired_jvm_tasty_batch_plan(
+        source,
+        "PairFactory.scala",
+        SourceId::from_index(source_id),
+        |batch| {
+            batch
+                .classes
+                .iter()
+                .map(|class| {
+                    (
+                        class.tasty_path.clone(),
+                        class.tasty_plan.pickle().unwrap().bytes().to_vec(),
+                    )
+                })
+                .collect()
+        },
+    )
+    .expect("one authentic source/typed session emits the original sidecars")
+}
+
+fn write_mixed_sidecars(root: &Path, sidecars: &[(String, Vec<u8>)]) {
+    for (path, bytes) in sidecars {
+        let target = root.join(path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, bytes).unwrap();
     }
 }
 
@@ -1659,4 +1695,112 @@ fn official_scala_compiles_and_runs_against_original_rust_dual_reference_forward
         "example.RustArtifactConsumer",
         19193,
     );
+}
+
+#[test]
+fn pinned_scala_reads_original_rust_mixed_constructor_sidecars_in_both_orders() {
+    if !required() {
+        return;
+    }
+    let scala = Scala::from_environment();
+    let root = task_dir();
+    for (label, source, method, expected_body) in [
+        (
+            "forward",
+            MIXED_FORWARD,
+            "wrapAndCreate",
+            "new example.Pair(existing, new example.Counter(seed))",
+        ),
+        (
+            "reverse",
+            MIXED_REVERSE,
+            "createAndWrap",
+            "new example.Pair(new example.Counter(seed), existing)",
+        ),
+    ] {
+        let base = root.join(label);
+        let producer = base.join("original-rust-tasty");
+        let oracle = base.join("scala-reference-classes");
+        let reconstructed = base.join("from-tasty-inspection-only");
+        fs::create_dir_all(&producer).unwrap();
+        fs::create_dir_all(&oracle).unwrap();
+        fs::create_dir_all(&reconstructed).unwrap();
+        let source_path = base.join("PairFactory.scala");
+        fs::write(&source_path, source).unwrap();
+        let sidecars = emit_mixed_sidecars(source, 201450 + u32::from(label == "reverse") * 2);
+        assert_eq!(sidecars.len(), 3, "Counter, Pair and PairFactory sidecars");
+        let repeated = emit_mixed_sidecars(source, 201451 + u32::from(label == "reverse") * 2);
+        assert_eq!(
+            sidecars, repeated,
+            "fresh sessions produce identical Rust TASTy"
+        );
+        write_mixed_sidecars(&producer, &sidecars);
+        let classpath = format!("{}:{}", oracle.display(), scala.libraries);
+        let _ = scala.compile(&scala.libraries, &oracle, &source_path);
+
+        let tasty_paths = ["Counter", "Pair", "PairFactory"]
+            .map(|name| producer.join(format!("example/{name}.tasty")));
+        for (name, sidecar) in ["Counter", "Pair", "PairFactory"]
+            .into_iter()
+            .zip(&tasty_paths)
+        {
+            let decompiled = output(scala.scalac().arg("-decompile").arg(sidecar));
+            let decompiled = strip_ansi(&String::from_utf8_lossy(&decompiled.stdout));
+            match name {
+                "Counter" => assert!(
+                    decompiled.contains("class Counter(start: scala.Int)"),
+                    "{decompiled}"
+                ),
+                "Pair" => assert!(
+                    decompiled
+                        .contains("class Pair(first: example.Counter, second: example.Counter)"),
+                    "{decompiled}"
+                ),
+                "PairFactory" => {
+                    assert!(
+                        decompiled.contains(&format!(
+                            "def {method}(existing: example.Counter, seed: scala.Int): example.Pair"
+                        )),
+                        "{decompiled}"
+                    );
+                    assert!(decompiled.contains(expected_body), "{decompiled}");
+                }
+                _ => unreachable!(),
+            }
+            let printed = output(scala.scalac().arg("-print-tasty").arg(sidecar));
+            let dump = strip_ansi(&String::from_utf8_lossy(&printed.stdout));
+            assert!(dump.contains("version: 28.9.0"), "{name}: {dump}");
+            if name == "PairFactory" {
+                assert!(dump.contains(&format!("[{method}]")), "{dump}");
+                assert_eq!(dump.matches("TERMREFdirect").count(), 2, "{dump}");
+                assert!(dump.contains("SELECTin"), "{dump}");
+                assert!(dump.contains("<init>[Signed Signature(List(example.Counter, example.Counter),example.Pair)"), "{dump}");
+                assert!(
+                    dump.contains("<init>[Signed Signature(List(scala.Int),example.Counter)"),
+                    "{dump}"
+                );
+            }
+        }
+        let from_tasty = output(
+            scala
+                .scalac()
+                .args(["-release", "21", "-from-tasty", "-classpath"])
+                .arg(&classpath)
+                .arg("-d")
+                .arg(&reconstructed)
+                .args(&tasty_paths),
+        );
+        let _ = from_tasty;
+        for name in ["Counter", "Pair", "PairFactory"] {
+            assert!(
+                reconstructed
+                    .join(format!("example/{name}.class"))
+                    .is_file()
+            );
+        }
+        eprintln!(
+            "SCALA_MIXED_ORIGIN_ACCEPTED orientation={label} source_revision={SCALA_REVISION} sidecars={}",
+            sidecars.len()
+        );
+    }
 }

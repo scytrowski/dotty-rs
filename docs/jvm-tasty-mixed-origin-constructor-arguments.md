@@ -215,3 +215,49 @@ The Scala rebuild script above is strict about the Scala revision and compiles
 each consumer separately. This increment changes only audit tests, frozen
 oracle fixtures/manifests/scripts, and documentation. Existing fixture bytes
 are not modified.
+
+## Rust TASTy implementation receipt (#2014)
+
+The source-backed pickler bridge now projects the immutable ordered proof into
+one receipt with original per-position source and typed roots and an explicit
+`Formal` or `NestedNew` origin. The pickler checks each origin against the
+corresponding `Pair` constructor formal and preserves the original method
+parameter order. The existing constructor `APPLY` writer serializes both
+children without a separate mixed-expression writer. The two supported
+orientations remain `(existing, new Counter(seed))` and
+`(new Counter(seed), existing)`.
+
+[`jvm_tasty_mixed_origin_constructor_arguments.rs`](../tests/jvm_tasty_mixed_origin_constructor_arguments.rs)
+decodes the original Rust output and checks the ordered
+`(Counter, Int) => Pair` method parameters, the selected signed constructors,
+the direct `Counter` formal reference, the nested `Counter` constructor call,
+and its `seed` reference. It also exercises swapped or forged receipts,
+duplicate roots, a missing source-to-typed edge, wrong result/argument types,
+third arguments, deeper construction, helper results, locals, branches, and a
+foreign constructor class. The rejected inputs report their first source,
+typing, or proof failure in test output.
+
+The strict pinned reader test in
+[`jvm_tasty_dual_reference_forwarding_scala_consumer.rs`](../tests/jvm_tasty_dual_reference_forwarding_scala_consumer.rs)
+uses the complete original Rust sidecars from one authentic source/typed
+session per orientation. Scala 3.9.0 accepts all six files with `-decompile`,
+`-print-tasty`, and `-from-tasty`. The last command reconstructs the classes
+from the Rust sidecars while using Scala-compiled reference classes for symbol
+lookup; it is not a runtime test of Rust-generated classfiles.
+
+The strict run used Scala revision
+`777528f19a58e794c9954a42f433373472ec57f8`, runtime jar hashes
+`9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba`
+(`scala3-library_3-3.9.0.jar`) and
+`b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd`
+(`scala-library-3.9.0.jar`), and Temurin 21.0.13 `java` hash
+`9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`.
+
+The first post-#2013 failure was the expected
+`Unsupported { feature: BodyExpression }` at the TASTy cross-contract gate for
+both frozen orientations. After the bridge, both authentic batches validate
+and the pinned readers accept the original Rust sidecars. A separate byte
+comparison against baseline `1fbc0ac64cef9d8c4b7e5a16d4fe7a1e753f2a6d`
+found matching hashes for all 12 Rust TASTy sidecars from the existing
+one-argument, two-nested-argument, two-direct-formal, and reference-local
+factory fixtures.
