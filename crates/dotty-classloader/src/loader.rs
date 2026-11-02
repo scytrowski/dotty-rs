@@ -2471,7 +2471,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         };
         if !symbol_matches_binary_name(self.store, class, name)
             || self.store.symbols.get(class).kind != SymbolKind::Class
-            || !symbol_matches_binary_name(self.store, class, name)
             || self.store.symbols.get(constructor).kind != SymbolKind::Constructor
             || self.store.symbols.get(constructor).owner != Some(class)
             || !matches!(self.store.symbols.get(class).info, SymbolInfo::Complete(_))
