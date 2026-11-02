@@ -109,11 +109,15 @@ constructors. The bounded neighboring probe explicitly completed the existing
 | `fields/Body(x: Int)` primary constructor | Supported; one `Int` parameter, owning class result |
 
 Therefore the first unsupported neighboring constructor shape remains
-unmeasured. Establishing it requires a separate frozen input with a constructor
-dependency or clause shape beyond this successful one-`Int` probe and an
-explicit completion attempt; the historical `<missing>` row is not used as a
-boundary. The two selected positive targets and the 14-unit/126-row denominator
-remain unchanged. No production gate or reusable loader contract was changed.
+unmeasured. The bounded prerequisite to measure it is a preselected, frozen
+constructor whose parameter type has a semantic shape not handled by this
+bootstrap plus resolver path (unavailable dependency or unsupported type-tree
+shape), followed by explicit `complete_symbol` on that constructor and capture
+of its `UnpickleError` or resulting `Type::Error`. The successful `Body(Int)`
+probe rules out an ordinary single primitive parameter as that boundary. The
+historical `<missing>` row is not used as evidence. The two selected positive
+targets and the 14-unit/126-row denominator remain unchanged. No production
+gate or reusable loader contract was changed.
 
 Validation ran with the pinned toolchain and isolated temporary/build
 directories (`TMPDIR` under the issue worktree, JDK `java.io.tmpdir` under the
