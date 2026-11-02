@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed on the pinned whole-method Box Match acceptance receipt."""
+"""Fail closed on the pinned Box Match and extractor acceptance receipts."""
 
 from __future__ import annotations
 
@@ -16,6 +16,27 @@ SOURCE_SHA256 = "df57333192eb934169f06a07873c2e1ba88c9159404f60e5bfe33b3d016e215
 SCALA_REVISION = "777528f19a58e794c9954a42f433373472ec57f8"
 PRODUCT2_FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0")
 PRODUCT2_SOURCE_SHA256 = "4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31"
+SCALA_MATRIX_CASES = {
+    "Wildcard": "accepted",
+    "WrongResult": "rejected",
+    "WrongArityZero": "rejected",
+    "WrongArityTwo": "rejected",
+    "WrongSelectorType": "accepted_with_warning",
+    "WrongConstructorType": "rejected",
+    "SameSpelledExtractor": "accepted_with_warning",
+    "ExplicitCompanion": "accepted",
+    "ExplicitUnapplyOverload": "accepted",
+    "ExplicitUnapplyReuse": "accepted_with_warning",
+    "ExplicitUnapplyWrongResult": "rejected",
+    "PackageAliasUnapply": "accepted_with_warning",
+    "ImportedAliasUnapply": "accepted_with_warning",
+    "CompanionAliasUnapply": "accepted_with_warning",
+    "NonCaseControl": "accepted",
+    "InputSupertype": "accepted_with_warning",
+    "WrongPatternType": "rejected",
+    "NonCaseMissingExtractor": "rejected",
+    "CaseBinderEscape": "rejected",
+}
 PRODUCT2_CASES = {
     "WrongArityOne": "rejected",
     "WrongArityThree": "rejected",
@@ -56,7 +77,7 @@ RUST_TESTS = {
     "source_trait_parent_does_not_enable_product2_completion",
     "source_trait_parent_product1_defers_multi_parent_selector_shape",
     "source_trait_parent_product1_preserves_identity_in_both_completion_routes",
-    "source_trait_parent_product1_records_frozen_match_first_errors_only",
+    "source_trait_parent_product1_records_frozen_match_first_error_movement",
     "source_trait_parent_product1_rejects_generic_and_class_parent_shapes",
     "source_trait_parent_product1_rolls_back_then_retries_sibling_in_same_session",
     "source_trait_product1_parent_is_authenticated_by_symbol_not_spelling",
@@ -137,6 +158,30 @@ def read_tsv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     if any(None in row or any(value is None for value in row.values()) for row in rows):
         raise ReceiptError(f"{path}: malformed row")
     return reader.fieldnames, rows
+
+
+def validate_scala_matrix(lines: list[str]) -> None:
+    observed: dict[str, str] = {}
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 2:
+            raise ReceiptError("Scala matrix has malformed columns")
+        name, classification = fields
+        if name in observed:
+            raise ReceiptError(f"Scala matrix contains duplicated case: {name}")
+        observed[name] = classification
+    if observed != SCALA_MATRIX_CASES:
+        missing = sorted(SCALA_MATRIX_CASES.keys() - observed.keys())
+        unexpected = sorted(observed.keys() - SCALA_MATRIX_CASES.keys())
+        changed = sorted(
+            name
+            for name in SCALA_MATRIX_CASES.keys() & observed.keys()
+            if observed[name] != SCALA_MATRIX_CASES[name]
+        )
+        raise ReceiptError(
+            "Scala matrix inventory/classification changed "
+            f"(missing={missing!r}, unexpected={unexpected!r}, changed={changed!r})"
+        )
 
 
 def validate_inputs(root: Path) -> None:
@@ -235,12 +280,8 @@ def validate_inputs(root: Path) -> None:
             raise ReceiptError(f"frozen Scala source hash mismatch: {row['path']}")
     matrix_lines = (fixture / "scala-matrix.tsv").read_text(encoding="utf-8").splitlines()
     # The Scala runner intentionally emits a headerless two-column receipt.
-    matrix_rows = [line.split("\t") for line in matrix_lines]
-    if any(len(row) != 2 for row in matrix_rows):
-        raise ReceiptError("Scala matrix has malformed columns")
-    matrix_map = dict(matrix_rows)
-    if len(matrix_map) != len(matrix_rows):
-        raise ReceiptError("Scala matrix contains duplicated cases")
+    validate_scala_matrix(matrix_lines)
+    matrix_map = dict(line.split("\t") for line in matrix_lines)
     for name in SCALA_CASES.values():
         expected = "accepted_with_warning" if name == "WrongSelectorType" else "rejected"
         if matrix_map.get(name) != expected:
@@ -468,8 +509,7 @@ def validate_oracle_log(path: Path) -> None:
     if missing:
         raise ReceiptError(f"pinned Scala oracle log is missing required evidence: {sorted(missing)!r}")
     matrix_lines = (Path(__file__).resolve().parents[2] / FIXTURE / "scala-matrix.tsv").read_text(encoding="utf-8").splitlines()
-    if len(matrix_lines) != 18 or len({line.split("\t", 1)[0] for line in matrix_lines}) != 18:
-        raise ReceiptError("Scala oracle matrix did not execute all 18 unique frozen controls")
+    validate_scala_matrix(matrix_lines)
 
 
 def parse_ordinary_report(path: Path) -> dict[str, dict[str, str]]:
@@ -572,7 +612,7 @@ def main() -> int:
             print("exact two-root/two-session and nine-case negative Typer receipt verified")
         elif args.command == "oracle-log":
             validate_oracle_log(args.log)
-            print("pinned Scala 3.9.0 oracle, snapshots, hashes, and 18-case matrix verified")
+            print("pinned Scala 3.9.0 oracle, snapshots, hashes, and all 19 frozen matrix controls verified")
         elif args.command == "product2-oracle-log":
             validate_product2_oracle_log(args.log)
             print("pinned Scala 3.9.0 Product2 oracle, eight artifacts, and ten-case matrix verified")

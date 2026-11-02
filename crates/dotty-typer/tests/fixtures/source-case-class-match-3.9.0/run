@@ -81,6 +81,7 @@ matrix=(
   'ImportedAliasUnapply.scala	accepted_with_warning'
   'CompanionAliasUnapply.scala	accepted_with_warning'
   'NonCaseControl.scala	accepted'
+  'InputSupertype.scala	accepted_with_warning'
   'WrongPatternType.scala	rejected'
   'NonCaseMissingExtractor.scala	rejected'
   'CaseBinderEscape.scala	rejected'

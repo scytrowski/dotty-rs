@@ -1,0 +1,3 @@
+root	before	after
+classify	ExtractorPatternConstraintDeferred at Event.scala#tree43 bytes 327:337 (Event selector, Created input; rolled-back input type)	no first error; typed#tree27
+extract	ExtractorPatternConstraintDeferred at Event.scala#tree25 bytes 210:221 (Event selector, Created input; rolled-back input type)	no first error; typed#tree49
