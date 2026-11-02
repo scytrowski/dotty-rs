@@ -14,6 +14,36 @@ from pathlib import Path
 FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-match-3.9.0")
 SOURCE_SHA256 = "df57333192eb934169f06a07873c2e1ba88c9159404f60e5bfe33b3d016e215c"
 SCALA_REVISION = "777528f19a58e794c9954a42f433373472ec57f8"
+PRODUCT2_FIXTURE = Path("crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0")
+PRODUCT2_SOURCE_SHA256 = "4b144913df1d2021359c44633dc2a23f21bf6288bf2528c86cc6f53d79b8ee31"
+PRODUCT2_CASES = {
+    "WrongArityOne": "rejected",
+    "WrongArityThree": "rejected",
+    "WrongLiteralTypes": "rejected",
+    "WrongResult": "rejected",
+    "ReversedFields": "accepted",
+    "ExplicitSelectorResultMismatch": "rejected",
+    "ExplicitSelectors": "accepted",
+    "ExplicitUnapplyCollision": "accepted_with_warning",
+    "OrdinaryNonCase": "rejected",
+    "UnrelatedSameNameExtractor": "accepted_with_warning",
+}
+PRODUCT2_RUST_ROOTS = {
+    "select": "select\tPositive.scala#tree24\t86:208\tmatching.Flagged\tmatching.Matcher\t(Flagged):Int\tscala.Product\t_1:Int@Flagged,_2:Boolean@Flagged\tFlagged$.unapply\tBind(value:Int)@153:158;Bind(enabled:Boolean)@160:167\tcomplete\tInt\ttrue\t" + PRODUCT2_SOURCE_SHA256,
+    "classify": "classify\tPositive.scala#tree44\t212:332\tmatching.Flagged\tmatching.Matcher\t(Flagged):Int\tscala.Product\t_1:Int@Flagged,_2:Boolean@Flagged\tFlagged$.unapply\tLiteral(0:Int),Literal(true:Boolean);Bind(value:Int),Wildcard(Boolean)\tcomplete\tInt\ttrue\t" + PRODUCT2_SOURCE_SHA256,
+}
+PRODUCT2_NEGATIVE_EVIDENCE = {
+    "WrongArityOne": ("rejected", "rust_rejected", "flagged_product2_negative_matrix_rejects_without_publishing_roots"),
+    "WrongArityThree": ("rejected", "rust_rejected", "flagged_product2_negative_matrix_rejects_without_publishing_roots"),
+    "WrongLiteralTypes": ("rejected", "rust_rejected", "flagged_product2_negative_matrix_rejects_without_publishing_roots"),
+    "WrongResult": ("rejected", "rust_rejected", "flagged_product2_negative_matrix_rejects_without_publishing_roots"),
+    "ReversedFields": ("accepted", "deferred", "no exact Rust fixture"),
+    "ExplicitSelectorResultMismatch": ("rejected", "rust_deferred", "frozen_extractor_negative_matrix_rejects_or_defers_without_typed_roots"),
+    "ExplicitSelectors": ("accepted", "deferred", "no exact Rust fixture"),
+    "ExplicitUnapplyCollision": ("accepted_with_warning", "identity_control", "explicit_companion_unapply_is_preserved_without_generated_identity_collisions"),
+    "OrdinaryNonCase": ("rejected", "rust_rejected", "flagged_product2_negative_matrix_rejects_without_publishing_roots"),
+    "UnrelatedSameNameExtractor": ("accepted_with_warning", "identity_control", "unknown_explicit_unapply_parameter_identity_defers_generation_for_alias_contexts"),
+}
 RUST_TESTS = {
     "flagged_product2_late_case_failure_rolls_back_before_valid_sibling",
     "flagged_product2_negative_matrix_rejects_without_publishing_roots",
@@ -106,6 +136,77 @@ def validate_inputs(root: Path) -> None:
     source = fixture / "Positive.scala"
     if hashlib.sha256(source.read_bytes()).hexdigest() != SOURCE_SHA256:
         raise ReceiptError("frozen two-root Positive.scala hash changed")
+    product2_source = root / PRODUCT2_FIXTURE / "Positive.scala"
+    if hashlib.sha256(product2_source.read_bytes()).hexdigest() != PRODUCT2_SOURCE_SHA256:
+        raise ReceiptError("frozen Product2 Positive.scala hash changed")
+    product2_hashes = read_tsv(root / PRODUCT2_FIXTURE / "source-hashes.tsv")[1]
+    if not product2_hashes or len({row["path"] for row in product2_hashes}) != len(product2_hashes):
+        raise ReceiptError("Product2 source hash manifest is empty or duplicated")
+    for row in product2_hashes:
+        path = root / PRODUCT2_FIXTURE / row["path"]
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != row["sha256"]:
+            raise ReceiptError(f"frozen Product2 Scala source hash mismatch: {row['path']}")
+    product2_matrix = [line.split("\t") for line in (root / PRODUCT2_FIXTURE / "scala-matrix.tsv").read_text(encoding="utf-8").splitlines()]
+    if len(product2_matrix) != len(PRODUCT2_CASES) or any(len(row) != 2 for row in product2_matrix):
+        raise ReceiptError("Product2 Scala matrix is malformed or incomplete")
+    if dict(product2_matrix) != PRODUCT2_CASES:
+        raise ReceiptError("Product2 Scala classifications changed")
+    product2_negative = read_tsv(root / "docs/typer-heterogeneous-product2-match-negative-3.9.0.tsv")[1]
+    if len(product2_negative) != len(PRODUCT2_NEGATIVE_EVIDENCE):
+        raise ReceiptError("Product2 negative sidecar must retain all ten frozen controls")
+    seen_negative = set()
+    for row in product2_negative:
+        name = row["case"]
+        if name not in PRODUCT2_NEGATIVE_EVIDENCE or name in seen_negative:
+            raise ReceiptError("Product2 negative sidecar contains an unknown or duplicate control")
+        seen_negative.add(name)
+        classification, disposition, evidence = PRODUCT2_NEGATIVE_EVIDENCE[name]
+        source_path = root / PRODUCT2_FIXTURE / f"{name}.scala"
+        expected_source_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        if (
+            row["source_path"] != str(PRODUCT2_FIXTURE / f"{name}.scala")
+            or row["source_sha256"] != expected_source_hash
+            or row["scala_classification"] != classification
+            or row["rust_disposition"] != disposition
+            or row["rust_evidence"] != evidence
+            or row["integrated_source_sha"] != "3a854831b9c074261e31e82d325c0350f606b95a"
+        ):
+            raise ReceiptError(f"Product2 negative sidecar changed for {name}")
+    product2_cohorts = read_tsv(root / "docs/typer-heterogeneous-product2-match-cohorts-3.9.0.tsv")[1]
+    match_cohorts = read_tsv(root / "docs/typer-source-case-class-match-cohorts-3.9.0.tsv")[1]
+    if len(product2_cohorts) != 50 or len(match_cohorts) != 50:
+        raise ReceiptError("Product2 cohort sidecar must retain all 25 + 25 frozen roots")
+    baseline_manifests = {
+        "main": read_tsv(root / "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv")[1],
+        "analysis": read_tsv(root / "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv")[1],
+    }
+    baseline_maps = {
+        cohort: {row["identity"]: row for row in rows}
+        for cohort, rows in baseline_manifests.items()
+    }
+    for sidecar, baseline in zip(product2_cohorts, match_cohorts):
+        frozen = baseline_maps[sidecar["cohort"]].get(sidecar["identity"])
+        expected_status = None if frozen is None else (
+            frozen.get("baseline_status")
+            or ("typed" if baseline["protected_success"] == "true" else "not_protected")
+        )
+        expected_gate = None if frozen is None else (
+            frozen.get("gate")
+            or ("required_typed" if baseline["protected_success"] == "true" else "observe")
+        )
+        if (
+            frozen is None
+            or
+            sidecar["cohort"] != baseline["cohort"]
+            or sidecar["identity"] != baseline["identity"]
+            or sidecar["source_tree"] != baseline["source_tree"]
+            or sidecar["baseline_status"] != expected_status
+            or sidecar["gate"] != expected_gate
+            or sidecar["protected_success"] != baseline["protected_success"]
+            or sidecar["required_result"] != baseline["required_result"]
+            or sidecar["integrated_source_sha"] != "3a854831b9c074261e31e82d325c0350f606b95a"
+        ):
+            raise ReceiptError("Product2 cohort sidecar changed a protected root or provenance")
     hashes = read_tsv(fixture / "source-hashes.tsv")[1]
     if not hashes or len({row["path"] for row in hashes}) != len(hashes):
         raise ReceiptError("negative/oracle source hash manifest is empty or duplicated")
@@ -285,6 +386,55 @@ def validate_rust_log(path: Path) -> None:
         raise ReceiptError("committed negative receipt disagrees with executed Rust matrix")
 
 
+def validate_product2_log(path: Path) -> None:
+    text = require_test_log(path, RUST_TESTS)
+    lines = marker_lines(text, "ISSUE1972_POSITIVE\t")
+    actual: dict[str, dict[str, tuple[str, ...]]] = {"first": {}, "second": {}}
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 16 or fields[1] not in actual:
+            raise ReceiptError("Product2 positive receipt has malformed columns or session")
+        session, row = fields[1], tuple(fields[2:])
+        name = row[0]
+        if name not in PRODUCT2_RUST_ROOTS or name in actual[session]:
+            raise ReceiptError("Product2 receipt has an unexpected or duplicated root")
+        if "\t".join(row) != PRODUCT2_RUST_ROOTS[name]:
+            raise ReceiptError(f"Product2 {name} receipt differs from the frozen semantic contract")
+        actual[session][name] = row
+    expected_names = set(PRODUCT2_RUST_ROOTS)
+    if any(set(rows) != expected_names for rows in actual.values()) or len(lines) != 4:
+        raise ReceiptError("Product2 gate requires exactly select/classify in two sessions")
+    if actual["first"] != actual["second"]:
+        raise ReceiptError("Product2 sessions differ in normalized semantic identity")
+    header, committed = read_tsv(Path("docs/typer-heterogeneous-product2-match-positive-3.9.0.tsv"))
+    if len(header) != 17 or len(committed) != 4:
+        raise ReceiptError("Product2 positive sidecar has the wrong schema or row count")
+    expected_rows = set()
+    for session, roots in actual.items():
+        for name, row in roots.items():
+            canonical = "\t".join(row)
+            expected_rows.add((session, *row, hashlib.sha256(canonical.encode()).hexdigest(), "3a854831b9c074261e31e82d325c0350f606b95a"))
+    sidecar_rows = {tuple(row[column] for column in header) for row in committed}
+    if sidecar_rows != expected_rows:
+        raise ReceiptError("Product2 positive sidecar disagrees with fresh-session receipts")
+
+
+def validate_product2_oracle_log(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    required = {
+        "verified eight pinned Scala 3.9.0 artifacts",
+        f"Scala 3.9.0 source revision: {SCALA_REVISION}",
+        'JDK: JAVA_VERSION="21.0.8"',
+        "Positive typed snapshot and negative matrix match.",
+        "verified frozen source SHA-256 manifest",
+    }
+    if required - set(text.splitlines()):
+        raise ReceiptError(f"Product2 Scala oracle log is missing pinned evidence: {sorted(required - set(text.splitlines()))!r}")
+    matrix = (Path(__file__).resolve().parents[2] / PRODUCT2_FIXTURE / "scala-matrix.tsv").read_text(encoding="utf-8").splitlines()
+    if len(matrix) != len(PRODUCT2_CASES) or len({line.split("\t", 1)[0] for line in matrix}) != len(PRODUCT2_CASES):
+        raise ReceiptError("Product2 oracle did not run every unique frozen control")
+
+
 def validate_oracle_log(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     required_lines = {
@@ -384,6 +534,10 @@ def main() -> int:
         item.add_argument("log", type=Path, nargs="+" if command == "typer-log" else None)
     oracle = sub.add_parser("oracle-log")
     oracle.add_argument("log", type=Path)
+    product2_oracle = sub.add_parser("product2-oracle-log")
+    product2_oracle.add_argument("log", type=Path)
+    product2 = sub.add_parser("product2-log")
+    product2.add_argument("log", type=Path)
     cohorts = sub.add_parser("cohorts")
     cohorts.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
     cohorts.add_argument("--report", action="append", type=Path, required=True)
@@ -400,6 +554,12 @@ def main() -> int:
         elif args.command == "oracle-log":
             validate_oracle_log(args.log)
             print("pinned Scala 3.9.0 oracle, snapshots, hashes, and 18-case matrix verified")
+        elif args.command == "product2-oracle-log":
+            validate_product2_oracle_log(args.log)
+            print("pinned Scala 3.9.0 Product2 oracle, eight artifacts, and ten-case matrix verified")
+        elif args.command == "product2-log":
+            validate_product2_log(args.log)
+            print("exact Matcher.select/classify Product2 receipts verified in two fresh sessions")
         elif args.command in {"namer-log", "typer-log"}:
             expected = NAMER_TESTS if args.command == "namer-log" else TYPER_TESTS
             if args.command == "namer-log":
