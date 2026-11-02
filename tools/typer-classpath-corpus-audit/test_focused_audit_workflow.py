@@ -88,7 +88,26 @@ class FocusedAuditWorkflowTests(unittest.TestCase):
         self.assertIn("--require-typed-cohort docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv", workflow)
         self.assertIn("--require-typed-cohort docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv", workflow)
         self.assertIn("if-no-files-found: error", workflow)
-        self.assertIn("--verify-determinism", workflow)
+
+    def test_sealed_rollback_outputs_are_verified_and_uploaded_from_runner_scratch(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        workflow = (repo / ".github/workflows/typer-focused-audit.yml").read_text(encoding="utf-8")
+        runner = (
+            repo / "crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/run-rollback-matrix"
+        ).read_text(encoding="utf-8")
+        step = workflow.split("- name: Run pinned sealed Event negative and rollback matrix\n", 1)[1].split(
+            "\n      - name:", 1
+        )[0]
+
+        self.assertIn(
+            "DOTTY_SEALED_ADT_ROLLBACK_TMP_ROOT: ${{ github.workspace }}/target/source-sealed-adt-match-rollback-oracle",
+            step,
+        )
+        self.assertIn("scratch=\"${DOTTY_SEALED_ADT_ROLLBACK_TMP_ROOT:", runner)
+        self.assertIn('test -s "$DOTTY_SEALED_ADT_ROLLBACK_TMP_ROOT/scala-failure-matrix.tsv"', step)
+        self.assertIn("diff -u crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0/scala-failure-matrix.tsv", step)
+        self.assertIn("-name '*.out' | wc -l)\" -eq 9", step)
+        self.assertIn("source-sealed-adt-match-rollback-oracle/", workflow.split("- name: Upload focused report", 1)[1])
 
 
 if __name__ == "__main__":

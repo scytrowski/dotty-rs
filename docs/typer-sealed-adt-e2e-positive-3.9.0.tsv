@@ -1,0 +1,5 @@
+session	root	source_path_tree	source_span	normalized_receipt_sha256	proof
+first	classify	Event.scala#tree60	266:400	1e6b6a3c239bc3e8e8c61a03fde85845c7910828fcd1029df1b0f6f6149f04d3	complete DefDef+Match; Event selector; sealed variants; Product._1; canonical unapply; typed binders; all source RHS mappings
+first	extract	Event.scala#tree36	150:262	a490bae2a69dd4c3f7f34cff66c2b7c8a2880b6f1782ae9ce768837a1480b658	complete DefDef+Match; Event selector; sealed variants; Product._1; canonical unapply; typed binders; all source RHS mappings
+second	classify	Event.scala#tree60	266:400	1e6b6a3c239bc3e8e8c61a03fde85845c7910828fcd1029df1b0f6f6149f04d3	complete DefDef+Match; Event selector; sealed variants; Product._1; canonical unapply; typed binders; all source RHS mappings
+second	extract	Event.scala#tree36	150:262	a490bae2a69dd4c3f7f34cff66c2b7c8a2880b6f1782ae9ce768837a1480b658	complete DefDef+Match; Event selector; sealed variants; Product._1; canonical unapply; typed binders; all source RHS mappings

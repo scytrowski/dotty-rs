@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -100,6 +101,79 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
         ]
         with self.assertRaises(gate.ReceiptError):
             gate.validate_scala_matrix(changed_classification)
+
+    def sealed_adt_log(self, *, duplicate: bool = False, changed: bool = False) -> str:
+        rows = sorted(gate.SEALED_ADT_POSITIVE)
+        if changed:
+            session, root, receipt = rows[-1]
+            rows[-1] = (session, root, receipt.replace("selector=Event", "selector=Created", 1))
+        lines = ["ISSUE2000_POSITIVE\t" + "\t".join(row) for row in rows]
+        if duplicate:
+            lines.append(lines[0])
+        return "\n".join(lines) + "\n"
+
+    def test_sealed_event_receipts_require_exact_two_roots_in_two_sessions(self) -> None:
+        gate.validate_sealed_adt_receipts(self.sealed_adt_log())
+
+    def test_sealed_event_receipts_reject_missing_duplicate_and_substituted_rows(self) -> None:
+        with self.assertRaises(gate.ReceiptError):
+            gate.validate_sealed_adt_receipts(self.sealed_adt_log().replace("first\textract\t", "first\tother\t", 1))
+        with self.assertRaises(gate.ReceiptError):
+            gate.validate_sealed_adt_receipts(self.sealed_adt_log(duplicate=True))
+        with self.assertRaises(gate.ReceiptError):
+            gate.validate_sealed_adt_receipts(self.sealed_adt_log(changed=True))
+
+    def test_sealed_rollback_and_cohort_sidecars_match_frozen_inputs(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        gate.validate_sealed_rollback_sidecar(root)
+        gate.validate_sealed_cohort_contract(root)
+        gate.validate_recorded_cohort_receipt(root)
+
+    def test_recorded_per_root_cohort_receipt_rejects_missing_and_changed_roots(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        paths = (
+            "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv",
+            "docs/typer-stdlib-minimal-method-cohort-3.9.0.tsv",
+            "docs/typer-stdlib-holdout-acceptance-ii-3.9.0.tsv",
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv",
+            "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative in paths:
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(repository / relative, destination)
+            receipt = root / paths[0]
+            original = receipt.read_text(encoding="utf-8")
+            receipt.write_text("\n".join(original.splitlines()[:-1]) + "\n", encoding="utf-8")
+            with self.assertRaises(gate.ReceiptError):
+                gate.validate_recorded_cohort_receipt(root)
+            receipt.write_text(original.replace("library/src/scala/Option.scala#tree=118", "substituted#tree=118", 1), encoding="utf-8")
+            with self.assertRaises(gate.ReceiptError):
+                gate.validate_recorded_cohort_receipt(root)
+
+    def test_rust_receipt_rejects_mismatched_tested_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = self.write_log(Path(directory) / "rust.log", "")
+            with self.assertRaises(gate.ReceiptError):
+                gate.validate_rust_log(log, "a" * 40, "b" * 40)
+
+    def test_issue1999_rollback_log_requires_both_named_non_skipped_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = self.write_log(
+                Path(directory) / "rollback.log",
+                "test typer::tests::issue_1999_late_event_result_failure_observes_both_cases_before_atomic_rollback ... ok\n"
+                "test typer::tests::issue_1999_structural_corruption_restores_then_recovers_in_same_typer ... ok\n"
+                "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+            )
+            gate.validate_named_test_log(log, gate.ISSUE1999_TESTS)
+            empty = self.write_log(
+                Path(directory) / "empty.log",
+                "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out\n",
+            )
+            with self.assertRaises(gate.ReceiptError):
+                gate.validate_named_test_log(empty, gate.ISSUE1999_TESTS)
 
     def product2_log(self, *, duplicate: bool = False, changed: bool = False) -> str:
         tests = sorted(gate.RUST_TESTS)
