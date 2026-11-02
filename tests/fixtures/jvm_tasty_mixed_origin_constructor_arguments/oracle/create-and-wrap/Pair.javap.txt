@@ -1,5 +1,5 @@
-Classfile /home/vdrake6/.codex/worktrees/a2c8/dotty-rs/.issue2011-worktree/target/issue-2011/oracle/create-and-wrap/producer/example/Pair.class
-  Last modified Nov 2, 2026; size 771 bytes
+Classfile <producer>/example/Pair.class
+  Last modified <normalized>; size 771 bytes
   SHA-256 checksum 9d3c294a7b9c7a66d30edc44c1a783ce9a14668247cba58fe3133daeef212ef5
   Compiled from "PairFactory.scala"
 public class example.Pair extends java.lang.Object

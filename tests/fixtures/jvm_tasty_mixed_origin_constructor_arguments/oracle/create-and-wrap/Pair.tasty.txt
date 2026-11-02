@@ -1,5 +1,5 @@
---------------------------------------------------------------------------------
-/home/vdrake6/.codex/worktrees/a2c8/dotty-rs/.issue2011-worktree/target/issue-2011/oracle/create-and-wrap/producer/example/Pair.tasty
+<producer>/example/Pair.tasty
+<producer>/example/Pair.tasty
 --------------------------------------------------------------------------------
 Header:
   version: 28.9.0

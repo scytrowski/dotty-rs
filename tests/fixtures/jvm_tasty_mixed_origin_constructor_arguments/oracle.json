@@ -6,8 +6,7 @@
     "scala_revision": "777528f19a58e794c9954a42f433373472ec57f8",
     "scala_expected_revision": "777528f19a58e794c9954a42f433373472ec57f8",
     "scalac_version": "3.9.0-bin-SNAPSHOT-git-777528f",
-    "scalac_jar_sha256": "b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f",
-    "jdk_version": "Picked up JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/home/vdrake6/.codex/worktrees/a2c8/dotty-rs/.issue2011-worktree/target/issue-2011/tmp -XX:-UsePerfData",
+    "jdk_version": "openjdk version \"21.0.13\" 2026-10-20 LTS",
     "java_sha256": "9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155",
     "javap_version": "21.0.13",
     "classfile_major": 65,
@@ -17,7 +16,8 @@
       "class": 3,
       "tasty": 3
     },
-    "outputs": "Both order-specific producer directories are compiled from empty output; each consumer is compiled separately against its matching Scala producer directory and Scala runtime."
+    "outputs": "Both order-specific producer directories are compiled from empty output; each consumer is compiled separately against its matching Scala producer directory and Scala runtime.",
+    "scalac_jar_sha256_informational": "b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f"
   },
   "orders": {
     "wrap-and-create": {
@@ -78,22 +78,22 @@
       ],
       "snapshots": {
         "Counter.javap.txt": {
-          "sha256": "25c5de6365fa0c80b8dd06de01671d114e85bd6c3a0366c18ff2342e0e5ee4f6"
+          "sha256": "7adc8505b609c796a47c76c78bce7f4253b6c79761b4318a89a0b93851d9d7b4"
         },
         "Counter.tasty.txt": {
-          "sha256": "6a19f0fd3c233b28e4074fcc7c514dd54f123d9d2ed6a0de8747e06b8f210959"
+          "sha256": "14cd078b0fe86307d78f984a048e4158e71ba479791850787d49e66d5b3ac27e"
         },
         "Pair.javap.txt": {
-          "sha256": "de92d494c5cad5ca86c38605a862b8d8f1b5b199c5120879ebd7c113988b336e"
+          "sha256": "ec1960b6f2446b419751fd07b44b9fe49a556d6299d820045e45cd41e6a759e1"
         },
         "Pair.tasty.txt": {
-          "sha256": "b8f23ceb30f7535bf3ffa2a7a40f3b3b822577bf8768f39b0d47f4553af866a2"
+          "sha256": "1fd712261608793860e331a8d74430403a7f8d9897f3849e062ef327c3dcdfa0"
         },
         "PairFactory.javap.txt": {
-          "sha256": "b01c6fe8de54124d9fb86a1b8204241a944940155860ea4e408f3150417c3b82"
+          "sha256": "76e56789e30eb63c7ff9b8cc0857974d6e70f86dc9e0281001a180a764d5025b"
         },
         "PairFactory.tasty.txt": {
-          "sha256": "aac3448305a64f329bb442d5846c82308fafbaf845d985573976375543935c67"
+          "sha256": "089dfc8f2a7ca65af35a05f663a4597825d88bd0f73294cc8f7883ea06540c56"
         }
       }
     },
@@ -155,22 +155,22 @@
       ],
       "snapshots": {
         "Counter.javap.txt": {
-          "sha256": "0b5ab70625cd3ef2af2b5737b6b942eb9a45e78bfe4f162e54d80a877b780672"
+          "sha256": "4614f2f19e4adb3cc08748c133d97d894c128eea74d87e901a9b3248501d1fa6"
         },
         "Counter.tasty.txt": {
-          "sha256": "d0466965940e614cb7123400973f6fdd24ae9e6e95441382a128d819daaccb2b"
+          "sha256": "553b9d86c9abe03252358aa385544c759c6a0029852d20c50502f6e3abab6ebc"
         },
         "Pair.javap.txt": {
-          "sha256": "b5adf6ed78a3a21bdb1c64ac5d0b131b90b605d43d9a2fb1304a70882ee8658d"
+          "sha256": "b94b7aa196cf38e09c5bb1dd701fb4d95117b059402d07e2bd122f707693cb11"
         },
         "Pair.tasty.txt": {
-          "sha256": "9a7ef539c94f7b1ff65f119ef278e402e82e6ce0ec7336949222b853173f263c"
+          "sha256": "ff8a6bb96c48b53a63ed03b22ac2e9535841744cca429828f59b12f63fd0fdba"
         },
         "PairFactory.javap.txt": {
-          "sha256": "2e6cdbe606cec5e0c5574ed2a2545dcc1a492dcc9f39b742b57436ec79c3f390"
+          "sha256": "cf0f1de53d156513c3de4e41afc697771feedca754481011845784567d127f5f"
         },
         "PairFactory.tasty.txt": {
-          "sha256": "4d014bf825e0e8a7a5995efd9582169e349f2c5b49cd785e17bb7a3b3e8190c0"
+          "sha256": "0a56d42f2b64c0dee979966cc823939fabb40ef1c88dabd6ca764b0216499147"
         }
       }
     }

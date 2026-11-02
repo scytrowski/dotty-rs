@@ -13,6 +13,7 @@ scala_cp="$(find "$SCALA39_ROOT/dist/target/universal/stage/maven2" -type f -nam
 export PATH="$JAVA_HOME/bin:$PATH"
 mkdir -p "$TMPDIR"
 export JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=$TMPDIR -XX:-UsePerfData"
+python3 "$fixture_dir/test_oracle_tools.py"
 "$scalac" -version 2>&1 | grep -F '3.9.0-bin-SNAPSHOT-git-777528f' >/dev/null
 "$JAVA_HOME/bin/java" -version 2>&1 | grep -F '21.0.13' >/dev/null
 rm -rf "$work_dir"
@@ -37,9 +38,15 @@ for order in wrap-and-create create-and-wrap; do
 
   for name in Counter Pair PairFactory; do
     mkdir -p "$oracle_output/oracle/$order"
-    "$JAVA_HOME/bin/javap" -v -p -c -classpath "$producer" "example.$name" > "$oracle_output/oracle/$order/$name.javap.txt"
+    class_file="$producer/example/$name.class"
+    tasty_file="$producer/example/$name.tasty"
+    "$JAVA_HOME/bin/javap" -v -p -c -classpath "$producer" "example.$name" \
+      | python3 "$fixture_dir/normalize-dump.py" javap "$class_file" "<producer>/example/$name.class" \
+      > "$oracle_output/oracle/$order/$name.javap.txt"
     "$JAVA_HOME/bin/java" -cp "$scala_cp" dotty.tools.MainGenericCompiler \
-      -color:never -print-tasty "$producer/example/$name.tasty" > "$oracle_output/oracle/$order/$name.tasty.txt"
+      -color:never -print-tasty "$tasty_file" \
+      | python3 "$fixture_dir/normalize-dump.py" tasty "$tasty_file" "<producer>/example/$name.tasty" \
+      > "$oracle_output/oracle/$order/$name.tasty.txt"
   done
   mkdir -p "$oracle_output/scala39/$order/example"
   cp "$producer"/example/* "$oracle_output/scala39/$order/example/"
@@ -58,4 +65,4 @@ for order in wrap-and-create create-and-wrap; do
     done
   done
 done
-cmp "$oracle_output/oracle.json" "$fixture_dir/oracle.json"
+python3 "$fixture_dir/compare-manifests.py" "$oracle_output/oracle.json" "$fixture_dir/oracle.json"

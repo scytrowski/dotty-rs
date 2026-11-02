@@ -1,5 +1,5 @@
-Classfile /home/vdrake6/.codex/worktrees/a2c8/dotty-rs/.issue2011-worktree/target/issue-2011/oracle/wrap-and-create/producer/example/Counter.class
-  Last modified Nov 2, 2026; size 647 bytes
+Classfile <producer>/example/Counter.class
+  Last modified <normalized>; size 647 bytes
   SHA-256 checksum 4f081b67549914d0afc1669b233631f5741008a084a9ae22b7d76b132d661c3b
   Compiled from "PairFactory.scala"
 public class example.Counter extends java.lang.Object

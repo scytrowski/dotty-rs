@@ -11,13 +11,18 @@ The audit starts from `origin/main` at
 `7943e8d495815ceef2b7e4a53baee7f6fcac949b`. Scala is pinned to revision
 `777528f19a58e794c9954a42f433373472ec57f8`, staged compiler
 `3.9.0-bin-SNAPSHOT-git-777528f`, and Temurin JDK `21.0.13+9` with
-`--release 21`. The compiler JAR SHA-256 is
-`b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f`; the
-`java` binary SHA-256 is
+`--release 21`. `oracle.json` retains the staged compiler JAR SHA-256 as an
+informational receipt because sbt may package the same pinned sources with
+different ZIP metadata. The `java` binary SHA-256 is
 `9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`.
+The compiler JAR receipt currently recorded is
+`b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f`; the
+reproduction comparison deliberately ignores only that field.
 `oracle.json` records the exact producer and client source hashes, the six
 producer artifact hashes for each ordering, classfile/TASTy UUID links, and
-snapshot hashes.
+hashes for normalized snapshots. Normalization replaces only the dump's input
+path and javap modification-date header; bytecode offsets, constant-pool
+references, artifact checksums, and the rest of each dump remain compared.
 
 The two producer inputs are separate frozen files under
 [`tests/fixtures/jvm_tasty_mixed_origin_constructor_arguments`](../tests/fixtures/jvm_tasty_mixed_origin_constructor_arguments):
@@ -44,6 +49,10 @@ export TMPDIR="$PWD/target/issue-2011/tmp"
 export DOTTY_ISSUE_2011_ORACLE_DIR="$PWD/target/issue-2011/oracle"
 tests/fixtures/jvm_tasty_mixed_origin_constructor_arguments/rebuild-oracle.sh
 ```
+
+The rebuild first runs `test_oracle_tools.py`, which verifies that paths and
+dates normalize while bytecode evidence is preserved, and that manifest
+comparison ignores only the informational compiler JAR digest.
 
 The clients compile against only the matching Scala producer output and Scala
 runtime. Each creates `Counter(7)`, invokes its one factory method with seed

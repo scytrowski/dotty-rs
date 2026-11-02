@@ -125,8 +125,6 @@ java_version = subprocess.run([str(java), "-version"], capture_output=True, text
 javap_version = subprocess.check_output([str(javap), "-version"], text=True).strip()
 compiler_hash = sha(compiler_jar)
 java_hash = sha(java)
-if compiler_hash != "b56626390028bd06347e3549cf271a03ca7d2e7be491ceff630ccee94e439f4f":
-    raise ValueError(f"unexpected Scala compiler JAR hash: {compiler_hash}")
 if java_hash != "9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155":
     raise ValueError(f"unexpected JDK java binary hash: {java_hash}")
 if "21.0.13" not in (java_version.stdout + java_version.stderr):
@@ -139,8 +137,12 @@ manifest = {
         "scala_revision": revision,
         "scala_expected_revision": "777528f19a58e794c9954a42f433373472ec57f8",
         "scalac_version": "3.9.0-bin-SNAPSHOT-git-777528f",
-        "scalac_jar_sha256": compiler_hash,
-        "jdk_version": (java_version.stdout + java_version.stderr).strip().splitlines()[0],
+        "scalac_jar_sha256_informational": compiler_hash,
+        "jdk_version": next(
+            line.strip()
+            for line in (java_version.stdout + java_version.stderr).splitlines()
+            if "version" in line.lower() and "picked up" not in line.lower()
+        ),
         "java_sha256": java_hash,
         "javap_version": javap_version,
         "classfile_major": 65,
