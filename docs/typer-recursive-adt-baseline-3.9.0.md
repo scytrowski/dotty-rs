@@ -27,6 +27,17 @@ control, and checks the source, output, diagnostic, and classification hashes.
 The positive typed snapshot is committed as
 [`Expr.scala39-typed-tree.txt`](../crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/Expr.scala39-typed-tree.txt).
 
+The Rust baseline was observed against authoritative merged `main` revision
+[`1ab217d716f47d68ba46915cfdea2fb842fcb173`](https://github.com/scytrowski/dotty-rs/commit/1ab217d716f47d68ba46915cfdea2fb842fcb173)
+(merge of PR #2033, the base of this issue PR), using Rust `1.98.1`
+(`rustc 1.98.1 (48a229cea 2026-09-01)`, Cargo
+`1.98.1 (797e8a9bc 2026-08-05)`) and Temurin JDK `21.0.8+9`. The authentic
+resolver's [`Product.tasty`](../crates/dotty-tasty/tests/fixtures/scala3-library/scala/Product.tasty)
+fixture has SHA-256
+`ad9302597f965b7e218f34b83de00381b64d83487aae80bcc410d67233751e3c`.
+These pins identify the baseline independently of later changes to the
+checkout or the blockers tracked by #2035 and #2036.
+
 Scala's typed output establishes these generated declarations and identities:
 
 - `Expr` is a source sealed trait; `Num` and `Succ` are distinct source case
@@ -85,15 +96,26 @@ recorded as deferred because the root never reaches the call. The separate
 pins these source locations independently of the two-root numerator.
 
 A separate fresh session characterizes source declarations without changing
-the root attempts. Its
-[`class evidence`](../crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/rust-class-evidence.tsv)
-records canonical `Expr`, `Num`, `Succ`, companion, generated `unapply`, source
-field, and `_1` identities. `Num` completes with `unapply: (Num) => Num`,
-`_1: Int`, and `Object`, `Expr`, and `Product` parents. `Succ` preserves its
-canonical source field and direct source `Expr` edge, but generated unapply,
-selector, and class-info completion all stop at the same
-`UnsupportedProduct1FieldType` error. The separate probe does not alter the
-two-session baseline.
+the root attempts. Before completion, the probe retrieves each generated
+`x$1` using `(unapply, source, class-tree)` in the derived-symbol index. It
+asserts that the formal is a synthetic `Parameter`, belongs to that exact
+generated unapply, resolves in its method scope, carries the source origin
+associated with the class tree, and is distinct from the class, source field,
+and other case-class formal. Successful `Num.unapply` input and result
+`TypeRef`s target the canonical `Num` symbol; `Num._1` targets canonical
+`Int`; and the ordered `Num` parents target canonical `Object`, source `Expr`,
+and TASTy-loaded `Product` symbols. The source `Succ.inner` type resolves to
+the canonical `Expr` trait, while its completion remains deferred behind the
+authentic error. These identities and relationships are frozen in its
+[`class evidence`](../crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/rust-class-evidence.tsv).
+
+The receipt records canonical `Expr`, `Num`, `Succ`, companion, generated
+`unapply`, source field, synthetic formal, and `_1` identities. `Num` completes
+with `unapply: (Num) => Num`, `_1: Int`, and `Object`, `Expr`, and `Product`
+parents. `Succ` preserves its canonical source field and direct source `Expr`
+edge, but generated unapply, selector, and class-info completion all stop at
+the same `UnsupportedProduct1FieldType` error. The separate probe does not
+alter the two-session baseline.
 
 The observations distinguish Scala-valid source from Rust support: the
 positive Scala source is **Rust-valid but deferred** at the whole-method
@@ -119,3 +141,30 @@ the `Product1._1: Expr`/parent completion contracts, tracked separately by
 issues [#2035](https://github.com/scytrowski/dotty-rs/issues/2035) and
 [#2036](https://github.com/scytrowski/dotty-rs/issues/2036). The binder and
 explicit recursive call remain later whole-method checkpoints.
+
+## Protected regression contract
+
+The focused audit continues to name and verify the existing acceptance sets:
+the checks are run by the existing
+[`Typer focused audit workflow`](../.github/workflows/typer-focused-audit.yml).
+
+- **Box/Flagged/Event: 2/2 each** — the frozen positive receipts are
+  [`source-case-class-match-positive-3.9.0.tsv`](typer-source-case-class-match-positive-3.9.0.tsv)
+  and [`typer-sealed-adt-e2e-positive-3.9.0.tsv`](typer-sealed-adt-e2e-positive-3.9.0.tsv).
+  The workflow runs `cargo +1.98.1 test -p dotty-typer --test source_case_class_match`
+  and the sealed Event baseline tests.
+- **Lexical closures: 6/6** — roots and expected identities are pinned in
+  [`six-root-gate.tsv`](../crates/dotty-typer/tests/fixtures/lexical-closure-contract/six-root-gate.tsv);
+  the focused workflow runs the exact two-session gate
+  `six_frozen_roots_type_as_complete_methods_in_two_independent_sessions` and
+  its rollback group.
+- **Inherited members: 4/4** — the Rust source receipt is
+  [`four-root-baseline.tsv`](../crates/dotty-typer/tests/fixtures/inherited-members-3.9.0/four-root-baseline.tsv),
+  and the workflow verifies the exact
+  `cargo +1.98.1 test -p dotty-typer --test inherited_members_baseline` log.
+- **Ordinary stdlib cohorts: 16/25 main and 15/25 analysis** — the 25+25
+  identities and two-pass status are pinned in
+  [`typer-sealed-adt-e2e-cohorts-3.9.0.tsv`](typer-sealed-adt-e2e-cohorts-3.9.0.tsv)
+  and [`typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv`](typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv).
+  The focused audit runs deterministic passes and verifies the exact cohort
+  receipts. The full Scala corpus remains disabled.
