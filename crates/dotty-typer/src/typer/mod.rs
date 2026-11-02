@@ -36831,6 +36831,637 @@ mod tests {
         );
     }
 
+    fn issue_1999_late_failure_projection(
+        typer: &SourceTyper<'_>,
+        parsed: &dotty_parser::ParseResult,
+    ) -> Vec<(&'static str, String)> {
+        let source = typer.source;
+        let typed_nodes = typer
+            .typed_ast()
+            .iter()
+            .map(|(tree, node)| (tree.index(), node.clone()))
+            .collect::<Vec<_>>();
+        let mappings = parsed
+            .ast
+            .iter()
+            .map(|(tree, _)| {
+                (
+                    tree.index(),
+                    typer.source_typed_index().get(source, tree),
+                    typer.function_literal_method_at(source, tree),
+                    typer.function_literal_definition_at(source, tree),
+                    typer.function_literal_parameter_symbol_at(source, tree),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut local_scopes = typer
+            .local_scopes
+            .iter()
+            .map(|((source, tree), scope)| (source.index(), tree.index(), scope.index()))
+            .collect::<Vec<_>>();
+        local_scopes.sort_unstable();
+        let mut local_symbols = typer
+            .local_symbols
+            .iter()
+            .map(|((source, tree), symbol)| (source.index(), tree.index(), symbol.index()))
+            .collect::<Vec<_>>();
+        local_symbols.sort_unstable();
+        let mut pattern_bindings = typer
+            .pattern_bindings
+            .by_tree
+            .iter()
+            .map(|((source, tree), symbol)| (source.index(), tree.index(), symbol.index()))
+            .collect::<Vec<_>>();
+        pattern_bindings.sort_unstable();
+        let mut pattern_scopes = typer
+            .pattern_bindings
+            .scope_by_symbol
+            .iter()
+            .map(|(symbol, scope)| (symbol.index(), scope.index()))
+            .collect::<Vec<_>>();
+        pattern_scopes.sort_unstable();
+        let expression_scopes = typer
+            .expression_scopes
+            .iter()
+            .map(|frame| {
+                (
+                    frame.scope.index(),
+                    frame.parent.map(|parent| parent.index()),
+                    frame.is_block_scope,
+                    frame.is_case_scope,
+                    frame
+                        .imports
+                        .iter()
+                        .map(|(tree, context)| {
+                            (
+                                tree.index(),
+                                context.lexical.index(),
+                                context.owner.index(),
+                                context.local_scopes.map(|scope| scope.index()),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let active_local_type_scopes = typer
+            .active_local_type_scopes
+            .iter()
+            .map(|frame| {
+                (
+                    frame.context.index(),
+                    frame.scope.index(),
+                    frame
+                        .body
+                        .map(|span| (span.source().index(), span.span().range())),
+                )
+            })
+            .collect::<Vec<_>>();
+        let active_local_import_scopes = typer
+            .active_local_import_scopes
+            .iter()
+            .map(|(context, scope)| (context.index(), scope.map(|scope| scope.index())))
+            .collect::<Vec<_>>();
+        let active_local_type_binders = typer
+            .active_local_type_binders
+            .iter()
+            .map(|(ty, binders)| {
+                (
+                    ty.index(),
+                    binders
+                        .iter()
+                        .map(|symbol| symbol.index())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let initializing_local_symbols = {
+            let mut symbols = typer
+                .initializing_local_symbols
+                .iter()
+                .map(|symbol| symbol.index())
+                .collect::<Vec<_>>();
+            symbols.sort_unstable();
+            symbols
+        };
+        let inferred_local_lazy_types_in_progress = {
+            let mut symbols = typer
+                .inferred_local_lazy_types_in_progress
+                .iter()
+                .map(|symbol| symbol.index())
+                .collect::<Vec<_>>();
+            symbols.sort_unstable();
+            symbols
+        };
+        let inferred_field_types_in_progress = {
+            let mut symbols = typer
+                .inferred_field_types_in_progress
+                .iter()
+                .map(|symbol| symbol.index())
+                .collect::<Vec<_>>();
+            symbols.sort_unstable();
+            symbols
+        };
+        let inferred_method_results_in_progress = {
+            let mut symbols = typer
+                .inferred_method_results_in_progress
+                .iter()
+                .map(|symbol| symbol.index())
+                .collect::<Vec<_>>();
+            symbols.sort_unstable();
+            symbols
+        };
+        vec![
+            (
+                "store checkpoint",
+                format!("{:?}", typer.store.checkpoint()),
+            ),
+            ("symbols and infos", format!("{:?}", typer.store.symbols)),
+            (
+                "all scopes and buckets",
+                format!("{:?}", typer.store.scopes),
+            ),
+            ("types", format!("{:?}", typer.store.types)),
+            ("annotations", format!("{:?}", typer.store.annotations)),
+            (
+                "resolver checkpoint",
+                format!("{:?}", typer.resolver.checkpoint()),
+            ),
+            (
+                "typed checkpoint",
+                format!("{:?}", typer.typed_ast().checkpoint()),
+            ),
+            ("typed nodes", format!("{typed_nodes:?}")),
+            ("source typed mappings", format!("{mappings:?}")),
+            ("local scopes", format!("{local_scopes:?}")),
+            ("local symbols", format!("{local_symbols:?}")),
+            ("pattern bindings", format!("{pattern_bindings:?}")),
+            ("pattern scopes", format!("{pattern_scopes:?}")),
+            ("expression scopes", format!("{expression_scopes:?}")),
+            (
+                "active local type scopes",
+                format!("{active_local_type_scopes:?}"),
+            ),
+            (
+                "active local import scopes",
+                format!("{active_local_import_scopes:?}"),
+            ),
+            (
+                "active local type binders",
+                format!("{active_local_type_binders:?}"),
+            ),
+            (
+                "initializing local symbols",
+                format!("{initializing_local_symbols:?}"),
+            ),
+            (
+                "inferred local lazy types",
+                format!("{inferred_local_lazy_types_in_progress:?}"),
+            ),
+            (
+                "inferred field types",
+                format!("{inferred_field_types_in_progress:?}"),
+            ),
+            (
+                "inferred method results",
+                format!("{inferred_method_results_in_progress:?}"),
+            ),
+        ]
+    }
+
+    fn assert_issue_1999_projection_unchanged(
+        before: &[(&'static str, String)],
+        after: &[(&'static str, String)],
+        message: &str,
+    ) {
+        let changed = before
+            .iter()
+            .zip(after)
+            .filter_map(|((name, before), (_, after))| (before != after).then_some(*name))
+            .collect::<Vec<_>>();
+        assert!(changed.is_empty(), "{message}: changed {changed:?}");
+    }
+
+    #[test]
+    fn issue_1999_late_event_result_failure_observes_both_cases_before_atomic_rollback() {
+        let source_text =
+            include_str!("../../tests/fixtures/source-sealed-adt-match-3.9.0/Event.scala")
+                .replace(
+                    "object Matcher:\n",
+                    "object Matcher:\n  def prior(event: Event): Int = 1\n\n",
+                )
+                .replace(
+                    "def extract(event: Event): Int",
+                    "def extract(event: Event): Boolean",
+                );
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(&source_text);
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "extract" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .expect("mutated extract root");
+        let (rhs, cases) = match &parsed.ast.get(method).kind {
+            TreeKind::DefDef(definition) => {
+                let rhs = definition.rhs.expect("extract has a body");
+                let TreeKind::Match(matched) = &parsed.ast.get(rhs).kind else {
+                    panic!("extract body remains a Match")
+                };
+                (rhs, matched.cases.clone())
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(cases.len(), 2);
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JDK 21 is configured");
+        let classpath = dotty_classloader::classloader::CompositeClassPath::new(vec![
+            Box::new(dotty_classloader::classloader::DirectoryClassPath::new(
+                fixture,
+            )),
+            Box::new(
+                dotty_classloader::classloader::JdkClassPath::new(
+                    std::path::PathBuf::from(java_home).join("jmods"),
+                )
+                .expect("JDK module path"),
+            ),
+        ]);
+        let resolver = dotty_classloader::classloader::ClasspathSymbolResolver::new(
+            classpath,
+            definitions,
+            dotty_classloader::classloader::LoadingSession::new(),
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let prior = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if typer.store.names.resolve(definition.name.as_name().text()) == "prior" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .expect("prior successful sibling method");
+        typer
+            .type_method_definition(prior)
+            .expect("prior successful sibling remains available during rollback");
+        let before_projection = issue_1999_late_failure_projection(&typer, &parsed);
+        let before_resolver = typer.resolver.checkpoint();
+        let before_typed = typer.typed_ast().checkpoint();
+        let before_index = typer.source_typed_index().len();
+        let before_local_scopes = typer.local_scopes.len();
+        let before_pattern_bindings = typer.pattern_bindings.by_tree.len();
+        let before_pattern_scope_bindings = typer.pattern_bindings.scope_by_symbol.len();
+        let before_expression_scopes = typer.expression_scopes.len();
+        let observed = Rc::new(RefCell::new(None));
+        let observation = Rc::clone(&observed);
+        let parsed_ref = &parsed;
+        let observed_cases = cases.clone();
+        typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+            if typer.source_typed_index().get(source, rhs).is_none() {
+                return;
+            }
+            let bindings = parsed_ref
+                .ast
+                .iter()
+                .filter_map(|(tree, node)| {
+                    let symbol = typer.pattern_binding_symbol_at(source, tree)?;
+                    let name = match &node.kind {
+                        TreeKind::Bind(binding) => typer.store.names.resolve(binding.name.text()),
+                        TreeKind::Ident(ident) => typer.store.names.resolve(ident.name.text()),
+                        other => {
+                            panic!("Event pattern binding has unexpected source shape: {other:?}")
+                        }
+                    };
+                    Some((
+                        name.to_owned(),
+                        issue_1972_symbol_type(typer.store, symbol, definitions),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                bindings,
+                [
+                    ("id".to_owned(), "Int".to_owned()),
+                    ("code".to_owned(), "Int".to_owned())
+                ]
+            );
+            let typed_cases = observed_cases
+                .iter()
+                .filter_map(|case| typer.source_typed_index().get(source, *case))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                typed_cases.len(),
+                2,
+                "both case roots were typed before result conformance failed"
+            );
+            assert!(
+                typer.source_typed_index().get(source, rhs).is_some(),
+                "the Match was typed before result conformance failed"
+            );
+            assert!(
+                typer.typed_ast().checkpoint() != before_typed,
+                "the failing transaction built typed nodes"
+            );
+            *observation.borrow_mut() = Some((bindings, typed_cases.len()));
+        }));
+
+        let error = typer
+            .type_method_definition(method)
+            .expect_err("the wrong declared result fails after Match typing");
+        assert!(
+            matches!(error, TyperError::ExpectedExpressionTypeMismatch { .. }),
+            "{error:?}"
+        );
+        assert_eq!(observed.borrow().as_ref().map(|(_, count)| *count), Some(2));
+        assert_issue_1999_projection_unchanged(
+            &before_projection,
+            &issue_1999_late_failure_projection(&typer, &parsed),
+            "rollback restores complete semantic contents and preserves the prior root",
+        );
+        assert_eq!(typer.resolver.checkpoint(), before_resolver);
+        assert_eq!(typer.typed_ast().checkpoint(), before_typed);
+        assert_eq!(typer.source_typed_index().len(), before_index);
+        assert_eq!(typer.local_scopes.len(), before_local_scopes);
+        assert_eq!(
+            typer.pattern_bindings.by_tree.len(),
+            before_pattern_bindings
+        );
+        assert_eq!(
+            typer.pattern_bindings.scope_by_symbol.len(),
+            before_pattern_scope_bindings
+        );
+        assert_eq!(typer.expression_scopes.len(), before_expression_scopes);
+        assert!(typer.source_typed_index().get(source, method).is_none());
+        assert!(typer.source_typed_index().get(source, prior).is_some());
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
+        for case in cases {
+            assert!(typer.source_typed_index().get(source, case).is_none());
+        }
+        for (tree, _) in parsed.ast.iter() {
+            assert!(typer.pattern_binding_symbol_at(source, tree).is_none());
+        }
+        let retry = typer
+            .type_method_definition(method)
+            .expect_err("retry reports the same post-Match result mismatch");
+        assert_eq!(format!("{retry:?}"), format!("{error:?}"));
+        assert_issue_1999_projection_unchanged(
+            &before_projection,
+            &issue_1999_late_failure_projection(&typer, &parsed),
+            "retry preserves every semantic value and the earlier successful root",
+        );
+    }
+
+    #[test]
+    fn issue_1999_structural_corruption_restores_then_recovers_in_same_typer() {
+        let fixture_source =
+            include_str!("../../tests/fixtures/source-sealed-adt-match-3.9.0/Event.scala");
+        let source_text = fixture_source
+            .replace("sealed trait Event", "sealed trait Event\ntrait Other")
+            .replace(
+                "object Matcher:\n",
+                "object Matcher:\n  def prior(event: Event): Int = 1\n\n",
+            );
+        let mut receipts = Vec::new();
+        for corruption in [
+            "forged companion",
+            "foreign _1 owner",
+            "unrelated parent",
+            "duplicate parent",
+            "invalid parent TypeId",
+            "missing parent ClassInfo",
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(&source_text);
+            let tree_named = |name: &str| {
+                parsed
+                    .ast
+                    .iter()
+                    .find_map(|(tree, node)| match &node.kind {
+                        TreeKind::DefDef(definition)
+                            if store.names.resolve(definition.name.as_name().text()) == name =>
+                        {
+                            Some(tree)
+                        }
+                        _ => None,
+                    })
+                    .expect("source method")
+            };
+            let prior = tree_named("prior");
+            let extract = tree_named("extract");
+            let classify = tree_named("classify");
+            let symbol_named = |name: &str| {
+                parsed
+                    .ast
+                    .iter()
+                    .find_map(|(tree, node)| match &node.kind {
+                        TreeKind::TypeDef(definition)
+                            if store.names.resolve(definition.name.as_name().text()) == name =>
+                        {
+                            index.symbol_at(source, tree)
+                        }
+                        _ => None,
+                    })
+                    .expect("source class symbol")
+            };
+            let event = symbol_named("Event");
+            let other = symbol_named("Other");
+            let created = symbol_named("Created");
+            let deleted = symbol_named("Deleted");
+            let created_links = store.symbols.get(created).links;
+            let deleted_companion = store.symbols.get(deleted).links.companion.unwrap();
+            let class_scope = index.scope_of(created).expect("Created scope");
+            let selector_name = store.names.intern("_1");
+            let selector = store
+                .scopes
+                .get(class_scope)
+                .lookup(&dotty_core::Name::new(
+                    selector_name,
+                    dotty_core::Namespace::Term,
+                ))
+                .expect("Created._1 selector");
+            let selector_owner = store.symbols.get(selector).owner;
+            let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library");
+            let java_home = std::env::var_os("JAVA_HOME").expect("JDK 21 is configured");
+            let classpath = dotty_classloader::classloader::CompositeClassPath::new(vec![
+                Box::new(dotty_classloader::classloader::DirectoryClassPath::new(
+                    fixture,
+                )),
+                Box::new(
+                    dotty_classloader::classloader::JdkClassPath::new(
+                        std::path::PathBuf::from(java_home).join("jmods"),
+                    )
+                    .expect("JDK module path"),
+                ),
+            ]);
+            let resolver = dotty_classloader::classloader::ClasspathSymbolResolver::new(
+                classpath,
+                definitions,
+                dotty_classloader::classloader::LoadingSession::new(),
+            );
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            )
+            .with_resolver(Box::new(resolver));
+            let prior_typed = typer
+                .type_method_definition(prior)
+                .expect("prior successful root is retained");
+            typer.complete_symbol(event).expect("canonical Event");
+            typer.complete_symbol(other).expect("canonical Other");
+            let SymbolInfo::Complete(original_event_info) = *typer.store.symbols.info(event) else {
+                panic!("Event ClassInfo precompleted")
+            };
+            let SymbolInfo::Complete(event_info_id) = *typer.store.symbols.info(event) else {
+                panic!("Event ClassInfo is complete")
+            };
+            let Some(Type::ClassInfo(mut event_info)) =
+                typer.store.types.try_get(event_info_id).cloned()
+            else {
+                panic!("Event is represented by ClassInfo")
+            };
+
+            match corruption {
+                "forged companion" => {
+                    typer.store.symbols.get_mut(created).links.companion = Some(deleted_companion);
+                }
+                "foreign _1 owner" => {
+                    typer.store.symbols.get_mut(selector).owner = Some(deleted);
+                }
+                "unrelated parent" => {
+                    let parent = typer.store.types.alloc(Type::TypeRef {
+                        prefix: definitions.no_prefix,
+                        target: dotty_core::types::TypeRefTarget::Symbol(other),
+                    });
+                    event_info.parents = vec![parent];
+                }
+                "duplicate parent" => {
+                    event_info.parents = vec![definitions.object_type, definitions.object_type];
+                }
+                "invalid parent TypeId" => {
+                    event_info.parents = vec![typer.store.types.reserve().id()];
+                }
+                "missing parent ClassInfo" => event_info.parents.clear(),
+                _ => unreachable!(),
+            }
+            if corruption.contains("parent") || corruption == "missing parent ClassInfo" {
+                let malformed = typer.store.types.alloc(Type::ClassInfo(event_info));
+                typer
+                    .store
+                    .symbols
+                    .set_info(event, SymbolInfo::Complete(malformed));
+            }
+            let before = issue_1999_late_failure_projection(&typer, &parsed);
+            let error = typer
+                .type_method_definition(extract)
+                .expect_err("structural corruption rejects a whole source DefDef");
+            if corruption.contains("parent") || corruption == "missing parent ClassInfo" {
+                assert!(
+                    matches!(&error, TyperError::MalformedClassInfo { symbol, .. } if *symbol == event),
+                    "{corruption}: {error:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        error,
+                        TyperError::SymbolSourceKindMismatch { .. }
+                            | TyperError::ExtractorQualifierNotFound { .. }
+                            | TyperError::ExtractorQualifierNotValueLike { .. }
+                            | TyperError::ExtractorUnapplyNotFound { .. }
+                            | TyperError::ExtractorResultMemberNotFound { .. }
+                            | TyperError::DeclarationContextMissing { .. }
+                    ),
+                    "{corruption}: {error:?}"
+                );
+            }
+            assert_issue_1999_projection_unchanged(
+                &before,
+                &issue_1999_late_failure_projection(&typer, &parsed),
+                "structural whole-method rollback preserves prior root and all state",
+            );
+            let retry = typer
+                .type_method_definition(extract)
+                .expect_err("same complete source method fails on retry");
+            assert_eq!(format!("{retry:?}"), format!("{error:?}"));
+            assert_issue_1999_projection_unchanged(
+                &before,
+                &issue_1999_late_failure_projection(&typer, &parsed),
+                "structural whole-method retry leaves all state unchanged",
+            );
+
+            match corruption {
+                "forged companion" => typer.store.symbols.get_mut(created).links = created_links,
+                "foreign _1 owner" => typer.store.symbols.get_mut(selector).owner = selector_owner,
+                _ => typer
+                    .store
+                    .symbols
+                    .set_info(event, SymbolInfo::Complete(original_event_info)),
+            }
+            assert!(typer.source_typed_index().get(source, extract).is_none());
+            assert!(typer.source_typed_index().get(source, classify).is_none());
+            assert_eq!(
+                typer.source_typed_index().get(source, prior),
+                Some(prior_typed)
+            );
+            typer
+                .type_method_definition(extract)
+                .expect("restored uncached extract types in the same SourceTyper");
+            typer
+                .type_method_definition(classify)
+                .expect("restored uncached classify types in the same SourceTyper");
+            assert!(typer.source_typed_index().get(source, extract).is_some());
+            assert!(typer.source_typed_index().get(source, classify).is_some());
+            receipts.push(format!(
+                "{corruption}\t{}\textract+classify",
+                issue_1999_error_category(&error)
+            ));
+        }
+        assert_eq!(
+            format!(
+                "corruption\tfirst error\trecovered roots\n{}\n",
+                receipts.join("\n")
+            ),
+            include_str!(
+                "../../tests/fixtures/source-sealed-adt-match-3.9.0/rust-structural-lifecycle.tsv"
+            )
+        );
+    }
+
+    fn issue_1999_error_category(error: &TyperError) -> &'static str {
+        match error {
+            TyperError::MalformedClassInfo { .. } => "MalformedClassInfo",
+            TyperError::SymbolSourceKindMismatch { .. } => "SymbolSourceKindMismatch",
+            TyperError::ExtractorQualifierNotFound { .. } => "ExtractorQualifierNotFound",
+            TyperError::ExtractorQualifierNotValueLike { .. } => "ExtractorQualifierNotValueLike",
+            TyperError::ExtractorUnapplyNotFound { .. } => "ExtractorUnapplyNotFound",
+            TyperError::ExtractorResultMemberNotFound { .. } => "ExtractorResultMemberNotFound",
+            TyperError::DeclarationContextMissing { .. } => "DeclarationContextMissing",
+            other => panic!("unexpected structural lifecycle error: {other:?}"),
+        }
+    }
+
     type Issue1972RetryProjection = (
         Vec<(u32, String, String)>,
         Vec<(u32, String, String, String)>,

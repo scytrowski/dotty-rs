@@ -1,0 +1,7 @@
+corruption	first error	recovered roots
+forged companion	ExtractorQualifierNotValueLike	extract+classify
+foreign _1 owner	ExtractorResultMemberNotFound	extract+classify
+unrelated parent	MalformedClassInfo	extract+classify
+duplicate parent	MalformedClassInfo	extract+classify
+invalid parent TypeId	MalformedClassInfo	extract+classify
+missing parent ClassInfo	MalformedClassInfo	extract+classify
