@@ -5,6 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dotty_classloader::classloader::{
     BinaryName, ClassLoader, ClassPathEntry, ClasspathSymbolResolver, CompositeClassPath,
@@ -16,6 +17,16 @@ use dotty_tasty_unpickler::tasty_unpickler::{TastySession, TastyUnpickler, Unpic
 
 const RECEIPT: &str =
     include_str!("../../../docs/classloader-semantic-tasty-convergence-ii/member-completion.tsv");
+
+static NEXT_TEMP_LAYOUT: AtomicU64 = AtomicU64::new(0);
+
+struct TemporaryLayout(PathBuf);
+
+impl Drop for TemporaryLayout {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 
 const MEMBERS: &[(&str, &str, &str, u32)] = &[
     (
@@ -393,9 +404,14 @@ fn legacy_method(id: &str) -> (String, String) {
     // the exact original bytes in their package-relative classpath layout for
     // the legacy reader; no fixture is generated or semantically rewritten.
     let layout = if id == "info-wrapped-m" {
-        let dir = PathBuf::from(std::env::var_os("TMPDIR").expect("isolated TMPDIR"))
-            .join(format!("semantic-layout-{}", std::process::id()));
-        let package = dir.join("me/cytrowski/tastyfixtures/semantic");
+        let dir = std::env::temp_dir().join(format!(
+            "dotty-semantic-layout-{}-{}",
+            std::process::id(),
+            NEXT_TEMP_LAYOUT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).expect("unique temporary package root");
+        let layout = TemporaryLayout(dir);
+        let package = layout.0.join("me/cytrowski/tastyfixtures/semantic");
         fs::create_dir_all(&package).expect("temporary package layout");
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../dotty-tasty-unpickler/tests/fixtures/semantic");
@@ -409,23 +425,21 @@ fn legacy_method(id: &str) -> (String, String) {
             package.join("InfoBase.tasty"),
         )
         .unwrap();
-        Some(dir)
+        Some(layout)
     } else {
         None
     };
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
     let mut loader = ClassLoader::with_definitions(
-        classpath_with_extra(layout.clone()),
+        classpath_with_extra(layout.as_ref().map(|layout| layout.0.clone())),
         &mut store,
         definitions,
         LoadingSession::new(),
     );
     let loaded = loader.load_class(&BinaryName::from_internal(lookup));
     drop(loader);
-    if let Some(layout) = layout {
-        let _ = fs::remove_dir_all(layout);
-    }
+    drop(layout);
     let owner = match loaded {
         Ok(owner) => owner,
         Err(error) => {
