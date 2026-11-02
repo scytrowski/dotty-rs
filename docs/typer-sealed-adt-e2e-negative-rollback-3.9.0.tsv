@@ -1,0 +1,16 @@
+case	source_root	rust_first_error	scala_result	scala_first_severity	rollback_and_retry
+created_bool_literal	Event.scala#tree60@266..403	PatternTypeMismatch	rejected	Error	failed root retried; both canonical roots recovered in the same typer
+deleted_bool_literal	Event.scala#tree60@266..403	PatternTypeMismatch	rejected	Error	failed root retried; both canonical roots recovered in the same typer
+created_zero_arity	Event.scala#tree35@150..259	ExtractorPatternArityUnsupported	rejected	Error	failed root retried; both canonical roots recovered in the same typer
+deleted_two_arity	Event.scala#tree37@150..269	ExtractorProductSelectorCountMismatch	rejected	Error	failed root retried; both canonical roots recovered in the same typer
+wrong_declared_result_after_cases	Event.scala#tree36@150..266	ExpectedExpressionTypeMismatch	rejected	Error	partial Match and id/code binders observed; full rollback, stable retry, and both roots recovered
+cross_case_binder_escape	Event.scala#tree36@150..260	TermNameNotFound	rejected	Error	failed root retried; both canonical roots recovered in the same typer
+unrelated_string_extractor	Event.scala#tree53@216..357	ExtractorPatternConstraintDeferred	rejected	Warning	failed root retried; both canonical roots recovered in the same typer
+same_spelling_wrong_unapply_input	Event.scala#tree47@203..323	ExtractorUnapplyNotFound	rejected	Warning	failed root retried; both canonical roots recovered in the same typer
+non_event_variant	Event.scala#tree40@162..274	ExtractorPatternConstraintDeferred	rejected	Warning	failed root retried; both canonical roots recovered in the same typer
+structural:forged companion	Event.scala#tree36+tree60	ExtractorQualifierNotValueLike	not applicable	not applicable	recovered roots: extract+classify
+structural:foreign _1 owner	Event.scala#tree36+tree60	ExtractorResultMemberNotFound	not applicable	not applicable	recovered roots: extract+classify
+structural:unrelated parent	Event.scala#tree36+tree60	MalformedClassInfo	not applicable	not applicable	recovered roots: extract+classify
+structural:duplicate parent	Event.scala#tree36+tree60	MalformedClassInfo	not applicable	not applicable	recovered roots: extract+classify
+structural:invalid parent TypeId	Event.scala#tree36+tree60	MalformedClassInfo	not applicable	not applicable	recovered roots: extract+classify
+structural:missing parent ClassInfo	Event.scala#tree36+tree60	MalformedClassInfo	not applicable	not applicable	recovered roots: extract+classify

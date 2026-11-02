@@ -836,6 +836,11 @@ fn sealed_event_extract_and_classify_are_complete_owned_methods() {
             .expect("two-root before/after receipt header")
             .1
     );
+    for (session, rows) in [("first", &first), ("second", &second)] {
+        for (name, receipt) in rows {
+            println!("ISSUE2000_POSITIVE\t{session}\t{name}\t{receipt}");
+        }
+    }
     for (name, receipt) in first {
         println!("ISSUE1998_COMPLETE_ROOT\t{name}\t{receipt}");
     }
