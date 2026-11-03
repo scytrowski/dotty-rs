@@ -12,9 +12,12 @@ default loader, add a resolver policy, or add an operation to `SymbolResolver`.
 - Positive input: original
   `crates/dotty-classloader/tests/fixtures/tasty_visibility/me/cytrowski/tastyfixtures/visibility/Open.tasty`,
   SHA-256 `49286e74a3d3693b08d2a29575f23089f6be5c486231390059f43c19a8929894`.
+  Its checked-in source is
+  `crates/dotty-classloader/tests/fixtures/tasty_visibility/Visibility.scala`.
 - Ordered test classpath: the `tasty_visibility` fixture directory, then
   JDK 21 `jmods` (`JAVA_HOME/jmods`, `java.base.jmod` SHA-256
   `fad51abeafe6a1ecb0c2696a88684dc417cc534b74b5d865042df7381d9d0e91`).
+  The local JDK was Eclipse Temurin `21.0.13+9`.
   Tests bootstrap one `Definitions` value per `SemanticStore`; each fresh run
   gets a fresh store and `LoadingSession`.
 
@@ -100,6 +103,12 @@ The constructor result intentionally differs: legacy resolves to canonical
 `scala.Unit`, while semantic `Open` uses the class itself. This is retained as
 an explicit delta rather than normalized away.
 
+The test checks in both runs' normalized output in
+[`resolver-handoff-receipts.tsv`](resolver-handoff-receipts.tsv) and verifies
+that file against observations on each execution. Numeric IDs are asserted to
+differ between the independent adapters but are not written into or compared
+by the normalized receipts.
+
 The same-session policy for B2 is: the first successful selected request
 publishes one canonical symbol in `LoadingSession`; another selected semantic
 attempt from a different loader over that session returns a typed
@@ -119,6 +128,28 @@ as session-wide facts.
 | Error restoration | Resolver missing-name failure leaves its classpath and session usable; subsequent ordinary request succeeds. Semantic rollback/collision tests assert exact checkpoint equality and absence/presence of resolved/repository/cache entries. |
 | Explicit selection/no fallback | Pre-change boundary evidence: no resolver semantic operation exists; B2 must call one explicit-name method and return its semantic error directly. |
 | Package authority and origin | Assert class owner equals canonical session package, Object equals canonical `Definitions::object_class`, and `origin` is the selected resource. |
+
+## Validation record
+
+Executed with Rust `1.98.1 (48a229cea 2026-09-01)`, JDK 21 above,
+task-isolated `TMPDIR` and `CARGO_TARGET_DIR`, `CARGO_PROFILE_TEST_DEBUG=0`,
+`CARGO_INCREMENTAL=0`, and serial Cargo jobs.
+
+- Passed: `cargo fmt --all -- --check`.
+- Passed: `python3 tools/check-frontend-boundaries.py`.
+- Passed: `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+- Passed: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`.
+- Passed: `cargo test -p dotty-classloader --locked -j1`, including the new
+  resolver handoff, identity collision, rollback and two-run receipt controls.
+- Not completed: `DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --workspace
+  --all-targets --locked -j1` stopped while compiling
+  `tests/jvm_stateful_class_contract.rs` with
+  `rustc-LLVM ERROR: IO failure on output stream: No space left on device`;
+  the shared temporary filesystem reached 100% usage. This result is not a
+  pass. The classloader acceptance tests did run with JDK 21 and its
+  `java.base.jmod`.
+- The original agent trace was not present in the supplied issue/checkout
+  context, so no trace was generated or represented as available.
 
 No resolver delegation is demonstrated by B1. The resolver-facing B2 API,
 typed error boundary, callback ordering and production behavior remain future
