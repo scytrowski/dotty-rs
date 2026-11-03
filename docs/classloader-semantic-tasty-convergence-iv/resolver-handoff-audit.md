@@ -84,6 +84,18 @@ pub(crate) fn load_semantic_class_for_member(
 ) -> Result<SymbolId, SemanticMemberLoadFailure>;
 ```
 
+The rejected alternative is resolver-wide policy state, for example an
+internal `semantic_names: HashSet<BinaryName>` (or a semantic-loading mode)
+consulted by the generic `load_class` route before it constructs a loader.
+That is a concrete way to select names without changing `SymbolResolver`, but
+it keeps policy on the resolver across unrelated requests and moves the
+selection decision into the generic loading boundary. Since nested TASTy
+resolution also performs ordinary resolver loads, that broader state is more
+exposed to callback paths and makes it harder to tell which one request opted
+in. The chosen one-request method is preferred because its exact
+`BinaryName`, selection point, and failure boundary stay together at the
+package-type miss that requested the class.
+
 `SemanticMemberLoadFailure` keeps the requested name even when the underlying
 error describes a dependency (or an `UnsupportedShape` with no name of its
 own), and retains the original typed `SemanticTastyLoadError`. The method
