@@ -44,6 +44,7 @@ const MAX_INHERITANCE_DEPTH: usize = 256;
 pub(crate) struct CachedDecodedModule {
     pub(crate) resource: ClassResource,
     pub(crate) decoded: tasty_symbol::DecodedTastyClass,
+    pub(crate) predef_string_alias: Option<tasty_symbol::DecodedTastyAlias>,
 }
 
 #[derive(Debug)]
@@ -3296,11 +3297,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let probe_observations = RefCell::new(Vec::new());
         let class_path = &self.class_path;
         let resource_before_decode = self.resource_lookup_total_ns();
-        let decoded = if let Some(cached) = decoded_cache.get(name)
+        let (decoded, predef_string_alias) = if let Some(cached) = decoded_cache.get(name)
             && cached.resource == resource
         {
             *decoded_cache_hit = true;
-            cached.decoded.clone()
+            (cached.decoded.clone(), cached.predef_string_alias.clone())
         } else {
             decoded_cache.remove(name);
             let decode_started = self.collect_load_profiles.then(Instant::now);
@@ -3374,14 +3375,22 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let decoded = decoded.map_err(|error| {
                 ClassLoadError::InvalidTastyFile(identity.module_class_name.clone(), error)
             })?;
+            let predef_string_alias = tasty_symbol::decode_predef_string_alias(
+                resource.bytes(),
+                &identity.module_class_name,
+            )
+            .map_err(|error| {
+                ClassLoadError::InvalidTastyFile(identity.module_class_name.clone(), error)
+            })?;
             decoded_cache.insert(
                 name.clone(),
                 CachedDecodedModule {
                     resource: resource.clone(),
                     decoded: decoded.clone(),
+                    predef_string_alias: predef_string_alias.clone(),
                 },
             );
-            decoded
+            (decoded, predef_string_alias)
         };
 
         let module_class = self.store.symbols.get(identity.module_class);
@@ -3445,6 +3454,33 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 resolved_type,
                 origin,
             );
+        }
+        if let Some(alias) = predef_string_alias {
+            debug_assert_eq!(alias.address, 378);
+            let text = self.store.names.intern(&alias.name);
+            let name = Name::new(text, Namespace::Type);
+            let visibility = alias
+                .visibility
+                .as_ref()
+                .map_or(Visibility::Public, |declared| {
+                    self.tasty_visibility(&identity.module_class_name, declared)
+                });
+            let alias_symbol = self.store.symbols.alloc(Symbol {
+                name,
+                owner: Some(identity.module_class),
+                kind: SymbolKind::TypeAlias,
+                flags: alias.flags,
+                visibility,
+                info: SymbolInfo::Missing,
+                origin,
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            });
+            self.store
+                .scopes
+                .get_mut(declarations)
+                .enter(name, alias_symbol);
         }
 
         self.complete_class(

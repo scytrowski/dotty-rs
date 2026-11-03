@@ -1,10 +1,10 @@
 # `scala.Predef.String` provenance and resolution audit (#2025)
 
-This audit explains the two frozen `Animal.sound` / `Dog.sound` completion
-failures without changing production behavior. Its deterministic, diagnostic-only
-rows are in [`predef-alias-audit.tsv`](predef-alias-audit.tsv). The focused
-classloader integration test builds the rows twice from fresh `SemanticStore`s
-and compares their UTF-8 bytes. The historical 14-unit / 126-row reports and
+This audit records the two original `Animal.sound` / `Dog.sound` completion
+failures before A2. Its deterministic, diagnostic-only rows are in
+[`predef-alias-audit.tsv`](predef-alias-audit.tsv); that TSV remains a frozen
+historical report. Current behavior is checked separately by the focused
+classloader integration test. The historical 14-unit / 126-row reports and
 `docs/classloader-semantic-tasty-convergence-ii/member-completion.tsv` remain
 unchanged.
 
@@ -111,3 +111,39 @@ is indicated by this evidence.
 
 This is a measured handoff, not a claim that the current resolver completes the
 alias. It does not change resolver behavior or broaden classloader acceptance.
+
+## A2 — bounded classloader declaration publication
+
+The classpath resolver now projects one declaration while completing the
+canonical `scala/Predef$` module class. It reuses the selected `Predef.tasty`
+resource and validates the module class at address 128, then selects the direct
+TypeDef at address 378 from that module template. The resulting core symbol is
+`TypeAlias` / Type namespace / owner `Predef$`; it takes the fixture's flags,
+visibility and TASTy origin. The resolver exposes that same symbol through its
+existing type-member lookup.
+
+The alias target is retained from the address-indexed RHS as the typed binary
+path `java/lang/String` in the resolver's decoded-module cache. A2 does not
+load or complete that class. The published alias symbol retains
+`SymbolInfo::Missing` until follow-on resolver work can connect that target to
+its canonical class identity. The alias SymbolId remains distinct from the
+target class identity. Module completion and its declaration scope use the
+existing `LoadingSession` journal: rollback removes the alias scope and module
+completion, and a retry in the same resolver session re-publishes one alias
+under the canonical module-class SymbolId.
+
+The original `Animal.sound` and `Dog.sound` sites now complete their method
+signature construction through a symbol-backed `TypeRef` to this canonical
+`scala.Predef$.String` alias. The integration assertions check the original
+DEFDEF addresses 22 and 36, the alias kind and owner path, and that alias
+`SymbolInfo` remains `Missing` after each signature completes. This is
+signature construction only: the separate direct `complete_symbol(378)` probe
+still attempts target resolution and independently returns the pinned failure
+at target address 383 with JDK 21, or the missing-package error at address 385
+without the JDK. Neither result claims that `java.lang.String` has been loaded
+or that either full Animal/Dog completion path has been accepted.
+
+No general TypeDef/opaque/higher-kinded alias projection was added. Other
+module TASTy files and same-spelled term members continue through their
+existing paths; a malformed or ambiguous indexed Predef alias is a typed TASTy
+projection failure rather than a guessed class or fallback type.
