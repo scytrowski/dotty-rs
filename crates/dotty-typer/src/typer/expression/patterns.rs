@@ -2709,6 +2709,199 @@ mod tests {
     }
 
     #[test]
+    fn recursive_source_product1_projects_its_canonical_trait_reference() {
+        let source_text = "package scala { trait Product }; package matching { sealed trait Expr; final case class Succ(inner: Expr) extends Expr }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let (class, class_tree, unapply) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Succ" =>
+                {
+                    let class = index.symbol_at(source, tree)?;
+                    let unapply = index.generated_case_class_method(
+                        class,
+                        dotty_core::GeneratedCaseClassMethodRole::Unapply,
+                    )?;
+                    Some((class, tree, unapply))
+                }
+                _ => None,
+            })
+            .expect("source Succ class and generated unapply");
+        let expr = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Expr" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("source Expr trait");
+        let class_type = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, class));
+        let expr_type = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, expr));
+        let selector_name = Name::new(store.names.intern("_1"), Namespace::Term);
+        let second_selector_name = Name::new(store.names.intern("_2"), Namespace::Term);
+        let unapply_formal = index
+            .derived_symbol_at(unapply, source, class_tree)
+            .expect("generated unapply formal retains its distinct source-derived identity");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let class_info = typer
+            .complete_symbol(class)
+            .expect("complete bounded recursive Product1 class");
+        let parents = match typer.store().types.get(class_info) {
+            Type::ClassInfo(info) => {
+                let parent_symbols = info
+                    .parents
+                    .iter()
+                    .map(|parent| type_ref_symbol(&typer, *parent))
+                    .collect::<Vec<_>>();
+                assert_eq!(parent_symbols.len(), 3);
+                assert_eq!(parent_symbols[0], definitions.object_class);
+                assert_eq!(parent_symbols[1], expr);
+                let product = parent_symbols[2];
+                let product_symbol = typer.store().symbols.get(product);
+                assert_eq!(product_symbol.kind, SymbolKind::Trait);
+                assert_eq!(
+                    typer.store().names.resolve(product_symbol.name.text()),
+                    "Product"
+                );
+                assert_eq!(
+                    product_symbol.owner,
+                    typer.packages.symbol(&["scala"]),
+                    "canonical scala.Product edge"
+                );
+                parent_symbols
+            }
+            other => panic!("unexpected class completion: {other:?}"),
+        };
+        assert_eq!(
+            parents.len(),
+            3,
+            "Object, Expr, and Product are unique edges"
+        );
+        typer
+            .complete_symbol(expr)
+            .expect("complete canonical source Expr parent");
+        typer
+            .complete_symbol(parents[2])
+            .expect("complete canonical scala.Product parent");
+        assert!(typer.is_subtype(class_type, expr_type).unwrap());
+        assert!(!typer.is_subtype(expr_type, class_type).unwrap());
+        let selector = typer
+            .store()
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&selector_name);
+        assert_eq!(selector.len(), 1, "exactly one class-owned _1 is present");
+        let selector = selector[0];
+        assert!(
+            typer
+                .store()
+                .scopes
+                .get(index.scope_of(class).unwrap())
+                .lookup_all(&second_selector_name)
+                .is_empty()
+        );
+        assert_eq!(typer.store().symbols.get(selector).kind, SymbolKind::Method);
+        assert_eq!(typer.store().symbols.get(selector).owner, Some(class));
+        let field_tree = match &parsed.ast.get(class_tree).kind {
+            TreeKind::TypeDef(definition) => match &parsed.ast.get(definition.rhs).kind {
+                TreeKind::Template(template) => match &parsed.ast.get(template.constructor).kind {
+                    TreeKind::DefDef(constructor) => constructor.value_param_clauses[0][0],
+                    other => panic!("unexpected constructor: {other:?}"),
+                },
+                other => panic!("unexpected template: {other:?}"),
+            },
+            other => panic!("unexpected class declaration: {other:?}"),
+        };
+        let field = index.symbol_at(source, field_tree).unwrap();
+        assert_eq!(typer.store().symbols.get(field).kind, SymbolKind::Field);
+        assert_eq!(typer.store().symbols.get(field).owner, Some(class));
+        assert_ne!(selector, field);
+        assert_ne!(selector, unapply_formal);
+        assert_ne!(field, unapply_formal);
+        let mut journal = Vec::new();
+        let projected = typer
+            .unary_extractor_component_type(class_type, class_tree.index(), unapply, &mut journal)
+            .expect("Product1 projection reads completed Succ._1");
+        assert_eq!(type_ref_symbol(&typer, projected), expr);
+        let selector_info = typer.complete_symbol(selector).unwrap();
+        let Type::Method(selector_method) = typer.store().types.get(selector_info) else {
+            panic!("Succ._1 is a parameterless method")
+        };
+        assert!(selector_method.params.is_empty());
+        assert_eq!(type_ref_symbol(&typer, selector_method.result), expr);
+    }
+
+    #[test]
+    fn recursive_source_product1_rejects_stale_class_info_with_duplicate_product_edge() {
+        let source_text = "package scala { trait Product }; package matching { sealed trait Expr; final case class Succ(inner: Expr) extends Expr }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Succ" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("source Succ class");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let canonical_info = typer
+            .complete_symbol(class)
+            .expect("valid source Product1 class completes");
+        let Type::ClassInfo(mut stale) = typer.store().types.get(canonical_info).clone() else {
+            panic!("Succ ClassInfo")
+        };
+        stale.parents.push(stale.parents[2]);
+        let stale_info = typer.store.types.alloc(Type::ClassInfo(stale));
+        typer
+            .store
+            .symbols
+            .set_info(class, SymbolInfo::Complete(stale_info));
+
+        assert!(matches!(
+            typer.complete_symbol(class),
+            Err(TyperError::MalformedClassInfo { symbol, .. }) if symbol == class
+        ));
+    }
+
+    fn type_ref_symbol(typer: &SourceTyper<'_>, ty: dotty_core::TypeId) -> dotty_core::SymbolId {
+        match typer.store.types.get(ty) {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected canonical TypeRef, found {other:?}"),
+        }
+    }
+
+    #[test]
     fn product_selector_completes_first_and_retries_resolver_transactionally() {
         let source_text = "package scala {}; package matching { case class Box(value: Int) }";
         let (parsed, mut store, packages, definitions, index, source) = setup(source_text);

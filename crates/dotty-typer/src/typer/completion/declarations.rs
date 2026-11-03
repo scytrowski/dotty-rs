@@ -238,14 +238,17 @@ impl SourceTyper<'_> {
         }
         let product_selector =
             self.source_case_class_product_selector(symbol, kind, &template, constructor);
-        if product_selector.is_some() && template.parents.len() == 1 {
-            self.validate_source_case_class_trait_parent(
-                symbol,
-                template.parents[0],
-                parents[0],
-                info_journal,
-            )?;
-        }
+        let source_case_class_trait_parent =
+            if product_selector.is_some() && template.parents.len() == 1 {
+                Some(self.validate_source_case_class_trait_parent(
+                    symbol,
+                    template.parents[0],
+                    parents[0],
+                    info_journal,
+                )?)
+            } else {
+                None
+            };
         let mut product_type_to_add = None;
         if let Some(selectors) = product_selector {
             let mut selector_results = Vec::with_capacity(selectors.len());
@@ -277,14 +280,16 @@ impl SourceTyper<'_> {
                     tree_index: template.constructor.index(),
                 });
             }
-            if !template.parents.is_empty()
-                && selector_results.len() == 1
-                && selector_results[0].1 != self.definitions.int
-            {
-                return Err(TyperError::UnsupportedProduct1FieldType {
-                    class: symbol,
-                    tree_index: template.constructor.index(),
-                });
+            if !template.parents.is_empty() && selector_results.len() == 1 {
+                let field_type = selector_results[0].1;
+                let supported_reference = source_case_class_trait_parent
+                    .is_some_and(|parent| self.is_canonical_source_trait_ref(field_type, parent));
+                if field_type != self.definitions.int && !supported_reference {
+                    return Err(TyperError::UnsupportedProduct1FieldType {
+                        class: symbol,
+                        tree_index: template.constructor.index(),
+                    });
+                }
             }
             for (selector, result) in selector_results {
                 let method_info = self.store.types.alloc(Type::Method(MethodType {
@@ -486,7 +491,7 @@ impl SourceTyper<'_> {
         parent_tree: TreeId<Untyped>,
         parent_type: TypeId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
-    ) -> Result<(), TyperError> {
+    ) -> Result<SymbolId, TyperError> {
         let Some(Type::TypeRef {
             target: dotty_core::TypeRefTarget::Symbol(parent),
             ..
@@ -532,7 +537,130 @@ impl SourceTyper<'_> {
                 tree_index: parent_tree.index(),
             });
         }
+        Ok(parent)
+    }
+
+    pub(super) fn validate_completed_source_case_class_product1(
+        &mut self,
+        class: SymbolId,
+        class_info_type: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        if self.store.symbols.get(class).origin != SymbolOrigin::Source(self.source) {
+            return Ok(());
+        }
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(class)
+        else {
+            return Ok(());
+        };
+        if source != self.source || self.index.symbol_at(source, tree) != Some(class) {
+            return Ok(());
+        }
+        let Some(TreeKind::TypeDef(definition)) = self.arena.try_get(tree).map(|node| &node.kind)
+        else {
+            return Ok(());
+        };
+        let Some(TreeKind::Template(template)) =
+            self.arena.try_get(definition.rhs).map(|node| &node.kind)
+        else {
+            return Ok(());
+        };
+        let Some(TreeKind::DefDef(constructor)) = self
+            .arena
+            .try_get(template.constructor)
+            .map(|node| &node.kind)
+        else {
+            return Ok(());
+        };
+        if template.parents.len() != 1 {
+            return Ok(());
+        }
+        let Some(projection) = self.source_case_class_product_selector(
+            class,
+            SymbolKind::Class,
+            template,
+            constructor,
+        ) else {
+            return Ok(());
+        };
+        let [(field_tree, selector)] = projection.as_slice() else {
+            return Ok(());
+        };
+        let malformed = || TyperError::MalformedClassInfo {
+            symbol: class,
+            info: class_info_type,
+        };
+        let context = self
+            .index
+            .declaration_context_of(class)
+            .ok_or_else(malformed)?;
+        let parent_type =
+            self.project_parent_type(template.parents[0], context, 0, info_journal)?;
+        let parent = self.validate_source_case_class_trait_parent(
+            class,
+            template.parents[0],
+            parent_type,
+            info_journal,
+        )?;
+        let Some(TreeKind::ValDef(field)) = self.arena.try_get(*field_tree).map(|node| &node.kind)
+        else {
+            return Err(malformed());
+        };
+        let field_type = self.type_of_tpt_inner_journaled(field.tpt, context, info_journal)?;
+        if field_type != self.definitions.int
+            && !self.is_canonical_source_trait_ref(field_type, parent)
+        {
+            return Err(malformed());
+        }
+        let Some(Type::ClassInfo(class_info)) = self.store.types.try_get(class_info_type).cloned()
+        else {
+            return Err(malformed());
+        };
+        let Some(product_type) = self.canonical_scala_product_type(tree.index())? else {
+            return Err(malformed());
+        };
+        let expected_parents = [self.definitions.object_type, parent_type, product_type];
+        if class_info.parents.len() != expected_parents.len()
+            || !class_info
+                .parents
+                .iter()
+                .zip(expected_parents)
+                .all(|(actual, expected)| self.same_parent_type(*actual, expected, 0))
+        {
+            return Err(malformed());
+        }
+        let SymbolInfo::Complete(selector_info) = *self.store.symbols.info(*selector) else {
+            return Err(malformed());
+        };
+        let Some(Type::Method(method)) = self.store.types.try_get(selector_info) else {
+            return Err(malformed());
+        };
+        if !method.params.is_empty() || !self.same_parent_type(method.result, field_type, 0) {
+            return Err(malformed());
+        }
         Ok(())
+    }
+
+    fn is_canonical_source_trait_ref(&self, ty: TypeId, expected: SymbolId) -> bool {
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(actual),
+            ..
+        }) = self.store.types.try_get(ty)
+        else {
+            return false;
+        };
+        *actual == expected
+            && self.store.symbols.contains(*actual)
+            && self.store.symbols.get(*actual).kind == SymbolKind::Trait
+            && self.store.symbols.get(*actual).origin == SymbolOrigin::Source(self.source)
+            && matches!(
+                self.index.definition_of(*actual),
+                Some(SourceDefinition::Canonical { source, tree })
+                    if source == self.source && self.index.symbol_at(source, tree) == Some(*actual)
+            )
+            && self
+                .source_class_type_parameters(*actual)
+                .is_ok_and(|parameters| parameters.is_empty())
     }
 
     fn validate_source_parent_graph(
