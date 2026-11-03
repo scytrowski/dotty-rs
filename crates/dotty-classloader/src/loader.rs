@@ -86,6 +86,7 @@ struct TastyTopLevelSelection {
     binary_name: BinaryName,
     class_address: u32,
     constructor_address: u32,
+    constructor_parameter_address: Option<u32>,
 }
 
 fn is_compiler_source_file_annotation(
@@ -2321,8 +2322,16 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 tasty_symbol::TastyDecodeError::Ast(error),
             ))
         })?;
+        let has_single_term_parameter = match template_shape.term_params.as_slice() {
+            [] => false,
+            [dotty_tasty::tasty::ParameterNode::TermParam { .. }] => true,
+            _ => {
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "the class template may have at most one ordinary constructor parameter",
+                ));
+            }
+        };
         if !template_shape.type_params.is_empty()
-            || !template_shape.term_params.is_empty()
             || template_shape.stats.len() != 1
             || !matches!(
                 template_shape.stats.first(),
@@ -2331,7 +2340,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             )
         {
             return Err(SemanticTastyLoadError::UnsupportedShape(
-                "the class template must have no parameters and one constructor declaration",
+                "the class template must have no type parameters and one constructor declaration",
             ));
         }
         let address_index = file.ast_address_index().map_err(|error| {
@@ -2424,6 +2433,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "the selected constructor is missing from the AST address index",
             ),
         )?;
+        let constructor_tree_node = address_index.get_node(constructor_address).ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the selected constructor is missing from the structural address index",
+            ),
+        )?;
         let constructor = constructor_node.decode_defdef_body().map_err(|error| {
             SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
                 name.clone(),
@@ -2440,21 +2454,111 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 "user annotations on the primary constructor are unsupported",
             ));
         }
-        if !constructor.parameters.is_empty()
-            || constructor.header_items
-                != [dotty_tasty::tasty::DefDefHeaderItem::Clause(
-                    dotty_tasty::tasty::EMPTYCLAUSE_TAG,
-                )]
-        {
+        let valid_constructor_parameters = if has_single_term_parameter {
+            match (
+                template_shape.term_params.as_slice(),
+                constructor.parameters.as_slice(),
+            ) {
+                (
+                    [
+                        dotty_tasty::tasty::ParameterNode::TermParam {
+                            name: template_parameter_name,
+                            ..
+                        },
+                    ],
+                    [
+                        dotty_tasty::tasty::ParameterNode::TermParam {
+                            name: constructor_parameter_name,
+                            ..
+                        },
+                    ],
+                ) => {
+                    constructor.header_items.len() == 1
+                        && matches!(
+                            &constructor.header_items[0],
+                            dotty_tasty::tasty::DefDefHeaderItem::Parameter(
+                                dotty_tasty::tasty::ParameterNode::TermParam { name, .. }
+                            ) if name == constructor_parameter_name
+                                && name == template_parameter_name
+                        )
+                        && constructor.clauses.is_empty()
+                        && Self::constructor_parameter_is_ordinary(constructor.parameters.first())
+                        && Self::template_parameter_is_plain(template_shape.term_params.first())
+                }
+                _ => false,
+            }
+        } else {
+            constructor.parameters.is_empty()
+                && constructor.header_items
+                    == [dotty_tasty::tasty::DefDefHeaderItem::Clause(
+                        dotty_tasty::tasty::EMPTYCLAUSE_TAG,
+                    )]
+        };
+        if !valid_constructor_parameters {
             return Err(SemanticTastyLoadError::UnsupportedShape(
-                "the primary constructor must have one empty parameter clause",
+                "the primary constructor must have one empty clause or one ordinary Int clause",
             ));
         }
+        let constructor_parameter_address = if has_single_term_parameter {
+            let Some(parameter) = constructor.parameters.first() else {
+                unreachable!("supported constructor has one parameter")
+            };
+            let Some(parameter_node) = address_index.iter().find(|node| {
+                node.tag == dotty_tasty::tasty::PARAM_TAG
+                    && node.payload.as_ptr() == parameter.payload().as_ptr()
+                    && node.payload.len() == parameter.payload().len()
+                    && address_index.parent_of(node.offset as u32) == Some(constructor_tree_node)
+            }) else {
+                return Err(SemanticTastyLoadError::UnsupportedShape(
+                    "the constructor parameter is missing from the structural address index",
+                ));
+            };
+            Some(u32::try_from(parameter_node.offset).map_err(|_| {
+                SemanticTastyLoadError::UnsupportedShape(
+                    "the constructor parameter address exceeds the supported wire range",
+                )
+            })?)
+        } else {
+            None
+        };
         Ok(TastyTopLevelSelection {
             binary_name: name.clone(),
             class_address,
             constructor_address,
+            constructor_parameter_address,
         })
+    }
+
+    fn constructor_parameter_is_ordinary(
+        parameter: Option<&dotty_tasty::tasty::ParameterNode<'_>>,
+    ) -> bool {
+        let Some(dotty_tasty::tasty::ParameterNode::TermParam { .. }) = parameter else {
+            return false;
+        };
+        parameter
+            .expect("term parameter checked above")
+            .decode_body()
+            .is_ok_and(|body| body.tail.is_empty())
+    }
+
+    fn template_parameter_is_plain(
+        parameter: Option<&dotty_tasty::tasty::ParameterNode<'_>>,
+    ) -> bool {
+        let Some(dotty_tasty::tasty::ParameterNode::TermParam { .. }) = parameter else {
+            return false;
+        };
+        parameter
+            .expect("term parameter checked above")
+            .decode_body()
+            .is_ok_and(|body| {
+                body.tail
+                    == [
+                        dotty_tasty::tasty::DefinitionTail::Modifier(
+                            dotty_tasty::tasty::PRIVATE_TAG,
+                        ),
+                        dotty_tasty::tasty::DefinitionTail::Modifier(dotty_tasty::tasty::LOCAL_TAG),
+                    ]
+            })
     }
 
     fn snapshot_open_builtin_aliases(&mut self) -> OpenBuiltinAliasSnapshot {
@@ -2631,10 +2735,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             ));
         }
 
-        // Bind only the canonical Unit needed by Open's serialized result
-        // tree. The session checkpoint owns both the symbol update and the
-        // package-scope entry, so a later failure rolls them back together.
+        // Bind only the canonical Unit needed by the constructor result tree
+        // and Int needed by its one supported plain formal. The session
+        // checkpoint owns both symbol updates and package-scope entries, so a
+        // later failure rolls them back together.
         self.bind_open_builtin_unit()?;
+        if selection.constructor_parameter_address.is_some() {
+            self.bind_open_primitive("Int", self.definitions.int)?;
+        }
 
         let packages = self.session.packages.take_packages();
         let mut unpickler =
@@ -2687,6 +2795,31 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         })();
         let (index, mut packages) = unpickler.into_parts();
         self.session.packages.swap_packages(&mut packages);
+        let result = match (result, selection.constructor_parameter_address) {
+            (Ok((class, constructor)), Some(parameter_address)) => {
+                match index
+                    .symbol_at(parameter_address)
+                    .map(|parameter| self.store.symbols.get(parameter))
+                {
+                    Some(parameter_symbol)
+                        if parameter_symbol.kind == SymbolKind::Parameter
+                            && parameter_symbol.owner == Some(constructor)
+                            && matches!(
+                                parameter_symbol.info,
+                                SymbolInfo::Complete(ty)
+                                    if type_ref_symbol(self.store, ty)
+                                        == type_ref_symbol(self.store, self.definitions.int)
+                            ) =>
+                    {
+                        Ok((class, constructor))
+                    }
+                    _ => Err(SemanticTastyLoadError::UnsupportedShape(
+                        "the constructor parameter must retain its indexed identity and canonical Int type",
+                    )),
+                }
+            }
+            (result, _) => result,
+        };
         let (class, constructor) = match result {
             Ok(identities) => identities,
             Err(error) => {
@@ -2720,7 +2853,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 matches!(
                     self.store.types.get(info),
                     Type::Method(method)
-                        if method.params.is_empty()
+                        if method.kind == MethodKind::Plain
+                            && (method.params.is_empty()
+                                || (method.params.len() == 1
+                                    && type_ref_symbol(self.store, method.params[0].ty)
+                                        == type_ref_symbol(self.store, self.definitions.int)))
                             && type_ref_symbol(self.store, method.result) == Some(class)
                 )
             }
@@ -7193,6 +7330,20 @@ mod tests {
         }
     }
 
+    struct ConstructorFixtureClassPath(HashMap<BinaryName, Vec<u8>>, PathBuf);
+
+    impl ClassPathEntry for ConstructorFixtureClassPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            Ok(self.0.get(name).map(|bytes| {
+                ClassResource::new(
+                    bytes.clone(),
+                    ClassFormat::Tasty,
+                    ClassOrigin::Directory(self.1.clone()),
+                )
+            }))
+        }
+    }
+
     type SharedTastyResources = Arc<std::sync::Mutex<HashMap<BinaryName, Vec<u8>>>>;
 
     #[derive(Clone)]
@@ -7333,6 +7484,26 @@ mod tests {
             .expect("real JDK classpath");
         CompositeClassPath::new(vec![
             Box::new(crate::class_path::DirectoryClassPath::new(fixture_root)),
+            Box::new(jdk),
+        ])
+    }
+
+    fn constructor_parameter_test_class_path() -> CompositeClassPath {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty-unpickler/tests/fixtures/semantic");
+        let semantic_fixture = ConstructorFixtureClassPath(
+            HashMap::from([(name, semantic_unpickler_fixture_bytes("CtorPlain.tasty"))]),
+            fixture_root,
+        );
+        let visibility_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for Object");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK classpath");
+        CompositeClassPath::new(vec![
+            Box::new(semantic_fixture),
+            Box::new(crate::class_path::DirectoryClassPath::new(visibility_root)),
             Box::new(jdk),
         ])
     }
@@ -8936,7 +9107,7 @@ mod tests {
                     }
                     (_, actual) => panic!("unexpected {simple_name} visibility: {actual:?}"),
                 }
-                let info = class_info(loader.store, class);
+                let info = class_info(loader.store, class).clone();
                 assert_eq!(info.parents.len(), 1, "{simple_name} parent count");
                 assert_eq!(
                     parent_symbol(loader.store, info.parents[0]),
@@ -8989,11 +9160,213 @@ mod tests {
     }
 
     #[test]
+    fn semantic_adapter_loads_one_plain_int_constructor_between_visibility_roots() {
+        fn normalized_session() -> Vec<String> {
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(constructor_parameter_test_class_path(), &mut store);
+            let definitions = loader.definitions();
+            let semantic_fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty-unpickler/tests/fixtures/semantic");
+            let visibility_fixture_root =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility");
+            let cases = [
+                (open_binary_name(), "Open", false),
+                (
+                    BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain"),
+                    "CtorPlain",
+                    true,
+                ),
+                (plain_private_binary_name(), "PlainPrivate", false),
+            ];
+            let mut classes = Vec::new();
+            let mut summaries = Vec::new();
+
+            for (name, simple_name, has_int_parameter) in cases {
+                let class = loader
+                    .load_semantic_class_with_tasty_unpickler(&name)
+                    .unwrap_or_else(|error| panic!("{simple_name} load failed: {error:?}"));
+                let repeated = loader
+                    .load_semantic_class_with_tasty_unpickler(&name)
+                    .expect("same-store repeat reuses the completed class");
+                assert_eq!(repeated, class, "{simple_name} repeated class identity");
+                assert_eq!(loader.session.resolved.get(&name), Some(&class));
+                assert_eq!(
+                    loader.repository.get(&name).and_then(ClassEntry::symbol),
+                    Some(class)
+                );
+                assert_eq!(loader.semantic_tasty_loaded.get(&name), Some(&class));
+
+                let expected_origin = if has_int_parameter {
+                    &semantic_fixture_root
+                } else {
+                    &visibility_fixture_root
+                };
+                assert_eq!(
+                    loader.origin(class),
+                    Some(&ClassOrigin::Directory(expected_origin.clone())),
+                    "{simple_name} resource origin"
+                );
+                let symbol = loader.store.symbols.get(class);
+                assert_eq!(symbol.kind, SymbolKind::Class);
+                assert!(symbol_matches_binary_name(loader.store, class, &name));
+                let package = symbol.owner.expect("canonical package owner");
+                let visibility = match symbol.visibility {
+                    Visibility::Public => "public",
+                    Visibility::PrivateWithin(owner) if owner == package => {
+                        "private-within-package"
+                    }
+                    actual => panic!("unexpected {simple_name} visibility {actual:?}"),
+                };
+                let info = class_info(loader.store, class).clone();
+                assert_eq!(info.parents.len(), 1, "{simple_name} parent count");
+                assert_eq!(
+                    parent_symbol(loader.store, info.parents[0]),
+                    definitions.object_class
+                );
+                let constructor_name =
+                    Name::new(loader.store.names.intern("<init>"), Namespace::Term);
+                let constructor = loader
+                    .store
+                    .scopes
+                    .get(info.declarations)
+                    .lookup(&constructor_name)
+                    .expect("canonical primary constructor");
+                let constructor_symbol = loader.store.symbols.get(constructor);
+                assert_eq!(constructor_symbol.kind, SymbolKind::Constructor);
+                assert_eq!(constructor_symbol.owner, Some(class));
+                let SymbolInfo::Complete(constructor_type) = constructor_symbol.info else {
+                    panic!("{simple_name} constructor is complete");
+                };
+                let Type::Method(method) = loader.store.types.get(constructor_type) else {
+                    panic!("{simple_name} constructor has a method signature");
+                };
+                assert_eq!(method.kind, MethodKind::Plain);
+                assert_eq!(method.params.len(), usize::from(has_int_parameter));
+                if has_int_parameter {
+                    assert_eq!(
+                        type_ref_symbol(loader.store, method.params[0].ty),
+                        type_ref_symbol(loader.store, definitions.int),
+                        "plain formal uses canonical Int"
+                    );
+                }
+                assert_eq!(
+                    unit_type_ref_target(loader.store, method.result),
+                    Some(class)
+                );
+                classes.push(class);
+                summaries.push(format!(
+                    "{simple_name}:{visibility}:parents={}:plain_params={}:result=self",
+                    info.parents.len(),
+                    method.params.len()
+                ));
+            }
+            assert_ne!(classes[0], classes[1]);
+            assert_ne!(classes[1], classes[2]);
+            assert_eq!(
+                loader.store.symbols.get(classes[0]).owner,
+                loader.store.symbols.get(classes[2]).owner,
+                "Open and PlainPrivate retain their shared package identity"
+            );
+            assert_eq!(loader.semantic_tasty_loaded.len(), 3);
+            summaries
+        }
+
+        assert_eq!(
+            normalized_session(),
+            normalized_session(),
+            "fresh sessions preserve semantic roles and relationships"
+        );
+    }
+
+    #[test]
+    fn semantic_plain_int_constructor_rollback_preserves_prior_root_and_retries() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(constructor_parameter_test_class_path(), &mut store);
+        let open = loader
+            .load_semantic_class_with_tasty_unpickler(&open_binary_name())
+            .expect("Open commits before the injected constructor failure");
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+        let resource = loader
+            .class_path
+            .find_class(&name)
+            .expect("constructor fixture lookup")
+            .expect("CtorPlain fixture");
+        let file =
+            tasty_symbol::parse_classloader_tasty(resource.bytes()).expect("valid CtorPlain");
+        let selection =
+            ClassLoader::<CompositeClassPath>::validate_semantic_class_shape(&file, &name)
+                .expect("one plain Int constructor formal is structurally supported");
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+        let package_mark = loader.session.packages.checkpoint();
+        let unit = unit_type_ref_target(loader.store, loader.definitions.unit).unwrap();
+        let int = unit_type_ref_target(loader.store, loader.definitions.int).unwrap();
+
+        let error = loader
+            .load_semantic_class_transaction(
+                &file,
+                &name,
+                &selection,
+                resource.origin().clone(),
+                true,
+            )
+            .expect_err("injected post-completion failure exercises rollback");
+        assert!(matches!(
+            error,
+            SemanticTastyLoadError::UnsupportedShape(
+                "injected failure after class and constructor completion"
+            )
+        ));
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert_eq!(loader.session.packages.checkpoint(), package_mark);
+        assert_eq!(loader.store.symbols.get(open).kind, SymbolKind::Class);
+        assert_eq!(
+            loader.session.resolved.get(&open_binary_name()),
+            Some(&open)
+        );
+        assert!(!loader.semantic_tasty_loaded.contains_key(&name));
+        let scala_scope = loader
+            .session
+            .packages
+            .scope_of(loader.session.packages.get(&["scala"]).unwrap())
+            .unwrap();
+        for (symbol, spelling) in [(unit, "Unit"), (int, "Int")] {
+            let alias = Name::new(loader.store.names.intern(spelling), Namespace::Type);
+            let entered = loader.store.scopes.get(scala_scope).lookup_all(&alias);
+            assert_eq!(
+                entered.contains(&symbol),
+                spelling == "Unit",
+                "{spelling} alias rollback"
+            );
+        }
+
+        let retried = loader
+            .load_semantic_class_with_tasty_unpickler(&name)
+            .expect("valid bytes retry after rollback");
+        assert_eq!(loader.semantic_tasty_loaded.get(&name), Some(&retried));
+        assert_ne!(retried, open);
+        assert!(matches!(
+            loader.store.symbols.get(retried).info,
+            SymbolInfo::Complete(_)
+        ));
+        assert_eq!(
+            loader.origin(retried),
+            Some(&resource.origin().clone()),
+            "retry retains the selected fixture origin"
+        );
+        assert_eq!(
+            loader.session.resolved.get(&open_binary_name()),
+            Some(&open)
+        );
+    }
+
+    #[test]
     fn semantic_class_loader_rejects_wrong_package_and_module_before_mutation() {
         let wrong_package_name = BinaryName::from_internal("other/package/Open");
         let module_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Holder");
-        let parameterized_name =
-            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+        let generic_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorGeneric");
         let cases = [
             (
                 wrong_package_name,
@@ -9016,9 +9389,23 @@ mod tests {
                 "the TASTy unit must contain exactly one top-level class declaration",
             ),
             (
-                parameterized_name,
-                semantic_unpickler_fixture_bytes("CtorPlain.tasty"),
-                "the class template must have no parameters and one constructor declaration",
+                generic_name,
+                semantic_unpickler_fixture_bytes("CtorGeneric.tasty"),
+                "the class template must have no type parameters and one constructor declaration",
+            ),
+            (
+                BinaryName::from_internal(
+                    "me/cytrowski/tastyfixtures/semantic/CtorWithVal",
+                ),
+                semantic_unpickler_fixture_bytes("CtorWithVal.tasty"),
+                "the primary constructor must have one empty clause or one ordinary Int clause",
+            ),
+            (
+                BinaryName::from_internal(
+                    "me/cytrowski/tastyfixtures/semantic/CtorTwoTermClauses",
+                ),
+                semantic_unpickler_fixture_bytes("CtorTwoTermClauses.tasty"),
+                "the class template may have at most one ordinary constructor parameter",
             ),
         ];
 
@@ -10971,7 +11358,7 @@ mod tests {
             matches!(
                 error,
                 SemanticTastyLoadError::UnsupportedShape(
-                    "the class template must have no parameters and one constructor declaration"
+                    "the class template must have no type parameters and one constructor declaration"
                 )
             ),
             "unexpected nested-shape error: {error:?}"
@@ -18421,7 +18808,7 @@ mod tests {
     }
 
     #[test]
-    fn authentic_regular_constructor_is_rejected_before_semantic_loader_transaction() {
+    fn authentic_regular_constructor_is_accepted_by_semantic_and_legacy_loaders() {
         let bytes = fs::read(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../dotty-tasty-unpickler/tests/fixtures/semantic/CtorPlain.tasty"),
@@ -18442,14 +18829,17 @@ mod tests {
             ]),
             &mut store,
         );
-        let error = loader
+        let semantic_class = loader
             .load_semantic_class_with_tasty_unpickler(&name)
-            .expect_err("ordinary constructor parameters remain outside the loader gate");
+            .expect("the single ordinary Int constructor formal is supported");
         assert_eq!(
-            format!("{error:?}"),
-            "UnsupportedShape(\"the class template must have no parameters and one constructor declaration\")"
+            loader.semantic_tasty_loaded.get(&name),
+            Some(&semantic_class)
         );
-        assert!(loader.semantic_tasty_loaded.is_empty());
+        assert!(matches!(
+            loader.store.symbols.get(semantic_class).info,
+            SymbolInfo::Complete(_)
+        ));
         drop(loader);
 
         let mut legacy_store = SemanticStore::new();
