@@ -8,7 +8,7 @@ use dotty_core::ast::TreeKind;
 use dotty_core::types::{Type, TypeRefTarget};
 use dotty_core::{
     Definitions, GeneratedCaseClassMethodRole, Packages, SemanticStore, SourceId, SourceText,
-    SymbolFlags, SymbolKind, SymbolOrigin, TypeName,
+    SymbolFlags, SymbolInfo, SymbolKind, SymbolOrigin, TypeName,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
@@ -16,14 +16,29 @@ use dotty_typer::{SourceTyper, TyperError};
 
 const SOURCE: &str = include_str!("fixtures/source-recursive-adt-match-3.9.0/Expr.scala");
 
+struct UnwrapProofContext<'a> {
+    source_ast: &'a dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+    source: SourceId,
+    index: &'a dotty_core::SourceSemanticIndex,
+    typer: &'a SourceTyper<'a>,
+    source_method: dotty_core::TreeId<dotty_core::ast::Untyped>,
+    method: dotty_core::SymbolId,
+    parameter: dotty_core::SymbolId,
+    typed_method: dotty_core::TreeId<dotty_core::ast::Typed>,
+}
+
 #[test]
 fn evaluator_recursive_adt_roots_type_after_generated_unapply_completion() {
-    let (first, first_paths) = analyze_roots(SourceId::from_index(20341));
-    let (second, second_paths) = analyze_roots(SourceId::from_index(20342));
+    let (first, first_paths, first_unwrap) = analyze_roots(SourceId::from_index(20341));
+    let (second, second_paths, second_unwrap) = analyze_roots(SourceId::from_index(20342));
     assert_eq!(first, second, "fresh source sessions normalize identically");
     assert_eq!(
         first_paths, second_paths,
         "deferred probes normalize identically"
+    );
+    assert_eq!(
+        first_unwrap, second_unwrap,
+        "unwrap normalizes across fresh sessions"
     );
     assert_eq!(
         first.len(),
@@ -52,6 +67,11 @@ fn evaluator_recursive_adt_roots_type_after_generated_unapply_completion() {
     for row in first_paths {
         println!("ISSUE2034_DEFERRED\t{row}");
     }
+    let actual = format!("{first_unwrap}\n");
+    let expected =
+        include_str!("fixtures/source-recursive-adt-match-3.9.0/rust-unwrap-before-after.tsv");
+    assert_eq!(actual, expected);
+    println!("ISSUE2037_UNWRAP\t{first_unwrap}");
 }
 
 #[test]
@@ -447,7 +467,7 @@ fn type_ref_symbol(typer: &SourceTyper<'_>, ty: dotty_core::TypeId) -> dotty_cor
     }
 }
 
-fn analyze_roots(source: SourceId) -> (Vec<String>, Vec<String>) {
+fn analyze_roots(source: SourceId) -> (Vec<String>, Vec<String>, String) {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
     let parsed = dotty_parser::parse_compilation_unit(
@@ -541,6 +561,7 @@ fn analyze_roots(source: SourceId) -> (Vec<String>, Vec<String>) {
     )
     .with_resolver(Box::new(resolver));
     let mut rows = Vec::new();
+    let mut unwrap_receipt = None;
     let mut root_trees = Vec::new();
     for (name, tree, position, symbol, parameter, owner) in roots {
         let outcome = match typer.type_method_definition(tree) {
@@ -550,6 +571,18 @@ fn analyze_roots(source: SourceId) -> (Vec<String>, Vec<String>) {
                     typer.typed_ast().get(typed).kind,
                     TreeKind::DefDef(_)
                 ));
+                if name == "unwrap" {
+                    unwrap_receipt = Some(assert_complete_unwrap(UnwrapProofContext {
+                        source_ast: &parsed.ast,
+                        source,
+                        index: &index,
+                        typer: &typer,
+                        source_method: tree,
+                        method: symbol,
+                        parameter,
+                        typed_method: typed,
+                    }));
+                }
                 format!("complete=typed#tree{}", typed.index())
             }
             Err(error) => {
@@ -714,5 +747,266 @@ fn analyze_roots(source: SourceId) -> (Vec<String>, Vec<String>) {
         }
     }
     deferred.sort();
-    (rows, deferred)
+    (
+        rows,
+        deferred,
+        unwrap_receipt.expect("the original Evaluator.unwrap root was typed"),
+    )
+}
+
+fn assert_complete_unwrap(context: UnwrapProofContext<'_>) -> String {
+    let UnwrapProofContext {
+        source_ast,
+        source,
+        index,
+        typer,
+        source_method,
+        method,
+        parameter,
+        typed_method,
+    } = context;
+    let store = typer.store();
+    let source_type_symbol = |target: &str| {
+        source_ast.iter().find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == target =>
+            {
+                index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+    };
+    let expr = source_type_symbol("Expr").expect("the original source Expr trait");
+    assert_eq!(store.symbols.get(expr).kind, SymbolKind::Trait);
+    assert!(store.symbols.get(expr).flags.contains(SymbolFlags::SEALED));
+    assert!(matches!(store.symbols.get(expr).origin, SymbolOrigin::Source(id) if id == source));
+    assert_eq!(store.symbols.get(parameter).kind, SymbolKind::Parameter);
+    assert_eq!(store.symbols.get(parameter).owner, Some(method));
+    assert!(
+        matches!(store.symbols.get(parameter).origin, SymbolOrigin::Source(id) if id == source)
+    );
+
+    let SymbolInfo::Complete(method_type) = *store.symbols.info(method) else {
+        panic!("unwrap signature is complete")
+    };
+    let Type::Method(signature) = store.types.get(method_type) else {
+        panic!("unwrap has a method signature")
+    };
+    assert_eq!(signature.params.len(), 1);
+    assert_eq!(type_ref_symbol(typer, signature.params[0].ty), expr);
+    assert_eq!(type_ref_symbol(typer, signature.result), expr);
+
+    let TreeKind::DefDef(source_definition) = &source_ast.get(source_method).kind else {
+        panic!("source root is a DefDef")
+    };
+    let source_rhs = source_definition.rhs.expect("unwrap has a source body");
+    let TreeKind::Match(source_match) = &source_ast.get(source_rhs).kind else {
+        panic!("unwrap body is the original Match")
+    };
+    assert_eq!(source_match.cases.len(), 2);
+    let mapped = |source_tree| {
+        let typed_tree = typer
+            .source_typed_index()
+            .get(source, source_tree)
+            .unwrap_or_else(|| panic!("source tree {source_tree:?} has a typed mapping"));
+        assert_eq!(
+            source_ast.get(source_tree).position,
+            typer.typed_ast().get(typed_tree).position,
+            "source span survives typing for {source_tree:?}"
+        );
+        typed_tree
+    };
+    assert_eq!(mapped(source_method), typed_method);
+    let typed_definition = &typer.typed_ast().get(typed_method).kind;
+    let TreeKind::DefDef(typed_definition) = typed_definition else {
+        panic!("typed root remains a DefDef")
+    };
+    let typed_rhs = mapped(source_rhs);
+    let typed_result_type = mapped(source_definition.tpt);
+    assert_eq!(
+        denoted_symbol(typer, typer.typed_ast().get(typed_result_type).ty),
+        Some(expr)
+    );
+    assert_eq!(typed_definition.rhs, Some(typed_rhs));
+    let TreeKind::Match(typed_match) = &typer.typed_ast().get(typed_rhs).kind else {
+        panic!("typed RHS remains a Match")
+    };
+    assert_eq!(typed_match.cases.len(), 2);
+    assert_eq!(typed_match.cases.len(), source_match.cases.len());
+
+    let source_selector = source_match.selector;
+    let typed_selector = mapped(source_selector);
+    assert_eq!(typed_match.selector, typed_selector);
+    assert_eq!(typed_symbol(typer, typed_selector), parameter);
+    assert_eq!(type_ref_symbol(typer, signature.params[0].ty), expr);
+    assert_eq!(
+        denoted_symbol(typer, typer.typed_ast().get(typed_selector).ty),
+        Some(expr)
+    );
+    assert_eq!(
+        denoted_symbol(typer, typer.typed_ast().get(typed_rhs).ty),
+        Some(expr)
+    );
+
+    let mut receipt = Vec::new();
+    let mut selected_methods = Vec::new();
+    for (case_index, (source_case, typed_case)) in source_match
+        .cases
+        .iter()
+        .zip(typed_match.cases.iter())
+        .enumerate()
+    {
+        assert_eq!(mapped(*source_case), *typed_case);
+        let TreeKind::CaseDef(source_case) = &source_ast.get(*source_case).kind else {
+            panic!("source case {case_index} is a CaseDef")
+        };
+        let TreeKind::CaseDef(typed_case) = &typer.typed_ast().get(*typed_case).kind else {
+            panic!("typed case {case_index} is a CaseDef")
+        };
+        assert_eq!(typed_case.guard, None);
+        assert_eq!(mapped(source_case.pattern), typed_case.pattern);
+        assert_eq!(mapped(source_case.body), typed_case.body);
+        let TreeKind::Apply(source_extractor) = &source_ast.get(source_case.pattern).kind else {
+            panic!("source case pattern {case_index} is an extractor application")
+        };
+        let TreeKind::UnApply(typed_extractor) = &typer.typed_ast().get(typed_case.pattern).kind
+        else {
+            panic!("typed case pattern {case_index} is an UnApply")
+        };
+        assert_eq!(source_extractor.args.len(), 1);
+        assert_eq!(typed_extractor.patterns.len(), 1);
+        assert_eq!(
+            mapped(source_extractor.function),
+            match &typer.typed_ast().get(typed_extractor.function).kind {
+                TreeKind::Select(selected) => selected.qualifier,
+                other => panic!("extractor function is a selected companion member: {other:?}"),
+            }
+        );
+        let selected = typed_symbol(typer, typed_extractor.function);
+        let variant_name = if case_index == 0 { "Num" } else { "Succ" };
+        let variant = source_type_symbol(variant_name).expect("canonical source case class");
+        assert_eq!(
+            denoted_symbol(typer, typer.typed_ast().get(typed_case.pattern).ty),
+            Some(variant)
+        );
+        let unapply = index
+            .generated_case_class_method(variant, GeneratedCaseClassMethodRole::Unapply)
+            .expect("authentic derived unapply role");
+        assert_eq!(selected, unapply);
+        let companion = store
+            .symbols
+            .get(variant)
+            .links
+            .companion
+            .expect("source companion");
+        let unapply_owner = store.symbols.get(unapply).owner.expect("generated owner");
+        assert_eq!(
+            store.symbols.get(unapply_owner).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            store
+                .names
+                .resolve(store.symbols.get(unapply_owner).name.text()),
+            format!("{variant_name}$")
+        );
+        assert_ne!(unapply_owner, companion);
+        selected_methods.push(format!("{variant_name}$.unapply@{variant_name}$"));
+
+        let source_nested = source_extractor.args[0];
+        let typed_nested = typed_extractor.patterns[0];
+        assert_eq!(mapped(source_nested), typed_nested);
+        let source_body_expr =
+            if let TreeKind::Block(block) = &source_ast.get(source_case.body).kind {
+                block.expr
+            } else {
+                source_case.body
+            };
+        let mapped_body_expr = mapped(source_body_expr);
+        let body = if let TreeKind::Block(block) = &typer.typed_ast().get(typed_case.body).kind {
+            block.expr
+        } else {
+            typed_case.body
+        };
+        assert_eq!(mapped_body_expr, body);
+        assert_eq!(
+            denoted_symbol(typer, typer.typed_ast().get(body).ty),
+            Some(expr)
+        );
+        match case_index {
+            0 => {
+                let TreeKind::Ident(wildcard) = &typer.typed_ast().get(typed_nested).kind else {
+                    panic!("Num wildcard does not introduce a binder")
+                };
+                assert_eq!(store.names.resolve(wildcard.name.text()), "_");
+                assert_eq!(store.symbols.get(parameter).kind, SymbolKind::Parameter);
+                assert_eq!(typed_symbol(typer, body), parameter);
+                receipt.push("Num(_):Expr=>expr");
+            }
+            1 => {
+                let TreeKind::Bind(binding) = &typer.typed_ast().get(typed_nested).kind else {
+                    panic!("Succ(inner) introduces one case-local binder")
+                };
+                let binder = typed_symbol(typer, typed_nested);
+                assert_eq!(store.names.resolve(binding.name.text()), "inner");
+                assert_eq!(store.symbols.get(binder).kind, SymbolKind::Local);
+                assert_eq!(store.symbols.get(binder).owner, Some(method));
+                assert_eq!(
+                    store.symbols.get(binder).origin,
+                    SymbolOrigin::Source(source)
+                );
+                let SymbolInfo::Complete(binder_type) = *store.symbols.info(binder) else {
+                    panic!("the case-local binder has a completed type")
+                };
+                assert_eq!(type_ref_symbol(typer, binder_type), expr);
+                assert_eq!(type_ref_symbol(typer, signature.params[0].ty), expr);
+                assert_eq!(typed_symbol(typer, body), binder);
+                receipt.push("Succ(inner:Expr):Expr=>case-local inner");
+            }
+            _ => unreachable!(),
+        }
+    }
+    assert_eq!(
+        receipt,
+        [
+            "Num(_):Expr=>expr",
+            "Succ(inner:Expr):Expr=>case-local inner"
+        ]
+    );
+    format!(
+        "Expr.scala#tree{}|before=UnsupportedProduct1FieldType(Succ.inner)|after=complete Evaluator.unwrap(expr:Expr):Expr|match=Expr,cases=[{}]|selected=[{}]|source_mappings=DefDef,Match,selector,CaseDef[0..1],UnApply[0..1],qualifier[0..1],wildcard,binder,body[0..1]|spans=preserved",
+        source_method.index(),
+        receipt.join(","),
+        selected_methods.join(",")
+    )
+}
+
+fn typed_symbol(
+    typer: &SourceTyper<'_>,
+    tree: dotty_core::TreeId<dotty_core::ast::Typed>,
+) -> dotty_core::SymbolId {
+    match typer.store().types.get(typer.typed_ast().get(tree).ty) {
+        Type::TermRef {
+            target: dotty_core::types::TermRefTarget::Symbol(symbol),
+            ..
+        } => *symbol,
+        other => panic!("expected canonical term reference for {tree:?}, got {other:?}"),
+    }
+}
+
+fn denoted_symbol(typer: &SourceTyper<'_>, ty: dotty_core::TypeId) -> Option<dotty_core::SymbolId> {
+    match typer.store().types.get(ty) {
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } => Some(*symbol),
+        Type::TermRef {
+            target: dotty_core::types::TermRefTarget::Symbol(symbol),
+            ..
+        } => match *typer.store().symbols.info(*symbol) {
+            SymbolInfo::Complete(ty) => denoted_symbol(typer, ty),
+            _ => None,
+        },
+        _ => None,
+    }
 }
