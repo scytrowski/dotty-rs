@@ -143,12 +143,12 @@ For the original fixture and negative controls, B2's exact outcomes are:
 | Original `Open`, fixture directory followed by JDK 21 `jmods` | `Ok(symbol)` | `symbol` is the canonical `Open`; class kind/owner/package/origin match the B1 receipt, parent is canonical `java.lang.Object`, and semantic constructor result is `Open`. Resolver transaction commits. |
 | `Open` name resolves first to a class-file resource, which is unsupported by semantic loading | `Err(SemanticMemberLoadFailure { binary_name: Open, source: UnsupportedShape("the selected classpath resource is not TASTy") })` | No legacy retry; semantic-loader and resolver checkpoints are restored. |
 | Truncated bytes selected as `Open.tasty` | `Err(SemanticMemberLoadFailure { binary_name: Open, source: ClassLoad(InvalidTastyFile(Open, _)) })` | No legacy retry; no positive resolved/origin/cache entry remains. |
-| Original `Open.tasty` with `java/lang/Object` omitted from the classpath | `Err(SemanticMemberLoadFailure { binary_name: Open, source: Resolver(ResolutionError::Malformed { .. }) })` | The nested resolver error remains the source; no legacy retry, and both semantic and outer resolver checkpoints are restored. |
+| Original `Open.tasty` with `java/lang/Object` omitted from the classpath | `Err(SemanticMemberLoadFailure { binary_name: Open, source: UnsupportedShape("the configured classpath cannot resolve java.lang.Object") })` | The error retains the selected root and names the missing required dependency; no legacy retry, and both semantic and outer resolver checkpoints are restored. |
 
 These error shapes use existing `SemanticTastyLoadError` variants exercised by
 the loader controls. The `BinaryName` in the wrapper always identifies the
-selected root `Open`; a missing dependency remains attributable in the nested
-resolver error. Ordinary, nonselected requests continue through
+selected root `Open`; the missing-`Object` `UnsupportedShape` reason identifies
+the unavailable dependency. Ordinary, nonselected requests continue through
 `ClassLoader::load_class` unchanged.
 
 ## Evidence and B2 acceptance contract
