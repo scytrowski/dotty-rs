@@ -1,3 +1,4 @@
+use dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind;
 use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
 use dotty_core::ast::{Typed, Untyped};
 use dotty_core::{SourceId, SymbolId, TreeId};
@@ -7,8 +8,7 @@ use dotty_tasty::tasty::{RenderedNameSignature, RenderedParamSig, RenderedSigned
 use dotty_tasty::term::{AstRefKind, RawTree, TermValue};
 use dotty_tasty_pickler::{
     ClassStatePicklePlan, DirectFormalConstructorCallPairBinding, LocalValueBinding,
-    OrderedConstructorCallArgumentPairBinding, PickleError, PlannedCallBinding,
-    SourceTypedBindings,
+    OrderedConstructorCallArgumentPairBinding, PlannedCallBinding, SourceTypedBindings,
 };
 
 const FORWARD: &str = include_str!(
@@ -37,6 +37,141 @@ fn emitted(source: &str, source_id: u32) -> Vec<(String, Vec<u8>)> {
         },
     )
     .unwrap()
+}
+
+fn assert_frontend_proof(source: &str, source_id: u32, expected: [&str; 2]) {
+    with_paired_jvm_tasty_batch_plan(
+        source,
+        "PairFactory.scala",
+        SourceId::from_index(source_id),
+        |batch| {
+            assert_eq!(batch.source_id, SourceId::from_index(source_id));
+            assert_eq!(batch.classes.len(), 3, "one frontend unit owns all declarations");
+            assert_eq!(batch.jvm_unit.classes.len(), 3);
+            assert_eq!(batch.constructor_call_proofs.len(), 1);
+
+            let proof = &batch.constructor_call_proofs[0];
+            let (store, source_ast, typed_ast, source_index, _source_typed_index, jvm_unit) =
+                proof.session_inputs();
+            assert_eq!(proof.source_id(), batch.source_id);
+            assert!(std::ptr::eq(batch.jvm_unit, jvm_unit));
+            assert_eq!(proof.method_descriptor(), "(Lexample/Counter;I)Lexample/Pair;");
+            assert_eq!(
+                proof.constructor_descriptor(),
+                "(Lexample/Counter;Lexample/Counter;)V"
+            );
+            assert_eq!(proof.argument_proof().kind(), ConstructorArgumentProofKind::FormalNestedPair);
+            let pair = proof.argument_proof().ordered_pair().unwrap();
+            let arguments = pair.arguments();
+            let labels = arguments.map(|argument| {
+                if argument.formal().is_some() {
+                    "formal"
+                } else {
+                    assert!(argument.nested_new().is_some());
+                    "nested"
+                }
+            });
+            assert_eq!(labels, expected);
+
+            let formal_index = expected.iter().position(|origin| *origin == "formal").unwrap();
+            let nested_index = expected.iter().position(|origin| *origin == "nested").unwrap();
+            let formal = arguments[formal_index].formal().unwrap();
+            let nested = arguments[nested_index].nested_new().unwrap();
+            assert_eq!(formal.formal(), pair.method_formals()[0]);
+            assert_eq!(nested.argument_formal(), pair.method_formals()[1]);
+            assert_eq!(nested.class(), proof.formal_class().unwrap());
+            assert_eq!(nested.source_outer_argument(), arguments[nested_index].source_argument());
+            assert_eq!(nested.typed_outer_argument(), arguments[nested_index].typed_argument());
+            assert_ne!(arguments[0].source_argument(), arguments[1].source_argument());
+            assert_ne!(arguments[0].typed_argument(), arguments[1].typed_argument());
+            assert_ne!(pair.constructor_formals()[0], pair.constructor_formals()[1]);
+
+            let nested_roots = (
+                nested.source_outer_argument(),
+                nested.typed_outer_argument(),
+                nested.source_apply(),
+                nested.typed_apply(),
+                nested.source_select(),
+                nested.typed_select(),
+                nested.source_new(),
+                nested.typed_new(),
+                nested.source_argument(),
+                nested.typed_argument(),
+            );
+            eprintln!(
+                "MIXED_FRONTEND_SESSION source={:?} classes={:?} members={:?} caller={:?} method={:?} method_descriptor={} method_formals={:?}/{:?} formal_types={:?} target={:?} constructor={:?} constructor_descriptor={} constructor_formals={:?}/{:?} rhs={:?} select={:?} new={:?} arguments={:?} nested={:?} nested_roots={:?} origins={:?}",
+                batch.source_id,
+                batch.classes.iter().map(|class| class.class).collect::<Vec<_>>(),
+                batch
+                    .classes
+                    .iter()
+                    .map(|class| (class.class, class.source_member_order.clone()))
+                    .collect::<Vec<_>>(),
+                proof.caller_class(),
+                proof.method(),
+                proof.method_descriptor(),
+                pair.source_method_formals(),
+                pair.method_formals(),
+                pair.method_formal_types(),
+                proof.target_class(),
+                proof.constructor(),
+                proof.constructor_descriptor(),
+                pair.source_constructor_formals(),
+                pair.constructor_formals(),
+                (proof.source_rhs(), proof.typed_rhs()),
+                (proof.source_select(), proof.typed_select()),
+                (proof.source_new(), proof.typed_new()),
+                arguments.map(|argument| (argument.source_argument(), argument.typed_argument())),
+                (nested.class(), nested.constructor(), nested.argument_formal()),
+                nested_roots,
+                labels,
+            );
+
+            for (index, origin) in expected.into_iter().enumerate() {
+                match (origin, arguments[index].formal(), arguments[index].nested_new()) {
+                    ("formal", Some(formal), None) => assert_eq!(
+                        formal.formal(),
+                        pair.method_formals()[0],
+                        "the direct Counter leaf is the original Counter method formal"
+                    ),
+                    ("nested", None, Some(nested)) => {
+                        assert_eq!(nested.argument_formal(), pair.method_formals()[1]);
+                        assert_eq!(nested.source_outer_argument(), arguments[index].source_argument());
+                        assert_eq!(nested.typed_outer_argument(), arguments[index].typed_argument());
+                    }
+                    other => panic!("unexpected ordered argument proof: {other:?}"),
+                }
+            }
+
+            for class in batch.classes {
+                let plan = class.tasty_plan.plan();
+                assert_eq!(plan.source.id, batch.source_id);
+                assert!(std::ptr::eq(plan.store, store));
+                assert!(std::ptr::eq(plan.source_ast, source_ast));
+                assert!(std::ptr::eq(plan.typed_ast, typed_ast));
+                assert!(std::ptr::eq(plan.source_index, source_index));
+                for (source_formal, method_formal) in pair
+                    .source_method_formals()
+                    .into_iter()
+                    .zip(pair.method_formals())
+                {
+                    assert_eq!(
+                        plan.source_index.symbol_at(batch.source_id, source_formal),
+                        Some(method_formal),
+                        "all class plans borrow the source index for the same method formals"
+                    );
+                }
+                for argument in arguments {
+                    assert_eq!(
+                        plan.typed_bindings.typed_at(batch.source_id, argument.source_argument()),
+                        Some(argument.typed_argument()),
+                        "original source argument roots map to their exact typed roots"
+                    );
+                }
+            }
+        },
+    )
+    .unwrap();
 }
 
 fn tasty(bytes: &[u8]) -> TastyFile<'_> {
@@ -157,6 +292,10 @@ fn assert_mixed_wire(source: &str, source_id: u32, method: &str, expected: [&str
     let index = tasty.ast_address_index().unwrap();
     let parameter_addresses = parameter_addresses(&index, method_address);
     assert_eq!(parameter_addresses.len(), 2);
+    eprintln!(
+        "MIXED_TASTY_REFERENCES method={method} PARAM_existing={} PARAM_seed={} expected_argument_targets={:?}",
+        parameter_addresses[0], parameter_addresses[1], expected
+    );
     let RawTree::LengthNode(outer_node) = body.rhs.unwrap() else {
         panic!("method body is the original Pair constructor APPLY")
     };
@@ -290,14 +429,14 @@ impl SourceTypedBindings for ChangedMixedBindings<'_> {
 
 fn validate_changed_pair(
     mutate: impl FnOnce(&mut OrderedConstructorCallArgumentPairBinding),
-) -> Result<(), PickleError> {
+) -> Result<(), String> {
     validate_changed_pair_with_missing_edge(mutate, None)
 }
 
 fn validate_changed_pair_with_missing_edge(
     mutate: impl FnOnce(&mut OrderedConstructorCallArgumentPairBinding),
     missing_source_edge: Option<TreeId<Untyped>>,
-) -> Result<(), PickleError> {
+) -> Result<(), String> {
     let source_id = SourceId::from_index(201409);
     with_paired_jvm_tasty_batch_plan(FORWARD, "PairFactory.scala", source_id, |batch| {
         let proof = batch.constructor_call_proofs.first().unwrap();
@@ -334,15 +473,24 @@ fn validate_changed_pair_with_missing_edge(
             constructor: original.constructor.clone(),
             members: original.members,
         };
-        let validated = changed_plan.validate()?;
-        validated.validate_method_bodies()?;
-        validated.pickle().map(|_| ())
+        let validated = changed_plan
+            .validate()
+            .map_err(|error| format!("TASTy plan validation: {error:?}"))?;
+        validated
+            .validate_method_bodies()
+            .map_err(|error| format!("typed body validation: {error:?}"))?;
+        validated
+            .pickle()
+            .map(|_| ())
+            .map_err(|error| format!("TASTy pickler: {error:?}"))
     })
     .unwrap()
 }
 
 #[test]
 fn mixed_constructor_arguments_serialize_in_both_original_positions() {
+    assert_frontend_proof(FORWARD, 201400, ["formal", "nested"]);
+    assert_frontend_proof(REVERSE, 201402, ["nested", "formal"]);
     assert_mixed_wire(FORWARD, 201401, "wrapAndCreate", ["formal", "nested"]);
     assert_mixed_wire(REVERSE, 201403, "createAndWrap", ["nested", "formal"]);
 }
@@ -353,6 +501,7 @@ fn mixed_constructor_receipt_rejects_swapped_and_forged_provenance() {
 
     let swapped = validate_changed_pair(|pair| pair.arguments.swap(0, 1));
     assert!(swapped.is_err(), "position-swapped roots must be rejected");
+    eprintln!("MIXED_NEGATIVE_FIRST_REJECTION swapped-roots {swapped:?}");
 
     let wrong_constructor = validate_changed_pair(|pair| {
         let Origin::NestedNew { call, .. } = pair.arguments[1].origin else {
@@ -370,6 +519,7 @@ fn mixed_constructor_receipt_rejects_swapped_and_forged_provenance() {
         wrong_constructor.is_err(),
         "wrong constructor target must fail"
     );
+    eprintln!("MIXED_NEGATIVE_FIRST_REJECTION wrong-nested-constructor {wrong_constructor:?}");
 
     let seed_used_as_direct_counter = validate_changed_pair(|pair| {
         let Origin::Formal {
@@ -390,6 +540,9 @@ fn mixed_constructor_receipt_rejects_swapped_and_forged_provenance() {
         seed_used_as_direct_counter.is_err(),
         "direct Counter origin cannot target the Int seed formal"
     );
+    eprintln!(
+        "MIXED_NEGATIVE_FIRST_REJECTION direct-formal-target {seed_used_as_direct_counter:?}"
+    );
 
     let existing_used_as_nested_seed = validate_changed_pair(|pair| {
         let Origin::NestedNew { call, .. } = pair.arguments[1].origin else {
@@ -404,6 +557,7 @@ fn mixed_constructor_receipt_rejects_swapped_and_forged_provenance() {
         existing_used_as_nested_seed.is_err(),
         "nested seed cannot target the existing Counter formal"
     );
+    eprintln!("MIXED_NEGATIVE_FIRST_REJECTION nested-seed-target {existing_used_as_nested_seed:?}");
 
     let duplicate_root = validate_changed_pair(|pair| {
         pair.arguments[1].source_argument = pair.arguments[0].source_argument;
@@ -413,6 +567,7 @@ fn mixed_constructor_receipt_rejects_swapped_and_forged_provenance() {
         duplicate_root.is_err(),
         "duplicate source/typed roots must fail"
     );
+    eprintln!("MIXED_NEGATIVE_FIRST_REJECTION duplicate-source-typed-roots {duplicate_root:?}");
 
     let foreign_formal = validate_changed_pair(|pair| {
         let Origin::Formal {
@@ -436,6 +591,7 @@ fn mixed_constructor_receipt_rejects_swapped_and_forged_provenance() {
         foreign_formal.is_err(),
         "a constructor symbol cannot forge a caller formal"
     );
+    eprintln!("MIXED_NEGATIVE_FIRST_REJECTION foreign-formal {foreign_formal:?}");
 
     let missing_source_edge = with_paired_jvm_tasty_batch_plan(
         FORWARD,
@@ -459,6 +615,7 @@ fn mixed_constructor_receipt_rejects_swapped_and_forged_provenance() {
         missing_edge.is_err(),
         "missing source-to-typed edges must fail"
     );
+    eprintln!("MIXED_NEGATIVE_FIRST_REJECTION missing-source-typed-edge {missing_edge:?}");
 }
 
 #[test]

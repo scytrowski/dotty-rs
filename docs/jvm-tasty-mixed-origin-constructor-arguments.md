@@ -1,5 +1,194 @@
 # Mixed-origin Pair constructor arguments audit (#2011)
 
+## Integrated release-gate ledger (#2018)
+
+This section records the fresh integrated run required by #2018. Its baseline
+is `main` at `cfaa8c1160cd190113b867b77d3644357d691a6f` (merged #2052), fetched
+from GitHub on 2026-11-03. The issue worktree was clean before creating the
+issue branch. All seven prerequisite merge commits are ancestors of this
+baseline. The receipts below are historical prerequisite evidence; the
+commands and results later in this section were rerun against the integrated
+baseline and are the release-gate evidence.
+
+| Prerequisite | PR head reviewed | Merge commit | Final review | Successful PR CI / Scala run |
+| --- | --- | --- | --- | --- |
+| #2011 / #2020 | `3fa7da8814cf66314987df3f6769646aaea2cb2d` | `ace9c50af2df7050846518f96464c48574c05a20` | `READY_FOR_MERGE` | `41491828053` / `41491828041` |
+| #2012 / #2023 | `1dc234bd5e2a8a5d018de9085d27ee1af0754e2a` | `ac403ef0b8af2d263cd5e1680a2150e5f6517de3` | `READY_FOR_MERGE` | `41515579857` / `41515579879` |
+| #2013 / #2032 | `e3778e27f74aea351d193cdaf2b40273502130f7` | `1fbc0ac64cef9d8c4b7e5a16d4fe7a1e753f2a6d` | `READY_FOR_MERGE` | `41530527659` / `41530527654` |
+| #2014 / #2042 | `79fa8b7930da4db76451f10c4b489641e197abfe` | `ff2f400f19a6b805ef8c2b20766dda0cf84d02f2` | `READY_FOR_MERGE` | `41542276284` / `41542276334` |
+| #2015 / #2045 | `4c54c7210b6c1cf446747a3f94e3883ef8b49d6d` | `5cb16a5868c53071e9fcbc08370df688a5378ed0` | `READY_FOR_MERGE` | `41553616952` / `41553616867` |
+| #2016 / #2049 | `063f658bb7f65ca587243e5ecb8a6ae867073fa9` | `05de4d04196041b6ef442e7d8716511f8a148a0b` | `READY_FOR_MERGE` | `41591752299` / `41591752294` |
+| #2017 / #2053 | `df32a8629dcbd5e2fbbff6a34bbfe9ffaa64ce39` | `2b7ccbf87c9c2b4771aeb4bc01a0236547edf572` | `READY_FOR_MERGE` | `41603443906` / `41603443829` |
+
+All final review submissions were published on their reviewed heads. The CI
+and Scala workflow runs for each prerequisite head completed successfully;
+none is substituted for integrated-main validation below.
+
+### AC1 — frozen baseline and toolchain
+
+| Input | Integrated-run receipt |
+| --- | --- |
+| Rust | `rustc 1.98.1 (48a229cea 2026-09-01)`; `cargo 1.98.1 (797e8a9bc 2026-08-05)` |
+| Scala source | `777528f19a58e794c9954a42f433373472ec57f8`; Scala `3.9.0-bin-SNAPSHOT-git-777528f`; TASTy `28.9.0` |
+| Java | Temurin `21.0.13+9`; `java` SHA-256 `9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`; `javac` and `javap` report `21.0.13`; classfile major `65` |
+| Staged compiler | `with_compiler.jar` SHA-256 `e22501460f3d2b272d2dd93666d7229950c6929aa681cc2eb47a1e2946eef161`; this identifies this local sbt build, not a deterministic compiler constant |
+| Published Scala runtime | `scala3-library_3-3.9.0.jar`: `9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba`; `scala-library-3.9.0.jar`: `b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd` |
+
+Frozen producer and independent consumer inputs used by the strict Scala run:
+
+| Input | SHA-256 |
+| --- | --- |
+| Forward producer `wrap-and-create/PairFactory.scala` | `9232b0a536470a69041f399a23f2b4a0e80a9dcfeb28575f17a84d1f146f8935` |
+| Reverse producer `create-and-wrap/PairFactory.scala` | `0c14002f9915683fe60371ac53ea36bec77b24b8a04781152fbae020449ac95c` |
+| Java runtime harness `PairFactoryIdentityHarness.java` | `9b070f0d29c3607562b1529a49a61c10edaab9e1415e7fa03646bf1b566bdb3c` |
+| Scala client `Consumer.scala` | `0694c78ae678da1575b14b136c2503b35ff038bd1f24624aa97b20c7fd83c035` |
+| Scala reverse client `ConsumerReversed.scala` | `4db1392a9548a7f9f6a6376c115870bf9dde0cac0bef4e61b45f29ebf9b22c04` |
+
+### AC2–AC3 — original frontend session, identities, and TASTy
+
+`mixed_constructor_arguments_serialize_in_both_original_positions` emits one
+session receipt per original input through
+`with_paired_jvm_tasty_batch_plan`. The callback-scoped proof borrows the same
+`SemanticStore`, source/typed arenas, source semantic index, source-to-typed
+bindings, and complete JVM unit. The test asserts pointer identity for the
+shared store/arenas/index across all three class plans, and verifies each
+source argument maps to the exact typed root in the proof.
+
+| Receipt | `wrapAndCreate` | `createAndWrap` |
+| --- | --- | --- |
+| `SourceId` | `201400` | `201402` |
+| classes / symbols | `Counter=40`, `Pair=41`, `PairFactory=42` | same run-local IDs |
+| factory method / symbol | source `TreeId(59)`, `SymbolId(60)` | source `TreeId(59)`, `SymbolId(60)` |
+| method formals | source `TreeId(45), TreeId(47)`; symbols `61, 62`; types `TypeId(82), TypeId(5)` (`Counter, Int`) | same run-local IDs |
+| factory descriptor | `(Lexample/Counter;I)Lexample/Pair;` | same |
+| target / outer constructor | `Pair` symbol `41`; `Pair.<init>` symbol `52`, descriptor `(Lexample/Counter;Lexample/Counter;)V` | same run-local IDs |
+| outer method RHS, Select, New | source/typed `58/22`, `51/15`, `50/14` | same run-local IDs |
+| Pair arguments, source/typed | `52/16`, `57/21` | `56/20`, `57/21` |
+| ordered origins | `Formal(existing), NestedNew(Counter(seed))` | `NestedNew(Counter(seed)), Formal(existing)` |
+| nested Counter roots | Apply `57/21`, Select `55/19`, New `54/18`, seed `56/20`; ctor symbol `44`, seed formal `62` | Apply `56/20`, Select `54/18`, New `53/17`, seed `55/19`; ctor symbol `44`, seed formal `62` |
+
+The proof kind is the existing `FormalNestedPair`; no separate mixed-proof
+engine is introduced. It retains separate method and constructor formals,
+source order, exact source/typed roots, canonical symbols, and types.
+`PairFactory.tasty` contains the ordered
+`(existing: Counter, seed: Int): Pair` method signature, signed
+`Pair.<init>(Counter, Counter): Pair` selection, a direct `TERMREFdirect` to
+`existing`, and a nested `Counter.<init>(Int): Counter` application whose
+`TERMREFdirect` targets `seed`. The AST index reports method `PARAM` addresses
+`32` (`existing`) and `41` (`seed`) in both orientations; the focused test
+prints those addresses with the expected outer argument-origin order and
+asserts each reference targets the corresponding formal. Reversing the
+expression swaps only those two argument children. `Pair.tasty` retains
+separate immutable `left`/`right` aliases; `Counter.tasty` retains state,
+`get`, and `set`.
+
+### AC4–AC5 — six linked artifacts, deterministic bytes, and JVM call shape
+
+Each orientation emits exactly `Counter.class/.tasty`, `Pair.class/.tasty`,
+and `PairFactory.class/.tasty`. The strict Scala consumer emits each original
+orientation twice from fresh Rust sessions and confirms byte equality within
+that orientation. The reversed Factory differs as expected; equality between
+different sources is not required. All classes are major 65 and each class
+`TASTY` attribute matches its sidecar UUID.
+
+| Artifact | Shared / forward SHA-256 | Reverse SHA-256 | UUID |
+| --- | --- | --- | --- |
+| `Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | same | `008071c3c00968ac0000000000008193` |
+| `Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | same | — |
+| `Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | same | `000b7d8d7441c7f00000000000008198` |
+| `Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | same | — |
+| `PairFactory.class` | `4b764c8dccf4074f3df76ede0326c7da7e94af458aa21d4d8a660bc2193886d9` | `c01945fb2aa13978a44c036646bc0d29c0eb5455f44c58244f57e5f0fe9bf0cc` | forward `009425da889b07c80000000000008198`; reverse `00921f29eb774ec10000000000008198` |
+| `PairFactory.tasty` | `4264dc0388a33002da2500cd178fd05c3f94199b9cac8221d3bdde67ef549009` | `5f8a3f3cf5c3f4ed83e7ea4f8498cb6498f502f90a8e988a51268b15ab9b70a9` | — |
+
+The Rust bytecode is fully decoded and the straight-line CFG is verified. The
+factory ABI in both orientations is
+`wrapAndCreate/createAndWrap:(Lexample/Counter;I)Lexample/Pair;`, with
+`existing` in local 1 and `seed` in local 2. Forward reports
+`max_stack=6,max_locals=3`: Pair `new@0`, `aload_1@4`, Counter `new@5`,
+`iload_2@9`, `Counter.<init>(I)V@10`, `Pair.<init>(Counter,Counter)V@13`,
+`areturn@16`. Reverse reports `max_stack=5,max_locals=3`: Pair `new@0`,
+Counter `new@4`, `iload_2@8`, Counter init `@9`, `aload_1@12`, Pair init
+`@13`, `areturn@16`. Constant-pool references are decoded from the emitted
+classfile; the runtime test does not assume guessed indexes or offsets.
+
+### AC6–AC7 — strict Java and Scala consumers
+
+The separate Java client is compiled with `javac --release 21` and runs with
+`java -Xverify:all -ea` against only the original Rust `.class` files. Both
+orientations pass: the original `Counter(7)` retains identity in its requested
+Pair field, the other field is a fresh `Counter(seed)`, changing the original
+to `42` affects only its alias, changing the new Counter to `-9` affects only
+that instance, and another call allocates a fresh Counter. Original six-file
+hashes are checked before and after. Runtime output records
+`identity:true; first=42/-9; repeat=11; zero=0; negative=-5; fresh:true` for
+both method orders.
+
+The independently compiled Scala 3.9 client uses the same original six Rust
+files plus only the two hash-pinned Scala runtime JARs. It runs on JDK 21 with
+the same identity, allocation, and mutation assertions; output is
+`formal-identity=true; fresh-counter=true; isolated-mutation=true` for both
+argument orders. Official `-decompile`, `-print-tasty`, and `-from-tasty`
+inspect the original TASTy; `-from-tasty` output is inspection-only and is
+excluded from runtime resolution. Separate classfile-masked controls prove
+Scala resolves Counter methods, Pair methods/constructor, and the mixed
+factory method from TASTy. The six original hashes remain unchanged after
+compile, inspect, and run.
+
+### AC8 — negative first failures and publisher fault containment
+
+These controls mutate isolated source plans, TASTy sidecars, or copied class
+files. A JVM-valid positional field swap is checked by object identity instead
+of being labeled a verifier error.
+
+| Control | Observed first rejecting stage |
+| --- | --- |
+| Third Pair constructor argument | SourceTyper: `ApplicationArityMismatch (expected: 2, actual: 3)` |
+| Deeper nested constructor / wrong function shape | Cross-class proof: `SourceShape` (the nested argument must use an original factory formal; its function must be `Select`) |
+| Wrong result type | Cross-class proof: exact Pair `TypeRef` identity mismatch |
+| Wrong typed constructor/formal owners, swapped or duplicate roots, forged formal, absent source-to-typed edge | TASTy body validation: observed `Unsupported BodyExpression`, `Reference { reason: Owner }`, `SourceDefinition`, or `BodyBinding ... actual: None`; exact error receipts are printed by `mixed_constructor_receipt_rejects_swapped_and_forged_provenance` |
+| Wrong Counter/Pair consumer signatures or owner | Pinned Scala source typing: `[E171]` arity, `[E007]` type mismatch, `[E006]` missing package symbol, or `[E008]` missing TASTy member as appropriate |
+| Corrupt formal/seed `TERMREFdirect` or malformed Pair alias address | Official Scala `-decompile`: `TreeWithoutOwner` |
+| Missing/misplaced, corrupt, or mismatched-UUID sidecar | Scala binary reader: missing TASTy file, load error, or “out of sync with its TASTy file” |
+| Wrong constructor Methodref, missing Counter `new`/`<init>`, wrong seed slot, extra pending allocation | JVM verifier: observed `VerifyError` at the bad operand, constructor, or stack state |
+| `max_stack` too small / `max_locals` too small | JVM verifier `VerifyError: Operand stack overflow` / classfile load `ClassFormatError: Arguments can't fit into locals` |
+| Same-typed but wrong Pair Fieldref | JVM/Scala accept the type-correct class; Java identity assertion reports that caller identity moved to the wrong Pair field |
+| Publisher failure after each of six staged files, before promotion, and after promotion | `mixed_constructor_batch_publisher_contains_each_handled_failure` rejects each case, leaves no accepted partial destination, and preserves the preexisting sentinel. This is handled-failure containment, not crash-atomic multi-file durability. |
+
+### AC9–AC10 — required executions, CI, and closeout boundary
+
+The integrated run used
+`DOTTY_REQUIRE_SCALA_TASTY_MIXED_ORIGIN_CONSTRUCTOR_CONSUMER=1`, every active
+strict flag in `.github/workflows/jvm-tasty-factory-scala-consumer.yml`, and
+`DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`. It ran all listed Scala consumer and
+reader targets, the additional alias-address, secondary-constructor rollback,
+and dual-reference forwarding checks, plus the mandatory
+`DOTTY_CLASSFILE_REQUIRE_JDK=1` classfile/JVM/source/artifact/stateful/identity
+gate. No required Scala or JDK target skipped. A full workspace-test attempt
+without `JAVA_HOME` stopped at a Java executable lookup; the full rerun with
+the hash-verified JDK path passed.
+
+On the integrated baseline, these required checks passed:
+
+```text
+cargo fmt --all -- --check
+python3 tools/check-frontend-boundaries.py
+cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo +1.98.1 doc --workspace --no-deps --locked
+JAVA_HOME=<Temurin 21.0.13> RUST_TEST_THREADS=1 cargo +1.98.1 test --workspace --all-targets --locked
+git diff --check
+```
+
+`RUST_TEST_THREADS=1` bounds the workspace test harness because the earlier
+#2011 default-parallel run on this host reached its process file-descriptor
+limit. No hosted full Scala corpus audit was run.
+
+Deferred forms remain outside this release gate: a third constructor
+argument, deeper nesting or branch-local construction, local/field/helper
+produced arguments, generics, contextual/default/overloaded/secondary
+constructors, cross-unit ABI, and a public compiler session or CLI. No
+production behavior was changed for #2018; future missing producer behavior
+returns to its owning issue.
+
 This is an audit-only result. It records the Scala 3.9.0 representation and
 the current Rust first rejection for a Pair constructor call with one existing
 method formal and one nested `new Counter(seed)`. It changes no production
