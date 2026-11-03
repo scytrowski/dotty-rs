@@ -2984,6 +2984,27 @@ mod tests {
             Ok(Some(alias_id)),
             "type member lookup should return the declaration identity"
         );
+        let SymbolInfo::Complete(alias_info) = store.symbols.get(alias_id).info else {
+            panic!("canonical Predef.String type-member lookup should resolve its declared target");
+        };
+        let Type::AliasingBounds { alias: target } = store.types.get(alias_info) else {
+            panic!("Predef.String should retain its declared alias target in AliasingBounds");
+        };
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(target_class),
+            ..
+        } = store.types.get(*target)
+        else {
+            panic!("Predef.String's target should be a symbol-backed TypeRef");
+        };
+        assert_eq!(
+            store.names.resolve(store.symbols.get(*target_class).name.text()),
+            "String",
+            "the alias target should be the canonical java.lang.String class"
+        );
+        assert_eq!(store.symbols.get(alias_id).kind, SymbolKind::TypeAlias);
+        assert_eq!(store.symbols.get(alias_id).owner, Some(module_class));
+        assert_ne!(alias_id, *target_class);
         let term_string = Name::new(store.names.intern("String"), Namespace::Term);
         assert_eq!(
             resolver.resolve_member(
