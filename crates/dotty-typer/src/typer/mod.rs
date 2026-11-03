@@ -37546,6 +37546,313 @@ mod tests {
     }
 
     #[test]
+    fn issue_2037_reference_unwrap_result_failure_rolls_back_binder_and_retries_sibling() {
+        let source_text = include_str!("../../tests/fixtures/source-recursive-adt-match-3.9.0/Expr.scala")
+            .replace("def unwrap(expr: Expr): Expr", "def invalid(expr: Expr): Int")
+            .replace(
+                "  def eval(expr: Expr): Int =",
+                "  def validSibling(expr: Expr): Expr =\n    expr match\n      case Num(_)      => expr\n      case Succ(inner) => inner\n\n  def eval(expr: Expr): Int =",
+            );
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(&source_text);
+        let method_tree = |name: &str| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == name =>
+                    {
+                        Some(tree)
+                    }
+                    _ => None,
+                })
+                .expect("requested source method")
+        };
+        let invalid = method_tree("invalid");
+        let sibling = method_tree("validSibling");
+        let invalid_symbol = index
+            .symbol_at(source, invalid)
+            .expect("source invalid method");
+        let expr = class_symbol(&parsed, &store, &index, source, "Expr");
+        let succ = class_symbol(&parsed, &store, &index, source, "Succ");
+        let succ_unapply = index
+            .generated_case_class_method(succ, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .expect("canonical source-derived Succ.unapply");
+        let succ_selector = index
+            .derived_symbol_at(
+                succ,
+                source,
+                parsed
+                    .ast
+                    .iter()
+                    .find_map(|(_, node)| match &node.kind {
+                        TreeKind::TypeDef(definition)
+                            if store.names.resolve(definition.name.as_name().text()) == "Succ" =>
+                        {
+                            let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind
+                            else {
+                                return None;
+                            };
+                            let TreeKind::DefDef(constructor) =
+                                &parsed.ast.get(template.constructor).kind
+                            else {
+                                return None;
+                            };
+                            Some(constructor.value_param_clauses[0][0])
+                        }
+                        _ => None,
+                    })
+                    .expect("Succ constructor field tree"),
+            )
+            .expect("canonical source-derived Succ._1");
+        let (rhs, cases, binder_tree, body_tree) = {
+            let TreeKind::DefDef(definition) = &parsed.ast.get(invalid).kind else {
+                unreachable!()
+            };
+            let rhs = definition.rhs.expect("invalid method has a body");
+            let TreeKind::Match(matched) = &parsed.ast.get(rhs).kind else {
+                panic!("invalid method retains the original Match")
+            };
+            assert_eq!(matched.cases.len(), 2);
+            let TreeKind::CaseDef(second_case) = &parsed.ast.get(matched.cases[1]).kind else {
+                unreachable!()
+            };
+            let TreeKind::Apply(extractor) = &parsed.ast.get(second_case.pattern).kind else {
+                panic!("Succ pattern remains an extractor application")
+            };
+            let binder = extractor.args[0];
+            let body = match &parsed.ast.get(second_case.body).kind {
+                TreeKind::Block(block) => block.expr,
+                _ => second_case.body,
+            };
+            (rhs, matched.cases.clone(), binder, body)
+        };
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JDK 21 is configured");
+        let classpath = dotty_classloader::classloader::CompositeClassPath::new(vec![
+            Box::new(dotty_classloader::classloader::DirectoryClassPath::new(
+                fixture,
+            )),
+            Box::new(
+                dotty_classloader::classloader::JdkClassPath::new(
+                    std::path::PathBuf::from(java_home).join("jmods"),
+                )
+                .expect("JDK module path"),
+            ),
+        ]);
+        let resolver = dotty_classloader::classloader::ClasspathSymbolResolver::new(
+            classpath,
+            definitions,
+            dotty_classloader::classloader::LoadingSession::new(),
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let before_store = typer.store().checkpoint();
+        let before_typed = typer.typed_ast().checkpoint();
+        let before_projection = issue_1999_late_failure_projection(&typer, &parsed);
+        let before_type_index = parsed
+            .ast
+            .iter()
+            .map(|(tree, _)| (tree, typer.source_type_index().type_at(source, tree)))
+            .collect::<Vec<_>>();
+        let watched = [invalid_symbol, expr, succ, succ_unapply, succ_selector]
+            .map(|symbol| (symbol, *typer.store().symbols.info(symbol)));
+        let observed = Rc::new(RefCell::new(false));
+        let observation = Rc::clone(&observed);
+        let parsed_ref = &parsed;
+        typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+            let typed_match = typer
+                .source_typed_index()
+                .get(source, rhs)
+                .expect("the Match reached its typed mapping before result conformance failed");
+            assert_eq!(
+                type_symbol(typer.store(), typer.typed_ast().get(typed_match).ty),
+                expr,
+                "the Match reached its typed mapping before declared-result conformance failed"
+            );
+            assert_eq!(
+                cases
+                    .iter()
+                    .filter(|case| typer.source_typed_index().get(source, **case).is_some())
+                    .count(),
+                2,
+                "both original cases completed before result conformance"
+            );
+            let binder = typer
+                .pattern_binding_symbol_at(source, binder_tree)
+                .expect("the source-owned inner binder exists before rollback");
+            assert_eq!(typer.store().symbols.get(binder).kind, SymbolKind::Local);
+            assert_eq!(
+                typer.store().symbols.get(binder).owner,
+                Some(invalid_symbol)
+            );
+            assert_eq!(
+                typer.store().symbols.get(binder).origin,
+                SymbolOrigin::Source(source)
+            );
+            let SymbolInfo::Complete(binder_type) = *typer.store().symbols.info(binder) else {
+                panic!("the late-failure binder already has its completed type")
+            };
+            assert_eq!(type_symbol(typer.store(), binder_type), expr);
+            let typed_binder = typer
+                .source_typed_index()
+                .get(source, binder_tree)
+                .expect("the source binder has a typed mapping before rollback");
+            let typed_body = typer
+                .source_typed_index()
+                .get(source, body_tree)
+                .expect("the inner body reference has a typed mapping before rollback");
+            assert!(
+                matches!(
+                    typer.store().types.get(typer.typed_ast().get(typed_body).ty),
+                    Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == binder
+                ),
+                "the typed Succ body refers to its case-local inner binder"
+            );
+            let TreeKind::Bind(binding) = &typer.typed_ast().get(typed_binder).kind else {
+                panic!("typed Succ pattern retains its canonical binder")
+            };
+            assert_eq!(typer.store().names.resolve(binding.name.text()), "inner");
+            assert_eq!(
+                parsed_ref.ast.get(binder_tree).position,
+                typer.typed_ast().get(typed_binder).position
+            );
+            assert_ne!(typer.typed_ast().checkpoint(), before_typed);
+            *observation.borrow_mut() = true;
+        }));
+
+        let error = typer
+            .type_method_definition(invalid)
+            .expect_err("Int result mismatch fails after the reference-valued Match is typed");
+        assert!(
+            matches!(
+                error,
+                TyperError::ExpectedExpressionTypeMismatch {
+                    source: error_source,
+                    tree_index,
+                    actual,
+                    expected,
+                } if error_source == source
+                    && tree_index == rhs.index()
+                    && expected == definitions.int
+                && actual != expected
+            ),
+            "unexpected complete-method result diagnostic: {error:?}"
+        );
+        let normalized_diagnostic = match &error {
+            TyperError::ExpectedExpressionTypeMismatch {
+                source: error_source,
+                tree_index,
+                actual: _,
+                expected,
+            } => (*error_source, *tree_index, *expected),
+            other => panic!("unexpected complete-method result diagnostic: {other:?}"),
+        };
+        assert!(
+            *observed.borrow(),
+            "observer saw the live Succ binder before rollback"
+        );
+        assert_eq!(typer.store().checkpoint(), before_store);
+        assert_eq!(typer.typed_ast().checkpoint(), before_typed);
+        assert_issue_1999_projection_unchanged(
+            &before_projection,
+            &issue_1999_late_failure_projection(&typer, &parsed),
+            "rollback removes binder scopes, typed nodes and every source mapping",
+        );
+        assert_eq!(
+            parsed
+                .ast
+                .iter()
+                .map(|(tree, _)| (tree, typer.source_type_index().type_at(source, tree)))
+                .collect::<Vec<_>>(),
+            before_type_index,
+            "source type cache is restored"
+        );
+        assert!(typer.source_typed_index().get(source, invalid).is_none());
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
+        assert!(
+            typer
+                .pattern_binding_symbol_at(source, binder_tree)
+                .is_none()
+        );
+        for (symbol, info) in watched {
+            assert_eq!(*typer.store().symbols.info(symbol), info);
+        }
+
+        let typed_sibling = typer
+            .type_method_definition(sibling)
+            .expect("valid same-session unwrap sibling succeeds after late failure rollback");
+        assert_eq!(
+            typer.source_typed_index().get(source, sibling),
+            Some(typed_sibling)
+        );
+        let TreeKind::DefDef(sibling_definition) = &parsed.ast.get(sibling).kind else {
+            unreachable!()
+        };
+        let sibling_rhs = sibling_definition.rhs.expect("valid sibling body");
+        let typed_rhs = typer
+            .source_typed_index()
+            .get(source, sibling_rhs)
+            .expect("same-session sibling Match is completely mapped");
+        let TreeKind::Match(sibling_match) = &typer.typed_ast().get(typed_rhs).kind else {
+            panic!("valid sibling remains a typed Match")
+        };
+        assert_eq!(sibling_match.cases.len(), 2);
+
+        let sibling_store = typer.store().checkpoint();
+        let sibling_typed = typer.typed_ast().checkpoint();
+        let sibling_projection = issue_1999_late_failure_projection(&typer, &parsed);
+        let sibling_type_index = parsed
+            .ast
+            .iter()
+            .map(|(tree, _)| (tree, typer.source_type_index().type_at(source, tree)))
+            .collect::<Vec<_>>();
+        typer.transaction_failure_observer = None;
+        let retry = typer
+            .type_method_definition(invalid)
+            .expect_err("repeating the invalid method reports the same diagnostic");
+        let retry_diagnostic = match retry {
+            TyperError::ExpectedExpressionTypeMismatch {
+                source: error_source,
+                tree_index,
+                actual,
+                expected,
+            } if actual != expected => (error_source, tree_index, expected),
+            other => panic!("retry changed the complete-method diagnostic: {other:?}"),
+        };
+        assert_eq!(retry_diagnostic, normalized_diagnostic);
+        assert_eq!(typer.store().checkpoint(), sibling_store);
+        assert_eq!(typer.typed_ast().checkpoint(), sibling_typed);
+        assert_issue_1999_projection_unchanged(
+            &sibling_projection,
+            &issue_1999_late_failure_projection(&typer, &parsed),
+            "repeated failure preserves the successfully typed sibling",
+        );
+        assert_eq!(
+            parsed
+                .ast
+                .iter()
+                .map(|(tree, _)| (tree, typer.source_type_index().type_at(source, tree)))
+                .collect::<Vec<_>>(),
+            sibling_type_index
+        );
+        assert_eq!(
+            typer.source_typed_index().get(source, sibling),
+            Some(typed_sibling)
+        );
+    }
+
+    #[test]
     fn issue_1999_late_event_result_failure_observes_both_cases_before_atomic_rollback() {
         let source_text =
             include_str!("../../tests/fixtures/source-sealed-adt-match-3.9.0/Event.scala")

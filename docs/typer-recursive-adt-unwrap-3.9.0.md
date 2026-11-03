@@ -29,5 +29,15 @@ joined Match remain `Expr`. Existing class evidence verifies the distinct
 source fields, Product1 selectors, generated unapply methods and companion
 owners for `Num` and `Succ`.
 
+A separate unit regression changes the declared result to `Int`. Its
+pre-rollback observer confirms the whole Match and both cases were typed, and
+that `Succ(inner)` had created its source-owned local binder with the canonical
+`Expr` TypeRef and mapped `inner` body reference before the result mismatch.
+After the deterministic mismatch, it verifies restoration of store allocations
+and symbol infos, source type cache, typed arena, source-to-typed mappings,
+pattern bindings and case/local scopes. It then types a valid `unwrap` sibling
+in that same typer and confirms repeating the invalid method preserves the
+sibling and produces the same normalized diagnostic.
+
 This result required no additional production typer behavior. `Evaluator.eval`
 and its recursion contract remain outside this proof.
