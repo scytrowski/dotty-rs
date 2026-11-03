@@ -101,6 +101,9 @@ tree. These checks ran against the unchanged integrated main SHA above:
 The pinned Scala secondary-constructor workflow and the full hosted required
 CI jobs still need successful runs on this PR candidate. Their authentic run
 URLs and exact run head SHA will be added here only after GitHub reports them.
+The Scala consumer workflow path filter now includes this convergence evidence
+directory, so its pinned secondary-constructor rejection is scheduled for this
+PR rather than silently skipped by path filtering.
 
 ## Provenance and limits
 
