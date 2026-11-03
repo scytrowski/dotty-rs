@@ -1,7 +1,7 @@
 use dotty::jvm_tasty_plan::with_paired_jvm_tasty_class_plan;
 use dotty_classfile::classfile::{ClassFile, Reader};
 use dotty_classfile::tasty_link::TastyLinkId;
-use dotty_core::SourceId;
+use dotty_core::{SourceId, SymbolId, TreeId, Typed, Untyped};
 use dotty_jvm::emit_class;
 use dotty_jvm_tasty_contract::{
     JvmTastyBatchArtifacts, JvmTastyClassFileArtifact, JvmTastySidecarArtifact,
@@ -11,6 +11,11 @@ use dotty_jvm_tasty_contract::{JvmTastyContractError, validate_classfile_tasty_l
 use dotty_tasty::ast::{APPLY_TAG, DEFDEF_TAG, PARAM_TAG, TERMREFDIRECT_TAG};
 use dotty_tasty::tasty::{DefinitionBody, TastyFile};
 use dotty_tasty::term::{AstRefKind, RawTree, TermValue};
+use dotty_tasty_pickler::{
+    ClassStatePicklePlan, DirectFormalConstructorCallPairBinding, LocalValueBinding,
+    NestedConstructorCallBinding, NestedConstructorCallPairBinding,
+    OrderedConstructorCallArgumentPairBinding, PlannedCallBinding, SourceTypedBindings,
+};
 
 use dotty::jvm_tasty_artifacts::{
     PairedArtifactError, PairedBatchArtifactError, emit_paired_jvm_tasty_batch,
@@ -46,6 +51,12 @@ const NESTED_CONSTRUCTOR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala");
 const MULTI_ARGUMENT_CONSTRUCTOR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala");
+const MIXED_ORIGIN_WRAP_AND_CREATE_BATCH: &str = include_str!(
+    "fixtures/jvm_tasty_mixed_origin_constructor_arguments/wrap-and-create/PairFactory.scala"
+);
+const MIXED_ORIGIN_CREATE_AND_WRAP_BATCH: &str = include_str!(
+    "fixtures/jvm_tasty_mixed_origin_constructor_arguments/create-and-wrap/PairFactory.scala"
+);
 const DUAL_REFERENCE_FORWARDING_BATCH: &str =
     include_str!("fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala");
 const PAIR_FACTORY_IDENTITY_HARNESS_JAVA: &[u8] = include_bytes!(
@@ -5406,6 +5417,66 @@ fn sibling_factory_classfile_mut(
         .unwrap()
 }
 
+fn mixed_factory_code_range(classfile_bytes: &[u8], method_name: &str) -> (usize, usize) {
+    let mut reader = Reader::new(classfile_bytes);
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let method = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index).ok() == Some(method_name))
+        .unwrap();
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("mixed factory method has one Code attribute");
+    };
+    let start = code.code.as_ptr() as usize - classfile_bytes.as_ptr() as usize;
+    (start, code.code.len())
+}
+
+fn mixed_argument_instruction_ranges(
+    code: &[u8],
+) -> (std::ops::Range<usize>, std::ops::Range<usize>, usize, usize) {
+    let mut pc = 0;
+    assert_eq!(code[pc], 0xbb);
+    pc += 3;
+    assert_eq!(code[pc], 0x59);
+    pc += 1;
+    let first = pc;
+    let mut formal = None;
+    let mut nested = None;
+    let mut int_load = None;
+    for _ in 0..2 {
+        let start = pc;
+        match code[pc] {
+            0x2b => {
+                formal = Some(start..start + 1);
+                pc += 1;
+            }
+            0xbb => {
+                pc += 3;
+                assert_eq!(code[pc], 0x59);
+                pc += 1;
+                int_load = Some(pc);
+                assert_eq!(code[pc], 0x1c);
+                pc += 1;
+                assert_eq!(code[pc], 0xb7);
+                pc += 3;
+                nested = Some(start..pc);
+            }
+            opcode => panic!("unexpected mixed argument opcode {opcode:#04x} at {pc}"),
+        }
+    }
+    assert_eq!(code[pc], 0xb7);
+    let outer_initializer_operand = pc + 1;
+    pc += 3;
+    assert_eq!(code[pc], 0xb0);
+    pc += 1;
+    assert_eq!(pc, code.len());
+    let formal = formal.expect("one Formal argument");
+    let nested = nested.expect("one NestedNew argument");
+    assert!(formal.start >= first && nested.start >= first);
+    (formal, nested, int_load.unwrap(), outer_initializer_operand)
+}
+
 #[test]
 fn sibling_constructor_batch_emits_six_deterministic_linked_artifacts() {
     let first = emit_paired_jvm_tasty_batch(
@@ -6096,10 +6167,11 @@ fn dual_reference_forwarding_publisher_rejects_each_six_file_fault_without_parti
         .enumerate()
     {
         let destination = root.path().join(format!("failed-{index}"));
-        assert!(matches!(
-            publish_batch_pairs(&destination, &pairs, Some(fault)),
-            Err(BatchPublishError::Io { .. })
-        ));
+        let result = publish_batch_pairs(&destination, &pairs, Some(fault));
+        assert!(
+            matches!(result, Err(BatchPublishError::Io { .. })),
+            "{result:?}"
+        );
         assert!(!destination.exists(), "fault case {index}");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
@@ -6113,6 +6185,814 @@ fn dual_reference_forwarding_publisher_rejects_each_six_file_fault_without_parti
         Err(BatchPublishError::DestinationExists { .. })
     ));
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve prior output");
+    assert_eq!(read_relative_files(&existing).unwrap(), ["sentinel"]);
+}
+
+#[test]
+fn mixed_constructor_pair_emits_both_original_argument_orientations() {
+    for (source, source_id, repeat_id, method_name, order) in [
+        (
+            MIXED_ORIGIN_WRAP_AND_CREATE_BATCH,
+            20150,
+            20152,
+            "wrapAndCreate",
+            ["formal", "nested"],
+        ),
+        (
+            MIXED_ORIGIN_CREATE_AND_WRAP_BATCH,
+            20151,
+            20153,
+            "createAndWrap",
+            ["nested", "formal"],
+        ),
+    ] {
+        let batch = emit_paired_jvm_tasty_batch(
+            source,
+            "PairFactory.scala",
+            SourceId::from_index(source_id),
+        )
+        .expect("the source-bound mixed JVM/TASTy contract accepts the authentic orientation");
+        let repeated = emit_paired_jvm_tasty_batch(
+            source,
+            "PairFactory.scala",
+            SourceId::from_index(repeat_id),
+        )
+        .unwrap();
+        assert_eq!(batch.source_id(), SourceId::from_index(source_id));
+        assert_eq!(batch.classes().len(), 3);
+        assert_ne!(batch.source_id(), repeated.source_id());
+        assert_eq!(
+            batch
+                .classes()
+                .iter()
+                .map(|artifact| artifact.classfile_path())
+                .collect::<Vec<_>>(),
+            [
+                "example/Counter.class",
+                "example/Pair.class",
+                "example/PairFactory.class"
+            ]
+        );
+        let mut classes = Vec::new();
+        for (index, (artifact, again)) in batch.classes().iter().zip(repeated.classes()).enumerate()
+        {
+            assert_eq!(artifact.source_id(), batch.source_id());
+            assert_eq!(artifact.classfile_bytes(), again.classfile_bytes());
+            assert_eq!(artifact.tasty_path(), again.tasty_path());
+            assert_eq!(artifact.tasty_bytes(), again.tasty_bytes());
+            assert_eq!(artifact.tasty_link_id(), again.tasty_link_id());
+            let tasty = TastyFile::parse_and_validate_scala_3_9(artifact.tasty_bytes()).unwrap();
+            assert_eq!(
+                (
+                    tasty.header().major_version,
+                    tasty.header().minor_version,
+                    tasty.header().experimental_version
+                ),
+                (28, 9, 0)
+            );
+            assert_eq!(
+                artifact.tasty_link_id(),
+                TastyLinkId::from_bytes(tasty.header().uuid)
+            );
+            let mut reader = Reader::new(artifact.classfile_bytes());
+            let class = ClassFile::decode(&mut reader).unwrap();
+            assert!(reader.is_at_end());
+            assert_eq!((class.version.major, class.version.minor), (65, 0));
+            assert_eq!(
+                class.tasty_link_id().unwrap(),
+                Some(artifact.tasty_link_id())
+            );
+            validate_classfile_tasty_link(&class, artifact.tasty_bytes()).unwrap();
+            eprintln!(
+                "mixed-origin artifact source_sha256={} path={} class_sha256={} tasty_sha256={} uuid={:02x?}",
+                sha256sum_bytes(source.as_bytes()),
+                artifact.classfile_path(),
+                sha256sum_bytes(artifact.classfile_bytes()),
+                sha256sum_bytes(artifact.tasty_bytes()),
+                tasty.header().uuid
+            );
+            classes.push(class);
+            if index == 2 {
+                let (method_address, method) = tasty_method_body(&tasty, method_name);
+                assert_eq!(method.parameters.len(), 2);
+                assert_eq!(
+                    method
+                        .parameters
+                        .iter()
+                        .map(|parameter| tasty.names().render(parameter.name()).unwrap())
+                        .collect::<Vec<_>>(),
+                    ["existing", "seed"]
+                );
+                let parameter_addresses =
+                    tasty_parameter_addresses(&tasty.ast_address_index().unwrap(), method_address);
+                assert_eq!(parameter_addresses.len(), 2);
+                let RawTree::LengthNode(outer) =
+                    method.rhs.expect("factory method has the original body")
+                else {
+                    panic!("factory body is Apply")
+                };
+                assert_eq!(outer.tag, APPLY_TAG);
+                let outer = outer.decode_apply().unwrap();
+                assert_eq!(outer.arguments.len(), 2);
+                for (argument, expected) in outer.arguments.iter().zip(order) {
+                    match (expected, argument) {
+                        ("formal", RawTree::Leaf(term)) => {
+                            assert_eq!(term.tag, TERMREFDIRECT_TAG);
+                            assert!(
+                                matches!(term.value, TermValue::AstRef(address) if address == parameter_addresses[0])
+                            );
+                        }
+                        ("nested", RawTree::LengthNode(node)) => {
+                            assert_eq!(node.tag, APPLY_TAG);
+                            let nested = node.decode_apply().unwrap();
+                            let RawTree::Leaf(seed) = &nested.arguments[0] else {
+                                panic!("nested Counter seed is a direct method-formal reference")
+                            };
+                            assert_eq!(seed.tag, TERMREFDIRECT_TAG);
+                            assert!(
+                                matches!(seed.value, TermValue::AstRef(address) if address == parameter_addresses[1])
+                            );
+                        }
+                        _ => panic!("TASTy arguments retain their source positions and origins"),
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            batch
+                .classes()
+                .iter()
+                .flat_map(|artifact| [artifact.classfile_path(), artifact.tasty_path()])
+                .collect::<Vec<_>>(),
+            [
+                "example/Counter.class",
+                "example/Counter.tasty",
+                "example/Pair.class",
+                "example/Pair.tasty",
+                "example/PairFactory.class",
+                "example/PairFactory.tasty"
+            ]
+        );
+        assert_eq!(
+            classes[1]
+                .constant_pool
+                .utf8(
+                    classes[1]
+                        .methods
+                        .iter()
+                        .find(
+                            |method| classes[1].constant_pool.utf8(method.name_index).unwrap()
+                                == "<init>"
+                        )
+                        .unwrap()
+                        .descriptor_index
+                )
+                .unwrap(),
+            "(Lexample/Counter;Lexample/Counter;)V"
+        );
+        assert_eq!(
+            classes[1]
+                .fields
+                .iter()
+                .map(|field| (
+                    classes[1].constant_pool.utf8(field.name_index).unwrap(),
+                    classes[1]
+                        .constant_pool
+                        .utf8(field.descriptor_index)
+                        .unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("left", "Lexample/Counter;"),
+                ("right", "Lexample/Counter;")
+            ]
+        );
+        assert_eq!(
+            classes[0]
+                .fields
+                .iter()
+                .map(|field| (
+                    classes[0].constant_pool.utf8(field.name_index).unwrap(),
+                    classes[0]
+                        .constant_pool
+                        .utf8(field.descriptor_index)
+                        .unwrap(),
+                ))
+                .collect::<Vec<_>>(),
+            [("current", "I")]
+        );
+        for (name, descriptor) in [("<init>", "(I)V"), ("get", "()I"), ("set", "(I)V")] {
+            assert!(
+                classes[0].methods.iter().any(|method| {
+                    classes[0].constant_pool.utf8(method.name_index).ok() == Some(name)
+                        && classes[0].constant_pool.utf8(method.descriptor_index).ok()
+                            == Some(descriptor)
+                }),
+                "Counter retains {name}{descriptor}"
+            );
+        }
+        let factory = &classes[2];
+        let method = factory
+            .methods
+            .iter()
+            .find(|method| factory.constant_pool.utf8(method.name_index).unwrap() == method_name)
+            .unwrap();
+        assert_eq!(
+            factory.constant_pool.utf8(method.descriptor_index).unwrap(),
+            "(Lexample/Counter;I)Lexample/Pair;"
+        );
+        let [Attribute::Code(code)] = method.attributes.as_slice() else {
+            panic!("mixed factory method has one Code attribute")
+        };
+        assert_eq!(
+            (code.max_stack, code.max_locals),
+            (if order[0] == "formal" { 6 } else { 5 }, 3)
+        );
+        let mut pc = 0;
+        let pair_allocation_pc = pc;
+        let pair_allocation = take_batch_cp_operand(code.code, &mut pc, 0xbb);
+        assert_eq!(batch_class_name(factory, pair_allocation), "example/Pair");
+        take_batch_opcode(code.code, &mut pc, 0x59);
+        let mut trace = vec![format!(
+            "pc={pair_allocation_pc} new cp#{} example/Pair",
+            pair_allocation.0
+        )];
+        for origin in order {
+            match origin {
+                "formal" => {
+                    let formal_pc = pc;
+                    take_batch_opcode(code.code, &mut pc, 0x2b);
+                    trace.push(format!("pc={formal_pc} aload_1 existing:Counter"));
+                }
+                "nested" => {
+                    let nested_pc = pc;
+                    let nested = take_batch_cp_operand(code.code, &mut pc, 0xbb);
+                    assert_eq!(batch_class_name(factory, nested), "example/Counter");
+                    take_batch_opcode(code.code, &mut pc, 0x59);
+                    let seed_pc = pc;
+                    take_batch_opcode(code.code, &mut pc, 0x1c);
+                    let nested_init_pc = pc;
+                    let initializer = take_batch_cp_operand(code.code, &mut pc, 0xb7);
+                    assert_eq!(
+                        batch_method_ref(factory, initializer),
+                        ("example/Counter", ("<init>", "(I)V"))
+                    );
+                    trace.push(format!(
+                        "pc={nested_pc} new cp#{} example/Counter",
+                        nested.0
+                    ));
+                    trace.push(format!("pc={seed_pc} iload_2 seed:Int"));
+                    trace.push(format!(
+                        "pc={nested_init_pc} invokespecial cp#{} example/Counter.<init>(I)V",
+                        initializer.0
+                    ));
+                }
+                _ => unreachable!(),
+            }
+        }
+        let pair_init_pc = pc;
+        let pair_initializer = take_batch_cp_operand(code.code, &mut pc, 0xb7);
+        assert_eq!(
+            batch_method_ref(factory, pair_initializer),
+            (
+                "example/Pair",
+                ("<init>", "(Lexample/Counter;Lexample/Counter;)V")
+            )
+        );
+        take_batch_opcode(code.code, &mut pc, 0xb0);
+        assert_eq!(
+            pc,
+            code.code.len(),
+            "the mixed bytecode checker consumes every instruction"
+        );
+        trace.push(format!(
+            "pc={pair_init_pc} invokespecial cp#{} example/Pair.<init>(Counter,Counter)V",
+            pair_initializer.0
+        ));
+        trace.push(format!("pc={pc_minus_one} areturn", pc_minus_one = pc - 1));
+        eprintln!(
+            "mixed-origin bytecode method={method_name} order={order:?} max_stack={} max_locals={} [{}]",
+            code.max_stack,
+            code.max_locals,
+            trace.join("; ")
+        );
+    }
+}
+
+#[test]
+fn mixed_constructor_renamed_and_reordered_variants_are_deterministic_per_source() {
+    let renamed = MIXED_ORIGIN_WRAP_AND_CREATE_BATCH
+        .replace("package example", "package renamed")
+        .replace("PairFactory", "PairBuilder")
+        .replace("wrapAndCreate", "assemble")
+        .replace("Pair", "Bundle")
+        .replace("Counter", "Meter");
+
+    let reversed = MIXED_ORIGIN_CREATE_AND_WRAP_BATCH;
+    let (package, declarations) = reversed.split_once("\n\n").unwrap();
+    let (counter, remainder) = declarations.split_once("\n\nclass Pair(").unwrap();
+    let pair_and_factory = format!("class Pair({}", remainder);
+    let (pair, factory_tail) = pair_and_factory
+        .split_once("\n\nclass PairFactory:")
+        .unwrap();
+    let factory = format!("class PairFactory:{factory_tail}");
+    let reordered = format!("{package}\n\n{factory}\n\n{pair}\n\n{counter}");
+
+    for (source, expected_first_path, first_id, second_id) in [
+        (&renamed, "renamed/Meter.class", 20158, 20159),
+        (&reordered, "example/PairFactory.class", 20160, 20161),
+    ] {
+        let first = emit_paired_jvm_tasty_batch(
+            source,
+            "PairFactory.scala",
+            SourceId::from_index(first_id),
+        )
+        .unwrap();
+        let second = emit_paired_jvm_tasty_batch(
+            source,
+            "PairFactory.scala",
+            SourceId::from_index(second_id),
+        )
+        .unwrap();
+        assert_ne!(first.source_id(), second.source_id());
+        assert_eq!(first.classes().len(), 3);
+        assert_eq!(first.classes()[0].classfile_path(), expected_first_path);
+        for (left, right) in first.classes().iter().zip(second.classes()) {
+            assert_eq!(left.classfile_path(), right.classfile_path());
+            assert_eq!(left.tasty_path(), right.tasty_path());
+            assert_eq!(left.classfile_bytes(), right.classfile_bytes());
+            assert_eq!(left.tasty_bytes(), right.tasty_bytes());
+            assert_eq!(left.tasty_link_id(), right.tasty_link_id());
+        }
+    }
+}
+
+#[test]
+fn mixed_constructor_contract_rejects_source_order_and_bytecode_corruption() {
+    let batch = emit_paired_jvm_tasty_batch(
+        MIXED_ORIGIN_WRAP_AND_CREATE_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(20154),
+    )
+    .unwrap();
+    let original = JvmTastyBatchArtifacts {
+        classfiles: batch
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastyClassFileArtifact {
+                classfile_path: artifact.classfile_path().to_owned(),
+                classfile_bytes: artifact.classfile_bytes().to_vec(),
+            })
+            .collect(),
+        sidecars: batch
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastySidecarArtifact {
+                tasty_path: artifact.tasty_path().to_owned(),
+                tasty_bytes: artifact.tasty_bytes().to_vec(),
+            })
+            .collect(),
+    };
+    let (code_start, code_len) =
+        mixed_factory_code_range(&original.classfiles[2].classfile_bytes, "wrapAndCreate");
+    let code = &original.classfiles[2].classfile_bytes[code_start..code_start + code_len];
+    let (formal_range, nested_range, int_load, outer_init_operand) =
+        mixed_argument_instruction_ranges(code);
+    let mut cases = Vec::new();
+
+    let mut source_order_swap = original.clone();
+    let classfile = &mut sibling_factory_classfile_mut(&mut source_order_swap).classfile_bytes;
+    let between =
+        formal_range.start.min(nested_range.start)..formal_range.end.max(nested_range.end);
+    let (formal_bytes, nested_bytes) = (
+        code[formal_range.clone()].to_vec(),
+        code[nested_range.clone()].to_vec(),
+    );
+    let reordered = [nested_bytes, formal_bytes].concat();
+    classfile[code_start + between.start..code_start + between.end].copy_from_slice(&reordered);
+    cases.push(("source-order-swap", source_order_swap));
+
+    let mut wrong_aload_slot = original.clone();
+    sibling_factory_classfile_mut(&mut wrong_aload_slot).classfile_bytes
+        [code_start + formal_range.start] = 0x2a;
+    cases.push(("wrong-aload-slot", wrong_aload_slot));
+
+    let mut wrong_iload_slot = original.clone();
+    sibling_factory_classfile_mut(&mut wrong_iload_slot).classfile_bytes[code_start + int_load] =
+        0x1b;
+    cases.push(("wrong-iload-slot", wrong_iload_slot));
+
+    let mut extra_allocation = original.clone();
+    sibling_factory_classfile_mut(&mut extra_allocation).classfile_bytes
+        [code_start + formal_range.start] = 0xbb;
+    cases.push(("unexpected-extra-new", extra_allocation));
+
+    let mut missing_nested_initializer = original.clone();
+    sibling_factory_classfile_mut(&mut missing_nested_initializer).classfile_bytes
+        [code_start + nested_range.end - 3] = 0x00;
+    cases.push(("missing-nested-invokespecial", missing_nested_initializer));
+
+    let mut wrong_pair_constructor = original.clone();
+    let wrong_constructor = {
+        let mut reader = Reader::new(&original.classfiles[2].classfile_bytes);
+        let class = ClassFile::decode(&mut reader).unwrap();
+        (1..=u16::MAX)
+            .map(ConstantPoolIndex)
+            .find(|index| {
+                let Some(ConstantPoolEntry::Methodref {
+                    class_index,
+                    name_and_type_index,
+                }) = class.constant_pool.get(*index)
+                else {
+                    return false;
+                };
+                class.constant_pool.class_name(*class_index).ok() == Some("example/Counter")
+                    && class
+                        .constant_pool
+                        .name_and_type(*name_and_type_index)
+                        .is_ok_and(|entry| entry == ("<init>", "(I)V"))
+            })
+            .expect("factory constant pool retains Counter.<init>(I)V")
+    };
+    sibling_factory_classfile_mut(&mut wrong_pair_constructor).classfile_bytes
+        [code_start + outer_init_operand..code_start + outer_init_operand + 2]
+        .copy_from_slice(&wrong_constructor.0.to_be_bytes());
+    cases.push((
+        "wrong-pair-constructor-owner-and-descriptor",
+        wrong_pair_constructor,
+    ));
+
+    let mut wrong_stack = original.clone();
+    sibling_factory_classfile_mut(&mut wrong_stack).classfile_bytes[code_start - 8..code_start - 6]
+        .copy_from_slice(&[0, 5]);
+    cases.push(("wrong-max-stack", wrong_stack));
+    let mut wrong_locals = original.clone();
+    sibling_factory_classfile_mut(&mut wrong_locals).classfile_bytes
+        [code_start - 6..code_start - 4]
+        .copy_from_slice(&[0, 2]);
+    cases.push(("wrong-max-locals", wrong_locals));
+
+    with_paired_jvm_tasty_batch_plan(
+        MIXED_ORIGIN_WRAP_AND_CREATE_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(20156),
+        |plan| {
+            let tasty_plans = plan
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans).unwrap();
+            for (label, corrupted) in cases {
+                let error = validate_jvm_tasty_batch_artifacts(&validated, corrupted)
+                    .expect_err("a corrupted mixed call cannot yield an accepted complete batch");
+                assert!(
+                    matches!(
+                        error,
+                        JvmTastyContractError::BatchArtifact {
+                            class_index: 2,
+                            phase: "cross-class invocation",
+                            ..
+                        }
+                    ),
+                    "{label} must fail at the mixed bytecode contract: {error:?}"
+                );
+            }
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn mixed_constructor_batch_rejects_invalid_paths_and_sidecar_links() {
+    let batch = emit_paired_jvm_tasty_batch(
+        MIXED_ORIGIN_WRAP_AND_CREATE_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(20162),
+    )
+    .unwrap();
+    let valid = JvmTastyBatchArtifacts {
+        classfiles: batch
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastyClassFileArtifact {
+                classfile_path: artifact.classfile_path().to_owned(),
+                classfile_bytes: artifact.classfile_bytes().to_vec(),
+            })
+            .collect(),
+        sidecars: batch
+            .classes()
+            .iter()
+            .map(|artifact| JvmTastySidecarArtifact {
+                tasty_path: artifact.tasty_path().to_owned(),
+                tasty_bytes: artifact.tasty_bytes().to_vec(),
+            })
+            .collect(),
+    };
+    let reversed = emit_paired_jvm_tasty_batch(
+        MIXED_ORIGIN_CREATE_AND_WRAP_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(20163),
+    )
+    .unwrap();
+    let wrong_uuid_sidecar = reversed.classes()[2].tasty_bytes().to_vec();
+    let mut missing_sidecar = valid.clone();
+    missing_sidecar
+        .sidecars
+        .retain(|sidecar| sidecar.tasty_path != "example/PairFactory.tasty");
+    let mut corrupt_sidecar = valid.clone();
+    corrupt_sidecar
+        .sidecars
+        .iter_mut()
+        .find(|sidecar| sidecar.tasty_path == "example/PairFactory.tasty")
+        .unwrap()
+        .tasty_bytes = vec![0, 1, 2];
+    let mut mismatched_link = valid.clone();
+    mismatched_link
+        .sidecars
+        .iter_mut()
+        .find(|sidecar| sidecar.tasty_path == "example/PairFactory.tasty")
+        .unwrap()
+        .tasty_bytes = wrong_uuid_sidecar;
+    let mut duplicate_path = valid.clone();
+    duplicate_path
+        .classfiles
+        .iter_mut()
+        .find(|file| file.classfile_path == "example/PairFactory.class")
+        .unwrap()
+        .classfile_path = "example/Pair.class".to_owned();
+    let mut unsafe_path = valid.clone();
+    unsafe_path
+        .classfiles
+        .iter_mut()
+        .find(|file| file.classfile_path == "example/PairFactory.class")
+        .unwrap()
+        .classfile_path = "../PairFactory.class".to_owned();
+
+    with_paired_jvm_tasty_batch_plan(
+        MIXED_ORIGIN_WRAP_AND_CREATE_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(20164),
+        |plan| {
+            let tasty_plans = plan.classes.iter().map(|class| class.tasty_plan).collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans).unwrap();
+            assert!(matches!(validate_jvm_tasty_batch_artifacts(&validated, missing_sidecar), Err(JvmTastyContractError::BatchArtifactPaths { reason: "missing expected TASTy sidecar path", .. })));
+            assert!(matches!(validate_jvm_tasty_batch_artifacts(&validated, duplicate_path), Err(JvmTastyContractError::BatchArtifactPaths { reason: "duplicate artifact path", .. })));
+            assert!(matches!(validate_jvm_tasty_batch_artifacts(&validated, unsafe_path), Err(JvmTastyContractError::BatchArtifactPaths { .. })));
+            assert!(matches!(validate_jvm_tasty_batch_artifacts(&validated, corrupt_sidecar), Err(JvmTastyContractError::BatchArtifact { class_index: 2, phase: "class-file/TASTy link", .. })));
+            let mismatch = validate_jvm_tasty_batch_artifacts(&validated, mismatched_link).expect_err("a sidecar from the opposite mixed orientation cannot link to the original method body");
+            eprintln!("MIXED_OPPOSITE_SIDECAR_FIRST_REJECTION: {mismatch:?}");
+            assert!(matches!(mismatch, JvmTastyContractError::BatchArtifact { class_index: 2, .. }), "first rejection is recorded at the authoritative factory artifact stage: {mismatch:?}");
+        },
+    ).unwrap();
+}
+
+struct MixedContractBindings<'a> {
+    base: &'a dyn SourceTypedBindings,
+    source: SourceId,
+    method: SymbolId,
+    pair: OrderedConstructorCallArgumentPairBinding,
+    expose_receipt: bool,
+    missing_edge: Option<TreeId<Untyped>>,
+}
+
+type MixedReceiptMutator = fn(&mut OrderedConstructorCallArgumentPairBinding);
+type MixedReceiptCase = (&'static str, MixedReceiptMutator, bool);
+
+impl SourceTypedBindings for MixedContractBindings<'_> {
+    fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
+        if self.missing_edge == Some(tree) {
+            None
+        } else {
+            self.base.typed_at(source, tree)
+        }
+    }
+    fn planned_class_symbols(&self) -> &[SymbolId] {
+        self.base.planned_class_symbols()
+    }
+    fn planned_method_symbols(&self) -> &[SymbolId] {
+        self.base.planned_method_symbols()
+    }
+    fn nested_constructor_call(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<NestedConstructorCallBinding> {
+        self.base.nested_constructor_call(source, method)
+    }
+    fn nested_constructor_call_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<NestedConstructorCallPairBinding> {
+        self.base.nested_constructor_call_pair(source, method)
+    }
+    fn direct_formal_constructor_call_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<DirectFormalConstructorCallPairBinding> {
+        self.base
+            .direct_formal_constructor_call_pair(source, method)
+    }
+    fn ordered_constructor_call_argument_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<OrderedConstructorCallArgumentPairBinding> {
+        if source == self.source && method == self.method {
+            self.expose_receipt.then_some(self.pair)
+        } else {
+            self.base
+                .ordered_constructor_call_argument_pair(source, method)
+        }
+    }
+    fn planned_call(&self, source: SourceId, method: SymbolId) -> Option<PlannedCallBinding> {
+        self.base.planned_call(source, method)
+    }
+    fn local_value_bindings(&self, source: SourceId, method: SymbolId) -> Vec<LocalValueBinding> {
+        self.base.local_value_bindings(source, method)
+    }
+}
+
+fn mutate_mixed_swap_receipt(pair: &mut OrderedConstructorCallArgumentPairBinding) {
+    pair.arguments.swap(0, 1);
+}
+
+fn mutate_mixed_duplicate_receipt(pair: &mut OrderedConstructorCallArgumentPairBinding) {
+    pair.arguments[1].source_argument = pair.arguments[0].source_argument;
+    pair.arguments[1].typed_argument = pair.arguments[0].typed_argument;
+}
+
+fn mutate_mixed_wrong_result(pair: &mut OrderedConstructorCallArgumentPairBinding) {
+    let dotty_tasty_pickler::OrderedConstructorCallArgumentOrigin::NestedNew { call, .. } =
+        pair.arguments[1].origin
+    else {
+        panic!("forward argument 1 is NestedNew")
+    };
+    let dotty_tasty_pickler::OrderedConstructorCallArgumentOrigin::Formal {
+        formal,
+        formal_type,
+        ..
+    } = pair.arguments[0].origin
+    else {
+        panic!("forward argument 0 is Formal")
+    };
+    pair.arguments[0].origin = dotty_tasty_pickler::OrderedConstructorCallArgumentOrigin::Formal {
+        formal,
+        formal_type,
+        result_type: call.result_type,
+    };
+}
+
+#[test]
+fn mixed_constructor_contract_rejects_forged_source_typed_receipts() {
+    with_paired_jvm_tasty_batch_plan(
+        MIXED_ORIGIN_WRAP_AND_CREATE_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(20165),
+        |batch| {
+            let proof = batch.constructor_call_proofs.first().unwrap();
+            let factory = batch
+                .classes
+                .iter()
+                .find(|class| class.tasty_plan.plan().class == proof.caller_class())
+                .unwrap();
+            let plan = factory.tasty_plan.plan();
+            let source = batch.source_id;
+            let method = proof.method();
+            let original = plan
+                .typed_bindings
+                .ordered_constructor_call_argument_pair(source, method)
+                .unwrap();
+            let cases: [MixedReceiptCase; 4] = [
+                (
+                    "swapped-source-typed-arguments",
+                    mutate_mixed_swap_receipt,
+                    true,
+                ),
+                (
+                    "duplicate-source-typed-roots",
+                    mutate_mixed_duplicate_receipt,
+                    true,
+                ),
+                (
+                    "wrong-selected-result-type",
+                    mutate_mixed_wrong_result,
+                    true,
+                ),
+                (
+                    "stale-source-id-receipt",
+                    |_: &mut OrderedConstructorCallArgumentPairBinding| {},
+                    false,
+                ),
+            ];
+            for (label, mutate, expose_receipt) in cases {
+                let mut changed_pair = original;
+                mutate(&mut changed_pair);
+                let changed = MixedContractBindings {
+                    base: plan.typed_bindings,
+                    source,
+                    method,
+                    pair: changed_pair,
+                    expose_receipt,
+                    missing_edge: None,
+                };
+                let changed_plan = ClassStatePicklePlan {
+                    store: plan.store,
+                    definitions: plan.definitions,
+                    source_ast: plan.source_ast,
+                    typed_ast: plan.typed_ast,
+                    source_index: plan.source_index,
+                    typed_bindings: &changed,
+                    source: plan.source.clone(),
+                    class: plan.class,
+                    class_tree: plan.class_tree,
+                    constructor: plan.constructor.clone(),
+                    members: plan.members,
+                };
+                let result = match changed_plan.validate() {
+                    Err(error) => Err(JvmTastyContractError::TastyPlan(error)),
+                    Ok(changed_tasty) => {
+                        let mut tasty_plans = batch
+                            .classes
+                            .iter()
+                            .map(|class| class.tasty_plan)
+                            .collect::<Vec<_>>();
+                        tasty_plans[2] = &changed_tasty;
+                        validate_jvm_tasty_batch(batch.jvm_unit, &tasty_plans).map(|_| ())
+                    }
+                };
+                eprintln!("MIXED_RECEIPT_FIRST_REJECTION {label}: {result:?}");
+                assert!(
+                    result.is_err(),
+                    "{label} cannot pass source/typed/TASTy contract validation"
+                );
+                let first_stage_is_expected = match &result {
+                    Err(JvmTastyContractError::BatchClass { error, .. }) => matches!(
+                        error.as_ref(),
+                        JvmTastyContractError::TastyPlan(_)
+                            | JvmTastyContractError::BatchArtifact {
+                                phase: "cross-class invocation",
+                                ..
+                            }
+                    ),
+                    Err(
+                        JvmTastyContractError::TastyPlan(_)
+                        | JvmTastyContractError::BatchArtifact {
+                            phase: "cross-class invocation",
+                            ..
+                        },
+                    ) => true,
+                    _ => false,
+                };
+                assert!(
+                    first_stage_is_expected,
+                    "{label} must fail at the first source-bound contract stage: {result:?}"
+                );
+            }
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn mixed_constructor_batch_publisher_contains_each_handled_failure() {
+    let batch = emit_paired_jvm_tasty_batch(
+        MIXED_ORIGIN_WRAP_AND_CREATE_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(20157),
+    )
+    .unwrap();
+    let pairs = batch_publish_pairs(&batch);
+    assert_eq!(pairs.len(), 3);
+    let root = TestDirectory::new("mixed-constructor-publish-faults");
+    for (index, fault) in (1..=6)
+        .map(BatchPublishFault::AfterStagedFiles)
+        .chain([
+            BatchPublishFault::BeforePromotion,
+            BatchPublishFault::AfterPromotion,
+        ])
+        .enumerate()
+    {
+        let destination = root.path().join(format!("failed-{index}"));
+        let result = publish_batch_pairs(&destination, &pairs, Some(fault));
+        assert!(
+            matches!(result, Err(BatchPublishError::Io { .. })),
+            "{result:?}"
+        );
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+    let existing = root.path().join("existing-output");
+    std::fs::create_dir(&existing).unwrap();
+    let sentinel = existing.join("sentinel");
+    std::fs::write(&sentinel, b"preserve mixed output").unwrap();
+    assert!(matches!(
+        publish_batch_pairs(&existing, &pairs, None),
+        Err(BatchPublishError::DestinationExists { .. })
+    ));
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve mixed output");
     assert_eq!(read_relative_files(&existing).unwrap(), ["sentinel"]);
 }
 
