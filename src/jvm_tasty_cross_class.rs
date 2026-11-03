@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use dotty_core::ast::{ApplyKind, AstArena, TreeKind, Typed, TypedAst, Untyped};
+use dotty_core::ast::{ApplyKind, AstArena, TreeKind, Typed, TypedAst, TypedTreeId, Untyped};
 use dotty_core::{
     Definitions, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SourceTypedIndex,
     SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TermRefTarget, TreeId, Type,
@@ -1596,19 +1596,11 @@ fn validate_two_argument_constructor_call_candidate<'session>(
     let typed_new_tpt = source_typed_index
         .get(source_id, source_new_node.tpt)
         .ok_or_else(|| typed_error("outer New type tree has no exact typed binding"))?;
-    let typed_outer_args = [
-        source_typed_index
-            .get(source_id, outer_apply.args[0])
-            .ok_or_else(|| typed_error("first outer argument has no exact typed binding"))?,
-        source_typed_index
-            .get(source_id, outer_apply.args[1])
-            .ok_or_else(|| typed_error("second outer argument has no exact typed binding"))?,
-    ];
-    if outer_apply.args[0] == outer_apply.args[1] || typed_outer_args[0] == typed_outer_args[1] {
-        return Err(typed_error(
-            "sibling outer arguments must retain distinct source and typed roots",
-        ));
-    }
+    let typed_outer_args = map_ordered_constructor_argument_bindings(
+        source_typed_index,
+        source_id,
+        [outer_apply.args[0], outer_apply.args[1]],
+    )?;
     let typed_apply_tree = source_typed_index
         .get(source_id, source_apply_tree)
         .ok_or_else(|| typed_error("final constructor Apply has no exact typed binding"))?;
@@ -1633,11 +1625,22 @@ fn validate_two_argument_constructor_call_candidate<'session>(
             ));
         }
     };
-    if typed_apply.function != typed_select || typed_apply.args != typed_outer_args {
+    if typed_apply.args.len() != 2 {
         return Err(typed_error(
             "typed outer Apply must preserve exact ordered source mappings",
         ));
     }
+    if typed_apply.function != typed_select {
+        return Err(typed_error(
+            "typed outer Apply must preserve exact ordered source mappings",
+        ));
+    }
+    validate_ordered_constructor_argument_bindings(
+        source_typed_index,
+        source_id,
+        [outer_apply.args[0], outer_apply.args[1]],
+        [typed_apply.args[0], typed_apply.args[1]],
+    )?;
     let typed_selection = match &typed_ast
         .try_get(typed_select)
         .ok_or_else(|| typed_error("outer typed Select is stale"))?
@@ -2852,6 +2855,49 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         method_descriptor: method_descriptor.to_owned(),
         constructor_descriptor: constructor_descriptor.to_owned(),
     })
+}
+
+/// Resolve the canonical typed roots for two source-ordered constructor
+/// arguments. Keeping this check separate lets callers exercise the argument
+/// provenance validator without replacing a Typer-owned session index.
+pub fn map_ordered_constructor_argument_bindings(
+    source_typed_index: &SourceTypedIndex,
+    source_id: SourceId,
+    source_arguments: [TreeId<Untyped>; 2],
+) -> Result<[TypedTreeId; 2], CrossClassConstructorCallProofError> {
+    let typed_error = |message| CrossClassConstructorCallProofError::TypedBinding(message);
+    let typed_arguments = [
+        source_typed_index
+            .get(source_id, source_arguments[0])
+            .ok_or_else(|| typed_error("first outer argument has no exact typed binding"))?,
+        source_typed_index
+            .get(source_id, source_arguments[1])
+            .ok_or_else(|| typed_error("second outer argument has no exact typed binding"))?,
+    ];
+    if source_arguments[0] == source_arguments[1] || typed_arguments[0] == typed_arguments[1] {
+        return Err(typed_error(
+            "sibling outer arguments must retain distinct source and typed roots",
+        ));
+    }
+    Ok(typed_arguments)
+}
+
+/// Check that source argument edges retain their exact original order in the
+/// typed Apply. This is shared by the proof path and focused provenance tests.
+pub fn validate_ordered_constructor_argument_bindings(
+    source_typed_index: &SourceTypedIndex,
+    source_id: SourceId,
+    source_arguments: [TreeId<Untyped>; 2],
+    typed_arguments: [TypedTreeId; 2],
+) -> Result<(), CrossClassConstructorCallProofError> {
+    let expected =
+        map_ordered_constructor_argument_bindings(source_typed_index, source_id, source_arguments)?;
+    if expected != typed_arguments {
+        return Err(CrossClassConstructorCallProofError::TypedBinding(
+            "typed outer Apply must preserve exact ordered source mappings",
+        ));
+    }
+    Ok(())
 }
 
 fn is_direct_constructor_call_candidate(ast: &AstArena<Untyped>, rhs: TreeId<Untyped>) -> bool {

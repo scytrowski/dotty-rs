@@ -1,6 +1,7 @@
 use dotty::jvm_tasty_cross_class::{
-    CrossClassConstructorCallProofInput, ValidatedCrossClassConstructorCallProof,
-    validate_cross_class_constructor_call_proofs,
+    CrossClassConstructorCallProofInput, ImmutableLocalInitializationProofInput,
+    ValidatedCrossClassConstructorCallProof, validate_cross_class_constructor_call_proofs,
+    validate_immutable_local_initialization_proof, validate_ordered_constructor_argument_bindings,
 };
 use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 use dotty_core::ast::{AstArena, AstPhase, TreeKind};
@@ -775,30 +776,49 @@ fn with_two_argument_proof<R>(
                 missing_local_edge.remove(source_id, local.source_use()),
                 Some(local.typed_use())
             );
-            let missing_result = dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs_with_typer(
-                CrossClassConstructorCallProofInput {
+            let method_tree = match source_index.definition_of(proofs[0].method()) {
+                Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+                _ => panic!("local proof method retains its original source declaration"),
+            };
+            let missing_result = validate_immutable_local_initialization_proof(
+                ImmutableLocalInitializationProofInput {
                     source_id,
-                    source_root: parsed.root,
+                    method_tree,
                     store: typer.store(),
                     definitions: &definitions,
                     source_ast: &parsed.ast,
                     typed_ast: typer.typed_ast(),
                     source_index: &source_index,
                     source_typed_index: &missing_local_edge,
+                    local_binding: typer
+                        .typed_local_binding_at(source_id, local.source_declaration()),
                     jvm_unit: &jvm_unit,
                 },
-                &typer,
             );
-            assert!(matches!(
-                missing_result,
-                Err(
-                    dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
-                        _
-                    )
+            assert_eq!(
+                missing_result.err().unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "final local Ident has no original typed mapping"
                 )
-            ));
+            );
 
             let [first, second] = arguments;
+            let missing_argument_result = validate_ordered_constructor_argument_bindings(
+                &missing_local_edge,
+                source_id,
+                [first.source_argument(), second.source_argument()],
+                [first.typed_argument(), second.typed_argument()],
+            );
+            assert_eq!(
+                missing_argument_result.unwrap_err(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    if first.source_argument() == local.source_use() {
+                        "first outer argument has no exact typed binding"
+                    } else {
+                        "second outer argument has no exact typed binding"
+                    }
+                )
+            );
             let mut swapped_edges = typer.source_typed_index().clone();
             swapped_edges.remove(source_id, first.source_argument());
             swapped_edges.remove(source_id, second.source_argument());
@@ -808,7 +828,21 @@ fn with_two_argument_proof<R>(
             swapped_edges
                 .insert(source_id, second.source_argument(), first.typed_argument())
                 .unwrap();
-            let swapped_result = dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs_with_typer(
+            assert_eq!(
+                validate_ordered_constructor_argument_bindings(
+                    &swapped_edges,
+                    source_id,
+                    [first.source_argument(), second.source_argument()],
+                    [first.typed_argument(), second.typed_argument()],
+                )
+                .unwrap_err(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "typed outer Apply must preserve exact ordered source mappings"
+                )
+            );
+
+            let foreign_index = typer.source_typed_index().clone();
+            let foreign_index_result = dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs_with_typer(
                 CrossClassConstructorCallProofInput {
                     source_id,
                     source_root: parsed.root,
@@ -817,24 +851,17 @@ fn with_two_argument_proof<R>(
                     source_ast: &parsed.ast,
                     typed_ast: typer.typed_ast(),
                     source_index: &source_index,
-                    source_typed_index: &swapped_edges,
+                    source_typed_index: &foreign_index,
                     jvm_unit: &jvm_unit,
                 },
                 &typer,
             );
-            assert!(matches!(
-                swapped_result,
-                Err(
-                    dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
-                        _
-                    )
+            assert_eq!(
+                foreign_index_result.err().unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "local binding resolver must borrow the exact proof session stores and indexes"
                 )
-            ));
-
-            let method_tree = match source_index.definition_of(proofs[0].method()) {
-                Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
-                _ => panic!("local proof method retains its original source declaration"),
-            };
+            );
             let mut two_local_source = clone_arena(&parsed.ast);
             let rhs = match &two_local_source.get(method_tree).kind {
                 TreeKind::DefDef(definition) => definition.rhs.unwrap(),
