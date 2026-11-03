@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "purpose": "Scala 3.9 oracle only; no Rust/Scala interoperability claim.",
+  "scala_source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "scala_version": "3.9.0",
+  "jdk": "Temurin 21.0.13+9",
+  "release": 21,
+  "classfile_major": 65,
+  "tasty_version": "28.9.0",
+  "sources": {
+    "PairFactory.scala": "9072a8c50bf0c9b62568187e7152618d4ea5567b2bed412c76cdcaf192af18cb",
+    "PairFactoryReversed.scala": "81ee9e087f89eb071444244c4b2c8ca16c83711d89f07236ddfe35f331bc31db",
+    "Consumer.scala": "c247ad2a0e44d2b7ed97d4ae713899d284ae0841401372c68033e7e5dbb2c8f9",
+    "ConsumerReversed.scala": "5691fdf779b48e575adc0eb1a5dcb740aa94c99f14c6ab8745f03137b5905df3"
+  },
+  "classes": {
+    "primary": [
+      {
+        "name": "example.Counter",
+        "classfile": "scala39/primary/example/Counter.class",
+        "tasty": "scala39/primary/example/Counter.tasty",
+        "classfile_sha256": "1542e1674fda55b6802a95c9c8293a7407a67b5844f187e3112a2b704a6f5466",
+        "tasty_sha256": "8b1e5cce98b3f9094efb1f22da776750c3a0ca139f9710ef5a51f95602c365ae",
+        "classfile_size": 647,
+        "tasty_size": 576,
+        "classfile_major": 65,
+        "tasty_uuid": "00c87518f6fb45e800cb2cb451678f1b",
+        "classfile_tasty_link_matches": true
+      },
+      {
+        "name": "example.Pair",
+        "classfile": "scala39/primary/example/Pair.class",
+        "tasty": "scala39/primary/example/Pair.tasty",
+        "classfile_sha256": "f1eef58012d2fe9d8e52496dcf7dacffbddec946d746123293566c45dc651b6f",
+        "tasty_sha256": "fbfa1e0f2012c5c929a6b5e1b47354ee32103c97e513cb704079f69527cc17f2",
+        "classfile_size": 771,
+        "tasty_size": 676,
+        "classfile_major": 65,
+        "tasty_uuid": "006835ae67e809d30022a022d1c7905b",
+        "classfile_tasty_link_matches": true
+      },
+      {
+        "name": "example.PairFactory",
+        "classfile": "scala39/primary/example/PairFactory.class",
+        "tasty": "scala39/primary/example/PairFactory.tasty",
+        "classfile_sha256": "94636f417284198bffcd67affd8ac1dc5c2860a6bea0fa6dd7105e0731cc6844",
+        "tasty_sha256": "06d2f5a6bfce4c7bd29f864a32884959a989c4d48739c829f7951b4f43a001ea",
+        "classfile_size": 734,
+        "tasty_size": 598,
+        "classfile_major": 65,
+        "tasty_uuid": "002c42bfcba917d2008e924c583a8321",
+        "classfile_tasty_link_matches": true
+      }
+    ],
+    "reversed": [
+      {
+        "name": "example.Counter",
+        "classfile": "scala39/reversed/example/Counter.class",
+        "tasty": "scala39/reversed/example/Counter.tasty",
+        "classfile_sha256": "41a246f2869803c5036455ac7014fb065a53fd91017f1e242834fade4c61b30b",
+        "tasty_sha256": "d095ce75077674c555d2bf20068c400207df0487312f18a4e9b675266a0becd9",
+        "classfile_size": 655,
+        "tasty_size": 584,
+        "classfile_major": 65,
+        "tasty_uuid": "00b5412e4d9bdde800cb2ca459678f1b",
+        "classfile_tasty_link_matches": true
+      },
+      {
+        "name": "example.Pair",
+        "classfile": "scala39/reversed/example/Pair.class",
+        "tasty": "scala39/reversed/example/Pair.tasty",
+        "classfile_sha256": "f2ab80e04d171d06b2eeacc0f354943fc77c80a0544db2933b12a1e04f72a8e3",
+        "tasty_sha256": "bdfe0f49805000d4cc40ca17c14bef5e7c20c746667ee634d0e5cffd0ed63b5c",
+        "classfile_size": 779,
+        "tasty_size": 684,
+        "classfile_major": 65,
+        "tasty_uuid": "0067f4c998ab20d30022b822d1c7805b",
+        "classfile_tasty_link_matches": true
+      },
+      {
+        "name": "example.PairFactory",
+        "classfile": "scala39/reversed/example/PairFactory.class",
+        "tasty": "scala39/reversed/example/PairFactory.tasty",
+        "classfile_sha256": "33c58332b74c2c22e82119fe9091fbf0fdf381c00280a3c1b765ca3d08feadd6",
+        "tasty_sha256": "6b32163db0e587ab5cfb24e22bc80eadff5741d016f6623393e71b563db6e71f",
+        "classfile_size": 750,
+        "tasty_size": 614,
+        "classfile_major": 65,
+        "tasty_uuid": "00bd25e5b07a03d200f6954c582f8f21",
+        "classfile_tasty_link_matches": true
+      }
+    ]
+  },
+  "toolchain": {
+    "compiler_artifact": "scala3-compiler_3-3.9.0.jar",
+    "compiler_sha256": "3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a",
+    "scala3_library_sha256": "9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba",
+    "scala_library_sha256": "b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd",
+    "java_sha256": "9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155",
+    "javap_sha256": "b2146e8dcfe5662c04d14f3fad68756a1a597d01461ca475a2cdbeb44c84a678"
+  },
+  "consumer_observations": {
+    "primary": "passed: existing is left, fresh is right; mutations are independent; repeated call allocates a distinct fresh Counter",
+    "reversed": "passed: fresh is left, existing is right; mutations are independent; repeated call allocates a distinct fresh Counter",
+    "runtime": "java -Xverify:all -ea"
+  }
+}
