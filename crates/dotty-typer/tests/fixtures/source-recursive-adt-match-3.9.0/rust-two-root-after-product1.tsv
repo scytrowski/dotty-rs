@@ -1,0 +1,3 @@
+session	root
+eval	path=Expr.scala#tree58	method=SymbolId(68)	parameter=SymbolId(70)	source_bytes=259:375	owner=Evaluator$:SymbolId(44)	first_error=MalformedMethodClause { method: SymbolId(61), method_tree_index: 18, clause_index: 0 }(source_tree=Expr.scala#tree18@78:125);typed_index=absent
+unwrap	path=Expr.scala#tree36	method=SymbolId(67)	parameter=SymbolId(69)	source_bytes=147:255	owner=Evaluator$:SymbolId(44)	first_error=MalformedMethodClause { method: SymbolId(61), method_tree_index: 18, clause_index: 0 }(source_tree=Expr.scala#tree18@78:125);typed_index=absent

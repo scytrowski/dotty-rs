@@ -62,6 +62,293 @@ fn source_trait_parent_product1_preserves_identity_in_both_completion_routes() {
 }
 
 #[test]
+fn source_recursive_product1_reference_is_canonical_in_both_completion_routes() {
+    let source = "package adt\nsealed trait Expr\nfinal case class Num(value: Int) extends Expr\nfinal case class Succ(inner: Expr) extends Expr\n";
+    let reordered = "package adt\nfinal case class Num(value: Int) extends Expr\nfinal case class Succ(inner: Expr) extends Expr\nsealed trait Expr\n";
+    let class_first = source_recursive_product1_session(SourceId::from_index(20361), false, source);
+    let selector_first =
+        source_recursive_product1_session(SourceId::from_index(20362), true, source);
+    assert_eq!(class_first, selector_first);
+    assert_eq!(
+        source_recursive_product1_session(SourceId::from_index(20363), false, reordered),
+        class_first,
+        "source declaration order and fresh stores preserve normalized ownership"
+    );
+}
+
+#[test]
+fn source_recursive_product1_rejects_unrelated_trait_field_and_keeps_sibling_retryable() {
+    let source = SourceId::from_index(20364);
+    let text = "package foreign { trait Expr }; package adt { sealed trait Expr; final case class Succ(inner: foreign.Expr) extends Expr; final case class Num(value: Int) extends Expr }";
+    let mut session = Session::new(text, source);
+    let succ = session.source_type_symbol("Succ");
+    let num = session.source_type_symbol("Num");
+    let expr_symbols = session
+        .parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if session
+                    .store
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    == "Expr" =>
+            {
+                session.index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(expr_symbols.len(), 2);
+    assert_ne!(expr_symbols[0], expr_symbols[1]);
+    assert_eq!(
+        session
+            .store
+            .names
+            .resolve(session.store.symbols.get(expr_symbols[0]).name.text()),
+        session
+            .store
+            .names
+            .resolve(session.store.symbols.get(expr_symbols[1]).name.text())
+    );
+    let succ_tree = session
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, _)| (session.index.symbol_at(source, tree) == Some(succ)).then_some(tree))
+        .unwrap();
+    let selector = session
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, _)| session.index.derived_symbol_at(succ, source, tree))
+        .expect("derived Succ._1");
+    session.with_typer(|_, _, index, _, typer| {
+        for result in [typer.complete_symbol(succ), typer.complete_symbol(selector)] {
+            assert!(
+                matches!(&result, Err(TyperError::UnsupportedProduct1FieldType { class, .. }) if *class == succ),
+                "same-spelled but unrelated source trait is rejected: {result:?}"
+            );
+            assert_eq!(*typer.store().symbols.info(succ), SymbolInfo::Missing);
+            assert_eq!(*typer.store().symbols.info(selector), SymbolInfo::Missing);
+        }
+        let num_info = typer
+            .complete_symbol(num)
+            .expect("valid sibling can complete after failed reference projection");
+        assert!(matches!(typer.store().types.get(num_info), Type::ClassInfo(_)));
+        assert_eq!(
+            typer.store().symbols.get(succ).origin,
+            SymbolOrigin::Source(source)
+        );
+        assert_eq!(index.symbol_at(source, succ_tree), Some(succ));
+    });
+}
+
+#[test]
+fn completed_source_product1_rejects_broken_selector_authentication() {
+    for corruption in [
+        "foreign owner",
+        "foreign field owner",
+        "missing selector",
+        "conflicting selector",
+    ] {
+        let source = SourceId::from_index(match corruption {
+            "foreign owner" => 20365,
+            "foreign field owner" => 20366,
+            "missing selector" => 20367,
+            "conflicting selector" => 20368,
+            _ => unreachable!(),
+        });
+        let text = "package adt\nsealed trait Expr\nfinal case class Num(value: Int) extends Expr\nfinal case class Succ(inner: Expr) extends Expr\n";
+        let mut session = Session::new(text, source);
+        let succ = session.source_type_symbol("Succ");
+        let num = session.source_type_symbol("Num");
+        let selector = session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| session.index.derived_symbol_at(succ, source, tree))
+            .expect("canonical Succ._1");
+        let num_selector = session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| session.index.derived_symbol_at(num, source, tree))
+            .expect("canonical Num._1");
+        let field = session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| {
+                (session.index.derived_symbol_at(succ, source, tree) == Some(selector))
+                    .then(|| session.index.symbol_at(source, tree))
+                    .flatten()
+            })
+            .expect("canonical Succ constructor field");
+        session.with_typer(|_, _, _, _, typer| {
+            typer
+                .complete_symbol(succ)
+                .expect("valid recursive Product1 class completes first");
+        });
+        let completed = *session.store.symbols.info(succ);
+        assert!(matches!(completed, SymbolInfo::Complete(_)));
+        let scope = session.index.scope_of(succ).expect("Succ scope");
+        match corruption {
+            "foreign owner" => session.store.symbols.get_mut(selector).owner = Some(num),
+            "foreign field owner" => session.store.symbols.get_mut(field).owner = Some(num),
+            "missing selector" => session.store.scopes.get_mut(scope).remove(selector),
+            "conflicting selector" => {
+                let selector_name = Name::new(session.store.names.intern("_1"), Namespace::Term);
+                session
+                    .store
+                    .scopes
+                    .get_mut(scope)
+                    .enter(selector_name, num_selector);
+            }
+            _ => unreachable!(),
+        }
+        let checkpoint = session.store.checkpoint();
+        let error = session
+            .with_typer(|_, _, _, _, typer| typer.complete_symbol(succ))
+            .expect_err("completed Product1 rejects unauthenticated selector metadata");
+        assert!(
+            matches!(&error, TyperError::MalformedClassInfo { symbol, .. } if *symbol == succ),
+            "{corruption}: {error:?}"
+        );
+        assert_eq!(session.store.checkpoint(), checkpoint, "{corruption}");
+        assert_eq!(*session.store.symbols.info(succ), completed, "{corruption}");
+    }
+}
+
+fn source_recursive_product1_session(source: SourceId, selector_first: bool, text: &str) -> String {
+    let mut session = Session::new(text, source);
+    let expr = session.source_type_symbol("Expr");
+    let succ = session.source_type_symbol("Succ");
+    let class_tree = session
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, _)| (session.index.symbol_at(source, tree) == Some(succ)).then_some(tree))
+        .expect("canonical source Succ tree");
+    let TreeKind::TypeDef(definition) = &session.parsed.ast.get(class_tree).kind else {
+        panic!("Succ definition")
+    };
+    let TreeKind::Template(template) = &session.parsed.ast.get(definition.rhs).kind else {
+        panic!("Succ template")
+    };
+    let TreeKind::DefDef(constructor) = &session.parsed.ast.get(template.constructor).kind else {
+        panic!("Succ constructor")
+    };
+    let field_tree = constructor.value_param_clauses[0][0];
+    let field = session.index.symbol_at(source, field_tree).unwrap();
+    let selector = session
+        .index
+        .derived_symbol_at(succ, source, field_tree)
+        .unwrap();
+    let unapply = session
+        .index
+        .generated_case_class_method(succ, GeneratedCaseClassMethodRole::Unapply)
+        .unwrap();
+    let formal = session
+        .index
+        .derived_symbol_at(unapply, source, class_tree)
+        .unwrap();
+    let selector_name = Name::new(session.store.names.intern("_1"), Namespace::Term);
+    let second_selector_name = Name::new(session.store.names.intern("_2"), Namespace::Term);
+    session.with_typer(|_, _, index, _definitions, typer| {
+        if selector_first {
+            typer
+                .complete_symbol(selector)
+                .expect("selector-first recursive reference completion");
+        } else {
+            typer
+                .complete_symbol(succ)
+                .expect("class-first recursive reference completion");
+        }
+        let class_info = typer.complete_symbol(succ).unwrap();
+        let Type::ClassInfo(class_info) = typer.store().types.get(class_info) else {
+            panic!("Succ ClassInfo")
+        };
+        let parent_types = class_info.parents.clone();
+        let parents = class_info
+            .parents
+            .iter()
+            .map(|parent| match typer.store().types.get(*parent) {
+                Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                } => typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(*symbol).name.text())
+                    .to_owned(),
+                other => panic!("ClassInfo parent TypeRef: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(parents, ["Object", "Expr", "Product"]);
+        let scope = index.scope_of(succ).unwrap();
+        assert_eq!(typer.store().scopes.get(scope).lookup_all(&selector_name), [selector]);
+        assert!(typer
+            .store()
+            .scopes
+            .get(scope)
+            .lookup_all(&second_selector_name)
+            .is_empty());
+        let selector_info = typer.complete_symbol(selector).unwrap();
+        let Type::Method(method) = typer.store().types.get(selector_info) else {
+            panic!("Succ._1 is Method")
+        };
+        assert!(method.params.is_empty());
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(result),
+            ..
+        } = typer.store().types.get(method.result)
+        else {
+            panic!("Succ._1 result is canonical Expr TypeRef")
+        };
+        assert_eq!(*result, expr);
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(parent),
+            ..
+        } = typer.store().types.get(parent_types[1])
+        else {
+            panic!("direct parent is canonical Expr TypeRef")
+        };
+        assert_eq!(*parent, expr);
+        assert_eq!(typer.store().symbols.get(field).kind, SymbolKind::Field);
+        assert_eq!(typer.store().symbols.get(field).owner, Some(succ));
+        assert_ne!(selector, field);
+        assert_ne!(selector, formal);
+        assert_ne!(field, formal);
+        let product = typer.store().symbols.get(
+            match typer.store().types.get(parent_types[2]) {
+                Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                } => *symbol,
+                other => panic!("Product TypeRef: {other:?}"),
+            },
+        );
+        assert!(matches!(product.origin, SymbolOrigin::Tasty(_)));
+        let product_package = typer
+            .store()
+            .symbols
+            .get(product.owner.expect("Product has scala owner"));
+        assert_eq!(
+            typer.store().names.resolve(product_package.name.text()),
+            "scala"
+        );
+        assert_eq!(typer.store().names.resolve(product.name.text()), "Product");
+        let expr_flags = typer.store().symbols.get(expr).flags;
+        assert!(expr_flags.contains(SymbolFlags::SEALED));
+        let product_count = parents.iter().filter(|parent| parent.as_str() == "Product").count();
+        assert_eq!(product_count, 1);
+        "parents=Object,Expr,Product;Succ._1=Method():Expr;field=Field:Succ;identities=distinct;ProductEdges=1".to_owned()
+    })
+}
+
+#[test]
 fn precompleted_source_parent_graph_failures_roll_back_and_retry_in_both_routes() {
     let source_text =
         SOURCE_TRAIT_PRODUCT1.replace("sealed trait Event", "sealed trait Event\ntrait Other");

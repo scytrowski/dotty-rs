@@ -30,6 +30,13 @@ impl SourceTyper<'_> {
                     ) {
                         typer.validate_existing_class_info(symbol, ty)?;
                     }
+                    if typer.store.symbols.get(symbol).kind == SymbolKind::Class {
+                        typer.validate_completed_source_case_class_product1(
+                            symbol,
+                            ty,
+                            info_journal,
+                        )?;
+                    }
                     return Ok(ty);
                 }
                 SymbolInfo::Missing => {}
