@@ -829,6 +829,12 @@ fn recursive_eval_late_result_failure_observes_binder_call_and_rolls_back_for_re
         recovered_receipt, fresh_receipt,
         "recovered success roots preserve normalized type shapes, binder/reference relationships, and selected recursive callee"
     );
+    println!(
+        "ISSUE2040_ROLLBACK\tlate_result_mismatch\tobserved=Succ.inner:Expr,Evaluator.eval(inner):Int,Match,CaseDef[0..1];restored=store,resolver,typed_arena,SourceTypedIndex,scope_projection,binder_frames"
+    );
+    println!(
+        "ISSUE2040_ROLLBACK\tsame_session_retry\trepeated_diagnostic=stable;recovered=Evaluator.unwrap(expr:Expr):Expr,Evaluator.eval(expr:Expr):Int;fresh_session=normalized_equal"
+    );
 }
 
 #[test]
