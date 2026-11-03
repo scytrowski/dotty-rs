@@ -98,6 +98,10 @@ struct TastyHeaderFieldSelection {
     constructor_parameter_address: u32,
 }
 
+type HeaderFieldProjection = (SymbolId, SymbolId, SymbolId, ScopeId);
+type HeaderFieldProjectionFailure = (SemanticTastyLoadError, Option<SymbolId>);
+type HeaderFieldProjectionResult = Result<HeaderFieldProjection, HeaderFieldProjectionFailure>;
+
 fn uniquely_declares_header_field(scope: &Scope, name: Name, field: SymbolId) -> bool {
     scope.entered_symbols().any(|member| member == field) && scope.lookup_all(&name) == [field]
 }
@@ -1052,8 +1056,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         name: &BinaryName,
         selection: &TastyHeaderFieldSelection,
         inject_late_failure: bool,
-    ) -> Result<(SymbolId, SymbolId, SymbolId, ScopeId), (SemanticTastyLoadError, Option<SymbolId>)>
-    {
+    ) -> HeaderFieldProjectionResult {
         if selection.binary_name != *name {
             return Err((
                 SemanticTastyLoadError::UnsupportedShape(
