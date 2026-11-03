@@ -2,10 +2,11 @@
 
 **Verdict: PARTIAL.** The integrated positive and regression suites pass locally
 on base `9341a1138326c6636af53dda0c28be13f1fab65c` with Temurin JDK 21.0.13.
-The required hosted checks on this PR head and an authentic nonempty trace
-receipt for execution run `4d88b28e-40a6-439c-8c52-398221815884` are not yet
-available. This report does not claim `SPRINT GOAL MET` until both are attached
-to one candidate. No production semantic code changed for C1.
+The required hosted CI and pinned Scala/JDK gates passed on PR candidate
+`2be5614d3e80b8a0c03326fac0dc7fc9c0205129` (links below). An authentic nonempty
+trace receipt for execution run `4d88b28e-40a6-439c-8c52-398221815884` is
+unavailable, so this report does not claim `SPRINT GOAL MET`. No production
+semantic code changed for C1.
 
 ## Frozen inputs
 
@@ -96,22 +97,29 @@ tree. These checks ran against the unchanged integrated main SHA above:
   The first default-parallel attempt hit the host file-descriptor limit during
   JDK classpath setup; the serial required suite then passed. No suite failures
   were suppressed.
-- `git diff --check` — to be recorded on the final PR candidate.
+- `git diff --check` — passed locally, and also passed in hosted CI.
 
-The pinned Scala secondary-constructor workflow and the full hosted required
-CI jobs still need successful runs on this PR candidate. Their authentic run
-URLs and exact run head SHA will be added here only after GitHub reports them.
-The Scala consumer workflow path filter now includes this convergence evidence
-directory, so its pinned secondary-constructor rejection is scheduled for this
-PR rather than silently skipped by path filtering.
+Hosted runs on PR candidate `2be5614d3e80b8a0c03326fac0dc7fc9c0205129`:
+
+- [CI run 3378](https://github.com/scytrowski/dotty-rs/actions/runs/41621959122)
+  — success, including the complete workspace checks, workflow lint and JDK
+  encoder gate.
+- [JVM TASTy factory Scala consumer run 390](https://github.com/scytrowski/dotty-rs/actions/runs/41621959046)
+  — success, including strict pinned Scala/TASTy release gates, constructor
+  alias address checks, the required semantic loader secondary-constructor
+  rejection, strict Scala reader and mandatory Java 21 verifier/publisher gate.
+
+The Scala consumer workflow path filter includes this convergence evidence
+directory, ensuring its secondary-constructor test runs for this evidence-only
+change.
 
 ## Provenance and limits
 
 The trace store contains the parent run manifest and a scope-phase event only;
 it has no nonempty tool-call trace for this implementation run. Shell
 correlation was unavailable. No trace link, event count, or usage total is
-inferred from that partial record. The execution therefore remains `PARTIAL`
-until authentic tracing and required hosted checks are available.
+inferred from that partial record. This provenance gap is why the verdict
+remains `PARTIAL` despite the successful required hosted checks.
 
 The acceptance is limited to these three class roots, two original indexed
 methods, their listed controls, and their existing loader paths. It does not
