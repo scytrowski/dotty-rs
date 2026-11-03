@@ -1987,7 +1987,12 @@ impl Namer<'_> {
             && constructor.type_params.is_empty()
             && constructor.value_param_clauses.len() == 1
             && (value_parameters.len() == 1
-                || self.is_flagged_product2_source_shape(value_parameters));
+                || self.is_structural_product2_source_shape(
+                    tree,
+                    class_symbol,
+                    template.constructor,
+                    value_parameters,
+                ));
         if synthesize_unapply {
             self.enter_case_class_product_selectors(tree, class_symbol, value_parameters)?;
         }
@@ -2016,29 +2021,87 @@ impl Namer<'_> {
         Ok(())
     }
 
-    /// The bounded two-field unapply identity is enabled only for the exact
-    /// source parameter shape frozen by the Scala 3.9 oracle. Type identity is
-    /// checked during completion; Namer requires the direct source spellings.
-    fn is_flagged_product2_source_shape(&self, value_parameters: &[TreeId<Untyped>]) -> bool {
+    /// Admit only canonical, source-owned ordinary two-field case classes.
+    /// This authenticates declaration provenance and metadata without making
+    /// decisions about the fields' declared types.
+    fn is_structural_product2_source_shape(
+        &self,
+        class_tree: TreeId<Untyped>,
+        class_symbol: SymbolId,
+        constructor_tree: TreeId<Untyped>,
+        value_parameters: &[TreeId<Untyped>],
+    ) -> bool {
         if value_parameters.len() != 2 {
             return false;
         }
-        [("value", "Int"), ("enabled", "Boolean")]
-            .into_iter()
-            .zip(value_parameters)
-            .all(|((expected_name, expected_type), parameter_tree)| {
-                let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
-                    return false;
-                };
-                if self.store.names.resolve(parameter.name.as_name().text()) != expected_name {
-                    return false;
-                }
-                matches!(
-                    &self.arena.get(parameter.tpt).kind,
-                    TreeKind::Ident(type_name)
-                        if self.store.names.resolve(type_name.name.text()) == expected_type
+        if self.index.symbol_at(self.source, class_tree) != Some(class_symbol)
+            || self.index.definition_of(class_symbol)
+                != Some(SourceDefinition::Canonical {
+                    source: self.source,
+                    tree: class_tree,
+                })
+            || self.store.symbols.get(class_symbol).kind != SymbolKind::Class
+            || !self
+                .store
+                .symbols
+                .get(class_symbol)
+                .flags
+                .contains(SymbolFlags::CASE)
+        {
+            return false;
+        }
+        let Some(TreeKind::TypeDef(definition)) =
+            self.arena.try_get(class_tree).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        let Some(TreeKind::Template(template)) =
+            self.arena.try_get(definition.rhs).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        if template.constructor != constructor_tree {
+            return false;
+        }
+        let Some(TreeKind::DefDef(constructor)) =
+            self.arena.try_get(constructor_tree).map(|node| &node.kind)
+        else {
+            return false;
+        };
+        if !constructor.type_params.is_empty()
+            || constructor.value_param_clauses.len() != 1
+            || constructor.value_param_clauses[0] != value_parameters
+        {
+            return false;
+        }
+
+        let mut distinct_trees = std::collections::HashSet::new();
+        value_parameters.iter().all(|parameter_tree| {
+            if !distinct_trees.insert(*parameter_tree) {
+                return false;
+            }
+            let Some(node) = self.arena.try_get(*parameter_tree) else {
+                return false;
+            };
+            let TreeKind::ValDef(parameter) = &node.kind else {
+                return false;
+            };
+            if parameter.rhs.is_some()
+                || parameter.metadata.visibility.is_some()
+                || !parameter.metadata.annotations.is_empty()
+                || parameter.metadata.modifiers != [Modifier::ParamAccessor]
+                || matches!(
+                    self.arena.try_get(parameter.tpt).map(|node| &node.kind),
+                    Some(TreeKind::ByNameTypeTree(_))
                 )
-            })
+                || matches!(self.arena.try_get(parameter.tpt).map(|node| &node.kind),
+                    Some(TreeKind::PhaseSpecific(UntypedNode::PostfixOp(operator)))
+                        if self.store.names.resolve(operator.op.text()) == "*")
+            {
+                return false;
+            }
+            true
+        })
     }
 
     /// Enters source-proven selectors for the bounded case-class product

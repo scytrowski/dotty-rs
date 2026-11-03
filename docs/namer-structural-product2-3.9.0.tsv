@@ -1,0 +1,11 @@
+case	before	current
+Add(left: Expr, right: Expr)	#2061 frozen receipt: fields present; selectors and unapply absent	one source-derived _1 and _2 Method; one companion unapply Method; x$1 formal; signatures missing
+Pair(first: Expr, second: Expr)	name-specific two-field gate did not admit	positional _1 and _2 plus companion unapply identities
+Pair(second: Expr, first: Expr)	name-specific two-field gate did not admit	positional _1 and _2 preserve reversed source field order
+Pair(first: String, second: Int)	name-specific two-field gate did not admit	positional identities published without type-spelling decisions
+Flagged(value: Int, enabled: Boolean)	selectors and unapply already published	existing identity roles, owners, and source provenance unchanged
+Num(value: Int) and Box(value: Int)	one-field selector and companion behavior already published	unchanged by structural two-field admission
+explicit _1 or _2 member	member collision blocks that generated name	member retained; only noncolliding positional identity may be synthesized
+explicit matching companion unapply	matching candidate replaces generated identity	one explicit candidate; class selectors remain independently published
+alias or unresolved unapply overload	parameter identity deferred by existing policy	no ambiguous generated candidate; naming checkpoint rolls back
+generic, curried, defaulted, by-name, repeated, contextual	outside the bounded ordinary shape	no Product2 identity claim; existing Namer error or deferral behavior retained

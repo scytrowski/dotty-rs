@@ -7156,50 +7156,270 @@ fn two_field_companion_collision_policy_preserves_identity_constraints() {
 }
 
 #[test]
-fn generated_product2_rejects_other_two_field_source_shapes() {
-    use dotty_core::{GeneratedCaseClassMethodRole, TermName, TypeName};
+fn structural_product2_admission_ignores_names_and_declared_type_spellings() {
+    use dotty_core::{GeneratedCaseClassMethodRole, SymbolOrigin};
 
     let sources = [
-        "case class Flagged(enabled: Boolean, value: Int)",
-        "case class Flagged(left: Int, right: Boolean)",
-        "case class Flagged(value: String, enabled: Boolean)",
-        "case class Flagged(value: Int, enabled: String)",
+        "package left\nsealed trait Expr\nfinal case class Add(left: Expr, right: Expr) extends Expr",
+        "package left\nsealed trait Expr\nfinal case class Add(left: Expr, right: Expr) extends Expr\nobject Add { def marker: Int = 1 }",
+        "package left\nsealed trait Expr\nobject Add { def marker: Int = 1 }\nfinal case class Add(left: Expr, right: Expr) extends Expr",
+        "package renamed\nsealed trait Expr\ncase class Pair(first: Expr, second: Expr) extends Expr",
+        "package reordered\nsealed trait Expr\ncase class Pair(second: Expr, first: Expr) extends Expr",
+        "package primitive\ncase class Pair(first: String, second: Int)",
     ];
+    let mut receipts = Vec::new();
     for (source_index, source_text) in sources.into_iter().enumerate() {
-        let mut named = named_source(source_text, 1963 + source_index as u32);
+        let mut named = named_source(source_text, 8200 + source_index as u32);
         let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
             panic!("compilation unit should have a package root");
         };
-        let class = named
-            .index
-            .symbol_at(named.source, package.stats[0])
+        let class_tree = *package
+            .stats
+            .iter()
+            .rev()
+            .find(|tree| matches!(named.parsed.ast.get(**tree).kind, TreeKind::TypeDef(_)))
             .unwrap();
-        assert_eq!(
-            named
+        let class = named.index.symbol_at(named.source, class_tree).unwrap();
+        let unapply = named
+            .index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
+            .unwrap_or_else(|| panic!("expected generated unapply identity for {source_text}"));
+        let class_scope = named.index.scope_of(class).unwrap();
+        let TreeKind::TypeDef(definition) = &named.parsed.ast.get(class_tree).kind else {
+            unreachable!()
+        };
+        let TreeKind::Template(template) = &named.parsed.ast.get(definition.rhs).kind else {
+            unreachable!()
+        };
+        let TreeKind::DefDef(constructor) = &named.parsed.ast.get(template.constructor).kind else {
+            unreachable!()
+        };
+        let mut class_fields = Vec::new();
+        let mut selectors = Vec::new();
+        let mut source_positions = Vec::new();
+        for (ordinal, parameter_tree) in constructor.value_param_clauses[0].iter().enumerate() {
+            let field = named
                 .index
-                .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply),
-            None,
-            "unrecognized two-field shape must not publish unapply: {source_text}"
+                .symbol_at(named.source, *parameter_tree)
+                .unwrap();
+            let selector = named
+                .index
+                .derived_symbol_at(class, named.source, *parameter_tree)
+                .expect("selector key must derive from its original source parameter");
+            let field_symbol = named.store.symbols.get(field);
+            let selector_symbol = named.store.symbols.get(selector);
+            assert_eq!(field_symbol.kind, SymbolKind::Field);
+            assert_eq!(field_symbol.owner, Some(class));
+            assert_eq!(field_symbol.origin, SymbolOrigin::Source(named.source));
+            assert_eq!(
+                named.index.definition_of(field),
+                Some(SourceDefinition::Canonical {
+                    source: named.source,
+                    tree: *parameter_tree,
+                })
+            );
+            assert_eq!(selector_symbol.kind, SymbolKind::Method);
+            assert_eq!(selector_symbol.owner, Some(class));
+            assert!(selector_symbol.flags.contains(SymbolFlags::SYNTHETIC));
+            assert_eq!(selector_symbol.origin, SymbolOrigin::Source(named.source));
+            assert_eq!(
+                selector_symbol.position,
+                named.parsed.ast.get(*parameter_tree).position
+            );
+            source_positions.push(selector_symbol.position);
+            assert_eq!(
+                named.index.definition_of(selector),
+                Some(SourceDefinition::Derived {
+                    source: named.source,
+                    tree: *parameter_tree,
+                })
+            );
+            assert_ne!(field, selector);
+            let selector_name = format!("_{}", ordinal + 1);
+            assert_eq!(
+                named.store.names.resolve(selector_symbol.name.text()),
+                selector_name
+            );
+            assert_eq!(
+                named
+                    .store
+                    .scopes
+                    .get(class_scope)
+                    .lookup_all(TermName::new(named.store.names.intern(&selector_name)).as_name()),
+                [selector]
+            );
+            class_fields.push(
+                named
+                    .store
+                    .names
+                    .resolve(field_symbol.name.text())
+                    .to_owned(),
+            );
+            selectors.push(selector_name);
+        }
+        assert_ne!(selectors[0], selectors[1]);
+        assert_ne!(source_positions[0], source_positions[1]);
+        assert_eq!(named.store.symbols.get(unapply).kind, SymbolKind::Method);
+        assert_eq!(
+            named.store.symbols.get(unapply).info,
+            dotty_core::SymbolInfo::Missing
         );
-        let package_scope = named
-            .index
-            .scope_of(named.store.symbols.get(class).owner.unwrap())
-            .unwrap();
-        let module = named
+        let unapply_symbol = named.store.symbols.get(unapply);
+        let companion_module = unapply_symbol.owner.unwrap();
+        assert_eq!(
+            named.store.symbols.get(companion_module).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            named.store.symbols.get(companion_module).owner,
+            named.store.symbols.get(class).owner
+        );
+        assert_eq!(unapply_symbol.origin, SymbolOrigin::Source(named.source));
+        assert_eq!(
+            named.index.definition_of(unapply),
+            Some(SourceDefinition::Derived {
+                source: named.source,
+                tree: class_tree,
+            })
+        );
+        assert_eq!(
+            named.index.generated_case_class_method_identity(unapply),
+            Some(dotty_core::GeneratedCaseClassMethod {
+                class,
+                role: GeneratedCaseClassMethodRole::Unapply,
+            })
+        );
+        assert!(
+            named
+                .store
+                .symbols
+                .get(unapply)
+                .flags
+                .contains(SymbolFlags::SYNTHETIC)
+        );
+        let unapply_scope = named.index.scope_of(unapply).unwrap();
+        assert_eq!(named.store.scopes.get(unapply_scope).owner, Some(unapply));
+        let formals = named
             .store
             .scopes
-            .get(package_scope)
-            .lookup(TypeName::new(named.store.names.intern("Flagged$")).as_name())
-            .unwrap();
+            .get(unapply_scope)
+            .lookup_all(TermName::new(named.store.names.intern("x$1")).as_name());
+        assert_eq!(formals.len(), 1);
+        assert_eq!(named.store.symbols.get(formals[0]).owner, Some(unapply));
+        assert_eq!(
+            named.store.symbols.get(formals[0]).kind,
+            SymbolKind::Parameter
+        );
+        assert_eq!(
+            named.index.definition_of(formals[0]),
+            Some(SourceDefinition::Derived {
+                source: named.source,
+                tree: class_tree,
+            })
+        );
+        assert!(
+            named
+                .store
+                .symbols
+                .get(formals[0])
+                .flags
+                .contains(SymbolFlags::SYNTHETIC)
+        );
         assert!(
             named
                 .store
                 .scopes
-                .get(named.index.scope_of(module).unwrap())
-                .lookup_all(TermName::new(named.store.names.intern("unapply")).as_name())
-                .is_empty()
+                .get(class_scope)
+                .lookup(TermName::new(named.store.names.intern("_3")).as_name())
+                .is_none()
         );
+        receipts.push((class_fields, selectors));
     }
+    assert_eq!(receipts[0].1, ["_1", "_2"]);
+    assert_eq!(receipts[1], receipts[0]);
+    assert_eq!(receipts[2], receipts[0]);
+    assert_eq!(receipts[3].1, ["_1", "_2"]);
+    assert_eq!(receipts[4].0, ["second", "first"]);
+    assert_eq!(receipts[4].1, ["_1", "_2"]);
+    assert_eq!(receipts[5].1, ["_1", "_2"]);
+}
+
+#[test]
+fn duplicate_product2_parameter_tree_rolls_back_and_allows_a_clean_retry() {
+    let source_text = "case class Pair(first: Expr, second: Expr)";
+    let (mut parsed, source, mut store) = parsed_source(source_text, 8300);
+    let class_tree = match &parsed.ast.get(parsed.root).kind {
+        TreeKind::PackageDef(package) => package.stats[0],
+        _ => panic!("compilation unit should have a package root"),
+    };
+    let constructor_tree = {
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
+            panic!("Pair should be a TypeDef");
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            panic!("Pair should have a template");
+        };
+        template.constructor
+    };
+    let first_parameter = match &parsed.ast.get(constructor_tree).kind {
+        TreeKind::DefDef(constructor) => constructor.value_param_clauses[0][0],
+        _ => panic!("Pair should have a primary constructor"),
+    };
+    let TreeKind::DefDef(constructor) = &mut parsed.ast.get_mut(constructor_tree).kind else {
+        unreachable!();
+    };
+    constructor.value_param_clauses[0][1] = first_parameter;
+
+    let mut packages = Packages::new();
+    let checkpoint = store.checkpoint();
+    let error = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "DuplicateParameter.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect_err("duplicate source parameter identity must reject naming");
+    assert!(matches!(
+        error,
+        NamerError::DuplicateDerivedSourceTreeSymbol {
+            source: error_source,
+            tree_index,
+            ..
+        } if error_source == source && tree_index == first_parameter.index()
+    ));
+    assert_eq!(store.checkpoint(), checkpoint);
+    assert!(packages.is_empty());
+
+    let retry_source = SourceId::from_index(8301);
+    let retry_text = "case class Pair(first: Expr, second: Expr)";
+    let retry_parsed = parse_compilation_unit(
+        SourceText::new(retry_text).unwrap(),
+        retry_source,
+        dotty_lexer::ContextualScanner::new(retry_text).unwrap(),
+        &mut store.names,
+    );
+    let retry_index = name_compilation_unit(
+        &retry_parsed.ast,
+        retry_parsed.root,
+        retry_source,
+        "Pair.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("valid parameter trees should name after malformed retry rollback");
+    let TreeKind::PackageDef(package) = &retry_parsed.ast.get(retry_parsed.root).kind else {
+        panic!("retry source should have a package root");
+    };
+    let class = retry_index
+        .symbol_at(retry_source, package.stats[0])
+        .unwrap();
+    assert!(
+        retry_index
+            .generated_case_class_method(class, GeneratedCaseClassMethodRole::Unapply)
+            .is_some()
+    );
 }
 
 #[test]

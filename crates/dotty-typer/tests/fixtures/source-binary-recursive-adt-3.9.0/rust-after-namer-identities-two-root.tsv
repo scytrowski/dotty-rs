@@ -1,0 +1,5 @@
+session	root	path	method	parameter	source_bytes	owner	outcome
+session-a	eval	path=Expr.scala#tree64	method=source-owned	parameter=owned-by-source-method	source_bytes=275:410	owner=Evaluator$	first_error=MalformedMethodClause(nested=Expr.scala#tree20@78:136);typed_index=absent
+session-a	selectLeft	path=Expr.scala#tree39	method=source-owned	parameter=owned-by-source-method	source_bytes=158:271	owner=Evaluator$	first_error=MalformedMethodClause(nested=Expr.scala#tree20@78:136);typed_index=absent
+session-b	eval	path=Expr.scala#tree64	method=source-owned	parameter=owned-by-source-method	source_bytes=275:410	owner=Evaluator$	first_error=MalformedMethodClause(nested=Expr.scala#tree20@78:136);typed_index=absent
+session-b	selectLeft	path=Expr.scala#tree39	method=source-owned	parameter=owned-by-source-method	source_bytes=158:271	owner=Evaluator$	first_error=MalformedMethodClause(nested=Expr.scala#tree20@78:136);typed_index=absent

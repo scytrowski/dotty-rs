@@ -1,0 +1,2 @@
+evidence
+Expr=sealed_trait;Add=source_case_class;parent=Expr:canonical;fields=left:source-member,right:source-member,distinct=true;selectors=_1:published,_2:published,unapply=published,companion=module(Add)	selectors=distinct-class-owned	unapply=companion-owned	formal=x$1	signature=uncompleted
