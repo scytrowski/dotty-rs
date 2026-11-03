@@ -23,7 +23,7 @@ repository's fixture provenance records compiler revision
 `9341a1138326c6636af53dda0c28be13f1fab65c`. The audit branch originally
 started from `c16a1270b761e25011c221025d51379444e05569`; before PR publication,
 GitHub `main` advanced to `3c1755c84042411681ec7bf05045fe00ce1c9d41` with four
-unrelated typer-fixture/documentation commits. The branch was reapplied to
+unrelated typer-fixture/documentation commits. The final patch was reapplied to
 that refreshed base; those commits do not touch the audited classloader or
 test paths.
 
@@ -183,6 +183,7 @@ On the local `9341a113` checkout with isolated `CARGO_TARGET_DIR` and `TMPDIR`:
 - The required JDK gate (`DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test -p dotty-classfile --test classfile_jvm_encoder -p dotty-jvm --lib -p dotty --test jvm_source_compilation --test jvm_stateful_class_contract --locked -- --nocapture --test-threads=1`) — passed with Temurin JDK 21.0.13.
 
 The pinned Scala 3.9.0 source-built compiler oracle generated and inspected the
-temporary classfiles described above. The local test checkout predates the
-refreshed base; CI on the PR is required to validate the final branch against
-current `main`.
+temporary classfiles described above. All Rust checks listed above were also
+rerun from a clean worktree based on refreshed `main` SHA
+`3c1755c84042411681ec7bf05045fe00ce1c9d41`, with the final tests/docs patch
+applied. Hosted CI on the PR will report the status for the published commit.
