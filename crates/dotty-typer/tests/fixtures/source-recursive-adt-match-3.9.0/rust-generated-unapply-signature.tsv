@@ -1,0 +1,5 @@
+stage	case	class	unapply	owner	formal	formal_owner	signature	field	field_owner	field_type
+before	Num	SymbolId(41)	SymbolId(51)	Num$	SymbolId(52)	SymbolId(51)	(SymbolId(41)):SymbolId(41)	SymbolId(53)	SymbolId(41)	Int
+before	Succ	SymbolId(42)	SymbolId(61)	Succ$	SymbolId(62)	SymbolId(61)	MalformedMethodClause	SymbolId(63)	SymbolId(42)	Expr
+after	Num	SymbolId(41)	SymbolId(51)	Num$	SymbolId(52)	SymbolId(51)	(SymbolId(41)):SymbolId(41)	SymbolId(53)	SymbolId(41)	Int
+after	Succ	SymbolId(42)	SymbolId(61)	Succ$	SymbolId(62)	SymbolId(61)	(SymbolId(42)):SymbolId(42)	SymbolId(63)	SymbolId(42)	Expr

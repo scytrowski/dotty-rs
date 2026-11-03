@@ -17,7 +17,7 @@ use dotty_typer::{SourceTyper, TyperError};
 const SOURCE: &str = include_str!("fixtures/source-recursive-adt-match-3.9.0/Expr.scala");
 
 #[test]
-fn evaluator_recursive_adt_two_roots_record_authentic_first_blockers() {
+fn evaluator_recursive_adt_roots_type_after_generated_unapply_completion() {
     let (first, first_paths) = analyze_roots(SourceId::from_index(20341));
     let (second, second_paths) = analyze_roots(SourceId::from_index(20342));
     assert_eq!(first, second, "fresh source sessions normalize identically");
@@ -31,21 +31,23 @@ fn evaluator_recursive_adt_two_roots_record_authentic_first_blockers() {
         "only unwrap and eval count as whole DefDef roots"
     );
     let actual = format!("{}\n", first.join("\n"));
-    let expected =
-        include_str!("fixtures/source-recursive-adt-match-3.9.0/rust-two-root-after-product1.tsv")
-            .split_once('\n')
-            .expect("two-root receipt header")
-            .1;
+    let expected = include_str!(
+        "fixtures/source-recursive-adt-match-3.9.0/rust-two-root-after-generated-unapply.tsv"
+    )
+    .split_once('\n')
+    .expect("two-root receipt header")
+    .1;
     assert_eq!(actual, expected);
     for row in first {
         println!("ISSUE2034_ROOT\t{row}");
     }
     let actual = format!("{}\n", first_paths.join("\n"));
-    let expected =
-        include_str!("fixtures/source-recursive-adt-match-3.9.0/rust-deferred-paths.tsv")
-            .split_once('\n')
-            .expect("deferred path header")
-            .1;
+    let expected = include_str!(
+        "fixtures/source-recursive-adt-match-3.9.0/rust-paths-after-generated-unapply.tsv"
+    )
+    .split_once('\n')
+    .expect("deferred path header")
+    .1;
     assert_eq!(actual, expected);
     for row in first_paths {
         println!("ISSUE2034_DEFERRED\t{row}");
@@ -54,10 +56,15 @@ fn evaluator_recursive_adt_two_roots_record_authentic_first_blockers() {
 
 #[test]
 fn evaluator_recursive_adt_classification_records_canonical_mechanisms() {
-    let rows = characterize_classes(SourceId::from_index(20343));
+    let rows = characterize_classes(SourceId::from_index(20343), false, SOURCE);
+    assert_eq!(
+        rows,
+        characterize_classes(SourceId::from_index(20344), true, SOURCE),
+        "independent sessions and class-first/member-lookup-first completion agree"
+    );
     let actual = format!("{}\n", rows.join("\n"));
     let expected = include_str!(
-        "fixtures/source-recursive-adt-match-3.9.0/rust-class-evidence-after-product1.tsv"
+        "fixtures/source-recursive-adt-match-3.9.0/rust-class-evidence-after-generated-unapply.tsv"
     )
     .split_once('\n')
     .expect("class evidence header")
@@ -68,13 +75,48 @@ fn evaluator_recursive_adt_classification_records_canonical_mechanisms() {
     }
 }
 
-fn characterize_classes(source: SourceId) -> Vec<String> {
+#[test]
+fn recursive_adt_generated_unapply_is_independent_of_declaration_order() {
+    let reordered = SOURCE
+        .replace(
+            "final case class Num(value: Int) extends Expr\nfinal case class Succ(inner: Expr) extends Expr",
+            "final case class Succ(inner: Expr) extends Expr\nfinal case class Num(value: Int) extends Expr",
+        );
+    let original = characterize_classes(SourceId::from_index(20345), false, SOURCE);
+    let reordered = characterize_classes(SourceId::from_index(20346), false, &reordered);
+    assert_eq!(
+        normalized_signatures(&original),
+        normalized_signatures(&reordered),
+        "class declaration order cannot change canonical unapply input/results"
+    );
+}
+
+fn normalized_signatures(rows: &[String]) -> Vec<String> {
+    rows.iter()
+        .filter_map(|row| {
+            let name = row.split('\t').next()?;
+            if !matches!(name, "Num" | "Succ") {
+                return None;
+            }
+            let class_symbol = row.split("symbol=").nth(1)?.split('\t').next()?;
+            let signature = row.split("\ttype=").nth(1)?.split('\t').next()?;
+            assert_eq!(signature, format!("({class_symbol}):{class_symbol}"));
+            Some(format!("{name}:(class):class"))
+        })
+        .collect()
+}
+
+fn characterize_classes(
+    source: SourceId,
+    complete_class_first: bool,
+    source_text: &str,
+) -> Vec<String> {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
     let parsed = dotty_parser::parse_compilation_unit(
-        SourceText::new(SOURCE).expect("valid frozen source"),
+        SourceText::new(source_text).expect("valid source"),
         source,
-        ContextualScanner::new(SOURCE).expect("scan frozen source"),
+        ContextualScanner::new(source_text).expect("scan source"),
         &mut store.names,
     );
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
@@ -131,6 +173,7 @@ fn characterize_classes(source: SourceId) -> Vec<String> {
             )
         })
         .collect::<Vec<_>>();
+    let unapply_name = dotty_core::TermName::new(store.names.intern("unapply"));
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -215,6 +258,24 @@ fn characterize_classes(source: SourceId) -> Vec<String> {
             .expect("canonical generated unapply identity");
         assert_ne!(unapply, class);
         assert_eq!(typer.store().symbols.get(unapply).owner, Some(module_class));
+        if complete_class_first {
+            typer
+                .complete_symbol(class)
+                .expect("class-first source completion succeeds");
+        }
+        assert_eq!(
+            typer
+                .store()
+                .scopes
+                .get(
+                    index
+                        .scope_of(module_class)
+                        .expect("companion member scope")
+                )
+                .lookup(unapply_name.as_name()),
+            Some(unapply),
+            "ordinary companion member lookup returns the canonical generated method"
+        );
         let formal = index
             .derived_symbol_at(unapply, source, tree)
             .expect("canonical generated unapply formal derived from case-class tree");
@@ -239,33 +300,30 @@ fn characterize_classes(source: SourceId) -> Vec<String> {
             Some(formal),
             "the generated unapply formal resolves to its canonical derived identity"
         );
-        let unapply_shape = match typer.complete_symbol(unapply) {
-            Ok(ty) => match typer.store().types.get(ty) {
-                Type::Method(method) => {
-                    assert_eq!(method.params.len(), 1);
-                    let arg = type_ref_symbol(&typer, method.params[0].ty);
-                    let result = type_ref_symbol(&typer, method.result);
-                    assert_eq!(
-                        arg, class,
-                        "generated formal input targets canonical case class"
-                    );
-                    assert_eq!(
-                        result, class,
-                        "generated unapply result targets canonical case class"
-                    );
-                    format!("({arg:?}):{result:?}")
-                }
-                other => format!("unexpected={other:?}"),
-            },
-            Err(error) => {
-                if name == "Succ" {
-                    assert!(matches!(
-                        error,
-                        TyperError::MalformedMethodClause { method, .. } if method == unapply
-                    ));
-                }
-                format!("error={error:?}")
+        let unapply_type = typer
+            .complete_symbol(unapply)
+            .expect("ordinary generated unapply completion");
+        assert_eq!(
+            typer.complete_symbol(unapply).unwrap(),
+            unapply_type,
+            "repeated generated method completion is idempotent"
+        );
+        let unapply_shape = match typer.store().types.get(unapply_type) {
+            Type::Method(method) => {
+                assert_eq!(method.params.len(), 1);
+                let arg = type_ref_symbol(&typer, method.params[0].ty);
+                let result = type_ref_symbol(&typer, method.result);
+                assert_eq!(
+                    arg, class,
+                    "generated formal input targets canonical case class"
+                );
+                assert_eq!(
+                    result, class,
+                    "generated unapply result targets canonical case class"
+                );
+                format!("({arg:?}):{result:?}")
             }
+            other => format!("unexpected={other:?}"),
         };
 
         let constructor = &parsed.ast.get(template.constructor).kind;
@@ -608,18 +666,19 @@ fn analyze_roots(source: SourceId) -> (Vec<String>, Vec<String>) {
         };
         let body_expr = block.expr;
         let body_range = parsed.ast.get(body_expr).position.unwrap().span().range();
-        for target in [return_tree, binder, body_expr] {
-            assert!(
-                typer.source_typed_index().get(source, target).is_none(),
-                "failed whole-method typing must not retain a fragment mapping"
-            );
-        }
+        let typed_status = |tree| {
+            typer
+                .source_typed_index()
+                .get(source, tree)
+                .map(|typed| format!("typed#tree{}", typed.index()))
+                .unwrap_or_else(|| "deferred".to_owned())
+        };
         let return_range = parsed.ast.get(return_tree).position.unwrap().span().range();
         let binder_range = parsed.ast.get(binder).position.unwrap().span().range();
         if name == "unwrap" {
             deferred.push(format!(
-                "unwrap\treturn=tree{}@{}:{}:Expr,deferred\tbinder=tree{}@{}:{}:inner,deferred\tbody=tree{}@{}:{}:inner,deferred",
-                return_tree.index(), return_range.start(), return_range.end(), binder.index(), binder_range.start(), binder_range.end(), body_expr.index(), body_range.start(), body_range.end()
+                "unwrap\treturn=tree{}@{}:{}:Expr,{}\tbinder=tree{}@{}:{}:inner,{}\tbody=tree{}@{}:{}:inner,{}",
+                return_tree.index(), return_range.start(), return_range.end(), typed_status(return_tree), binder.index(), binder_range.start(), binder_range.end(), typed_status(binder), body_expr.index(), body_range.start(), body_range.end(), typed_status(body_expr)
             ));
         } else {
             let recursive = parsed
@@ -648,15 +707,9 @@ fn analyze_roots(source: SourceId) -> (Vec<String>, Vec<String>) {
             let call_range = parsed.ast.get(call).position.unwrap().span().range();
             let function_range = parsed.ast.get(function).position.unwrap().span().range();
             let argument_range = parsed.ast.get(argument).position.unwrap().span().range();
-            for target in [call, function, argument] {
-                assert!(
-                    typer.source_typed_index().get(source, target).is_none(),
-                    "recursive call fragment must remain unmapped after root rollback"
-                );
-            }
             deferred.push(format!(
-                "eval\treturn=tree{}@{}:{}:Int,deferred\tbinder=tree{}@{}:{}:inner,deferred\tcall=tree{}@{}:{}:eval(inner),namer_owner={eval_owner_name}:{eval_symbol:?},typed_result=deferred\tfunction=tree{}@{}:{}:eval\targument=tree{}@{}:{}:inner",
-                return_tree.index(), return_range.start(), return_range.end(), binder.index(), binder_range.start(), binder_range.end(), call.index(), call_range.start(), call_range.end(), function.index(), function_range.start(), function_range.end(), argument.index(), argument_range.start(), argument_range.end()
+                "eval\treturn=tree{}@{}:{}:Int,{}\tbinder=tree{}@{}:{}:inner,{}\tcall=tree{}@{}:{}:eval(inner),namer_owner={eval_owner_name}:{eval_symbol:?},typed_result={}\tfunction=tree{}@{}:{}:eval,{}\targument=tree{}@{}:{}:inner,{}",
+                return_tree.index(), return_range.start(), return_range.end(), typed_status(return_tree), binder.index(), binder_range.start(), binder_range.end(), typed_status(binder), call.index(), call_range.start(), call_range.end(), typed_status(call), function.index(), function_range.start(), function_range.end(), typed_status(function), argument.index(), argument_range.start(), argument_range.end(), typed_status(argument)
             ));
         }
     }
