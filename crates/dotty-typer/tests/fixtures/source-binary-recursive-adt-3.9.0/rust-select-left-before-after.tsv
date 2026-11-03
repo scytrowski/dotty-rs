@@ -1,0 +1,4 @@
+stage	session	root	result
+before	issue-2072	selectLeft	complete whole DefDef; nested source identity and mapping proof not asserted
+after	session-a	selectLeft	root=selectLeft@158:271;signature=(Expr):Expr;selector=expr:Expr;cases=Num(_)=>expr,Add(left,_2)=>left;Add.unapply=companion-owned(Add):Add;selectors=_1(left):Expr,_2(right):Expr;binder=left@Add._1:case-local;wildcard=Add._2:unbound;mapped_source_trees=19
+after	session-b	selectLeft	root=selectLeft@158:271;signature=(Expr):Expr;selector=expr:Expr;cases=Num(_)=>expr,Add(left,_2)=>left;Add.unapply=companion-owned(Add):Add;selectors=_1(left):Expr,_2(right):Expr;binder=left@Add._1:case-local;wildcard=Add._2:unbound;mapped_source_trees=19
