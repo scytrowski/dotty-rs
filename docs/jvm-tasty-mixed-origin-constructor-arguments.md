@@ -156,19 +156,97 @@ of being labeled a verifier error.
 
 ### AC9–AC10 — required executions, CI, and closeout boundary
 
-The integrated Scala/JDK run used
-`DOTTY_REQUIRE_SCALA_TASTY_MIXED_ORIGIN_CONSTRUCTOR_CONSUMER=1`, every active
-strict flag in `.github/workflows/jvm-tasty-factory-scala-consumer.yml`, and
-`DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`. It ran all listed Scala consumer and
-reader targets, the additional alias-address, secondary-constructor rollback,
-and dual-reference forwarding checks, plus the mandatory
-`DOTTY_CLASSFILE_REQUIRE_JDK=1` classfile/JVM/source/artifact/stateful/identity
-gate. No required Scala or JDK target skipped. A full workspace-test attempt
-without `JAVA_HOME` stopped at a Java executable lookup; the full rerun with
-the hash-verified JDK path passed before the final test-only proof-receipt
-instrumentation was added. The final focused proof test passed with that
-instrumentation; two final workspace reruns stalled during recompilation and
-were interrupted without reaching test execution.
+The integrated Rust source and proof-test tree was tested at
+`53a0311301cc35de3be579e61f33aead90cff006`, which includes current
+`main` `9341a1138326c6636af53dda0c28be13f1fab65c` and the final test-only
+receipt instrumentation. The focused proof test (4/4), workspace Clippy, and
+the full workspace test command below passed at this SHA. Follow-up changes to
+this section are documentation only; they do not change the tested Rust source
+or tests. The durable full-workspace receipt is the successful Rust job in PR
+CI run [`41622037569`](https://github.com/scytrowski/dotty-rs/actions/runs/41622037569).
+It installed Rust `1.98.1 (48a229cea 2026-09-01)` and ran:
+
+```sh
+cargo test --workspace --all-targets --locked
+```
+
+The run also passed formatting, frontend-boundary, Clippy, rustdoc, and diff
+checks. Its workspace tests included
+`jvm_tasty_mixed_origin_runtime`: both `missing_jdk_tools_skip_optional_run_and_fail_required_run`
+and `mixed_origin_counter_identity_and_allocation_order_on_strict_jdk21` passed
+on the installed JDK 21. The separate pinned Scala workflow
+[`41622037513`](https://github.com/scytrowski/dotty-rs/actions/runs/41622037513)
+also passed every step: the 23-target strict Scala/oracle batch, the
+PARAM-address Scala oracle, secondary-constructor rollback, dual-reference
+forwarding, and the mandatory Java 21 gate. Across those 33 test result groups,
+945 tests passed with none failed or ignored. Both workflow runs were triggered
+for PR head `53a0311301cc35de3be579e61f33aead90cff006`; GitHub tested its PR
+merge ref `502f7a298e42a2c2af618639ca54648c60634b56` against base
+`9341a1138326c6636af53dda0c28be13f1fab65c`. The checked-in CI runs therefore
+cover the final Rust source/test tree; this follow-up changes documentation
+only. Preserve the earlier local history: the first workspace run without
+`JAVA_HOME` stopped at Java executable lookup; a JDK-configured run passed
+before final test-only proof-receipt instrumentation; two subsequent local
+reruns stalled during recompilation and were interrupted before tests began.
+
+The strict Scala reproducer is the checked-in workflow
+[`.github/workflows/jvm-tasty-factory-scala-consumer.yml`](../.github/workflows/jvm-tasty-factory-scala-consumer.yml),
+step “Run strict linked Scala and TASTy oracle release gates”. It is run with
+Rust 1.98.1, Temurin 21.0.13+9, `SCALA39_ROOT` pointing at the Scala 3.9 source
+checkout at `777528f19a58e794c9954a42f433373472ec57f8`, and
+`COURSIER_MAVEN_ROOT=$GITHUB_WORKSPACE/.cache/coursier/v1/https/repo1.maven.org/maven2`.
+The workflow step sets all its listed `DOTTY_REQUIRE_SCALA_TASTY_*` gates to
+`1`, sets `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`, creates the oracle `TMPDIR`
+and invokes the exact cargo target list shown in that step. At integrated
+baseline `cfaa8c1160cd190113b867b77d3644357d691a6f`, all 23 listed test
+binaries passed (71 tests total, including 3 mixed-origin consumer tests).
+The additional strict Scala groups were run with these commands and each
+passed one test:
+
+```sh
+DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 cargo +1.98.1 test -p dotty --test jvm_tasty_plan \
+  same_batch_reference_field_alias_targets_template_parameter_and_preserves_read \
+  --locked -- --nocapture
+
+DOTTY_REQUIRE_SCALA39_SECONDARY_CONSTRUCTOR_TEST=1 cargo +1.98.1 test -p dotty-classloader --lib \
+  semantic_class_loader_rejects_secondary_constructor_with_rollback \
+  --locked -- --nocapture --test-threads=1
+
+DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_BATCH=1 cargo +1.98.1 test -p dotty --test jvm_tasty_artifacts \
+  dual_reference_forwarding_emits_six_linked_artifacts_with_ordered_formal_loads \
+  --locked -- --nocapture --test-threads=1
+```
+
+The mixed-origin Java runtime check used Temurin 21.0.13+9 with
+`DOTTY_CLASSFILE_REQUIRE_JDK=1`:
+
+```sh
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +1.98.1 test \
+  --test jvm_tasty_mixed_origin_constructor_arguments \
+  --test jvm_tasty_mixed_origin_runtime \
+  --test jvm_tasty_artifacts \
+  --locked -- --nocapture --test-threads=1
+```
+
+All 68 tests in those three targets passed, including both Java runtime
+orientations and artifact controls. The mandatory broad Java gate was run as:
+
+```sh
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +1.98.1 test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  --test jvm_tasty_artifacts \
+  --test jvm_tasty_dual_reference_identity \
+  --test jvm_tasty_mixed_origin_constructor_arguments \
+  --test jvm_tasty_mixed_origin_runtime \
+  --test jvm_stateful_class_contract \
+  --locked -- --nocapture --test-threads=1
+```
+
+It passed all 879 tests across ten test binaries on the integrated baseline.
+The workflow run URLs above provide durable current-head receipts; the exact
+local commands and historical host-specific logs are supplementary evidence.
 
 On the integrated baseline, these required checks passed:
 
@@ -177,7 +255,7 @@ cargo fmt --all -- --check
 python3 tools/check-frontend-boundaries.py
 cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo +1.98.1 doc --workspace --no-deps --locked
-JAVA_HOME=<Temurin 21.0.13> RUST_TEST_THREADS=1 cargo +1.98.1 test --workspace --all-targets --locked
+cargo +1.98.1 test --workspace --all-targets --locked
 git diff --check
 ```
 
