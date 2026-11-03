@@ -1165,20 +1165,24 @@ pub(crate) fn decode_predef_string_alias(
         else {
             continue;
         };
-        if wire_name(&file, name).as_deref() == Some("String")
-            && !matches!(candidate_body, RawTree::LengthNode(ref body) if body.tag == TEMPLATE_TAG)
-        {
-            direct_declarations.push(child.offset as u32);
+        if wire_name(&file, name).as_deref() == Some("String") {
+            let is_alias = !matches!(candidate_body, RawTree::LengthNode(ref body) if body.tag == TEMPLATE_TAG);
+            direct_declarations.push((child.offset as u32, is_alias));
         }
     }
     if direct_declarations.len() > 1 {
         return Err(TastyDecodeError::AmbiguousPredefStringAlias);
     }
-    let [direct_address] = direct_declarations.as_slice() else {
+    let [(direct_address, is_alias)] = direct_declarations.as_slice() else {
         return Err(TastyDecodeError::InvalidPredefStringAlias(
             "no direct String type alias is present",
         ));
     };
+    if !is_alias {
+        return Err(TastyDecodeError::InvalidPredefStringAlias(
+            "the sole direct String declaration is a class, not a type alias",
+        ));
+    }
     if *direct_address != STRING_ALIAS_ADDRESS {
         return Err(TastyDecodeError::InvalidPredefStringAlias(
             "the direct String type alias is not at address 378",
