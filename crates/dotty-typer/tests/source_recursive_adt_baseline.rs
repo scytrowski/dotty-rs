@@ -32,7 +32,7 @@ fn evaluator_recursive_adt_two_roots_record_authentic_first_blockers() {
     );
     let actual = format!("{}\n", first.join("\n"));
     let expected =
-        include_str!("fixtures/source-recursive-adt-match-3.9.0/rust-two-root-baseline.tsv")
+        include_str!("fixtures/source-recursive-adt-match-3.9.0/rust-two-root-after-product1.tsv")
             .split_once('\n')
             .expect("two-root receipt header")
             .1;
@@ -56,11 +56,12 @@ fn evaluator_recursive_adt_two_roots_record_authentic_first_blockers() {
 fn evaluator_recursive_adt_classification_records_canonical_mechanisms() {
     let rows = characterize_classes(SourceId::from_index(20343));
     let actual = format!("{}\n", rows.join("\n"));
-    let expected =
-        include_str!("fixtures/source-recursive-adt-match-3.9.0/rust-class-evidence.tsv")
-            .split_once('\n')
-            .expect("class evidence header")
-            .1;
+    let expected = include_str!(
+        "fixtures/source-recursive-adt-match-3.9.0/rust-class-evidence-after-product1.tsv"
+    )
+    .split_once('\n')
+    .expect("class evidence header")
+    .1;
     assert_eq!(actual, expected);
     for row in rows {
         println!("ISSUE2034_CLASS\t{row}");
@@ -256,7 +257,15 @@ fn characterize_classes(source: SourceId) -> Vec<String> {
                 }
                 other => format!("unexpected={other:?}"),
             },
-            Err(error) => format!("error={error:?}"),
+            Err(error) => {
+                if name == "Succ" {
+                    assert!(matches!(
+                        error,
+                        TyperError::MalformedMethodClause { method, .. } if method == unapply
+                    ));
+                }
+                format!("error={error:?}")
+            }
         };
 
         let constructor = &parsed.ast.get(template.constructor).kind;
@@ -284,6 +293,7 @@ fn characterize_classes(source: SourceId) -> Vec<String> {
             selector, field,
             "source field and synthetic _1 stay distinct"
         );
+        assert_ne!(selector, formal, "generated unapply formal stays distinct");
         assert_ne!(
             formal, field,
             "generated unapply formal is not the source field"
@@ -292,6 +302,10 @@ fn characterize_classes(source: SourceId) -> Vec<String> {
             Ok(ty) => match typer.store().types.get(ty) {
                 Type::Method(method) => {
                     let result = type_ref_symbol(&typer, method.result);
+                    assert!(method.params.is_empty(), "case selector is parameterless");
+                    if name == "Succ" {
+                        assert_eq!(result, expr_symbol);
+                    }
                     if name == "Num" {
                         let int = type_ref_symbol(&typer, definitions.int);
                         assert_eq!(result, int, "Num._1 targets canonical scala.Int");
@@ -310,18 +324,25 @@ fn characterize_classes(source: SourceId) -> Vec<String> {
                         .iter()
                         .map(|parent| type_ref_symbol(&typer, *parent))
                         .collect::<Vec<_>>();
-                    if name == "Num" {
-                        assert_eq!(parent_symbols.len(), 3);
-                        assert_eq!(parent_symbols[0], definitions.object_class);
-                        assert_eq!(parent_symbols[1], expr_symbol);
-                        let product = parent_symbols[2];
-                        let product_symbol = typer.store().symbols.get(product);
-                        assert_eq!(
-                            typer.store().names.resolve(product_symbol.name.text()),
-                            "Product"
-                        );
-                        assert!(matches!(product_symbol.origin, SymbolOrigin::Tasty(_)));
-                    }
+                    assert_eq!(parent_symbols.len(), 3);
+                    assert_eq!(parent_symbols[0], definitions.object_class);
+                    assert_eq!(parent_symbols[1], expr_symbol);
+                    let product = parent_symbols[2];
+                    let product_symbol = typer.store().symbols.get(product);
+                    assert_eq!(
+                        typer.store().names.resolve(product_symbol.name.text()),
+                        "Product"
+                    );
+                    assert_eq!(product_symbol.kind, SymbolKind::Trait);
+                    assert!(matches!(product_symbol.origin, SymbolOrigin::Tasty(_)));
+                    assert_eq!(
+                        parent_symbols
+                            .iter()
+                            .filter(|parent| **parent == product)
+                            .count(),
+                        1,
+                        "exactly one canonical Product edge is retained"
+                    );
                     format!("parents={parent_symbols:?}")
                 }
                 other => format!("unexpected={other:?}"),
@@ -350,7 +371,7 @@ fn characterize_classes(source: SourceId) -> Vec<String> {
             assert_eq!(field_type_target, expr_symbol);
             assert_eq!(typer.store().symbols.get(field).owner, Some(class));
             rows.push(format!(
-                "Succ.inner_type\ttree{}=>{field_type_target:?}\tfield={field:?}\tfield_owner={class:?}\ttype_completion=deferred_before_field_completion",
+                "Succ.inner_type\ttree{}=>{field_type_target:?}\tfield={field:?}\tfield_owner={class:?}\ttype_completion=canonical_source_TypeRef",
                 field_type_tree.index()
             ));
         }
@@ -494,6 +515,46 @@ fn analyze_roots(source: SourceId) -> (Vec<String>, Vec<String>) {
                         format!(
                             "Expr.scala#tree{}@{}:{}",
                             tree.index(),
+                            range.start(),
+                            range.end()
+                        )
+                    }
+                    TyperError::MalformedMethodClause {
+                        method,
+                        method_tree_index,
+                        clause_index: 0,
+                    } => {
+                        let generated_unapply = parsed
+                            .ast
+                            .iter()
+                            .find_map(|(class_tree, node)| match &node.kind {
+                                TreeKind::TypeDef(definition)
+                                    if typer
+                                        .store()
+                                        .names
+                                        .resolve(definition.name.as_name().text())
+                                        == "Succ" =>
+                                {
+                                    index.symbol_at(source, class_tree).and_then(|class| {
+                                        index.generated_case_class_method(
+                                            class,
+                                            GeneratedCaseClassMethodRole::Unapply,
+                                        )
+                                    })
+                                }
+                                _ => None,
+                            })
+                            .expect("canonical generated Succ.unapply");
+                        assert_eq!(*method, generated_unapply);
+                        let (class_tree, node) = parsed
+                            .ast
+                            .iter()
+                            .find(|(candidate, _)| candidate.index() == *method_tree_index)
+                            .expect("generated unapply blocker source tree");
+                        let range = node.position.unwrap().span().range();
+                        format!(
+                            "Expr.scala#tree{}@{}:{}",
+                            class_tree.index(),
                             range.start(),
                             range.end()
                         )

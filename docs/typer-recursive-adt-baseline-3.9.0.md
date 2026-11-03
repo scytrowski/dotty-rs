@@ -27,7 +27,7 @@ control, and checks the source, output, diagnostic, and classification hashes.
 The positive typed snapshot is committed as
 [`Expr.scala39-typed-tree.txt`](../crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/Expr.scala39-typed-tree.txt).
 
-The Rust baseline was observed against authoritative merged `main` revision
+The original Rust baseline was observed against authoritative merged `main` revision
 [`1ab217d716f47d68ba46915cfdea2fb842fcb173`](https://github.com/scytrowski/dotty-rs/commit/1ab217d716f47d68ba46915cfdea2fb842fcb173)
 (merge of PR #2033, the base of this issue PR), using Rust `1.98.1`
 (`rustc 1.98.1 (48a229cea 2026-09-01)`, Cargo
@@ -109,13 +109,25 @@ the canonical `Expr` trait, while its completion remains deferred behind the
 authentic error. These identities and relationships are frozen in its
 [`class evidence`](../crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/rust-class-evidence.tsv).
 
-The receipt records canonical `Expr`, `Num`, `Succ`, companion, generated
-`unapply`, source field, synthetic formal, and `_1` identities. `Num` completes
-with `unapply: (Num) => Num`, `_1: Int`, and `Object`, `Expr`, and `Product`
-parents. `Succ` preserves its canonical source field and direct source `Expr`
-edge, but generated unapply, selector, and class-info completion all stop at
-the same `UnsupportedProduct1FieldType` error. The separate probe does not
-alter the two-session baseline.
+The original receipt records canonical `Expr`, `Num`, `Succ`, companion, generated
+`unapply`, source field, synthetic formal, and `_1` identities. In that
+original baseline, `Num` completes with `unapply: (Num) => Num`, `_1: Int`, and
+`Object`, `Expr`, and `Product` parents. `Succ` preserves its canonical source
+field and direct source `Expr` edge, but generated unapply, selector, and
+class-info completion all stop at the same `UnsupportedProduct1FieldType`
+error. The separate probe does not alter the two-session baseline.
+
+## Product1 reference projection update (#2036)
+
+The follow-on class/selector increment is recorded in
+[`typer-recursive-adt-product1-reference-3.9.0.md`](typer-recursive-adt-product1-reference-3.9.0.md).
+The original baseline receipts above remain unchanged. The new after-change
+receipts show that `Succ` retains `Object`, the exact source `Expr` edge, and
+one authentic classpath `scala.Product` edge; its constructor `Field(inner)`
+remains distinct from the class-owned parameterless `_1(): Expr` method. The
+original whole-method roots now reach the separate generated
+`Succ.unapply` `MalformedMethodClause` blocker owned by #2035. Neither root is
+claimed to type successfully.
 
 The observations distinguish Scala-valid source from Rust support: the
 positive Scala source is **Rust-valid but deferred** at the whole-method

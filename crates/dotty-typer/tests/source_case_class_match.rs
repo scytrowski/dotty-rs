@@ -83,6 +83,35 @@ fn source_recursive_product1_rejects_unrelated_trait_field_and_keeps_sibling_ret
     let mut session = Session::new(text, source);
     let succ = session.source_type_symbol("Succ");
     let num = session.source_type_symbol("Num");
+    let expr_symbols = session
+        .parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if session
+                    .store
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    == "Expr" =>
+            {
+                session.index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(expr_symbols.len(), 2);
+    assert_ne!(expr_symbols[0], expr_symbols[1]);
+    assert_eq!(
+        session
+            .store
+            .names
+            .resolve(session.store.symbols.get(expr_symbols[0]).name.text()),
+        session
+            .store
+            .names
+            .resolve(session.store.symbols.get(expr_symbols[1]).name.text())
+    );
     let succ_tree = session
         .parsed
         .ast
