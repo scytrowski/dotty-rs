@@ -156,3 +156,27 @@ Artifact-link controls use the frozen Scala primary `PairFactory.class` and
 with their corresponding typed contract error. This validates the existing
 class-file/TASTy link checker against the issue's real oracle artifact; it does
 not claim the paired Rust TASTy producer ran.
+
+## Proof-only direct-New local receipt
+
+Issue #2065 adds `validate_immutable_local_initialization_proof` beside the
+existing cross-class proof boundary. It consumes a `TypedLocalBinding` captured
+from `typed_local_binding_at` in the original Typer session and returns an
+opaque, borrowed receipt for the original Block, ValDef, explicit type,
+`new Counter(seed)` initializer, final local Ident, selected Counter primary
+constructor, and canonical IDs/types. It checks the one-entry method-owned
+local scope, immutable flag, exact source-to-typed edges and positions, the
+two-formal `(Counter, Int)` method signature, Counter and Pair constructor
+signatures, and the final Pair application in either argument order. Renamed
+classes/method/local and reordered class declarations pass through canonical
+identities without fixed-spelling dispatch.
+
+The receipt is not an ordered constructor argument origin and is not consumed
+by `ConstructorArgumentProof`, TASTy planning, or either producer. The earlier
+helper-initialized `LocalValConstructorArgumentProof` retains its
+`PlannedCallProof` requirement and first failures. Primary and reversed direct
+initializer sessions prove the receipt independently; test-only corruption of
+the original initializer/use mapping and seed typed edge is rejected at the
+corresponding typed-binding gate. This proof does not claim validation of
+conditional, nested, helper, mutable, shadowed, or multi-local initializers;
+those remain unsupported. No class-file or TASTy output bytes change.
