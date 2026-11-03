@@ -42,8 +42,18 @@ Oracle classifications and source hashes remain in the pinned fixture set:
 foreign-extractor, renamed/swapped-field, and warning-only sources. The
 Scala-side oracle is pinned to Scala 3.9.0 revision
 `777528f19a58e794c9954a42f433373472ec57f8` and the fixture's Temurin 21.0.8+9
-environment. These Rust tests consume the frozen source and oracle receipts;
-they do not rebuild or modify Scala fixtures.
+environment. Its runner reproduced all 17 frozen source hashes, the immutable
+`Expr.scala` digest, the typed-tree snapshot, all 16 classifications, and the
+diagnostic/output hashes in this environment. The Rust tests consume the
+frozen source and oracle receipts; they do not modify Scala fixtures.
+
+Reproduce the pinned oracle with `SCALA39_ROOT` set to the recorded Scala
+checkout, `JAVA_HOME` set to Temurin 21.0.8+9, and `COURSIER_MAVEN_ROOT` set to
+the cache containing the eight digested artifacts:
+
+```sh
+crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/run
+```
 
 This issue remains a typer-only increment. It adds no recursive `eval`
 behavior, general arity support, backend lowering, TASTy output, or public
