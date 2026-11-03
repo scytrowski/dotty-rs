@@ -4586,7 +4586,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_unapply_rolls_back_late_signature_failure_and_retries() {
+    fn reference_unapply_rejects_malformed_formal_after_reference_validation() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "package scala { trait Product }; package matching { sealed trait Expr; final case class Succ(inner: Expr) extends Expr }",
         );
@@ -4645,6 +4645,149 @@ mod tests {
         };
         assert_eq!(method.params.len(), 1);
         assert_eq!(type_symbol(typer.store(), method.params[0].ty), succ);
+        assert_eq!(type_symbol(typer.store(), method.result), succ);
+    }
+
+    #[test]
+    fn reference_unapply_publication_rolls_back_with_enclosing_transaction_and_retries() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { trait Product }; package matching { sealed trait Expr; final case class Succ(inner: Expr) extends Expr }",
+        );
+        let succ = class_symbol(&parsed, &store, &index, source, "Succ");
+        let expr = class_symbol(&parsed, &store, &index, source, "Expr");
+        let product = class_symbol(&parsed, &store, &index, source, "Product");
+        let unapply = index
+            .generated_case_class_method(succ, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .expect("Succ has its ordinary generated unapply role");
+        let SourceDefinition::Canonical {
+            tree: class_tree, ..
+        } = index.definition_of(succ).unwrap()
+        else {
+            panic!("Succ must have a canonical source definition");
+        };
+        let input = index
+            .derived_symbol_at(unapply, source, class_tree)
+            .expect("generated unapply owns its derived formal");
+        let TreeKind::TypeDef(class_definition) = &parsed.ast.get(class_tree).kind else {
+            panic!("Succ must remain a class TypeDef");
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(class_definition.rhs).kind else {
+            panic!("Succ must retain its source template");
+        };
+        let constructor = index
+            .symbol_at(source, template.constructor)
+            .expect("Succ has its canonical constructor");
+        let TreeKind::DefDef(constructor_definition) = &parsed.ast.get(template.constructor).kind
+        else {
+            panic!("Succ must retain its primary constructor");
+        };
+        let field = index
+            .symbol_at(source, constructor_definition.value_param_clauses[0][0])
+            .expect("Succ has its source constructor field");
+        let class_scope = index.scope_of(succ).expect("Succ class scope");
+        let selector_name = TermName::new(store.names.intern("_1"));
+        let selector = store
+            .scopes
+            .get(class_scope)
+            .lookup(selector_name.as_name())
+            .expect("Product1 contributes Succ._1");
+        let watched_symbols = [
+            succ,
+            expr,
+            product,
+            constructor,
+            field,
+            selector,
+            unapply,
+            input,
+        ];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let store_checkpoint = typer.store().checkpoint();
+        let type_index_checkpoint = typer.type_index.checkpoint();
+        let typed_arena_checkpoint = typer.typed_arena.checkpoint();
+        let typed_mappings_before = parsed
+            .ast
+            .iter()
+            .map(|(tree, _)| (tree, typer.typed_index.get(source, tree)))
+            .collect::<Vec<_>>();
+        let infos_before =
+            watched_symbols.map(|symbol| (symbol, *typer.store().symbols.info(symbol)));
+
+        let failure: Result<(), TyperError> = typer.run_atomic(|typer, journal| {
+            let signature = typer.complete_symbol_inner(unapply, journal)?;
+            assert_eq!(
+                *typer.store().symbols.info(unapply),
+                SymbolInfo::Complete(signature),
+                "the generated method info is published inside the transaction"
+            );
+            let Type::Method(method) = typer.store().types.get(signature) else {
+                panic!("the reference unapply signature must be a MethodType");
+            };
+            assert_eq!(method.params.len(), 1);
+            let SymbolInfo::Complete(formal_type) = *typer.store().symbols.info(input) else {
+                panic!("the generated formal info is published inside the transaction");
+            };
+            assert_eq!(formal_type, method.params[0].ty);
+            assert_eq!(type_symbol(typer.store(), formal_type), succ);
+            assert_eq!(type_symbol(typer.store(), method.result), succ);
+            for symbol in [succ, expr, selector] {
+                assert!(
+                    matches!(*typer.store().symbols.info(symbol), SymbolInfo::Complete(_)),
+                    "completion inside the aborted transaction should visit {symbol:?}"
+                );
+            }
+            Err(TyperError::UnsupportedSymbolCompletion {
+                symbol: unapply,
+                kind: SymbolKind::Method,
+            })
+        });
+
+        assert!(matches!(
+            failure,
+            Err(TyperError::UnsupportedSymbolCompletion { symbol, kind: SymbolKind::Method })
+                if symbol == unapply
+        ));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        for (symbol, before) in infos_before {
+            assert_eq!(
+                *typer.store().symbols.info(symbol),
+                before,
+                "the enclosing failure restores {symbol:?} after method/formal publication"
+            );
+        }
+        assert_eq!(typer.typed_arena.checkpoint(), typed_arena_checkpoint);
+        for (tree, expected) in typed_mappings_before {
+            assert_eq!(typer.typed_index.get(source, tree), expected);
+        }
+        for (tree, _) in parsed.ast.iter() {
+            assert_eq!(
+                typer.type_index.type_at(source, tree),
+                type_index_checkpoint.type_at(source, tree)
+            );
+        }
+
+        let signature = typer
+            .complete_symbol(unapply)
+            .expect("the same live typer retries successfully after enclosing rollback");
+        assert_eq!(
+            *typer.store().symbols.info(unapply),
+            SymbolInfo::Complete(signature)
+        );
+        let SymbolInfo::Complete(formal_type) = *typer.store().symbols.info(input) else {
+            panic!("the successful retry publishes the formal info");
+        };
+        let Type::Method(method) = typer.store().types.get(signature) else {
+            panic!("the successful retry publishes a plain method signature");
+        };
+        assert_eq!(formal_type, method.params[0].ty);
+        assert_eq!(type_symbol(typer.store(), formal_type), succ);
         assert_eq!(type_symbol(typer.store(), method.result), succ);
     }
 
