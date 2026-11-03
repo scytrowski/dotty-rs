@@ -180,3 +180,46 @@ the original initializer/use mapping and seed typed edge is rejected at the
 corresponding typed-binding gate. This proof does not claim validation of
 conditional, nested, helper, mutable, shadowed, or multi-local initializers;
 those remain unsupported. No class-file or TASTy output bytes change.
+
+## Issue #2068 ordered formal/local proof
+
+The follow-up proof reuses the opaque initializer receipt above for exactly
+one `val` in a method-owned Block. It records that receipt as a distinct
+ordered LocalVal origin beside the existing Formal and NestedNew origins; it
+does not reinterpret the helper-local `LocalValConstructorArgumentProof` or
+change the helper's `PlannedCallProof` contract. The ordered proof kind is
+`FormalLocalPair`, with each argument view retaining its actual Pair parameter
+position.
+
+The focused proof test runs the primary and reversed source fixtures through
+one original parser/namer/typer session each. Both prove the same
+`(Counter, Int) => Pair` method and `Pair(Counter, Counter)` constructor
+signatures. The receipt keeps the original Block/declaration/initializer/use
+source and typed roots, local symbol and scope, and selected Counter
+constructor. In the reversed case the local occupies Pair argument zero; the
+formal occupies argument one. The seed remains only the initializer input.
+The proof API does not authorize a paired plan or change JVM/TASTy bytes.
+
+The earlier Rust first-error table is historical evidence from before #2068:
+its valid Block cases reached the direct-Apply shape rejection. Current focused
+positive coverage accepts only the one-local direct-New initializer with one
+other original Counter formal. Multi-local, mutable, shadowed, helper,
+conditional, nested-initializer, branch and other origins remain unsupported.
+
+The updated cross-contract first-error matrix records the now-reached boundary:
+
+| Control | First current result |
+| --- | --- |
+| package/class/method/local rename | ordered proof succeeds; paired TASTy planning rejects `BodyExpression` |
+| class declaration reorder | ordered proof succeeds; paired TASTy planning rejects `BodyExpression` |
+| multiple local declarations | `SourceShape`: one-local Block required |
+| mutable local | `SourceIdentity`: original immutable method-owned local required |
+| local shadows a method formal | `SourceIdentity`: local source name cannot shadow a formal |
+| nested final result Block | `SourceShape`: final Block expression must be the Pair constructor Apply |
+| conditional initializer | `SourceShape`: local initializer must be the direct constructor Apply |
+| helper initializer | `SourceShape`: initializer function must be the constructor Select |
+| wrong constructor owner | `TypedBinding`: final Apply must retain the method's canonical Pair result type |
+
+The two positive rows stop downstream because this issue only adds proof
+acceptance: the current paired TASTy path still reports unsupported
+`BodyExpression`, and no JVM/TASTy output is enabled by this change.

@@ -17801,7 +17801,7 @@ fn immutable_reference_local_pair_constructor_audit_runs_on_jvm_only_path() {
         )
         .expect("JVM-only audit compiles the immutable Counter local and Pair call");
         assert!(paired_first_error.as_deref().is_some_and(|error| {
-            error.contains("factory body must be the original direct constructor Apply")
+            error.contains("local Pair call requires the original Typer binding resolver")
         }));
         eprintln!("{method_name}: paired first error={:?}", paired_first_error);
         assert_eq!(artifacts.len(), 3);

@@ -24,6 +24,10 @@ const TWO_ARGUMENT_SOURCE: &str =
 const MIXED_ORIGIN_SOURCE: &str = include_str!(
     "fixtures/jvm_tasty_mixed_origin_constructor_arguments/wrap-and-create/PairFactory.scala"
 );
+const IMMUTABLE_LOCAL_PAIR_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactory.scala");
+const IMMUTABLE_LOCAL_PAIR_REVERSED_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
 
 fn clone_arena<P: AstPhase + Clone>(source: &AstArena<P>) -> AstArena<P> {
     let mut cloned = AstArena::new();
@@ -660,7 +664,14 @@ fn with_two_argument_proof<R>(
             let Some(rhs) = method_definition.rhs else {
                 continue;
             };
-            if !matches!(parsed.ast.get(rhs).kind, TreeKind::Apply(_)) {
+            let candidate = match &parsed.ast.get(rhs).kind {
+                TreeKind::Apply(_) => true,
+                TreeKind::Block(block) => {
+                    matches!(parsed.ast.get(block.expr).kind, TreeKind::Apply(_))
+                }
+                _ => false,
+            };
+            if !candidate {
                 continue;
             }
             let method = source_index.symbol_at(source_id, member).unwrap();
@@ -676,12 +687,28 @@ fn with_two_argument_proof<R>(
             }
             let context = typer.expression_context_for(method).unwrap();
             let typed_rhs = typer.type_expression(rhs, context).unwrap();
+            let locals = match &parsed.ast.get(rhs).kind {
+                TreeKind::Block(block) => block
+                    .stats
+                    .iter()
+                    .filter_map(|declaration| {
+                        typer
+                            .typed_local_binding_at(source_id, *declaration)
+                            .map(|binding| dotty_jvm::JvmLocalBinding {
+                                declaration: binding.declaration(),
+                                symbol: binding.symbol(),
+                                mutable: false,
+                            })
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
             method_plans.push((
                 *class,
                 JvmMethodPlan {
                     method,
                     parameters,
-                    locals: Vec::new(),
+                    locals,
                     body: Some(typed_rhs),
                 },
             ));
@@ -718,18 +745,129 @@ fn with_two_argument_proof<R>(
     };
     jvm_unit.metadata(&definitions).unwrap();
     let proofs =
-        validate_cross_class_constructor_call_proofs(CrossClassConstructorCallProofInput {
-            source_id,
-            source_root: parsed.root,
-            store: typer.store(),
-            definitions: &definitions,
-            source_ast: &parsed.ast,
-            typed_ast: typer.typed_ast(),
-            source_index: &source_index,
-            source_typed_index: typer.source_typed_index(),
-            jvm_unit: &jvm_unit,
-        })
+        dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs_with_typer(
+            CrossClassConstructorCallProofInput {
+                source_id,
+                source_root: parsed.root,
+                store: typer.store(),
+                definitions: &definitions,
+                source_ast: &parsed.ast,
+                typed_ast: typer.typed_ast(),
+                source_index: &source_index,
+                source_typed_index: typer.source_typed_index(),
+                jvm_unit: &jvm_unit,
+            },
+            &typer,
+        )
         .unwrap();
+    if let Some(pair) = proofs[0].argument_proof().ordered_pair() {
+        let arguments = pair.arguments();
+        if arguments
+            .iter()
+            .any(|argument| argument.local_val().is_some())
+        {
+            let mut missing_local_edge = typer.source_typed_index().clone();
+            let local = arguments
+                .iter()
+                .find_map(|argument| argument.local_val())
+                .unwrap();
+            assert_eq!(
+                missing_local_edge.remove(source_id, local.source_use()),
+                Some(local.typed_use())
+            );
+            let missing_result = dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs_with_typer(
+                CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root: parsed.root,
+                    store: typer.store(),
+                    definitions: &definitions,
+                    source_ast: &parsed.ast,
+                    typed_ast: typer.typed_ast(),
+                    source_index: &source_index,
+                    source_typed_index: &missing_local_edge,
+                    jvm_unit: &jvm_unit,
+                },
+                &typer,
+            );
+            assert!(matches!(
+                missing_result,
+                Err(
+                    dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                        _
+                    )
+                )
+            ));
+
+            let [first, second] = arguments;
+            let mut swapped_edges = typer.source_typed_index().clone();
+            swapped_edges.remove(source_id, first.source_argument());
+            swapped_edges.remove(source_id, second.source_argument());
+            swapped_edges
+                .insert(source_id, first.source_argument(), second.typed_argument())
+                .unwrap();
+            swapped_edges
+                .insert(source_id, second.source_argument(), first.typed_argument())
+                .unwrap();
+            let swapped_result = dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs_with_typer(
+                CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root: parsed.root,
+                    store: typer.store(),
+                    definitions: &definitions,
+                    source_ast: &parsed.ast,
+                    typed_ast: typer.typed_ast(),
+                    source_index: &source_index,
+                    source_typed_index: &swapped_edges,
+                    jvm_unit: &jvm_unit,
+                },
+                &typer,
+            );
+            assert!(matches!(
+                swapped_result,
+                Err(
+                    dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                        _
+                    )
+                )
+            ));
+
+            let method_tree = match source_index.definition_of(proofs[0].method()) {
+                Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+                _ => panic!("local proof method retains its original source declaration"),
+            };
+            let mut two_local_source = clone_arena(&parsed.ast);
+            let rhs = match &two_local_source.get(method_tree).kind {
+                TreeKind::DefDef(definition) => definition.rhs.unwrap(),
+                _ => panic!("factory method remains a method"),
+            };
+            let TreeKind::Block(block) = &mut two_local_source.get_mut(rhs).kind else {
+                panic!("factory source remains the original Block")
+            };
+            block.stats.push(block.stats[0]);
+            let two_local_result = dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs_with_typer(
+                CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root: parsed.root,
+                    store: typer.store(),
+                    definitions: &definitions,
+                    source_ast: &two_local_source,
+                    typed_ast: typer.typed_ast(),
+                    source_index: &source_index,
+                    source_typed_index: typer.source_typed_index(),
+                    jvm_unit: &jvm_unit,
+                },
+                &typer,
+            );
+            assert!(matches!(
+                two_local_result,
+                Err(
+                    dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                        _
+                    )
+                )
+            ));
+        }
+    }
     assert_eq!(proofs.len(), 1, "one source factory body has one proof");
     consume(
         &proofs[0],
@@ -1304,6 +1442,117 @@ fn two_ordered_nested_arguments_keep_distinct_source_and_typed_provenance() {
             );
         },
     );
+}
+
+#[test]
+fn one_initialized_local_and_one_formal_keep_both_argument_orders() {
+    use dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind;
+
+    for (source, source_number, local_first) in [
+        (IMMUTABLE_LOCAL_PAIR_SOURCE, 20681, false),
+        (IMMUTABLE_LOCAL_PAIR_REVERSED_SOURCE, 20682, true),
+    ] {
+        for fresh_session in 0..2 {
+            with_two_argument_proof(
+                source,
+                source_number + fresh_session,
+                |proof, store, source_ast, typed_ast, _index, bindings, source_id, _, _, _| {
+                    let argument_proof = proof.argument_proof();
+                    assert_eq!(
+                        argument_proof.kind(),
+                        ConstructorArgumentProofKind::FormalLocalPair
+                    );
+                    assert_eq!(
+                        proof.method_descriptor(),
+                        "(Lexample/Counter;I)Lexample/Pair;"
+                    );
+                    assert_eq!(
+                        proof.constructor_descriptor(),
+                        "(Lexample/Counter;Lexample/Counter;)V"
+                    );
+                    let pair = argument_proof.ordered_pair().unwrap();
+                    let [first, second] = pair.arguments();
+                    let ordered = [first, second];
+                    for (index, argument) in ordered.into_iter().enumerate() {
+                        if (index == 0) == local_first {
+                            let local = argument
+                                .local_val()
+                                .expect("the corresponding ordered argument is the proven local");
+                            assert_eq!(argument.source_argument(), local.source_use());
+                            assert_eq!(argument.typed_argument(), local.typed_use());
+                            assert!(matches!(
+                                store.types.get(typed_ast.get(local.typed_use()).ty),
+                                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == local.symbol()
+                            ));
+                            assert_eq!(
+                                source_ast.get(local.source_block()).position,
+                                typed_ast.get(local.typed_block()).position
+                            );
+                            assert_eq!(
+                                bindings.get(source_id, local.source_initializer()),
+                                Some(local.typed_initializer())
+                            );
+                            assert!(store.scopes.contains(local.scope()));
+                            assert_eq!(
+                                store.symbols.get(local.symbol()).owner,
+                                Some(proof.method())
+                            );
+                            assert_ne!(local.constructor(), proof.constructor());
+                        } else {
+                            let formal = argument.formal().expect(
+                                "the corresponding ordered argument is the original method formal",
+                            );
+                            assert_eq!(formal.formal(), pair.method_formals()[0]);
+                            assert_eq!(formal.source_argument(), argument.source_argument());
+                            assert_eq!(formal.typed_argument(), argument.typed_argument());
+                        }
+                    }
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn local_pair_proof_survives_fresh_sessions_renames_and_class_reordering() {
+    use dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind;
+
+    for (source, method_name, local_first) in [
+        (IMMUTABLE_LOCAL_PAIR_SOURCE, "create", false),
+        (IMMUTABLE_LOCAL_PAIR_REVERSED_SOURCE, "createReversed", true),
+    ] {
+        let renamed = source
+            .replace("PairFactory", "Builder")
+            .replace(method_name, "assemble")
+            .replace("fresh", "allocated");
+        let counter = source.find("class Counter").unwrap();
+        let pair = source.find("class Pair(").unwrap();
+        let factory = source.find("class PairFactory:").unwrap();
+        let reordered = format!(
+            "{}{}{}{}",
+            &source[..counter],
+            &source[pair..factory],
+            &source[counter..pair],
+            &source[factory..]
+        );
+        for (variant, source_number) in [(&renamed, 20691), (&reordered, 20692)] {
+            with_two_argument_proof(
+                variant,
+                source_number,
+                |proof, _, _, _, _, _, _, _, _, _| {
+                    assert_eq!(
+                        proof.argument_proof().kind(),
+                        ConstructorArgumentProofKind::FormalLocalPair
+                    );
+                    let arguments = proof.argument_proof().ordered_pair().unwrap().arguments();
+                    let local_index = if local_first { 0 } else { 1 };
+                    let formal_index = 1 - local_index;
+                    assert!(arguments[local_index].local_val().is_some());
+                    assert!(arguments[formal_index].formal().is_some());
+                },
+            );
+        }
+    }
 }
 
 #[test]
