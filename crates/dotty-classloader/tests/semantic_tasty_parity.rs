@@ -1103,6 +1103,9 @@ struct AuthenticConstructorObservation {
     class_template_parameters: usize,
     class_template_stats: usize,
     header_field_and_constructor_formal_are_distinct: bool,
+    header_field: String,
+    constructor_formal: String,
+    encoded_same_name_accessors: String,
 }
 
 fn complete_authentic_constructor_once(simple_name: &str) -> AuthenticConstructorObservation {
@@ -1168,21 +1171,26 @@ fn complete_authentic_constructor_once(simple_name: &str) -> AuthenticConstructo
         .collect::<Vec<_>>();
     assert_eq!(constructor_addresses.len(), 1);
     let constructor_address = constructor_addresses[0];
-    let neighboring_roles_are_distinct = if simple_name == "CtorWithVal" {
-        let field = unpickler
-            .index()
-            .symbol_at(9)
-            .expect("header field at original AST address 9");
-        let constructor_formal = unpickler
-            .index()
-            .symbol_at(31)
-            .expect("constructor's own formal at original AST address 31");
-        assert_ne!(field, constructor_formal);
-        true
-    } else {
-        false
-    };
-
+    let method_addresses = address_index
+        .iter_nodes()
+        .filter(|node| node.tag == DEFDEF_TAG)
+        .filter_map(|node| u32::try_from(node.offset).ok())
+        .filter(|address| {
+            matches!(
+                unpickler.symbol_state_at(*address),
+                Some((SymbolKind::Method, _))
+            )
+        })
+        .collect::<Vec<_>>();
+    let completed_methods = method_addresses
+        .iter()
+        .map(|address| {
+            let ty = unpickler
+                .complete_symbol(*address)
+                .expect("complete original class-owned method/accessor");
+            (*address, ty)
+        })
+        .collect::<Vec<_>>();
     let _class_info = unpickler
         .complete_symbol(class_address)
         .expect("complete class");
@@ -1199,6 +1207,28 @@ fn complete_authentic_constructor_once(simple_name: &str) -> AuthenticConstructo
         .filter_map(|node| u32::try_from(node.offset).ok())
         .filter_map(|address| unpickler.index().symbol_at(address))
         .collect::<Vec<_>>();
+    let class_owned_fields = address_index
+        .iter_nodes()
+        .filter(|node| node.tag == PARAM_TAG)
+        .filter_map(|node| u32::try_from(node.offset).ok())
+        .filter(|address| {
+            matches!(
+                unpickler.symbol_state_at(*address),
+                Some((SymbolKind::Field, _))
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut completed_header_fields = Vec::new();
+    for address in &class_owned_fields {
+        let ty = unpickler
+            .complete_symbol(*address)
+            .expect("complete original class-header field");
+        let symbol = unpickler
+            .index()
+            .symbol_at(*address)
+            .expect("entered class-header field");
+        completed_header_fields.push((*address, symbol, ty));
+    }
     assert!(matches!(
         unpickler.symbol_state_at(class_address),
         Some((SymbolKind::Class, SymbolInfo::Complete(_)))
@@ -1211,12 +1241,120 @@ fn complete_authentic_constructor_once(simple_name: &str) -> AuthenticConstructo
         ))
     );
     let semantic_index = unpickler.into_index();
+    let int_symbol = store
+        .types
+        .get(definitions.int)
+        .reference_symbol()
+        .expect("canonical Int symbol");
+    let mut header_field_observations = Vec::new();
+    let class_type = match store.types.get(_class_info) {
+        Type::ClassInfo(info) => info,
+        other => panic!("completed class must have ClassInfo: {other:?}"),
+    };
+    for (address, symbol, ty) in completed_header_fields {
+        let info = store.symbols.get(symbol);
+        assert_eq!(info.kind, SymbolKind::Field);
+        assert_eq!(info.owner, Some(class));
+        assert!(
+            store
+                .scopes
+                .get(class_type.declarations)
+                .entered_symbols()
+                .any(|member| member == symbol)
+        );
+        let field_type = match store.types.get(ty) {
+            Type::TypeRef { target, .. } if target.symbol() == Some(int_symbol) => {
+                "scala.Int".to_owned()
+            }
+            other => format!("{other:?}"),
+        };
+        header_field_observations.push(format!(
+            "@{address}:{}:{:?}:owner={}:visibility={:?}:flags={:?}:type={field_type}",
+            store.names.resolve(info.name.text()),
+            info.kind,
+            symbol_path(&store, info.owner.expect("field has class owner")),
+            info.visibility,
+            info.flags,
+        ));
+    }
     assert_eq!(store.symbols.get(constructor).owner, Some(class));
     let constructor_owned_formal_symbols = formal_symbols
         .iter()
         .filter(|symbol| store.symbols.get(**symbol).owner == Some(constructor))
         .count();
     assert_eq!(constructor_owned_formal_symbols, 1);
+    let class_formals = formal_symbols
+        .iter()
+        .filter(|symbol| store.symbols.get(**symbol).owner == Some(class))
+        .copied()
+        .collect::<Vec<_>>();
+    let constructor_formals = formal_symbols
+        .iter()
+        .filter(|symbol| store.symbols.get(**symbol).owner == Some(constructor))
+        .copied()
+        .collect::<Vec<_>>();
+    let header_field_and_constructor_formal_are_distinct = if simple_name == "CtorWithVal" {
+        assert_eq!(class_formals.len(), 1);
+        assert_eq!(constructor_formals.len(), 1);
+        assert_ne!(class_formals[0], constructor_formals[0]);
+        true
+    } else {
+        false
+    };
+    let constructor_formal_observations = constructor_formals
+        .iter()
+        .map(|symbol| {
+            let info = store.symbols.get(*symbol);
+            let formal_type = match info.info {
+                SymbolInfo::Complete(type_id) => match store.types.get(type_id) {
+                    Type::TypeRef { target, .. } if target.symbol() == Some(int_symbol) => {
+                        "scala.Int".to_owned()
+                    }
+                    other => format!("{other:?}"),
+                },
+                other => format!("{other:?}"),
+            };
+            format!(
+                "{}:{:?}:owner={}:visibility={:?}:flags={:?}:type={formal_type}",
+                store.names.resolve(info.name.text()),
+                info.kind,
+                symbol_path(&store, info.owner.expect("formal has constructor owner")),
+                info.visibility,
+                info.flags,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    let encoded_same_name_accessors = address_index
+        .iter_nodes()
+        .filter(|node| node.tag == DEFDEF_TAG)
+        .filter_map(|node| u32::try_from(node.offset).ok())
+        .filter_map(|address| {
+            let symbol = semantic_index.symbol_at(address)?;
+            let info = store.symbols.get(symbol);
+            (info.owner == Some(class)
+                && info.kind == SymbolKind::Method
+                && store.names.resolve(info.name.text()) == "x")
+                .then_some((address, symbol))
+        })
+        .map(|(address, symbol)| {
+            let info = store.symbols.get(symbol);
+            let _completed_type = completed_methods
+                .iter()
+                .find(|(completed_address, _)| *completed_address == address)
+                .map(|(_, ty)| *ty);
+            format!(
+                "@{address}:{}:{:?}:owner={}:visibility={:?}:flags={:?}:info={:?}",
+                store.names.resolve(info.name.text()),
+                info.kind,
+                symbol_path(&store, info.owner.expect("method has class owner")),
+                info.visibility,
+                info.flags,
+                info.info,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
     drop(semantic_index);
     fs::remove_dir_all(&fixture_root).expect("remove test-local classpath after resolution");
 
@@ -1233,11 +1371,7 @@ fn complete_authentic_constructor_once(simple_name: &str) -> AuthenticConstructo
         .first()
         .and_then(|param| reference_symbol(param.ty))
         .expect("constructor formal must resolve to a named type");
-    let canonical_int = store
-        .types
-        .get(definitions.int)
-        .reference_symbol()
-        .expect("bootstrapped canonical Int reference");
+    let canonical_int = int_symbol;
     assert_eq!(parameter_symbol, canonical_int);
     let parameter_type = if parameter_symbol == canonical_int {
         "scala.Int".to_owned()
@@ -1290,7 +1424,10 @@ fn complete_authentic_constructor_once(simple_name: &str) -> AuthenticConstructo
         effective_result: symbol_path(&store, result),
         class_template_parameters: template_shape.term_params.len(),
         class_template_stats: template_shape.stats.len(),
-        header_field_and_constructor_formal_are_distinct: neighboring_roles_are_distinct,
+        header_field_and_constructor_formal_are_distinct,
+        header_field: header_field_observations.join(";"),
+        constructor_formal: constructor_formal_observations,
+        encoded_same_name_accessors,
     }
 }
 
@@ -1348,11 +1485,25 @@ fn authentic_plain_constructor_is_completed_repeatably_and_val_neighbor_is_disti
     assert_eq!(first.class_template_stats, 1);
 
     let with_val = complete_authentic_constructor_once("CtorWithVal");
+    let with_val_repeat = complete_authentic_constructor_once("CtorWithVal");
+    assert_eq!(
+        with_val, with_val_repeat,
+        "fresh-store CtorWithVal receipts are stable"
+    );
     assert_eq!(with_val.class_address, 4);
     assert_eq!(with_val.constructor_address, 28);
     assert_eq!(with_val.class_template_parameters, 1);
     assert_eq!(with_val.class_template_stats, 1);
     assert!(with_val.header_field_and_constructor_formal_are_distinct);
+    assert_eq!(
+        with_val.header_field,
+        "@9:x:Field:owner=me.cytrowski.tastyfixtures.semantic.CtorWithVal:visibility=Public:flags=SymbolFlags(0):type=scala.Int"
+    );
+    assert_eq!(
+        with_val.constructor_formal,
+        "x:Parameter:owner=me.cytrowski.tastyfixtures.semantic.CtorWithVal.<init>:visibility=Public:flags=SymbolFlags(0):type=scala.Int"
+    );
+    assert!(with_val.encoded_same_name_accessors.is_empty());
 }
 
 fn complete_visibility_constructor_once(unit_id: &str) -> Result<String, String> {
