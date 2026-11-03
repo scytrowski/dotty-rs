@@ -101,4 +101,3 @@ SourceFile: "PairFactoryReversed.scala"
   Scala3InlineInfo: length = 0x4 (unknown attribute)
    01 00 00 00
   Scala: length = 0x0 (unknown attribute)
-
