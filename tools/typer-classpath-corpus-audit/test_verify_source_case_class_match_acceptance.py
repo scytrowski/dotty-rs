@@ -129,6 +129,93 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
         gate.validate_sealed_cohort_contract(root)
         gate.validate_recorded_cohort_receipt(root)
 
+    def test_recursive_expr_frozen_inputs_and_positive_sidecar_are_exact(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        gate.validate_recursive_adt_inputs(root)
+        with tempfile.TemporaryDirectory() as directory:
+            log = self.write_log(Path(directory) / "recursive-positive.log", self.recursive_positive_log())
+            gate.validate_recursive_adt_positive_log(log, "a" * 40, "a" * 40)
+
+    def recursive_positive_log(self) -> str:
+        lines = ["running 1 test"]
+        for session in ("first", "second"):
+            for root, tree, span in (("unwrap", "tree36", "147:255"), ("eval", "tree58", "259:375")):
+                proof = gate.RECURSIVE_ADT_POSITIVE_PROOFS[root]
+                lines.append(
+                    f"ISSUE2040_POSITIVE\t{session}\t{root}\tExpr.scala#{tree}\t{span}\t{proof}"
+                )
+        lines += ["test evaluator_recursive_adt_roots_type_after_generated_unapply_completion ... ok",
+                  "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out"]
+        lines.insert(1, f"ISSUE2040_TESTED_SHA\t{'a' * 40}")
+        return "\n".join(lines) + "\n"
+
+    def test_recursive_expr_positive_receipt_rejects_missing_duplicate_and_changed_rows(self) -> None:
+        good = self.recursive_positive_log()
+        cases = [
+            good.replace("ISSUE2040_POSITIVE\tsecond\teval", "ISSUE2040_POSITIVE\tsecond\tother"),
+            good + next(line for line in good.splitlines() if line.startswith("ISSUE2040_POSITIVE\tfirst\tunwrap")) + "\n",
+            good.replace("same Method SymbolId", "same-named method"),
+        ]
+        for index, body in enumerate(cases):
+            with tempfile.TemporaryDirectory() as directory:
+                log = self.write_log(Path(directory) / f"receipt-{index}.log", body)
+                with self.assertRaises(gate.ReceiptError):
+                    gate.validate_recursive_adt_positive_log(log, "a" * 40, "a" * 40)
+
+    def test_recursive_expr_negative_sidecar_and_rollback_inventory_are_exact(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        sidecar = root / "docs/typer-recursive-adt-e2e-negative-rollback-3.9.0.tsv"
+        self.assertTrue(sidecar.is_file())
+        _, rows = gate.read_tsv(sidecar)
+        self.assertEqual(len(rows), 17)
+        self.assertEqual({row["case"] for row in rows if row["case"].startswith("foreign_")},
+                         {"foreign_succ_owner", "foreign_eval_wrong_argument", "foreign_eval_control", "foreign_expr_succ_owner"})
+
+    def test_recursive_expr_negative_gate_requires_all_cases_and_both_rollback_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = self.write_log(Path(directory) / "negative.log", self.recursive_negative_log())
+            gate.validate_recursive_adt_negative_log(log)
+            missing = self.write_log(Path(directory) / "missing.log", self.recursive_negative_log().replace(
+                "ISSUE2039_NEGATIVE\twrong_reference_literal", "OMITTED\twrong_reference_literal"))
+            with self.assertRaises(gate.ReceiptError):
+                gate.validate_recursive_adt_negative_log(missing)
+            skipped = self.write_log(Path(directory) / "skipped.log", "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out\n")
+            with self.assertRaises(gate.ReceiptError):
+                gate.validate_recursive_adt_negative_log(skipped)
+
+    def recursive_negative_log(self) -> str:
+        root = Path(__file__).resolve().parents[2]
+        fixture = root / gate.RECURSIVE_ADT_SOURCE / "rust-negative-matrix.tsv"
+        lines = ["running 2 tests"]
+        for row in gate.read_tsv(fixture)[1]:
+            lines.append(f"ISSUE2039_NEGATIVE\t{row['case']}\t{row['root']}\t{row['scala_result']}\t{row['rust_result']}")
+        for case, evidence in (
+            ("late_result_mismatch", "observed=Succ.inner:Expr,Evaluator.eval(inner):Int,Match,CaseDef[0..1];restored=store,resolver,typed_arena,SourceTypedIndex,scope_projection,binder_frames"),
+            ("same_session_retry", "repeated_diagnostic=stable;recovered=Evaluator.unwrap(expr:Expr):Expr,Evaluator.eval(expr:Expr):Int;fresh_session=normalized_equal"),
+        ):
+            lines.append(f"ISSUE2040_ROLLBACK\t{case}\t{evidence}")
+        lines.extend([
+            "test typer::tests::method_parameter_capture::recursive_adt_rollback::recursive_eval_late_result_failure_observes_binder_call_and_rolls_back_for_retry ... ok",
+            "test typer::tests::method_parameter_capture::recursive_adt_rollback::recursive_adt_negative_matrix_is_stable_across_fresh_sessions ... ok",
+            "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 998 filtered out",
+        ])
+        return "\n".join(lines) + "\n"
+
+    def test_recursive_expr_oracle_log_rejects_missing_pinned_evidence(self) -> None:
+        required = [
+            "verified all 8 pinned Scala 3.9.0 artifacts",
+            f"Scala source revision: {gate.SCALA_REVISION}",
+            'JDK: JAVA_VERSION="21.0.8"; IMPLEMENTOR_VERSION="Temurin-21.0.8+9"',
+            "Two-root typed snapshot and 13-case classification matrix match.",
+            "verified frozen source SHA-256 manifest",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            log = self.write_log(Path(directory) / "oracle.log", "\n".join(required) + "\n")
+            gate.validate_recursive_adt_oracle_log(log)
+            log.write_text("\n".join(required[:-1]) + "\n", encoding="utf-8")
+            with self.assertRaises(gate.ReceiptError):
+                gate.validate_recursive_adt_oracle_log(log)
+
     def test_recorded_per_root_cohort_receipt_rejects_missing_and_changed_roots(self) -> None:
         repository = Path(__file__).resolve().parents[2]
         paths = (

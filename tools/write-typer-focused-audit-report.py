@@ -73,14 +73,23 @@ hashes = (
     ("Cohort contract SHA-256", Path("docs/typer-sealed-adt-e2e-cohorts-3.9.0.tsv")),
     ("Committed per-root cohort receipt SHA-256", Path("docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv")),
     ("Two-pass cohort receipt SHA-256", REPORT_DIR / "source-case-class-match-cohorts.tsv"),
+    ("Recursive Expr.scala SHA-256", Path("crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/Expr.scala")),
+    ("Recursive artifact manifest SHA-256", Path("crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/scala-artifacts.sha256.tsv")),
+    ("Recursive positive receipt SHA-256", Path("docs/typer-recursive-adt-e2e-positive-3.9.0.tsv")),
+    ("Recursive negative/rollback receipt SHA-256", Path("docs/typer-recursive-adt-e2e-negative-rollback-3.9.0.tsv")),
+    ("Recursive protected-root cohort receipt SHA-256", Path("docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv")),
 )
 rows.extend((label, f"`{sha256(path)}`") for label, path in hashes)
 rows.extend(
     (
         ("Positive roots", "2 original roots × 2 fresh sessions (4/4 required)"),
-        ("Negative matrix", "9 Scala-classified failures; 6 structural rollback controls"),
+        ("Box extractor negative matrix", "9 Scala-classified failures; 6 structural rollback controls"),
         ("Protected earlier roots", "Box 2/2 + Product2 2/2 + closures 6/6 + inherited 4/4"),
         ("Ordinary cohorts", "main 16/25 + analysis 15/25; two deterministic passes"),
+        ("Recursive Expr positive roots", "unwrap and eval as full source-owned DefDefs in two independent sessions (4 exact rows)"),
+        ("Recursive Expr negative and rollback", "15 Scala-classified controls; late binder/recursive-Apply rollback, repeated failure, same-session retry"),
+        ("Prior source-root preservation", "Box 2/2 + Product2 2/2 + Event 2/2 + closures 6/6 + inherited members 4/4"),
+        ("Prerequisites", "#2034 through #2039 merge ancestry is required by a fail-closed workflow step"),
         ("Full Scala corpus", "not run on hosted CI"),
     )
 )

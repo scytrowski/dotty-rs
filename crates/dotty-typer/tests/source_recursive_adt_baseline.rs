@@ -45,6 +45,46 @@ fn evaluator_recursive_adt_roots_type_after_generated_unapply_completion() {
         first_eval, second_eval,
         "eval normalizes across fresh sessions"
     );
+    for (session, roots) in [("first", &first), ("second", &second)] {
+        for root in ["unwrap", "eval"] {
+            let row = roots
+                .iter()
+                .find(|row| row.starts_with(&format!("{root}\t")))
+                .expect("one original source-owned root per method");
+            let path = row
+                .split('\t')
+                .find_map(|field| field.strip_prefix("path="))
+                .expect("source path and parser tree identity");
+            let span = row
+                .split('\t')
+                .find_map(|field| field.strip_prefix("source_bytes="))
+                .expect("original source span");
+            let proof = match root {
+                "unwrap" => concat!(
+                    "owner=adt.Evaluator$|signature=(Expr):Expr|selector=Expr|",
+                    "cases=Num(_)=>expr:Expr,Succ(inner:Expr)=>inner:Expr|",
+                    "extractors=Num$.unapply:Num,Succ$.unapply:Succ|",
+                    "parents=Num:Expr+Product,Succ:Expr+Product|",
+                    "fields=Num._1:Int,Succ._1:Expr|",
+                    "mappings=DefDef,formal,Match,selector,CaseDef[0..1],UnApply[0..1],",
+                    "qualifier[0..1],wildcard,binder,body[0..1]|result=Expr"
+                ),
+                "eval" => concat!(
+                    "owner=adt.Evaluator$|signature=(Expr):Int|selector=Expr|",
+                    "cases=Num(value:Int)=>value:Int,Succ(inner:Expr)=>eval(inner):Int+1:Int|",
+                    "extractors=Num$.unapply:Num,Succ$.unapply:Succ|",
+                    "parents=Num:Expr+Product,Succ:Expr+Product|",
+                    "fields=Num._1:Int,Succ._1:Expr|",
+                    "recursive=Evaluator.eval same Method SymbolId;argument=Succ.inner:Expr;result=Int|",
+                    "mappings=DefDef,formal,Match,selector,CaseDef[0..1],UnApply[0..1],",
+                    "qualifier[0..1],binder,body[0..1],recursive-function,argument,call,",
+                    "addition,literal|result=Int"
+                ),
+                _ => unreachable!(),
+            };
+            println!("ISSUE2040_POSITIVE\t{session}\t{root}\t{path}\t{span}\t{proof}");
+        }
+    }
     assert_eq!(
         first.len(),
         2,
@@ -1447,6 +1487,12 @@ fn assert_complete_unwrap(context: UnwrapProofContext<'_>) -> String {
     let TreeKind::DefDef(typed_definition) = typed_definition else {
         panic!("typed root remains a DefDef")
     };
+    let source_parameter = source_definition.value_param_clauses[0][0];
+    let typed_parameter = mapped(source_parameter);
+    assert_eq!(
+        typed_definition.value_param_clauses[0][0], typed_parameter,
+        "the explicit formal is the typed child mapped from the source formal"
+    );
     let typed_rhs = mapped(source_rhs);
     let typed_result_type = mapped(source_definition.tpt);
     assert_eq!(

@@ -134,6 +134,38 @@ ISSUE1999_TESTS = {
     "typer::tests::issue_1999_late_event_result_failure_observes_both_cases_before_atomic_rollback",
     "typer::tests::issue_1999_structural_corruption_restores_then_recovers_in_same_typer",
 }
+RECURSIVE_ADT_POSITIVE_TESTS = {
+    "evaluator_recursive_adt_roots_type_after_generated_unapply_completion",
+}
+RECURSIVE_ADT_NEGATIVE_TESTS = {
+    "typer::tests::method_parameter_capture::recursive_adt_rollback::recursive_adt_negative_matrix_is_stable_across_fresh_sessions",
+    "typer::tests::method_parameter_capture::recursive_adt_rollback::recursive_eval_late_result_failure_observes_binder_call_and_rolls_back_for_retry",
+}
+RECURSIVE_ADT_POSITIVE_PROOFS = {
+    "unwrap": (
+        "owner=adt.Evaluator$|signature=(Expr):Expr|selector=Expr|"
+        "cases=Num(_)=>expr:Expr,Succ(inner:Expr)=>inner:Expr|"
+        "extractors=Num$.unapply:Num,Succ$.unapply:Succ|"
+        "parents=Num:Expr+Product,Succ:Expr+Product|"
+        "fields=Num._1:Int,Succ._1:Expr|"
+        "mappings=DefDef,formal,Match,selector,CaseDef[0..1],UnApply[0..1],"
+        "qualifier[0..1],wildcard,binder,body[0..1]|result=Expr"
+    ),
+    "eval": (
+        "owner=adt.Evaluator$|signature=(Expr):Int|selector=Expr|"
+        "cases=Num(value:Int)=>value:Int,Succ(inner:Expr)=>eval(inner):Int+1:Int|"
+        "extractors=Num$.unapply:Num,Succ$.unapply:Succ|"
+        "parents=Num:Expr+Product,Succ:Expr+Product|"
+        "fields=Num._1:Int,Succ._1:Expr|"
+        "recursive=Evaluator.eval same Method SymbolId;argument=Succ.inner:Expr;result=Int|"
+        "mappings=DefDef,formal,Match,selector,CaseDef[0..1],UnApply[0..1],"
+        "qualifier[0..1],binder,body[0..1],recursive-function,argument,call,"
+        "addition,literal|result=Int"
+    ),
+}
+RECURSIVE_ADT_SOURCE_SHA256 = "073be43ad13b7518902a341d3e06b00254d990a325855c70738469c70c8e74ab"
+RECURSIVE_ADT_ARTIFACT_MANIFEST_SHA256 = "0b69527d4b2d2bb9d6cebba92b481f0a0f2d9aed7b2a8a2b15dbda3233128573"
+RECURSIVE_ADT_SOURCE = Path("crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0")
 SCOPE_ROLLBACK_TESTS = {
     "symbols::scope::tests::remove_drops_the_name_bucket_after_its_last_symbol",
 }
@@ -407,6 +439,154 @@ def passed_tests(text: str) -> set[str]:
         elif pending and line == "FAILED":
             pending = None
     return passed
+
+
+def validate_recursive_adt_inputs(root: Path) -> None:
+    fixture = root / RECURSIVE_ADT_SOURCE
+    source = fixture / "Expr.scala"
+    if not source.is_file() or hashlib.sha256(source.read_bytes()).hexdigest() != RECURSIVE_ADT_SOURCE_SHA256:
+        raise ReceiptError("frozen recursive Expr source SHA-256 changed")
+    artifact_manifest = fixture / "scala-artifacts.sha256.tsv"
+    if hashlib.sha256(artifact_manifest.read_bytes()).hexdigest() != RECURSIVE_ADT_ARTIFACT_MANIFEST_SHA256:
+        raise ReceiptError("pinned recursive Expr Scala artifact coordinates/hashes changed")
+    for manifest in ("source-hashes.tsv", "output-sha256.tsv"):
+        _, rows = read_tsv(fixture / manifest)
+        if not rows or len({row["path"] for row in rows}) != len(rows):
+            raise ReceiptError(f"recursive Expr {manifest} is empty or duplicated")
+        for row in rows:
+            path = fixture / row["path"]
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != row["sha256"]:
+                raise ReceiptError(f"recursive Expr pinned input hash mismatch: {row['path']}")
+    artifact_rows = [line.split("\t") for line in (fixture / "scala-artifacts.sha256.tsv").read_text(encoding="utf-8").splitlines()]
+    if len(artifact_rows) != 8 or any(len(row) != 2 for row in artifact_rows):
+        raise ReceiptError("recursive Expr Scala oracle must pin exactly eight artifacts")
+    for digest, relative in artifact_rows:
+        path = root / "target/coursier/v1/https/repo1.maven.org/maven2" / relative
+        # Artifact bytes are verified by the pinned runner, while the manifest itself
+        # is bound here so a changed coordinate/hash cannot silently alter CI inputs.
+        if not re.fullmatch(r"[0-9a-f]{64}", digest) or not relative.startswith("org/"):
+            raise ReceiptError(f"malformed recursive Expr Scala artifact pin: {relative}")
+    matrix = read_tsv(fixture / "scala-negative-matrix.tsv")[1]
+    if len(matrix) != 15 or len({row["case"] for row in matrix}) != 15:
+        raise ReceiptError("recursive Expr Scala negative matrix must have 15 unique cases")
+    negative_cases = read_tsv(fixture / "negative-cases.tsv")[1]
+    scala_classifications = {row["case"]: row["scala_result"] for row in negative_cases}
+    if len(scala_classifications) != 15 or {row["case"]: row["scala_result"] for row in matrix} != scala_classifications:
+        raise ReceiptError("recursive Expr Scala negative outcomes differ from the frozen mutation inventory")
+    required = {"wrong_reference_literal", "extractor_arity_zero", "unwrap_result_int", "eval_result_boolean",
+                "cross_case_binder", "eval_wrong_type", "eval_wrong_arity", "foreign_succ_owner",
+                "foreign_eval_control", "foreign_expr_succ_owner"}
+    if not required.issubset({row["case"] for row in matrix}):
+        raise ReceiptError("recursive Expr Scala matrix is missing required source controls")
+
+
+def validate_recursive_adt_oracle_log(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    required_lines = {
+        "verified all 8 pinned Scala 3.9.0 artifacts",
+        f"Scala source revision: {SCALA_REVISION}",
+        'JDK: JAVA_VERSION="21.0.8"; IMPLEMENTOR_VERSION="Temurin-21.0.8+9"',
+        "Two-root typed snapshot and 13-case classification matrix match.",
+        "verified frozen source SHA-256 manifest",
+    }
+    if required_lines - set(text.splitlines()):
+        raise ReceiptError(f"recursive Expr pinned oracle log is missing evidence: {sorted(required_lines - set(text.splitlines()))!r}")
+
+
+def validate_recursive_adt_positive_log(path: Path, tested_sha: str, expected_sha: str) -> None:
+    if not re.fullmatch(r"[0-9a-f]{40}", tested_sha) or tested_sha != expected_sha:
+        raise ReceiptError("recursive Expr Rust evidence must match the exact 40-character audited SHA")
+    text = require_test_log(path, RECURSIVE_ADT_POSITIVE_TESTS)
+    if marker_lines(text, "ISSUE2040_TESTED_SHA\t") != [f"ISSUE2040_TESTED_SHA\t{tested_sha}"]:
+        raise ReceiptError("recursive Expr Rust log is missing the exact tested checkout SHA")
+    lines = marker_lines(text, "ISSUE2040_POSITIVE\t")
+    actual: dict[tuple[str, str], tuple[str, ...]] = {}
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            raise ReceiptError("recursive Expr positive receipt has malformed columns")
+        _, session, root, source_path_tree, span, *proof = fields
+        key = session, root
+        if session not in {"first", "second"} or root not in RECURSIVE_ADT_POSITIVE_PROOFS or key in actual:
+            raise ReceiptError("recursive Expr positive receipt has an unexpected or duplicate session/root")
+        if source_path_tree not in {"Expr.scala#tree36", "Expr.scala#tree58"}:
+            raise ReceiptError("recursive Expr positive receipt substituted a source tree")
+        expected_tree = "Expr.scala#tree36" if root == "unwrap" else "Expr.scala#tree58"
+        expected_span = "147:255" if root == "unwrap" else "259:375"
+        if source_path_tree != expected_tree or span != expected_span:
+            raise ReceiptError("recursive Expr positive receipt changed its frozen path/tree/span")
+        if "\t".join(proof) != RECURSIVE_ADT_POSITIVE_PROOFS[root]:
+            raise ReceiptError(f"recursive Expr {root} semantic receipt differs from the asserted contract")
+        actual[key] = (source_path_tree, span, *proof)
+    expected_keys = {(session, root) for session in ("first", "second") for root in ("unwrap", "eval")}
+    if len(lines) != 4 or set(actual) != expected_keys:
+        raise ReceiptError("recursive Expr requires exactly unwrap/eval in two fresh sessions")
+    if actual[("first", "unwrap")] != actual[("second", "unwrap")] or actual[("first", "eval")] != actual[("second", "eval")]:
+        raise ReceiptError("recursive Expr normalized semantic receipts differ across fresh sessions")
+    sidecar_path = Path(__file__).resolve().parents[2] / "docs/typer-recursive-adt-e2e-positive-3.9.0.tsv"
+    header, rows = read_tsv(sidecar_path)
+    expected_header = ["session", "root", "source_path_tree", "source_span", "normalized_semantic_sha256", "proof"]
+    if header != expected_header or len(rows) != 4:
+        raise ReceiptError("recursive Expr positive sidecar has the wrong schema or denominator")
+    expected_rows = set()
+    for (session, root), receipt in actual.items():
+        normalized = "\t".join(receipt)
+        expected_rows.add((session, root, receipt[0], receipt[1], hashlib.sha256(normalized.encode()).hexdigest(), "\t".join(receipt[2:])))
+    if {tuple(row[column] for column in header) for row in rows} != expected_rows:
+        raise ReceiptError("committed recursive Expr positive sidecar differs from the four executed receipts")
+
+
+def validate_recursive_adt_negative_oracle_log(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    if "verified 15 pinned Scala negative/control cases" not in text:
+        raise ReceiptError("recursive Expr pinned Scala negative runner did not execute all 15 controls")
+
+
+def validate_recursive_adt_negative_log(path: Path) -> None:
+    text = require_test_log(path, RECURSIVE_ADT_NEGATIVE_TESTS)
+    root = Path(__file__).resolve().parents[2]
+    expected = read_tsv(root / RECURSIVE_ADT_SOURCE / "rust-negative-matrix.tsv")[1]
+    actual_lines = marker_lines(text, "ISSUE2039_NEGATIVE\t")
+    actual: dict[str, tuple[str, str, str]] = {}
+    for line in actual_lines:
+        fields = line.split("\t")
+        if len(fields) != 5 or fields[1] in actual:
+            raise ReceiptError("recursive Expr negative receipt is malformed or duplicated")
+        actual[fields[1]] = (fields[2], fields[3], fields[4])
+    if len(expected) != 15 or len(actual_lines) != 15:
+        raise ReceiptError("recursive Expr negative matrix did not execute all 15 named cases")
+    for row in expected:
+        observed = actual.get(row["case"])
+        if observed != (row["root"], row["scala_result"], row["rust_result"]):
+            raise ReceiptError(f"recursive Expr negative receipt changed for {row['case']}")
+    rollback_lines = marker_lines(text, "ISSUE2040_ROLLBACK\t")
+    expected_rollback = {
+        "late_result_mismatch": "observed=Succ.inner:Expr,Evaluator.eval(inner):Int,Match,CaseDef[0..1];restored=store,resolver,typed_arena,SourceTypedIndex,scope_projection,binder_frames",
+        "same_session_retry": "repeated_diagnostic=stable;recovered=Evaluator.unwrap(expr:Expr):Expr,Evaluator.eval(expr:Expr):Int;fresh_session=normalized_equal",
+    }
+    if len(rollback_lines) != 2:
+        raise ReceiptError("recursive Expr rollback proof must contain the late failure and same-session retry")
+    actual_rollback = {}
+    for line in rollback_lines:
+        fields = line.split("\t")
+        if len(fields) != 3 or fields[1] in actual_rollback:
+            raise ReceiptError("recursive Expr rollback receipt is malformed or duplicated")
+        actual_rollback[fields[1]] = fields[2]
+    if actual_rollback != expected_rollback:
+        raise ReceiptError("recursive Expr rollback/retry receipt differs from the observed contract")
+    sidecar_path = root / "docs/typer-recursive-adt-e2e-negative-rollback-3.9.0.tsv"
+    header, rows = read_tsv(sidecar_path)
+    if len(rows) != 17 or header != ["case", "scala_classification", "rust_outcome", "evidence"]:
+        raise ReceiptError("recursive Expr negative/rollback sidecar has the wrong schema or inventory")
+    expected_rows = {
+        (row["case"], row["scala_result"], row["rust_result"], row["rust_result"])
+        for row in expected
+    } | {
+        (case, "rejected", "rolled_back_then_retry_succeeded", evidence)
+        for case, evidence in expected_rollback.items()
+    }
+    if {tuple(row[column] for column in header) for row in rows} != expected_rows:
+        raise ReceiptError("committed recursive Expr negative/rollback sidecar differs from executed evidence")
 
 
 def validate_sealed_rollback_sidecar(root: Path) -> None:
@@ -805,6 +985,8 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     inputs = sub.add_parser("inputs")
     inputs.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
+    recursive_inputs = sub.add_parser("recursive-inputs")
+    recursive_inputs.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
     for command, tests in (("rust-log", RUST_TESTS), ("namer-log", NAMER_TESTS), ("typer-log", TYPER_TESTS)):
         item = sub.add_parser(command)
         item.add_argument("log", type=Path, nargs="+" if command == "typer-log" else None)
@@ -813,6 +995,16 @@ def main() -> int:
             item.add_argument("--expected-sha", required=True)
     issue1999 = sub.add_parser("issue1999-rust-log")
     issue1999.add_argument("log", type=Path)
+    recursive_oracle = sub.add_parser("recursive-oracle-log")
+    recursive_oracle.add_argument("log", type=Path)
+    recursive_negative_oracle = sub.add_parser("recursive-negative-oracle-log")
+    recursive_negative_oracle.add_argument("log", type=Path)
+    recursive_positive = sub.add_parser("recursive-positive-log")
+    recursive_positive.add_argument("log", type=Path)
+    recursive_positive.add_argument("--tested-sha", required=True)
+    recursive_positive.add_argument("--expected-sha", required=True)
+    recursive_negative = sub.add_parser("recursive-negative-log")
+    recursive_negative.add_argument("log", type=Path)
     scope_rollback = sub.add_parser("scope-rollback-rust-log")
     scope_rollback.add_argument("log", type=Path)
     oracle = sub.add_parser("oracle-log")
@@ -832,6 +1024,21 @@ def main() -> int:
         validate_inputs(root)
         if args.command == "inputs":
             print("frozen Box and sealed Event sources, classifications, and receipts verified")
+        elif args.command == "recursive-inputs":
+            validate_recursive_adt_inputs(root)
+            print("frozen recursive Expr source, Scala artifacts, oracle outputs, and 15-case matrix verified")
+        elif args.command == "recursive-oracle-log":
+            validate_recursive_adt_oracle_log(args.log)
+            print("pinned recursive Expr Scala/JDK positive oracle and artifact hashes verified")
+        elif args.command == "recursive-negative-oracle-log":
+            validate_recursive_adt_negative_oracle_log(args.log)
+            print("all 15 pinned recursive Expr Scala negative/control cases executed")
+        elif args.command == "recursive-positive-log":
+            validate_recursive_adt_positive_log(args.log, args.tested_sha, args.expected_sha)
+            print("exact four original recursive Expr DefDef receipts and tested SHA verified")
+        elif args.command == "recursive-negative-log":
+            validate_recursive_adt_negative_log(args.log)
+            print("15 recursive Expr negative cases and late rollback/retry proof verified")
         elif args.command == "rust-log":
             validate_rust_log(args.log, args.tested_sha, args.expected_sha)
             print("exact Box and sealed Event roots, negative matrix, and tested SHA verified")
