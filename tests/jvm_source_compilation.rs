@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -47,6 +48,10 @@ const FACTORY_RESULT_ARGUMENT_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala");
 const REFERENCE_LOCAL_CONSTRUCTOR_FLOW_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala");
+const IMMUTABLE_REFERENCE_LOCAL_PAIR_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactory.scala");
+const IMMUTABLE_REFERENCE_LOCAL_PAIR_REVERSED_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
 const MULTI_ARGUMENT_FACTORY_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala");
 const MIXED_ORIGIN_WRAP_AND_CREATE_SOURCE: &str = include_str!(
@@ -16872,6 +16877,407 @@ fn reference_local_constructor_flow_emits_and_executes_on_the_jvm_only_path() {
             String::from_utf8_lossy(&java.stdout),
             String::from_utf8_lossy(&java.stderr)
         );
+    }
+}
+
+#[test]
+fn immutable_reference_local_pair_constructor_audit_runs_on_jvm_only_path() {
+    for (source, source_name, source_id, method_name, argument_loads) in [
+        (
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_SOURCE,
+            "PairFactory.scala",
+            20631,
+            "create",
+            [0x2b, 0x2d],
+        ),
+        (
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_REVERSED_SOURCE,
+            "PairFactoryReversed.scala",
+            20633,
+            "createReversed",
+            [0x2d, 0x2b],
+        ),
+    ] {
+        let output = TestOutputDirectory::new("immutable-reference-local-pair-audit");
+        let source_id = SourceId::from_index(source_id);
+        let mut paired_first_error = None;
+        let observed_local_scope = RefCell::new(None);
+        let mut observe_typer = |ast: &AstArena<Untyped>,
+                                 _source_root: TreeId<Untyped>,
+                                 index: &SourceSemanticIndex,
+                                 typer: &mut SourceTyper<'_>,
+                                 _definitions: &Definitions| {
+            let (method_tree, method_definition) = ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if typer
+                            .store()
+                            .names
+                            .resolve(definition.name.as_name().text())
+                            == method_name =>
+                    {
+                        Some((tree, definition))
+                    }
+                    _ => None,
+                })
+                .expect("the original factory method exists in the source arena");
+            let method = index.symbol_at(source_id, method_tree).unwrap();
+            let rhs = method_definition.rhs.expect("factory method has a body");
+            let TreeKind::Block(block) = &ast.get(rhs).kind else {
+                panic!("factory body is the original block");
+            };
+            let local_tree = block.stats[0];
+            let binding = typer
+                .typed_local_binding_at(source_id, local_tree)
+                .expect("immutable local has a typed local binding");
+            let scope = binding.scope();
+            assert!(typer.store().scopes.contains(scope));
+            let local_symbol = binding.symbol();
+            assert_eq!(typer.store().symbols.get(local_symbol).owner, Some(method));
+            let name = typer.store().symbols.get(local_symbol).name;
+            assert_eq!(
+                typer.store().scopes.get(scope).lookup_all(&name),
+                &[local_symbol]
+            );
+            eprintln!(
+                "{method_name}: local binding symbol={local_symbol:?}, scope={scope:?}, owner={:?}, lookup={:?}",
+                typer.store().scopes.get(scope).owner,
+                typer.store().scopes.get(scope).lookup_all(&name)
+            );
+            *observed_local_scope.borrow_mut() = Some((scope, local_symbol));
+        };
+        let mut observe_source = |ast: &AstArena<Untyped>,
+                                  source_root: TreeId<Untyped>,
+                                  index: &SourceSemanticIndex,
+                                  source_typed_index: &SourceTypedIndex,
+                                  unit: &mut JvmCompilationUnit<'_>,
+                                  definitions: &Definitions| {
+            let factory = audit_class_named(unit, "PairFactory");
+            let counter = audit_class_named(unit, "Counter");
+            let pair = audit_class_named(unit, "Pair");
+            let (method_tree, method_definition) = ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if unit.store.names.resolve(definition.name.as_name().text())
+                            == method_name =>
+                    {
+                        Some((tree, definition))
+                    }
+                    _ => None,
+                })
+                .expect("the original factory method exists in the source arena");
+            let method = index.symbol_at(source_id, method_tree).unwrap();
+            assert_eq!(unit.store.symbols.get(method).owner, Some(factory));
+            let [existing_tree, seed_tree] = method_definition.value_param_clauses[0].as_slice()
+            else {
+                panic!("the factory method has exactly two ordered formals");
+            };
+            let existing = index.symbol_at(source_id, *existing_tree).unwrap();
+            let seed = index.symbol_at(source_id, *seed_tree).unwrap();
+            let rhs = method_definition.rhs.expect("factory method has a body");
+            let TreeKind::Block(block) = &ast.get(rhs).kind else {
+                panic!("factory body is the original block");
+            };
+            assert_eq!(block.stats.len(), 1);
+            let local_tree = block.stats[0];
+            let TreeKind::ValDef(local) = &ast.get(local_tree).kind else {
+                panic!("the block has exactly one immutable local VALDEF");
+            };
+            assert_eq!(index.symbol_at(source_id, local_tree), None);
+            assert!(source_typed_index.get(source_id, local_tree).is_some());
+            let local_initializer = local.rhs.expect("fresh has an initializer");
+            let TreeKind::Apply(initializer) = &ast.get(local_initializer).kind else {
+                panic!("fresh initializer is a constructor Apply");
+            };
+            assert_eq!(initializer.args.len(), 1);
+            let TreeKind::Select(initializer_select) = &ast.get(initializer.function).kind else {
+                panic!("fresh initializer applies the Counter constructor selection");
+            };
+            let initializer_select_tree = initializer.function;
+            let initializer_new_tree = initializer_select.qualifier;
+            let seed_argument_tree = initializer.args[0];
+            assert!(matches!(
+                ast.get(initializer_select.qualifier).kind,
+                TreeKind::New(_)
+            ));
+            assert!(matches!(
+                ast.get(initializer.args[0]).kind,
+                TreeKind::Ident(_)
+            ));
+            let initializer_argument = source_typed_index
+                .get(source_id, initializer.args[0])
+                .expect("the initializer seed has an original typed-tree edge");
+            assert!(matches!(
+                unit.store.types.get(unit.typed_ast.get(initializer_argument).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(target), .. }
+                    if *target == seed
+            ));
+            let TreeKind::Apply(outer) = &ast.get(block.expr).kind else {
+                panic!("block result is the Pair constructor Apply");
+            };
+            assert_eq!(outer.args.len(), 2);
+            let TreeKind::Select(outer_select) = &ast.get(outer.function).kind else {
+                panic!("outer application selects Pair constructor");
+            };
+            let outer_select_tree = outer.function;
+            let outer_new_tree = outer_select.qualifier;
+            let source_arguments = outer
+                .args
+                .iter()
+                .map(|argument| match ast.get(*argument).kind {
+                    TreeKind::Ident(ident) => unit.store.names.resolve(ident.name.text()),
+                    _ => panic!("final Pair arguments are source Ident leaves"),
+                })
+                .collect::<Vec<_>>();
+            let typed_argument_symbols = outer
+                .args
+                .iter()
+                .map(|argument| {
+                    let typed = source_typed_index
+                        .get(source_id, *argument)
+                        .expect("each final constructor argument has its typed edge");
+                    match unit.store.types.get(unit.typed_ast.get(typed).ty) {
+                        Type::TermRef {
+                            target: TermRefTarget::Symbol(symbol),
+                            ..
+                        } => *symbol,
+                        other => panic!("expected canonical TERMREF argument, found {other:?}"),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let expected_arguments = if method_name == "create" {
+                ["existing", "fresh"]
+            } else {
+                ["fresh", "existing"]
+            };
+            assert_eq!(source_arguments, expected_arguments);
+            let typed_argument_names = typed_argument_symbols
+                .iter()
+                .map(|symbol| {
+                    unit.store
+                        .names
+                        .resolve(unit.store.symbols.get(*symbol).name.text())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(typed_argument_names, expected_arguments);
+            let local_symbol = typed_argument_symbols[usize::from(method_name == "create")];
+            let local_info = unit.store.symbols.get(local_symbol);
+            assert_eq!(local_info.kind, SymbolKind::Local);
+            assert_eq!(local_info.owner, Some(method));
+            assert!(local_info.position.is_some());
+            let (scope, scoped_local_symbol) = observed_local_scope
+                .borrow()
+                .as_ref()
+                .copied()
+                .expect("typed local scope was audited in the same compilation session");
+            assert_eq!(scoped_local_symbol, local_symbol);
+            assert!(unit.store.scopes.contains(scope));
+            assert_eq!(unit.store.scopes.get(scope).owner, Some(method));
+            assert_eq!(
+                unit.store.scopes.get(scope).lookup_all(&local_info.name),
+                &[local_symbol]
+            );
+            for (source_tree, target_class) in [
+                (local_tree, counter),
+                (local_initializer, counter),
+                (block.expr, pair),
+            ] {
+                let typed_tree = source_typed_index
+                    .get(source_id, source_tree)
+                    .expect("original source tree has a typed root");
+                assert!(matches!(
+                    unit.store.types.get(unit.typed_ast.get(typed_tree).ty),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(target), .. }
+                        if *target == target_class
+                ));
+            }
+            eprintln!(
+                "{method_name}: source arguments={source_arguments:?}, typed TERMREF symbols={typed_argument_symbols:?} {typed_argument_names:?}; existing formal={existing:?}, local tree symbol={:?}",
+                index.symbol_at(source_id, local_tree)
+            );
+            let source_trees = [method_tree, rhs, local_tree, local_initializer, block.expr];
+            let typed_trees = source_trees
+                .iter()
+                .map(|tree| source_typed_index.get(source_id, *tree))
+                .collect::<Vec<_>>();
+            let typed_ids_and_types = typed_trees
+                .iter()
+                .map(|tree| {
+                    tree.map(|tree| {
+                        let typed = unit.typed_ast.get(tree);
+                        (tree, typed.ty)
+                    })
+                })
+                .collect::<Vec<_>>();
+            eprintln!(
+                "{method_name}: SourceId={source_id:?}, SymbolIds method={method:?} existing={existing:?} seed={seed:?} local={local_symbol:?}, source trees={source_trees:?}, spans={:?}, typed tree/type edges={typed_ids_and_types:?}",
+                source_trees.map(|tree| ast.get(tree).position)
+            );
+            assert!(matches!(ast.get(outer_new_tree).kind, TreeKind::New(_)));
+            let nested_source_trees = [
+                initializer_select_tree,
+                initializer_new_tree,
+                seed_argument_tree,
+                outer_select_tree,
+                outer_new_tree,
+                outer.args[0],
+                outer.args[1],
+            ];
+            let nested_typed_edges = nested_source_trees
+                .iter()
+                .map(|tree| {
+                    source_typed_index.get(source_id, *tree).map(|typed_tree| {
+                        let typed = unit.typed_ast.get(typed_tree);
+                        (typed_tree, typed.ty)
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert!(nested_typed_edges.iter().all(Option::is_some));
+            eprintln!(
+                "{method_name}: nested source trees={nested_source_trees:?}, spans={:?}, typed tree/type edges={nested_typed_edges:?}",
+                nested_source_trees.map(|tree| ast.get(tree).position)
+            );
+            for tree in [method_tree, rhs, local_tree, local_initializer, block.expr] {
+                assert!(
+                    ast.get(tree).position.is_some(),
+                    "original source span is retained"
+                );
+            }
+            let error = match validate_cross_class_constructor_call_proofs(
+                CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root,
+                    store: unit.store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: unit.typed_ast,
+                    source_index: index,
+                    source_typed_index,
+                    jvm_unit: unit,
+                },
+            ) {
+                Ok(_) => panic!("the paired proof stage rejects this local initializer shape"),
+                Err(error) => error,
+            };
+            let first_argument = outer.args[0];
+            let second_argument = outer.args[1];
+            let mut swapped_typed_index = source_typed_index.clone();
+            let first_typed = swapped_typed_index
+                .remove(source_id, first_argument)
+                .expect("first argument has its original typed mapping");
+            let second_typed = swapped_typed_index
+                .remove(source_id, second_argument)
+                .expect("second argument has its original typed mapping");
+            swapped_typed_index
+                .insert(source_id, first_argument, second_typed)
+                .unwrap();
+            swapped_typed_index
+                .insert(source_id, second_argument, first_typed)
+                .unwrap();
+            let swapped_root_error = match validate_cross_class_constructor_call_proofs(
+                CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root,
+                    store: unit.store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: unit.typed_ast,
+                    source_index: index,
+                    source_typed_index: &swapped_typed_index,
+                    jvm_unit: unit,
+                },
+            ) {
+                Ok(_) => panic!("the proof must reject the original direct-Apply shape"),
+                Err(error) => error,
+            };
+            assert_eq!(swapped_root_error, error);
+            let mut swapped_expression_roots = source_typed_index.clone();
+            let initializer_typed = swapped_expression_roots
+                .remove(source_id, local_initializer)
+                .expect("initializer has its original typed root");
+            let result_typed = swapped_expression_roots
+                .remove(source_id, block.expr)
+                .expect("Pair result has its original typed root");
+            swapped_expression_roots
+                .insert(source_id, local_initializer, result_typed)
+                .unwrap();
+            swapped_expression_roots
+                .insert(source_id, block.expr, initializer_typed)
+                .unwrap();
+            let swapped_expression_error = match validate_cross_class_constructor_call_proofs(
+                CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root,
+                    store: unit.store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: unit.typed_ast,
+                    source_index: index,
+                    source_typed_index: &swapped_expression_roots,
+                    jvm_unit: unit,
+                },
+            ) {
+                Ok(_) => panic!("the proof must reject the original direct-Apply shape"),
+                Err(error) => error,
+            };
+            assert_eq!(swapped_expression_error, error);
+            let mut missing_local_edge = source_typed_index.clone();
+            missing_local_edge.remove(source_id, outer.args[usize::from(method_name == "create")]);
+            let missing_local_error = match validate_cross_class_constructor_call_proofs(
+                CrossClassConstructorCallProofInput {
+                    source_id,
+                    source_root,
+                    store: unit.store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: unit.typed_ast,
+                    source_index: index,
+                    source_typed_index: &missing_local_edge,
+                    jvm_unit: unit,
+                },
+            ) {
+                Ok(_) => panic!("the proof must reject before local-edge validation"),
+                Err(error) => error,
+            };
+            assert_eq!(missing_local_error, error);
+            paired_first_error = Some(format!("{error:?}"));
+        };
+        let artifacts = compile_source_batch_with_typer_and_source_observer(
+            source,
+            source_name,
+            output.path(),
+            source_id,
+            SourceUnitCardinality::AtLeastTwo,
+            &mut observe_typer,
+            &mut observe_source,
+        )
+        .expect("JVM-only audit compiles the immutable Counter local and Pair call");
+        assert!(paired_first_error.as_deref().is_some_and(|error| {
+            error.contains("factory body must be the original direct constructor Apply")
+        }));
+        eprintln!("{method_name}: paired first error={:?}", paired_first_error);
+        assert_eq!(artifacts.len(), 3);
+        let factory = decode_emitted_class_named(&artifacts, "example/PairFactory");
+        let method = factory
+            .methods
+            .iter()
+            .find(|method| factory.constant_pool.utf8(method.name_index) == Ok(method_name))
+            .expect("PairFactory factory method is emitted");
+        assert_eq!(
+            factory.constant_pool.utf8(method.descriptor_index),
+            Ok("(Lexample/Counter;I)Lexample/Pair;")
+        );
+        let [Attribute::Code(code)] = method.attributes.as_slice() else {
+            panic!("factory method has one Code attribute");
+        };
+        assert_eq!(code.max_stack, 4);
+        assert_eq!(code.max_locals, 4);
+        let mut expected = vec![0xbb, 0x59, 0x1c, 0xb7, 0x4e, 0xbb, 0x59];
+        expected.extend(argument_loads);
+        expected.extend([0xb7, 0xb0]);
+        assert_opcode_sequence(code.code, &expected);
     }
 }
 

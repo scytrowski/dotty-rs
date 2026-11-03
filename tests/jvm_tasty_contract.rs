@@ -43,6 +43,157 @@ const REFERENCE_CONSTRUCTOR_BATCH: &str =
 const NESTED_CONSTRUCTOR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_nested_constructor_calls/NestedConstructorCalls.scala");
 
+const IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactory.scala");
+
+#[test]
+fn immutable_reference_local_pair_source_variation_first_error_matrix() {
+    let cases = [
+        (
+            "package/class/method/local rename",
+            "factory body must be the original direct constructor Apply",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH
+                .replace("package example", "package renamed")
+                .replace("Counter", "Gauge")
+                .replace("Pair", "Duo")
+                .replace("create", "build")
+                .replace("fresh", "item"),
+        ),
+        (
+            "class declaration reorder",
+            "factory body must be the original direct constructor Apply",
+            {
+                let source = IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH;
+                let counter_start = source.find("class Counter(").unwrap();
+                let pair_start = source.find("class Pair(").unwrap();
+                let factory_start = source.find("class PairFactory:").unwrap();
+                format!(
+                    "{}{}{}{}",
+                    &source[..counter_start],
+                    &source[pair_start..factory_start],
+                    &source[counter_start..pair_start],
+                    &source[factory_start..]
+                )
+            },
+        ),
+        (
+            "missing initializer",
+            "LocalValueRightHandSideMissing",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH
+                .replace("val fresh: Counter = new Counter(seed)", "val fresh: Counter"),
+        ),
+        (
+            "two locals",
+            "factory body must be the original direct constructor Apply",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace(
+                "    val fresh: Counter = new Counter(seed)",
+                "    val extra: Counter = new Counter(seed)\n    val fresh: Counter = new Counter(seed)",
+            ),
+        ),
+        (
+            "mutable local",
+            "factory body must be the original direct constructor Apply",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace("val fresh:", "var fresh:"),
+        ),
+        (
+            "shadowed formal",
+            "TermNameNotFound",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace("val fresh:", "val existing:"),
+        ),
+        (
+            "use before initialization",
+            "TermNameNotFound",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace(
+                "    val fresh: Counter = new Counter(seed)\n    new Pair(existing, fresh)",
+                "    new Pair(existing, fresh)\n    val fresh: Counter = new Counter(seed)",
+            ),
+        ),
+        (
+            "wrong local type",
+            "TypeNameNotFound",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace(
+                "val fresh: Counter = new Counter(seed)",
+                "val fresh: String = new Counter(seed)",
+            ),
+        ),
+        (
+            "wrong argument type",
+            "ApplicationArgumentTypeMismatch",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace(
+                "new Pair(existing, fresh)",
+                "new Pair(existing, seed)",
+            ),
+        ),
+        (
+            "wrong constructor arity",
+            "ApplicationArityMismatch",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace(
+                "new Pair(existing, fresh)",
+                "new Pair(existing)",
+            ),
+        ),
+        (
+            "nested result block",
+            "AnonymousClassInstantiationDeferred",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace(
+                "    new Pair(existing, fresh)",
+                "    { new Pair(existing, fresh) }",
+            ),
+        ),
+        (
+            "conditional initializer",
+            "factory body must be the original direct constructor Apply",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace(
+                "val fresh: Counter = new Counter(seed)",
+                "val fresh: Counter = if seed > 0 then new Counter(seed) else new Counter(0)",
+            ),
+        ),
+        (
+            "helper initializer",
+            "factory body must be the original direct constructor Apply",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH
+                .replace(
+                    "class PairFactory:\n  def create",
+                    "class PairFactory:\n  def make(seed: Int): Counter = new Counter(seed)\n  def create",
+                )
+                .replace("val fresh: Counter = new Counter(seed)", "val fresh: Counter = make(seed)"),
+        ),
+        (
+            "wrong constructor owner",
+            "factory body must be the original direct constructor Apply",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH
+                .replace(
+                    "class PairFactory:",
+                    "class Other(first: Counter, second: Counter)\nclass PairFactory:",
+                )
+                .replace("new Pair(existing, fresh)", "new Other(existing, fresh)"),
+        ),
+        (
+            "third constructor allocation",
+            "ApplicationArityMismatch",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace(
+                "new Pair(existing, fresh)",
+                "new Pair(existing, fresh, new Counter(seed))",
+            ),
+        ),
+    ];
+    for (index, (name, expected_first_error, source)) in cases.into_iter().enumerate() {
+        let first_error = match with_paired_jvm_tasty_batch_plan(
+            &source,
+            "PairFactory.scala",
+            SourceId::from_index(20640 + index as u32),
+            |_| (),
+        ) {
+            Ok(()) => "ACCEPTED".to_owned(),
+            Err(error) => format!("{error:?}"),
+        };
+        assert!(
+            first_error.contains(expected_first_error),
+            "{name} should first fail with {expected_first_error}, got {first_error}"
+        );
+    }
+}
+
 #[test]
 fn whole_batch_proves_distinct_class_abi_and_rejects_partial_or_swapped_artifacts() {
     with_paired_jvm_tasty_batch_plan(
@@ -2138,6 +2289,56 @@ fn stale_classfile_link_uuid_is_rejected_against_validated_tasty_header() {
     assert!(matches!(
         validate_classfile_tasty_link(&stale, &tasty_bytes),
         Err(JvmTastyContractError::StaleTastyLink { .. })
+    ));
+}
+
+#[test]
+fn immutable_local_pair_scala_oracle_links_reject_missing_stale_and_malformed_controls() {
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/jvm_tasty_immutable_reference_local_pair/scala39/primary/example");
+    let class_bytes = std::fs::read(fixture_dir.join("PairFactory.class")).unwrap();
+    let tasty_bytes = std::fs::read(fixture_dir.join("PairFactory.tasty")).unwrap();
+    let mut reader = Reader::new(&class_bytes);
+    let class = ClassFile::decode(&mut reader).unwrap();
+    validate_classfile_tasty_link(&class, &tasty_bytes).unwrap();
+
+    let missing_builder = ClassFileBuilder::new(
+        "example/PairFactory",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    let missing_bytes = missing_builder.encode().unwrap();
+    let mut missing_reader = Reader::new(&missing_bytes);
+    let missing = ClassFile::decode(&mut missing_reader).unwrap();
+    assert!(matches!(
+        validate_classfile_tasty_link(&missing, &tasty_bytes),
+        Err(JvmTastyContractError::MissingTastyLink { .. })
+    ));
+
+    let mut stale_builder = ClassFileBuilder::new(
+        "example/PairFactory",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    stale_builder
+        .tasty_link(TastyLinkId::from_bytes([0; TastyLinkId::LENGTH]))
+        .unwrap();
+    let stale_bytes = stale_builder.encode().unwrap();
+    let mut stale_reader = Reader::new(&stale_bytes);
+    let stale = ClassFile::decode(&mut stale_reader).unwrap();
+    assert!(matches!(
+        validate_classfile_tasty_link(&stale, &tasty_bytes),
+        Err(JvmTastyContractError::StaleTastyLink { .. })
+    ));
+    assert!(matches!(
+        validate_classfile_tasty_link(&class, &tasty_bytes[..5]),
+        Err(JvmTastyContractError::InvalidTastyFile { .. })
     ));
 }
 
