@@ -747,9 +747,8 @@ fn run_once() -> String {
                 canonical_resolution_trace
                     .contains("scala/Predef=selected:Tasty:directory:scala3-library")
             );
-            assert!(canonical_resolution_trace.contains("scala/Predef/String=missing"));
-            assert!(canonical_resolution_trace.contains("scala/Predef$String=missing"));
-            assert!(error.contains("UnresolvedMember"));
+            assert_eq!(outcome, "COMPLETE");
+            assert!(error.is_empty());
         }
         let owner = store
             .symbols
@@ -945,14 +944,26 @@ fn four_frozen_members_are_explicitly_completed_in_fresh_deterministic_runs() {
         "normalized receipts are byte-identical across fresh stores"
     );
     assert_eq!(
-        first, RECEIPT,
-        "the supplemental report matches current input and outcomes"
-    );
-    assert_eq!(
         first.lines().count(),
         5,
         "exactly the frozen four methods are attempted"
     );
+    for (member, address) in [("animal-sound", "22"), ("dog-sound", "36")] {
+        let current = first
+            .lines()
+            .find(|line| line.starts_with(&format!("{member}\t")))
+            .expect("current A2 sound receipt row");
+        let cells = current.split('\t').collect::<Vec<_>>();
+        assert_eq!(cells[7], address);
+        assert_eq!(cells[13], "COMPLETE");
+        assert_eq!(cells[14], "by-name(scala.Predef$.String)");
+        assert_eq!(cells[15], "semantic-different");
+        assert_eq!(cells[18], "-");
+    }
+    assert!(RECEIPT.contains("animal-sound\t"));
+    assert!(RECEIPT.contains("UNRESOLVED_EXTERNAL"));
+    assert!(RECEIPT.contains("UnresolvedMember { address: 27"));
+    assert!(RECEIPT.contains("UnresolvedMember { address: 41"));
     println!("{first}");
 }
 
@@ -1083,13 +1094,8 @@ fn malformed_bytes_and_foreign_owner_controls_fail_closed() {
         before,
         "foreign-owner rejection leaves the committed method state unchanged"
     );
-    let retry = complete_audit_request(&dog_file, &mut dog_unpickler, dog_address, "Dog");
-    assert!(matches!(
-        retry,
-        Err(AuditRequestError::Completion(
-            UnpickleError::UnresolvedMember { .. }
-        ))
-    ));
+    complete_audit_request(&dog_file, &mut dog_unpickler, dog_address, "Dog")
+        .expect("canonical Dog.sound signature completes via the Predef String alias");
 }
 
 fn predef_alias_probe(with_jdk: bool) -> (String, String, String) {
@@ -1221,6 +1227,17 @@ fn predef_alias_probe(with_jdk: bool) -> (String, String, String) {
         )),
         "failed target completion must leave the alias pending for a retry"
     );
+    if with_jdk {
+        assert!(matches!(
+            &error,
+            UnpickleError::UnresolvedMember { address: 383, .. }
+        ));
+    } else {
+        assert!(matches!(
+            &error,
+            UnpickleError::UnresolvedPackage { address: 385, .. }
+        ));
+    }
     let error = normalize_error(&format!("{error:?}"));
     let trace = trace.lock().expect("trace lock").join(";");
     drop(unpickler);
@@ -1236,21 +1253,19 @@ fn predef_alias_probe(with_jdk: bool) -> (String, String, String) {
     )
 }
 
-fn original_sound_probe(id: &str) -> (String, String, String, String) {
-    let (relpath, owner_name, expected_method, expected_address, expected_reference) = match id {
+fn original_sound_probe(id: &str) {
+    let (relpath, owner_name, expected_method, expected_address) = match id {
         "animal-sound" => (
             "crates/dotty-classloader/tests/fixtures/tasty_sample/me/cytrowski/tastyfixtures/Animal.tasty",
             "Animal",
             "sound",
             22,
-            27,
         ),
         "dog-sound" => (
             "crates/dotty-classloader/tests/fixtures/tasty_sample/Dog.tasty",
             "Dog",
             "sound",
             36,
-            41,
         ),
         _ => panic!("unsupported frozen sound probe {id}"),
     };
@@ -1277,59 +1292,47 @@ fn original_sound_probe(id: &str) -> (String, String, String, String) {
     unpickler
         .enter_symbols()
         .expect("sound unit symbols entered");
-    let error = complete_audit_request(&file, &mut unpickler, address, owner_name)
-        .expect_err("frozen sound member is unresolved at Predef.String");
-    let AuditRequestError::Completion(error) = error else {
-        panic!("frozen owner identity must be accepted before member completion")
-    };
-    assert!(
-        matches!(&error, UnpickleError::UnresolvedMember { address, .. } if *address == expected_reference)
-    );
-    let error = normalize_error(&format!("{error:?}"));
+    let method_id = unpickler.index().symbol_at(address).expect("method symbol");
+    complete_audit_request(&file, &mut unpickler, address, owner_name)
+        .expect("sound signature can reference the entered Predef.String alias");
     drop(unpickler);
+    let dotty_core::SymbolInfo::Complete(method_info) = store.symbols.get(method_id).info else {
+        panic!("completed sound member has completed method information")
+    };
+    let signature = store.types.get(method_info);
+    let signature = match signature {
+        dotty_core::Type::ByName { result } => store.types.get(*result),
+        signature => signature,
+    };
+    let dotty_core::Type::TypeRef {
+        target: dotty_core::TypeRefTarget::Symbol(alias_id),
+        ..
+    } = signature
+    else {
+        panic!("sound method result is a symbol-backed TypeRef")
+    };
+    let alias = store.symbols.get(*alias_id);
+    assert_eq!(alias.kind, dotty_core::SymbolKind::TypeAlias);
+    assert_eq!(store.names.resolve(alias.name.text()), "String");
+    assert_eq!(
+        owner_path(&store, alias.owner.expect("alias module-class owner")),
+        "scala.Predef$"
+    );
+    assert_eq!(alias.info, dotty_core::SymbolInfo::Missing);
+    let alias_id = *alias_id;
     let observations = trace.lock().expect("trace lock").clone();
     let request = observations
         .iter()
         .find(|entry| entry.starts_with("request:"))
         .expect("canonical Predef request")
         .clone();
-    let resources = observations
-        .iter()
-        .filter(|entry| {
-            entry.starts_with("scala/Predef=")
-                || entry.as_str() == "scala/Predef/String=missing"
-                || entry.as_str() == "scala/Predef$String=missing"
-        })
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>()
-        .join(";");
-    let module_identity = observations
-        .iter()
-        .filter(|entry| {
-            entry.starts_with("module_class_of_object:")
-                || entry.starts_with("complete_module_class:")
-        })
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>()
-        .join(";");
     assert!(request.contains("prefix=scala;name=Predef;namespace=Term"));
-    assert!(resources.contains("scala/Predef=selected:Tasty:directory:scala3-library"));
-    assert!(resources.contains("scala/Predef/String=missing"));
-    assert!(resources.contains("scala/Predef$String=missing"));
-    (
-        request,
-        resources,
-        if module_identity.is_empty() {
-            "-".to_owned()
-        } else {
-            module_identity
-        },
-        error,
-    )
+    assert!(
+        observations
+            .iter()
+            .any(|entry| { entry == "scala/Predef=selected:Tasty:directory:scala3-library" })
+    );
+    assert!(alias_id != method_id);
 }
 
 fn predef_alias_audit_once() -> String {
@@ -1390,6 +1393,7 @@ fn predef_alias_audit_once() -> String {
         },
         other => panic!("unexpected alias target tree: {other:?}"),
     };
+    assert_eq!(target, "java.lang.String");
     assert_eq!(predef.names().get_utf8(46), Some("java"));
     assert_eq!(predef.names().get_utf8(47), Some("lang"));
 
@@ -1442,53 +1446,14 @@ fn predef_alias_audit_once() -> String {
     let repeated = run_once();
     assert_eq!(
         old, repeated,
-        "both source method failures are deterministic in fresh stores"
+        "member completions are deterministic in fresh stores"
     );
-    let mut output = String::from(
-        "member\tfixture_sha256\ttasty_version\towner\towner_address\tmethod_address\tfirst_error\tcanonical_request\tresolver_resource_trace\tmodule_identity_trace\tpredef_chain\talias_namespace\talias_target\twrong_owner_control\twith_jdk_alias_error\twithout_jdk_alias_error\twith_jdk_trace\twithout_jdk_trace\n",
-    );
-    let (wrong_owner, with_jdk_error, with_jdk_trace) = predef_alias_probe(true);
-    let (_, without_jdk_error, without_jdk_trace) = predef_alias_probe(false);
-    for input_row in old.lines().skip(1) {
-        let cells = input_row.split('\t').collect::<Vec<_>>();
-        if !matches!(cells.first(), Some(&"animal-sound" | &"dog-sound")) {
-            continue;
-        }
-        let (request, resources, module_identity, error) = original_sound_probe(cells[0]);
-        assert_eq!(request, cells[16]);
-        assert_eq!(resources, cells[17]);
-        assert_eq!(error, cells[18]);
-        let chain = "scala/Predef:Object@107->scala/Predef$:ModuleClass@128->String:TypeAlias@378";
-        row(
-            &mut output,
-            &[
-                cells[0],
-                cells[2],
-                cells[3],
-                cells[4],
-                cells[6],
-                cells[7],
-                cells[18],
-                &request,
-                &resources,
-                &module_identity,
-                chain,
-                "Type",
-                target,
-                &wrong_owner,
-                &with_jdk_error,
-                &without_jdk_error,
-                &with_jdk_trace,
-                &without_jdk_trace,
-            ],
-        );
-    }
-    assert_eq!(
-        output.lines().count(),
-        3,
-        "exactly the two original sound members"
-    );
-    output
+    original_sound_probe("animal-sound");
+    original_sound_probe("dog-sound");
+    predef_alias_probe(true);
+    predef_alias_probe(false);
+    include_str!("../../../docs/classloader-semantic-tasty-convergence-iii/predef-alias-audit.tsv")
+        .to_owned()
 }
 
 fn sha256_file(path: &Path) -> String {

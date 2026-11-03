@@ -71,6 +71,20 @@ pub(crate) struct DecodedTastyIdentity {
     pub visibility: Option<DeclaredVisibility>,
 }
 
+/// The one source-proven alias declaration currently projected from an
+/// external module. Its address authenticates the declaration within the
+/// selected module's original TASTy index; the target remains incomplete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DecodedTastyAlias {
+    pub address: u32,
+    pub name: String,
+    /// The address-backed source target, retained as a binary path without
+    /// loading or completing that class.
+    pub target: BinaryName,
+    pub flags: SymbolFlags,
+    pub visibility: Option<DeclaredVisibility>,
+}
+
 /// Low-overhead timing and outcome counters for one opt-in classloader TASTy
 /// decode. Durations are exclusive across the listed stages; resolver
 /// callbacks are separately timed and remain nested inside their caller stage.
@@ -423,6 +437,12 @@ pub enum TastyDecodeError {
     /// More than one top-level definition claims the requested module
     /// identity in the same TASTy package.
     AmbiguousModuleIdentity,
+    /// The pinned Predef module does not contain the one address-backed
+    /// `String` type alias required by the bounded module projection.
+    InvalidPredefStringAlias(&'static str),
+    /// More than one type declaration named `String` appears directly in the
+    /// pinned Predef module template.
+    AmbiguousPredefStringAlias,
 }
 
 impl fmt::Display for TastyDecodeError {
@@ -455,6 +475,18 @@ impl fmt::Display for TastyDecodeError {
             Self::AmbiguousModuleIdentity => {
                 write!(formatter, "TASTy has ambiguous top-level module identities")
             }
+            Self::InvalidPredefStringAlias(reason) => {
+                write!(
+                    formatter,
+                    "invalid indexed scala.Predef.String alias: {reason}"
+                )
+            }
+            Self::AmbiguousPredefStringAlias => {
+                write!(
+                    formatter,
+                    "TASTy has ambiguous scala.Predef.String type aliases"
+                )
+            }
             Self::UnresolvedSupertype(parent) => write!(
                 formatter,
                 "unresolved supertype reference at parent {}: shape={}, semantic_reference={}, reference_prefix={}, names={:?}, raw={}",
@@ -480,7 +512,9 @@ impl std::error::Error for TastyDecodeError {
             | Self::UnresolvedClassTypeParameter { .. }
             | Self::MissingModuleSuperclass
             | Self::UnresolvedSupertype(_)
-            | Self::AmbiguousModuleIdentity => None,
+            | Self::AmbiguousModuleIdentity
+            | Self::InvalidPredefStringAlias(_)
+            | Self::AmbiguousPredefStringAlias => None,
         }
     }
 }
@@ -498,6 +532,8 @@ impl TastyDecodeError {
             Self::MissingModuleSuperclass => "tasty.missing_module_superclass",
             Self::UnresolvedSupertype(_) => "tasty.unresolved_supertype",
             Self::AmbiguousModuleIdentity => "tasty.ambiguous_module_identity",
+            Self::InvalidPredefStringAlias(_) => "tasty.invalid_predef_string_alias",
+            Self::AmbiguousPredefStringAlias => "tasty.ambiguous_predef_string_alias",
         }
     }
 
@@ -542,7 +578,9 @@ impl TastyDecodeError {
             | Self::UnresolvedClassTypeParameter { .. }
             | Self::MissingModuleSuperclass
             | Self::UnresolvedSupertype(_)
-            | Self::AmbiguousModuleIdentity => ClassLoadCategory::Conditional,
+            | Self::AmbiguousModuleIdentity
+            | Self::InvalidPredefStringAlias(_)
+            | Self::AmbiguousPredefStringAlias => ClassLoadCategory::Conditional,
         }
     }
 }
@@ -1051,6 +1089,167 @@ pub(crate) fn decode_module_identity(
         companion_class_kind: companion_classes.first().copied(),
         nested_type_visibilities: module_class.2.clone(),
     }))
+}
+
+/// Selects the single pinned `scala.Predef.String` declaration by its
+/// original TASTy address and direct module-template ownership. This is a
+/// declaration-only projection: the target remains for a later resolver
+/// increment, and no other module aliases are admitted.
+pub(crate) fn decode_predef_string_alias(
+    bytes: &[u8],
+    requested: &BinaryName,
+) -> Result<Option<DecodedTastyAlias>, TastyDecodeError> {
+    if requested.as_internal() != "scala/Predef$" {
+        return Ok(None);
+    }
+
+    const MODULE_CLASS_ADDRESS: u32 = 128;
+    const STRING_ALIAS_ADDRESS: u32 = 378;
+    let file = parse_classloader_tasty(bytes)?;
+    let index = file.ast_address_index()?;
+    let module =
+        index
+            .get(MODULE_CLASS_ADDRESS)
+            .ok_or(TastyDecodeError::InvalidPredefStringAlias(
+                "module class address 128 is absent",
+            ))?;
+    let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+        name,
+        type_or_template,
+        tail,
+    }) = module.decode_structured()?
+    else {
+        return Err(TastyDecodeError::InvalidPredefStringAlias(
+            "module class address 128 is not a TypeDef",
+        ));
+    };
+    if module_class_wire_name(&file, name).as_deref() != Some("Predef$")
+        || !has_modifier(&tail, OBJECT_TAG)
+        || !is_in_requested_top_level_package(&file, &index, module.offset, "scala")
+    {
+        return Err(TastyDecodeError::InvalidPredefStringAlias(
+            "module class address 128 is not the scala.Predef$ object class",
+        ));
+    }
+    let RawTree::LengthNode(template_node) = type_or_template else {
+        return Err(TastyDecodeError::InvalidPredefStringAlias(
+            "Predef$ has no template",
+        ));
+    };
+    if template_node.tag != TEMPLATE_TAG {
+        return Err(TastyDecodeError::InvalidPredefStringAlias(
+            "Predef$ body is not a template",
+        ));
+    }
+    let template_address = index
+        .children_of(MODULE_CLASS_ADDRESS)
+        .find(|child| child.tag == TEMPLATE_TAG)
+        .map(|child| child.offset as u32)
+        .ok_or(TastyDecodeError::InvalidPredefStringAlias(
+            "Predef$ template has no indexed address",
+        ))?;
+    template_node.decode_template_structure()?;
+    let mut direct_declarations = Vec::new();
+    for child in index
+        .children_of(template_address)
+        .filter(|child| child.tag == TYPEDEF_TAG)
+    {
+        let Some(definition) = index.get(child.offset as u32) else {
+            continue;
+        };
+        let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+            name,
+            type_or_template: candidate_body,
+            ..
+        }) = definition.decode_structured()?
+        else {
+            continue;
+        };
+        if wire_name(&file, name).as_deref() == Some("String") {
+            let is_alias = !matches!(candidate_body, RawTree::LengthNode(ref body) if body.tag == TEMPLATE_TAG);
+            direct_declarations.push((child.offset as u32, is_alias));
+        }
+    }
+    if direct_declarations.len() > 1 {
+        return Err(TastyDecodeError::AmbiguousPredefStringAlias);
+    }
+    let [(direct_address, is_alias)] = direct_declarations.as_slice() else {
+        return Err(TastyDecodeError::InvalidPredefStringAlias(
+            "no direct String type alias is present",
+        ));
+    };
+    if !is_alias {
+        return Err(TastyDecodeError::InvalidPredefStringAlias(
+            "the sole direct String declaration is a class, not a type alias",
+        ));
+    }
+    if *direct_address != STRING_ALIAS_ADDRESS {
+        return Err(TastyDecodeError::InvalidPredefStringAlias(
+            "the direct String type alias is not at address 378",
+        ));
+    }
+    let indexed_alias =
+        index
+            .get(STRING_ALIAS_ADDRESS)
+            .ok_or(TastyDecodeError::InvalidPredefStringAlias(
+                "indexed address 378 is absent",
+            ))?;
+    if indexed_alias.tag != TYPEDEF_TAG {
+        return Err(TastyDecodeError::InvalidPredefStringAlias(
+            "indexed address 378 is not a TypeDef",
+        ));
+    }
+    let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+        name,
+        type_or_template,
+        tail,
+    }) = indexed_alias.decode_structured()?
+    else {
+        return Err(TastyDecodeError::InvalidPredefStringAlias(
+            "address 378 is not a TypeDef",
+        ));
+    };
+    let direct_parent = index
+        .parent_of(STRING_ALIAS_ADDRESS)
+        .map(|parent| parent.offset as u32);
+    if !is_selected_direct_predef_alias(
+        *direct_address,
+        indexed_alias.offset as u32,
+        direct_parent,
+        template_address,
+    ) {
+        return Err(TastyDecodeError::InvalidPredefStringAlias(
+            "address 378 is not the direct String declaration in the Predef$ template",
+        ));
+    }
+    let rendered_name = wire_name(&file, name).ok_or(
+        TastyDecodeError::InvalidPredefStringAlias("address 378 has no valid type name"),
+    )?;
+    if rendered_name != "String" {
+        return Err(TastyDecodeError::InvalidPredefStringAlias(
+            "address 378 is not named String",
+        ));
+    }
+    let target = predef_string_alias_target(&file, &type_or_template, &tail).ok_or(
+        TastyDecodeError::InvalidPredefStringAlias("address 378 has an unsupported target tree"),
+    )?;
+
+    Ok(Some(DecodedTastyAlias {
+        address: STRING_ALIAS_ADDRESS,
+        name: rendered_name,
+        target,
+        flags: symbol_flags(&tail),
+        visibility: decode_visibility(&file, &tail),
+    }))
+}
+
+fn is_selected_direct_predef_alias(
+    direct_address: u32,
+    selected_address: u32,
+    parent_address: Option<u32>,
+    template_address: u32,
+) -> bool {
+    direct_address == selected_address && parent_address == Some(template_address)
 }
 
 fn is_in_requested_top_level_package(
@@ -3848,6 +4047,56 @@ fn unresolved_alias_package_prefix(file: &TastyFile<'_>, tree: &RawTree<'_>) -> 
     parent_reference_details(file, tree, 0).and_then(|details| details.prefix)
 }
 
+/// Decodes only the pinned ordinary type-alias form for `Predef.String`:
+/// `String = java.lang.String`. Other valid TASTy type forms stay unsupported
+/// until this narrow projection is deliberately extended.
+fn predef_string_alias_target(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    tail: &[DefinitionTail<'_>],
+) -> Option<BinaryName> {
+    if !tail.is_empty() {
+        return None;
+    }
+    let RawTree::NatAst {
+        tag,
+        value: string_name,
+        child,
+        ..
+    } = tree
+    else {
+        return None;
+    };
+    if *tag != dotty_tasty::tasty::SELECTTPT_TAG
+        || wire_name(file, *string_name).as_deref() != Some("String")
+    {
+        return None;
+    }
+    let RawTree::NatAst {
+        tag,
+        value: lang_name,
+        child,
+        ..
+    } = child.as_ref()
+    else {
+        return None;
+    };
+    if *tag != dotty_tasty::tasty::SELECT_TAG
+        || wire_name(file, *lang_name).as_deref() != Some("lang")
+    {
+        return None;
+    }
+    let RawTree::Leaf(java) = child.as_ref() else {
+        return None;
+    };
+    if java.tag != dotty_tasty::tasty::TERMREFPKG_TAG
+        || !matches!(java.value, dotty_tasty::tasty::TermValue::NameRef(name) if wire_name(file, name).as_deref() == Some("java"))
+    {
+        return None;
+    }
+    Some(BinaryName::from_internal("java/lang/String"))
+}
+
 /// Extracts the owner and simple name of a reference that could not be
 /// resolved by the ordinary TASTy prefix reader. Applied type arguments and
 /// the `Ident` wrapper used by extends clauses are transparent here.
@@ -5479,6 +5728,118 @@ mod tests {
             decoded.super_class.as_internal(),
             "scala/LowPriorityImplicits"
         );
+    }
+
+    #[test]
+    fn predef_string_alias_projection_is_address_and_owner_backed() {
+        let bytes = fixture_bytes("scala3-library/scala/Predef.tasty");
+        let alias = decode_predef_string_alias(&bytes, &BinaryName::from_internal("scala/Predef$"))
+            .expect("the pinned alias shape should decode")
+            .expect("Predef.String should be projected");
+
+        assert_eq!(alias.address, 378);
+        assert_eq!(alias.name, "String");
+        assert_eq!(alias.target.as_internal(), "java/lang/String");
+        assert_eq!(alias.flags, SymbolFlags::EMPTY);
+        assert_eq!(alias.visibility, None);
+        assert!(matches!(
+            decode_predef_string_alias(&[0], &BinaryName::from_internal("scala/Other$")),
+            Ok(None)
+        ));
+        assert!(matches!(
+            decode_predef_string_alias(&[0], &BinaryName::from_internal("scala/Predef$")),
+            Err(TastyDecodeError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn predef_string_alias_projection_rejects_unsupported_rhs_and_modifiers() {
+        let bytes = fixture_bytes("scala3-library/scala/Predef.tasty");
+        let file = parse_classloader_tasty(&bytes).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let alias = index.get(378).unwrap();
+        let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+            type_or_template,
+            tail,
+            ..
+        }) = alias.decode_structured().unwrap()
+        else {
+            panic!("address 378 should be a TypeDef")
+        };
+        assert!(predef_string_alias_target(&file, &type_or_template, &tail).is_some());
+        assert!(
+            predef_string_alias_target(
+                &file,
+                &type_or_template,
+                &[DefinitionTail::Modifier(dotty_tasty::tasty::OPAQUE_TAG)]
+            )
+            .is_none()
+        );
+
+        let applied = RawTree::LengthNode(dotty_tasty::tasty::RawNode {
+            tag: APPLIEDTPT_TAG,
+            offset: 0,
+            payload: &[],
+        });
+        assert!(predef_string_alias_target(&file, &applied, &[]).is_none());
+
+        let rhs_address = index
+            .children_of(378)
+            .find(|child| child.tag == dotty_tasty::tasty::SELECTTPT_TAG)
+            .expect("alias RHS selection should have an AST address")
+            .offset;
+        let rhs_tag_file_offset = file
+            .section(StandardSection::Asts)
+            .expect("Predef fixture should have an AST section")
+            .offset
+            + rhs_address;
+        assert_eq!(
+            bytes[rhs_tag_file_offset],
+            dotty_tasty::tasty::SELECTTPT_TAG
+        );
+
+        // SELECT is a term selection with the same spelling and qualifier as
+        // the supported SELECTtpt. The complete decoder must reject it.
+        for unsupported_tag in [
+            dotty_tasty::tasty::SELECT_TAG,
+            dotty_tasty::tasty::APPLIEDTPT_TAG,
+        ] {
+            let mut unsupported_rhs = bytes.clone();
+            unsupported_rhs[rhs_tag_file_offset] = unsupported_tag;
+            let decoded = decode_predef_string_alias(
+                &unsupported_rhs,
+                &BinaryName::from_internal("scala/Predef$"),
+            );
+            assert!(
+                !matches!(decoded, Ok(Some(_))),
+                "tag {unsupported_tag}: {decoded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn predef_string_alias_projection_requires_the_selected_direct_owner() {
+        const TEMPLATE_ADDRESS: u32 = 214;
+        assert!(is_selected_direct_predef_alias(
+            378,
+            378,
+            Some(TEMPLATE_ADDRESS),
+            TEMPLATE_ADDRESS
+        ));
+        // Models address 378 moved under a nested template while the direct
+        // String declaration remains at 387, as in the review reproducer.
+        assert!(!is_selected_direct_predef_alias(
+            387,
+            378,
+            Some(308),
+            TEMPLATE_ADDRESS
+        ));
+        assert!(!is_selected_direct_predef_alias(
+            378,
+            378,
+            Some(308),
+            TEMPLATE_ADDRESS
+        ));
     }
 
     #[test]

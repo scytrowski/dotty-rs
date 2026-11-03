@@ -2904,6 +2904,157 @@ mod tests {
     }
 
     #[test]
+    fn predef_module_scope_exposes_the_source_indexed_string_alias() {
+        let library_root = fixture_path("../dotty-tasty/tests/fixtures/scala3-library");
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME"));
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(library_root)),
+            Box::new(JdkClassPath::new(java_home.join("jmods")).expect("JDK 21 jmods")),
+        ]);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(&mut store, &["scala"])
+            .unwrap()
+            .unwrap();
+        let prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let predef_name = Name::new(store.names.intern("Predef"), Namespace::Term);
+        let object = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix,
+                    name: predef_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let module_class = resolver
+            .module_class_of_object(&store, object)
+            .unwrap()
+            .unwrap();
+
+        let resolver_checkpoint = resolver.checkpoint();
+        let store_checkpoint = store.checkpoint();
+        assert_eq!(
+            resolver.complete_module_class(&mut store, module_class),
+            Ok(true)
+        );
+        let SymbolInfo::Complete(class_info) = store.symbols.get(module_class).info else {
+            panic!("Predef module class should be complete");
+        };
+        let Type::ClassInfo(class_info) = store.types.get(class_info) else {
+            panic!("Predef module class should have class info");
+        };
+        let declarations = class_info.declarations;
+        let string = Name::new(store.names.intern("String"), Namespace::Type);
+        let alias_id = {
+            let aliases = store.scopes.get(declarations).lookup_all(&string);
+            assert_eq!(aliases.len(), 1, "expected the real Predef.String alias");
+            aliases[0]
+        };
+        let alias = store.symbols.get(alias_id);
+        assert_eq!(alias.kind, SymbolKind::TypeAlias);
+        assert_eq!(alias.name.namespace(), Namespace::Type);
+        assert_eq!(alias.owner, Some(module_class));
+        assert_eq!(alias.visibility, Visibility::Public);
+        assert_eq!(alias.info, SymbolInfo::Missing);
+        assert_eq!(alias.origin, store.symbols.get(module_class).origin);
+        assert_eq!(alias.flags, SymbolFlags::EMPTY);
+
+        let member_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, module_class));
+        assert_eq!(
+            resolver.resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: member_prefix,
+                    name: string,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            ),
+            Ok(Some(alias_id)),
+            "type member lookup should return the declaration identity"
+        );
+        let term_string = Name::new(store.names.intern("String"), Namespace::Term);
+        assert_eq!(
+            resolver.resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: member_prefix,
+                    name: term_string,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            ),
+            Ok(None),
+            "a same-spelled term member is not the type alias"
+        );
+        let foreign = store.symbols.alloc(Symbol {
+            name: string,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store.scopes.get_mut(declarations).enter(string, foreign);
+        assert_eq!(
+            resolver.resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: member_prefix,
+                    name: string,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            ),
+            Err(ResolutionError::Ambiguous { candidates: 2 }),
+            "a foreign same-spelled type cannot replace the indexed alias"
+        );
+
+        resolver.rollback_to(&mut store, resolver_checkpoint);
+        store.rollback_to(store_checkpoint);
+        assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+        assert!(!store.symbols.contains(alias_id));
+
+        assert_eq!(
+            resolver.complete_module_class(&mut store, module_class),
+            Ok(true)
+        );
+        let SymbolInfo::Complete(class_info) = store.symbols.get(module_class).info else {
+            panic!("same-session retry should complete Predef again");
+        };
+        let Type::ClassInfo(class_info) = store.types.get(class_info) else {
+            panic!("Predef retry should retain a class declarations scope");
+        };
+        let retry_alias_id = {
+            let aliases = store
+                .scopes
+                .get(class_info.declarations)
+                .lookup_all(&string);
+            assert_eq!(aliases.len(), 1);
+            aliases[0]
+        };
+        let retry_alias = store.symbols.get(retry_alias_id);
+        assert_eq!(retry_alias.kind, SymbolKind::TypeAlias);
+        assert_eq!(retry_alias.owner, Some(module_class));
+        assert_eq!(retry_alias.info, SymbolInfo::Missing);
+    }
+
+    #[test]
     fn caller_rollback_removes_a_successful_package_module_materialization() {
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
@@ -4646,6 +4797,7 @@ mod tests {
                     ClassOrigin::Directory(PathBuf::from("<module-fixture>")),
                 ),
                 decoded,
+                predef_string_alias: None,
             },
         );
         path.entries.lock().unwrap().remove(&binary);

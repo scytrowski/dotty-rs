@@ -44,6 +44,7 @@ const MAX_INHERITANCE_DEPTH: usize = 256;
 pub(crate) struct CachedDecodedModule {
     pub(crate) resource: ClassResource,
     pub(crate) decoded: tasty_symbol::DecodedTastyClass,
+    pub(crate) predef_string_alias: Option<tasty_symbol::DecodedTastyAlias>,
 }
 
 #[derive(Debug)]
@@ -3296,11 +3297,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let probe_observations = RefCell::new(Vec::new());
         let class_path = &self.class_path;
         let resource_before_decode = self.resource_lookup_total_ns();
-        let decoded = if let Some(cached) = decoded_cache.get(name)
+        let (decoded, predef_string_alias) = if let Some(cached) = decoded_cache.get(name)
             && cached.resource == resource
         {
             *decoded_cache_hit = true;
-            cached.decoded.clone()
+            (cached.decoded.clone(), cached.predef_string_alias.clone())
         } else {
             decoded_cache.remove(name);
             let decode_started = self.collect_load_profiles.then(Instant::now);
@@ -3374,14 +3375,22 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let decoded = decoded.map_err(|error| {
                 ClassLoadError::InvalidTastyFile(identity.module_class_name.clone(), error)
             })?;
+            let predef_string_alias = tasty_symbol::decode_predef_string_alias(
+                resource.bytes(),
+                &identity.module_class_name,
+            )
+            .map_err(|error| {
+                ClassLoadError::InvalidTastyFile(identity.module_class_name.clone(), error)
+            })?;
             decoded_cache.insert(
                 name.clone(),
                 CachedDecodedModule {
                     resource: resource.clone(),
                     decoded: decoded.clone(),
+                    predef_string_alias: predef_string_alias.clone(),
                 },
             );
-            decoded
+            (decoded, predef_string_alias)
         };
 
         let module_class = self.store.symbols.get(identity.module_class);
@@ -3445,6 +3454,33 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 resolved_type,
                 origin,
             );
+        }
+        if let Some(alias) = predef_string_alias {
+            debug_assert_eq!(alias.address, 378);
+            let text = self.store.names.intern(&alias.name);
+            let name = Name::new(text, Namespace::Type);
+            let visibility = alias
+                .visibility
+                .as_ref()
+                .map_or(Visibility::Public, |declared| {
+                    self.tasty_visibility(&identity.module_class_name, declared)
+                });
+            let alias_symbol = self.store.symbols.alloc(Symbol {
+                name,
+                owner: Some(identity.module_class),
+                kind: SymbolKind::TypeAlias,
+                flags: alias.flags,
+                visibility,
+                info: SymbolInfo::Missing,
+                origin,
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            });
+            self.store
+                .scopes
+                .get_mut(declarations)
+                .enter(name, alias_symbol);
         }
 
         self.complete_class(
@@ -13951,6 +13987,155 @@ mod tests {
             class_info(repeated_loader.store, identity.module_class).declarations,
             declarations
         );
+    }
+
+    #[test]
+    fn complete_module_rejects_a_direct_string_class_alias_collision() {
+        use crate::tasty_symbol::TastyDecodeError;
+        use dotty_tasty::tasty::{
+            DefinitionBody, RawNodes, RawTree, StructuredNode, TastyFile, Writer,
+        };
+
+        fn encode_node(node: &StructuredNode<'_>) -> Vec<u8> {
+            let mut writer = Writer::new();
+            node.encode(&mut writer).unwrap();
+            writer.into_inner()
+        }
+
+        fn encoded_tree(bytes: &[u8]) -> RawTree<'_> {
+            let mut reader = dotty_tasty::tasty::Reader::new(bytes);
+            let nodes = RawNodes::decode(&mut reader).unwrap();
+            assert_eq!(nodes.len(), 1);
+            RawTree::LengthNode(nodes.get(0).unwrap().clone())
+        }
+
+        let original = dotty_tasty_fixture_bytes("scala3-library/scala/Predef.tasty");
+        let file = TastyFile::parse_scala_3_9(&original).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let alias = index.get(378).unwrap();
+        let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+            name: string_name, ..
+        }) = alias.decode_structured().unwrap()
+        else {
+            panic!("address 378 should be the source String TypeDef")
+        };
+
+        let asts = file.asts().unwrap();
+        assert_eq!(asts.len(), 1, "Predef fixture should have one AST root");
+        let StructuredNode::Package(mut package) =
+            asts.get(0).unwrap().decode_structured().unwrap()
+        else {
+            panic!("Predef AST root should be its scala package")
+        };
+        let has_name = |reference, expected: &str| match file.names().get(reference) {
+            Some(dotty_tasty::tasty::RawName::ObjectClass { underlying }) => {
+                file.names().get_utf8(*underlying) == Some(expected)
+            }
+            Some(dotty_tasty::tasty::RawName::Utf8(name)) => name == expected,
+            _ => false,
+        };
+
+        let predef_position = package
+            .stats
+            .entries()
+            .iter()
+            .position(|node| {
+                matches!(
+                    node.decode_structured(),
+                    Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef { name, .. }))
+                        if has_name(name, "Predef")
+                )
+            })
+            .expect("Predef object should be a package member");
+        let predef_node = &package.stats.entries()[predef_position];
+        let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+            name: predef_name,
+            type_or_template: RawTree::LengthNode(predef_template_node),
+            tail: predef_tail,
+        }) = predef_node.decode_structured().unwrap()
+        else {
+            panic!("Predef object should have a template")
+        };
+        let mut predef_template = predef_template_node.decode_template_structure().unwrap();
+        let collision_position = predef_template
+            .stats
+            .iter()
+            .position(|stat| {
+                matches!(
+                    stat,
+                    RawTree::LengthNode(node)
+                        if matches!(
+                            node.decode_structured(),
+                            Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                                name,
+                                type_or_template: RawTree::LengthNode(ref body),
+                                ..
+                            })) if has_name(name, "ArrowAssoc")
+                                && matches!(body.decode_structured(), Ok(StructuredNode::Template(_)))
+                        )
+                )
+            })
+            .expect("Predef should have a direct object template to rename as a class collision");
+        let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+            type_or_template,
+            tail,
+            ..
+        }) = (match &predef_template.stats[collision_position] {
+            RawTree::LengthNode(node) => node.decode_structured().unwrap(),
+            _ => unreachable!(),
+        })
+        else {
+            unreachable!()
+        };
+        let renamed_collision = StructuredNode::TypeDef(DefinitionBody::TypeDef {
+            name: string_name,
+            type_or_template,
+            tail,
+        });
+        let renamed_collision_bytes = encode_node(&renamed_collision);
+        predef_template.stats[collision_position] = encoded_tree(&renamed_collision_bytes);
+
+        let predef_template_bytes = encode_node(&StructuredNode::Template(predef_template));
+        let predef_def_bytes = encode_node(&StructuredNode::TypeDef(DefinitionBody::TypeDef {
+            name: predef_name,
+            type_or_template: encoded_tree(&predef_template_bytes),
+            tail: predef_tail,
+        }));
+        let mut package_stats = package.stats.entries().to_vec();
+        package_stats[predef_position] = match encoded_tree(&predef_def_bytes) {
+            RawTree::LengthNode(node) => node,
+            _ => unreachable!(),
+        };
+        package.stats = RawNodes::from_entries(package_stats).unwrap();
+
+        let collision = file
+            .encode_structured_relocated(&[StructuredNode::Package(package)])
+            .unwrap();
+        let name = BinaryName::from_internal("scala/Predef");
+        let fixtures =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dotty-tasty/tests/fixtures");
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for Predef hierarchy");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK modules");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(HashMap::from([(
+                name.clone(),
+                collision,
+            )]))),
+            Box::new(crate::class_path::DirectoryClassPath::new(fixtures)),
+            Box::new(jdk),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+
+        assert!(matches!(
+            loader.complete_module(&name),
+            Err(ClassLoadError::InvalidTastyFile(
+                _,
+                TastyDecodeError::AmbiguousPredefStringAlias
+            ))
+        ));
+        assert!(!loader.session.modules.contains_key(&name));
     }
 
     #[test]
