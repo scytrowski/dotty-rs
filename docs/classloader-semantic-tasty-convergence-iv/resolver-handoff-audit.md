@@ -65,31 +65,91 @@ the outer resolver's mutable classpath/session ownership is not re-entered
 through that callback. B2 must preserve this non-reentrant ownership shape or
 introduce a separately reviewed transaction/callback design.
 
-## B2 API choices
+## Frozen B2 request and error contract
 
-1. **One explicitly requested binary name (preferred):** add a crate-private
-   resolver adapter method that accepts one `BinaryName` and calls the
-   semantic loader path. The eventual `resolve_member`/adapter call site
-   decides explicitly, before loading starts, that this exact request opts
-   in. The method takes the resolver's classpath and session, supplies the
-   same `Definitions` and store to one loader, and restores classpath/session
-   on both results. It returns a typed semantic loading error with the
-   requested name attached. A semantic error is terminal for this selected
-   request; there is no legacy retry after a partial attempt.
-2. **Resolver-wide allowlist/policy:** store an internal selected-name set
-   or mode on the resolver and consult it from the generic class-load route.
-   This preserves the public trait but adds policy state, makes opt-in timing
-   less local, and risks a selected request being observed through nested
-   callbacks. It is larger and less auditable than a one-request operation.
+B2 uses one explicitly selected `BinaryName` operation. It does not add a
+resolver-wide mode, allowlist, public constructor option, or `SymbolResolver`
+trait method. The crate-private adapter boundary is:
 
-Selection belongs at a single explicit adapter call site, not in
-`SymbolResolver`, a public constructor, or a global default. Nonselected
-requests continue through `ClassLoader::load_class`. The selected call must
-fail with an attributable typed error for unsupported shape, malformed TASTy,
-missing resource or dependency; it must not silently fall back. Before
-implementation, B2 must settle whether the error is a resolver error variant
-or an adapter-local result type and prove it preserves the original
-`SemanticTastyLoadError` and binary name.
+```rust
+pub(crate) struct SemanticMemberLoadFailure {
+    pub(crate) binary_name: BinaryName,
+    pub(crate) source: SemanticTastyLoadError,
+}
+
+pub(crate) fn load_semantic_class_for_member(
+    &mut self,
+    store: &mut SemanticStore,
+    name: &BinaryName,
+) -> Result<SymbolId, SemanticMemberLoadFailure>;
+```
+
+`SemanticMemberLoadFailure` keeps the requested name even when the underlying
+error describes a dependency (or an `UnsupportedShape` with no name of its
+own), and retains the original typed `SemanticTastyLoadError`. The method
+takes `self.class_path` and `self.session`, constructs one
+`ClassLoader::with_definitions` with the resolver's same `Definitions` and
+borrowed store, calls `load_semantic_class_with_tasty_unpickler(name)`, then
+restores both values from `into_parts` on either result. No callback may
+re-enter the temporarily emptied outer resolver; nested TASTy references use
+the semantic loader's borrowed-classpath resolver as in the current control.
+
+The explicit call site is the empty-candidate, package-owned type branch in
+`resolve_member_inner`, immediately after deriving and path-validating its
+exact `binary_name`. B2's selected request calls
+`load_semantic_class_for_member(store, &binary_name)` there; every request not
+explicitly routed through that call retains the current legacy
+`load_class` path. Selection is made for that one computed name before any
+semantic mutation begins. A semantic error is terminal for that request;
+there is no retry through the legacy loader.
+
+The selected branch runs inside `resolve_member`'s existing `transact`. B2's
+private transaction closure carries a named error through rollback:
+
+```rust
+enum MemberResolutionFailure {
+    Resolver(ResolutionError),
+    SemanticLoad(SemanticMemberLoadFailure),
+}
+
+type MemberResolutionResult<T> = Result<T, MemberResolutionFailure>;
+
+fn transact<T, E>(
+    &mut self,
+    store: &mut SemanticStore,
+    operation: impl FnOnce(&mut Self, &mut SemanticStore) -> Result<Option<T>, E>,
+) -> Result<Option<T>, E>;
+```
+
+`resolve_member_inner` returns `MemberResolutionResult<Option<SymbolId>>` and
+maps its existing core errors to `MemberResolutionFailure::Resolver`; the
+selected adapter maps its wrapper to `MemberResolutionFailure::SemanticLoad`.
+`transact` must therefore be generic over its closure error type, while
+retaining its existing behavior: `Ok(Some(_))` commits the session undo mark;
+`Ok(None)` and every `Err(_)` restore the session, canonical `Object`, and
+store checkpoint. The semantic loader's inner transaction first rolls back
+its own partial mutations. The public `SymbolResolver::resolve_member`
+boundary still returns `ResolutionError`; its selected-error adapter maps the
+wrapper to `ResolutionError::Malformed { reason }`, with `reason` containing
+the requested `BinaryName` and the full `SemanticTastyLoadError` debug form.
+This is the sole text conversion, after rollback; the typed wrapper is not
+discarded or converted into a legacy retry inside the transaction. Existing
+`ResolutionError` and the public trait remain unchanged.
+
+For the original fixture and negative controls, B2's exact outcomes are:
+
+| Selected request and classpath | Adapter result before trait-boundary conversion | Required state/result |
+|---|---|---|
+| Original `Open`, fixture directory followed by JDK 21 `jmods` | `Ok(symbol)` | `symbol` is the canonical `Open`; class kind/owner/package/origin match the B1 receipt, parent is canonical `java.lang.Object`, and semantic constructor result is `Open`. Resolver transaction commits. |
+| `Open` name resolves first to a class-file resource, which is unsupported by semantic loading | `Err(SemanticMemberLoadFailure { binary_name: Open, source: UnsupportedShape("the selected classpath resource is not TASTy") })` | No legacy retry; semantic-loader and resolver checkpoints are restored. |
+| Truncated bytes selected as `Open.tasty` | `Err(SemanticMemberLoadFailure { binary_name: Open, source: ClassLoad(InvalidTastyFile(Open, _)) })` | No legacy retry; no positive resolved/origin/cache entry remains. |
+| Original `Open.tasty` with `java/lang/Object` omitted from the classpath | `Err(SemanticMemberLoadFailure { binary_name: Open, source: Resolver(ResolutionError::Malformed { .. }) })` | The nested resolver error remains the source; no legacy retry, and both semantic and outer resolver checkpoints are restored. |
+
+These error shapes use existing `SemanticTastyLoadError` variants exercised by
+the loader controls. The `BinaryName` in the wrapper always identifies the
+selected root `Open`; a missing dependency remains attributable in the nested
+resolver error. Ordinary, nonselected requests continue through
+`ClassLoader::load_class` unchanged.
 
 ## Evidence and B2 acceptance contract
 
