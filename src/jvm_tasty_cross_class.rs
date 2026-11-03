@@ -3416,6 +3416,20 @@ pub fn validate_immutable_local_initialization_proof<'session>(
             "Pair must be a different canonical class in the original source batch",
         ));
     }
+    if !is_canonical_class_type_ref(
+        store,
+        typed_ast
+            .try_get(typed_outer_new)
+            .ok_or_else(|| typed_error("typed final Pair New is stale"))?
+            .ty,
+        pair_class,
+        package,
+        definitions.no_prefix,
+    ) {
+        return Err(typed_error(
+            "typed final Pair New result must retain the canonical Pair TypeRef",
+        ));
+    }
     let typed_final_class = match store.types.try_get(typed_final.ty) {
         Some(Type::TypeRef {
             prefix,

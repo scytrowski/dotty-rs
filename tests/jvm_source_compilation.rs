@@ -17187,6 +17187,51 @@ fn immutable_reference_local_pair_constructor_audit_runs_on_jvm_only_path() {
                 "corrupting only the typed final Apply result must fail against the method result"
             );
 
+            let typed_outer_new = match &unit
+                .typed_ast
+                .get(local_proof.typed_final_expression())
+                .kind
+            {
+                TreeKind::Apply(apply) => match &unit.typed_ast.get(apply.function).kind {
+                    TreeKind::Select(selection) => selection.qualifier,
+                    _ => unreachable!("final Pair Apply selects its constructor"),
+                },
+                _ => unreachable!("receipt final tree is an Apply"),
+            };
+            assert!(matches!(
+                unit.typed_ast.get(typed_outer_new).kind,
+                TreeKind::New(_)
+            ));
+            let mut wrong_outer_new_result_ast = copy_ast(unit.typed_ast);
+            wrong_outer_new_result_ast.get_mut(typed_outer_new).ty = definitions.int;
+            let mut wrong_outer_new_result_unit = JvmCompilationUnit {
+                store: unit.store,
+                typed_ast: &wrong_outer_new_result_ast,
+                classes: unit.classes.clone(),
+            };
+            assert!(
+                matches!(
+                validate_immutable_local_initialization_proof(
+                    ImmutableLocalInitializationProofInput {
+                        source_id,
+                        method_tree,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: &wrong_outer_new_result_ast,
+                        source_index: index,
+                        source_typed_index,
+                        local_binding: Some(local_binding),
+                        jvm_unit: &mut wrong_outer_new_result_unit,
+                    }
+                ),
+                Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "typed final Pair New result must retain the canonical Pair TypeRef",
+                ))
+            ),
+                "corrupting only the typed final Pair New result must fail its canonical type check"
+            );
+
             assert!(matches!(
                 validate_immutable_local_initialization_proof(
                     ImmutableLocalInitializationProofInput {
