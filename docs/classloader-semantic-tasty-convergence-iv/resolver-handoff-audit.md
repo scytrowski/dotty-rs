@@ -148,8 +148,8 @@ task-isolated `TMPDIR` and `CARGO_TARGET_DIR`, `CARGO_PROFILE_TEST_DEBUG=0`,
   the shared temporary filesystem reached 100% usage. This result is not a
   pass. The classloader acceptance tests did run with JDK 21 and its
   `java.base.jmod`.
-- The original agent trace was not present in the supplied issue/checkout
-  context, so no trace was generated or represented as available.
+- The issue execution has a canonical trace; its report is finalized separately
+  from this audit and is not reproduced here.
 
 No resolver delegation is demonstrated by B1. The resolver-facing B2 API,
 typed error boundary, callback ordering and production behavior remain future
