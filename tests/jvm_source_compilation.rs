@@ -17035,6 +17035,93 @@ fn immutable_reference_local_pair_constructor_audit_runs_on_jvm_only_path() {
                     Some(typed_tree)
                 );
             }
+            let mut swapped_typed_ast = copy_ast(unit.typed_ast);
+            let typed_final = local_proof.typed_final_expression();
+            let TreeKind::Apply(swapped_final_apply) =
+                &mut swapped_typed_ast.get_mut(typed_final).kind
+            else {
+                unreachable!("receipt final tree is an Apply")
+            };
+            swapped_final_apply.args.swap(0, 1);
+            let mut swapped_typed_unit = JvmCompilationUnit {
+                store: unit.store,
+                typed_ast: &swapped_typed_ast,
+                classes: unit.classes.clone(),
+            };
+            assert!(
+                matches!(
+                validate_immutable_local_initialization_proof(
+                    ImmutableLocalInitializationProofInput {
+                        source_id,
+                        method_tree,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: &swapped_typed_ast,
+                        source_index: index,
+                        source_typed_index,
+                        local_binding: Some(local_binding),
+                        jvm_unit: &mut swapped_typed_unit,
+                    }
+                ),
+                Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "typed final Apply must match the original source argument order and roots",
+                ))
+            ),
+                "swapping only the typed Apply's children must fail against original source order"
+            );
+
+            let foreign_store = SemanticStore::default();
+            let mut foreign_store_unit = JvmCompilationUnit {
+                store: &foreign_store,
+                typed_ast: unit.typed_ast,
+                classes: unit.classes.clone(),
+            };
+            assert!(matches!(
+                validate_immutable_local_initialization_proof(
+                    ImmutableLocalInitializationProofInput {
+                        source_id,
+                        method_tree,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: unit.typed_ast,
+                        source_index: index,
+                        source_typed_index,
+                        local_binding: Some(local_binding),
+                        jvm_unit: &mut foreign_store_unit,
+                    }
+                ),
+                Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SemanticIdentity(
+                    "JVM unit and source proof must borrow the same semantic and typed stores",
+                ))
+            ), "a unit with only its semantic store replaced must fail pointer authentication");
+
+            let foreign_typed_ast = copy_ast(unit.typed_ast);
+            let mut foreign_typed_ast_unit = JvmCompilationUnit {
+                store: unit.store,
+                typed_ast: &foreign_typed_ast,
+                classes: unit.classes.clone(),
+            };
+            assert!(matches!(
+                validate_immutable_local_initialization_proof(
+                    ImmutableLocalInitializationProofInput {
+                        source_id,
+                        method_tree,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: unit.typed_ast,
+                        source_index: index,
+                        source_typed_index,
+                        local_binding: Some(local_binding),
+                        jvm_unit: &mut foreign_typed_ast_unit,
+                    }
+                ),
+                Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SemanticIdentity(
+                    "JVM unit and source proof must borrow the same semantic and typed stores",
+                ))
+            ), "a unit with only its typed AST replaced must fail pointer authentication");
             assert!(matches!(
                 validate_immutable_local_initialization_proof(
                     ImmutableLocalInitializationProofInput {

@@ -2766,6 +2766,11 @@ pub fn validate_immutable_local_initialization_proof<'session>(
         local_binding,
         jvm_unit,
     } = input;
+    if !std::ptr::eq(jvm_unit.store, store) || !std::ptr::eq(jvm_unit.typed_ast, typed_ast) {
+        return Err(CrossClassConstructorCallProofError::SemanticIdentity(
+            "JVM unit and source proof must borrow the same semantic and typed stores",
+        ));
+    }
     let method_node = source_ast
         .try_get(method_tree)
         .ok_or_else(|| source_error("factory method tree is stale"))?;
@@ -3522,11 +3527,20 @@ pub fn validate_immutable_local_initialization_proof<'session>(
     let typed_formal_use = source_typed_index
         .get(source_id, formal_arg)
         .ok_or_else(|| typed_error("final existing formal has no original typed mapping"))?;
-    if typed_final_apply.args != [typed_formal_use, typed_local_use]
-        && typed_final_apply.args != [typed_local_use, typed_formal_use]
-    {
+    let expected_typed_args = final_apply
+        .args
+        .iter()
+        .map(|source_arg| {
+            source_typed_index
+                .get(source_id, *source_arg)
+                .ok_or_else(|| {
+                    typed_error("final constructor argument has no original typed mapping")
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if typed_final_apply.args != expected_typed_args {
         return Err(typed_error(
-            "typed final Apply must preserve original argument order and roots",
+            "typed final Apply must match the original source argument order and roots",
         ));
     }
     if !matches!(store.types.try_get(typed_ast.try_get(typed_local_use)
