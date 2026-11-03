@@ -1,3 +1,6 @@
+#[path = "recursive_adt_rollback.rs"]
+mod recursive_adt_rollback;
+
 use super::*;
 
 #[test]

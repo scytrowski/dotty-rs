@@ -1,0 +1,21 @@
+# Recursive `Expr` negative and rollback contract (Scala 3.9.0)
+
+This test increment keeps `Expr.scala` byte-identical to the 2/2 accepted-root fixture. Negative attempts are generated from that immutable source by `negative-cases.tsv`; they do not change the accepted denominator. `scala-negative-matrix.tsv` records each Scala 3.9 classification and first diagnostic location. `rust-negative-matrix.tsv` records the Rust whole-method outcome as a deferred error category plus source tree/span, or as accepted. Rust receipts are checked by `recursive_adt_negative_matrix_is_stable_across_fresh_sessions` in two independently parsed sessions, including same-session retry of every rejected root.
+
+The explicit foreign `Evaluator.eval` control is accepted by Scala and Rust; its foreign `eval(true)` variant is rejected by both. The separately named foreign `Expr`/`Succ` source is rejected by Scala and safely deferred by Rust as `ExtractorPatternConstraintDeferred`. The classpath-only `Foreign.Succ.unapply` source is rejected by Scala and deferred by the Rust fixture classpath at `SymbolResolution` because the bounded checked-in Scala TASTy fixture cannot complete `scala.Some`'s `scala.Serializable` parent. These classifications are retained as diagnostics; neither case changes production behavior.
+
+The late-failure test adds only runtime test source after the frozen definitions: a successful `prior` method followed by `broken(expr: Expr): Boolean`, whose second case binds canonical `Succ.inner: Expr`, types the canonical recursive `Evaluator.eval(inner)` application, and then fails when the complete match result is checked against `Boolean`. A private transaction failure observer verifies the typed binder, callee symbol, recursive argument mapping, `Match`, and both `CaseDef` mappings before unwind. After unwind the existing #1999 projection plus store, resolver, typed-arena and source/typed mapping checkpoints are unchanged; failed root mappings and binder frames are absent. Retrying `broken` returns the same error without state change, then untouched `unwrap` and `eval` both type in the same session. A separately parsed session returns the same normalized diagnostic and source spans. No production change was needed because no rollback leak was demonstrated.
+
+The issue-local matrix is paired with the pinned `run` baseline (which executes the untouched two accepted roots and its 13 Scala classifications, including missing/wrong parent, invalid recursive argument, unsupported inferred result, foreign extractor and warning-only control). The serial crate run also executes the established structural tests in their owning fixtures: `source_trait_parent_product1_rejects_generic_and_class_parent_shapes`, `source_trait_parent_product1_defers_multi_parent_selector_shape`, `completed_source_product1_rejects_broken_selector_authentication`, `generated_case_class_unapply_validates_and_rolls_back_source_class_info`, `generated_product2_unapply_rejects_forged_provenance_and_field_identities`, and `malformed_source_parent_shape_is_explicit_and_lookup_is_transactional`. Those Rust-only tests exercise unrelated selector/parent/provenance corruption and retry paths without expanding the frozen `Expr` source denominator. This issue adds no general ADT, ProductN, exhaustivity, JVM, IR or TASTy behavior.
+
+## Reproduction
+
+Set `JAVA_HOME` to Temurin 21.0.8+9, `SCALA39_ROOT` to revision `777528f19a58e794c9954a42f433373472ec57f8`, and `COURSIER_MAVEN_ROOT` to the directory containing the eight artifacts listed in `scala-artifacts.sha256.tsv`. Then run:
+
+```sh
+./crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/run
+./crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/run-negative-matrix
+cargo +1.98.1 test -p dotty-typer --locked -- --test-threads=1
+```
+
+The first command verifies the frozen positive source, all eight artifact hashes and the existing two-root/13-case Scala baseline. The second compiles each named mutation and checks its recorded classification and first diagnostic. The final command runs the typer unit, integration and fixture tests serially; serial execution avoids exhausting the process file-descriptor limit when many JDK module resolvers run concurrently.

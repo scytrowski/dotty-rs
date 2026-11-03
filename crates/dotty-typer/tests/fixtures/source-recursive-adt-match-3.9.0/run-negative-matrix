@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Compile every named Expr negative/control mutation with pinned Scala 3.9.0."""
+from pathlib import Path
+import hashlib
+import os
+import re
+import subprocess
+import sys
+
+fixture = Path(__file__).resolve().parent
+repo = fixture.parents[4]
+scala = Path(os.environ["SCALA39_ROOT"])
+java = Path(os.environ["JAVA_HOME"]) / "bin/java"
+maven = Path(os.environ.get("COURSIER_MAVEN_ROOT", repo / "target/coursier/v1/https/repo1.maven.org/maven2"))
+scratch = Path(os.environ.get("DOTTY_RECURSIVE_ADT_TMP_ROOT", repo / "target/source-recursive-adt-negative-matrix"))
+assert subprocess.check_output(["git", "-C", str(scala), "rev-parse", "HEAD"], text=True).strip() == "777528f19a58e794c9954a42f433373472ec57f8"
+release = (Path(os.environ["JAVA_HOME"]) / "release").read_text()
+assert 'JAVA_VERSION="21.0.8"' in release and 'IMPLEMENTOR_VERSION="Temurin-21.0.8+9"' in release
+artifacts = []
+for line in (fixture / "scala-artifacts.sha256.tsv").read_text().splitlines():
+    digest, relative = line.split("\t")
+    path = maven / relative
+    assert path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == digest, relative
+    artifacts.append(path)
+classpath = os.pathsep.join(map(str, artifacts))
+scratch.mkdir(parents=True, exist_ok=True)
+(scratch / "tmp").mkdir(exist_ok=True)
+(scratch / "classes").mkdir(exist_ok=True)
+rows = {}
+for line in (fixture / "negative-cases.tsv").read_text().splitlines()[1:]:
+    name, root, expected, old, new = line.split("\t")
+    rows.setdefault(name, [root, expected, []])[2].append((old, new))
+report = ["case\troot\tscala_result\tdiagnostic_path_line_col\tfirst_diagnostic"]
+for name, (root, expected, mutations) in rows.items():
+    source = (fixture / "Expr.scala").read_text()
+    for old, new in mutations:
+        old, new = old.replace(r"\n", "\n"), new.replace(r"\n", "\n")
+        assert source.count(old) == 1, (name, old, source.count(old))
+        source = source.replace(old, new, 1)
+    source_path = scratch / f"{name}.scala"
+    source_path.write_text(source)
+    output = scratch / f"{name}.diagnostics.txt"
+    classes = scratch / "classes" / name
+    classes.mkdir(exist_ok=True)
+    result = subprocess.run([str(java), "-XX:-UsePerfData", "-Xshare:off", f"-Djava.io.tmpdir={scratch / 'tmp'}", "-cp", classpath, "dotty.tools.dotc.Main", "-classpath", classpath, "-d", str(classes), "-color:never", str(source_path)], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    diagnostic = result.stdout.replace(str(source_path), f"{name}.scala")
+    (output).write_text("".join(line.rstrip(" \t\r\n") + "\n" for line in diagnostic.splitlines()))
+    actual = "rejected" if result.returncode else ("accepted_with_warning" if re.search(r"[0-9]+ warning(s)? found", diagnostic) else "accepted")
+    assert actual == expected, f"{name}: expected {expected}, got {actual}; see {output}"
+    location = re.search(r"([A-Za-z0-9_-]+\.scala:[0-9]+:[0-9]+)", diagnostic)
+    first = next((line.strip() for line in diagnostic.splitlines() if line.strip()), "(no diagnostic)")
+    report.append("\t".join((name, root, actual, location.group(1) if location else "-", first)))
+report_text = "\n".join(report) + "\n"
+report_path = fixture / "scala-negative-matrix.tsv"
+if "--write-report" in sys.argv:
+    report_path.write_text(report_text)
+else:
+    assert report_path.read_text() == report_text, f"Scala report differs; rerun with --write-report after review: {report_path}"
+print(f"verified {len(rows)} pinned Scala negative/control cases")
