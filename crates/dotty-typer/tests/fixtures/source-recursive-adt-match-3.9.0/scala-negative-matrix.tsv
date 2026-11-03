@@ -1,0 +1,16 @@
+case	root	scala_result	diagnostic_path_line_col	first_diagnostic
+wrong_reference_literal	unwrap	rejected	wrong_reference_literal.scala:12:16	-- [E172] Type Error: wrong_reference_literal.scala:12:16
+wrong_reference_string_literal	unwrap	rejected	wrong_reference_string_literal.scala:12:16	-- [E172] Type Error: wrong_reference_string_literal.scala:12:16
+extractor_arity_zero	unwrap	rejected	extractor_arity_zero.scala:12:15	-- [E107] Syntax Error: extractor_arity_zero.scala:12:15
+extractor_arity_two	unwrap	rejected	extractor_arity_two.scala:12:15	-- [E107] Syntax Error: extractor_arity_two.scala:12:15
+unwrap_result_int	unwrap	rejected	unwrap_result_int.scala:12:26	-- [E007] Type Mismatch Error: unwrap_result_int.scala:12:26
+eval_result_boolean	evalResult	rejected	eval_result_boolean.scala:11:26	-- [E007] Type Mismatch Error: eval_result_boolean.scala:11:26
+cross_case_binder	eval	rejected	cross_case_binder.scala:16:26	-- [E006] Not Found Error: cross_case_binder.scala:16:26
+eval_boolean_argument	eval	rejected	eval_boolean_argument.scala:17:31	-- [E007] Type Mismatch Error: eval_boolean_argument.scala:17:31
+eval_zero_arguments	eval	rejected	eval_zero_arguments.scala:17:30	-- [E171] Type Error: eval_zero_arguments.scala:17:30
+eval_wrong_type	eval	rejected	eval_wrong_type.scala:17:31	-- [E007] Type Mismatch Error: eval_wrong_type.scala:17:31
+eval_wrong_arity	eval	rejected	eval_wrong_arity.scala:17:31	-- [E007] Type Mismatch Error: eval_wrong_arity.scala:17:31
+foreign_succ_owner	unwrap	rejected	foreign_succ_owner.scala:21:34	-- [E007] Type Mismatch Error: foreign_succ_owner.scala:21:34
+foreign_eval_wrong_argument	eval	rejected	foreign_eval_wrong_argument.scala:21:39	-- [E007] Type Mismatch Error: foreign_eval_wrong_argument.scala:21:39
+foreign_eval_control	eval	accepted	-	(no diagnostic)
+foreign_expr_succ_owner	eval	rejected	foreign_expr_succ_owner.scala:22:11	-- [E030] Match case Unreachable Warning: foreign_expr_succ_owner.scala:22:11

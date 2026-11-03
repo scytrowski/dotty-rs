@@ -1,0 +1,22 @@
+case	root	scala_result	old_source	new_source
+wrong_reference_literal	unwrap	rejected	case Succ(inner) => inner	case Succ(true) => true
+wrong_reference_string_literal	unwrap	rejected	case Succ(inner) => inner	case Succ("bad") => "bad"
+extractor_arity_zero	unwrap	rejected	case Succ(inner) => inner	case Succ() => expr
+extractor_arity_two	unwrap	rejected	case Succ(inner) => inner	case Succ(left, right) => left
+unwrap_result_int	unwrap	rejected	def unwrap(expr: Expr): Expr	def unwrap(expr: Expr): Int
+unwrap_result_int	unwrap	rejected	case Num(_)      => expr	case Num(_)      => 0
+eval_result_boolean	evalResult	rejected	object Evaluator:\n	object Evaluator:\n  def evalResult(expr: Expr): Boolean =\n    expr match\n      case Num(_)      => 0\n      case Succ(inner) => eval(inner) + 1\n\n
+cross_case_binder	eval	rejected	case Num(value)  => value	case Num(value)  => inner
+eval_boolean_argument	eval	rejected	eval(inner) + 1	eval(true) + 1
+eval_zero_arguments	eval	rejected	eval(inner) + 1	eval() + 1
+eval_wrong_type	eval	rejected	eval(inner) + 1	eval("bad") + 1
+eval_wrong_arity	eval	rejected	eval(inner) + 1	eval(inner, inner) + 1
+foreign_succ_owner	unwrap	rejected	package adt\n	package adt\n\nclass ForeignResult:\n  def isEmpty: Boolean = false\n  def get: String = ""\n\nobject Foreign:\n  object Succ:\n    def unapply(value: String): ForeignResult = new ForeignResult\n\n
+foreign_succ_owner	unwrap	rejected	case Succ(inner) => inner	case Foreign.Succ(inner) => inner
+foreign_eval_wrong_argument	eval	rejected	package adt\n	package adt\n\nobject Foreign:\n  def eval(value: Expr): Int = 0\n\n
+foreign_eval_wrong_argument	eval	rejected	eval(inner) + 1	Foreign.eval(true) + 1
+foreign_eval_control	eval	accepted	package adt\n	package adt\n\nobject Foreign:\n  def eval(value: Expr): Int = 0\n\n
+foreign_eval_control	eval	accepted	eval(inner) + 1	Foreign.eval(inner) + 1
+foreign_expr_succ_owner	eval	rejected	package adt\n	package adt\n\nobject Foreign:\n  sealed trait Expr\n  final case class Succ(inner: Expr) extends Expr\n  def eval(value: Expr): Int = 0\n\n
+foreign_expr_succ_owner	eval	rejected	def eval(expr: Expr): Int	def eval(expr: Foreign.Expr): Int
+foreign_expr_succ_owner	eval	rejected	case Succ(inner) => eval(inner) + 1	case Foreign.Succ(inner) => eval(inner) + 1
