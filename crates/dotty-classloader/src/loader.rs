@@ -9904,6 +9904,186 @@ mod tests {
     }
 
     #[test]
+    fn original_open_legacy_and_semantic_controls_use_distinct_fresh_store_ids() {
+        fn fresh_receipt(semantic: bool) -> (SymbolId, String) {
+            let mut store = SemanticStore::new();
+            if semantic {
+                // Ensure the independently allocated root IDs differ, so this
+                // control cannot accidentally compare equal arena numbers.
+                store.symbols.alloc(Symbol {
+                    name: Name::new(store.names.intern("AuditAllocation"), Namespace::Type),
+                    owner: None,
+                    kind: SymbolKind::Class,
+                    flags: SymbolFlags::EMPTY,
+                    visibility: Visibility::Public,
+                    info: SymbolInfo::Missing,
+                    origin: SymbolOrigin::Synthetic,
+                    annotations: Vec::new(),
+                    position: None,
+                    links: SymbolLinks::default(),
+                });
+            }
+            let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+            let name = open_binary_name();
+            let class = if semantic {
+                loader
+                    .load_semantic_class_with_tasty_unpickler(&name)
+                    .expect("private semantic Open control")
+            } else {
+                loader.load_class(&name).expect("legacy Open control")
+            };
+            let repeated = if semantic {
+                loader.load_semantic_class_with_tasty_unpickler(&name)
+            } else {
+                loader
+                    .load_class(&name)
+                    .map_err(SemanticTastyLoadError::ClassLoad)
+            }
+            .expect("same-loader repeat returns the original identity");
+            assert_eq!(repeated, class);
+            assert!(symbol_matches_binary_name(loader.store, class, &name));
+
+            let symbol = loader.store.symbols.get(class);
+            assert_eq!(symbol.kind, SymbolKind::Class);
+            assert_eq!(symbol.visibility, Visibility::Public);
+            let package = symbol.owner.expect("Open package owner");
+            assert_eq!(loader.store.symbols.get(package).kind, SymbolKind::Package);
+            assert_eq!(
+                loader
+                    .session
+                    .packages
+                    .get(&["me", "cytrowski", "tastyfixtures", "visibility"]),
+                Some(package),
+                "class owner is the canonical session package"
+            );
+            let class_info = class_info(loader.store, class).clone();
+            assert_eq!(class_info.parents.len(), 1);
+            assert_eq!(
+                parent_symbol(loader.store, class_info.parents[0]),
+                loader.definitions.object_class
+            );
+            let constructor_name = Name::new(loader.store.names.intern("<init>"), Namespace::Term);
+            let constructor = loader
+                .store
+                .scopes
+                .get(class_info.declarations)
+                .lookup(&constructor_name)
+                .expect("Open primary constructor");
+            assert_eq!(
+                loader.store.symbols.get(constructor).kind,
+                SymbolKind::Constructor
+            );
+            assert_eq!(loader.store.symbols.get(constructor).owner, Some(class));
+            let SymbolInfo::Complete(constructor_type) = loader.store.symbols.get(constructor).info
+            else {
+                panic!("Open constructor is complete");
+            };
+            let Type::Method(method) = loader.store.types.get(constructor_type) else {
+                panic!("Open constructor has a method signature");
+            };
+            assert!(method.params.is_empty());
+            let result = unit_type_ref_target(loader.store, method.result)
+                .expect("constructor result is a canonical class reference");
+            let result_name = symbol_name(loader.store, result);
+            assert_eq!(
+                result_name,
+                if semantic { "Open" } else { "Unit" },
+                "preserve the observed legacy/semantic constructor-result delta"
+            );
+            let fixture_root =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility");
+            assert_eq!(
+                loader.origin(class),
+                Some(&ClassOrigin::Directory(fixture_root)),
+                "selected TASTy resource origin"
+            );
+            assert_eq!(loader.session.resolved.get(&name), Some(&class));
+            assert_eq!(
+                loader.repository.get(&name).and_then(ClassEntry::symbol),
+                Some(class)
+            );
+            if semantic {
+                assert_eq!(loader.semantic_tasty_loaded.get(&name), Some(&class));
+            } else {
+                assert!(loader.semantic_tasty_loaded.is_empty());
+            }
+
+            let receipt = format!(
+                "class=Class;owner=me/cytrowski/tastyfixtures/visibility;visibility=Public;parent=java/lang/Object;constructor=owner:Open,params:0,result:{result_name};origin=tasty_visibility;repeat=same-symbol;package=canonical"
+            );
+            (class, receipt)
+        }
+
+        let (legacy_id_a, legacy_a) = fresh_receipt(false);
+        let (semantic_id_a, semantic_a) = fresh_receipt(true);
+        let (legacy_id_b, legacy_b) = fresh_receipt(false);
+        let (semantic_id_b, semantic_b) = fresh_receipt(true);
+        assert_ne!(legacy_id_a, semantic_id_a);
+        assert_ne!(legacy_id_b, semantic_id_b);
+        assert_eq!(legacy_id_a, legacy_id_b);
+        assert_eq!(semantic_id_a, semantic_id_b);
+        assert_eq!(legacy_a, legacy_b, "fresh legacy receipt is deterministic");
+        assert_eq!(
+            semantic_a, semantic_b,
+            "fresh semantic receipt is deterministic"
+        );
+        assert_eq!(
+            legacy_a.replace("result:Unit", "result:<route-result>"),
+            semantic_a.replace("result:Open", "result:<route-result>"),
+            "normalization retains all shared roles while preserving the constructor delta"
+        );
+        let recorded = include_str!(
+            "../../../docs/classloader-semantic-tasty-convergence-iv/resolver-handoff-receipts.tsv"
+        );
+        assert_eq!(
+            recorded,
+            format!(
+                "run\tadapter\treceipt\n1\tlegacy\t{legacy_a}\n1\tsemantic\t{semantic_a}\n2\tlegacy\t{legacy_b}\n2\tsemantic\t{semantic_b}\n"
+            ),
+            "checked-in normalized receipts match both deterministic fresh runs"
+        );
+        eprintln!("classloader-handoff-receipt adapter=legacy {legacy_a}");
+        eprintln!("classloader-handoff-receipt adapter=semantic {semantic_a}");
+        eprintln!(
+            "classloader-handoff-receipt fresh-runs=2 ids-distinct=true normalized=deterministic"
+        );
+    }
+
+    #[test]
+    fn semantic_open_identity_collision_across_loaders_rolls_back_then_legacy_reuses_it() {
+        let name = open_binary_name();
+        let mut store = SemanticStore::new();
+        let (first, definitions, session) = {
+            let mut loader = ClassLoader::new(open_test_class_path(), &mut store);
+            let definitions = loader.definitions();
+            let first = loader
+                .load_semantic_class_with_tasty_unpickler(&name)
+                .expect("first selected semantic request succeeds");
+            (first, definitions, loader.into_session())
+        };
+        let class_path = open_test_class_path();
+        let mut next = ClassLoader::with_definitions(class_path, &mut store, definitions, session);
+        let store_mark = next.store.checkpoint();
+        let session_mark = next.session.checkpoint();
+        assert!(matches!(
+            next.load_semantic_class_with_tasty_unpickler(&name),
+            Err(SemanticTastyLoadError::UnsupportedShape(
+                "the requested class already has a loader identity or package type declaration"
+            ))
+        ));
+        assert_eq!(next.store.checkpoint(), store_mark);
+        assert_eq!(next.session.checkpoint(), session_mark);
+        assert!(next.semantic_tasty_loaded.is_empty());
+        assert!(next.repository.get(&name).is_none());
+
+        let legacy = next
+            .load_class(&name)
+            .expect("ordinary lookup reuses the canonical session identity");
+        assert_eq!(legacy, first);
+        assert_eq!(next.session.resolved.get(&name), Some(&first));
+    }
+
+    #[test]
     fn open_legacy_and_semantic_loads_have_matched_cold_warm_profile_receipt() {
         use std::time::Instant;
 

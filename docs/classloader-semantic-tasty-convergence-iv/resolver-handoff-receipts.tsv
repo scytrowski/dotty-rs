@@ -1,0 +1,5 @@
+run	adapter	receipt
+1	legacy	class=Class;owner=me/cytrowski/tastyfixtures/visibility;visibility=Public;parent=java/lang/Object;constructor=owner:Open,params:0,result:Unit;origin=tasty_visibility;repeat=same-symbol;package=canonical
+1	semantic	class=Class;owner=me/cytrowski/tastyfixtures/visibility;visibility=Public;parent=java/lang/Object;constructor=owner:Open,params:0,result:Open;origin=tasty_visibility;repeat=same-symbol;package=canonical
+2	legacy	class=Class;owner=me/cytrowski/tastyfixtures/visibility;visibility=Public;parent=java/lang/Object;constructor=owner:Open,params:0,result:Unit;origin=tasty_visibility;repeat=same-symbol;package=canonical
+2	semantic	class=Class;owner=me/cytrowski/tastyfixtures/visibility;visibility=Public;parent=java/lang/Object;constructor=owner:Open,params:0,result:Open;origin=tasty_visibility;repeat=same-symbol;package=canonical

@@ -2249,6 +2249,72 @@ mod tests {
     }
 
     #[test]
+    fn resolver_legacy_load_hands_back_classpath_and_session_on_success_and_error() {
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let jdk = JdkClassPath::new(java_home.join("jmods")).expect("JDK 21 jmods");
+        let path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(fixture_path(
+                "tests/fixtures/tasty_visibility",
+            ))),
+            Box::new(jdk),
+        ]);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(path, definitions, LoadingSession::new());
+        let open = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let loaded = resolver
+            .load_class(&mut store, &open)
+            .expect("resolver's existing route loads Open through legacy loader");
+        assert!(
+            resolver.class_path.is_some(),
+            "classpath is restored on success"
+        );
+        assert_eq!(resolver.session.resolved.get(&open), Some(&loaded));
+        assert_eq!(
+            resolver
+                .session
+                .packages
+                .get(&["me", "cytrowski", "tastyfixtures", "visibility",]),
+            store.symbols.get(loaded).owner,
+            "legacy loader shares canonical package authority"
+        );
+        let fixture_root = fixture_path("tests/fixtures/tasty_visibility");
+        assert_eq!(
+            resolver.session.origins.get(&loaded),
+            Some(&ClassOrigin::Directory(fixture_root))
+        );
+
+        let missing =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/NoSuchAuditClass");
+        let store_mark = store.checkpoint();
+        let session_mark = resolver.session.checkpoint();
+        assert!(matches!(
+            resolver.load_class(&mut store, &missing),
+            Err(ClassLoadError::NotFound(name)) if name == missing
+        ));
+        assert!(
+            resolver.class_path.is_some(),
+            "classpath is restored on error"
+        );
+        assert_eq!(
+            store.checkpoint(),
+            store_mark,
+            "failed lookup rolls back store"
+        );
+        assert_eq!(
+            resolver.session.checkpoint(),
+            session_mark,
+            "failed lookup rolls back session"
+        );
+
+        let repeated = resolver
+            .load_class(&mut store, &open)
+            .expect("resolver remains usable after failed lookup");
+        assert_eq!(repeated, loaded, "session reuses canonical Open identity");
+        assert!(resolver.class_path.is_some());
+    }
+
+    #[test]
     fn package_term_prefix_matches_type_prefix_and_rejects_wrong_or_unknown_symbols() {
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
