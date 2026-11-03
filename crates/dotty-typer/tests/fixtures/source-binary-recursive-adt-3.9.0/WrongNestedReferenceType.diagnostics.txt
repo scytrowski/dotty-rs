@@ -1,0 +1,16 @@
+-- [E029] Pattern Match Exhaustivity Warning: WrongNestedReferenceType.scala:10:4
+10 |    expr match
+   |    ^^^^
+   |    match may not be exhaustive.
+   |
+   |    It would fail on pattern case: adt.Add(_, _)
+   |
+   | longer explanation available when compiling with `-explain`
+-- [E030] Match case Unreachable Error: WrongNestedReferenceType.scala:12:15 ---
+12 |      case Add(value: Int, _) => expr
+   |               ^
+   |               Unreachable case
+   |
+   | longer explanation available when compiling with `-explain`
+1 warning found
+1 error found

@@ -1,0 +1,9 @@
+-- [E029] Pattern Match Exhaustivity Warning: WarningOnly.scala:15:4 -----------
+15 |    expr match
+   |    ^^^^
+   |    match may not be exhaustive.
+   |
+   |    It would fail on pattern case: adt.Add(_, _)
+   |
+   | longer explanation available when compiling with `-explain`
+1 warning found

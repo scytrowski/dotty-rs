@@ -1,0 +1,22 @@
+-- [E030] Match case Unreachable Warning: WrongParent.scala:12:11 --------------
+12 |      case Add(left, _) => left
+   |           ^^^^^^^^^^^^
+   |           Unreachable case
+-- [E030] Match case Unreachable Warning: WrongParent.scala:17:11 --------------
+17 |      case Add(left, right) => eval(left) + eval(right)
+   |           ^^^^^^^^^^^^^^^^
+   |           Unreachable case
+-- [E030] Match case Unreachable Error: WrongParent.scala:12:11 ----------------
+12 |      case Add(left, _) => left
+   |           ^
+   |           Unreachable case
+   |
+   | longer explanation available when compiling with `-explain`
+-- [E030] Match case Unreachable Error: WrongParent.scala:17:11 ----------------
+17 |      case Add(left, right) => eval(left) + eval(right)
+   |           ^
+   |           Unreachable case
+   |
+   | longer explanation available when compiling with `-explain`
+2 warnings found
+2 errors found

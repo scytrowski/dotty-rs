@@ -1,0 +1,17 @@
+case	classification	reason
+WrongArityZero	rejected	Add extractor arity 0
+WrongArityOne	rejected	Add extractor arity 1
+WrongArityThree	rejected	Add extractor arity 3
+WrongNestedLiteralType	rejected	Int literal supplied where nested Expr is required
+WrongNestedReferenceType	rejected	Int typed pattern conflicts with nested Expr
+WrongMethodResult	rejected	method result annotation conflicts with Int-valued cases
+ForeignSameSpelledExtractor	accepted	qualified foreign Add extractor has a distinct unapply owner
+ExplicitCompanionUnapply	accepted	explicit Add companion unapply is accepted
+ExplicitSelectorCollision	accepted	explicit _1 selector is accepted
+RenamedConstructorFields	accepted	constructor field spelling does not change positional extractor acceptance
+SwappedConstructorFields	accepted	swapped constructor field order compiles with its own field identities
+MissingParent	rejected	Add has no Expr parent
+WrongParent	rejected	Add extends Product instead of Expr
+EscapedCaseBinder	rejected	case binder is referenced outside its case scope
+InvalidRecursiveArgument	rejected	Int argument is passed to recursive eval(Expr)
+WarningOnly	accepted_with_warning	non-exhaustive eval match emits a warning only

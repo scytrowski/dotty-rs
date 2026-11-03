@@ -1,0 +1,17 @@
+source	classification
+WrongArityZero	rejected
+WrongArityOne	rejected
+WrongArityThree	rejected
+WrongNestedLiteralType	rejected
+WrongNestedReferenceType	rejected
+WrongMethodResult	rejected
+ForeignSameSpelledExtractor	accepted
+ExplicitCompanionUnapply	accepted
+ExplicitSelectorCollision	accepted
+RenamedConstructorFields	accepted
+SwappedConstructorFields	accepted
+MissingParent	rejected
+WrongParent	rejected
+EscapedCaseBinder	rejected
+InvalidRecursiveArgument	rejected
+WarningOnly	accepted_with_warning

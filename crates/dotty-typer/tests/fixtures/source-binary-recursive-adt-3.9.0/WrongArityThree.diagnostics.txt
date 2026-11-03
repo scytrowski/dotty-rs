@@ -1,0 +1,7 @@
+-- [E107] Syntax Error: WrongArityThree.scala:12:14 ----------------------------
+12 |      case Add(left, _, _) => left
+   |           ^^^^^^^^^^^^^^^
+   |Wrong number of argument patterns for adt.Add; expected: (adt.Expr, adt.Expr)
+   |
+   | longer explanation available when compiling with `-explain`
+1 error found
