@@ -97,8 +97,10 @@ fn immutable_reference_local_pair_source_variation_first_error_matrix() {
         ),
         (
             "shadowed formal",
-            "TermNameNotFound",
-            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace("val fresh:", "val existing:"),
+            "factory body must be the original direct constructor Apply",
+            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH
+                .replace("val fresh:", "val existing:")
+                .replace("new Pair(existing, fresh)", "new Pair(existing, existing)"),
         ),
         (
             "use before initialization",
@@ -134,10 +136,10 @@ fn immutable_reference_local_pair_source_variation_first_error_matrix() {
         ),
         (
             "nested result block",
-            "AnonymousClassInstantiationDeferred",
+            "factory body must be the original direct constructor Apply",
             IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace(
-                "    new Pair(existing, fresh)",
-                "    { new Pair(existing, fresh) }",
+                "    val fresh: Counter = new Counter(seed)\n    new Pair(existing, fresh)",
+                "    val fresh: Counter = new Counter(seed);\n    { new Pair(existing, fresh) }",
             ),
         ),
         (

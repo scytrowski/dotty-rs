@@ -104,14 +104,16 @@ cover both positive source orientations and the paired first error. A separate
 first-error matrix changes one source property at a time and asserts the
 observed Rust failure class. The pinned Scala 3.9.0 compiler accepts
 package/class/method/local renames, class declaration reordering, two locals,
-a mutable local, a conditional initializer, and a helper-initialized local.
-Rust reaches the bounded paired-proof shape rejection for these; this records a
-gap without enabling new producer behavior. Scala rejects missing
-initialization, name shadowing, use before initialization, a wrong local type,
-a wrong constructor argument type, wrong constructor arity, a nested result
-block, a wrong constructor owner, and a third constructor argument. Rust
-reports the corresponding first typing/shape error classes in the test. These
-source-invalid cases are controls, not extra acceptance criteria.
+a mutable local, a valid local that shadows the formal (`val existing` and
+`new Pair(existing, existing)`), a nested result block separated from the
+initializer with a semicolon, a conditional initializer, and a
+helper-initialized local. Rust reaches the bounded paired-proof shape rejection
+for these; this records a gap without enabling new producer behavior. Scala
+rejects missing initialization, use before initialization, a wrong local type,
+a wrong constructor argument type, wrong constructor arity, a wrong
+constructor owner, and a third constructor argument. Rust reports the
+corresponding first typing/shape error classes in the test. These source-invalid
+cases are controls, not extra acceptance criteria.
 Corrupted-identity/bounds/ownership checks remain outside this bounded source
 variation matrix unless stated here; no result for them is inferred. The
 same-session Rust audit also swaps the two final argument typed edges, swaps
@@ -132,12 +134,12 @@ exercise their own local-flow contract, not this constructor-pair flow.
 | missing initializer | rejects | method body typing: `LocalValueRightHandSideMissing` |
 | two immutable locals | compiles | cross-class proof: original direct constructor Apply shape required |
 | mutable local | compiles | cross-class proof: original direct constructor Apply shape required |
-| shadowed formal name | rejects | method body typing: `TermNameNotFound` |
+| shadowed formal name, with both arguments using the local | compiles | cross-class proof: original direct constructor Apply shape required |
 | use before initialization | rejects | method body typing: `TermNameNotFound` |
 | wrong local type | rejects | method body typing: `TypeNameNotFound` |
 | wrong constructor argument type | rejects | method body typing: `ApplicationArgumentTypeMismatch` |
 | wrong constructor arity | rejects | method body typing: `ApplicationArityMismatch` |
-| nested result block | rejects | method body typing: `AnonymousClassInstantiationDeferred` |
+| nested result block, separated from initializer by `;` | compiles | cross-class proof: original direct constructor Apply shape required |
 | conditional initializer | compiles | cross-class proof: original direct constructor Apply shape required |
 | helper initializer | compiles | cross-class proof: original direct constructor Apply shape required |
 | wrong constructor owner | rejects | cross-class proof: original direct constructor Apply shape required |
