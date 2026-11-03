@@ -1,0 +1,1 @@
+Expr.scala#tree36|before=UnsupportedProduct1FieldType(Succ.inner)|after=complete Evaluator.unwrap(expr:Expr):Expr|match=Expr,cases=[Num(_):Expr=>expr,Succ(inner:Expr):Expr=>case-local inner]|selected=[Num$.unapply@Num$,Succ$.unapply@Succ$]|source_mappings=DefDef,Match,selector,CaseDef[0..1],UnApply[0..1],qualifier[0..1],wildcard,binder,body[0..1]|spans=preserved
