@@ -156,7 +156,7 @@ of being labeled a verifier error.
 
 ### AC9–AC10 — required executions, CI, and closeout boundary
 
-The integrated run used
+The integrated Scala/JDK run used
 `DOTTY_REQUIRE_SCALA_TASTY_MIXED_ORIGIN_CONSTRUCTOR_CONSUMER=1`, every active
 strict flag in `.github/workflows/jvm-tasty-factory-scala-consumer.yml`, and
 `DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`. It ran all listed Scala consumer and
@@ -165,7 +165,10 @@ and dual-reference forwarding checks, plus the mandatory
 `DOTTY_CLASSFILE_REQUIRE_JDK=1` classfile/JVM/source/artifact/stateful/identity
 gate. No required Scala or JDK target skipped. A full workspace-test attempt
 without `JAVA_HOME` stopped at a Java executable lookup; the full rerun with
-the hash-verified JDK path passed.
+the hash-verified JDK path passed before the final test-only proof-receipt
+instrumentation was added. The final focused proof test passed with that
+instrumentation; two final workspace reruns stalled during recompilation and
+were interrupted without reaching test execution.
 
 On the integrated baseline, these required checks passed:
 
@@ -180,7 +183,9 @@ git diff --check
 
 `RUST_TEST_THREADS=1` bounds the workspace test harness because the earlier
 #2011 default-parallel run on this host reached its process file-descriptor
-limit. No hosted full Scala corpus audit was run.
+limit. The final source was also checked with workspace Clippy, formatting,
+dependency-boundary validation, and `git diff --check`. No hosted full Scala
+corpus audit was run.
 
 Deferred forms remain outside this release gate: a third constructor
 argument, deeper nesting or branch-local construction, local/field/helper
