@@ -601,7 +601,7 @@ impl SourceTyper<'_> {
                 Some(Type::TypeRef {
                     target: TypeRefTarget::Symbol(product),
                     ..
-                }) if self.is_canonical_classpath_scala_product(*product)
+                }) if self.is_canonical_scala_product_symbol(*product)
             )
         });
         let has_product_projection = product_type.is_some();
@@ -671,7 +671,7 @@ impl SourceTyper<'_> {
         Ok(())
     }
 
-    fn is_canonical_classpath_scala_product(&self, product: SymbolId) -> bool {
+    fn is_canonical_scala_product_symbol(&self, product: SymbolId) -> bool {
         if !self.store.symbols.contains(product) {
             return false;
         }
@@ -682,10 +682,6 @@ impl SourceTyper<'_> {
                 .is_some_and(|owner| self.package_path(owner) == ["scala"])
             && symbol.name.namespace() == dotty_core::Namespace::Type
             && self.store.names.resolve(symbol.name.text()) == "Product"
-            && matches!(
-                symbol.origin,
-                SymbolOrigin::Classfile(_) | SymbolOrigin::Tasty(_)
-            )
     }
 
     fn is_canonical_source_trait_ref(&self, ty: TypeId, expected: SymbolId) -> bool {

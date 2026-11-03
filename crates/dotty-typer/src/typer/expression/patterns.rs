@@ -2875,10 +2875,41 @@ mod tests {
         let canonical_info = typer
             .complete_symbol(class)
             .expect("valid source Product1 class completes");
+        assert_eq!(
+            typer
+                .complete_symbol(class)
+                .expect("unchanged source Product1 class completes repeatedly"),
+            canonical_info,
+            "revalidation accepts the metadata this typer just published"
+        );
         let Type::ClassInfo(mut stale) = typer.store().types.get(canonical_info).clone() else {
             panic!("Succ ClassInfo")
         };
+        let product = type_ref_symbol(&typer, stale.parents[2]);
+        assert_eq!(
+            typer.store().symbols.get(product).origin,
+            SymbolOrigin::Source(source),
+            "the source-owned scala.Product fixture remains supported"
+        );
+        assert_eq!(
+            stale
+                .parents
+                .iter()
+                .filter(|parent| type_ref_symbol(&typer, **parent) == product)
+                .count(),
+            1,
+            "canonical ClassInfo has exactly one Product edge before corruption"
+        );
         stale.parents.push(stale.parents[2]);
+        assert_eq!(
+            stale
+                .parents
+                .iter()
+                .filter(|parent| type_ref_symbol(&typer, **parent) == product)
+                .count(),
+            2,
+            "the test corruption introduces only a duplicate Product edge"
+        );
         let stale_info = typer.store.types.alloc(Type::ClassInfo(stale));
         typer
             .store
