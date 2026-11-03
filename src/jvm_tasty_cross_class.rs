@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use dotty_core::ast::{ApplyKind, AstArena, TreeKind, Typed, TypedAst, Untyped};
+use dotty_core::ast::{ApplyKind, AstArena, TreeKind, Typed, TypedAst, TypedTreeId, Untyped};
 use dotty_core::{
     Definitions, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SourceTypedIndex,
     SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TermRefTarget, TreeId, Type,
@@ -108,6 +108,8 @@ pub enum ConstructorArgumentProofKind {
     DirectFormalPair,
     /// The outer constructor receives one original method formal and one nested call.
     FormalNestedPair,
+    /// The outer constructor receives one original formal and one initialized local.
+    FormalLocalPair,
     /// The outer constructor receives a same-instance planned method result.
     PlannedCall,
     /// The outer constructor receives one initialized immutable local val.
@@ -154,6 +156,24 @@ struct OrderedConstructorArgumentProof {
 enum OrderedConstructorArgumentOrigin {
     Formal(FormalConstructorArgumentProof),
     NestedNew(NestedConstructorArgumentProof),
+    LocalVal(ImmutableLocalArgumentProof),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ImmutableLocalArgumentProof {
+    source_block: TreeId<Untyped>,
+    source_declaration: TreeId<Untyped>,
+    source_initializer: TreeId<Untyped>,
+    source_use: TreeId<Untyped>,
+    typed_block: TreeId<Typed>,
+    typed_declaration: TreeId<Typed>,
+    typed_initializer: TreeId<Typed>,
+    typed_use: TreeId<Typed>,
+    symbol: SymbolId,
+    scope: dotty_core::ScopeId,
+    constructor: SymbolId,
+    local_type: TypeId,
+    result_type: TypeId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -330,6 +350,14 @@ impl ConstructorArgumentProof {
                         OrderedConstructorArgumentOrigin::Formal(_),
                         OrderedConstructorArgumentOrigin::Formal(_),
                     ) => ConstructorArgumentProofKind::DirectFormalPair,
+                    (
+                        OrderedConstructorArgumentOrigin::Formal(_),
+                        OrderedConstructorArgumentOrigin::LocalVal(_),
+                    )
+                    | (
+                        OrderedConstructorArgumentOrigin::LocalVal(_),
+                        OrderedConstructorArgumentOrigin::Formal(_),
+                    ) => ConstructorArgumentProofKind::FormalLocalPair,
                     _ => ConstructorArgumentProofKind::FormalNestedPair,
                 }
             }
@@ -468,13 +496,70 @@ impl OrderedConstructorArgumentProofView {
                 })
             }
             OrderedConstructorArgumentOrigin::NestedNew(_) => None,
+            OrderedConstructorArgumentOrigin::LocalVal(_) => None,
         }
     }
     pub const fn nested_new(self) -> Option<NestedConstructorArgumentProof> {
         match self.proof.origin {
             OrderedConstructorArgumentOrigin::NestedNew(proof) => Some(proof),
             OrderedConstructorArgumentOrigin::Formal(_) => None,
+            OrderedConstructorArgumentOrigin::LocalVal(_) => None,
         }
+    }
+    pub const fn local_val(self) -> Option<ImmutableLocalArgumentProofView> {
+        match self.proof.origin {
+            OrderedConstructorArgumentOrigin::LocalVal(proof) => {
+                Some(ImmutableLocalArgumentProofView { proof })
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImmutableLocalArgumentProofView {
+    proof: ImmutableLocalArgumentProof,
+}
+
+impl ImmutableLocalArgumentProofView {
+    pub const fn source_block(self) -> TreeId<Untyped> {
+        self.proof.source_block
+    }
+    pub const fn source_declaration(self) -> TreeId<Untyped> {
+        self.proof.source_declaration
+    }
+    pub const fn source_initializer(self) -> TreeId<Untyped> {
+        self.proof.source_initializer
+    }
+    pub const fn source_use(self) -> TreeId<Untyped> {
+        self.proof.source_use
+    }
+    pub const fn typed_block(self) -> TreeId<Typed> {
+        self.proof.typed_block
+    }
+    pub const fn typed_declaration(self) -> TreeId<Typed> {
+        self.proof.typed_declaration
+    }
+    pub const fn typed_initializer(self) -> TreeId<Typed> {
+        self.proof.typed_initializer
+    }
+    pub const fn typed_use(self) -> TreeId<Typed> {
+        self.proof.typed_use
+    }
+    pub const fn symbol(self) -> SymbolId {
+        self.proof.symbol
+    }
+    pub const fn scope(self) -> dotty_core::ScopeId {
+        self.proof.scope
+    }
+    pub const fn constructor(self) -> SymbolId {
+        self.proof.constructor
+    }
+    pub const fn local_type(self) -> TypeId {
+        self.proof.local_type
+    }
+    pub const fn result_type(self) -> TypeId {
+        self.proof.result_type
     }
 }
 
@@ -1078,6 +1163,7 @@ fn validate_cross_class_constructor_call_proofs_inner<'session>(
                     method_def,
                     method,
                     source_rhs,
+                    typer,
                     store,
                     definitions,
                     source_ast,
@@ -1165,6 +1251,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
     method_def: &dotty_core::ast::DefDef<Untyped>,
     method: SymbolId,
     source_rhs: TreeId<Untyped>,
+    typer: Option<&SourceTyper<'_>>,
     store: &'session SemanticStore,
     definitions: &'session Definitions,
     source_ast: &'session AstArena<Untyped>,
@@ -1342,8 +1429,53 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         ));
     }
 
+    let (source_apply_tree, source_block) =
+        match source_ast.try_get(source_rhs).map(|node| &node.kind) {
+            Some(TreeKind::Apply(_)) => (source_rhs, None),
+            Some(TreeKind::Block(block)) if block.stats.len() == 1 => (block.expr, Some(block)),
+            _ => {
+                return Err(source_error(
+                    "factory body must be a direct Apply or one-local Block",
+                ));
+            }
+        };
+    let immutable_local = if let Some(block) = source_block {
+        let [declaration] = block.stats.as_slice() else {
+            return Err(source_error(
+                "local Pair call block must contain exactly one declaration",
+            ));
+        };
+        if !matches!(
+            source_ast.try_get(*declaration).map(|node| &node.kind),
+            Some(TreeKind::ValDef(_))
+        ) {
+            return Err(source_error(
+                "local Pair call block must contain one val declaration",
+            ));
+        }
+        let typer = typer.ok_or_else(|| {
+            typed_error("local Pair call requires the original Typer binding resolver")
+        })?;
+        let local_binding = typer.typed_local_binding_at(source_id, *declaration);
+        Some(validate_immutable_local_initialization_proof(
+            ImmutableLocalInitializationProofInput {
+                source_id,
+                method_tree,
+                store,
+                definitions,
+                source_ast,
+                typed_ast,
+                source_index,
+                source_typed_index,
+                local_binding,
+                jvm_unit,
+            },
+        )?)
+    } else {
+        None
+    };
     let TreeKind::Apply(outer_apply) = &source_ast
-        .try_get(source_rhs)
+        .try_get(source_apply_tree)
         .ok_or_else(|| source_error("factory method RHS is stale"))?
         .kind
     else {
@@ -1464,22 +1596,27 @@ fn validate_two_argument_constructor_call_candidate<'session>(
     let typed_new_tpt = source_typed_index
         .get(source_id, source_new_node.tpt)
         .ok_or_else(|| typed_error("outer New type tree has no exact typed binding"))?;
-    let typed_outer_args = [
-        source_typed_index
-            .get(source_id, outer_apply.args[0])
-            .ok_or_else(|| typed_error("first outer argument has no exact typed binding"))?,
-        source_typed_index
-            .get(source_id, outer_apply.args[1])
-            .ok_or_else(|| typed_error("second outer argument has no exact typed binding"))?,
-    ];
-    if outer_apply.args[0] == outer_apply.args[1] || typed_outer_args[0] == typed_outer_args[1] {
-        return Err(typed_error(
-            "sibling outer arguments must retain distinct source and typed roots",
-        ));
+    let typed_outer_args = map_ordered_constructor_argument_bindings(
+        source_typed_index,
+        source_id,
+        [outer_apply.args[0], outer_apply.args[1]],
+    )?;
+    let typed_apply_tree = source_typed_index
+        .get(source_id, source_apply_tree)
+        .ok_or_else(|| typed_error("final constructor Apply has no exact typed binding"))?;
+    if source_block.is_some() {
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_apply_tree,
+            typed_apply_tree,
+            "final Pair constructor Apply",
+        )?;
     }
     let typed_root = typed_ast
-        .try_get(typed_rhs)
-        .ok_or_else(|| typed_error("factory typed RHS is stale"))?;
+        .try_get(typed_apply_tree)
+        .ok_or_else(|| typed_error("factory typed final expression is stale"))?;
     let typed_apply = match &typed_root.kind {
         TreeKind::Apply(application) if application.kind == ApplyKind::Regular => application,
         _ => {
@@ -1488,11 +1625,22 @@ fn validate_two_argument_constructor_call_candidate<'session>(
             ));
         }
     };
-    if typed_apply.function != typed_select || typed_apply.args != typed_outer_args {
+    if typed_apply.args.len() != 2 {
         return Err(typed_error(
             "typed outer Apply must preserve exact ordered source mappings",
         ));
     }
+    if typed_apply.function != typed_select {
+        return Err(typed_error(
+            "typed outer Apply must preserve exact ordered source mappings",
+        ));
+    }
+    validate_ordered_constructor_argument_bindings(
+        source_typed_index,
+        source_id,
+        [outer_apply.args[0], outer_apply.args[1]],
+        [typed_apply.args[0], typed_apply.args[1]],
+    )?;
     let typed_selection = match &typed_ast
         .try_get(typed_select)
         .ok_or_else(|| typed_error("outer typed Select is stale"))?
@@ -1859,12 +2007,18 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         ));
     }
 
-    let direct_formal_arguments = outer_apply.args.iter().all(|argument| {
-        matches!(
-            source_ast.try_get(*argument).map(|node| &node.kind),
-            Some(TreeKind::Ident(_))
-        )
-    });
+    let direct_formal_arguments = outer_apply.args.iter().copied().zip(typed_outer_args).all(
+        |(source_argument, typed_argument)| {
+            matches!(
+                source_ast.try_get(source_argument).map(|node| &node.kind),
+                Some(TreeKind::Ident(_))
+            ) && matches!(
+                typed_ast.try_get(typed_argument).and_then(|node| store.types.try_get(node.ty)),
+                Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. })
+                    if method_formals.contains(symbol)
+            )
+        },
+    );
     let mut ordered_argument_proofs = Vec::with_capacity(2);
     if direct_formal_arguments {
         for (index, typed_argument) in typed_outer_args.iter().copied().enumerate() {
@@ -2021,6 +2175,69 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                     .ok_or_else(|| typed_error("Pair formal argument typed root is stale"))?;
                 if !matches!(typed_argument_node.kind, TreeKind::Ident(_)) {
                     return Err(typed_error("Pair formal argument typed root must be Ident"));
+                }
+                if let Some(local) = immutable_local.as_ref()
+                    && matches!(
+                        store.types.try_get(typed_argument_node.ty),
+                        Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. })
+                            if *symbol == local.local()
+                    )
+                {
+                    if local.source_use() != source_outer_argument
+                        || local.typed_use() != typed_outer_argument
+                    {
+                        return Err(typed_error(
+                            "local Pair argument must preserve the exact original source and typed use roots",
+                        ));
+                    }
+                    let TreeKind::Ident(local_ident) = &source_ast.get(source_outer_argument).kind
+                    else {
+                        unreachable!("the local receipt authenticates an Ident use")
+                    };
+                    let target = match store.types.try_get(typed_argument_node.ty) {
+                        Some(Type::TermRef {
+                            target: TermRefTarget::Symbol(target),
+                            ..
+                        }) => *target,
+                        _ => {
+                            return Err(typed_error(
+                                "local Pair argument must retain its exact local TermRef",
+                            ));
+                        }
+                    };
+                    if target != local.local()
+                        || store.names.resolve(local_ident.name.text())
+                            != store
+                                .names
+                                .resolve(store.symbols.get(local.local()).name.text())
+                        || store.symbols.get(local.local()).info
+                            != SymbolInfo::Complete(local.local_type())
+                    {
+                        return Err(typed_error(
+                            "ordered local Pair argument must retain its exact initialized local identity and type",
+                        ));
+                    }
+                    let proof = ImmutableLocalArgumentProof {
+                        source_block: local.source_block(),
+                        source_declaration: local.source_declaration(),
+                        source_initializer: local.source_initializer(),
+                        source_use: local.source_use(),
+                        typed_block: local.typed_block(),
+                        typed_declaration: local.typed_declaration(),
+                        typed_initializer: local.typed_initializer(),
+                        typed_use: local.typed_use(),
+                        symbol: local.local(),
+                        scope: local.scope(),
+                        constructor: local.constructor(),
+                        local_type: local.local_type(),
+                        result_type: typed_argument_node.ty,
+                    };
+                    ordered_argument_proofs.push(OrderedConstructorArgumentProof {
+                        source_argument: source_outer_argument,
+                        typed_argument: typed_outer_argument,
+                        origin: OrderedConstructorArgumentOrigin::LocalVal(proof),
+                    });
+                    continue;
                 }
                 let formal = match store.types.try_get(typed_argument_node.ty) {
                     Some(Type::TermRef {
@@ -2638,6 +2855,49 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         method_descriptor: method_descriptor.to_owned(),
         constructor_descriptor: constructor_descriptor.to_owned(),
     })
+}
+
+/// Resolve the canonical typed roots for two source-ordered constructor
+/// arguments. Keeping this check separate lets callers exercise the argument
+/// provenance validator without replacing a Typer-owned session index.
+pub fn map_ordered_constructor_argument_bindings(
+    source_typed_index: &SourceTypedIndex,
+    source_id: SourceId,
+    source_arguments: [TreeId<Untyped>; 2],
+) -> Result<[TypedTreeId; 2], CrossClassConstructorCallProofError> {
+    let typed_error = |message| CrossClassConstructorCallProofError::TypedBinding(message);
+    let typed_arguments = [
+        source_typed_index
+            .get(source_id, source_arguments[0])
+            .ok_or_else(|| typed_error("first outer argument has no exact typed binding"))?,
+        source_typed_index
+            .get(source_id, source_arguments[1])
+            .ok_or_else(|| typed_error("second outer argument has no exact typed binding"))?,
+    ];
+    if source_arguments[0] == source_arguments[1] || typed_arguments[0] == typed_arguments[1] {
+        return Err(typed_error(
+            "sibling outer arguments must retain distinct source and typed roots",
+        ));
+    }
+    Ok(typed_arguments)
+}
+
+/// Check that source argument edges retain their exact original order in the
+/// typed Apply. This is shared by the proof path and focused provenance tests.
+pub fn validate_ordered_constructor_argument_bindings(
+    source_typed_index: &SourceTypedIndex,
+    source_id: SourceId,
+    source_arguments: [TreeId<Untyped>; 2],
+    typed_arguments: [TypedTreeId; 2],
+) -> Result<(), CrossClassConstructorCallProofError> {
+    let expected =
+        map_ordered_constructor_argument_bindings(source_typed_index, source_id, source_arguments)?;
+    if expected != typed_arguments {
+        return Err(CrossClassConstructorCallProofError::TypedBinding(
+            "typed outer Apply must preserve exact ordered source mappings",
+        ));
+    }
+    Ok(())
 }
 
 fn is_direct_constructor_call_candidate(ast: &AstArena<Untyped>, rhs: TreeId<Untyped>) -> bool {

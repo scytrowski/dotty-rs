@@ -51,7 +51,7 @@ fn immutable_reference_local_pair_source_variation_first_error_matrix() {
     let cases = [
         (
             "package/class/method/local rename",
-            "factory body must be the original direct constructor Apply",
+            "BodyExpression",
             IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH
                 .replace("package example", "package renamed")
                 .replace("Counter", "Gauge")
@@ -61,7 +61,7 @@ fn immutable_reference_local_pair_source_variation_first_error_matrix() {
         ),
         (
             "class declaration reorder",
-            "factory body must be the original direct constructor Apply",
+            "BodyExpression",
             {
                 let source = IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH;
                 let counter_start = source.find("class Counter(").unwrap();
@@ -84,7 +84,7 @@ fn immutable_reference_local_pair_source_variation_first_error_matrix() {
         ),
         (
             "two locals",
-            "factory body must be the original direct constructor Apply",
+            "factory body must be a direct Apply or one-local Block",
             IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace(
                 "    val fresh: Counter = new Counter(seed)",
                 "    val extra: Counter = new Counter(seed)\n    val fresh: Counter = new Counter(seed)",
@@ -92,12 +92,12 @@ fn immutable_reference_local_pair_source_variation_first_error_matrix() {
         ),
         (
             "mutable local",
-            "factory body must be the original direct constructor Apply",
+            "local must be the original immutable method-owned local",
             IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace("val fresh:", "var fresh:"),
         ),
         (
             "shadowed formal",
-            "factory body must be the original direct constructor Apply",
+            "local must retain its source name without shadowing a formal",
             IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH
                 .replace("val fresh:", "val existing:")
                 .replace("new Pair(existing, fresh)", "new Pair(existing, existing)"),
@@ -136,7 +136,7 @@ fn immutable_reference_local_pair_source_variation_first_error_matrix() {
         ),
         (
             "nested result block",
-            "factory body must be the original direct constructor Apply",
+            "final Block expression must be the original Pair constructor Apply",
             IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace(
                 "    val fresh: Counter = new Counter(seed)\n    new Pair(existing, fresh)",
                 "    val fresh: Counter = new Counter(seed);\n    { new Pair(existing, fresh) }",
@@ -144,7 +144,7 @@ fn immutable_reference_local_pair_source_variation_first_error_matrix() {
         ),
         (
             "conditional initializer",
-            "factory body must be the original direct constructor Apply",
+            "local initializer must be the original direct constructor Apply",
             IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace(
                 "val fresh: Counter = new Counter(seed)",
                 "val fresh: Counter = if seed > 0 then new Counter(seed) else new Counter(0)",
@@ -152,7 +152,7 @@ fn immutable_reference_local_pair_source_variation_first_error_matrix() {
         ),
         (
             "helper initializer",
-            "factory body must be the original direct constructor Apply",
+            "initializer function must be the constructor Select",
             IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH
                 .replace(
                     "class PairFactory:\n  def create",
@@ -162,7 +162,7 @@ fn immutable_reference_local_pair_source_variation_first_error_matrix() {
         ),
         (
             "wrong constructor owner",
-            "factory body must be the original direct constructor Apply",
+            "typed final Apply must retain the method's canonical Pair result type",
             IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH
                 .replace(
                     "class PairFactory:",
