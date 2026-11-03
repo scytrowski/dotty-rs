@@ -89,6 +89,15 @@ struct TastyTopLevelSelection {
     constructor_parameter_address: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TastyHeaderFieldSelection {
+    binary_name: BinaryName,
+    class_address: u32,
+    field_address: u32,
+    constructor_address: u32,
+    constructor_parameter_address: u32,
+}
+
 fn is_compiler_source_file_annotation(
     file: &dotty_tasty::tasty::TastyFile<'_>,
     annotation: &dotty_tasty::tasty::RawNode<'_>,
@@ -2217,6 +2226,266 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// The opt-in path accepts only the audited simple-class shape. This
     /// check happens before the unpickler enters package scopes, so a
     /// multi-declaration unit cannot publish partially supported siblings.
+    fn validate_immutable_header_field_shape(
+        file: &dotty_tasty::tasty::TastyFile<'_>,
+        name: &BinaryName,
+    ) -> Result<TastyHeaderFieldSelection, SemanticTastyLoadError> {
+        use dotty_tasty::tasty::{
+            DefDefHeaderItem, DefinitionBody, ParameterNode, RawTree, TEMPLATE_TAG, TYPEDEF_TAG,
+        };
+
+        let asts = file.asts().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Parse(error),
+            ))
+        })?;
+        let package = asts
+            .get(0)
+            .filter(|node| asts.len() == 1 && node.tag == dotty_tasty::tasty::PACKAGE_TAG)
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection requires one package tree",
+            ))?
+            .decode_package()
+            .map_err(|error| {
+                SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                    name.clone(),
+                    tasty_symbol::TastyDecodeError::Ast(error),
+                ))
+            })?;
+        let package_name = package
+            .path_name()
+            .and_then(|reference| file.render_name(reference).ok());
+        if package_name.as_deref() != Some(name.package_path().replace('/', ".").as_str())
+            || package.stats.len() != 1
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection requires one matching top-level class",
+            ));
+        }
+        let root = package
+            .stats
+            .get(0)
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection requires one matching top-level class",
+            ))?;
+        if root.tag != TYPEDEF_TAG {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected field owner must be a class",
+            ));
+        }
+        let definition = root.decode_definition().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?;
+        if file.names().get_utf8(definition.name()) != Some(name.simple_name()) {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field owner must match the requested binary name",
+            ));
+        }
+        let DefinitionBody::TypeDef {
+            type_or_template,
+            tail,
+            ..
+        } = root.decode_definition_body().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?
+        else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected field owner must be a class",
+            ));
+        };
+        if has_unsupported_class_annotations(file, &tail)
+            || !matches!(&type_or_template, RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG)
+            || tail.iter().any(|modifier| {
+                matches!(modifier, dotty_tasty::tasty::DefinitionTail::Modifier(tag)
+                    if matches!(*tag, dotty_tasty::tasty::OBJECT_TAG | dotty_tasty::tasty::TRAIT_TAG))
+            })
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected field owner must be an unannotated class template",
+            ));
+        }
+        let RawTree::LengthNode(template) = &type_or_template else {
+            unreachable!("class template checked above")
+        };
+        let shape = template.decode_template_structure().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?;
+        let [
+            ParameterNode::TermParam {
+                name: field_name, ..
+            },
+        ] = shape.term_params.as_slice()
+        else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection supports exactly one class-header term field",
+            ));
+        };
+        let field = shape.term_params[0].decode_body().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?;
+        if !field.tail.is_empty() {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the selected class-header field must be immutable and unannotated",
+            ));
+        }
+        if !shape.type_params.is_empty() || shape.stats.len() != 1 {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection supports one constructor and no other class members",
+            ));
+        }
+        let Some(RawTree::LengthNode(constructor_node)) = shape.stats.first() else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection requires one primary constructor",
+            ));
+        };
+        if constructor_node.tag != dotty_tasty::tasty::DEFDEF_TAG {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection requires one primary constructor",
+            ));
+        }
+        let constructor = constructor_node.decode_defdef_body().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Ast(error),
+            ))
+        })?;
+        let [
+            ParameterNode::TermParam {
+                name: formal_name, ..
+            },
+        ] = constructor.parameters.as_slice()
+        else {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection requires one ordinary constructor parameter",
+            ));
+        };
+        if field_name != formal_name
+            || file.names().get_utf8(constructor.name) != Some("<init>")
+            || constructor.header_items.len() != 1
+            || !matches!(constructor.header_items.first(), Some(DefDefHeaderItem::Parameter(ParameterNode::TermParam { name, .. })) if name == formal_name)
+            || !constructor.clauses.is_empty()
+            || !Self::constructor_parameter_is_ordinary(constructor.parameters.first())
+            || has_unsupported_definition_annotations(&constructor.tail)
+        {
+            return Err(SemanticTastyLoadError::UnsupportedShape(
+                "the field projection requires matching immutable field and ordinary Int formal",
+            ));
+        }
+
+        let address_index = file.ast_address_index().map_err(|error| {
+            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                name.clone(),
+                tasty_symbol::TastyDecodeError::Parse(error),
+            ))
+        })?;
+        let class_node = address_index
+            .iter()
+            .find(|node| {
+                node.tag == TYPEDEF_TAG
+                    && node.payload.as_ptr() == root.payload.as_ptr()
+                    && node.payload.len() == root.payload.len()
+            })
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the selected field owner is absent from the AST address index",
+            ))?;
+        let class_address = u32::try_from(class_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the class address exceeds the supported wire range",
+            )
+        })?;
+        let class_tree_node = address_index.get_node(class_address).ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the class is absent from the structural address index",
+            ),
+        )?;
+        let template_node = address_index
+            .iter()
+            .find(|node| {
+                node.tag == TEMPLATE_TAG
+                    && node.payload.as_ptr() == template.payload.as_ptr()
+                    && node.payload.len() == template.payload.len()
+                    && address_index.parent_of(node.offset as u32) == Some(class_tree_node)
+            })
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the selected class template is absent from the AST address index",
+            ))?;
+        let template_address = u32::try_from(template_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the template address exceeds the supported wire range",
+            )
+        })?;
+        let template_tree_node = address_index.get_node(template_address).ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the template is absent from the structural address index",
+            ),
+        )?;
+        let field_node = address_index
+            .iter()
+            .find(|node| {
+                node.tag == dotty_tasty::tasty::PARAM_TAG
+                    && node.payload.as_ptr() == shape.term_params[0].payload().as_ptr()
+                    && node.payload.len() == shape.term_params[0].payload().len()
+            })
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the selected header field is absent from the AST address index",
+            ))?;
+        let field_address = u32::try_from(field_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the field address exceeds the supported wire range",
+            )
+        })?;
+        let Some(RawTree::LengthNode(stat)) = shape.stats.first() else {
+            unreachable!("constructor shape checked above")
+        };
+        let constructor_address =
+            direct_template_stat_address(&address_index, template_tree_node, stat).ok_or(
+                SemanticTastyLoadError::UnsupportedShape(
+                    "the selected constructor is absent from the AST address index",
+                ),
+            )?;
+        let constructor_tree_node = address_index.get_node(constructor_address).ok_or(
+            SemanticTastyLoadError::UnsupportedShape(
+                "the constructor is absent from the structural address index",
+            ),
+        )?;
+        let formal_node = address_index
+            .iter()
+            .find(|node| {
+                node.tag == dotty_tasty::tasty::PARAM_TAG
+                    && node.payload.as_ptr() == constructor.parameters[0].payload().as_ptr()
+                    && node.payload.len() == constructor.parameters[0].payload().len()
+                    && address_index.parent_of(node.offset as u32) == Some(constructor_tree_node)
+            })
+            .ok_or(SemanticTastyLoadError::UnsupportedShape(
+                "the constructor formal is absent from the AST address index",
+            ))?;
+        let constructor_parameter_address = u32::try_from(formal_node.offset).map_err(|_| {
+            SemanticTastyLoadError::UnsupportedShape(
+                "the constructor formal address exceeds the supported wire range",
+            )
+        })?;
+        Ok(TastyHeaderFieldSelection {
+            binary_name: name.clone(),
+            class_address,
+            field_address,
+            constructor_address,
+            constructor_parameter_address,
+        })
+    }
+
     fn validate_semantic_class_shape(
         file: &dotty_tasty::tasty::TastyFile<'_>,
         name: &BinaryName,
@@ -9598,6 +9867,57 @@ mod tests {
         assert_eq!(loader.semantic_tasty_loaded.get(&plain_name), Some(&plain));
         assert_eq!(loader.session.resolved.get(&plain_name), Some(&plain));
         assert!(loader.repository.get(&malformed_name).is_none());
+    }
+
+    #[test]
+    fn authentic_immutable_header_field_selection_is_indexed_and_does_not_enable_class_loading() {
+        let with_val_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorWithVal");
+        let bytes = semantic_unpickler_fixture_bytes("CtorWithVal.tasty");
+        let file = tasty_symbol::parse_classloader_tasty(&bytes).expect("authentic fixture parses");
+        let selection =
+            ClassLoader::<InMemoryTastyClassPath>::validate_immutable_header_field_shape(
+                &file,
+                &with_val_name,
+            )
+            .expect("one immutable class-owned header field and its constructor formal");
+        assert_eq!(
+            selection,
+            TastyHeaderFieldSelection {
+                binary_name: with_val_name.clone(),
+                class_address: 4,
+                field_address: 9,
+                constructor_address: 28,
+                constructor_parameter_address: 31,
+            }
+        );
+        assert!(matches!(
+            ClassLoader::<InMemoryTastyClassPath>::validate_semantic_class_shape(
+                &file,
+                &with_val_name,
+            ),
+            Err(SemanticTastyLoadError::UnsupportedShape(_))
+        ));
+
+        let plain_bytes = semantic_unpickler_fixture_bytes("CtorPlain.tasty");
+        let plain_file = tasty_symbol::parse_classloader_tasty(&plain_bytes)
+            .expect("plain constructor fixture parses");
+        let plain_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+        assert!(matches!(
+            ClassLoader::<InMemoryTastyClassPath>::validate_immutable_header_field_shape(
+                &plain_file,
+                &plain_name,
+            ),
+            Err(SemanticTastyLoadError::UnsupportedShape(_))
+        ));
+        let wrong_owner = BinaryName::from_internal("other/package/CtorWithVal");
+        assert!(matches!(
+            ClassLoader::<InMemoryTastyClassPath>::validate_immutable_header_field_shape(
+                &file,
+                &wrong_owner,
+            ),
+            Err(SemanticTastyLoadError::UnsupportedShape(_))
+        ));
     }
 
     #[test]
