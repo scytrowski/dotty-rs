@@ -294,7 +294,7 @@ batch output, not the Scala oracle files.
 | | `example/PairFactory.class` | `4b764c8dccf4074f3df76ede0326c7da7e94af458aa21d4d8a660bc2193886d9` | `009425da-889b-07c8-0000-000000008198` |
 | | `example/PairFactory.tasty` | `4264dc0388a33002da2500cd178fd05c3f94199b9cac8221d3bdde67ef549009` | `009425da-889b-07c8-0000-000000008198` |
 | `createAndWrap(existing, seed)` | `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3-c009-68ac-0000-000000008193` |
-| | `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca7c87842b8dca7c6a8293045` | `008071c3-c009-68ac-0000-000000008193` |
+| | `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008071c3-c009-68ac-0000-000000008193` |
 | | `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d-7441-c7f0-0000-000000008198` |
 | | `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d-7441-c7f0-0000-000000008198` |
 | | `example/PairFactory.class` | `c01945fb2aa13978a44c036646bc0d29c0eb5455f44c58244f57e5f0fe9bf0cc` | `00921f29-eb77-4ec1-0000-000000008198` |
@@ -350,6 +350,141 @@ unconfigured test invocation skips that check. The Scala oracle source remains
 pinned at `777528f19a58e794c9954a42f433373472ec57f8`; its earlier #2014 strict
 reader receipt verifies the byte-identical Rust sidecars, but does not replace
 a strict run for this issue.
+
+## Strict JDK runtime identity and allocation-order proof (#2016)
+
+This runtime proof starts from integrated `main` at
+`b79dc945d392a470d42997081602c6f1464fe02a`; the required #2045 merge commit
+`5cb16a5868c53071e9fcbc08370df688a5378ed0` is an ancestor. It uses the two
+original frozen Scala inputs above, each in its own complete Rust
+Lexer/Parser/Namer/SourceTyper and paired JVM/TASTy session. It does not use
+Scala-produced classes or reconstructed artifacts. The Java harness is a
+separate test source, compiled with `javac --release 21`; the runtime classpath
+contains the three original Rust `.class` files and the harness classes. The
+six `.class`/`.tasty` bytes per orientation are hashed before compilation and
+compared byte-for-byte after `javac`, successful runtime execution, and all
+corrupt-copy runs.
+
+The strict integration is
+[`mixed_origin_counter_identity_and_allocation_order_on_strict_jdk21`](../tests/jvm_tasty_mixed_origin_runtime.rs).
+It decodes the factory `Code` attribute with the Rust class-file reader,
+resolves every allocation and constructor operand through the original
+constant pool, constructs a CFG from those decoded instructions, and runs the
+class-aware CFG analyzer. It also runs `javap -v -p -c` on each original
+factory class. PCs below are observed from the Rust decoder and javap for
+these exact artifact bytes, not assumed by the test when it walks the code.
+
+Both methods have descriptor
+`(Lexample/Counter;I)Lexample/Pair;`, argument local 1 is the reference and
+argument local 2 is the `Int`, and both use `max_locals=3`. The complete
+decoded instruction sequences and measured stack bounds are:
+
+| Method | Observed instructions | `max_stack` / `max_locals` |
+| --- | --- | --- |
+| `wrapAndCreate` | `0 new #12 Pair`; `3 dup`; `4 aload_1`; `5 new #14 Counter`; `8 dup`; `9 iload_2`; `10 invokespecial #17 Counter.<init>(I)V`; `13 invokespecial #20 Pair.<init>(Counter,Counter)V`; `16 areturn` | `6 / 3` |
+| `createAndWrap` | `0 new #12 Pair`; `3 dup`; `4 new #14 Counter`; `7 dup`; `8 iload_2`; `9 invokespecial #17 Counter.<init>(I)V`; `12 aload_1`; `13 invokespecial #20 Pair.<init>(Counter,Counter)V`; `16 areturn` | `5 / 3` |
+
+The class-aware CFG analyzer accepts both decoded streams and reports the same
+stack and local bounds as the classfiles. Each method allocates exactly one
+Pair and one Counter, calls `Counter.<init>(I)V` once and
+`Pair.<init>(LCounter;LCounter;)V` once, and returns the initialized Pair.
+The `new Pair` allocation remains pending while the nested Counter is created
+and initialized; this is the existing bounded two-live-uninitialized shape.
+
+Under Temurin JDK `21.0.13+9` (`java` reports build `21.0.13+9-LTS`), the
+separate harness prints these literal results with `java -Xverify:all -ea`:
+
+```text
+wrapAndCreate=identity:true;first=42/-9;repeat=11;zero=0;negative=-5;fresh:true
+createAndWrap=identity:true;first=42/-9;repeat=11;zero=0;negative=-5;fresh:true
+```
+
+The harness reads `Pair.left` and `Pair.right` with test-only reflection. For
+`wrapAndCreate`, it proves `left` is the original `Counter(7)` and `right` is
+a distinct `Counter(3)`. For `createAndWrap`, those identities are reversed:
+`right` is the original reference and `left` is freshly allocated. Both runs
+mutate the original to 42 and the new object to -9 independently, then exercise
+fresh allocations with seeds 11, 0, and -5. This verifies that method formal
+order `(Counter, Int)` does not determine the constructor argument position.
+
+Original artifact SHA-256 values measured before `javac` and unchanged through
+all client and negative runs (the two `Counter` and `Pair` outputs are
+identical because their source declarations are unchanged):
+
+| Orientation | Artifact | SHA-256 |
+| --- | --- | --- |
+| both | `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` |
+| both | `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` |
+| both | `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` |
+| both | `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` |
+| `wrapAndCreate` | `example/PairFactory.class` | `4b764c8dccf4074f3df76ede0326c7da7e94af458aa21d4d8a660bc2193886d9` |
+| `wrapAndCreate` | `example/PairFactory.tasty` | `4264dc0388a33002da2500cd178fd05c3f94199b9cac8221d3bdde67ef549009` |
+| `createAndWrap` | `example/PairFactory.class` | `c01945fb2aa13978a44c036646bc0d29c0eb5455f44c58244f57e5f0fe9bf0cc` |
+| `createAndWrap` | `example/PairFactory.tasty` | `5f8a3f3cf5c3f4ed83e7ea4f8498cb6498f502f90a8e988a51268b15ab9b70a9` |
+
+The new Java harness source hash is
+`9b070f0d29c3607562b1529a49a61c10edaab9e1415e7fa03646bf1b566bdb3c`.
+The selected Java tools are under
+`$HOME/.sdkman/candidates/java/21.0.13.0+9-tem`: `java` SHA-256
+`9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`,
+`javac` SHA-256
+`2cc288a26beebc50ca7cd924847dffbfb38ef3314e105bba6d4ebce03a0bcb6b`, and
+`javap` SHA-256
+`b2146e8dcfe5662c04d14f3fad68756a1a597d01461ca475a2cdbeb44c84a678`.
+The Rust toolchain is `rustc 1.98.1 (48a229cea 2026-09-01)` and `cargo
+1.98.1 (797e8a9bc 2026-08-05)`.
+
+Isolated corruption controls report the first observed failure stage. The
+type-correct reversed method body fails the Rust batch's source-bound argument
+order check; when tested independently by Java, it is verifier-valid and fails
+the reflected identity assertion. Replacing the nested allocation and
+initialization with a second `aload_1` is also verifier-valid, but fails the
+fresh-object assertion. Malformed instruction and classfile copies fail at
+their observed JVM boundary:
+
+| Corrupt copy | First observed stage |
+| --- | --- |
+| Reversed argument orientation against the original source receipt | Rust batch contract (`cross-class invocation`, expected `aload_1`, observed `new`) |
+| Reversed argument orientation run directly | Java identity assertion: caller identity is in the wrong Pair field |
+| Duplicate existing Counter instead of the nested allocation | Java identity assertion: the new side aliases the caller object |
+| Missing nested `NEW Counter` | JVM verifier (`VerifyError: Bad operand type when invoking <init>`) |
+| Extra Counter allocation in place of `NEW Pair` | JVM verifier (`VerifyError: Call to wrong <init> method`) |
+| Seed loaded from reference slot 1 | JVM verifier (`VerifyError: Bad type on operand stack`) |
+| Wrong constructor owner/signature | JVM verifier (`VerifyError: Bad type on operand stack`) |
+| Missing `Counter.<init>` | JVM verifier (`VerifyError: Bad type on operand stack`) |
+| Invalid uninitialized Counter receiver flow | JVM verifier (`VerifyError: Bad type on operand stack`) |
+| Counter `NEW` changed to Pair | JVM verifier (`VerifyError: Call to wrong <init> method`) |
+| `max_stack` reduced to 1 | JVM verifier (`VerifyError: Operand stack overflow`) |
+| `max_locals` reduced to 2 | JVM classfile loading (`ClassFormatError: Arguments can't fit into locals`) |
+| Omit `Counter.class` or `Pair.class` | JVM linker (`NoClassDefFoundError`) |
+
+The corruptions are written only into separate test directories under the
+issue-local `TMPDIR`; they never replace the six original batch files. The
+strict test prints the observed runtime failures and rechecks every original
+SHA-256 and file byte after the corrupt-copy runs. This is an unchanged
+original-artifact runtime acceptance result for this bounded Rust/JVM shape.
+It does not claim Scala 3.9 source-consumer or TASTy runtime acceptance.
+
+Validation on the #2016 implementation head used task-local
+`TMPDIR=$PWD/target/issue-2016/tmp` and
+`CARGO_TARGET_DIR=$PWD/target/issue-2016/cargo`, with SDKMAN Temurin JDK
+21.0.13 on `PATH`:
+
+```text
+cargo test -p dotty --test jvm_tasty_mixed_origin_runtime mixed_origin_counter_identity_and_allocation_order_on_strict_jdk21 --locked -- --nocapture: passed
+cargo test -p dotty --test jvm_tasty_artifacts --locked -- --test-threads=2: 62 passed
+cargo test -p dotty --test jvm_tasty_dual_reference_identity --locked: 2 passed (#1967 direct-reference identity gate)
+cargo test -p dotty --test jvm_tasty_artifacts factory_result_constructor_arguments_preserve_original_identity_on_jdk21 --locked: passed (#1880 Pair alias gate)
+cargo test -p dotty --test jvm_tasty_artifacts nested_constructor_factory_executes_original_rust_artifacts_on_jdk21 --locked: passed (#1918 nested-constructor gate)
+cargo test -p dotty --test jvm_tasty_artifacts sibling_constructor_batch_executes_original_rust_artifacts_with_independent_pair_identity --locked: passed
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test -p dotty-classfile --test classfile_jvm_encoder -p dotty-jvm --lib -p dotty --test jvm_source_compilation --test jvm_stateful_class_contract --locked -- --nocapture: passed; required JDK checks ran
+cargo fmt --all -- --check: passed
+python3 tools/check-frontend-boundaries.py: passed
+cargo clippy --workspace --all-targets --locked -- -D warnings: passed
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked: passed
+cargo test --workspace --all-targets --locked -- --test-threads=2: passed with DOTTY_CLASSFILE_REQUIRE_JDK=1
+git diff --check: passed
+```
 
 The following repository checks passed: `cargo fmt --all -- --check`,
 `python3 tools/check-frontend-boundaries.py`,
