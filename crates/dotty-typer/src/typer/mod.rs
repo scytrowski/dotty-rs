@@ -5701,6 +5701,180 @@ mod tests {
     }
 
     #[test]
+    fn recursive_source_product2_defers_class_and_applied_trait_parents() {
+        for (source_text, base_name) in [
+            (
+                "package scala { trait Product }; package matching { class Base; final case class Add(left: Int, right: Int) extends Base }",
+                "Base",
+            ),
+            (
+                "package scala { trait Product }; package matching { trait Base[A]; final case class Add(left: Int, right: Int) extends Base[Int] }",
+                "Base",
+            ),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let add = class_symbol(&parsed, &store, &index, source, "Add");
+            let base = class_symbol(&parsed, &store, &index, source, base_name);
+            let product = class_symbol(&parsed, &store, &index, source, "Product");
+            let class_scope = index.scope_of(add).unwrap();
+            let selectors = ["_1", "_2"].map(|name| {
+                store
+                    .scopes
+                    .get(class_scope)
+                    .lookup(TermName::new(store.names.intern(name)).as_name())
+                    .unwrap()
+            });
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let ordinary_info = typer
+                .complete_symbol(add)
+                .expect("unsupported parent shape completes as an ordinary class");
+            let Type::ClassInfo(info) = typer.store().types.get(ordinary_info) else {
+                panic!("Add ClassInfo")
+            };
+            assert!(
+                info.parents.iter().any(|parent| {
+                    match typer.store().types.try_get(*parent) {
+                        Some(Type::TypeRef {
+                            target: TypeRefTarget::Symbol(symbol),
+                            ..
+                        }) => *symbol == base,
+                        Some(Type::Applied { tycon, .. }) => {
+                            type_symbol(typer.store(), *tycon) == base
+                        }
+                        _ => false,
+                    }
+                }),
+                "the unsupported source parent is preserved"
+            );
+            assert!(info.parents.iter().all(|parent| {
+                !matches!(
+                    typer.store().types.try_get(*parent),
+                    Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. })
+                        if *symbol == product
+                )
+            }));
+            for selector in selectors {
+                assert_eq!(*typer.store().symbols.info(selector), SymbolInfo::Missing);
+            }
+
+            let mut corrupted = match typer.store().types.get(ordinary_info).clone() {
+                Type::ClassInfo(info) => info,
+                _ => unreachable!(),
+            };
+            let first_parent = corrupted.parents[0];
+            corrupted.parents.push(first_parent);
+            let corrupted_info = typer.store.types.alloc(Type::ClassInfo(corrupted));
+            typer
+                .store
+                .symbols
+                .set_info(add, SymbolInfo::Complete(corrupted_info));
+            assert!(matches!(
+                typer.complete_symbol(add),
+                Err(TyperError::MalformedClassInfo { symbol, info })
+                    if symbol == add && info == corrupted_info
+            ));
+            typer
+                .store
+                .symbols
+                .set_info(add, SymbolInfo::Complete(ordinary_info));
+            assert_eq!(
+                typer
+                    .complete_symbol(add)
+                    .expect("restoring valid deferred metadata allows a same-class retry"),
+                ordinary_info
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_source_product2_stale_missing_projection_is_rejected_then_valid_state_retries() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { trait Product }; package matching { sealed trait Expr; final case class Add(left: Expr, right: Expr) extends Expr }",
+        );
+        let add = class_symbol(&parsed, &store, &index, source, "Add");
+        let product_symbol = class_symbol(&parsed, &store, &index, source, "Product");
+        let class_scope = index.scope_of(add).unwrap();
+        let selectors = ["_1", "_2"].map(|name| {
+            store
+                .scopes
+                .get(class_scope)
+                .lookup(TermName::new(store.names.intern(name)).as_name())
+                .unwrap()
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let original_class_info = typer
+            .complete_symbol(add)
+            .expect("valid Product2 class completes");
+        let original_selector_infos =
+            selectors.map(|selector| *typer.store().symbols.info(selector));
+        let Type::ClassInfo(mut stale_class_info) =
+            typer.store().types.get(original_class_info).clone()
+        else {
+            panic!("Add ClassInfo")
+        };
+        stale_class_info.parents.retain(|parent| {
+            !matches!(
+                typer.store().types.try_get(*parent),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                }) if *symbol == product_symbol
+            )
+        });
+        let stale_class_info = typer.store.types.alloc(Type::ClassInfo(stale_class_info));
+        typer
+            .store
+            .symbols
+            .set_info(add, SymbolInfo::Complete(stale_class_info));
+        for selector in selectors {
+            typer.store.symbols.set_info(selector, SymbolInfo::Missing);
+        }
+        let stale_checkpoint = typer.store().checkpoint();
+        assert!(matches!(
+            typer.complete_symbol(add),
+            Err(TyperError::MalformedClassInfo { symbol, info })
+                if symbol == add && info == stale_class_info
+        ));
+        assert_eq!(typer.store().checkpoint(), stale_checkpoint);
+        assert_eq!(
+            *typer.store().symbols.info(add),
+            SymbolInfo::Complete(stale_class_info)
+        );
+        for selector in selectors {
+            assert_eq!(*typer.store().symbols.info(selector), SymbolInfo::Missing);
+        }
+
+        typer
+            .store
+            .symbols
+            .set_info(add, SymbolInfo::Complete(original_class_info));
+        for (selector, info) in selectors.into_iter().zip(original_selector_infos) {
+            typer.store.symbols.set_info(selector, info);
+        }
+        assert_eq!(
+            typer
+                .complete_symbol(add)
+                .expect("restored valid graph retries"),
+            original_class_info
+        );
+    }
+
+    #[test]
     fn recursive_source_product2_rolls_back_both_selectors_then_retries_same_session() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "package scala { class Product }; package matching { sealed trait Expr; final case class Add(left: Expr, right: Expr) extends Expr }",
