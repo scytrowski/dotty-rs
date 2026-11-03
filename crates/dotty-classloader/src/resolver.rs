@@ -2387,6 +2387,39 @@ mod tests {
         }
     }
 
+    struct MutablePredefStringPath {
+        inner: CompositeClassPath,
+        jmod: PathBuf,
+        state: Arc<AtomicUsize>,
+    }
+
+    impl ClassPathEntry for MutablePredefStringPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            if name.as_internal() == "java/lang/String" {
+                match self.state.load(Ordering::SeqCst) {
+                    0 => return Ok(None),
+                    1 => {
+                        return Ok(Some(ClassResource::new(
+                            vec![0xCA, 0xFE],
+                            ClassFormat::Class,
+                            ClassOrigin::Jmod(self.jmod.clone()),
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+            self.inner.find_class(name)
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            self.inner.contains_package(package)
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            self.inner.contains_package_prefix(package)
+        }
+    }
+
     struct FixtureClassPath(JdkClassPath);
 
     impl ClassPathEntry for FixtureClassPath {
@@ -2964,7 +2997,6 @@ mod tests {
         assert_eq!(alias.name.namespace(), Namespace::Type);
         assert_eq!(alias.owner, Some(module_class));
         assert_eq!(alias.visibility, Visibility::Public);
-        assert_eq!(alias.info, SymbolInfo::Missing);
         assert_eq!(alias.origin, store.symbols.get(module_class).origin);
         assert_eq!(alias.flags, SymbolFlags::EMPTY);
 
@@ -2983,6 +3015,59 @@ mod tests {
             ),
             Ok(Some(alias_id)),
             "type member lookup should return the declaration identity"
+        );
+        let SymbolInfo::Complete(alias_info) = store.symbols.get(alias_id).info else {
+            panic!("canonical Predef.String type-member lookup should resolve its declared target");
+        };
+        let Type::AliasingBounds { alias: target } = store.types.get(alias_info) else {
+            panic!("Predef.String should retain its declared alias target in AliasingBounds");
+        };
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(target_class),
+            ..
+        } = store.types.get(*target)
+        else {
+            panic!("Predef.String's target should be a symbol-backed TypeRef");
+        };
+        assert_eq!(
+            store
+                .names
+                .resolve(store.symbols.get(*target_class).name.text()),
+            "String",
+            "the alias target should be the canonical java.lang.String class"
+        );
+        assert_eq!(
+            package_path_of_symbol(
+                &store,
+                store
+                    .symbols
+                    .get(*target_class)
+                    .owner
+                    .expect("String package owner")
+            ),
+            Some(vec!["java".to_owned(), "lang".to_owned()])
+        );
+        assert!(matches!(
+            resolver.session.origins.get(target_class),
+            Some(crate::class_path::ClassOrigin::Jmod(path))
+                if path.file_name().is_some_and(|name| name == "java.base.jmod")
+        ));
+        assert_eq!(store.symbols.get(alias_id).kind, SymbolKind::TypeAlias);
+        assert_eq!(store.symbols.get(alias_id).owner, Some(module_class));
+        assert_ne!(alias_id, *target_class);
+        let original_target_class = *target_class;
+        assert_eq!(
+            resolver.resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: member_prefix,
+                    name: string,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            ),
+            Ok(Some(alias_id)),
+            "same-session repeated type lookup should reuse the alias declaration"
         );
         let term_string = Name::new(store.names.intern("String"), Namespace::Term);
         assert_eq!(
@@ -3029,6 +3114,13 @@ mod tests {
         store.rollback_to(store_checkpoint);
         assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
         assert!(!store.symbols.contains(alias_id));
+        assert!(!store.symbols.contains(original_target_class));
+        assert!(
+            !resolver
+                .session
+                .origins
+                .contains_key(&original_target_class)
+        );
 
         assert_eq!(
             resolver.complete_module_class(&mut store, module_class),
@@ -3051,7 +3143,129 @@ mod tests {
         let retry_alias = store.symbols.get(retry_alias_id);
         assert_eq!(retry_alias.kind, SymbolKind::TypeAlias);
         assert_eq!(retry_alias.owner, Some(module_class));
-        assert_eq!(retry_alias.info, SymbolInfo::Missing);
+        let SymbolInfo::Complete(retry_alias_info) = retry_alias.info else {
+            panic!("same-session retry should restore the resolved alias target");
+        };
+        let Type::AliasingBounds {
+            alias: retry_target,
+        } = store.types.get(retry_alias_info)
+        else {
+            panic!("retried Predef.String should retain its target bounds");
+        };
+        let Some(retry_target_class) = store.types.get(*retry_target).reference_symbol() else {
+            panic!("retried Predef.String target should reference a class symbol");
+        };
+        assert_ne!(retry_alias_id, retry_target_class);
+        assert_eq!(
+            store
+                .names
+                .resolve(store.symbols.get(retry_target_class).name.text()),
+            "String"
+        );
+    }
+
+    #[test]
+    fn predef_string_target_missing_or_corrupt_rolls_back_and_retries_in_session() {
+        for initial_state in [0, 1] {
+            let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JDK 21 JAVA_HOME"));
+            let jmod = java_home.join("jmods/java.base.jmod");
+            let state = Arc::new(AtomicUsize::new(initial_state));
+            let class_path = CompositeClassPath::new(vec![Box::new(MutablePredefStringPath {
+                inner: CompositeClassPath::new(vec![
+                    Box::new(DirectoryClassPath::new(fixture_path(
+                        "../dotty-tasty/tests/fixtures/scala3-library",
+                    ))),
+                    Box::new(JdkClassPath::new(java_home.join("jmods")).unwrap()),
+                ]),
+                jmod: jmod.clone(),
+                state: Arc::clone(&state),
+            })]);
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut resolver =
+                ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+            let package = resolver
+                .resolve_package(&mut store, &["scala"])
+                .unwrap()
+                .unwrap();
+            let package_prefix = store
+                .types
+                .alloc(Type::type_ref(definitions.no_prefix, package));
+            let predef_name = Name::new(store.names.intern("Predef"), Namespace::Term);
+            let object = resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix: package_prefix,
+                        name: predef_name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .unwrap()
+                .unwrap();
+            let module_class = resolver
+                .module_class_of_object(&store, object)
+                .unwrap()
+                .unwrap();
+            let prefix = store
+                .types
+                .alloc(Type::type_ref(definitions.no_prefix, module_class));
+            let string = Name::new(store.names.intern("String"), Namespace::Type);
+            let request = MemberRequest {
+                prefix,
+                name: string,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let store_checkpoint = store.checkpoint();
+            let session_checkpoint = resolver.session.checkpoint();
+            let resolver_checkpoint = resolver.checkpoint();
+            let error = resolver
+                .resolve_member(&mut store, &request)
+                .expect_err("missing or malformed JDK String must fail the alias lookup");
+            let ResolutionError::Malformed { reason } = error else {
+                panic!("target failure should remain an attributable typed error: {error:?}");
+            };
+            assert!(reason.contains("java/lang/String"), "{reason}");
+            if initial_state == 0 {
+                assert!(reason.contains("not found"), "{reason}");
+            } else {
+                assert!(reason.contains("invalid class file"), "{reason}");
+            }
+            assert_eq!(store.checkpoint(), store_checkpoint);
+            assert_eq!(resolver.session.checkpoint(), session_checkpoint);
+            assert_eq!(resolver.checkpoint(), resolver_checkpoint);
+            assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+            assert!(
+                !resolver
+                    .session
+                    .identified
+                    .contains_key(&BinaryName::from_internal("java/lang/String"))
+            );
+
+            state.store(2, Ordering::SeqCst);
+            let alias = resolver
+                .resolve_member(&mut store, &request)
+                .expect("a corrected genuine JDK resource should retry")
+                .expect("the indexed Predef alias should be selected");
+            assert_eq!(store.symbols.get(alias).kind, SymbolKind::TypeAlias);
+            assert_eq!(store.symbols.get(alias).owner, Some(module_class));
+            let SymbolInfo::Complete(info) = store.symbols.get(alias).info else {
+                panic!("retry should publish the resolved alias target");
+            };
+            let Type::AliasingBounds { alias: target } = store.types.get(info) else {
+                panic!("retry should preserve alias bounds");
+            };
+            let Some(target_class) = store.types.get(*target).reference_symbol() else {
+                panic!("retry should reference the target class");
+            };
+            assert_ne!(alias, target_class);
+            assert!(matches!(
+                resolver.session.origins.get(&target_class),
+                Some(crate::class_path::ClassOrigin::Jmod(path)) if path == &jmod
+            ));
+        }
     }
 
     #[test]

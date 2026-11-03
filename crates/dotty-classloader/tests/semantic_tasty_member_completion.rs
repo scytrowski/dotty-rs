@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dotty_classloader::classloader::{
@@ -176,6 +176,8 @@ fn tracing_classpath_without_jdk(trace: Arc<Mutex<Vec<String>>>) -> CompositeCla
 struct TracingResolver {
     inner: Box<dyn SymbolResolver>,
     trace: Arc<Mutex<Vec<String>>>,
+    fail_after_predef_string_lookup: Arc<AtomicBool>,
+    rollback_count: Arc<AtomicU64>,
 }
 
 impl TracingResolver {
@@ -187,6 +189,56 @@ impl TracingResolver {
             request.name.namespace(),
             request.space
         ));
+    }
+
+    fn fail_after_predef_string_lookup(
+        &self,
+        store: &SemanticStore,
+        request: &MemberRequest,
+        result: Result<Option<SymbolId>, ResolutionError>,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        if !self.fail_after_predef_string_lookup.load(Ordering::SeqCst)
+            || !request.name.is_type()
+            || store.names.resolve(request.name.text()) != "String"
+        {
+            return result;
+        }
+        let is_predef_module_prefix = match store.types.get(request.prefix) {
+            Type::TermRef {
+                target: dotty_core::TermRefTarget::Symbol(symbol),
+                ..
+            } => {
+                store.symbols.contains(*symbol)
+                    && store.names.resolve(store.symbols.get(*symbol).name.text()) == "Predef"
+            }
+            Type::TypeRef {
+                target: dotty_core::TypeRefTarget::Symbol(symbol),
+                ..
+            } => {
+                store.symbols.contains(*symbol)
+                    && store.names.resolve(store.symbols.get(*symbol).name.text()) == "Predef$"
+            }
+            _ => false,
+        };
+        if !is_predef_module_prefix {
+            return result;
+        }
+        if let Ok(Some(alias)) = result.as_ref()
+            && store.symbols.get(*alias).kind == dotty_core::SymbolKind::TypeAlias
+            && matches!(store.symbols.get(*alias).info, SymbolInfo::Complete(_))
+        {
+            self.fail_after_predef_string_lookup
+                .store(false, Ordering::SeqCst);
+            self.trace
+                .lock()
+                .unwrap()
+                .push("injected:after_predef_string_target".to_owned());
+            return Err(ResolutionError::Malformed {
+                reason: "injected enclosing TASTy transaction failure after Predef.String target materialization"
+                    .to_owned(),
+            });
+        }
+        result
     }
 }
 
@@ -275,6 +327,7 @@ impl SymbolResolver for TracingResolver {
     }
 
     fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
+        self.rollback_count.fetch_add(1, Ordering::SeqCst);
         self.inner.rollback_to(store, checkpoint)
     }
 
@@ -284,6 +337,7 @@ impl SymbolResolver for TracingResolver {
         checkpoint: ResolverCheckpoint,
         packages: &mut Packages,
     ) {
+        self.rollback_count.fetch_add(1, Ordering::SeqCst);
         self.inner
             .rollback_to_with_packages(store, checkpoint, packages)
     }
@@ -294,7 +348,8 @@ impl SymbolResolver for TracingResolver {
         request: &MemberRequest,
     ) -> Result<Option<SymbolId>, ResolutionError> {
         self.record_request(store, request);
-        self.inner.resolve_member(store, request)
+        let result = self.inner.resolve_member(store, request);
+        self.fail_after_predef_string_lookup(store, request, result)
     }
 
     fn resolve_member_with_packages(
@@ -304,8 +359,10 @@ impl SymbolResolver for TracingResolver {
         request: &MemberRequest,
     ) -> Result<Option<SymbolId>, ResolutionError> {
         self.record_request(store, request);
-        self.inner
-            .resolve_member_with_packages(store, packages, request)
+        let result = self
+            .inner
+            .resolve_member_with_packages(store, packages, request);
+        self.fail_after_predef_string_lookup(store, request, result)
     }
 
     fn resolve_package(
@@ -677,6 +734,8 @@ fn run_once() -> String {
                 LoadingSession::new(),
             )),
             trace: Arc::clone(&resolution_trace),
+            fail_after_predef_string_lookup: Arc::new(AtomicBool::new(false)),
+            rollback_count: Arc::new(AtomicU64::new(0)),
         };
         let session = TastySession::new()
             .with_resolver(Box::new(resolver))
@@ -1098,6 +1157,86 @@ fn malformed_bytes_and_foreign_owner_controls_fail_closed() {
         .expect("canonical Dog.sound signature completes via the Predef String alias");
 }
 
+#[test]
+fn enclosing_tasty_rollback_restores_predef_target_and_allows_retry() {
+    let path = workspace().join(MEMBERS[2].1);
+    let bytes = fs::read(path).expect("pinned Animal TASTy fixture");
+    let file = TastyFile::parse_and_validate_scala_3_9(&bytes).expect("Scala 3.9 Animal TASTy");
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let fail = Arc::new(AtomicBool::new(true));
+    let rollback_count = Arc::new(AtomicU64::new(0));
+    let resolver = TracingResolver {
+        inner: Box::new(ClasspathSymbolResolver::new(
+            tracing_classpath(Arc::clone(&trace)),
+            definitions,
+            LoadingSession::new(),
+        )),
+        trace: Arc::clone(&trace),
+        fail_after_predef_string_lookup: Arc::clone(&fail),
+        rollback_count: Arc::clone(&rollback_count),
+    };
+    let session = TastySession::new()
+        .with_resolver(Box::new(resolver))
+        .expect("resolver-backed TASTy session");
+    let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+    unpickler.enter_symbols().expect("Animal symbols entered");
+    let address = member_address(&file, "sound").expect("the single Animal.sound method");
+    let before = unpickler.symbol_state_at(address).unwrap();
+    let error = unpickler
+        .complete_symbol(address)
+        .expect_err("late injected failure should abort the enclosing TASTy completion");
+    assert_eq!(classify(&error), "UNRESOLVED_EXTERNAL");
+    assert!(
+        trace
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|entry| entry == "injected:after_predef_string_target")
+    );
+    assert!(rollback_count.load(Ordering::SeqCst) > 0);
+    assert_eq!(unpickler.symbol_state_at(address).unwrap(), before);
+
+    fail.store(false, Ordering::SeqCst);
+    unpickler
+        .complete_symbol(address)
+        .expect("the same unpickler store and resolver should retry after rollback");
+    let method = unpickler.index().symbol_at(address).unwrap();
+    drop(unpickler);
+    let SymbolInfo::Complete(method_info) = store.symbols.get(method).info else {
+        panic!("successful retry should complete the selected method signature");
+    };
+    let result = match store.types.get(method_info) {
+        Type::ByName { result } => *result,
+        _ => panic!("Animal.sound fixture result should preserve its by-name wrapper"),
+    };
+    let Type::TypeRef {
+        target: dotty_core::TypeRefTarget::Symbol(alias),
+        ..
+    } = store.types.get(result)
+    else {
+        panic!("retry should refer to the source-owned Predef.String alias");
+    };
+    assert_eq!(
+        store.symbols.get(*alias).kind,
+        dotty_core::SymbolKind::TypeAlias
+    );
+    let SymbolInfo::Complete(alias_info) = store.symbols.get(*alias).info else {
+        panic!("Predef.String alias target should survive the successful retry");
+    };
+    let Type::AliasingBounds { alias: target } = store.types.get(alias_info) else {
+        panic!("Predef.String target should preserve alias bounds");
+    };
+    assert!(matches!(
+        store.types.get(*target),
+        Type::TypeRef {
+            target: dotty_core::TypeRefTarget::Symbol(target_class),
+            ..
+        } if store.names.resolve(store.symbols.get(*target_class).name.text()) == "String"
+    ));
+}
+
 fn predef_alias_probe(with_jdk: bool) -> (String, String, String) {
     let path =
         workspace().join("crates/dotty-tasty/tests/fixtures/scala3-library/scala/Predef.tasty");
@@ -1203,6 +1342,8 @@ fn predef_alias_probe(with_jdk: bool) -> (String, String, String) {
             LoadingSession::new(),
         )),
         trace: Arc::clone(&trace),
+        fail_after_predef_string_lookup: Arc::new(AtomicBool::new(false)),
+        rollback_count: Arc::new(AtomicU64::new(0)),
     };
     let session = TastySession::new()
         .with_resolver(Box::new(resolver))
@@ -1253,7 +1394,7 @@ fn predef_alias_probe(with_jdk: bool) -> (String, String, String) {
     )
 }
 
-fn original_sound_probe(id: &str) {
+fn original_sound_probe(id: &str) -> String {
     let (relpath, owner_name, expected_method, expected_address) = match id {
         "animal-sound" => (
             "crates/dotty-classloader/tests/fixtures/tasty_sample/me/cytrowski/tastyfixtures/Animal.tasty",
@@ -1284,6 +1425,8 @@ fn original_sound_probe(id: &str) {
             LoadingSession::new(),
         )),
         trace: Arc::clone(&trace),
+        fail_after_predef_string_lookup: Arc::new(AtomicBool::new(false)),
+        rollback_count: Arc::new(AtomicU64::new(0)),
     };
     let session = TastySession::new()
         .with_resolver(Box::new(resolver))
@@ -1318,7 +1461,30 @@ fn original_sound_probe(id: &str) {
         owner_path(&store, alias.owner.expect("alias module-class owner")),
         "scala.Predef$"
     );
-    assert_eq!(alias.info, dotty_core::SymbolInfo::Missing);
+    let dotty_core::SymbolInfo::Complete(alias_info) = alias.info else {
+        panic!("canonical Predef.String alias should retain its completed target");
+    };
+    let dotty_core::Type::AliasingBounds { alias: target } = store.types.get(alias_info) else {
+        panic!("Predef.String target should remain represented by AliasingBounds");
+    };
+    let dotty_core::Type::TypeRef {
+        target: dotty_core::TypeRefTarget::Symbol(target_class),
+        ..
+    } = store.types.get(*target)
+    else {
+        panic!("Predef.String target should reference the canonical class identity");
+    };
+    assert_eq!(
+        store
+            .names
+            .resolve(store.symbols.get(*target_class).name.text()),
+        "String"
+    );
+    assert_eq!(
+        owner_path(&store, store.symbols.get(*target_class).owner.unwrap()),
+        "java.lang"
+    );
+    assert_ne!(*alias_id, *target_class);
     let alias_id = *alias_id;
     let observations = trace.lock().expect("trace lock").clone();
     let request = observations
@@ -1332,7 +1498,21 @@ fn original_sound_probe(id: &str) {
             .iter()
             .any(|entry| { entry == "scala/Predef=selected:Tasty:directory:scala3-library" })
     );
+    let target_origin = observations
+        .iter()
+        .find(|entry| entry.starts_with("java/lang/String=selected:Class:jmod:"))
+        .expect("java.lang.String must come from the real JDK jmod")
+        .clone();
+    assert!(target_origin.ends_with("java.base.jmod"));
     assert!(alias_id != method_id);
+    format!(
+        "alias={};target={}.{};origin={target_origin}",
+        owner_path(&store, alias.owner.unwrap()),
+        owner_path(&store, store.symbols.get(*target_class).owner.unwrap()),
+        store
+            .names
+            .resolve(store.symbols.get(*target_class).name.text())
+    )
 }
 
 fn predef_alias_audit_once() -> String {
@@ -1448,8 +1628,12 @@ fn predef_alias_audit_once() -> String {
         old, repeated,
         "member completions are deterministic in fresh stores"
     );
-    original_sound_probe("animal-sound");
-    original_sound_probe("dog-sound");
+    let animal_target_receipt = original_sound_probe("animal-sound");
+    let dog_target_receipt = original_sound_probe("dog-sound");
+    assert_eq!(
+        animal_target_receipt, dog_target_receipt,
+        "fresh sessions should produce byte-identical normalized alias-target receipts"
+    );
     predef_alias_probe(true);
     predef_alias_probe(false);
     include_str!("../../../docs/classloader-semantic-tasty-convergence-iii/predef-alias-audit.tsv")

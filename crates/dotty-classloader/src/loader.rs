@@ -3614,6 +3614,55 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 position: None,
                 links: SymbolLinks::default(),
             });
+            let target_resource = self
+                .class_path
+                .find_class(&alias.target)
+                .map_err(|error| ClassLoadError::Io(alias.target.clone(), Rc::new(error)))?
+                .ok_or_else(|| ClassLoadError::NotFound(alias.target.clone()))?;
+            if target_resource.format() != ClassFormat::Class
+                || !matches!(target_resource.origin(), ClassOrigin::Jmod(path) if path.file_name().is_some_and(|name| name == "java.base.jmod"))
+            {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: alias.target.clone(),
+                    reason: "Predef.String target is not the java.base JMOD class resource"
+                        .to_owned(),
+                });
+            }
+            let target_class = self.load_class(&alias.target)?;
+            let target = self.store.symbols.get(target_class).clone();
+            let target_package = target
+                .owner
+                .ok_or_else(|| ClassLoadError::IdentityConflict {
+                    name: alias.target.clone(),
+                    reason: "Predef.String target class has no canonical package owner".to_owned(),
+                })?;
+            let java_lang = self
+                .session
+                .packages
+                .resolve_package(self.store, "java/lang");
+            if target.kind != SymbolKind::Class
+                || target.name.namespace() != Namespace::Type
+                || self.store.names.resolve(target.name.text()) != "String"
+                || target_package != java_lang
+                || !matches!(target.origin, SymbolOrigin::Classfile(_))
+                || self.session.origins.get(&target_class) != Some(target_resource.origin())
+                || !matches!(target.info, SymbolInfo::Complete(info) if matches!(self.store.types.try_get(info), Some(Type::ClassInfo(class_info)) if class_info.class == target_class))
+            {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: alias.target.clone(),
+                    reason:
+                        "Predef.String target is not the complete canonical java.lang.String class"
+                            .to_owned(),
+                });
+            }
+            let target_type = self.type_ref(target_class);
+            let alias_info = self
+                .store
+                .types
+                .alloc(Type::AliasingBounds { alias: target_type });
+            self.store
+                .symbols
+                .set_info(alias_symbol, SymbolInfo::Complete(alias_info));
             self.store
                 .scopes
                 .get_mut(declarations)
