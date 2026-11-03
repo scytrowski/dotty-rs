@@ -3,6 +3,10 @@
 Status: audit complete; this report defines the bounded B2 constructor gate. No
 production code changed.
 
+The loader rejection below records the #2026 audit snapshot before issue
+[#2028](constructor-one-int.md); the latter implements the bounded B2 form
+from that audit without changing this historical fixture ledger or its TSV.
+
 ## Frozen inputs and provenance
 
 The original compiler-generated inputs are the unchanged
@@ -46,7 +50,7 @@ make this an eligible class: the header field/alias is additional member
 semantics outside B2. The fixture is never used as the positive acceptance
 input.
 
-## Current loader boundary
+## Loader boundary at the audit snapshot
 
 Calling the existing crate-private semantic loader on the unchanged
 `CtorPlain.tasty` returns, before the semantic transaction begins:

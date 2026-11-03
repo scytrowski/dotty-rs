@@ -871,7 +871,9 @@ All done unless noted otherwise.
    `.class` loading. **Done** for name/flags/superclass/interfaces/class
    type parameters/applied parent views/fields/methods (§4.4); method and
    class generics are supported for a bounded subset, while unsupported
-   member shapes and annotations remain unbuilt (§3).
+   member shapes and annotations remain unbuilt (§3). The private semantic
+   TASTy adapter's one plain Int primary-constructor formal is documented in
+   [`constructor-one-int.md`](classloader-semantic-tasty-convergence-iii/constructor-one-int.md).
 
 ### Open work (not milestone-numbered — tracked here instead)
 - Broader `.tasty` member type resolution beyond the named/applied subset,
