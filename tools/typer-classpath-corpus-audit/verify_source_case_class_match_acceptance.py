@@ -116,6 +116,7 @@ TYPER_TESTS = {
     "typer::expression::patterns::tests::erased_unapply_parameters_are_rejected_even_when_source_parsing_lacks_erased_params",
     "typer::expression::patterns::tests::extractor_resolution_reports_focused_qualifier_and_unapply_errors",
     "typer::expression::patterns::tests::extractor_unapply_callable_shapes_are_rejected_explicitly",
+    "typer::expression::patterns::tests::recursive_source_product2_generated_unapply_projects_two_distinct_expr_selectors",
     "typer::expression::patterns::tests::simple_extractor_plan_retains_unapply_identity_types_and_source_arguments",
     "typer::expression::patterns::tests::unary_extractor_falls_back_to_get_after_product_arity_mismatch",
     "typer::tests::generated_case_class_unapply_has_source_canonical_plain_signature_and_member_lookup",

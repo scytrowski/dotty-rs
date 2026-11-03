@@ -1,0 +1,5 @@
+session	root
+session-a	eval	path=Expr.scala#tree64	method=source-owned	parameter=owned-by-source-method	source_bytes=275:410	owner=Evaluator$	complete=whole_DefDef:typed#tree30
+session-a	selectLeft	path=Expr.scala#tree39	method=source-owned	parameter=owned-by-source-method	source_bytes=158:271	owner=Evaluator$	complete=whole_DefDef:typed#tree52
+session-b	eval	path=Expr.scala#tree64	method=source-owned	parameter=owned-by-source-method	source_bytes=275:410	owner=Evaluator$	complete=whole_DefDef:typed#tree30
+session-b	selectLeft	path=Expr.scala#tree39	method=source-owned	parameter=owned-by-source-method	source_bytes=158:271	owner=Evaluator$	complete=whole_DefDef:typed#tree52

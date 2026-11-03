@@ -4834,6 +4834,202 @@ mod tests {
     }
 
     #[test]
+    fn recursive_source_product2_generated_unapply_projects_two_distinct_expr_selectors() {
+        let source_text = "package scala { trait Product }; package app { sealed trait Expr; final case class Num(value: Int) extends Expr; final case class Add(left: Expr, right: Expr) extends Expr; class C { def choose(value: Expr): Int = value match { case Add(_, _) => 1 } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "choose" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("choose method");
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::CaseDef(case_def) => match &parsed.ast.get(case_def.pattern).kind {
+                    TreeKind::Apply(application)
+                        if matches!(
+                            &parsed.ast.get(application.function).kind,
+                            TreeKind::Ident(name)
+                                if store.names.resolve(name.name.text()) == "Add"
+                        ) =>
+                    {
+                        Some(case_def.pattern)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("Add(_, _) extractor pattern");
+        let expr = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Expr" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("Expr trait");
+        let product = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Product" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("canonical scala.Product fixture");
+        let add = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Add" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("Add class");
+        let class_tree = match index.definition_of(add).unwrap() {
+            dotty_core::SourceDefinition::Canonical { tree, .. } => tree,
+            other => panic!("unexpected Add definition {other:?}"),
+        };
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
+            panic!("Add is a class")
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            panic!("Add has a template")
+        };
+        let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+            panic!("Add has a constructor")
+        };
+        let fields = constructor.value_param_clauses[0].clone();
+        let class_scope = index.scope_of(add).unwrap();
+        let selector_1 = store
+            .scopes
+            .get(class_scope)
+            .lookup(&Name::new(store.names.intern("_1"), Namespace::Term))
+            .unwrap();
+        let selector_2 = store
+            .scopes
+            .get(class_scope)
+            .lookup(&Name::new(store.names.intern("_2"), Namespace::Term))
+            .unwrap();
+        assert_ne!(selector_1, selector_2);
+        assert_eq!(
+            store
+                .scopes
+                .get(class_scope)
+                .lookup(&Name::new(store.names.intern("_3"), Namespace::Term),),
+            None
+        );
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        typer
+            .complete_symbol(add)
+            .expect("Add and its selectors complete");
+        typer
+            .complete_symbol(product)
+            .expect("canonical Product ClassInfo");
+        let expr_type = typer.store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(expr),
+        });
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, expr_type, context, journal, mappings)
+            })
+            .expect("ordinary generated unapply projects Add's selectors");
+        let TreeKind::UnApply(unapply) = &typer.typed_arena.get(typed).kind else {
+            panic!("typed extractor pattern")
+        };
+        assert_eq!(unapply.patterns.len(), 2);
+        let component_types = unapply
+            .patterns
+            .iter()
+            .map(|pattern| typer.typed_arena.get(*pattern).ty)
+            .collect::<Vec<_>>();
+        assert_eq!(component_types.len(), 2);
+        for component in component_types {
+            assert!(matches!(
+                typer.store.types.try_get(component),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                }) if *symbol == expr
+            ));
+        }
+        let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(selected_unapply),
+            ..
+        }) = typer
+            .store
+            .types
+            .try_get(typer.typed_arena.get(unapply.function).ty)
+        else {
+            panic!("generated unapply is selected by ordinary lookup")
+        };
+        assert_eq!(
+            Some(*selected_unapply),
+            typer.index.generated_case_class_method(
+                add,
+                dotty_core::GeneratedCaseClassMethodRole::Unapply
+            )
+        );
+        let fields = fields
+            .iter()
+            .map(|tree| index.symbol_at(source, *tree).unwrap())
+            .collect::<Vec<_>>();
+        for ((field_tree, field), selector) in constructor.value_param_clauses[0]
+            .iter()
+            .zip(fields)
+            .zip([selector_1, selector_2])
+        {
+            assert_eq!(typer.store.symbols.get(field).owner, Some(add));
+            assert_eq!(
+                typer.index.definition_of(field),
+                Some(dotty_core::SourceDefinition::Canonical {
+                    source,
+                    tree: *field_tree
+                })
+            );
+            assert_eq!(
+                typer.index.derived_symbol_at(add, source, *field_tree),
+                Some(selector)
+            );
+            assert_eq!(typer.store.symbols.get(selector).owner, Some(add));
+            assert_eq!(
+                typer.index.definition_of(selector),
+                Some(dotty_core::SourceDefinition::Derived {
+                    source,
+                    tree: *field_tree
+                })
+            );
+        }
+    }
+
+    #[test]
     fn real_flagged_product_extractor_reads_ordered_source_selectors() {
         let ordered = "case class Earlier(flag: Boolean); case class Later(code: Int);";
         let expected = flagged_product_extractor_receipt(ordered);

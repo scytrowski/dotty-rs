@@ -4502,7 +4502,8 @@ mod tests {
             .complete_symbol(bad_unapply)
             .expect_err("second mismatched field must reject the pair");
         assert!(
-            matches!(error, TyperError::MalformedMethodClause { method, .. } if method == bad_unapply)
+            matches!(error, TyperError::MalformedMethodClause { method, .. } if method == bad_unapply),
+            "unexpected mismatched generated unapply error: {error:?}"
         );
         assert_eq!(typer.store().checkpoint(), checkpoint);
         for symbol in [bad, bad_unapply, bad_input, bad_fields[0], bad_fields[1]] {
@@ -5489,6 +5490,584 @@ mod tests {
             assert_eq!(method.kind, MethodKind::Plain);
             assert_eq!(method.result, expected_type);
         }
+    }
+
+    #[test]
+    fn recursive_source_product2_completes_distinct_selectors_and_exact_parent_edges() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { trait Product }; package matching { sealed trait Expr; final case class Add(left: Expr, right: Expr) extends Expr }",
+        );
+        let expr = class_symbol(&parsed, &store, &index, source, "Expr");
+        let add = class_symbol(&parsed, &store, &index, source, "Add");
+        let class_tree = match index.definition_of(add).unwrap() {
+            SourceDefinition::Canonical { tree, .. } => tree,
+            other => panic!("unexpected Add definition: {other:?}"),
+        };
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(class_tree).kind else {
+            panic!("Add is a source class")
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            panic!("Add has a source template")
+        };
+        let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+            panic!("Add has a constructor")
+        };
+        let fields = constructor.value_param_clauses[0].clone();
+        assert_ne!(
+            parsed.ast.get(fields[0]).position,
+            parsed.ast.get(fields[1]).position,
+            "constructor fields retain individual source spans"
+        );
+        let class_scope = index.scope_of(add).unwrap();
+        let selector = |store: &mut SemanticStore, spelling: &str| {
+            store
+                .scopes
+                .get(class_scope)
+                .lookup(TermName::new(store.names.intern(spelling)).as_name())
+        };
+        let selector_1 = selector(&mut store, "_1").unwrap();
+        let selector_2 = selector(&mut store, "_2").unwrap();
+        assert_ne!(selector_1, selector_2);
+        assert_eq!(selector(&mut store, "_3"), None);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let product = typer.canonical_scala_product_type(0).unwrap().unwrap();
+        let product = type_symbol(typer.store(), product);
+        let class_info = typer.complete_symbol(add).expect("Add class completion");
+        let Type::ClassInfo(class_info) = typer.store().types.get(class_info) else {
+            panic!("Add publishes ClassInfo")
+        };
+        let edges = class_info
+            .parents
+            .iter()
+            .filter_map(|parent| match typer.store().types.try_get(*parent) {
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                }) => Some(*symbol),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(edges, [typer.definitions.object_class, expr, product,]);
+
+        let field_symbols = fields
+            .iter()
+            .map(|tree| index.symbol_at(source, *tree).unwrap())
+            .collect::<Vec<_>>();
+        let selector_symbols = [selector_1, selector_2];
+        assert_ne!(field_symbols[0], field_symbols[1]);
+        for (ordinal, ((field_tree, field), selector)) in fields
+            .iter()
+            .zip(field_symbols)
+            .zip(selector_symbols)
+            .enumerate()
+        {
+            assert_eq!(typer.store().symbols.get(field).kind, SymbolKind::Field);
+            assert_eq!(typer.store().symbols.get(field).owner, Some(add));
+            assert_eq!(
+                index.definition_of(field),
+                Some(SourceDefinition::Canonical {
+                    source,
+                    tree: *field_tree
+                })
+            );
+            assert_eq!(
+                index.derived_symbol_at(add, source, *field_tree),
+                Some(selector)
+            );
+            assert_eq!(
+                index.definition_of(selector),
+                Some(SourceDefinition::Derived {
+                    source,
+                    tree: *field_tree,
+                })
+            );
+            assert_eq!(typer.store().symbols.get(selector).owner, Some(add));
+            assert!(
+                typer
+                    .store()
+                    .symbols
+                    .get(selector)
+                    .flags
+                    .contains(SymbolFlags::SYNTHETIC)
+            );
+            let SymbolInfo::Complete(info) = *typer.store().symbols.info(selector) else {
+                panic!("selector completed")
+            };
+            let Type::Method(method) = typer.store().types.get(info) else {
+                panic!("selector is a method")
+            };
+            assert_eq!(method.kind, MethodKind::Plain);
+            assert!(method.params.is_empty());
+            assert_eq!(
+                type_symbol(typer.store(), method.result),
+                expr,
+                "selector {ordinal} result"
+            );
+            assert_ne!(fields[0], fields[1]);
+        }
+        let add_type = nominal_type_ref(typer.store, definitions, add);
+        let expr_type = nominal_type_ref(typer.store, definitions, expr);
+        typer
+            .complete_symbol(expr)
+            .expect("Expr class info is complete");
+        typer
+            .complete_symbol(product)
+            .expect("canonical Product class info is complete");
+        assert!(typer.is_subtype(add_type, expr_type).unwrap());
+        assert!(!typer.is_subtype(expr_type, add_type).unwrap());
+        let completed_again = typer
+            .complete_symbol(add)
+            .expect("completed graph validates on reuse");
+        let Type::ClassInfo(completed_again) = typer.store().types.get(completed_again) else {
+            panic!("ClassInfo")
+        };
+        assert_eq!(completed_again.parents.len(), 3);
+    }
+
+    #[test]
+    fn recursive_source_product2_defers_mixed_or_unrelated_fields_without_partial_projection() {
+        for (source_text, description) in [
+            (
+                "package scala { trait Product }; package matching { sealed trait Expr; final case class Add(left: Expr, right: Int) extends Expr }",
+                "second source field is not the direct parent type",
+            ),
+            (
+                "package scala { trait Product }; package foreign { trait Expr }; package matching { sealed trait Expr; final case class Add(left: Expr, right: foreign.Expr) extends Expr }",
+                "same-spelled foreign trait does not authenticate",
+            ),
+            (
+                "package scala { trait Product }; package matching { sealed trait Expr; final case class Add(left: Int, right: Boolean) extends Expr }",
+                "the unrelated Int/Boolean Product2 control does not admit a source parent",
+            ),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let add = class_symbol(&parsed, &store, &index, source, "Add");
+            let class_scope = index.scope_of(add).unwrap();
+            let selectors = ["_1", "_2"].map(|name| {
+                store
+                    .scopes
+                    .get(class_scope)
+                    .lookup(TermName::new(store.names.intern(name)).as_name())
+                    .unwrap()
+            });
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let checkpoint = typer.store().checkpoint();
+            let class_info = typer
+                .complete_symbol(add)
+                .expect("unsupported parented projection defers as an ordinary class");
+            assert_ne!(typer.store().checkpoint(), checkpoint);
+            let Type::ClassInfo(class_info) = typer.store().types.get(class_info) else {
+                panic!("ordinary Add ClassInfo")
+            };
+            assert_eq!(
+                class_info.parents.len(),
+                2,
+                "{description}: retain Object and Expr"
+            );
+            assert!(
+                class_info.parents.iter().all(|parent| {
+                    !matches!(
+                        typer.store().types.try_get(*parent),
+                        Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. })
+                            if typer.store().names.resolve(typer.store().symbols.get(*symbol).name.text()) == "Product"
+                    )
+                }),
+                "{description}: unsupported shape has no Product edge"
+            );
+            for selector in selectors {
+                assert_eq!(
+                    *typer.store().symbols.info(selector),
+                    SymbolInfo::Missing,
+                    "{description}: neither selector is partially published"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recursive_source_product2_defers_class_and_applied_trait_parents() {
+        for (source_text, base_name) in [
+            (
+                "package scala { trait Product }; package matching { class Base; final case class Add(left: Int, right: Int) extends Base }",
+                "Base",
+            ),
+            (
+                "package scala { trait Product }; package matching { trait Base[A]; final case class Add(left: Int, right: Int) extends Base[Int] }",
+                "Base",
+            ),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let add = class_symbol(&parsed, &store, &index, source, "Add");
+            let base = class_symbol(&parsed, &store, &index, source, base_name);
+            let product = class_symbol(&parsed, &store, &index, source, "Product");
+            let class_scope = index.scope_of(add).unwrap();
+            let selectors = ["_1", "_2"].map(|name| {
+                store
+                    .scopes
+                    .get(class_scope)
+                    .lookup(TermName::new(store.names.intern(name)).as_name())
+                    .unwrap()
+            });
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let ordinary_info = typer
+                .complete_symbol(add)
+                .expect("unsupported parent shape completes as an ordinary class");
+            let Type::ClassInfo(info) = typer.store().types.get(ordinary_info) else {
+                panic!("Add ClassInfo")
+            };
+            assert!(
+                info.parents.iter().any(|parent| {
+                    match typer.store().types.try_get(*parent) {
+                        Some(Type::TypeRef {
+                            target: TypeRefTarget::Symbol(symbol),
+                            ..
+                        }) => *symbol == base,
+                        Some(Type::Applied { tycon, .. }) => {
+                            type_symbol(typer.store(), *tycon) == base
+                        }
+                        _ => false,
+                    }
+                }),
+                "the unsupported source parent is preserved"
+            );
+            assert!(info.parents.iter().all(|parent| {
+                !matches!(
+                    typer.store().types.try_get(*parent),
+                    Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. })
+                        if *symbol == product
+                )
+            }));
+            for selector in selectors {
+                assert_eq!(*typer.store().symbols.info(selector), SymbolInfo::Missing);
+            }
+
+            let mut corrupted = match typer.store().types.get(ordinary_info).clone() {
+                Type::ClassInfo(info) => info,
+                _ => unreachable!(),
+            };
+            let first_parent = corrupted.parents[0];
+            corrupted.parents.push(first_parent);
+            let corrupted_info = typer.store.types.alloc(Type::ClassInfo(corrupted));
+            typer
+                .store
+                .symbols
+                .set_info(add, SymbolInfo::Complete(corrupted_info));
+            assert!(matches!(
+                typer.complete_symbol(add),
+                Err(TyperError::MalformedClassInfo { symbol, info })
+                    if symbol == add && info == corrupted_info
+            ));
+            typer
+                .store
+                .symbols
+                .set_info(add, SymbolInfo::Complete(ordinary_info));
+            assert_eq!(
+                typer
+                    .complete_symbol(add)
+                    .expect("restoring valid deferred metadata allows a same-class retry"),
+                ordinary_info
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_source_product2_stale_missing_projection_is_rejected_then_valid_state_retries() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { trait Product }; package matching { sealed trait Expr; final case class Add(left: Expr, right: Expr) extends Expr }",
+        );
+        let add = class_symbol(&parsed, &store, &index, source, "Add");
+        let product_symbol = class_symbol(&parsed, &store, &index, source, "Product");
+        let class_scope = index.scope_of(add).unwrap();
+        let selectors = ["_1", "_2"].map(|name| {
+            store
+                .scopes
+                .get(class_scope)
+                .lookup(TermName::new(store.names.intern(name)).as_name())
+                .unwrap()
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let original_class_info = typer
+            .complete_symbol(add)
+            .expect("valid Product2 class completes");
+        let original_selector_infos =
+            selectors.map(|selector| *typer.store().symbols.info(selector));
+        let Type::ClassInfo(mut stale_class_info) =
+            typer.store().types.get(original_class_info).clone()
+        else {
+            panic!("Add ClassInfo")
+        };
+        stale_class_info.parents.retain(|parent| {
+            !matches!(
+                typer.store().types.try_get(*parent),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                }) if *symbol == product_symbol
+            )
+        });
+        let stale_class_info = typer.store.types.alloc(Type::ClassInfo(stale_class_info));
+        typer
+            .store
+            .symbols
+            .set_info(add, SymbolInfo::Complete(stale_class_info));
+        for selector in selectors {
+            typer.store.symbols.set_info(selector, SymbolInfo::Missing);
+        }
+        let stale_checkpoint = typer.store().checkpoint();
+        assert!(matches!(
+            typer.complete_symbol(add),
+            Err(TyperError::MalformedClassInfo { symbol, info })
+                if symbol == add && info == stale_class_info
+        ));
+        assert_eq!(typer.store().checkpoint(), stale_checkpoint);
+        assert_eq!(
+            *typer.store().symbols.info(add),
+            SymbolInfo::Complete(stale_class_info)
+        );
+        for selector in selectors {
+            assert_eq!(*typer.store().symbols.info(selector), SymbolInfo::Missing);
+        }
+
+        typer
+            .store
+            .symbols
+            .set_info(add, SymbolInfo::Complete(original_class_info));
+        for (selector, info) in selectors.into_iter().zip(original_selector_infos) {
+            typer.store.symbols.set_info(selector, info);
+        }
+        assert_eq!(
+            typer
+                .complete_symbol(add)
+                .expect("restored valid graph retries"),
+            original_class_info
+        );
+    }
+
+    #[test]
+    fn recursive_source_product2_rolls_back_both_selectors_then_retries_same_session() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { class Product }; package matching { sealed trait Expr; final case class Add(left: Expr, right: Expr) extends Expr }",
+        );
+        let add = class_symbol(&parsed, &store, &index, source, "Add");
+        let product = class_symbol(&parsed, &store, &index, source, "Product");
+        let class_scope = index.scope_of(add).unwrap();
+        let selectors = ["_1", "_2"].map(|name| {
+            store
+                .scopes
+                .get(class_scope)
+                .lookup(TermName::new(store.names.intern(name)).as_name())
+                .unwrap()
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let checkpoint = typer.store().checkpoint();
+        let error = typer
+            .complete_symbol(add)
+            .expect_err("Product must resolve to a Trait");
+        assert!(matches!(error, TyperError::SymbolResolution { .. }));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(*typer.store().symbols.info(add), SymbolInfo::Missing);
+        for selector in selectors {
+            assert_eq!(*typer.store().symbols.info(selector), SymbolInfo::Missing);
+        }
+
+        typer.store.symbols.get_mut(product).kind = SymbolKind::Trait;
+        typer
+            .complete_symbol(add)
+            .expect("valid retry in the same session");
+        for selector in selectors {
+            let SymbolInfo::Complete(info) = *typer.store().symbols.info(selector) else {
+                panic!("both selectors complete after retry")
+            };
+            let Type::Method(method) = typer.store().types.get(info) else {
+                panic!("selector has a MethodType")
+            };
+            assert!(method.params.is_empty());
+            assert_eq!(
+                type_symbol(typer.store(), method.result),
+                class_symbol(&parsed, typer.store(), &index, source, "Expr")
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_source_product2_is_stable_across_sessions_completion_order_and_reordering() {
+        let first = "package scala { trait Product }; package matching { sealed trait Expr; final case class Num(value: Int) extends Expr; final case class Add(left: Expr, right: Expr) extends Expr }";
+        let reordered = "package scala { trait Product }; package matching { final case class Add(left: Expr, right: Expr) extends Expr; final case class Num(value: Int) extends Expr; sealed trait Expr }";
+        let expected = recursive_source_product2_receipt(first, false);
+        assert_eq!(recursive_source_product2_receipt(first, true), expected);
+        assert_eq!(recursive_source_product2_receipt(reordered, true), expected);
+    }
+
+    fn recursive_source_product2_receipt(source_text: &str, selector_first: bool) -> String {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let symbol_named = |store: &SemanticStore, index: &SourceSemanticIndex, expected: &str| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == expected =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing {expected}"))
+        };
+        let expr = symbol_named(&store, &index, "Expr");
+        let add = symbol_named(&store, &index, "Add");
+        assert!(store.symbols.get(expr).flags.contains(SymbolFlags::SEALED));
+        assert!(store.symbols.get(add).flags.contains(SymbolFlags::CASE));
+        let SourceDefinition::Canonical { tree: add_tree, .. } = index.definition_of(add).unwrap()
+        else {
+            panic!("Add has canonical source identity")
+        };
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(add_tree).kind else {
+            panic!("Add is a class")
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            panic!("Add has a template")
+        };
+        let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+            panic!("Add has a constructor")
+        };
+        let fields = constructor.value_param_clauses[0].clone();
+        let class_scope = index.scope_of(add).unwrap();
+        let selectors = ["_1", "_2"].map(|name| {
+            store
+                .scopes
+                .get(class_scope)
+                .lookup(TermName::new(store.names.intern(name)).as_name())
+                .unwrap()
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        if selector_first {
+            typer
+                .complete_symbol(selectors[1])
+                .expect("selector-first route");
+        }
+        let info = typer.complete_symbol(add).expect("class completion");
+        let Type::ClassInfo(info) = typer.store().types.get(info) else {
+            panic!("Add ClassInfo")
+        };
+        let parents = info
+            .parents
+            .iter()
+            .map(|parent| {
+                let symbol = type_symbol(typer.store(), *parent);
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(symbol).name.text())
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(parents, ["Object", "Expr", "Product"]);
+        let mut projections = Vec::new();
+        for ((field_tree, selector), expected_field) in
+            fields.iter().zip(selectors).zip(["left", "right"])
+        {
+            let field = index.symbol_at(source, *field_tree).unwrap();
+            let TreeKind::ValDef(definition) = &parsed.ast.get(*field_tree).kind else {
+                panic!("field source tree")
+            };
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(definition.name.as_name().text()),
+                expected_field
+            );
+            assert_eq!(
+                index.definition_of(field),
+                Some(SourceDefinition::Canonical {
+                    source,
+                    tree: *field_tree
+                })
+            );
+            assert_eq!(
+                index.definition_of(selector),
+                Some(SourceDefinition::Derived {
+                    source,
+                    tree: *field_tree
+                })
+            );
+            assert_eq!(typer.store().symbols.get(field).owner, Some(add));
+            assert_eq!(typer.store().symbols.get(selector).owner, Some(add));
+            let SymbolInfo::Complete(info) = *typer.store().symbols.info(selector) else {
+                panic!("selector info")
+            };
+            let Type::Method(method) = typer.store().types.get(info) else {
+                panic!("selector MethodType")
+            };
+            assert!(method.params.is_empty());
+            assert_eq!(type_symbol(typer.store(), method.result), expr);
+            projections.push(format!(
+                "{expected_field}:Expr=>{}:Expr@Add",
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(selector).name.text())
+            ));
+        }
+        let add_type = nominal_type_ref(typer.store, definitions, add);
+        let expr_type = nominal_type_ref(typer.store, definitions, expr);
+        typer.complete_symbol(expr).unwrap();
+        let product_type = typer.canonical_scala_product_type(0).unwrap().unwrap();
+        let product = type_symbol(typer.store(), product_type);
+        typer.complete_symbol(product).unwrap();
+        assert!(typer.is_subtype(add_type, expr_type).unwrap());
+        assert!(!typer.is_subtype(expr_type, add_type).unwrap());
+        format!(
+            "Add|parents={}|projection={}|Add<:Expr=true|Expr<:Add=false",
+            parents.join(","),
+            projections.join(",")
+        )
     }
 
     #[test]

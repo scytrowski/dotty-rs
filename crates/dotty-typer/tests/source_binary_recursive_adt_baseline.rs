@@ -34,15 +34,13 @@ fn binary_recursive_adt_roots_are_attempted_in_two_fresh_resolver_sessions() {
         .collect::<Vec<_>>();
     assert_eq!(
         format!("{}\n", receipt.join("\n")),
-        include_str!(
-            "fixtures/source-binary-recursive-adt-3.9.0/rust-after-typer-unapply-two-root.tsv"
-        )
-        .split_once('\n')
-        .expect("post-Typer unapply root receipt header")
-        .1
+        include_str!("fixtures/source-binary-recursive-adt-3.9.0/rust-after-product2-two-root.tsv")
+            .split_once('\n')
+            .expect("post-Product2 root receipt header")
+            .1
     );
     for row in receipt {
-        println!("ISSUE2071_ROOT_AFTER_UNAPPLY\t{row}");
+        println!("ISSUE2072_ROOT_AFTER_PRODUCT2\t{row}");
     }
 }
 
