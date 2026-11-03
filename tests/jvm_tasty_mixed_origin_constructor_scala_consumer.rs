@@ -443,6 +443,30 @@ fn stale_tasty_uuid(class_bytes: &[u8], tasty_bytes: &[u8]) -> Vec<u8> {
     mutated
 }
 
+fn relink_tasty_uuid(tasty_bytes: &[u8], original_tasty_bytes: &[u8]) -> Vec<u8> {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).unwrap();
+    let generated_uuid = tasty.header().uuid;
+    let target_uuid = TastyFile::parse_and_validate_scala_3_9(original_tasty_bytes)
+        .unwrap()
+        .header()
+        .uuid;
+    let mut bytes = tasty_bytes.to_vec();
+    let tasty_uuid_offsets = bytes
+        .windows(generated_uuid.len())
+        .enumerate()
+        .filter_map(|(offset, window)| (window == generated_uuid).then_some(offset))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tasty_uuid_offsets.len(),
+        1,
+        "TASTy UUID occurs once in its file"
+    );
+    let offset = tasty_uuid_offsets[0];
+    bytes[offset..offset + generated_uuid.len()].copy_from_slice(&target_uuid);
+    TastyFile::parse_and_validate_scala_3_9(&bytes).expect("relinked Scala TASTy remains valid");
+    bytes
+}
+
 fn formal_addresses(tasty_bytes: &[u8], method_name: &str) -> (u32, u32) {
     let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).unwrap();
     let index = tasty.ast_address_index().unwrap();
@@ -1523,6 +1547,98 @@ fn source_negative_probes(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatc
     );
 }
 
+fn factory_signature_negative_probes(
+    scala: &Scala,
+    root: &Path,
+    batch: &PairedJvmTastyBatchArtifacts,
+) {
+    let factory = batch
+        .classes()
+        .iter()
+        .find(|artifact| artifact.classfile_path() == "example/PairFactory.class")
+        .unwrap();
+    let original_factory_tasty = batch
+        .classes()
+        .iter()
+        .find(|artifact| artifact.tasty_path() == "example/PairFactory.tasty")
+        .unwrap();
+    let controls = [
+        (
+            "factory-tasty-wrong-formal-arity",
+            "package example\nclass PairFactory:\n  def wrapAndCreate(existing: Counter): Pair =\n    new Pair(existing, new Counter(2))\n",
+            "package example\nobject Consumer:\n  val pair: Pair = new PairFactory().wrapAndCreate(new Counter(7), 8)\n",
+            "[E007] Type Mismatch Error",
+        ),
+        (
+            "factory-tasty-wrong-result-type",
+            "package example\nclass PairFactory:\n  def wrapAndCreate(existing: Counter, seed: Int): Counter =\n    new Counter(seed)\n",
+            "package example\nobject Consumer:\n  val pair: Pair = new PairFactory().wrapAndCreate(new Counter(7), 8)\n",
+            "[E007] Type Mismatch Error",
+        ),
+    ];
+    for (label, factory_source, client_source, expected) in controls {
+        let case = root.join(format!("negative-{label}"));
+        let dependencies = case.join("dependencies");
+        let generated = case.join("generated");
+        let classes = case.join("classes");
+        let out = case.join("consumer-out");
+        for directory in [&dependencies, &generated, &classes, &out] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        write_batch(&dependencies, batch);
+        fs::remove_file(dependencies.join("example/PairFactory.class")).unwrap();
+        fs::remove_file(dependencies.join("example/PairFactory.tasty")).unwrap();
+
+        let factory_path = case.join("FactoryControl.scala");
+        fs::write(&factory_path, factory_source).unwrap();
+        scala.compile(
+            &format!("{}:{}", dependencies.display(), scala.libraries),
+            &generated,
+            &factory_path,
+        );
+        let generated_tasty = fs::read(generated.join("example/PairFactory.tasty"))
+            .expect("pinned Scala generated the Factory signature control");
+
+        write_batch(&classes, batch);
+        fs::write(
+            classes.join("example/PairFactory.tasty"),
+            relink_tasty_uuid(&generated_tasty, original_factory_tasty.tasty_bytes()),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(classes.join("example/PairFactory.class")).unwrap(),
+            factory.classfile_bytes(),
+            "{label} preserves the original Rust JVM classfile and ABI"
+        );
+        assert_ne!(
+            fs::read(classes.join("example/PairFactory.tasty")).unwrap(),
+            original_factory_tasty.tasty_bytes(),
+            "{label} uses a changed Factory TASTy signature"
+        );
+
+        let client_path = case.join("Consumer.scala");
+        fs::write(&client_path, client_source).unwrap();
+        let result = scala.compile_result(
+            &format!("{}:{}", classes.display(), scala.libraries),
+            &out,
+            &client_path,
+        );
+        assert!(!result.status.success(), "Scala accepted {label}");
+        let diagnostic = first_error(&result);
+        assert!(
+            diagnostic.contains(expected),
+            "wrong first Factory TASTy signature diagnostic for {label}: {diagnostic}\n{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            fs::read(classes.join("example/PairFactory.class")).unwrap(),
+            factory.classfile_bytes(),
+            "{label} leaves original JVM ABI bytes unchanged after Scala lookup"
+        );
+        eprintln!("SCALA_NEGATIVE_FIRST_FAILURE {label}: {diagnostic}");
+    }
+}
+
 #[test]
 fn official_scala_consumes_original_rust_mixed_origin_constructor_batch() {
     if !required() {
@@ -1612,6 +1728,19 @@ fn official_scala_consumes_original_rust_mixed_origin_constructor_batch() {
         "Consumer",
         20178,
     );
+}
+
+#[test]
+fn scala_rejects_factory_tasty_arity_and_result_controls_without_abi_changes() {
+    if !required() {
+        return;
+    }
+    let scala = Scala::from_environment();
+    let root = task_dir();
+    let batch =
+        emit_paired_jvm_tasty_batch(FORWARD, "PairFactory.scala", SourceId::from_index(20180))
+            .expect("signature controls start from the authentic Rust-produced six-artifact batch");
+    factory_signature_negative_probes(&scala, &root, &batch);
 }
 
 #[test]

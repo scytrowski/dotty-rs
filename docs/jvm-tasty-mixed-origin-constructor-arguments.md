@@ -111,6 +111,17 @@ is caught by the original-reference identity assertion. The tests preserve
 these distinct reader, compiler, verifier/linker, and semantic identity
 outcomes rather than expecting every mutation to fail at Scala source typing.
 
+Factory signature controls separately replace only `PairFactory.tasty` with
+an official Scala 3.9 sidecar for a one-formal `wrapAndCreate` or a
+`wrapAndCreate` returning `Counter`. The replacement sidecar is relinked to
+the original Factory class UUID; the original Rust `PairFactory.class` bytes
+are asserted unchanged before and after each independently authored client
+compile. Both controls fail at Scala source typing with `[E007] Type Mismatch
+Error` (the one-formal case reports the supplied `(Counter, Int)` arguments
+against its single `Counter` formal). These source-signature controls are
+independent of the JVM classfile descriptor mutation, which continues to pass
+source typing and fail later at JVM verification/linkage.
+
 The strict flag is `DOTTY_REQUIRE_SCALA_TASTY_MIXED_ORIGIN_CONSTRUCTOR_CONSUMER=1`.
 The existing pinned Scala workflow sets it, executes this consumer with the
 other inherited strict Scala readers and consumers, and retains the mandatory
