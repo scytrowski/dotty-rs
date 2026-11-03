@@ -31,24 +31,26 @@ fn require_exact_jdk_21_or_skip() -> bool {
     let unavailable = ["java", "javac", "javap"]
         .into_iter()
         .filter_map(|tool| {
-            let output = Command::new(tool).arg("-version").output().ok()?;
+            let output = match Command::new(tool).arg("-version").output() {
+                Ok(output) => output,
+                Err(error) => return Some(format!("{tool} unavailable: {error}")),
+            };
+            if !output.status.success() {
+                return Some(format!("{tool} -version failed"));
+            }
             let text = format!(
                 "{}{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            if !output.status.success() || !text.contains("21.") {
-                Some(format!("{tool}: {text}"))
-            } else {
-                None
-            }
+            (!text.contains("21.0.13")).then(|| format!("{tool} reports {text:?}"))
         })
         .collect::<Vec<_>>();
     if unavailable.is_empty() {
         true
     } else if std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1") {
         panic!(
-            "strict mixed runtime requires JDK 21 tools on PATH: {}",
+            "strict mixed runtime requires java, javac, and javap from JDK 21.0.13; unavailable: {}",
             unavailable.join("; ")
         );
     } else {
@@ -57,6 +59,64 @@ fn require_exact_jdk_21_or_skip() -> bool {
             unavailable.join("; ")
         );
         false
+    }
+}
+
+#[test]
+fn missing_jdk_tools_skip_optional_run_and_fail_required_run() {
+    let test_binary = std::env::current_exe().expect("current integration test binary");
+    let run_jdk_test = |required: bool| {
+        let mut command = Command::new(&test_binary);
+        command
+            .args([
+                "--exact",
+                "mixed_origin_counter_identity_and_allocation_order_on_strict_jdk21",
+                "--nocapture",
+            ])
+            .env("PATH", "/__dotty_issue2016_no_jdk_tools__");
+        if required {
+            command.env("DOTTY_CLASSFILE_REQUIRE_JDK", "1");
+        } else {
+            command.env_remove("DOTTY_CLASSFILE_REQUIRE_JDK");
+        }
+        command.output().expect("run JDK test in isolated process")
+    };
+
+    let optional = run_jdk_test(false);
+    let optional_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&optional.stdout),
+        String::from_utf8_lossy(&optional.stderr)
+    );
+    assert!(optional.status.success(), "{optional_output}");
+    assert!(
+        optional_output.contains("skipping optional mixed runtime JDK test"),
+        "{optional_output}"
+    );
+    for tool in ["java", "javac", "javap"] {
+        assert!(
+            optional_output.contains(&format!("{tool} unavailable")),
+            "{optional_output}"
+        );
+    }
+
+    let required = run_jdk_test(true);
+    let required_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&required.stdout),
+        String::from_utf8_lossy(&required.stderr)
+    );
+    assert!(!required.status.success(), "{required_output}");
+    assert!(
+        required_output
+            .contains("strict mixed runtime requires java, javac, and javap from JDK 21.0.13"),
+        "{required_output}"
+    );
+    for tool in ["java", "javac", "javap"] {
+        assert!(
+            required_output.contains(&format!("{tool} unavailable")),
+            "{required_output}"
+        );
     }
 }
 
