@@ -572,23 +572,60 @@ impl SourceTyper<'_> {
         else {
             return Ok(());
         };
-        if template.parents.len() != 1 {
+        if template.parents.len() != 1
+            || !self
+                .store
+                .symbols
+                .get(class)
+                .flags
+                .contains(SymbolFlags::CASE)
+            || !self
+                .source_class_type_parameters(class)
+                .is_ok_and(|parameters| parameters.is_empty())
+            || constructor.value_param_clauses.len() != 1
+            || constructor.value_param_clauses[0].len() != 1
+        {
             return Ok(());
         }
+        let malformed = || TyperError::MalformedClassInfo {
+            symbol: class,
+            info: class_info_type,
+        };
+        let Some(Type::ClassInfo(class_info)) = self.store.types.try_get(class_info_type).cloned()
+        else {
+            return Err(malformed());
+        };
+        let product_type = class_info.parents.iter().copied().find(|parent| {
+            matches!(
+                self.store.types.try_get(*parent),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(product),
+                    ..
+                }) if self.is_canonical_classpath_scala_product(*product)
+            )
+        });
+        let has_product_projection = product_type.is_some();
         let Some(projection) = self.source_case_class_product_selector(
             class,
             SymbolKind::Class,
             template,
             constructor,
         ) else {
-            return Ok(());
+            return if has_product_projection {
+                Err(malformed())
+            } else {
+                Ok(())
+            };
         };
         let [(field_tree, selector)] = projection.as_slice() else {
-            return Ok(());
+            return if has_product_projection {
+                Err(malformed())
+            } else {
+                Ok(())
+            };
         };
-        let malformed = || TyperError::MalformedClassInfo {
-            symbol: class,
-            info: class_info_type,
+        let Some(product_type) = product_type else {
+            return Err(malformed());
         };
         let context = self
             .index
@@ -612,13 +649,6 @@ impl SourceTyper<'_> {
         {
             return Err(malformed());
         }
-        let Some(Type::ClassInfo(class_info)) = self.store.types.try_get(class_info_type).cloned()
-        else {
-            return Err(malformed());
-        };
-        let Some(product_type) = self.canonical_scala_product_type(tree.index())? else {
-            return Err(malformed());
-        };
         let expected_parents = [self.definitions.object_type, parent_type, product_type];
         if class_info.parents.len() != expected_parents.len()
             || !class_info
@@ -639,6 +669,23 @@ impl SourceTyper<'_> {
             return Err(malformed());
         }
         Ok(())
+    }
+
+    fn is_canonical_classpath_scala_product(&self, product: SymbolId) -> bool {
+        if !self.store.symbols.contains(product) {
+            return false;
+        }
+        let symbol = self.store.symbols.get(product);
+        symbol.kind == SymbolKind::Trait
+            && symbol
+                .owner
+                .is_some_and(|owner| self.package_path(owner) == ["scala"])
+            && symbol.name.namespace() == dotty_core::Namespace::Type
+            && self.store.names.resolve(symbol.name.text()) == "Product"
+            && matches!(
+                symbol.origin,
+                SymbolOrigin::Classfile(_) | SymbolOrigin::Tasty(_)
+            )
     }
 
     fn is_canonical_source_trait_ref(&self, ty: TypeId, expected: SymbolId) -> bool {

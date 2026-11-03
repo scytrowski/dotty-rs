@@ -145,6 +145,82 @@ fn source_recursive_product1_rejects_unrelated_trait_field_and_keeps_sibling_ret
     });
 }
 
+#[test]
+fn completed_source_product1_rejects_broken_selector_authentication() {
+    for corruption in [
+        "foreign owner",
+        "foreign field owner",
+        "missing selector",
+        "conflicting selector",
+    ] {
+        let source = SourceId::from_index(match corruption {
+            "foreign owner" => 20365,
+            "foreign field owner" => 20366,
+            "missing selector" => 20367,
+            "conflicting selector" => 20368,
+            _ => unreachable!(),
+        });
+        let text = "package adt\nsealed trait Expr\nfinal case class Num(value: Int) extends Expr\nfinal case class Succ(inner: Expr) extends Expr\n";
+        let mut session = Session::new(text, source);
+        let succ = session.source_type_symbol("Succ");
+        let num = session.source_type_symbol("Num");
+        let selector = session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| session.index.derived_symbol_at(succ, source, tree))
+            .expect("canonical Succ._1");
+        let num_selector = session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| session.index.derived_symbol_at(num, source, tree))
+            .expect("canonical Num._1");
+        let field = session
+            .parsed
+            .ast
+            .iter()
+            .find_map(|(tree, _)| {
+                (session.index.derived_symbol_at(succ, source, tree) == Some(selector))
+                    .then(|| session.index.symbol_at(source, tree))
+                    .flatten()
+            })
+            .expect("canonical Succ constructor field");
+        session.with_typer(|_, _, _, _, typer| {
+            typer
+                .complete_symbol(succ)
+                .expect("valid recursive Product1 class completes first");
+        });
+        let completed = *session.store.symbols.info(succ);
+        assert!(matches!(completed, SymbolInfo::Complete(_)));
+        let scope = session.index.scope_of(succ).expect("Succ scope");
+        match corruption {
+            "foreign owner" => session.store.symbols.get_mut(selector).owner = Some(num),
+            "foreign field owner" => session.store.symbols.get_mut(field).owner = Some(num),
+            "missing selector" => session.store.scopes.get_mut(scope).remove(selector),
+            "conflicting selector" => {
+                let selector_name = Name::new(session.store.names.intern("_1"), Namespace::Term);
+                session
+                    .store
+                    .scopes
+                    .get_mut(scope)
+                    .enter(selector_name, num_selector);
+            }
+            _ => unreachable!(),
+        }
+        let checkpoint = session.store.checkpoint();
+        let error = session
+            .with_typer(|_, _, _, _, typer| typer.complete_symbol(succ))
+            .expect_err("completed Product1 rejects unauthenticated selector metadata");
+        assert!(
+            matches!(&error, TyperError::MalformedClassInfo { symbol, .. } if *symbol == succ),
+            "{corruption}: {error:?}"
+        );
+        assert_eq!(session.store.checkpoint(), checkpoint, "{corruption}");
+        assert_eq!(*session.store.symbols.info(succ), completed, "{corruption}");
+    }
+}
+
 fn source_recursive_product1_session(source: SourceId, selector_first: bool, text: &str) -> String {
     let mut session = Session::new(text, source);
     let expr = session.source_type_symbol("Expr");
