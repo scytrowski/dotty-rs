@@ -204,7 +204,7 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
     def test_recursive_expr_oracle_log_rejects_missing_pinned_evidence(self) -> None:
         required = [
             "verified all 8 pinned Scala 3.9.0 artifacts",
-            f"Scala 3.9.0 source revision: {gate.SCALA_REVISION}",
+            f"Scala source revision: {gate.SCALA_REVISION}",
             'JDK: JAVA_VERSION="21.0.8"; IMPLEMENTOR_VERSION="Temurin-21.0.8+9"',
             "Two-root typed snapshot and 13-case classification matrix match.",
             "verified frozen source SHA-256 manifest",

@@ -484,7 +484,7 @@ def validate_recursive_adt_oracle_log(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     required_lines = {
         "verified all 8 pinned Scala 3.9.0 artifacts",
-        f"Scala 3.9.0 source revision: {SCALA_REVISION}",
+        f"Scala source revision: {SCALA_REVISION}",
         'JDK: JAVA_VERSION="21.0.8"; IMPLEMENTOR_VERSION="Temurin-21.0.8+9"',
         "Two-root typed snapshot and 13-case classification matrix match.",
         "verified frozen source SHA-256 manifest",
