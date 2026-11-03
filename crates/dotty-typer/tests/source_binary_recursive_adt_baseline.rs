@@ -35,14 +35,14 @@ fn binary_recursive_adt_roots_are_attempted_in_two_fresh_resolver_sessions() {
     assert_eq!(
         format!("{}\n", receipt.join("\n")),
         include_str!(
-            "fixtures/source-binary-recursive-adt-3.9.0/rust-after-namer-identities-two-root.tsv"
+            "fixtures/source-binary-recursive-adt-3.9.0/rust-after-typer-unapply-two-root.tsv"
         )
         .split_once('\n')
-        .expect("post-Namer root receipt header")
+        .expect("post-Typer unapply root receipt header")
         .1
     );
     for row in receipt {
-        println!("ISSUE2066_ROOT_AFTER_NAMER\t{row}");
+        println!("ISSUE2071_ROOT_AFTER_UNAPPLY\t{row}");
     }
 }
 

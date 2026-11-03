@@ -1,0 +1,4 @@
+stage	class	original_fields	method_owner	formal_owner	method_type	outcome
+before #2071	Add	left: Expr,right: Expr (distinct canonical source Fields)	Add$	Add$.unapply	incomplete; MalformedMethodClause	Post-#2066 Typer rejects the two-reference-field clause
+after #2071	Add	left: Expr,right: Expr (distinct canonical source Fields)	Add$	Add$.unapply	Plain MethodType (x$1: Add): Add	complete; one input, one result, no tuple or Option
+Scala 3.9.0 oracle	Add	left: Expr,right: Expr (distinct class-owned Fields)	Add$	Add$.unapply	unapply(Add): Add	pinned typed-tree receipt in source-binary-recursive-adt-3.9.0

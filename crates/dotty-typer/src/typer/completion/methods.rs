@@ -285,8 +285,14 @@ impl SourceTyper<'_> {
                 clause_index: 0,
             });
         }
-        for (parameter_tree, expected_type) in
-            parameter_trees.iter().copied().zip(expected_field_types)
+        let mut two_reference_fields = false;
+        let mut authenticated_reference_parent = None;
+        let mut authenticated_fields = Vec::with_capacity(parameter_trees.len());
+        for (field_index, (parameter_tree, expected_type)) in parameter_trees
+            .iter()
+            .copied()
+            .zip(expected_field_types)
+            .enumerate()
         {
             let Some(TreeKind::ValDef(parameter)) =
                 self.arena.try_get(parameter_tree).map(|node| &node.kind)
@@ -304,7 +310,9 @@ impl SourceTyper<'_> {
                 },
             )?;
             if !self.store.symbols.contains(field)
+                || authenticated_fields.contains(&field)
                 || self.store.symbols.get(field).kind != SymbolKind::Field
+                || !self.store.symbols.get(field).flags.is_empty()
                 || self.store.symbols.get(field).owner != Some(class)
                 || self.store.symbols.get(field).origin != SymbolOrigin::Source(source)
                 || self.index.definition_of(field)
@@ -326,17 +334,26 @@ impl SourceTyper<'_> {
                     clause_index: 0,
                 });
             }
+            authenticated_fields.push(field);
             let parameter_context = self
                 .parameter_source_context(field)
                 .ok_or(TyperError::DeclarationContextMissing { symbol: field })?;
             let field_type =
                 self.type_of_tpt_inner_journaled(parameter.tpt, parameter_context, info_journal)?;
-            // Keep the reference exception to the canonical direct source-trait parent.
-            let supported_reference_field = if field_type != expected_type
-                && parameter_trees.len() == 1
-                && expected_type == self.definitions.int
-                && template.parents.len() == 1
-            {
+            // Product1 keeps its existing reference exception. Product2 accepts
+            // references only as a homogeneous pair authenticated against one
+            // canonical direct source-trait parent.
+            if parameter_trees.len() == 2 && field_index == 0 {
+                two_reference_fields = field_type != expected_type;
+            }
+            let reference_field_candidate = if parameter_trees.len() == 1 {
+                field_type != expected_type
+                    && expected_type == self.definitions.int
+                    && template.parents.len() == 1
+            } else {
+                two_reference_fields && template.parents.len() == 1
+            };
+            let supported_reference_field = if reference_field_candidate {
                 let parent_tree = template.parents[0];
                 let parent_type =
                     self.project_parent_type(parent_tree, parameter_context, 0, info_journal)?;
@@ -346,16 +363,49 @@ impl SourceTyper<'_> {
                     parent_type,
                     info_journal,
                 )?;
-                self.is_canonical_source_trait_ref(field_type, parent)
+                let same_parent = authenticated_reference_parent
+                    .is_none_or(|authenticated| authenticated == parent);
+                if parameter_trees.len() == 2 {
+                    authenticated_reference_parent = Some(parent);
+                }
+                same_parent && self.is_canonical_source_trait_ref(field_type, parent)
             } else {
                 false
             };
-            if field_type != expected_type && !supported_reference_field {
+            let supported_field_type = if parameter_trees.len() == 2 && two_reference_fields {
+                supported_reference_field
+            } else {
+                field_type == expected_type || supported_reference_field
+            };
+            if !supported_field_type {
                 return Err(TyperError::MalformedMethodClause {
                     method,
                     method_tree_index: class_tree.index(),
                     clause_index: 0,
                 });
+            }
+            if parameter_trees.len() == 2 && two_reference_fields {
+                match *self.store.symbols.info(field) {
+                    // Source fields remain lazily completed for this generated
+                    // signature. If another path has already supplied field
+                    // info, it must agree with the independently projected
+                    // canonical parent reference authenticated above.
+                    SymbolInfo::Missing => {}
+                    SymbolInfo::Complete(info) if info == field_type => {}
+                    SymbolInfo::Complete(_) => {
+                        return Err(TyperError::MalformedMethodClause {
+                            method,
+                            method_tree_index: class_tree.index(),
+                            clause_index: 0,
+                        });
+                    }
+                    SymbolInfo::Deferred(_) => {
+                        return Err(TyperError::DeferredSymbolCompletion { symbol: field });
+                    }
+                    SymbolInfo::Error => {
+                        return Err(TyperError::SymbolAlreadyErrored { symbol: field });
+                    }
+                }
             }
         }
 
