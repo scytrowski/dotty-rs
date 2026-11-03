@@ -5,6 +5,119 @@ the current Rust first rejection for a Pair constructor call with one existing
 method formal and one nested `new Counter(seed)`. It changes no production
 semantics and establishes no paired JVM/TASTy feature support.
 
+## Rust producer / official Scala client proof (#2017)
+
+The strict Scala consumer now emits each producer variant through one Rust
+frontend session, writes the original six linked files to a clean directory,
+then compiles a separately authored client against those artifacts and the two
+hash-pinned Scala runtime JARs. The runtime classpath contains only the Scala
+client output, the original Rust producer directory, and those runtime JARs.
+`-Xverify:all -ea` is enabled. Scala `-from-tasty` output is written to a
+separate inspection-only directory and is never included in runtime resolution.
+
+The original source and client receipts from the strict run are:
+
+| File | SHA-256 |
+| --- | --- |
+| `wrap-and-create/PairFactory.scala` | `9232b0a536470a69041f399a23f2b4a0e80a9dcfeb28575f17a84d1f146f8935` |
+| `create-and-wrap/PairFactory.scala` | `0c14002f9915683fe60371ac53ea36bec77b24b8a04781152fbae020449ac95c` |
+| `Consumer.scala` | `0694c78ae678da1575b14b136c2503b35ff038bd1f24624aa97b20c7fd83c035` |
+| `ConsumerReversed.scala` | `4db1392a9548a7f9f6a6376c115870bf9dde0cac0bef4e61b45f29ebf9b22c04` |
+
+The six original forward producer artifact hashes and linked TASTy UUIDs were:
+
+| Artifact | SHA-256 | TASTy UUID (class files only) |
+| --- | --- | --- |
+| `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3c00968ac0000000000008193` |
+| `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | — |
+| `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d7441c7f00000000000008198` |
+| `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | — |
+| `example/PairFactory.class` (forward) | `4b764c8dccf4074f3df76ede0326c7da7e94af458aa21d4d8a660bc2193886d9` | `009425da889b07c80000000000008198` |
+| `example/PairFactory.tasty` (forward) | `4264dc0388a33002da2500cd178fd05c3f94199b9cac8221d3bdde67ef549009` | — |
+
+The reverse producer uses the same Counter and Pair artifacts and UUIDs listed
+above, and its distinct Factory receipts are:
+
+| Artifact | SHA-256 | TASTy UUID |
+| --- | --- | --- |
+| `example/PairFactory.class` (reverse) | `c01945fb2aa13978a44c036646bc0d29c0eb5455f44c58244f57e5f0fe9bf0cc` | `00921f29eb774ec10000000000008198` |
+| `example/PairFactory.tasty` (reverse) | `5f8a3f3cf5c3f4ed83e7ea4f8498cb6498f502f90a8e988a51268b15ab9b70a9` | — |
+
+Each orientation is independently emitted again from a fresh Rust session; all
+six bytes match within that orientation. Byte equality is not required across
+changed source variants.
+
+The accepted clients print:
+
+```text
+formal-identity=true; fresh-counter=true; isolated-mutation=true; argument-order=existing,new
+formal-identity=true; fresh-counter=true; isolated-mutation=true; argument-order=new,existing
+```
+
+The assertions check original-object identity via test-only reflection, a new
+Counter per nested allocation and per call, and independent mutation of the
+formal and nested instances. Official Scala `-decompile`, `-print-tasty`, and
+`-from-tasty` inspect all three original sidecars. `-decompile` confirms
+ordered `(existing: Counter, seed: Int): Pair` formals and the direct formal
+plus nested `Counter(seed)` at the expected argument index for each ordering.
+The paired classfile-only controls fail source lookup after the corresponding
+TASTY class attribute/sidecar is removed; the original-sidecar controls pass
+for Counter `get`/`set`, Pair `leftValue`/`rightValue`/constructor, and the
+factory method. All six producer hashes are rechecked after compilation,
+inspection and runtime.
+
+Toolchain provenance from the strict run: Scala source revision
+`777528f19a58e794c9954a42f433373472ec57f8`, staged compiler
+`3.9.0-bin-SNAPSHOT-git-777528f` (staged `with_compiler.jar` SHA-256
+`172c8b8384e75ee24d327fce5ec788582bf314f66bf9983ba57e0cac6c3ff498`), and
+Temurin `21.0.13+9` (`java` SHA-256
+`9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`). The
+published Scala 3.9.0 runtime hashes verified by the test are
+`scala3-library_3-3.9.0.jar`
+`9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba` and
+`scala-library-3.9.0.jar`
+`b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd`.
+
+Authentic source-variant receipts from the same required run:
+
+| Variant | Producer source SHA-256 | Independent client SHA-256 | Runtime result |
+| --- | --- | --- | --- |
+| Renamed package/classes/method | `60ed8c99a1476a75fa00a91a0eb7330ac531675c69f717b80d0f1d94a29f0d59` | `380cd92695817152fec92bb3a7742beafa0468daa9a5d04edf040c8784a3533e` | Pass; renamed TASTy decompile/print/from-tasty pass |
+| Reordered class declarations | `ab37a91bc3a746ed2caaad9876790fa0543d6e7668cbc5d14d7d973b95c66720` | `0694c78ae678da1575b14b136c2503b35ff038bd1f24624aa97b20c7fd83c035` | Pass; official reader and runtime pass |
+
+The renamed six artifact SHA-256 values, in `Ledger`, `Duo`, `Factory` class
+then TASTy order, are `f5b5ac03d66bd01eefd42dc853b93affdb4eb1480a2e307a40beb174a3ca8a15`,
+`7306118359443cf349b7c79efa72b75127bf514e31f496a832ba203f4e4a4e6e`,
+`cb6ecc5dae7407d7d9dd05697832ebd387e67c2f99ed223b2f935e03a1994faf`,
+`54769dc8af30e7f3c82d5fc38a2648adcfdc7331653f9b9e5d9f7d9a92f4bbba`,
+`059d84133208988bf9d682a1fc0f74f07eb8a3723c70d564966277f2271d522e`, and
+`dead0c42c766f3b09d9b380187d4b7e81b863ff0af292e2e628a94dfcf1155c3`. The
+reordered declarations produce the same six bytes as the original forward
+input; the test still verifies byte identity across a second fresh session for
+each variant independently.
+
+The isolated negative matrix records the observed authoritative first
+failure: absent or misplaced sidecars fail in Scala's binary reader; corrupt
+sidecars fail while loading the named class; mismatched links report the class
+out of sync with TASTy; wrong Pair arity and argument type report `[E171]` and
+`[E007]`; wrong source package reports `[E006]`; a foreign same-spelled
+Counter reports `[E007]`; missing Counter reports `[E008]`; missing Counter
+constructor reports `NoSuchMethodError`; malformed formal and seed TERMREF
+addresses fail official `-decompile` with `TreeWithoutOwner`; a renamed-away
+TASTy factory method reports `[E008]`; an incorrect constructor Methodref
+fails at JVM verification; a changed Factory classfile descriptor fails at JVM
+verification; and a same-typed left/right Fieldref swap remains JVM-legal but
+is caught by the original-reference identity assertion. The tests preserve
+these distinct reader, compiler, verifier/linker, and semantic identity
+outcomes rather than expecting every mutation to fail at Scala source typing.
+
+The strict flag is `DOTTY_REQUIRE_SCALA_TASTY_MIXED_ORIGIN_CONSTRUCTOR_CONSUMER=1`.
+The existing pinned Scala workflow sets it, executes this consumer with the
+other inherited strict Scala readers and consumers, and retains the mandatory
+JDK 21 gate. With the flag set, missing compiler checkout, source revision,
+runtime cache, or Java runtime fails the test instead of taking the optional
+skip path.
+
 ## Frozen inputs and oracle
 
 The audit starts from `origin/main` at
