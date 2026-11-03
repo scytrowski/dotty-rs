@@ -1,0 +1,7 @@
+-- [E006] Not Found Error: EscapedCaseBinder.scala:12:27 -----------------------
+12 |      case Add(left, _) => right
+   |                           ^^^^^
+   |                           Not found: right
+   |
+   | longer explanation available when compiling with `-explain`
+1 error found

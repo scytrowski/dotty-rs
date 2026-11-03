@@ -1,0 +1,2 @@
+evidence
+Expr=sealed_trait;Add=source_case_class;parent=Expr:canonical;fields=left:source-member,right:source-member,distinct=true;selectors=_1:absent,_2:absent,unapply=absent,companion=module(Add)	class_completion=complete	unapply_signature=UNREACHED:no_namer_identity;selectors_after_class_completion=UNREACHED:no_selector_symbols;binder_matching=UNREACHED:no_namer_unapply;double_recursive_calls=UNREACHED:no_namer_unapply

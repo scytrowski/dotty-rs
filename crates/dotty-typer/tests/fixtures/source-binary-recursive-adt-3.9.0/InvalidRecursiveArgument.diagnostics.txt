@@ -1,0 +1,8 @@
+-- [E007] Type Mismatch Error: InvalidRecursiveArgument.scala:17:36 ------------
+17 |      case Add(left, right) => eval(1) + eval(right)
+   |                                    ^
+   |                                    Found:    (1 : Int)
+   |                                    Required: adt.Expr
+   |
+   | longer explanation available when compiling with `-explain`
+1 error found

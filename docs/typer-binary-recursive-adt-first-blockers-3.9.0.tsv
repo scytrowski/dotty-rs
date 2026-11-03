@@ -1,0 +1,3 @@
+root	source_path	method_owner	parameter_provenance	first_error	nested_source_path	span_bytes	session_a	session_b	whole_root
+selectLeft	Expr.scala#tree39	Evaluator$	source-owned-by-method	ExtractorUnapplyNotFound	Expr.scala#tree34	251:263	same normalized path, owner, and error	same normalized path, owner, and error	absent in both sessions
+eval	Expr.scala#tree64	Evaluator$	source-owned-by-method	ExtractorUnapplyNotFound	Expr.scala#tree53	366:382	same normalized path, owner, and error	same normalized path, owner, and error	absent in both sessions
