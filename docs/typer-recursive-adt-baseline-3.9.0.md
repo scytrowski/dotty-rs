@@ -124,16 +124,32 @@ The follow-on class/selector increment is recorded in
 The original baseline receipts above remain unchanged. The new after-change
 receipts show that `Succ` retains `Object`, the exact source `Expr` edge, and
 one authentic classpath `scala.Product` edge; its constructor `Field(inner)`
-remains distinct from the class-owned parameterless `_1(): Expr` method. The
-original whole-method roots now reach the separate generated
-`Succ.unapply` `MalformedMethodClause` blocker owned by #2035. Neither root is
-claimed to type successfully.
+remains distinct from the class-owned parameterless `_1(): Expr` method. On
+the #2036 merged revision, the original whole-method roots reached the
+separate generated `Succ.unapply` `MalformedMethodClause` blocker owned by
+#2035. That intermediate state remains frozen in the
+[`after-Product1 receipts`](../crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/rust-two-root-after-product1.tsv)
+and [`Product1 class evidence`](../crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/rust-class-evidence-after-product1.tsv).
 
-The observations distinguish Scala-valid source from Rust support: the
-positive Scala source is **Rust-valid but deferred** at the whole-method
-boundary. The class-specific evidence also keeps the later completion
-mechanisms separate. It does not test recursive method bodies after bypassing
-the genuine first blocker.
+## Generated unapply update (#2035)
+
+Issue #2035 completes the bounded `Succ$.unapply(x$1: Succ): Succ` signature
+using the same canonical source class, without treating `inner: Expr` as the
+method input or result. The unchanged `unwrap` and `eval` roots now type through
+the existing Match implementation. Their two-root numerator is unchanged;
+the after-signature receipts are [`rust-two-root-after-generated-unapply.tsv`](../crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/rust-two-root-after-generated-unapply.tsv),
+[`rust-class-evidence-after-generated-unapply.tsv`](../crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/rust-class-evidence-after-generated-unapply.tsv),
+and [`rust-generated-unapply-signature.tsv`](../crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/rust-generated-unapply-signature.tsv).
+No Match implementation change is part of #2035. See the
+[`generated unapply report`](typer-recursive-adt-generated-unapply-3.9.0.md)
+for the narrow signature contract and validation.
+
+The original observations distinguish Scala-valid source from the support
+available at the time of the baseline. After #2035 and #2036, the same positive
+source is **Rust-valid and typed** for both recorded whole-method roots. The
+receipts keep class completion, generated-method completion, and the unchanged
+Match path visible as separate checkpoints; they do not claim broader corpus
+coverage.
 
 ## Reproduction and scope
 
@@ -146,13 +162,13 @@ JAVA_HOME=/path/to/temurin-21.0.8+9 cargo +1.98.1 test -p dotty-typer \
   --test source_recursive_adt_baseline --locked -- --nocapture
 ```
 
-The baseline leaves production semantics unchanged and keeps generated
-methods and control fixtures outside the two-root denominator. The next
-focused source mechanisms are generated `Succ.unapply` result completion and
-the `Product1._1: Expr`/parent completion contracts, tracked separately by
-issues [#2035](https://github.com/scytrowski/dotty-rs/issues/2035) and
+The baseline leaves the pinned oracle and two-root denominator unchanged.
+Generated `Succ.unapply` signature completion and the `Product1._1: Expr`/parent
+completion are tracked separately by issues
+[#2035](https://github.com/scytrowski/dotty-rs/issues/2035) and
 [#2036](https://github.com/scytrowski/dotty-rs/issues/2036). The binder and
-explicit recursive call remain later whole-method checkpoints.
+explicit recursive call are exercised by the unchanged roots after these two
+focused prerequisites complete.
 
 ## Protected regression contract
 

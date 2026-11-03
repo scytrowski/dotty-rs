@@ -31,11 +31,14 @@ class retains `Object`, the exact source `Expr`, and one canonical
 `scala.Product` edge, while one distinct class-owned parameterless `_1` method
 returns `Expr`. The original constructor `Field(inner)` remains a field.
 
-The full `unwrap` and `eval` roots still stop at the independent generated
-`Succ.unapply` method-clause blocker owned by issue #2035. This is recorded in
-the updated Rust root receipt; no extractor or Match behavior is claimed here.
-`Num._1: Int`, the existing Box/Product2 selectors, and Created/Deleted
-selectors retain their prior receipts.
+The generated `Succ.unapply` method-clause blocker described in the initial
+version of this report was resolved separately by issue #2035. The unchanged
+`unwrap` and `eval` roots now complete through the existing source Match typer;
+their two-root set is unchanged. This Product1 increment still changes only
+class metadata and selector projection. `Num._1: Int`, the existing
+Box/Product2 selectors, and Created/Deleted selectors retain their prior
+receipts. See the [generated-unapply report](typer-recursive-adt-generated-unapply-3.9.0.md)
+for the signature completion evidence.
 
 ## Reproduction
 
