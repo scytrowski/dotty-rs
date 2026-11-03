@@ -261,3 +261,99 @@ comparison against baseline `1fbc0ac64cef9d8c4b7e5a16d4fe7a1e753f2a6d`
 found matching hashes for all 12 Rust TASTy sidecars from the existing
 one-argument, two-nested-argument, two-direct-formal, and reference-local
 factory fixtures.
+
+## Paired JVM/TASTy integration (#2015)
+
+The integration starts at frozen baseline `ff2f400f19a6b805ef8c2b20766dda0cf84d02f2`.
+The verified issue-level scope record selected one staged PR. The first paired
+artifact call for both original orientations reproduced
+`BatchArtifact { class_index: 2, phase: "cross-class invocation", reason:
+"two-argument constructor has no canonical paired receipt" }`. The real
+frontend session and JVM-only emitter remained successful, as measured above.
+
+The cross-class contract now consumes the existing ordered
+`Formal`/`NestedNew` receipt. It checks the exact source and typed argument
+roots, original formal declaration order, canonical source ownership, the
+`(Counter, Int) => Pair` method ABI, the selected `Pair(Counter, Counter)` and
+`Counter(Int)` constructors, and the result class. The decoded factory
+instructions are consumed in source argument order through `areturn`; each
+allocation is initialized exactly once before the next argument. Existing
+homogeneous direct-formal and nested-pair validators remain separate.
+
+Focused Rust integration results use the frozen producer files and the same
+`PairFactory.scala` name for each pair of independent sessions. Source IDs
+were distinct within each pair. The hashes and UUIDs below are from the Rust
+batch output, not the Scala oracle files.
+
+| Orientation | Artifact | SHA-256 | TASTy UUID |
+| --- | --- | --- | --- |
+| `wrapAndCreate(existing, seed)` | `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3-c009-68ac-0000-000000008193` |
+| | `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008071c3-c009-68ac-0000-000000008193` |
+| | `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| | `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| | `example/PairFactory.class` | `4b764c8dccf4074f3df76ede0326c7da7e94af458aa21d4d8a660bc2193886d9` | `009425da-889b-07c8-0000-000000008198` |
+| | `example/PairFactory.tasty` | `4264dc0388a33002da2500cd178fd05c3f94199b9cac8221d3bdde67ef549009` | `009425da-889b-07c8-0000-000000008198` |
+| `createAndWrap(existing, seed)` | `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3-c009-68ac-0000-000000008193` |
+| | `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca7c87842b8dca7c6a8293045` | `008071c3-c009-68ac-0000-000000008193` |
+| | `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| | `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| | `example/PairFactory.class` | `c01945fb2aa13978a44c036646bc0d29c0eb5455f44c58244f57e5f0fe9bf0cc` | `00921f29-eb77-4ec1-0000-000000008198` |
+| | `example/PairFactory.tasty` | `5f8a3f3cf5c3f4ed83e7ea4f8498cb6498f502f90a8e988a51268b15ab9b70a9` | `00921f29-eb77-4ec1-0000-000000008198` |
+
+The bytecode walk used decoded PCs and constant-pool entries from each Rust
+classfile:
+
+| Method | Observed instructions | Bounds |
+| --- | --- | --- |
+| `wrapAndCreate` | `0 new #12 Pair`; `3 dup`; `4 aload_1`; `5 new #14 Counter`; `8 dup`; `9 iload_2`; `10 invokespecial #17 Counter.<init>(I)V`; `13 invokespecial #20 Pair.<init>(Counter,Counter)V`; `16 areturn` | stack 6, locals 3 |
+| `createAndWrap` | `0 new #12 Pair`; `3 dup`; `4 new #14 Counter`; `7 dup`; `8 iload_2`; `9 invokespecial #17 Counter.<init>(I)V`; `12 aload_1`; `13 invokespecial #20 Pair.<init>(Counter,Counter)V`; `16 areturn` | stack 5, locals 3 |
+
+The integration test prints the decoded instruction PCs and operands while
+walking the bytecode. It also verifies all six artifact paths, class-file
+major 65, TASTy 28.9.0, per-class UUID links, Pair alias fields, method
+descriptor and direct TASTy PARAM references. Independent sessions match all
+six files byte for byte for each original orientation. Renamed and reordered
+inputs are compared only against their own second session.
+
+Negative controls reject a type-correct source-order swap at the mixed
+contract, duplicate/swapped source and typed roots, wrong selected argument
+type, absent current-source receipt, wrong local loads, an unexpected
+allocation, missing nested initialization, wrong Pair constructor reference,
+incorrect stack/local bounds, missing or corrupt sidecars, an opposite-order
+sidecar UUID/body, duplicate or unsafe artifact paths, and each of the six
+staged-write plus before/after-promotion handled publisher faults. The existing
+publisher preserves an already-present destination sentinel. These tests
+cover handled failures only and make no crash-atomic durability claim.
+
+Validation performed for this increment:
+
+```text
+cargo test -p dotty --test jvm_tasty_artifacts --locked: 62 passed
+cargo test -p dotty --test jvm_tasty_mixed_origin_constructor_arguments --locked: 4 passed
+cargo test -p dotty --test jvm_source_compilation mixed_origin_pair_arguments_reach_jvm_and_report_the_proof_boundary --locked -- --nocapture: passed for both source sessions
+```
+
+The Rust toolchain was `rustc 1.98.1 (48a229cea 2026-09-01)`. A local
+Temurin 21.0.8 installation is available at `/home/vdrake6/.jdks/jdk-21`;
+its `java` SHA-256 is
+`90d0a6d25da103678013f193db078b90ed8aeb27b66ebe78e0149616c9c1b811`. The
+mandatory `DOTTY_CLASSFILE_REQUIRE_JDK=1` gate passed with this JDK. The
+workspace suite's serial rerun reached an unrelated pinned-environment check
+and failed because it requires Java 21.0.13, while this environment provides
+21.0.8. The initial parallel workspace run also hit the container open-file
+limit in 13 classloader tests; those tests passed in the serial rerun except
+for the strict version assertion.
+
+The pinned Scala reader was not executed in strict mode. Its Scala 3.9 source
+checkout and runtime jars are not present in this environment, and the
+unconfigured test invocation skips that check. The Scala oracle source remains
+pinned at `777528f19a58e794c9954a42f433373472ec57f8`; its earlier #2014 strict
+reader receipt verifies the byte-identical Rust sidecars, but does not replace
+a strict run for this issue.
+
+The following repository checks passed: `cargo fmt --all -- --check`,
+`python3 tools/check-frontend-boundaries.py`,
+`cargo clippy --workspace --all-targets --locked -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`, and
+`git diff --check`. The complete workspace suite is therefore not recorded as
+passing; the pinned Scala/JDK environment gates remain outstanding.

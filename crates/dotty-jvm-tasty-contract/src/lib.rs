@@ -24,7 +24,10 @@ use dotty_jvm::{
     JvmFieldSourceVisibility,
 };
 use dotty_tasty::tasty::{TastyFile, TastyFileError};
-use dotty_tasty_pickler::{ClassMemberPicklePlan, PickleError, ValidatedClassStatePlan};
+use dotty_tasty_pickler::{
+    ClassMemberPicklePlan, OrderedConstructorCallArgumentOrigin, PickleError,
+    ValidatedClassStatePlan,
+};
 
 /// A typed, read-only failure while proving one JVM class and TASTy plan agree.
 #[derive(Debug)]
@@ -1685,6 +1688,7 @@ struct CrossClassMethodRef {
     receiver_field: Option<SymbolId>,
     nested_constructor: Option<NestedConstructorMethodRef>,
     nested_constructor_pair: Option<[NestedConstructorMethodRef; 2]>,
+    mixed_constructor_pair: Option<MixedConstructorPairRef>,
     direct_formal_constructor_pair: Option<[u16; 2]>,
     factory_method: Option<FactoryMethodRef>,
     factory_local_slot: Option<u16>,
@@ -1695,6 +1699,502 @@ struct NestedConstructorMethodRef {
     owner_internal_name: String,
     descriptor: String,
     argument_local_slot: u16,
+}
+
+enum MixedConstructorArgumentRef {
+    Formal { local_slot: u16 },
+    Nested(NestedConstructorMethodRef),
+}
+
+struct MixedConstructorPairRef {
+    arguments: [MixedConstructorArgumentRef; 2],
+    max_stack: u16,
+}
+
+fn validate_mixed_constructor_pair(
+    proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
+    caller: SymbolId,
+    (source_rhs, typed_rhs): (TreeId<Untyped>, TreeId<Typed>),
+    outer_application: &dotty_core::ast::Apply<Typed>,
+    outer_constructor_symbol: SymbolId,
+    outer_metadata: &JvmClassMetadata,
+    all_metadata: &[JvmClassMetadata],
+) -> Result<MixedConstructorPairRef, String> {
+    use dotty_core::ast::TreeKind;
+
+    let tasty = proof.tasty_plan.plan();
+    let source_id = tasty.source.id;
+    let binding = tasty
+        .typed_bindings
+        .ordered_constructor_call_argument_pair(source_id, caller)
+        .ok_or_else(|| "two-argument constructor has no ordered mixed-origin receipt".to_owned())?;
+    let source_outer = tasty
+        .source_ast
+        .try_get(source_rhs)
+        .and_then(|tree| match &tree.kind {
+            TreeKind::Apply(application) => Some(application),
+            _ => None,
+        })
+        .ok_or_else(|| "mixed constructor source RHS is not an Apply".to_owned())?;
+    let typed_outer = tasty
+        .typed_ast
+        .try_get(typed_rhs)
+        .and_then(|tree| match &tree.kind {
+            TreeKind::Apply(application) => Some(application),
+            _ => None,
+        })
+        .ok_or_else(|| "mixed constructor typed RHS is not an Apply".to_owned())?;
+    if source_outer.kind != dotty_core::ast::ApplyKind::Regular
+        || typed_outer.kind != dotty_core::ast::ApplyKind::Regular
+        || outer_application.kind != dotty_core::ast::ApplyKind::Regular
+        || source_outer.args.as_slice()
+            != binding.arguments.map(|argument| argument.source_argument)
+        || typed_outer.args.as_slice() != binding.arguments.map(|argument| argument.typed_argument)
+        || outer_application.args.as_slice()
+            != binding.arguments.map(|argument| argument.typed_argument)
+        || tasty.typed_bindings.typed_at(source_id, source_rhs) != Some(typed_rhs)
+        || !matches!(
+            tasty
+                .source_ast
+                .try_get(source_outer.function)
+                .map(|tree| &tree.kind),
+            Some(TreeKind::Select(_))
+        )
+        || binding.method_formals[0] == binding.method_formals[1]
+        || binding.source_method_formals[0] == binding.source_method_formals[1]
+        || binding.arguments[0].source_argument == binding.arguments[1].source_argument
+        || binding.arguments[0].typed_argument == binding.arguments[1].typed_argument
+    {
+        return Err(
+            "mixed constructor roots or receipt differ from the ordered source call".into(),
+        );
+    }
+
+    let caller_method = proof
+        .metadata
+        .methods()
+        .iter()
+        .find(|method| method.symbol() == caller)
+        .ok_or_else(|| "mixed constructor caller is absent from its JVM plan".to_owned())?;
+    let source_method_tree = tasty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            ClassMemberPicklePlan::Method {
+                symbol,
+                source_tree,
+            } if *symbol == caller => Some(*source_tree),
+            _ => None,
+        })
+        .ok_or_else(|| "mixed constructor caller is absent from its TASTy plan".to_owned())?;
+    let source_method = tasty
+        .source_ast
+        .try_get(source_method_tree)
+        .and_then(|tree| match &tree.kind {
+            TreeKind::DefDef(method) => Some(method),
+            _ => None,
+        })
+        .ok_or_else(|| "mixed constructor caller source definition is not a DefDef".to_owned())?;
+    if source_method.value_param_clauses.len() != 1
+        || source_method.value_param_clauses[0].as_slice() != binding.source_method_formals
+        || caller_method.parameters().len() != 2
+        || caller_method.parameters()[0].symbol() != binding.method_formals[0]
+        || caller_method.parameters()[1].symbol() != binding.method_formals[1]
+        || caller_method.parameters()[0].slot() != 1
+        || caller_method.parameters()[1].slot() != 2
+        || caller_method
+            .parameters()
+            .iter()
+            .any(|parameter| parameter.width() != 1)
+    {
+        return Err("mixed constructor method formals do not preserve the ordered JVM ABI".into());
+    }
+    if binding
+        .method_formals
+        .iter()
+        .any(|formal| !tasty.store.symbols.contains(*formal))
+    {
+        return Err("mixed constructor receipt contains a stale method formal".into());
+    }
+    for index in 0..2 {
+        let source_formal = binding.source_method_formals[index];
+        let formal = binding.method_formals[index];
+        if tasty.source_index.symbol_at(source_id, source_formal) != Some(formal)
+            || tasty.source_index.definition_of(formal)
+                != Some(SourceDefinition::Canonical {
+                    source: source_id,
+                    tree: source_formal,
+                })
+            || !tasty.store.symbols.contains(formal)
+            || tasty.store.symbols.get(formal).origin != SymbolOrigin::Source(source_id)
+        {
+            return Err(format!(
+                "mixed method formal {index} does not retain its canonical source identity"
+            ));
+        }
+    }
+    let typed_body_type = tasty
+        .typed_ast
+        .try_get(typed_rhs)
+        .ok_or_else(|| "mixed typed RHS is stale".to_owned())?
+        .ty;
+    if !matches!(tasty.store.types.try_get(typed_body_type), Some(Type::TypeRef { prefix, target: TypeRefTarget::Symbol(class) }) if *prefix == tasty.definitions.no_prefix && *class == outer_metadata.identity().symbol())
+    {
+        return Err("mixed typed method body does not return the exact planned Pair class".into());
+    }
+
+    let outer_constructor = outer_metadata
+        .constructor()
+        .filter(|constructor| constructor.symbol() == outer_constructor_symbol)
+        .ok_or_else(|| "mixed outer constructor is absent from its JVM plan".to_owned())?;
+    if !outer_constructor.access_flags().is_public() || outer_constructor.parameters().len() != 2 {
+        return Err("mixed outer constructor does not have two public parameters".into());
+    }
+
+    let counter_class = match tasty.store.symbols.get(binding.method_formals[0]).info {
+        SymbolInfo::Complete(ty) => match tasty.store.types.try_get(ty) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            }) => *class,
+            _ => {
+                return Err("mixed method formal 0 is not the canonical Counter class type".into());
+            }
+        },
+        _ => return Err("mixed method formal 0 has incomplete type information".into()),
+    };
+    if !matches!(tasty.store.symbols.get(binding.method_formals[1]).info, SymbolInfo::Complete(ty) if ty == tasty.definitions.int)
+        || caller_method.descriptor().as_str()
+            != format!(
+                "(L{};I)L{};",
+                all_metadata
+                    .iter()
+                    .find(|metadata| metadata.identity().symbol() == counter_class)
+                    .ok_or_else(|| "mixed Counter class is outside the batch".to_owned())?
+                    .identity()
+                    .internal_name(),
+                outer_metadata.identity().internal_name()
+            )
+    {
+        return Err("mixed method ABI is not exactly (Counter, Int) => Pair".into());
+    }
+    let mut nested_count = 0;
+    let mut arguments = Vec::with_capacity(2);
+    for index in 0..2 {
+        let argument = binding.arguments[index];
+        let typed_argument = tasty
+            .typed_ast
+            .try_get(argument.typed_argument)
+            .ok_or_else(|| format!("mixed typed argument {index} is stale"))?;
+        if tasty
+            .typed_bindings
+            .typed_at(source_id, argument.source_argument)
+            != Some(argument.typed_argument)
+        {
+            return Err(format!(
+                "mixed argument {index} has a stale source-to-typed edge"
+            ));
+        }
+        let (argument_class, argument_ref) = match argument.origin {
+            OrderedConstructorCallArgumentOrigin::Formal {
+                formal,
+                formal_type,
+                result_type,
+            } => {
+                if !tasty.store.symbols.contains(formal) {
+                    return Err(format!(
+                        "mixed direct argument {index} has a stale formal symbol"
+                    ));
+                }
+                let formal_index = binding
+                    .method_formals
+                    .iter()
+                    .position(|candidate| *candidate == formal)
+                    .ok_or_else(|| {
+                        format!("mixed direct argument {index} names a foreign caller formal")
+                    })?;
+                let source_argument = tasty
+                    .source_ast
+                    .try_get(argument.source_argument)
+                    .ok_or_else(|| format!("mixed formal source argument {index} is stale"))?;
+                let TreeKind::Ident(source_ident) = &source_argument.kind else {
+                    return Err(format!(
+                        "mixed formal source argument {index} is not an Ident"
+                    ));
+                };
+                let TreeKind::Ident(_) = typed_argument.kind else {
+                    return Err(format!(
+                        "mixed formal typed argument {index} is not an Ident"
+                    ));
+                };
+                let formal_info = tasty.store.symbols.get(formal);
+                let source_formal = tasty
+                    .source_ast
+                    .try_get(binding.source_method_formals[formal_index])
+                    .ok_or_else(|| format!("mixed source formal {formal_index} is stale"))?;
+                let TreeKind::ValDef(source_formal) = &source_formal.kind else {
+                    return Err(format!("mixed source formal {index} is not a ValDef"));
+                };
+                let Some(Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(target),
+                }) = tasty.store.types.try_get(typed_argument.ty)
+                else {
+                    return Err(format!(
+                        "mixed formal typed argument {index} is not a canonical TermRef"
+                    ));
+                };
+                let formal_class = match tasty.store.types.try_get(formal_type) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(class),
+                        ..
+                    }) => *class,
+                    _ => return Err(format!("mixed formal type {index} is not a class TypeRef")),
+                };
+                if formal_index != 0
+                    || *prefix != tasty.definitions.no_prefix
+                    || *target != formal
+                    || typed_argument.ty != result_type
+                    || formal_info.kind != SymbolKind::Parameter
+                    || formal_info.owner != Some(caller)
+                    || formal_info.origin != SymbolOrigin::Source(source_id)
+                    || !matches!(formal_info.info, SymbolInfo::Complete(ty) if ty == formal_type)
+                    || formal_class != counter_class
+                    || caller_method.parameters()[formal_index].ty()
+                        != dotty_jvm::JvmType::Reference(formal_class)
+                    || outer_constructor.parameters()[index].ty()
+                        != dotty_jvm::JvmType::Reference(formal_class)
+                    || tasty
+                        .store
+                        .symbols
+                        .get(binding.method_formals[formal_index])
+                        .kind
+                        != SymbolKind::Parameter
+                    || tasty
+                        .store
+                        .symbols
+                        .get(binding.method_formals[formal_index])
+                        .owner
+                        != Some(caller)
+                    || source_ident.name != *source_formal.name.as_name()
+                {
+                    return Err(format!(
+                        "mixed direct argument {index} does not name its exact ordered caller formal"
+                    ));
+                }
+                (
+                    formal_class,
+                    MixedConstructorArgumentRef::Formal {
+                        local_slot: caller_method.parameters()[formal_index].slot(),
+                    },
+                )
+            }
+            OrderedConstructorCallArgumentOrigin::NestedNew {
+                call,
+                argument_formal,
+            } => {
+                if argument.source_argument != call.source_apply
+                    || argument.typed_argument != call.typed_apply
+                    || argument_formal != binding.method_formals[1]
+                    || tasty.typed_bindings.typed_at(source_id, call.source_select)
+                        != Some(call.typed_select)
+                    || tasty.typed_bindings.typed_at(source_id, call.source_new)
+                        != Some(call.typed_new)
+                    || tasty
+                        .typed_bindings
+                        .typed_at(source_id, call.source_argument)
+                        != Some(call.typed_argument)
+                {
+                    return Err(format!(
+                        "mixed nested argument {index} has stale or mismatched receipt roots"
+                    ));
+                }
+                let source_call = tasty
+                    .source_ast
+                    .try_get(call.source_apply)
+                    .and_then(|tree| match &tree.kind {
+                        TreeKind::Apply(node) => Some(node),
+                        _ => None,
+                    })
+                    .ok_or_else(|| format!("mixed nested source call {index} is not an Apply"))?;
+                let typed_call = tasty
+                    .typed_ast
+                    .try_get(call.typed_apply)
+                    .and_then(|tree| match &tree.kind {
+                        TreeKind::Apply(node) => Some(node),
+                        _ => None,
+                    })
+                    .ok_or_else(|| format!("mixed nested typed call {index} is not an Apply"))?;
+                let source_select = tasty
+                    .source_ast
+                    .try_get(call.source_select)
+                    .and_then(|tree| match &tree.kind {
+                        TreeKind::Select(node) => Some(node),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        format!("mixed nested source selection {index} is not a Select")
+                    })?;
+                let typed_select = tasty
+                    .typed_ast
+                    .try_get(call.typed_select)
+                    .and_then(|tree| match &tree.kind {
+                        TreeKind::Select(node) => Some(node),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        format!("mixed nested typed selection {index} is not a Select")
+                    })?;
+                let source_argument = tasty
+                    .source_ast
+                    .try_get(call.source_argument)
+                    .ok_or_else(|| format!("mixed nested source leaf {index} is stale"))?;
+                let typed_leaf = tasty
+                    .typed_ast
+                    .try_get(call.typed_argument)
+                    .ok_or_else(|| format!("mixed nested typed leaf {index} is stale"))?;
+                let TreeKind::Ident(_) = source_argument.kind else {
+                    return Err(format!("mixed nested source leaf {index} is not an Ident"));
+                };
+                let Some(Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(target),
+                }) = tasty.store.types.try_get(typed_leaf.ty)
+                else {
+                    return Err(format!("mixed nested typed leaf {index} is not a TermRef"));
+                };
+                let formal = caller_method
+                    .parameters()
+                    .iter()
+                    .find(|parameter| parameter.symbol() == *target)
+                    .ok_or_else(|| {
+                        format!("mixed nested leaf {index} does not name a caller formal")
+                    })?;
+                let nested_metadata = all_metadata
+                    .iter()
+                    .find(|metadata| metadata.identity().symbol() == call.class)
+                    .ok_or_else(|| {
+                        format!("mixed nested constructor owner {index} is outside the batch")
+                    })?;
+                let nested_constructor = nested_metadata
+                    .constructor()
+                    .filter(|constructor| constructor.symbol() == call.constructor)
+                    .ok_or_else(|| {
+                        format!("mixed nested constructor {index} is absent from its JVM plan")
+                    })?;
+                if source_call.kind != dotty_core::ast::ApplyKind::Regular
+                    || typed_call.kind != dotty_core::ast::ApplyKind::Regular
+                    || source_call.function != call.source_select
+                    || source_call.args.as_slice() != [call.source_argument]
+                    || typed_call.function != call.typed_select
+                    || typed_call.args.as_slice() != [call.typed_argument]
+                    || source_select.qualifier != call.source_new
+                    || typed_select.qualifier != call.typed_new
+                    || !matches!(
+                        tasty
+                            .source_ast
+                            .try_get(call.source_new)
+                            .map(|tree| &tree.kind),
+                        Some(TreeKind::New(_))
+                    )
+                    || !matches!(
+                        tasty
+                            .typed_ast
+                            .try_get(call.typed_new)
+                            .map(|tree| &tree.kind),
+                        Some(TreeKind::New(_))
+                    )
+                    || !matches!(tasty.typed_ast.try_get(call.typed_select).and_then(|tree| tasty.store.types.try_get(tree.ty)), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == call.constructor)
+                    || *target != argument_formal
+                    || *prefix != tasty.definitions.no_prefix
+                    || call.formal_type != tasty.definitions.int
+                    || call.result_type != typed_argument.ty
+                    || !matches!(tasty.store.types.try_get(call.result_type), Some(Type::TypeRef { prefix, target: TypeRefTarget::Symbol(class) }) if *prefix == tasty.definitions.no_prefix && *class == call.class)
+                    || nested_constructor.descriptor().as_str() != "(I)V"
+                    || !nested_constructor.access_flags().is_public()
+                    || !tasty.store.symbols.contains(call.formal)
+                    || !nested_constructor
+                        .parameters()
+                        .iter()
+                        .any(|parameter| parameter.symbol() == call.formal)
+                    || tasty.store.symbols.get(call.formal).owner != Some(call.constructor)
+                    || tasty.store.symbols.get(call.formal).kind != SymbolKind::Parameter
+                    || tasty.store.symbols.get(call.formal).origin
+                        != SymbolOrigin::Source(source_id)
+                    || !matches!(tasty.store.symbols.get(call.formal).info, SymbolInfo::Complete(ty) if ty == tasty.definitions.int)
+                    || !tasty.store.symbols.contains(call.constructor)
+                    || tasty.store.symbols.get(call.constructor).kind != SymbolKind::Constructor
+                    || tasty.store.symbols.get(call.constructor).owner != Some(call.class)
+                    || tasty.store.symbols.get(call.constructor).origin
+                        != SymbolOrigin::Source(source_id)
+                    || !tasty.store.symbols.contains(argument_formal)
+                    || tasty.store.symbols.get(argument_formal).kind != SymbolKind::Parameter
+                    || tasty.store.symbols.get(argument_formal).owner != Some(caller)
+                    || tasty.store.symbols.get(argument_formal).origin
+                        != SymbolOrigin::Source(source_id)
+                    || !matches!(tasty.store.symbols.get(argument_formal).info, SymbolInfo::Complete(ty) if ty == tasty.definitions.int)
+                    || formal.width() != 1
+                    || outer_constructor.parameters()[index].ty()
+                        != dotty_jvm::JvmType::Reference(call.class)
+                    || call.class != counter_class
+                {
+                    return Err(format!(
+                        "mixed nested argument {index} differs from its source-backed constructor receipt"
+                    ));
+                }
+                nested_count += 1;
+                (
+                    call.class,
+                    MixedConstructorArgumentRef::Nested(NestedConstructorMethodRef {
+                        owner_internal_name: nested_metadata.identity().internal_name().to_owned(),
+                        descriptor: nested_constructor.descriptor().as_str().to_owned(),
+                        argument_local_slot: formal.slot(),
+                    }),
+                )
+            }
+        };
+        if argument_class != counter_class {
+            return Err("mixed arguments do not share the exact canonical reference class".into());
+        }
+        if outer_constructor.parameters()[index].ty()
+            != dotty_jvm::JvmType::Reference(argument_class)
+        {
+            return Err(format!(
+                "mixed Pair constructor formal {index} has the wrong reference class"
+            ));
+        }
+        arguments.push(argument_ref);
+    }
+    if nested_count != 1 {
+        return Err(
+            "mixed constructor receipt must contain exactly one Formal and one NestedNew argument"
+                .into(),
+        );
+    }
+    let [first, second] = arguments
+        .try_into()
+        .map_err(|_| "mixed constructor receipt is incomplete")?;
+    let counter_name = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == counter_class)
+        .ok_or_else(|| "mixed Counter class is outside the batch".to_owned())?
+        .identity()
+        .internal_name();
+    if outer_constructor.descriptor().as_str() != format!("(L{counter_name};L{counter_name};)V") {
+        return Err("mixed caller and selected Pair constructor descriptors do not match the canonical Counter/Int => Pair ABI".into());
+    }
+    let max_stack = if matches!(
+        binding.arguments[0].origin,
+        OrderedConstructorCallArgumentOrigin::Formal { .. }
+    ) {
+        6
+    } else {
+        5
+    };
+    Ok(MixedConstructorPairRef {
+        arguments: [first, second],
+        max_stack,
+    })
 }
 
 fn validate_nested_constructor_pair(
@@ -2290,6 +2790,7 @@ fn reference_local_factory_call(
         receiver_field: None,
         nested_constructor: None,
         nested_constructor_pair: None,
+        mixed_constructor_pair: None,
         direct_formal_constructor_pair: None,
         factory_method: Some(FactoryMethodRef {
             owner_internal_name: helper_owner.identity().internal_name().to_owned(),
@@ -2474,10 +2975,28 @@ fn validate_cross_class_call_code(
                 && application.kind == dotty_core::ast::ApplyKind::Regular
                 && application.args.len() == 2
             {
-                let direct_formal_constructor_pair = if tasty
+                let mixed_constructor_pair = if tasty
                     .typed_bindings
-                    .direct_formal_constructor_call_pair(tasty.source.id, caller)
+                    .ordered_constructor_call_argument_pair(tasty.source.id, caller)
                     .is_some()
+                {
+                    Some(validate_mixed_constructor_pair(
+                        proof,
+                        caller,
+                        (rhs, root),
+                        application,
+                        *target,
+                        target_class_metadata,
+                        &all_metadata,
+                    )?)
+                } else {
+                    None
+                };
+                let direct_formal_constructor_pair = if mixed_constructor_pair.is_none()
+                    && tasty
+                        .typed_bindings
+                        .direct_formal_constructor_call_pair(tasty.source.id, caller)
+                        .is_some()
                 {
                     Some(validate_direct_formal_constructor_pair(
                         proof,
@@ -2490,7 +3009,9 @@ fn validate_cross_class_call_code(
                 } else {
                     None
                 };
-                let nested_constructors = if direct_formal_constructor_pair.is_none() {
+                let nested_constructors = if mixed_constructor_pair.is_none()
+                    && direct_formal_constructor_pair.is_none()
+                {
                     Some(validate_nested_constructor_pair(
                         proof,
                         caller,
@@ -2521,6 +3042,7 @@ fn validate_cross_class_call_code(
                     receiver_field: None,
                     nested_constructor: None,
                     nested_constructor_pair: nested_constructors,
+                    mixed_constructor_pair,
                     direct_formal_constructor_pair,
                     factory_method: None,
                     factory_local_slot: None,
@@ -2752,6 +3274,7 @@ fn validate_cross_class_call_code(
                             receiver_field: None,
                             nested_constructor: None,
                             nested_constructor_pair: None,
+                            mixed_constructor_pair: None,
                             direct_formal_constructor_pair: None,
                             factory_method: Some(FactoryMethodRef {
                                 owner_internal_name: helper_metadata
@@ -2866,6 +3389,7 @@ fn validate_cross_class_call_code(
                             argument_local_slot: 1,
                         }),
                         nested_constructor_pair: None,
+                        mixed_constructor_pair: None,
                         direct_formal_constructor_pair: None,
                         factory_method: None,
                         factory_local_slot: None,
@@ -2938,6 +3462,7 @@ fn validate_cross_class_call_code(
                     receiver_field: None,
                     nested_constructor: None,
                     nested_constructor_pair: None,
+                    mixed_constructor_pair: None,
                     direct_formal_constructor_pair: None,
                     factory_method: None,
                     factory_local_slot: None,
@@ -3003,6 +3528,7 @@ fn validate_cross_class_call_code(
             },
             nested_constructor: None,
             nested_constructor_pair: None,
+            mixed_constructor_pair: None,
             direct_formal_constructor_pair: None,
             factory_method: None,
             factory_local_slot: None,
@@ -3192,6 +3718,107 @@ fn validate_cross_class_call_code(
                     "caller method {:?} does not invoke the exact same-instance factory and outer constructor",
                     call.caller
                 ));
+            }
+            continue;
+        }
+        if let Some(mixed_pair) = &call.mixed_constructor_pair {
+            let mut pc = 0;
+            let outer_allocation = take_factory_call_operand(code.code, &mut pc, 0xbb, "new")?;
+            take_factory_call_opcode(code.code, &mut pc, 0x59, "dup")?;
+            let mut nested_allocations = Vec::new();
+            let mut nested_initializers = Vec::new();
+            for argument in &mixed_pair.arguments {
+                match argument {
+                    MixedConstructorArgumentRef::Formal { local_slot } => {
+                        take_factory_local(code.code, &mut pc, false, *local_slot)?;
+                    }
+                    MixedConstructorArgumentRef::Nested(nested) => {
+                        let allocation =
+                            take_factory_call_operand(code.code, &mut pc, 0xbb, "new")?;
+                        take_factory_call_opcode(code.code, &mut pc, 0x59, "dup")?;
+                        take_int_local(code.code, &mut pc, nested.argument_local_slot)?;
+                        let initializer =
+                            take_factory_call_operand(code.code, &mut pc, 0xb7, "invokespecial")?;
+                        nested_allocations.push((allocation, nested));
+                        nested_initializers.push((initializer, nested));
+                    }
+                }
+            }
+            let outer_initializer =
+                take_factory_call_operand(code.code, &mut pc, 0xb7, "invokespecial")?;
+            take_factory_call_opcode(code.code, &mut pc, 0xb0, "areturn")?;
+            if pc != code.code.len()
+                || code.max_stack != mixed_pair.max_stack
+                || code.max_locals != 3
+                || !code.exception_table.is_empty()
+                || nested_allocations.len() != 1
+                || nested_initializers.len() != 1
+            {
+                return Err(format!(
+                    "caller method {:?} has invalid mixed constructor instructions, stack/local bounds, or exception metadata",
+                    call.caller
+                ));
+            }
+            let class_name = |index| -> Result<&str, String> {
+                let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Class { name_index }) =
+                    class_file.constant_pool.get(index)
+                else {
+                    return Err(
+                        "mixed constructor allocation does not reference CONSTANT_Class".into(),
+                    );
+                };
+                class_file
+                    .constant_pool
+                    .utf8(*name_index)
+                    .map_err(|error| format!("invalid mixed allocation class: {error:?}"))
+            };
+            let method_ref = |index| -> Result<(&str, (&str, &str)), String> {
+                let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+                    class_index,
+                    name_and_type_index,
+                }) = class_file.constant_pool.get(index)
+                else {
+                    return Err(
+                        "mixed constructor invocation does not reference CONSTANT_Methodref".into(),
+                    );
+                };
+                let owner = class_file
+                    .constant_pool
+                    .class_name(*class_index)
+                    .map_err(|error| format!("invalid mixed constructor owner: {error:?}"))?;
+                let method = class_file
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .map_err(|error| format!("invalid mixed constructor Methodref: {error:?}"))?;
+                Ok((owner, method))
+            };
+            if class_name(outer_allocation)? != call.owner_internal_name
+                || method_ref(outer_initializer)?
+                    != (
+                        call.owner_internal_name.as_str(),
+                        ("<init>", call.descriptor.as_str()),
+                    )
+            {
+                return Err(format!(
+                    "caller method {:?} does not allocate and invoke its exact mixed Pair constructor",
+                    call.caller
+                ));
+            }
+            for ((allocation, nested), (initializer, _)) in
+                nested_allocations.into_iter().zip(nested_initializers)
+            {
+                if class_name(allocation)? != nested.owner_internal_name
+                    || method_ref(initializer)?
+                        != (
+                            nested.owner_internal_name.as_str(),
+                            ("<init>", nested.descriptor.as_str()),
+                        )
+                {
+                    return Err(format!(
+                        "caller method {:?} does not allocate and initialize the exact nested Counter before continuing",
+                        call.caller
+                    ));
+                }
             }
             continue;
         }
