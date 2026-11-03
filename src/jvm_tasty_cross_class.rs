@@ -3158,10 +3158,36 @@ pub fn validate_immutable_local_initialization_proof<'session>(
         counter,
         package,
         definitions.no_prefix,
-    ) || !matches!(store.types.try_get(typed_ast.try_get(typed_init).ok_or_else(|| typed_error("typed initializer is stale"))?.ty), Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == counter)
-    {
+    ) {
         return Err(typed_error(
-            "typed New and initializer must retain canonical Counter TypeRefs",
+            "typed New type tree must retain the canonical Counter TypeRef",
+        ));
+    }
+    if !is_canonical_class_type_ref(
+        store,
+        typed_ast
+            .try_get(typed_new)
+            .ok_or_else(|| typed_error("typed New is stale"))?
+            .ty,
+        counter,
+        package,
+        definitions.no_prefix,
+    ) {
+        return Err(typed_error(
+            "typed New result must retain the canonical Counter TypeRef",
+        ));
+    }
+    if !matches!(
+        store.types.try_get(
+            typed_ast
+                .try_get(typed_init)
+                .ok_or_else(|| typed_error("typed initializer is stale"))?
+                .ty
+        ),
+        Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == counter
+    ) {
+        return Err(typed_error(
+            "typed initializer result must retain the Counter TypeRef",
         ));
     }
     let constructor = match store.types.try_get(
@@ -3388,6 +3414,21 @@ pub fn validate_immutable_local_initialization_proof<'session>(
     {
         return Err(identity_error(
             "Pair must be a different canonical class in the original source batch",
+        ));
+    }
+    let typed_final_class = match store.types.try_get(typed_final.ty) {
+        Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(class),
+        }) if *prefix == definitions.no_prefix => Some(*class),
+        _ => canonical_class_type_symbol(store, typed_final.ty, package, definitions.no_prefix),
+    };
+    if typed_final_class != Some(pair_class)
+        || canonical_class_type_symbol(store, signature.result, package, definitions.no_prefix)
+            != Some(pair_class)
+    {
+        return Err(typed_error(
+            "typed final Apply must retain the method's canonical Pair result type",
         ));
     }
     unique_constructor_call_class_plan(jvm_unit, pair_class)?;

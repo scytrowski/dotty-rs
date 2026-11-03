@@ -17122,6 +17122,71 @@ fn immutable_reference_local_pair_constructor_audit_runs_on_jvm_only_path() {
                     "JVM unit and source proof must borrow the same semantic and typed stores",
                 ))
             ), "a unit with only its typed AST replaced must fail pointer authentication");
+
+            let mut wrong_new_result_ast = copy_ast(unit.typed_ast);
+            wrong_new_result_ast
+                .get_mut(local_proof.typed_initializer_new())
+                .ty = definitions.int;
+            let mut wrong_new_result_unit = JvmCompilationUnit {
+                store: unit.store,
+                typed_ast: &wrong_new_result_ast,
+                classes: unit.classes.clone(),
+            };
+            assert!(
+                matches!(
+                validate_immutable_local_initialization_proof(
+                    ImmutableLocalInitializationProofInput {
+                        source_id,
+                        method_tree,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: &wrong_new_result_ast,
+                        source_index: index,
+                        source_typed_index,
+                        local_binding: Some(local_binding),
+                        jvm_unit: &mut wrong_new_result_unit,
+                    }
+                ),
+                Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "typed New result must retain the canonical Counter TypeRef",
+                ))
+            ),
+                "corrupting only the typed New result must fail the canonical Counter result gate"
+            );
+
+            let mut wrong_final_result_ast = copy_ast(unit.typed_ast);
+            wrong_final_result_ast
+                .get_mut(local_proof.typed_final_expression())
+                .ty = definitions.int;
+            let mut wrong_final_result_unit = JvmCompilationUnit {
+                store: unit.store,
+                typed_ast: &wrong_final_result_ast,
+                classes: unit.classes.clone(),
+            };
+            assert!(
+                matches!(
+                validate_immutable_local_initialization_proof(
+                    ImmutableLocalInitializationProofInput {
+                        source_id,
+                        method_tree,
+                        store: unit.store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: &wrong_final_result_ast,
+                        source_index: index,
+                        source_typed_index,
+                        local_binding: Some(local_binding),
+                        jvm_unit: &mut wrong_final_result_unit,
+                    }
+                ),
+                Err(dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
+                    "typed final Apply must retain the method's canonical Pair result type",
+                ))
+            ),
+                "corrupting only the typed final Apply result must fail against the method result"
+            );
+
             assert!(matches!(
                 validate_immutable_local_initialization_proof(
                     ImmutableLocalInitializationProofInput {
