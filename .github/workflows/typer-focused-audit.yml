@@ -19,6 +19,7 @@ on:
       - 'crates/dotty-tasty-unpickler/**'
       - 'crates/dotty-typer/**'
       - 'tools/typer-classpath-corpus-audit/**'
+      - 'tools/write-typer-focused-audit-report.py'
       - 'docs/typer-*.md'
       - 'docs/typer-*.tsv'
       - 'docs/typer-lexical-closure-acceptance-recovery-3.9.0/**'
@@ -57,6 +58,24 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: Enforce integrated recursive Expr prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          for prerequisite in \
+            d62365e3cf2e6b322cceabdbd9e697670eb9e1b5 \
+            deedd4c8581b31392c38f48060774466f50110c0 \
+            31ed0e3232069410e76dfa9ccfe2291bebeb97f9 \
+            5b8a7f0603f89d458fbfb1213d7dd2b94f5204da \
+            e5afcb6fb70c6aeea574d0543df937a6e95c80ef \
+            60cc3ce645b216b14fe90a31ee5ce975b9e2c2e6; do
+            git merge-base --is-ancestor "$prerequisite" HEAD || {
+              echo "required recursive Expr prerequisite $prerequisite is not integrated in HEAD=$(git rev-parse HEAD)" >&2
+              exit 1
+            }
+          done
+          printf 'Verified #2034-#2039 prerequisite merge ancestry at HEAD %s\n' "$(git rev-parse HEAD)"
+
       - name: Run audit tooling unit tests
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/typer-classpath-corpus-audit -p 'test_*.py'
 
@@ -70,6 +89,8 @@ jobs:
             tools/typer-classpath-corpus-audit/verify_inherited_members_acceptance.py inputs
           PYTHONDONTWRITEBYTECODE=1 python3 \
             tools/typer-classpath-corpus-audit/verify_source_case_class_match_acceptance.py inputs
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            tools/typer-classpath-corpus-audit/verify_source_case_class_match_acceptance.py recursive-inputs
 
       - name: Check out pinned Scala 3.9.0 sources
         uses: actions/checkout@v4
@@ -289,6 +310,18 @@ jobs:
             > "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-oracle.log" 2>&1
           cat "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-oracle.log"
 
+      - name: Run pinned recursive Expr ADT negative matrix
+        shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_RECURSIVE_ADT_TMP_ROOT: ${{ github.workspace }}/target/source-recursive-adt-negative-matrix
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          crates/dotty-typer/tests/fixtures/source-recursive-adt-match-3.9.0/run-negative-matrix \
+            > "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-negative-oracle.log" 2>&1
+          cat "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-negative-oracle.log"
+
       - name: Run pinned sealed Event negative and rollback matrix
         shell: bash
         env:
@@ -326,9 +359,39 @@ jobs:
         run: |
           set -euo pipefail
           cargo +1.98.1 test -p dotty-typer --test source_recursive_adt_baseline \
+            evaluator_recursive_adt_roots_type_after_generated_unapply_completion \
             --locked -- --nocapture \
             > "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-rust.log" 2>&1
+          printf 'ISSUE2040_TESTED_SHA\t%s\n' "$(git rev-parse HEAD)" \
+            >> "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-rust.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-rust.log"
+
+      - name: Run recursive Expr negative, rollback, retry, and recovery tests
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          cargo +1.98.1 test -p dotty-typer --lib --locked recursive_adt \
+            -- --nocapture > "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-negative-rust.log" 2>&1
+          cat "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-negative-rust.log"
+
+      - name: Verify strict recursive Expr receipts and pinned controls
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          verifier=tools/typer-classpath-corpus-audit/verify_source_case_class_match_acceptance.py
+          PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" recursive-oracle-log \
+            "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-oracle.log"
+          PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" recursive-negative-oracle-log \
+            "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-negative-oracle.log"
+          PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" recursive-positive-log \
+            "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-rust.log" \
+            --tested-sha "$(git rev-parse HEAD)" --expected-sha "$DOTTY_EXPECTED_SOURCE_SHA"
+          PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" recursive-negative-log \
+            "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-negative-rust.log"
 
       - name: Run exact source case-class Match Rust acceptance matrix
         shell: bash
@@ -560,5 +623,6 @@ jobs:
             ${{ github.workspace }}/target/source-sealed-adt-match-oracle/
             ${{ github.workspace }}/target/source-sealed-adt-match-rollback-oracle/
             ${{ github.workspace }}/target/source-recursive-adt-match-oracle/
+            ${{ github.workspace }}/target/source-recursive-adt-negative-matrix/
           if-no-files-found: error
           retention-days: 30
