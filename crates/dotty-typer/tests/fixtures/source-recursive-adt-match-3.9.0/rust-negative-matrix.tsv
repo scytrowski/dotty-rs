@@ -10,7 +10,7 @@ eval_boolean_argument	eval	rejected	deferred:ApplicationArgumentTypeMismatch:tre
 eval_zero_arguments	eval	rejected	deferred:ApplicationArityMismatch:tree51@360..366
 eval_wrong_type	eval	rejected	deferred:ApplicationArgumentTypeMismatch:tree52@360..371
 eval_wrong_arity	eval	rejected	deferred:ApplicationArityMismatch:tree53@360..378
-foreign_succ_owner	unwrap	rejected	deferred:SymbolResolution:tree3@76..80
+foreign_succ_owner	unwrap	rejected	deferred:ExtractorPatternConstraintDeferred:tree58@410..429
 foreign_eval_wrong_argument	eval	rejected	deferred:ApplicationArgumentTypeMismatch:tree62@411..429
 foreign_eval_control	eval	accepted	accepted:tree68@310..434
 foreign_expr_succ_owner	eval	rejected	deferred:ExtractorPatternConstraintDeferred:tree64@442..452

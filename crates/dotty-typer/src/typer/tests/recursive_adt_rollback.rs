@@ -207,6 +207,356 @@ fn typer_for<'a>(
         .with_resolver(Box::new(resolver))
 }
 
+fn symbol_path(store: &SemanticStore, symbol: SymbolId) -> String {
+    let mut names = Vec::new();
+    let mut next = Some(symbol);
+    while let Some(current) = next {
+        let info = store.symbols.get(current);
+        names.push(store.names.resolve(info.name.text()).to_owned());
+        next = info.owner;
+    }
+    names.reverse();
+    names.join(".")
+}
+
+fn normalized_type_shape(store: &SemanticStore, ty: TypeId) -> String {
+    match store.types.get(ty) {
+        Type::NoType => "NoType".to_owned(),
+        Type::NoPrefix => "NoPrefix".to_owned(),
+        Type::Error(_) => "Error".to_owned(),
+        Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        } => {
+            format!("TermRef({})", symbol_path(store, *symbol))
+        }
+        Type::TermRef {
+            target: TermRefTarget::Name(name),
+            ..
+        } => {
+            format!(
+                "TermRefName({})",
+                store.names.resolve(name.as_name().text())
+            )
+        }
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } => {
+            format!("TypeRef({})", symbol_path(store, *symbol))
+        }
+        Type::TypeRef {
+            target: TypeRefTarget::Name(name),
+            ..
+        } => {
+            format!(
+                "TypeRefName({})",
+                store.names.resolve(name.as_name().text())
+            )
+        }
+        Type::ThisType { class } => format!("This({})", symbol_path(store, *class)),
+        Type::SuperType { .. } => "Super".to_owned(),
+        Type::Constant(constant) => format!("Constant({constant:?})"),
+        Type::Applied { tycon, args } => format!(
+            "Applied({};{})",
+            normalized_type_shape(store, *tycon),
+            args.iter()
+                .map(|arg| normalized_type_shape(store, *arg))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Type::Method(method) => format!(
+            "Method({})->{}",
+            method
+                .params
+                .iter()
+                .map(|param| normalized_type_shape(store, param.ty))
+                .collect::<Vec<_>>()
+                .join(","),
+            normalized_type_shape(store, method.result)
+        ),
+        Type::Poly(poly) => format!("Poly({})", normalized_type_shape(store, poly.result)),
+        Type::And { left, right } => format!(
+            "And({},{})",
+            normalized_type_shape(store, *left),
+            normalized_type_shape(store, *right)
+        ),
+        Type::Or { left, right } => format!(
+            "Or({},{})",
+            normalized_type_shape(store, *left),
+            normalized_type_shape(store, *right)
+        ),
+        Type::ByName { result } => format!("ByName({})", normalized_type_shape(store, *result)),
+        Type::JavaArray { element } => format!("Array({})", normalized_type_shape(store, *element)),
+        Type::Repeated { element } => {
+            format!("Repeated({})", normalized_type_shape(store, *element))
+        }
+        Type::Bounds { .. } => "Bounds".to_owned(),
+        Type::AliasingBounds { alias } => {
+            format!("Alias({})", normalized_type_shape(store, *alias))
+        }
+        Type::Flexible { underlying } => {
+            format!("Flexible({})", normalized_type_shape(store, *underlying))
+        }
+        Type::Refined { parent, .. } => {
+            format!("Refined({})", normalized_type_shape(store, *parent))
+        }
+        Type::Recursive { parent } => {
+            format!("Recursive({})", normalized_type_shape(store, *parent))
+        }
+        Type::RecThis { .. } => "RecThis".to_owned(),
+        Type::TypeLambda(lambda) => format!(
+            "TypeLambda({})",
+            normalized_type_shape(store, lambda.result)
+        ),
+        Type::ParamRef { index, .. } => format!("ParamRef({index})"),
+        Type::Match(_) => "MatchType".to_owned(),
+        Type::MatchCase { pattern, result } => format!(
+            "MatchCase({},{})",
+            normalized_type_shape(store, *pattern),
+            normalized_type_shape(store, *result)
+        ),
+        Type::Annotated { underlying, .. } => {
+            format!("Annotated({})", normalized_type_shape(store, *underlying))
+        }
+        Type::Wildcard { bounds } => format!("Wildcard({})", normalized_type_shape(store, *bounds)),
+        Type::ClassInfo(_) => "ClassInfo".to_owned(),
+    }
+}
+
+fn typed_kind_shape(tree: &dotty_core::ast::TypedTree) -> &'static str {
+    match &tree.kind {
+        TreeKind::Ident(_) => "Ident",
+        TreeKind::Select(_) => "Select",
+        TreeKind::This(_) => "This",
+        TreeKind::Super(_) => "Super",
+        TreeKind::Literal(_) => "Literal",
+        TreeKind::Apply(_) => "Apply",
+        TreeKind::TypeApply(_) => "TypeApply",
+        TreeKind::New(_) => "New",
+        TreeKind::Typed(_) => "Typed",
+        TreeKind::NamedArg(_) => "NamedArg",
+        TreeKind::Assign(_) => "Assign",
+        TreeKind::Block(_) => "Block",
+        TreeKind::If(_) => "If",
+        TreeKind::Match(_) => "Match",
+        TreeKind::CaseDef(_) => "CaseDef",
+        TreeKind::Return(_) => "Return",
+        TreeKind::While(_) => "While",
+        TreeKind::Try(_) => "Try",
+        TreeKind::Closure(_) => "Closure",
+        TreeKind::ValDef(_) => "ValDef",
+        TreeKind::DefDef(_) => "DefDef",
+        TreeKind::TypeDef(_) => "TypeDef",
+        TreeKind::Template(_) => "Template",
+        TreeKind::PackageDef(_) => "PackageDef",
+        TreeKind::Import(_) => "Import",
+        TreeKind::Export(_) => "Export",
+        TreeKind::TypeTree(_) => "TypeTree",
+        TreeKind::SingletonTypeTree(_) => "SingletonTypeTree",
+        TreeKind::AppliedTypeTree(_) => "AppliedTypeTree",
+        TreeKind::RefinedTypeTree(_) => "RefinedTypeTree",
+        TreeKind::LambdaTypeTree(_) => "LambdaTypeTree",
+        TreeKind::MatchTypeTree(_) => "MatchTypeTree",
+        TreeKind::ByNameTypeTree(_) => "ByNameTypeTree",
+        TreeKind::TypeBoundsTree(_) => "TypeBoundsTree",
+        TreeKind::Bind(_) => "Bind",
+        TreeKind::Alternative(_) => "Alternative",
+        TreeKind::UnApply(_) => "UnApply",
+        TreeKind::Annotated(_) => "Annotated",
+        TreeKind::Quote(_) => "Quote",
+        TreeKind::Splice(_) => "Splice",
+        TreeKind::QuotePattern(_) => "QuotePattern",
+        TreeKind::SplicePattern(_) => "SplicePattern",
+        TreeKind::Inlined(_) => "Inlined",
+        TreeKind::PhaseSpecific(_) => "PhaseSpecific",
+    }
+}
+
+fn normalized_success_root(
+    parsed: &dotty_parser::ParseResult,
+    typer: &SourceTyper<'_>,
+    source: SourceId,
+    root: TreeId<Untyped>,
+    method_name: &str,
+) -> String {
+    let store = typer.store();
+    let TreeKind::DefDef(definition) = &parsed.ast.get(root).kind else {
+        unreachable!()
+    };
+    let rhs = definition.rhs.expect("accepted root has a body");
+    let root_span = parsed.ast.get(root).position.unwrap().span().range();
+    let mut shape = parsed
+        .ast
+        .iter()
+        .filter_map(|(source_tree, source_node)| {
+            let span = source_node.position?.span().range();
+            if span.start() < root_span.start() || span.end() > root_span.end() {
+                return None;
+            }
+            let typed_id = typer.source_typed_index().get(source, source_tree)?;
+            let typed = typer.typed_ast().get(typed_id);
+            Some(format!(
+                "{}..{}:{}:{}",
+                span.start(),
+                span.end(),
+                typed_kind_shape(typed),
+                normalized_type_shape(store, typed.ty)
+            ))
+        })
+        .collect::<Vec<_>>();
+    shape.sort();
+
+    let TreeKind::Match(matched) = &parsed.ast.get(rhs).kind else {
+        panic!("accepted method keeps its match root")
+    };
+    let TreeKind::CaseDef(succ_case) = &parsed.ast.get(matched.cases[1]).kind else {
+        unreachable!()
+    };
+    let TreeKind::Apply(extractor) = &parsed.ast.get(succ_case.pattern).kind else {
+        panic!("Succ pattern remains an extractor")
+    };
+    let binder_tree = extractor.args[0];
+    let binder = typer
+        .pattern_binding_symbol_at(source, binder_tree)
+        .expect("Succ.inner binder is published");
+    let method_symbol = typer
+        .index
+        .symbol_at(source, root)
+        .expect("canonical source method symbol");
+    assert_eq!(store.symbols.get(binder).owner, Some(method_symbol));
+    let SymbolInfo::Complete(binder_type) = *store.symbols.info(binder) else {
+        panic!("binder type is complete")
+    };
+    let expr_symbol = class_symbol(parsed, store, typer.index, source, "Expr");
+    assert_eq!(type_symbol(store, binder_type), expr_symbol);
+
+    let body = match &parsed.ast.get(succ_case.body).kind {
+        TreeKind::Block(block) => block.expr,
+        _ => succ_case.body,
+    };
+    let (reference, callee) = if method_name == "eval" {
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(addition)) = &parsed.ast.get(body).kind
+        else {
+            panic!("eval case keeps its addition")
+        };
+        let call = addition.left;
+        let TreeKind::Apply(application) = &parsed.ast.get(call).kind else {
+            panic!("recursive eval call remains an Apply")
+        };
+        (application.args[0], Some(application.function))
+    } else {
+        (body, None)
+    };
+    let typed_reference = typer
+        .source_typed_index()
+        .get(source, reference)
+        .expect("binder reference has a typed mapping");
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(reference_symbol),
+        ..
+    } = store.types.get(typer.typed_ast().get(typed_reference).ty)
+    else {
+        panic!("body reference retains canonical TermRef")
+    };
+    assert_eq!(
+        *reference_symbol, binder,
+        "body reference points to its own case binder"
+    );
+    let callee_shape = if let Some(callee_tree) = callee {
+        let canonical = typer
+            .index
+            .symbol_at(source, root)
+            .expect("canonical eval method");
+        let typed_callee = typer
+            .source_typed_index()
+            .get(source, callee_tree)
+            .expect("recursive callee has a typed mapping");
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(selected),
+            ..
+        } = store.types.get(typer.typed_ast().get(typed_callee).ty)
+        else {
+            panic!("recursive callee is a canonical TermRef")
+        };
+        assert_eq!(*selected, canonical);
+        symbol_path(store, *selected)
+    } else {
+        "none".to_owned()
+    };
+    let span = parsed.ast.get(root).position.unwrap().span().range();
+    format!(
+        "{}@{}..{};root-type={};binder={};binder-type={};body-reference={};callee={};shape=[{}]",
+        method_name,
+        span.start(),
+        span.end(),
+        normalized_type_shape(
+            store,
+            typer
+                .typed_ast()
+                .get(
+                    typer
+                        .source_typed_index()
+                        .get(source, root)
+                        .expect("root typed mapping")
+                )
+                .ty
+        ),
+        symbol_path(store, binder),
+        normalized_type_shape(store, binder_type),
+        symbol_path(store, *reference_symbol),
+        callee_shape,
+        shape.join(";")
+    )
+}
+
+fn late_failure_span_receipt(parsed: &dotty_parser::ParseResult, root: TreeId<Untyped>) -> String {
+    let TreeKind::DefDef(definition) = &parsed.ast.get(root).kind else {
+        unreachable!()
+    };
+    let root_span = parsed.ast.get(root).position.unwrap().span().range();
+    let rhs = definition.rhs.expect("failing method has a body");
+    let TreeKind::Match(matched) = &parsed.ast.get(rhs).kind else {
+        unreachable!()
+    };
+    let TreeKind::CaseDef(succ_case) = &parsed.ast.get(matched.cases[1]).kind else {
+        unreachable!()
+    };
+    let TreeKind::Apply(extractor) = &parsed.ast.get(succ_case.pattern).kind else {
+        unreachable!()
+    };
+    let binder = parsed
+        .ast
+        .get(extractor.args[0])
+        .position
+        .unwrap()
+        .span()
+        .range();
+    let body = match &parsed.ast.get(succ_case.body).kind {
+        TreeKind::Block(block) => block.expr,
+        _ => succ_case.body,
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::InfixOp(addition)) = &parsed.ast.get(body).kind else {
+        unreachable!()
+    };
+    let recursive = parsed
+        .ast
+        .get(addition.left)
+        .position
+        .unwrap()
+        .span()
+        .range();
+    format!(
+        "root={}..{};binder={}..{};recursive_apply={}..{}",
+        root_span.start(),
+        root_span.end(),
+        binder.start(),
+        binder.end(),
+        recursive.start(),
+        recursive.end()
+    )
+}
+
 #[test]
 fn recursive_eval_late_result_failure_observes_binder_call_and_rolls_back_for_retry() {
     let source_text = EXPR_SOURCE.replace(
@@ -263,15 +613,7 @@ fn recursive_eval_late_result_failure_observes_binder_call_and_rolls_back_for_re
             call.args[0],
         )
     };
-    let method_span = parsed.ast.get(broken).position.unwrap().span().range();
-    let binder_span = parsed.ast.get(binder_tree).position.unwrap().span().range();
-    let recursive_span = parsed
-        .ast
-        .get(recursive_call)
-        .position
-        .unwrap()
-        .span()
-        .range();
+    let first_span_receipt = late_failure_span_receipt(&parsed, broken);
     let mut typer = typer_for(&parsed, &mut store, &packages, definitions, &index, source);
     let prior_typed = typer
         .type_method_definition(prior)
@@ -425,6 +767,8 @@ fn recursive_eval_late_result_failure_observes_binder_call_and_rolls_back_for_re
         fresh_source,
     ) = parse_and_name(&source_text);
     let fresh_broken = tree_named(&fresh_parsed, &fresh_store, "broken");
+    let fresh_unwrap = tree_named(&fresh_parsed, &fresh_store, "unwrap");
+    let fresh_eval = tree_named(&fresh_parsed, &fresh_store, "eval");
     let mut fresh_typer = typer_for(
         &fresh_parsed,
         &mut fresh_store,
@@ -436,27 +780,54 @@ fn recursive_eval_late_result_failure_observes_binder_call_and_rolls_back_for_re
     let fresh_error = fresh_typer
         .type_method_definition(fresh_broken)
         .expect_err("independent source session rejects the same root");
-    assert_eq!(format!("{fresh_error:?}"), first_debug);
     assert_eq!(
-        format!(
-            "broken={}..{}; binder={}..{}; recursive_apply={}..{}; error={first_debug}",
-            method_span.start(),
-            method_span.end(),
-            binder_span.start(),
-            binder_span.end(),
-            recursive_span.start(),
-            recursive_span.end()
+        normalized_error(&fresh_error, &fresh_parsed),
+        normalized_error(&first, &parsed),
+        "diagnostic category and independently parsed tree span match"
+    );
+    assert_eq!(
+        late_failure_span_receipt(&fresh_parsed, fresh_broken),
+        first_span_receipt,
+        "root, binder and recursive-Apply spans are independently read from both parses"
+    );
+    let fresh_retry = fresh_typer
+        .type_method_definition(fresh_broken)
+        .expect_err("the independent session retry preserves the same failure");
+    assert_eq!(
+        normalized_error(&fresh_retry, &fresh_parsed),
+        normalized_error(&fresh_error, &fresh_parsed)
+    );
+    fresh_typer
+        .type_method_definition(fresh_unwrap)
+        .expect("untouched unwrap types in the independent fresh session");
+    fresh_typer
+        .type_method_definition(fresh_eval)
+        .expect("untouched eval types in the independent fresh session");
+    let recovered_receipt = format!(
+        "{}\n{}",
+        normalized_success_root(&parsed, &typer, source, unwrap, "unwrap"),
+        normalized_success_root(&parsed, &typer, source, eval, "eval")
+    );
+    let fresh_receipt = format!(
+        "{}\n{}",
+        normalized_success_root(
+            &fresh_parsed,
+            &fresh_typer,
+            fresh_source,
+            fresh_unwrap,
+            "unwrap"
         ),
-        format!(
-            "broken={}..{}; binder={}..{}; recursive_apply={}..{}; error={fresh_error:?}",
-            method_span.start(),
-            method_span.end(),
-            binder_span.start(),
-            binder_span.end(),
-            recursive_span.start(),
-            recursive_span.end()
-        ),
-        "fresh-session diagnostic and source spans normalize identically",
+        normalized_success_root(
+            &fresh_parsed,
+            &fresh_typer,
+            fresh_source,
+            fresh_eval,
+            "eval"
+        )
+    );
+    assert_eq!(
+        recovered_receipt, fresh_receipt,
+        "recovered success roots preserve normalized type shapes, binder/reference relationships, and selected recursive callee"
     );
 }
 
