@@ -485,7 +485,7 @@ impl SourceTyper<'_> {
         Some(projection)
     }
 
-    fn validate_source_case_class_trait_parent(
+    pub(super) fn validate_source_case_class_trait_parent(
         &mut self,
         class: SymbolId,
         parent_tree: TreeId<Untyped>,
@@ -684,7 +684,7 @@ impl SourceTyper<'_> {
             && self.store.names.resolve(symbol.name.text()) == "Product"
     }
 
-    fn is_canonical_source_trait_ref(&self, ty: TypeId, expected: SymbolId) -> bool {
+    pub(super) fn is_canonical_source_trait_ref(&self, ty: TypeId, expected: SymbolId) -> bool {
         let Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(actual),
             ..

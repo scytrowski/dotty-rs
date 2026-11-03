@@ -243,7 +243,11 @@ impl SourceTyper<'_> {
                 clause_index: 0,
             });
         };
-        if !constructor.type_params.is_empty() {
+        if !constructor.type_params.is_empty()
+            || !self
+                .source_class_type_parameters(class)
+                .is_ok_and(|parameters| parameters.is_empty())
+        {
             return Err(TyperError::MalformedMethodClause {
                 method,
                 method_tree_index: class_tree.index(),
@@ -326,7 +330,26 @@ impl SourceTyper<'_> {
                 .ok_or(TyperError::DeclarationContextMissing { symbol: field })?;
             let field_type =
                 self.type_of_tpt_inner_journaled(parameter.tpt, parameter_context, info_journal)?;
-            if field_type != expected_type {
+            // Keep the reference exception to the canonical direct source-trait parent.
+            let supported_reference_field = if field_type != expected_type
+                && parameter_trees.len() == 1
+                && expected_type == self.definitions.int
+                && template.parents.len() == 1
+            {
+                let parent_tree = template.parents[0];
+                let parent_type =
+                    self.project_parent_type(parent_tree, parameter_context, 0, info_journal)?;
+                let parent = self.validate_source_case_class_trait_parent(
+                    class,
+                    parent_tree,
+                    parent_type,
+                    info_journal,
+                )?;
+                self.is_canonical_source_trait_ref(field_type, parent)
+            } else {
+                false
+            };
+            if field_type != expected_type && !supported_reference_field {
                 return Err(TyperError::MalformedMethodClause {
                     method,
                     method_tree_index: class_tree.index(),
