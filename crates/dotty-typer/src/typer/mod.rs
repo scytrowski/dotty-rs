@@ -4605,6 +4605,190 @@ mod tests {
     }
 
     #[test]
+    fn generated_two_reference_field_unapply_validates_existing_info_and_retries() {
+        for field_index in 0..2 {
+            for corruption in [0, 1, 2] {
+                let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+                    "package scala { trait Product }; package matching { sealed trait Expr; final case class Add(left: Expr, right: Expr) extends Expr }; package foreign { trait Expr }",
+                );
+                let add = class_symbol(&parsed, &store, &index, source, "Add");
+                let foreign_expr = parsed
+                    .ast
+                    .iter()
+                    .find_map(|(foreign_tree, node)| match &node.kind {
+                        TreeKind::TypeDef(definition)
+                            if store.names.resolve(definition.name.as_name().text()) == "Expr" =>
+                        {
+                            index.symbol_at(source, foreign_tree).filter(|symbol| {
+                                store.symbols.owner(*symbol).is_some_and(|owner| {
+                                    store.names.resolve(store.symbols.get(owner).name.text())
+                                        == "foreign"
+                                })
+                            })
+                        }
+                        _ => None,
+                    })
+                    .expect("foreign.Expr source trait");
+                let unapply = index
+                    .generated_case_class_method(
+                        add,
+                        dotty_core::GeneratedCaseClassMethodRole::Unapply,
+                    )
+                    .unwrap();
+                let SourceDefinition::Canonical { tree, .. } = index.definition_of(add).unwrap()
+                else {
+                    panic!("Add source definition")
+                };
+                let fields = match &parsed.ast.get(tree).kind {
+                    TreeKind::TypeDef(definition) => match &parsed.ast.get(definition.rhs).kind {
+                        TreeKind::Template(template) => {
+                            match &parsed.ast.get(template.constructor).kind {
+                                TreeKind::DefDef(constructor) => constructor.value_param_clauses[0]
+                                    .iter()
+                                    .map(|parameter| index.symbol_at(source, *parameter).unwrap())
+                                    .collect::<Vec<_>>(),
+                                _ => panic!("Add constructor"),
+                            }
+                        }
+                        _ => panic!("Add template"),
+                    },
+                    _ => panic!("Add TypeDef"),
+                };
+                assert_eq!(fields.len(), 2);
+                let corrupted_field = fields[field_index];
+                let corrupted_info = match corruption {
+                    0 => SymbolInfo::Complete(definitions.int),
+                    1 => SymbolInfo::Error,
+                    2 => SymbolInfo::Complete(store.types.alloc(Type::TypeRef {
+                        prefix: definitions.no_prefix,
+                        target: TypeRefTarget::Symbol(foreign_expr),
+                    })),
+                    _ => unreachable!(),
+                };
+                store.symbols.set_info(corrupted_field, corrupted_info);
+                let mut typer = SourceTyper::new(
+                    &parsed.ast,
+                    source,
+                    &index,
+                    &mut store,
+                    definitions,
+                    &packages,
+                );
+                let store_checkpoint = typer.store().checkpoint();
+                let type_index_checkpoint = typer.type_index.checkpoint();
+                let result = typer.complete_symbol(unapply);
+                match corrupted_info {
+                    SymbolInfo::Complete(_) => assert!(matches!(
+                        result,
+                        Err(TyperError::MalformedMethodClause { method, .. }) if method == unapply
+                    )),
+                    SymbolInfo::Error => assert!(matches!(
+                        result,
+                        Err(TyperError::SymbolAlreadyErrored { symbol }) if symbol == corrupted_field
+                    )),
+                    _ => unreachable!(),
+                }
+                assert_eq!(typer.store().checkpoint(), store_checkpoint);
+                assert_eq!(*typer.store().symbols.info(corrupted_field), corrupted_info);
+                assert_eq!(
+                    *typer.store().symbols.info(fields[1 - field_index]),
+                    SymbolInfo::Missing
+                );
+                for (source_tree, _) in parsed.ast.iter() {
+                    assert_eq!(
+                        typer.type_index.type_at(source, source_tree),
+                        type_index_checkpoint.type_at(source, source_tree)
+                    );
+                }
+
+                // The malformed preexisting state remains observable on
+                // failure. Repair it in the same session, then verify the
+                // generated signature can be completed without publishing
+                // field infos as a side effect.
+                typer
+                    .store
+                    .symbols
+                    .set_info(corrupted_field, SymbolInfo::Missing);
+                let signature = typer
+                    .complete_symbol(unapply)
+                    .expect("same-session retry after field-info repair");
+                let Type::Method(method) = typer.store().types.get(signature) else {
+                    panic!("Add.unapply signature is a MethodType")
+                };
+                assert_eq!(method.params.len(), 1);
+                assert_eq!(type_symbol(typer.store(), method.params[0].ty), add);
+                assert_eq!(type_symbol(typer.store(), method.result), add);
+                for field in fields {
+                    assert_eq!(*typer.store().symbols.info(field), SymbolInfo::Missing);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generated_two_reference_field_unapply_accepts_consistent_complete_field_info() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { trait Product }; package matching { sealed trait Expr; final case class Add(left: Expr, right: Expr) extends Expr }",
+        );
+        let add = class_symbol(&parsed, &store, &index, source, "Add");
+        let unapply = index
+            .generated_case_class_method(add, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .unwrap();
+        let SourceDefinition::Canonical { tree, .. } = index.definition_of(add).unwrap() else {
+            panic!("Add source definition")
+        };
+        let fields = match &parsed.ast.get(tree).kind {
+            TreeKind::TypeDef(definition) => match &parsed.ast.get(definition.rhs).kind {
+                TreeKind::Template(template) => match &parsed.ast.get(template.constructor).kind {
+                    TreeKind::DefDef(constructor) => constructor.value_param_clauses[0]
+                        .iter()
+                        .map(|parameter| index.symbol_at(source, *parameter).unwrap())
+                        .collect::<Vec<_>>(),
+                    _ => panic!("Add constructor"),
+                },
+                _ => panic!("Add template"),
+            },
+            _ => panic!("Add TypeDef"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let field_infos = fields
+            .iter()
+            .map(|field| {
+                let info = typer
+                    .complete_symbol(*field)
+                    .expect("canonical source reference field completes");
+                assert_eq!(
+                    *typer.store().symbols.info(*field),
+                    SymbolInfo::Complete(info)
+                );
+                info
+            })
+            .collect::<Vec<_>>();
+        let signature = typer
+            .complete_symbol(unapply)
+            .expect("matching precompleted field infos remain valid");
+        let Type::Method(method) = typer.store().types.get(signature) else {
+            panic!("Add.unapply signature is a MethodType")
+        };
+        assert_eq!(method.params.len(), 1);
+        assert_eq!(type_symbol(typer.store(), method.params[0].ty), add);
+        assert_eq!(type_symbol(typer.store(), method.result), add);
+        for (field, info) in fields.into_iter().zip(field_infos) {
+            assert_eq!(
+                *typer.store().symbols.info(field),
+                SymbolInfo::Complete(info)
+            );
+        }
+    }
+
+    #[test]
     fn generated_case_class_unapply_validates_and_rolls_back_source_class_info() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "package scala { trait Product }; package matching { case class Broken(value: Int) extends MissingParent; case class Good(value: Int, enabled: Boolean) }",

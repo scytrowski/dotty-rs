@@ -384,6 +384,29 @@ impl SourceTyper<'_> {
                     clause_index: 0,
                 });
             }
+            if parameter_trees.len() == 2 && two_reference_fields {
+                match *self.store.symbols.info(field) {
+                    // Source fields remain lazily completed for this generated
+                    // signature. If another path has already supplied field
+                    // info, it must agree with the independently projected
+                    // canonical parent reference authenticated above.
+                    SymbolInfo::Missing => {}
+                    SymbolInfo::Complete(info) if info == field_type => {}
+                    SymbolInfo::Complete(_) => {
+                        return Err(TyperError::MalformedMethodClause {
+                            method,
+                            method_tree_index: class_tree.index(),
+                            clause_index: 0,
+                        });
+                    }
+                    SymbolInfo::Deferred(_) => {
+                        return Err(TyperError::DeferredSymbolCompletion { symbol: field });
+                    }
+                    SymbolInfo::Error => {
+                        return Err(TyperError::SymbolAlreadyErrored { symbol: field });
+                    }
+                }
+            }
         }
 
         let input = self
