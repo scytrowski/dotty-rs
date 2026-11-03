@@ -1487,6 +1487,12 @@ fn assert_complete_unwrap(context: UnwrapProofContext<'_>) -> String {
     let TreeKind::DefDef(typed_definition) = typed_definition else {
         panic!("typed root remains a DefDef")
     };
+    let source_parameter = source_definition.value_param_clauses[0][0];
+    let typed_parameter = mapped(source_parameter);
+    assert_eq!(
+        typed_definition.value_param_clauses[0][0], typed_parameter,
+        "the explicit formal is the typed child mapped from the source formal"
+    );
     let typed_rhs = mapped(source_rhs);
     let typed_result_type = mapped(source_definition.tpt);
     assert_eq!(
