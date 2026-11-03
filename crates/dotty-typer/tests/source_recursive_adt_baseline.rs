@@ -5,7 +5,7 @@ use dotty_classloader::classloader::{
     LoadingSession,
 };
 use dotty_core::ast::TreeKind;
-use dotty_core::types::{Type, TypeRefTarget};
+use dotty_core::types::{Constant, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, GeneratedCaseClassMethodRole, Packages, SemanticStore, SourceId, SourceText,
     SymbolFlags, SymbolInfo, SymbolKind, SymbolOrigin, TypeName,
@@ -29,8 +29,9 @@ struct UnwrapProofContext<'a> {
 
 #[test]
 fn evaluator_recursive_adt_roots_type_after_generated_unapply_completion() {
-    let (first, first_paths, first_unwrap) = analyze_roots(SourceId::from_index(20341));
-    let (second, second_paths, second_unwrap) = analyze_roots(SourceId::from_index(20342));
+    let (first, first_paths, first_unwrap, first_eval) = analyze_roots(SourceId::from_index(20341));
+    let (second, second_paths, second_unwrap, second_eval) =
+        analyze_roots(SourceId::from_index(20342));
     assert_eq!(first, second, "fresh source sessions normalize identically");
     assert_eq!(
         first_paths, second_paths,
@@ -39,6 +40,10 @@ fn evaluator_recursive_adt_roots_type_after_generated_unapply_completion() {
     assert_eq!(
         first_unwrap, second_unwrap,
         "unwrap normalizes across fresh sessions"
+    );
+    assert_eq!(
+        first_eval, second_eval,
+        "eval normalizes across fresh sessions"
     );
     assert_eq!(
         first.len(),
@@ -72,6 +77,15 @@ fn evaluator_recursive_adt_roots_type_after_generated_unapply_completion() {
         include_str!("fixtures/source-recursive-adt-match-3.9.0/rust-unwrap-before-after.tsv");
     assert_eq!(actual, expected);
     println!("ISSUE2037_UNWRAP\t{first_unwrap}");
+    let actual = format!("{first_eval}\n");
+    let expected =
+        include_str!("fixtures/source-recursive-adt-match-3.9.0/rust-eval-before-after.tsv")
+            .lines()
+            .nth(2)
+            .and_then(|row| row.split_once('\t').map(|(_, receipt)| receipt))
+            .expect("after row in recursive eval receipt");
+    assert_eq!(actual.trim_end(), expected);
+    println!("ISSUE2038_EVAL\t{first_eval}");
 }
 
 #[test]
@@ -93,6 +107,275 @@ fn evaluator_recursive_adt_classification_records_canonical_mechanisms() {
     for row in rows {
         println!("ISSUE2034_CLASS\t{row}");
     }
+}
+
+#[test]
+fn evaluator_eval_types_after_unwrap_with_reordered_source_declarations() {
+    let original = eval_after_unwrap_receipt(SourceId::from_index(20348), SOURCE);
+    let reordered = SOURCE
+        .replace(
+            "final case class Num(value: Int) extends Expr\nfinal case class Succ(inner: Expr) extends Expr",
+            "final case class Succ(inner: Expr) extends Expr\nfinal case class Num(value: Int) extends Expr",
+        )
+        .replace(
+            "  def unwrap(expr: Expr): Expr =\n    expr match\n      case Num(_)      => expr\n      case Succ(inner) => inner\n\n  def eval(expr: Expr): Int =\n    expr match\n      case Num(value)  => value\n      case Succ(inner) => eval(inner) + 1",
+            "  def eval(expr: Expr): Int =\n    expr match\n      case Num(value)  => value\n      case Succ(inner) => eval(inner) + 1\n\n  def unwrap(expr: Expr): Expr =\n    expr match\n      case Num(_)      => expr\n      case Succ(inner) => inner",
+        );
+    let reordered = eval_after_unwrap_receipt(SourceId::from_index(20349), &reordered);
+    assert_eq!(
+        normalize_eval_receipt(&original),
+        normalize_eval_receipt(&reordered),
+        "source class and method declaration order do not change recursive eval semantics"
+    );
+}
+
+fn normalize_eval_receipt(receipt: &str) -> String {
+    receipt
+        .split('\t')
+        .enumerate()
+        .filter_map(|(index, field)| (!matches!(index, 1..=4)).then_some(field))
+        .collect::<Vec<_>>()
+        .join("\t")
+}
+
+fn eval_after_unwrap_receipt(source: SourceId, source_text: &str) -> String {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(source_text).expect("valid reordered source"),
+        source,
+        ContextualScanner::new(source_text).expect("scan reordered source"),
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Expr.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("name reordered recursive source");
+    let mut methods = std::collections::BTreeMap::new();
+    for (tree, node) in parsed.ast.iter() {
+        if let TreeKind::DefDef(definition) = &node.kind {
+            let name = store.names.resolve(definition.name.as_name().text());
+            if matches!(name, "eval" | "unwrap") {
+                methods.insert(
+                    name.to_owned(),
+                    (tree, index.symbol_at(source, tree).unwrap()),
+                );
+            }
+        }
+    }
+    let (unwrap_tree, _) = methods["unwrap"];
+    let (eval_tree, eval_symbol) = methods["eval"];
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../dotty-tasty/tests/fixtures/scala3-library");
+    let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required");
+    let classpath = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(fixture)) as Box<dyn ClassPathEntry>,
+        Box::new(JdkClassPath::new(PathBuf::from(java_home).join("jmods")).expect("JDK modules")),
+    ]);
+    let resolver = ClasspathSymbolResolver::new(classpath, definitions, LoadingSession::new());
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let typed_unwrap = typer
+        .type_method_definition(unwrap_tree)
+        .expect("unwrap completes before eval in this session");
+    assert!(matches!(
+        typer.typed_ast().get(typed_unwrap).kind,
+        TreeKind::DefDef(_)
+    ));
+    let typed_eval = typer
+        .type_method_definition(eval_tree)
+        .expect("the explicitly annotated recursive eval completes after unwrap");
+    let parameter = match &parsed.ast.get(eval_tree).kind {
+        TreeKind::DefDef(definition) => index
+            .symbol_at(source, definition.value_param_clauses[0][0])
+            .expect("canonical source eval formal"),
+        _ => unreachable!(),
+    };
+    assert_complete_eval(
+        &parsed.ast,
+        source,
+        &index,
+        &typer,
+        eval_tree,
+        eval_symbol,
+        parameter,
+        typed_eval,
+        definitions.int,
+    )
+}
+
+#[test]
+fn recursive_eval_late_failure_rolls_back_and_allows_same_session_retry() {
+    let source_text = format!(
+        "{SOURCE}\nobject BrokenEvaluator:\n  def evalBroken(expr: Expr): Int =\n    expr match\n      case Num(value)  => value\n      case Succ(inner) => evalBroken(inner) + true\n"
+    );
+    let source = SourceId::from_index(20347);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(&source_text).expect("valid late-failure source"),
+        source,
+        ContextualScanner::new(&source_text).expect("scan late-failure source"),
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Expr.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("name recursive eval retry source");
+    let mut methods = std::collections::BTreeMap::new();
+    for (tree, node) in parsed.ast.iter() {
+        let TreeKind::DefDef(definition) = &node.kind else {
+            continue;
+        };
+        let name = store.names.resolve(definition.name.as_name().text());
+        if matches!(name, "eval" | "unwrap" | "evalBroken") {
+            methods.insert(
+                name.to_owned(),
+                (tree, index.symbol_at(source, tree).unwrap()),
+            );
+        }
+    }
+    let (broken_tree, broken_symbol) = methods["evalBroken"];
+    let (eval_tree, _) = methods["eval"];
+    let (unwrap_tree, _) = methods["unwrap"];
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../dotty-tasty/tests/fixtures/scala3-library");
+    let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required");
+    let classpath = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(fixture)) as Box<dyn ClassPathEntry>,
+        Box::new(JdkClassPath::new(PathBuf::from(java_home).join("jmods")).expect("JDK modules")),
+    ]);
+    let resolver = ClasspathSymbolResolver::new(classpath, definitions, LoadingSession::new());
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+
+    let store_before = typer.store().checkpoint();
+    let typed_before = typer.typed_ast().checkpoint();
+    let broken_info_before = *typer.store().symbols.info(broken_symbol);
+    let first_error = typer
+        .type_method_definition(broken_tree)
+        .expect_err("the trailing Boolean operand must fail after the recursive call");
+    let first_diagnostic = format!("{first_error:?}");
+    assert_eq!(typer.store().checkpoint(), store_before);
+    assert_eq!(typer.typed_ast().checkpoint(), typed_before);
+    assert_eq!(
+        *typer.store().symbols.info(broken_symbol),
+        broken_info_before
+    );
+    assert!(
+        typer
+            .source_typed_index()
+            .get(source, broken_tree)
+            .is_none()
+    );
+    let TreeKind::DefDef(broken_definition) = &parsed.ast.get(broken_tree).kind else {
+        unreachable!()
+    };
+    let broken_rhs = broken_definition.rhs.unwrap();
+    let TreeKind::Match(broken_match) = &parsed.ast.get(broken_rhs).kind else {
+        unreachable!()
+    };
+    let TreeKind::CaseDef(broken_case) = &parsed.ast.get(broken_match.cases[1]).kind else {
+        unreachable!()
+    };
+    let TreeKind::Block(broken_body) = &parsed.ast.get(broken_case.body).kind else {
+        unreachable!()
+    };
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(broken_infix)) =
+        &parsed.ast.get(broken_body.expr).kind
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(
+            &first_error,
+            TyperError::OverloadApplicationNoApplicable {
+                source: error_source,
+                tree_index,
+                ..
+            } if *error_source == source && *tree_index == broken_body.expr.index()
+        ),
+        "{first_diagnostic}"
+    );
+    assert!(
+        first_diagnostic.contains("ArgumentNonConformance"),
+        "{first_diagnostic}"
+    );
+    let recursive_call = broken_infix.left;
+    assert!(
+        typer
+            .source_typed_index()
+            .get(source, recursive_call)
+            .is_none()
+    );
+
+    let second_error = typer
+        .type_method_definition(broken_tree)
+        .expect_err("repeating the malformed method remains an error");
+    assert_eq!(format!("{second_error:?}"), first_diagnostic);
+    assert_eq!(typer.store().checkpoint(), store_before);
+    assert_eq!(typer.typed_ast().checkpoint(), typed_before);
+    assert_eq!(
+        *typer.store().symbols.info(broken_symbol),
+        broken_info_before
+    );
+    assert!(
+        typer
+            .source_typed_index()
+            .get(source, broken_tree)
+            .is_none()
+    );
+
+    let typed_eval = typer
+        .type_method_definition(eval_tree)
+        .expect("valid original eval still types in the same session");
+    let typed_unwrap = typer
+        .type_method_definition(unwrap_tree)
+        .expect("valid unwrap sibling still types in the same session");
+    assert!(matches!(
+        typer.typed_ast().get(typed_eval).kind,
+        TreeKind::DefDef(_)
+    ));
+    assert!(matches!(
+        typer.typed_ast().get(typed_unwrap).kind,
+        TreeKind::DefDef(_)
+    ));
+    assert_eq!(
+        typer.source_typed_index().get(source, eval_tree),
+        Some(typed_eval)
+    );
+    assert_eq!(
+        typer.source_typed_index().get(source, unwrap_tree),
+        Some(typed_unwrap)
+    );
 }
 
 #[test]
@@ -467,7 +750,7 @@ fn type_ref_symbol(typer: &SourceTyper<'_>, ty: dotty_core::TypeId) -> dotty_cor
     }
 }
 
-fn analyze_roots(source: SourceId) -> (Vec<String>, Vec<String>, String) {
+fn analyze_roots(source: SourceId) -> (Vec<String>, Vec<String>, String, String) {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
     let parsed = dotty_parser::parse_compilation_unit(
@@ -562,6 +845,7 @@ fn analyze_roots(source: SourceId) -> (Vec<String>, Vec<String>, String) {
     .with_resolver(Box::new(resolver));
     let mut rows = Vec::new();
     let mut unwrap_receipt = None;
+    let mut eval_receipt = None;
     let mut root_trees = Vec::new();
     for (name, tree, position, symbol, parameter, owner) in roots {
         let outcome = match typer.type_method_definition(tree) {
@@ -582,6 +866,23 @@ fn analyze_roots(source: SourceId) -> (Vec<String>, Vec<String>, String) {
                         parameter,
                         typed_method: typed,
                     }));
+                } else {
+                    eval_receipt = Some(assert_complete_eval(
+                        &parsed.ast,
+                        source,
+                        &index,
+                        &typer,
+                        tree,
+                        symbol,
+                        parameter,
+                        typed,
+                        definitions.int,
+                    ));
+                    assert_eq!(
+                        typer.type_method_definition(tree).unwrap(),
+                        typed,
+                        "retyping the same source method reuses its canonical typed root"
+                    );
                 }
                 format!("complete=typed#tree{}", typed.index())
             }
@@ -751,6 +1052,331 @@ fn analyze_roots(source: SourceId) -> (Vec<String>, Vec<String>, String) {
         rows,
         deferred,
         unwrap_receipt.expect("the original Evaluator.unwrap root was typed"),
+        eval_receipt.expect("the original Evaluator.eval root was typed"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_complete_eval(
+    source_ast: &dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+    source: SourceId,
+    index: &dotty_core::SourceSemanticIndex,
+    typer: &SourceTyper<'_>,
+    source_method: dotty_core::TreeId<dotty_core::ast::Untyped>,
+    method: dotty_core::SymbolId,
+    parameter: dotty_core::SymbolId,
+    typed_method: dotty_core::TreeId<dotty_core::ast::Typed>,
+    int_type: dotty_core::TypeId,
+) -> String {
+    let store = typer.store();
+    let owner = store.symbols.get(method).owner.expect("eval owner");
+    assert_eq!(store.symbols.get(owner).kind, SymbolKind::ModuleClass);
+    assert_eq!(
+        store.names.resolve(store.symbols.get(owner).name.text()),
+        "Evaluator$"
+    );
+    assert!(matches!(store.symbols.get(method).origin, SymbolOrigin::Source(id) if id == source));
+    assert_eq!(store.symbols.get(method).kind, SymbolKind::Method);
+    assert_eq!(store.symbols.get(parameter).kind, SymbolKind::Parameter);
+    assert_eq!(store.symbols.get(parameter).owner, Some(method));
+
+    let SymbolInfo::Complete(method_type) = *store.symbols.info(method) else {
+        panic!("eval signature is completed before the body is accepted")
+    };
+    let Type::Method(signature) = store.types.get(method_type) else {
+        panic!("eval has a method signature")
+    };
+    assert_eq!(signature.params.len(), 1);
+    let SymbolInfo::Complete(parameter_type) = *store.symbols.info(parameter) else {
+        panic!("eval formal has a completed type")
+    };
+    assert_eq!(
+        denoted_symbol(typer, parameter_type),
+        denoted_symbol(typer, signature.params[0].ty)
+    );
+    let int_symbol = denoted_symbol(typer, int_type).expect("canonical Int symbol");
+    assert_eq!(
+        store
+            .names
+            .resolve(store.symbols.get(int_symbol).name.text()),
+        "Int"
+    );
+    assert_eq!(denoted_symbol(typer, signature.result), Some(int_symbol));
+
+    let TreeKind::DefDef(source_def) = &source_ast.get(source_method).kind else {
+        panic!("source root is a DefDef")
+    };
+    let expr_symbol = source_ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "Expr" =>
+            {
+                index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+        .expect("canonical source Expr trait");
+    assert_eq!(
+        denoted_symbol(typer, signature.params[0].ty),
+        Some(expr_symbol)
+    );
+    let source_rhs = source_def.rhs.expect("eval has a body");
+    let TreeKind::Match(source_match) = &source_ast.get(source_rhs).kind else {
+        panic!("eval body is the original Match")
+    };
+    assert_eq!(source_match.cases.len(), 2);
+    let mapped = |tree| {
+        let typed = typer
+            .source_typed_index()
+            .get(source, tree)
+            .unwrap_or_else(|| panic!("missing typed mapping for {tree:?}"));
+        assert_eq!(
+            source_ast.get(tree).position,
+            typer.typed_ast().get(typed).position,
+            "source span survives typing for {tree:?}"
+        );
+        typed
+    };
+    assert_eq!(mapped(source_method), typed_method);
+    let typed_def = match &typer.typed_ast().get(typed_method).kind {
+        TreeKind::DefDef(definition) => definition,
+        other => panic!("typed root remains a DefDef: {other:?}"),
+    };
+    assert_eq!(typed_def.rhs, Some(mapped(source_rhs)));
+    let source_parameter = source_def.value_param_clauses[0][0];
+    assert_eq!(
+        typed_def.value_param_clauses[0][0],
+        mapped(source_parameter),
+        "the explicit formal has a source-to-typed mapping"
+    );
+    let typed_result = mapped(source_def.tpt);
+    assert_eq!(
+        denoted_symbol(typer, typer.typed_ast().get(typed_result).ty),
+        Some(int_symbol)
+    );
+    let typed_match_id = mapped(source_rhs);
+    let typed_match = match &typer.typed_ast().get(typed_match_id).kind {
+        TreeKind::Match(matched) => matched,
+        other => panic!("typed RHS remains a Match: {other:?}"),
+    };
+    assert_eq!(typed_match.cases.len(), 2);
+    assert_eq!(mapped(source_match.selector), typed_match.selector);
+    assert_eq!(typed_symbol(typer, typed_match.selector), parameter);
+    assert_eq!(
+        denoted_symbol(typer, typer.typed_ast().get(typed_match_id).ty),
+        Some(int_symbol)
+    );
+
+    let mut case_receipts = Vec::new();
+    let mut selected = Vec::new();
+    let mut case_binders = Vec::new();
+    let mut recursive_receipt = None;
+    for (case_index, (source_case_id, typed_case_id)) in source_match
+        .cases
+        .iter()
+        .zip(&typed_match.cases)
+        .enumerate()
+    {
+        assert_eq!(mapped(*source_case_id), *typed_case_id);
+        let TreeKind::CaseDef(source_case) = &source_ast.get(*source_case_id).kind else {
+            panic!("source case is a CaseDef")
+        };
+        let TreeKind::CaseDef(typed_case) = &typer.typed_ast().get(*typed_case_id).kind else {
+            panic!("typed case is a CaseDef")
+        };
+        assert_eq!(typed_case.guard, None);
+        assert_eq!(mapped(source_case.pattern), typed_case.pattern);
+        assert_eq!(mapped(source_case.body), typed_case.body);
+        let TreeKind::Apply(source_extractor) = &source_ast.get(source_case.pattern).kind else {
+            panic!("source case uses an extractor application")
+        };
+        let TreeKind::UnApply(typed_extractor) = &typer.typed_ast().get(typed_case.pattern).kind
+        else {
+            panic!("typed pattern is an UnApply")
+        };
+        assert_eq!(source_extractor.args.len(), 1);
+        assert_eq!(typed_extractor.patterns.len(), 1);
+        let TreeKind::Select(typed_extractor_selection) =
+            &typer.typed_ast().get(typed_extractor.function).kind
+        else {
+            panic!("typed extractor is selected from its authentic companion")
+        };
+        assert_eq!(
+            mapped(source_extractor.function),
+            typed_extractor_selection.qualifier,
+            "the source extractor reference is retained through typing"
+        );
+        let variant_name = if case_index == 0 { "Num" } else { "Succ" };
+        let variant = source_ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == variant_name =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("canonical variant symbol");
+        assert_eq!(
+            denoted_symbol(typer, typer.typed_ast().get(typed_case.pattern).ty),
+            Some(variant)
+        );
+        let unapply = index
+            .generated_case_class_method(variant, GeneratedCaseClassMethodRole::Unapply)
+            .expect("authentic source-generated unapply");
+        let selected_symbol = typed_symbol(typer, typed_extractor.function);
+        assert_eq!(selected_symbol, unapply);
+        selected.push(format!("{variant_name}$.unapply@{variant_name}$"));
+
+        let source_component = source_extractor.args[0];
+        let typed_component = typed_extractor.patterns[0];
+        assert_eq!(mapped(source_component), typed_component);
+        let TreeKind::Bind(binding) = &typer.typed_ast().get(typed_component).kind else {
+            panic!("each one-field extractor binds its source component")
+        };
+        let binder = typed_symbol(typer, typed_component);
+        case_binders.push(binder);
+        let binder_name = store.names.resolve(binding.name.text()).to_owned();
+        let SymbolInfo::Complete(binder_type) = *store.symbols.info(binder) else {
+            panic!("pattern binder has a complete type")
+        };
+        let expected_binder_type = if case_index == 0 {
+            int_symbol
+        } else {
+            expr_symbol
+        };
+        assert_eq!(
+            denoted_symbol(typer, binder_type),
+            Some(expected_binder_type)
+        );
+        assert_eq!(store.symbols.get(binder).owner, Some(method));
+        assert_eq!(
+            store.symbols.get(binder).origin,
+            SymbolOrigin::Source(source)
+        );
+        let body_expr = if let TreeKind::Block(block) = &source_ast.get(source_case.body).kind {
+            block.expr
+        } else {
+            source_case.body
+        };
+        let typed_body_expr = mapped(body_expr);
+        let typed_case_body_expr =
+            if let TreeKind::Block(block) = &typer.typed_ast().get(typed_case.body).kind {
+                block.expr
+            } else {
+                typed_case.body
+            };
+        assert_eq!(typed_body_expr, typed_case_body_expr);
+        assert_eq!(
+            denoted_symbol(typer, typer.typed_ast().get(typed_body_expr).ty),
+            Some(int_symbol)
+        );
+        if case_index == 0 {
+            assert_eq!(binder_name, "value");
+            assert_eq!(typed_symbol(typer, typed_body_expr), binder);
+            case_receipts.push("Num(value:Int)=>value:Int");
+        } else {
+            assert_eq!(binder_name, "inner");
+            let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(infix)) =
+                &source_ast.get(body_expr).kind
+            else {
+                panic!("Succ body is the original recursive call plus literal")
+            };
+            assert_eq!(store.names.resolve(infix.op.text()), "+");
+            let recursive_id = infix.left;
+            let TreeKind::Apply(recursive_source) = &source_ast.get(recursive_id).kind else {
+                panic!("left operand is the recursive method application")
+            };
+            assert_eq!(recursive_source.args.len(), 1);
+            let source_function = recursive_source.function;
+            let source_argument = recursive_source.args[0];
+            let TreeKind::Ident(function_ident) = &source_ast.get(source_function).kind else {
+                panic!("recursive reference is a simple method identifier")
+            };
+            assert_eq!(store.names.resolve(function_ident.name.text()), "eval");
+            let typed_call = mapped(recursive_id);
+            let TreeKind::Apply(typed_application) = &typer.typed_ast().get(typed_call).kind else {
+                panic!("recursive call remains one ordinary Apply")
+            };
+            assert_eq!(typed_application.args.len(), 1);
+            let typed_function = mapped(source_function);
+            assert_eq!(typed_application.function, typed_function);
+            assert_eq!(typed_symbol(typer, typed_function), method);
+            let typed_argument = mapped(source_argument);
+            assert_eq!(typed_application.args[0], typed_argument);
+            assert_eq!(typed_symbol(typer, typed_argument), binder);
+            assert_eq!(
+                denoted_symbol(typer, typer.typed_ast().get(typed_argument).ty),
+                Some(expected_binder_type)
+            );
+            assert_eq!(
+                denoted_symbol(typer, typer.typed_ast().get(typed_call).ty),
+                Some(int_symbol)
+            );
+
+            let addition = mapped(body_expr);
+            let TreeKind::Apply(typed_addition) = &typer.typed_ast().get(addition).kind else {
+                panic!("typed addition is an ordinary method application")
+            };
+            assert_eq!(typed_addition.args.len(), 1);
+            let TreeKind::Select(addition_function) =
+                &typer.typed_ast().get(typed_addition.function).kind
+            else {
+                panic!("Int addition resolves through a selected + method")
+            };
+            assert_eq!(addition_function.qualifier, typed_call);
+            let plus_symbol = typed_symbol(typer, typed_addition.function);
+            assert_eq!(
+                store
+                    .names
+                    .resolve(store.symbols.get(plus_symbol).name.text()),
+                "+"
+            );
+            let literal = mapped(infix.right);
+            assert!(matches!(
+                typer.typed_ast().get(literal).kind,
+                TreeKind::Literal(_)
+            ));
+            assert!(matches!(
+                store.types.get(typer.typed_ast().get(literal).ty),
+                Type::Constant(Constant::Int(1))
+            ));
+            assert_eq!(
+                denoted_symbol(typer, typer.typed_ast().get(addition).ty),
+                Some(int_symbol)
+            );
+            recursive_receipt = Some(
+                "call=eval(inner):same_symbol,arg=Succ.inner:Expr,result=Int,addition=Int,literal=1:Int"
+                    .to_owned(),
+            );
+            case_receipts.push("Succ(inner:Expr)=>eval(inner):Int + 1:Int");
+        }
+    }
+    assert_eq!(
+        case_receipts,
+        [
+            "Num(value:Int)=>value:Int",
+            "Succ(inner:Expr)=>eval(inner):Int + 1:Int"
+        ]
+    );
+    assert_eq!(case_binders.len(), 2);
+    assert_ne!(case_binders[0], case_binders[1]);
+    assert!(!case_binders.contains(&parameter));
+    let method_position = source_ast
+        .get(source_method)
+        .position
+        .expect("method span")
+        .span()
+        .range();
+    let call_receipt = recursive_receipt.expect("recursive call receipt");
+    format!(
+        "Evaluator.eval\tmethod={method:?}\tparameter={parameter:?}\towner=Evaluator$:{owner:?}\tsource_bytes={}:{}\tresult=Int\tcases=[{}]\tselected=[{}]\t{call_receipt}\tspans=preserved\tindependent_sessions=equal",
+        method_position.start(),
+        method_position.end(),
+        case_receipts.join(","),
+        selected.join(",")
     )
 }
 
