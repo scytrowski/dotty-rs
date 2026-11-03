@@ -9484,6 +9484,96 @@ mod tests {
     }
 
     #[test]
+    fn authentic_constructor_rejections_preserve_committed_ctor_plain_state() {
+        let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty-unpickler/tests/fixtures/semantic");
+        let plain_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorPlain");
+        let with_val_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/CtorWithVal");
+        let wrong_owner_name = BinaryName::from_internal("other/package/CtorPlain");
+        let malformed_name =
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Truncated");
+        let plain_bytes = semantic_unpickler_fixture_bytes("CtorPlain.tasty");
+        let with_val_bytes = semantic_unpickler_fixture_bytes("CtorWithVal.tasty");
+        let class_path = ConstructorFixtureClassPath(
+            HashMap::from([
+                (plain_name.clone(), plain_bytes.clone()),
+                (with_val_name.clone(), with_val_bytes),
+                (wrong_owner_name.clone(), plain_bytes.clone()),
+                (
+                    malformed_name.clone(),
+                    plain_bytes[..plain_bytes.len() - 1].to_vec(),
+                ),
+            ]),
+            fixture_root,
+        );
+        let java_home = std::env::var_os("JAVA_HOME").expect("JAVA_HOME for JDK 21 classpath");
+        let jdk = crate::jdk_class_path::JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("real JDK 21 classpath");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            CompositeClassPath::new(vec![Box::new(class_path), Box::new(jdk)]),
+            &mut store,
+        );
+        let plain = loader
+            .load_semantic_class_with_tasty_unpickler(&plain_name)
+            .expect("authentic CtorPlain commits before negative controls");
+        let plain_cache = loader.semantic_tasty_loaded.get(&plain_name).copied();
+        assert_eq!(plain_cache, Some(plain));
+
+        for (name, expected) in [
+            (
+                with_val_name.clone(),
+                "the primary constructor must have one empty clause or one ordinary Int clause",
+            ),
+            (
+                wrong_owner_name.clone(),
+                "the TASTy package must match the requested binary name",
+            ),
+        ] {
+            let store_mark = loader.store.checkpoint();
+            let session_mark = loader.session.checkpoint();
+            let package_mark = loader.session.packages.checkpoint();
+            let error = loader
+                .load_semantic_class_with_tasty_unpickler(&name)
+                .expect_err("unsupported authentic shape must fail closed");
+            let SemanticTastyLoadError::UnsupportedShape(message) = &error else {
+                panic!("first rejection for {name} must be UnsupportedShape: {error:?}");
+            };
+            assert_eq!(*message, expected, "first typed rejection for {name}");
+            assert_eq!(loader.store.checkpoint(), store_mark);
+            assert_eq!(loader.session.checkpoint(), session_mark);
+            assert_eq!(loader.session.packages.checkpoint(), package_mark);
+            assert_eq!(loader.semantic_tasty_loaded.get(&plain_name), Some(&plain));
+            assert_eq!(loader.session.resolved.get(&plain_name), Some(&plain));
+            assert!(!loader.semantic_tasty_loaded.contains_key(&name));
+            assert!(loader.repository.get(&name).is_none());
+            assert_eq!(
+                loader
+                    .load_semantic_class_with_tasty_unpickler(&plain_name)
+                    .expect("previously committed CtorPlain remains usable"),
+                plain
+            );
+        }
+
+        let store_mark = loader.store.checkpoint();
+        let session_mark = loader.session.checkpoint();
+        let package_mark = loader.session.packages.checkpoint();
+        assert!(matches!(
+            loader.load_semantic_class_with_tasty_unpickler(&malformed_name),
+            Err(SemanticTastyLoadError::ClassLoad(
+                ClassLoadError::InvalidTastyFile(_, _)
+            ))
+        ));
+        assert_eq!(loader.store.checkpoint(), store_mark);
+        assert_eq!(loader.session.checkpoint(), session_mark);
+        assert_eq!(loader.session.packages.checkpoint(), package_mark);
+        assert_eq!(loader.semantic_tasty_loaded.get(&plain_name), Some(&plain));
+        assert_eq!(loader.session.resolved.get(&plain_name), Some(&plain));
+        assert!(loader.repository.get(&malformed_name).is_none());
+    }
+
+    #[test]
     fn semantic_class_loader_rejects_secondary_constructor_with_rollback() {
         if std::env::var_os("DOTTY_REQUIRE_SCALA39_SECONDARY_CONSTRUCTOR_TEST").is_none() {
             eprintln!("secondary-constructor TASTy fixture requires the pinned Scala CI gate");
