@@ -173,6 +173,28 @@ fn tracing_classpath_without_jdk(trace: Arc<Mutex<Vec<String>>>) -> CompositeCla
     CompositeClassPath::new(vec![Box::new(TracingClassPath { inner, trace })])
 }
 
+struct MaskedClassPath {
+    inner: CompositeClassPath,
+    masked_internal_name: &'static str,
+}
+
+impl ClassPathEntry for MaskedClassPath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        if name.as_internal() == self.masked_internal_name {
+            return Ok(None);
+        }
+        self.inner.find_class(name)
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package(package)
+    }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.inner.contains_package_prefix(package)
+    }
+}
+
 struct TracingResolver {
     inner: Box<dyn SymbolResolver>,
     trace: Arc<Mutex<Vec<String>>>,
@@ -1395,18 +1417,20 @@ fn predef_alias_probe(with_jdk: bool) -> (String, String, String) {
 }
 
 fn original_sound_probe(id: &str) -> String {
-    let (relpath, owner_name, expected_method, expected_address) = match id {
+    let (relpath, owner_name, expected_method, expected_address, first_failure_address) = match id {
         "animal-sound" => (
             "crates/dotty-classloader/tests/fixtures/tasty_sample/me/cytrowski/tastyfixtures/Animal.tasty",
             "Animal",
             "sound",
             22,
+            27,
         ),
         "dog-sound" => (
             "crates/dotty-classloader/tests/fixtures/tasty_sample/Dog.tasty",
             "Dog",
             "sound",
             36,
+            41,
         ),
         _ => panic!("unsupported frozen sound probe {id}"),
     };
@@ -1435,10 +1459,41 @@ fn original_sound_probe(id: &str) -> String {
     unpickler
         .enter_symbols()
         .expect("sound unit symbols entered");
-    let method_id = unpickler.index().symbol_at(address).expect("method symbol");
-    complete_audit_request(&file, &mut unpickler, address, owner_name)
-        .expect("sound signature can reference the entered Predef.String alias");
+    // These are the two acceptance calls for the original Scala-generated
+    // method definitions, not class-root completion or scope membership.
+    let owner_address = owner_address(&file, owner_name).expect("original owner TYPEDEF");
+    let owner_id = unpickler
+        .index()
+        .symbol_at(owner_address)
+        .expect("indexed original method owner");
+    let method_owner = member_owner_address(&file, address).expect("method owner address");
+    assert_eq!(method_owner, owner_address);
+    let signature_id = unpickler
+        .complete_symbol(address)
+        .expect("original sound DEFDEF completes through resolved Predef.String");
+    let method_id = unpickler
+        .index()
+        .symbol_at(address)
+        .expect("original method identity");
+    assert_eq!(
+        unpickler
+            .complete_symbol(address)
+            .expect("same-session repeated completion reuses the method"),
+        signature_id
+    );
+    assert_eq!(
+        unpickler
+            .complete_symbol(address)
+            .expect("third completion remains idempotent"),
+        signature_id
+    );
     drop(unpickler);
+    assert_eq!(store.symbols.get(method_id).owner, Some(owner_id));
+    assert_eq!(
+        store.symbols.get(method_id).kind,
+        dotty_core::SymbolKind::Method
+    );
+    assert_eq!(store.symbols.get(method_id).visibility, Visibility::Public);
     let dotty_core::SymbolInfo::Complete(method_info) = store.symbols.get(method_id).info else {
         panic!("completed sound member has completed method information")
     };
@@ -1506,13 +1561,81 @@ fn original_sound_probe(id: &str) -> String {
     assert!(target_origin.ends_with("java.base.jmod"));
     assert!(alias_id != method_id);
     format!(
-        "alias={};target={}.{};origin={target_origin}",
+        "777528f19a58e794c9954a42f433373472ec57f8\t{owner_name}.sound\t{relpath}\t{}\t{:?}\t{owner_address}\t{address}\tTerm\tMethod\tpublic\t{first_failure_address}\t{}\t{}.{}\t{}.{}\tjava.base.jmod\tCOMPLETE",
+        sha256_file(&path),
+        store.symbols.get(owner_id).kind,
+        type_repr(&store, signature_id),
         owner_path(&store, alias.owner.unwrap()),
+        store.names.resolve(alias.name.text()),
         owner_path(&store, store.symbols.get(*target_class).owner.unwrap()),
         store
             .names
             .resolve(store.symbols.get(*target_class).name.text())
     )
+}
+
+#[test]
+fn missing_predef_and_jdk_string_resources_fail_typed_without_partial_method_state() {
+    let path = workspace().join(
+        "crates/dotty-classloader/tests/fixtures/tasty_sample/me/cytrowski/tastyfixtures/Animal.tasty",
+    );
+    let bytes = fs::read(path).expect("frozen Animal TASTy");
+    let file = TastyFile::parse_and_validate_scala_3_9(&bytes).expect("Animal TASTy");
+    let address = member_address(&file, "sound").expect("Animal.sound DEFDEF");
+    assert_eq!(address, 22);
+    let owner_address = owner_address(&file, "Animal").expect("Animal TYPEDEF");
+
+    for (masked_internal_name, error_address, expected_error_text) in [
+        ("scala/Predef", 29, "Predef"),
+        ("java/lang/String", 27, "java/lang/String"),
+    ] {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let classpath = CompositeClassPath::new(vec![Box::new(MaskedClassPath {
+            inner: classpath(),
+            masked_internal_name,
+        })]);
+        let session = TastySession::new()
+            .with_resolver(Box::new(ClasspathSymbolResolver::new(
+                classpath,
+                definitions,
+                LoadingSession::new(),
+            )))
+            .expect("resolver-backed masked-resource session");
+        let mut unpickler = TastyUnpickler::with_session(&file, &mut store, definitions, session);
+        unpickler.enter_symbols().expect("Animal symbols entered");
+        let owner_id = unpickler
+            .index()
+            .symbol_at(owner_address)
+            .expect("Animal owner identity");
+        let method_id = unpickler
+            .index()
+            .symbol_at(address)
+            .expect("Animal.sound identity");
+        assert!(owner_id != method_id);
+        let error = unpickler
+            .complete_symbol(address)
+            .expect_err("masked dependency must fail closed");
+        assert!(
+            matches!(
+                &error,
+                UnpickleError::ResolverFailure { address, .. }
+                    | UnpickleError::UnresolvedMember { address, .. }
+                    | UnpickleError::UnresolvedPackage { address, .. }
+                    if *address == error_address
+            ),
+            "masked {masked_internal_name}: {error:?}"
+        );
+        assert!(format!("{error:?}").contains(expected_error_text));
+        assert_eq!(
+            unpickler.symbol_state_at(address),
+            Some((
+                dotty_core::SymbolKind::Method,
+                dotty_core::SymbolInfo::Missing
+            )),
+            "failed external resolution leaves the original method incomplete"
+        );
+    }
 }
 
 fn predef_alias_audit_once() -> String {
@@ -1631,13 +1754,36 @@ fn predef_alias_audit_once() -> String {
     let animal_target_receipt = original_sound_probe("animal-sound");
     let dog_target_receipt = original_sound_probe("dog-sound");
     assert_eq!(
-        animal_target_receipt, dog_target_receipt,
-        "fresh sessions should produce byte-identical normalized alias-target receipts"
+        animal_target_receipt,
+        original_sound_probe("animal-sound"),
+        "fresh Animal sessions should produce byte-identical normalized receipts"
+    );
+    assert_eq!(
+        dog_target_receipt,
+        original_sound_probe("dog-sound"),
+        "fresh Dog sessions should produce byte-identical normalized receipts"
+    );
+    let sound_receipt = format!(
+        "source_revision\tmethod\tfixture\tsha256\towner_kind\towner_address\tdefinition_address\tnamespace\tkind\tvisibility\tfirst_failure_address\tcanonical_method_type\tresolved_alias\talias_target\talias_target_origin\tcompletion\n{animal_target_receipt}\n{dog_target_receipt}\n"
+    );
+    assert_eq!(
+        sound_receipt,
+        include_str!(
+            "../../../docs/classloader-semantic-tasty-convergence-iii/animal-dog-method-acceptance.tsv"
+        )
     );
     predef_alias_probe(true);
     predef_alias_probe(false);
     include_str!("../../../docs/classloader-semantic-tasty-convergence-iii/predef-alias-audit.tsv")
         .to_owned()
+}
+
+#[test]
+fn original_animal_and_dog_sound_methods_resolve_predef_string_target() {
+    let animal = original_sound_probe("animal-sound");
+    let dog = original_sound_probe("dog-sound");
+    assert_ne!(animal, dog, "receipts retain their exact original owners");
+    println!("{animal}\n{dog}");
 }
 
 fn sha256_file(path: &Path) -> String {
