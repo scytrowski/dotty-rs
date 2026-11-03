@@ -34,27 +34,29 @@ fn binary_recursive_adt_roots_are_attempted_in_two_fresh_resolver_sessions() {
         .collect::<Vec<_>>();
     assert_eq!(
         format!("{}\n", receipt.join("\n")),
-        include_str!("fixtures/source-binary-recursive-adt-3.9.0/rust-two-root-baseline.tsv")
-            .split_once('\n')
-            .expect("receipt header")
-            .1
+        include_str!(
+            "fixtures/source-binary-recursive-adt-3.9.0/rust-after-namer-identities-two-root.tsv"
+        )
+        .split_once('\n')
+        .expect("post-Namer root receipt header")
+        .1
     );
     for row in receipt {
-        println!("ISSUE2061_ROOT\t{row}");
+        println!("ISSUE2066_ROOT_AFTER_NAMER\t{row}");
     }
 }
 
 #[test]
-fn binary_recursive_adt_namer_and_class_completion_are_characterized() {
+fn binary_recursive_adt_generated_identities_are_discoverable_without_completion() {
     let actual = characterize_class(SourceId::from_index(20613));
     assert_eq!(
         format!("{actual}\n"),
-        include_str!("fixtures/source-binary-recursive-adt-3.9.0/rust-class-evidence.tsv")
+        include_str!("fixtures/source-binary-recursive-adt-3.9.0/rust-after-namer-identities.tsv")
             .split_once('\n')
-            .expect("class evidence header")
+            .expect("post-Namer identity evidence header")
             .1
     );
-    println!("ISSUE2061_CLASS\t{actual}");
+    println!("ISSUE2066_NAMER_IDENTITIES\t{actual}");
 }
 
 struct RootReceipt {
@@ -212,7 +214,7 @@ fn parse_tree_index(debug: &str) -> Option<u32> {
 }
 
 fn characterize_class(source: SourceId) -> String {
-    let (ast, _root, index, mut store, definitions, packages) = setup(source);
+    let (ast, _root, index, mut store, _definitions, _packages) = setup(source);
     let mut expr = None;
     let mut add = None;
     let mut add_tree = None;
@@ -304,67 +306,30 @@ fn characterize_class(source: SourceId) -> String {
     assert!(left.is_some() && right.is_some() && left != right);
     assert_eq!(store.symbols.get(left.unwrap()).owner, Some(add));
     assert_eq!(store.symbols.get(right.unwrap()).owner, Some(add));
-    assert_eq!(unapply, None, "Namer does not publish Add.unapply");
-    let resolver = resolver(definitions);
-    let mut typer =
-        dotty_typer::SourceTyper::new(&ast, source, &index, &mut store, definitions, &packages)
-            .with_resolver(Box::new(resolver));
-    let completion = match typer.complete_symbol(add) {
-        Ok(_) => "class_completion=complete".to_owned(),
-        Err(error) => {
-            let debug = format!("{error:?}");
-            let kind = debug.split(" {").next().unwrap_or(&debug);
-            let tree_index = parse_tree_index(&debug);
-            let nested = tree_index
-                .and_then(|index| ast.iter().find(|(candidate, _)| candidate.index() == index))
-                .map(|(tree, node)| {
-                    let range = node.position.unwrap().span().range();
-                    format!(
-                        "Expr.scala#tree{}@{}:{}",
-                        tree.index(),
-                        range.start(),
-                        range.end()
-                    )
-                })
-                .unwrap_or_else(|| "UNREPORTED".to_owned());
-            format!("class_completion=first_error:{kind}(nested={nested})")
-        }
+    let (Some(selector1), Some(selector2), Some(unapply)) = (selector1, selector2, unapply) else {
+        panic!("canonical Add must expose all bounded generated identities");
     };
-    let post_scope = index
-        .scope_of(add)
-        .expect("Add class scope after completion");
-    let post_selector1 = typer
-        .store()
+    assert_ne!(selector1, selector2);
+    assert_eq!(store.symbols.get(selector1).owner, Some(add));
+    assert_eq!(store.symbols.get(selector2).owner, Some(add));
+    let companion_module = store
         .scopes
-        .get(post_scope)
-        .lookup(selector1_name.as_name());
-    let post_selector2 = typer
-        .store()
+        .get(package_scope)
+        .lookup(TypeName::new(store.names.intern("Add$")).as_name())
+        .expect("Add companion module class");
+    assert_eq!(store.symbols.get(unapply).owner, Some(companion_module));
+    let input_formals = store
         .scopes
-        .get(post_scope)
-        .lookup(selector2_name.as_name());
-    assert_eq!(post_selector1.is_some(), post_selector2.is_some());
-    let selector_completion = match (post_selector1, post_selector2) {
-        (Some(first), Some(second)) => {
-            assert_ne!(first, second);
-            format!(
-                "selectors_after_class_completion=published:{first:?},{second:?};typed={:?},{:?}",
-                typer.store().symbols.get(first).info,
-                typer.store().symbols.get(second).info
-            )
-        }
-        (None, None) => "selectors_after_class_completion=UNREACHED:no_selector_symbols".to_owned(),
-        _ => unreachable!("selector pair presence was asserted above"),
-    };
-    let reachable = if unapply.is_some() {
-        format!(
-            "unapply_signature=probe_required;{selector_completion};binder_matching=UNREACHED:no_whole_root;double_recursive_calls=UNREACHED:no_whole_root"
-        )
-    } else {
-        format!(
-            "unapply_signature=UNREACHED:no_namer_identity;{selector_completion};binder_matching=UNREACHED:no_namer_unapply;double_recursive_calls=UNREACHED:no_namer_unapply"
-        )
-    };
+        .get(index.scope_of(unapply).expect("unapply scope"))
+        .lookup_all(TermName::new(store.names.intern("x$1")).as_name());
+    assert_eq!(input_formals.len(), 1);
+    assert_eq!(store.symbols.get(input_formals[0]).owner, Some(unapply));
+    assert!(matches!(
+        store.symbols.get(unapply).info,
+        dotty_core::SymbolInfo::Missing
+    ));
     let _ = add_tree;
-    format!("{class_facts}\t{completion}\t{reachable}")
+    format!(
+        "{class_facts}\tselectors=distinct-class-owned\tunapply=companion-owned\tformal=x$1\tsignature=uncompleted"
+    )
 }

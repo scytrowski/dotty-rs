@@ -3261,6 +3261,7 @@ mod tests {
         let source_text = "package scala { trait Product }; package matching { class Ordinary(val value: Int); case class Pair(left: Int, right: Int); case class Curried(value: Int)(extra: Int); case class Repeated(values: Int*) }";
         let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
         let selector_name = Name::new(store.names.intern("_1"), Namespace::Term);
+        let selector2_name = Name::new(store.names.intern("_2"), Namespace::Term);
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -3285,15 +3286,39 @@ mod tests {
                 .symbol_at(source, tree)
                 .expect("source class identity");
             let class_scope = index.scope_of(class).expect("class scope");
-            assert!(
-                typer
-                    .store()
-                    .scopes
-                    .get(class_scope)
-                    .lookup(&selector_name)
-                    .is_none(),
-                "{name} must not acquire a synthesized _1"
-            );
+            let selector = typer.store().scopes.get(class_scope).lookup(&selector_name);
+            if name == "Pair" {
+                assert!(selector.is_some(), "structural product-2 Pair gets _1");
+                assert!(
+                    typer
+                        .store()
+                        .scopes
+                        .get(class_scope)
+                        .lookup(&selector2_name)
+                        .is_some(),
+                    "structural product-2 Pair gets _2"
+                );
+            } else {
+                assert!(
+                    selector.is_none(),
+                    "{name} must not acquire a synthesized _1"
+                );
+            }
+            if name == "Pair" {
+                let error = typer
+                    .complete_symbol(class)
+                    .expect_err("unsupported Product2 field types remain a typer error");
+                assert!(matches!(
+                    error,
+                    TyperError::UnsupportedProduct2FieldTypes { class: actual, .. }
+                        if actual == class
+                ));
+                assert_eq!(
+                    *typer.store().symbols.info(selector.unwrap()),
+                    SymbolInfo::Missing
+                );
+                continue;
+            }
             let class_info = typer
                 .complete_symbol(class)
                 .expect("complete negative control");

@@ -1,20 +1,15 @@
 # Generated two-field case-class `unapply` identity (Scala 3.9.0)
 
-The Namer publishes one canonical generated `unapply` Method for the bounded
-top-level monomorphic source shape `case class Flagged(value: Int, enabled:
-Boolean)`. It is owned by the linked `Flagged$` ModuleClass, has the class
-visibility and synthetic flag, and is indexed by the original class plus the
-`Unapply` role. Its sole synthetic `x$1` formal is owned by that Method and
-derives from the original class declaration. The generated method has no
-completed signature.
+This document records the initial `Flagged` increment. Issue #2066 replaces
+its name/type-spelling gate with the bounded structural rule documented in
+[`namer-structural-product2-3.9.0.md`](namer-structural-product2-3.9.0.md).
+The generated method remains a canonical synthetic `unapply` Method owned by
+the linked companion ModuleClass, indexed by the original class plus the
+`Unapply` role, with one synthetic `x$1` formal and no completed signature.
 
-Eligibility reuses the existing source constructor checks: one ordinary
-constructor clause, no type parameters, defaults, by-name or contextual
-parameters, and plain parameter accessors. The existing one-field `Box`
-behavior remains. Explicit companion collision checking is unchanged: a
-direct exact `unapply(Flagged)` replaces the candidate; unresolved aliases or
-overloads defer naming instead of publishing a second candidate. The pinned
-Scala 3.9 oracle classifications for the source fixture are in
+The bounded ordinary shape and explicit companion collision policy are
+summarized in the structural document. The pinned Scala 3.9 oracle
+classifications for the original Flagged controls remain in
 `crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0/scala-matrix.tsv`.
 
 At the point recorded by this increment, `_1`/`_2` had not yet been published.

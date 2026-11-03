@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+fixture_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+repo_root="$(CDPATH= cd -- "$fixture_dir/../../../../.." && pwd)"
+scala_root="${SCALA39_ROOT:?set SCALA39_ROOT to the pinned Scala 3.9.0 checkout}"
+java_home="${JAVA_HOME:?set JAVA_HOME to Temurin JDK 21.0.8+9}"
+maven_root="${COURSIER_MAVEN_ROOT:-$repo_root/target/coursier/v1/https/repo1.maven.org/maven2}"
+scratch="${DOTTY_NAMER_PRODUCT2_TMP_ROOT:-$repo_root/target/namer-structural-product2-oracle}"
+manifest="$repo_root/crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0/scala-artifacts.sha256.tsv"
+expected_revision=777528f19a58e794c9954a42f433373472ec57f8
+test "$(git -C "$scala_root" rev-parse HEAD)" = "$expected_revision"
+grep -Fq 'JAVA_VERSION="21.0.8"' "$java_home/release"
+grep -Fq 'IMPLEMENTOR_VERSION="Temurin-21.0.8+9"' "$java_home/release"
+test -d "$java_home/jmods"
+python3 - "$maven_root" "$manifest" "$fixture_dir" <<'PY'
+from pathlib import Path
+import hashlib, sys
+maven, manifest, fixture = map(Path, sys.argv[1:])
+for line in manifest.read_text().splitlines():
+    expected, relative = line.split("\t")
+    path = maven / relative
+    assert path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == expected, relative
+for line in (fixture / "source-hashes.tsv").read_text().splitlines()[1:]:
+    expected, filename = line.split("\t")
+    actual = hashlib.sha256((fixture / filename).read_bytes()).hexdigest()
+    assert actual == expected, filename
+print("verified pinned Scala artifacts and structural source hash")
+PY
+jar_paths=()
+while IFS=$'\t' read -r digest relative; do jar_paths+=("$maven_root/$relative"); done < "$manifest"
+classpath="$(IFS=:; printf '%s' "${jar_paths[*]}")"
+mkdir -p "$scratch/tmp" "$scratch/classes"
+cd "$fixture_dir"
+"$java_home/bin/java" -XX:-UsePerfData -Xshare:off -Djava.io.tmpdir="$scratch/tmp" \
+  -cp "$classpath" dotty.tools.dotc.Main -classpath "$classpath" -d "$scratch/classes" \
+  -Vprint:typer -Xprint-types -Yprint-debug-owners -color:never Structural.scala \
+  > "$scratch/Structural.scala39-typed-tree.txt" 2> "$scratch/compiler-stderr.txt"
+python3 - "$scratch/Structural.scala39-typed-tree.txt" "$fixture_dir/scala-matrix.tsv" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+lines = Path(sys.argv[2]).read_text().splitlines()
+for class_name in ("Add", "Pair", "Reordered", "SameType"):
+    for selector in ("_1", "_2"):
+        marker = f"[owner = class {class_name}]def {selector}:"
+        assert text.count(marker) == 1, marker
+assert "[owner = object Add]def unapply([owner = method unapply]x$1:" in text
+assert len(lines) == 2 and lines[1] == "Structural\taccepted"
+print("Scala 3.9 accepted Add and renamed/reordered same-typed Product2 controls with ordered selectors")
+PY
+printf 'Scala source revision: %s\n' "$expected_revision"
+printf 'JDK: %s\n' "$(grep '^JAVA_VERSION=' "$java_home/release")"

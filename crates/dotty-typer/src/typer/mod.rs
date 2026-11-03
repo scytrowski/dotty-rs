@@ -4836,10 +4836,17 @@ mod tests {
             let first = typer
                 .complete_symbol(method)
                 .expect_err("unsupported constructor shape must be deferred");
-            assert!(
-                matches!(first, TyperError::MalformedMethodClause { .. }),
-                "unexpected unsupported-shape error for {source_text}: {first:?}"
-            );
+            if class_name == "Pair" {
+                assert!(
+                    matches!(first, TyperError::UnsupportedProduct2FieldTypes { class: actual, .. } if actual == class),
+                    "the generated structural Product2 identity reaches the bounded Typer rejection for {source_text}: {first:?}"
+                );
+            } else {
+                assert!(
+                    matches!(first, TyperError::MalformedMethodClause { .. }),
+                    "unexpected unsupported-shape error for {source_text}: {first:?}"
+                );
+            }
             assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
             let retry = typer
                 .complete_symbol(method)

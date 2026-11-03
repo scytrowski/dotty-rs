@@ -683,6 +683,11 @@ fn source_trait_parent_does_not_enable_product2_completion() {
         .iter()
         .filter_map(|(tree, _)| session.index.derived_symbol_at(class, source, tree))
         .collect::<Vec<_>>();
+    assert_eq!(
+        selectors.len(),
+        2,
+        "structural Product2 selectors are named"
+    );
     session.with_typer(|_, _, _, _, typer| {
         let class_info = typer
             .complete_symbol(class)
@@ -709,8 +714,10 @@ fn source_trait_parent_does_not_enable_product2_completion() {
                 })
         );
         assert!(
-            selectors.is_empty(),
-            "explicit-parent two-field classes do not acquire Product2 selectors"
+            selectors
+                .iter()
+                .all(|selector| *typer.store().symbols.info(*selector) == SymbolInfo::Missing),
+            "Typer does not partially complete structural Product2 selectors"
         );
     });
 }
