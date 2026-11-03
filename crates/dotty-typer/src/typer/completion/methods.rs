@@ -210,6 +210,7 @@ impl SourceTyper<'_> {
             }
         };
         self.validate_existing_class_info(class, class_info)?;
+        self.validate_completed_source_case_class_product1(class, class_info, info_journal)?;
 
         let Some(TreeKind::TypeDef(class_definition)) =
             self.arena.try_get(class_tree).map(|node| &node.kind)

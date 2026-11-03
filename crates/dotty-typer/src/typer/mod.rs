@@ -4509,6 +4509,146 @@ mod tests {
     }
 
     #[test]
+    fn reference_unapply_revalidates_completed_product1_parent_and_retries() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { trait Product }; package matching { sealed trait Expr; final case class Succ(inner: Expr) extends Expr }",
+        );
+        let succ = class_symbol(&parsed, &store, &index, source, "Succ");
+        let expr = class_symbol(&parsed, &store, &index, source, "Expr");
+        let unapply = index
+            .generated_case_class_method(succ, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .expect("Succ has its ordinary generated unapply role");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let class_info_type = typer
+            .complete_symbol(succ)
+            .expect("class-first completion establishes the Product1 metadata");
+        let Type::ClassInfo(mut stale_info) = typer.store().types.get(class_info_type).clone()
+        else {
+            panic!("Succ must have completed class metadata");
+        };
+        let expr_edge = stale_info
+            .parents
+            .iter()
+            .position(|parent| type_symbol(typer.store(), *parent) == expr)
+            .expect("the completed class metadata contains its canonical Expr edge");
+        stale_info.parents.remove(expr_edge);
+        let stale_info_type = typer.store.types.alloc(Type::ClassInfo(stale_info));
+        typer
+            .store
+            .symbols
+            .set_info(succ, SymbolInfo::Complete(stale_info_type));
+
+        let checkpoint = typer.store().checkpoint();
+        let type_checkpoint = typer.type_index.checkpoint();
+        let error = typer
+            .complete_symbol(unapply)
+            .expect_err("unapply must revalidate the completed class parent edge");
+        assert!(
+            matches!(error, TyperError::MalformedClassInfo { symbol, info }
+                if symbol == succ && info == stale_info_type),
+            "unexpected stale-edge rejection: {error:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(
+            *typer.store().symbols.info(succ),
+            SymbolInfo::Complete(stale_info_type),
+            "rejection preserves the pre-existing stale class metadata for diagnosis"
+        );
+        assert_eq!(*typer.store().symbols.info(unapply), SymbolInfo::Missing);
+        for (tree, _) in parsed.ast.iter() {
+            assert_eq!(
+                typer.type_index.type_at(source, tree),
+                type_checkpoint.type_at(source, tree)
+            );
+        }
+
+        typer
+            .store
+            .symbols
+            .set_info(succ, SymbolInfo::Complete(class_info_type));
+        let signature = typer
+            .complete_symbol(unapply)
+            .expect("repairing the parent edge allows retry in the same typer");
+        let Type::Method(method) = typer.store().types.get(signature) else {
+            panic!("recovered Succ.unapply must have a plain method signature");
+        };
+        assert_eq!(method.params.len(), 1);
+        assert_eq!(type_symbol(typer.store(), method.params[0].ty), succ);
+        assert_eq!(type_symbol(typer.store(), method.result), succ);
+    }
+
+    #[test]
+    fn reference_unapply_rolls_back_late_signature_failure_and_retries() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "package scala { trait Product }; package matching { sealed trait Expr; final case class Succ(inner: Expr) extends Expr }",
+        );
+        let succ = class_symbol(&parsed, &store, &index, source, "Succ");
+        let unapply = index
+            .generated_case_class_method(succ, dotty_core::GeneratedCaseClassMethodRole::Unapply)
+            .expect("Succ has its ordinary generated unapply role");
+        let SourceDefinition::Canonical {
+            tree: class_tree, ..
+        } = index.definition_of(succ).unwrap()
+        else {
+            panic!("Succ must have a canonical source definition");
+        };
+        let input = index
+            .derived_symbol_at(unapply, source, class_tree)
+            .expect("generated unapply owns its derived formal");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        typer
+            .complete_symbol(succ)
+            .expect("class-first completion prepares the supported reference signature");
+
+        let saved_kind = typer.store().symbols.get(input).kind;
+        assert_eq!(saved_kind, SymbolKind::Parameter);
+        typer.store.symbols.get_mut(input).kind = SymbolKind::Field;
+        let checkpoint = typer.store().checkpoint();
+        let type_checkpoint = typer.type_index.checkpoint();
+        let error = typer
+            .complete_symbol(unapply)
+            .expect_err("late formal validation must fail after accepting the reference field");
+        assert!(
+            matches!(error, TyperError::MethodParameterSymbolMissing { method, .. } if method == unapply)
+        );
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(*typer.store().symbols.info(unapply), SymbolInfo::Missing);
+        assert_eq!(*typer.store().symbols.info(input), SymbolInfo::Missing);
+        for (tree, _) in parsed.ast.iter() {
+            assert_eq!(
+                typer.type_index.type_at(source, tree),
+                type_checkpoint.type_at(source, tree)
+            );
+        }
+
+        typer.store.symbols.get_mut(input).kind = saved_kind;
+        let signature = typer
+            .complete_symbol(unapply)
+            .expect("repairing the derived formal allows same-session signature retry");
+        let Type::Method(method) = typer.store().types.get(signature) else {
+            panic!("recovered Succ.unapply must have a plain method signature");
+        };
+        assert_eq!(method.params.len(), 1);
+        assert_eq!(type_symbol(typer.store(), method.params[0].ty), succ);
+        assert_eq!(type_symbol(typer.store(), method.result), succ);
+    }
+
+    #[test]
     fn unsupported_generated_case_class_unapply_shapes_defer_without_partial_signature() {
         let mut deferred_shapes = 0;
         for source_text in [

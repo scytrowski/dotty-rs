@@ -125,6 +125,8 @@ TYPER_TESTS = {
     "typer::tests::local_patdef_alias_over_extractor_binds_the_original_selector_type",
     "typer::tests::non_case_classes_and_explicit_unapply_collisions_have_no_generated_role",
     "typer::tests::reference_unapply_rejects_unrelated_field_transactionally_and_retries_sibling",
+    "typer::tests::reference_unapply_revalidates_completed_product1_parent_and_retries",
+    "typer::tests::reference_unapply_rolls_back_late_signature_failure_and_retries",
     "typer::tests::unsupported_generated_case_class_unapply_shapes_defer_without_partial_signature",
 }
 ISSUE1999_TESTS = {
