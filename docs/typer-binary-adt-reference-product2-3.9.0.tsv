@@ -1,0 +1,3 @@
+state	class	parent_edges	fields	selectors	selector_provenance	unapply_result	arity_2_projection	_3
+before-2072	Add	Object,Expr(source); Product2 eligibility guard bypassed	left:Expr,right:Expr	incomplete	Namer identities present, source-parented two-field guard returns no projection	(Add):Add	blocked at missing selectors	absent
+after-2072	Add	Object,Expr(source),scala.Product(canonical once)	left:Expr,right:Expr	_1():Expr,_2():Expr (distinct methods)	_1<-left tree; _2<-right tree; both class-owned	(Add):Add	Expr,Expr in source order; distinct selector owners/provenance	absent
