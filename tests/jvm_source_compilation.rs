@@ -53,6 +53,8 @@ const IMMUTABLE_REFERENCE_LOCAL_PAIR_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactory.scala");
 const IMMUTABLE_REFERENCE_LOCAL_PAIR_REVERSED_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
+const TWO_IMMUTABLE_REFERENCE_LOCALS_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
 const MULTI_ARGUMENT_FACTORY_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala");
 const MIXED_ORIGIN_WRAP_AND_CREATE_SOURCE: &str = include_str!(
@@ -26141,6 +26143,376 @@ fn source_local_declarations_export_method_scoped_canonical_bindings() {
         }],
     };
     assert_eq!(unit.validate(), Ok(()));
+}
+
+#[test]
+fn two_immutable_reference_locals_preserve_authentic_source_typed_and_jvm_identity() {
+    let output = TestOutputDirectory::new("two-immutable-reference-locals-authentic-session");
+    let source_id = SourceId::from_index(21220);
+    let bindings = RefCell::new(None);
+    let mut observe_typer = |ast: &AstArena<Untyped>,
+                             _root: TreeId<Untyped>,
+                             index: &SourceSemanticIndex,
+                             typer: &mut SourceTyper<'_>,
+                             _definitions: &Definitions| {
+        let (method_tree, method) = ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(method)
+                    if typer.store().names.resolve(method.name.as_name().text()) == "create" =>
+                {
+                    Some((tree, method))
+                }
+                _ => None,
+            })
+            .expect("the original two-local create method exists");
+        let method_symbol = index.symbol_at(source_id, method_tree).unwrap();
+        let rhs = method.rhs.expect("create has its original source body");
+        let TreeKind::Block(block) = &ast.get(rhs).kind else {
+            panic!("create has the original straight-line source Block")
+        };
+        assert_eq!(block.stats.len(), 2);
+        let locals = block
+            .stats
+            .iter()
+            .map(|declaration| {
+                let binding = typer
+                    .typed_local_binding_at(source_id, *declaration)
+                    .expect("Typer records each original immutable local");
+                assert_eq!(
+                    typer.store().symbols.get(binding.symbol()).owner,
+                    Some(method_symbol)
+                );
+                assert_eq!(
+                    typer.store().scopes.get(binding.scope()).owner,
+                    Some(method_symbol)
+                );
+                assert!(
+                    !typer
+                        .store()
+                        .symbols
+                        .get(binding.symbol())
+                        .flags
+                        .contains(SymbolFlags::MUTABLE)
+                );
+                (*declaration, binding)
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(locals[0].1.symbol(), locals[1].1.symbol());
+        assert_ne!(locals[0].1.declaration(), locals[1].1.declaration());
+        *bindings.borrow_mut() = Some((method_tree, method_symbol, locals));
+    };
+    let mut observe_source = |ast: &AstArena<Untyped>,
+                              _root: TreeId<Untyped>,
+                              index: &SourceSemanticIndex,
+                              typed_index: &SourceTypedIndex,
+                              unit: &mut JvmCompilationUnit<'_>,
+                              definitions: &Definitions| {
+        let (method_tree, method_symbol, locals) = bindings
+            .borrow()
+            .clone()
+            .expect("source and typed observations belong to one frontend session");
+        let method = ast.get(method_tree);
+        let TreeKind::DefDef(method) = &method.kind else {
+            panic!("captured method tree remains the original DefDef")
+        };
+        let [first_param_tree, second_param_tree] = method.value_param_clauses[0].as_slice() else {
+            panic!("create retains its two ordered Int formals")
+        };
+        let first_param = index.symbol_at(source_id, *first_param_tree).unwrap();
+        let second_param = index.symbol_at(source_id, *second_param_tree).unwrap();
+        let rhs = method.rhs.unwrap();
+        let TreeKind::Block(block) = &ast.get(rhs).kind else {
+            panic!("create source body is the original Block")
+        };
+        let local_symbols = locals
+            .iter()
+            .map(|(_, binding)| binding.symbol())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            block.stats,
+            locals.iter().map(|(tree, _)| *tree).collect::<Vec<_>>()
+        );
+
+        for (position, ((declaration, binding), expected_param)) in
+            locals.iter().zip([first_param, second_param]).enumerate()
+        {
+            let TreeKind::ValDef(definition) = &ast.get(*declaration).kind else {
+                panic!("Block statistic {position} is the original ValDef")
+            };
+            let initializer = definition.rhs.unwrap();
+            let typed_declaration = typed_index.get(source_id, *declaration).unwrap();
+            assert_eq!(typed_declaration, binding.declaration());
+            let typed_initializer = typed_index.get(source_id, initializer).unwrap();
+            let TreeKind::Apply(initializer_apply) = &ast.get(initializer).kind else {
+                panic!("each original local initializer is a constructor Apply")
+            };
+            let TreeKind::Select(initializer_select) = &ast.get(initializer_apply.function).kind
+            else {
+                panic!("each local initializer selects Counter's constructor")
+            };
+            let typed_selection = typed_index
+                .get(source_id, initializer_apply.function)
+                .expect("the original constructor selection has a typed binding");
+            let selected_constructor =
+                match unit.store.types.get(unit.typed_ast.get(typed_selection).ty) {
+                    Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    } => *symbol,
+                    other => panic!("constructor Select retains its canonical TermRef: {other:?}"),
+                };
+            assert_eq!(
+                unit.store.symbols.get(selected_constructor).owner,
+                Some(audit_class_named(unit, "Counter"))
+            );
+            let initializer_argument = initializer_apply.args[0];
+            let typed_argument = typed_index.get(source_id, initializer_argument).unwrap();
+            let argument_type = unit.typed_ast.get(typed_argument).ty;
+            assert!(matches!(
+                unit.store.types.get(argument_type),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                    if *symbol == expected_param
+            ));
+            let typed_type = unit.typed_ast.get(typed_declaration).ty;
+            let local_type = unit.store.symbols.get(binding.symbol()).info;
+            assert!(
+                matches!(local_type, SymbolInfo::Complete(symbol_type) if symbol_type == typed_type)
+            );
+            assert!(
+                typed_index
+                    .get(source_id, initializer_apply.function)
+                    .is_some()
+            );
+            assert!(
+                typed_index
+                    .get(source_id, initializer_select.qualifier)
+                    .is_some()
+            );
+            eprintln!(
+                "two-local source identity position={position} name={} source_id={source_id:?} method={method_symbol:?} formal={expected_param:?} local={:?} scope={:?} owner={:?} source_tree={declaration:?} typed_tree={typed_declaration:?} initializer={initializer:?}->{typed_initializer:?} initializer_select={:?} constructor={selected_constructor:?} argument={initializer_argument:?}->{typed_argument:?} argument_type={argument_type:?} local_type={typed_type:?} source_span={:?}",
+                unit.store.names.resolve(definition.name.as_name().text()),
+                binding.symbol(),
+                binding.scope(),
+                unit.store.scopes.get(binding.scope()).owner,
+                initializer_apply.function,
+                ast.get(*declaration).position
+            );
+        }
+
+        let TreeKind::Apply(final_apply) = &ast.get(block.expr).kind else {
+            panic!("the original final expression is Pair's constructor Apply")
+        };
+        assert_eq!(final_apply.args.len(), 2);
+        let typed_final = typed_index.get(source_id, block.expr).unwrap();
+        let mut final_reference_symbols = Vec::new();
+        for (argument, local_symbol) in final_apply.args.iter().zip(local_symbols.iter().copied()) {
+            let typed_argument = typed_index.get(source_id, *argument).unwrap();
+            let argument_type = unit.typed_ast.get(typed_argument).ty;
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } = unit.store.types.get(argument_type)
+            else {
+                panic!("Pair argument is an original local TERMREF")
+            };
+            assert_eq!(*symbol, local_symbol);
+            final_reference_symbols.push(*symbol);
+        }
+        assert_eq!(final_reference_symbols, local_symbols);
+        let TreeKind::Apply(typed_final_apply) = &unit.typed_ast.get(typed_final).kind else {
+            panic!("the source Pair Apply has its exact typed Apply root")
+        };
+        let typed_constructor_select = typed_final_apply.function;
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(pair_constructor),
+            ..
+        } = unit
+            .store
+            .types
+            .get(unit.typed_ast.get(typed_constructor_select).ty)
+        else {
+            panic!("the typed final Pair constructor selection retains its canonical symbol")
+        };
+        let pair_symbol = audit_class_named(unit, "Pair");
+        assert_eq!(
+            unit.store.symbols.get(*pair_constructor).owner,
+            Some(pair_symbol)
+        );
+        eprintln!(
+            "two-local final Pair Apply source={:?} typed={typed_final:?} typed_constructor={pair_constructor:?} source_args={:?} local_symbols={:?} source_typed_edges=preserved",
+            block.expr, final_apply.args, final_reference_symbols
+        );
+        assert_eq!(
+            unit.classes.len(),
+            3,
+            "the one-session JVM pipeline compiles Counter, Pair and PairFactory"
+        );
+        let _ = definitions;
+    };
+    let artifacts = compile_source_batch_with_typer_and_source_observer(
+        TWO_IMMUTABLE_REFERENCE_LOCALS_SOURCE,
+        "TwoLocals.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe_typer,
+        &mut observe_source,
+    )
+    .expect("JVM-only source compilation accepts and emits the exact two-local producer");
+    assert_eq!(artifacts.len(), 3);
+    let factory = decode_emitted_class_named(&artifacts, "example/PairFactory");
+    let method = factory
+        .methods
+        .iter()
+        .find(|method| factory.constant_pool.utf8(method.name_index) == Ok("create"))
+        .expect("PairFactory.create is emitted by the JVM-only path");
+    assert_eq!(
+        factory.constant_pool.utf8(method.descriptor_index),
+        Ok("(II)Lexample/Pair;")
+    );
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("create has one code attribute")
+    };
+    assert_eq!(factory.version.major, 65);
+    assert_eq!(
+        code.max_stack, 4,
+        "duplicated Pair receiver plus two constructor arguments"
+    );
+    assert_eq!(code.max_locals, 5, "JVM-only layout assigns slots 0..4");
+    let instructions = decode_subset_instructions(code.code);
+    assert_eq!(
+        instructions,
+        [
+            (0, 0xbb),  // new Counter
+            (3, 0x59),  // dup
+            (4, 0x1b),  // iload_1 (firstSeed)
+            (5, 0xb7),  // Counter.<init>(I)V
+            (8, 0x4e),  // astore_3 (first)
+            (9, 0xbb),  // new Counter
+            (12, 0x59), // dup
+            (13, 0x1c), // iload_2 (secondSeed)
+            (14, 0xb7), // Counter.<init>(I)V
+            (17, 0x3a), // astore 4 (second)
+            (19, 0xbb), // new Pair
+            (22, 0x59), // dup
+            (23, 0x2d), // aload_3 (first)
+            (24, 0x19), // aload 4 (second)
+            (26, 0xb7), // Pair.<init>(Counter, Counter)
+            (29, 0xb0), // areturn
+        ],
+        "Rust JVM-only output allocates and initializes two local Counters in formal order, then forwards both locals to Pair"
+    );
+    for (offset, expected_owner) in [
+        (0, "example/Counter"),
+        (9, "example/Counter"),
+        (19, "example/Pair"),
+    ] {
+        let class_index = u16::from_be_bytes([code.code[offset + 1], code.code[offset + 2]]);
+        assert_eq!(
+            factory
+                .constant_pool
+                .class_name(ConstantPoolIndex(class_index)),
+            Ok(expected_owner),
+            "new at bytecode offset {offset} retains its canonical owner"
+        );
+    }
+    assert_eq!(code.code[17 + 1], 4, "second local stores into slot 4");
+    assert_eq!(code.code[24 + 1], 4, "Pair's second argument loads slot 4");
+    assert_invocation_sequence(
+        &factory,
+        code.code,
+        &[
+            (0xb7, "example/Counter", "<init>", "(I)V"),
+            (0xb7, "example/Counter", "<init>", "(I)V"),
+            (
+                0xb7,
+                "example/Pair",
+                "<init>",
+                "(Lexample/Counter;Lexample/Counter;)V",
+            ),
+        ],
+    );
+    eprintln!(
+        "two-local JVM-only result descriptor=(II)Lexample/Pair; max_stack={} max_locals={} code={:02x?}",
+        code.max_stack, code.max_locals, code.code
+    );
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let classpath = output
+        .path()
+        .to_str()
+        .expect("UTF-8 generated class directory");
+    let harness = output.path().join("TwoLocalRustArtifactsHarness.java");
+    fs::write(
+        &harness,
+        r#"import example.Counter;
+import example.Pair;
+import example.PairFactory;
+import java.lang.reflect.Field;
+
+public final class TwoLocalRustArtifactsHarness {
+  private static Counter counter(Pair pair, String fieldName) throws Exception {
+    Field field = Pair.class.getDeclaredField(fieldName);
+    field.setAccessible(true);
+    return (Counter) field.get(pair);
+  }
+
+  public static void main(String[] args) throws Exception {
+    PairFactory factory = new PairFactory();
+    Pair first = factory.create(7, 3);
+    Counter firstLeft = counter(first, "left");
+    Counter firstRight = counter(first, "right");
+    if (first.leftValue() != 7 || first.rightValue() != 3) throw new AssertionError("formal values/order");
+    if (firstLeft == firstRight) throw new AssertionError("locals must allocate distinct Counters");
+    firstLeft.set(70);
+    if (first.leftValue() != 70 || first.rightValue() != 3) throw new AssertionError("local state must be independent");
+
+    Pair second = factory.create(7, 3);
+    Counter secondLeft = counter(second, "left");
+    Counter secondRight = counter(second, "right");
+    if (secondLeft == secondRight || secondLeft == firstLeft || secondRight == firstRight) {
+      throw new AssertionError("each call and each local must allocate a fresh Counter");
+    }
+    if (second.leftValue() != 7 || second.rightValue() != 3) throw new AssertionError("fresh call values/order");
+    System.out.println("Rust two-local artifacts verified");
+  }
+}
+"#,
+    )
+    .expect("write Rust artifact JDK harness");
+    let javac = Command::new("javac")
+        .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for Rust two-local artifacts");
+    assert!(
+        javac.status.success(),
+        "javac rejected the Rust artifact harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            classpath,
+            "TwoLocalRustArtifactsHarness",
+        ])
+        .output()
+        .expect("start JDK verification and execution of Rust two-local artifacts");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected or failed the Rust artifacts\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "Rust two-local artifacts verified"
+    );
 }
 
 #[test]
