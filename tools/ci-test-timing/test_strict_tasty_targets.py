@@ -23,7 +23,7 @@ class StrictTastyTargetManifestTests(unittest.TestCase):
         (self.root / "tests" / "future_required_consumer.rs").touch()
         workflow = self.root / ".github" / "workflows" / "jvm-tasty-factory-scala-consumer.yml"
         workflow.parent.mkdir(parents=True)
-        workflow.write_text("""STRICT_REQUIRED_TARGETS: >-
+        self.base_workflow = """STRICT_REQUIRED_TARGETS: >-
  first_target second_target
 STRICT_SUPPORT_TARGETS: support_target
 STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
@@ -31,19 +31,46 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
   id: strict_tests
   env:
     DOTTY_REQUIRE_FIRST: '1'
-  run: cargo test --test "$target"
+  run: |
+    test_args=()
+    test_args+=(--test "$target")
+    cargo test "${test_args[@]}"
 - name: Run manifest-driven strict Scala and TASTy shard
   id: strict_tests
   env:
     DOTTY_REQUIRE_FIRST: '1'
-  run: cargo test --test "$target"
-""", encoding="utf-8")
+  run: |
+    test_args=()
+    test_args+=(--test "$target")
+    cargo test "${test_args[@]}"
+"""
+        workflow.write_text(self.base_workflow, encoding="utf-8")
 
     def tearDown(self):
         self.temporary_directory.cleanup()
 
     def fixture(self, name):
         return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+
+    def valid_manifest(self):
+        manifest = self.fixture("strict-targets-duplicate.json")
+        manifest["sharding"] = {
+            "shard_count": 2,
+            "shards": [
+                {"id": "shard-1", "estimated_test_seconds": 1.0, "targets": ["first_target"]},
+                {"id": "shard-2", "estimated_test_seconds": 2.0, "targets": ["second_target"]},
+            ],
+        }
+        return manifest
+
+    def append_run_step(self, command):
+        workflow = self.root / ".github" / "workflows" / "jvm-tasty-factory-scala-consumer.yml"
+        text = workflow.read_text(encoding="utf-8")
+        workflow.write_text(
+            text + "\n- name: Additional required consumer invocation\n  run: |\n" +
+            "\n".join("    " + line for line in command.splitlines()) + "\n",
+            encoding="utf-8",
+        )
 
     def test_command_rejects_invalid_fixture_manifests(self):
         validator = Path(__file__).parents[1] / "ci" / "validate_strict_tasty_targets.py"
@@ -122,10 +149,42 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
             validate_manifest(manifest, self.root)
 
     def test_rejects_new_required_consumer_invocation_absent_from_manifest(self):
-        workflow = self.root / ".github" / "workflows" / "jvm-tasty-factory-scala-consumer.yml"
-        workflow.write_text(workflow.read_text(encoding="utf-8") + "\ncargo test --test future_required_consumer\n", encoding="utf-8")
-        with self.assertRaisesRegex(ManifestError, "future_required_consumer"):
-            validate_manifest(self.fixture("strict-targets-missing.json"), self.root)
+        forms = (
+            'cargo test --test future_required_consumer',
+            'cargo test --test "future_required_consumer"',
+            "cargo test --test 'future_required_consumer'",
+            'cargo test --test=future_required_consumer',
+            'cargo test --test \\\n              future_required_consumer',
+        )
+        for command in forms:
+            with self.subTest(command=command):
+                workflow = self.root / ".github" / "workflows" / "jvm-tasty-factory-scala-consumer.yml"
+                workflow.write_text(self.base_workflow, encoding="utf-8")
+                validate_manifest(self.valid_manifest(), self.root)
+                self.append_run_step(command)
+                with self.assertRaisesRegex(ManifestError, "future_required_consumer"):
+                    validate_manifest(self.valid_manifest(), self.root)
+
+    def test_rejects_duplicate_strict_target_invocations_in_shell_argument_forms(self):
+        forms = (
+            'cargo test --test first_target',
+            'cargo test --test "first_target"',
+            "cargo test --test 'first_target'",
+            'cargo test --test=first_target',
+            'cargo test --test \\\n              first_target',
+        )
+        for command in forms:
+            with self.subTest(command=command):
+                workflow = self.root / ".github" / "workflows" / "jvm-tasty-factory-scala-consumer.yml"
+                workflow.write_text(self.base_workflow, encoding="utf-8")
+                self.append_run_step(command)
+                with self.assertRaisesRegex(ManifestError, "strict targets invoked outside"):
+                    validate_manifest(self.valid_manifest(), self.root)
+
+    def test_rejects_dynamic_required_test_target_invocation(self):
+        self.append_run_step('cargo test --test "$FUTURE_REQUIRED_TARGET"')
+        with self.assertRaisesRegex(ManifestError, "unsupported dynamic Cargo --test target"):
+            validate_manifest(self.valid_manifest(), self.root)
 
     def test_shard_selection_returns_manifest_order(self):
         manifest = self.fixture("strict-targets-duplicate.json")

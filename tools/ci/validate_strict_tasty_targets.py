@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 from pathlib import Path
+from textwrap import dedent
 from typing import Any
 
 
@@ -34,12 +36,82 @@ def _workflow_values(workflow: str, key: str) -> list[str]:
 
 
 def _validate_invocations(workflow: str, strict: list[str], support: list[str]) -> None:
-    source = "\n".join(line for line in workflow.splitlines() if not line.lstrip().startswith("#"))
-    literal = re.findall(r"--test\s+([A-Za-z0-9_]+)", source)
-    dynamic = len(re.findall(r"--test\s+\"\$target\"", source))
-    if dynamic != 2:
-        raise ManifestError(f"expected exactly two manifest-driven --test loops; found {dynamic}")
+    scripts = _workflow_run_scripts(workflow)
     allowed = set(strict) | set(support)
+    literal: list[str] = []
+    shard_array_invocations = 0
+    shard_array_builders = 0
+
+    for script in scripts:
+        source = re.sub(r"\\\r?\n[ \t]*", " ", script)
+        for line in source.splitlines():
+            try:
+                words = shlex.split(line, comments=True, posix=True)
+            except ValueError as error:
+                raise ManifestError(f"cannot parse workflow shell arguments: {error}") from error
+            if not words:
+                continue
+
+            if any(word.startswith("test_args") for word in words):
+                if words == ["test_args=()"]:
+                    continue
+                if words == ['test_args+=(--test', '$target)']:
+                    shard_array_builders += 1
+                else:
+                    raise ManifestError("unsupported or dynamic manifest-driven Cargo test argument construction")
+
+            cargo_positions = [index for index, word in enumerate(words) if word == "cargo"]
+            if not cargo_positions:
+                continue
+            if cargo_positions != [0]:
+                raise ManifestError("unsupported wrapped Cargo invocation in workflow shell")
+
+            command = words[1:]
+            if command and command[0].startswith("+"):
+                command = command[1:]
+            if not command or command[0] != "test":
+                continue
+
+            arguments = command[1:]
+            index = 0
+            while index < len(arguments):
+                argument = arguments[index]
+                if argument == "--":
+                    break
+                if argument == "${test_args[@]}":
+                    shard_array_invocations += 1
+                    index += 1
+                    continue
+                if argument.startswith("${") or argument.startswith("$") or "$(" in argument or "`" in argument:
+                    raise ManifestError(f"unsupported dynamic Cargo test arguments: {argument}")
+                if argument == "--test":
+                    if index + 1 >= len(arguments):
+                        raise ManifestError("Cargo --test option is missing its target")
+                    target = arguments[index + 1]
+                    if target.startswith("$") or "$(" in target or "`" in target:
+                        raise ManifestError(f"unsupported dynamic Cargo --test target: {target}")
+                    if re.fullmatch(r"[A-Za-z0-9_]+", target) is None:
+                        raise ManifestError(f"unsupported Cargo --test target syntax: {target!r}")
+                    literal.append(target)
+                    index += 2
+                    continue
+                if argument.startswith("--test="):
+                    target = argument[len("--test="):]
+                    if target.startswith("$") or "$(" in target or "`" in target:
+                        raise ManifestError(f"unsupported dynamic Cargo --test target: {target}")
+                    if re.fullmatch(r"[A-Za-z0-9_]+", target) is None:
+                        raise ManifestError(f"unsupported Cargo --test target syntax: {target!r}")
+                    literal.append(target)
+                index += 1
+
+            if any(argument.startswith("${") and argument != "${test_args[@]}" for argument in arguments):
+                raise ManifestError("unsupported dynamic Cargo test argument array")
+
+    if shard_array_builders != 2 or shard_array_invocations != 2:
+        raise ManifestError(
+            "expected exactly two manifest-driven --test loops and Cargo invocations; "
+            f"found {shard_array_builders} loop builders and {shard_array_invocations} invocations"
+        )
     unknown = sorted(set(literal) - allowed)
     if unknown:
         raise ManifestError("required Cargo test invocation absent from workflow inventory/support declarations: " + ", ".join(unknown))
@@ -49,6 +121,37 @@ def _validate_invocations(workflow: str, strict: list[str], support: list[str]) 
     undeclared = sorted(set(literal) - set(strict) - set(support))
     if undeclared:
         raise ManifestError("undeclared Cargo test invocations: " + ", ".join(undeclared))
+
+
+def _workflow_run_scripts(workflow: str) -> list[str]:
+    """Extract inline and block `run` values without scanning YAML metadata/comments."""
+    lines = workflow.splitlines()
+    scripts: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = re.match(r"^(\s*)run:\s*(.*)$", line)
+        if match is None:
+            index += 1
+            continue
+        indent = len(match.group(1))
+        value = match.group(2).strip()
+        if value in {"|", "|-", "|+", ">", ">-", ">+"}:
+            index += 1
+            block: list[str] = []
+            while index < len(lines):
+                candidate = lines[index]
+                if candidate.strip() and len(candidate) - len(candidate.lstrip()) <= indent:
+                    break
+                block.append(candidate)
+                index += 1
+            scripts.append(dedent("\n".join(block)))
+            continue
+        scripts.append(value)
+        index += 1
+    if not scripts:
+        raise ManifestError("workflow does not contain any shell run steps")
+    return scripts
 
 def _duplicates(values: list[str]) -> list[str]:
     seen: set[str] = set()
