@@ -16,9 +16,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "support/command_timing.rs"]
 mod command_timing;
+#[path = "support/scala39_toolchain.rs"]
+mod scala39_toolchain;
+use scala39_toolchain::SCALA_REVISION;
 
 const REQUIRE: &str = "DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_CONSUMER";
-const SCALA_REVISION: &str = "777528f19a58e794c9954a42f433373472ec57f8";
 const SOURCE: &str = include_str!("fixtures/jvm_tasty_dual_reference_forwarding/PairFactory.scala");
 const CLIENT: &str =
     include_str!("fixtures/jvm_tasty_dual_reference_forwarding/rust-consumer/Consumer.scala");
@@ -108,11 +110,7 @@ fn task_dir() -> PathBuf {
 }
 
 fn sha256(path: &Path) -> String {
-    String::from_utf8_lossy(&output(Command::new("sha256sum").arg(path)).stdout)
-        .split_whitespace()
-        .next()
-        .expect("sha256sum emits a hash")
-        .to_owned()
+    scala39_toolchain::sha256(path, &mut output)
 }
 
 struct Scala {
@@ -124,115 +122,26 @@ struct Scala {
 
 impl Scala {
     fn from_environment() -> Self {
-        let root =
-            PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT is required"));
-        let java_home =
-            PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required"));
-        let maven = PathBuf::from(
-            std::env::var_os("COURSIER_MAVEN_ROOT").expect("COURSIER_MAVEN_ROOT is required"),
-        );
-        let libraries = [
-            (
-                maven.join("org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar"),
-                "9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba",
-            ),
-            (
-                maven.join("org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar"),
-                "b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd",
-            ),
-        ];
-        for (path, expected) in &libraries {
-            assert!(
-                path.is_file(),
-                "pinned published Scala runtime exists: {}",
-                path.display()
+        let pinned = scala39_toolchain::from_environment(output, |command| {
+            command.env(
+                "JAVA_HOME",
+                std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required"),
             );
-            assert_eq!(
-                sha256(path),
-                *expected,
-                "published Scala runtime hash {}",
-                path.display()
+            command.env(
+                "JAVA_TOOL_OPTIONS",
+                format!("-XX:-UsePerfData -Djava.io.tmpdir={}", task_dir().display()),
             );
-        }
-        let revision = output(
-            Command::new("git")
-                .args(["-C"])
-                .arg(&root)
-                .args(["rev-parse", "HEAD"]),
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&revision.stdout).trim(),
-            SCALA_REVISION
-        );
-        let scalac = root.join("dist/target/universal/stage/bin/scalac");
-        let version = output(
-            Command::new(&scalac)
-                .env("JAVA_HOME", &java_home)
-                .env(
-                    "JAVA_TOOL_OPTIONS",
-                    format!("-XX:-UsePerfData -Djava.io.tmpdir={}", task_dir().display()),
-                )
-                .arg("-version"),
-        );
-        let version_text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&version.stdout),
-            String::from_utf8_lossy(&version.stderr)
-        );
-        assert!(
-            version_text.contains("3.9.0-bin-SNAPSHOT-git-777528f"),
-            "{version_text}"
-        );
-        let compiler_jar = root.join("dist/target/universal/stage/lib/with_compiler.jar");
-        assert!(
-            compiler_jar.is_file(),
-            "staged pinned compiler jar exists: {}",
-            compiler_jar.display()
-        );
-        let java = java_home.join("bin/java");
-        let java_version = output(Command::new(&java).arg("-version"));
-        let java_text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&java_version.stdout),
-            String::from_utf8_lossy(&java_version.stderr)
-        );
-        assert!(java_text.contains("21.0.13"), "{java_text}");
-        assert_eq!(
-            sha256(&java),
-            "9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155"
-        );
-        eprintln!(
-            "SCALA_PROVENANCE revision={SCALA_REVISION} compiler={} compiler_sha256={} java={} java_sha256={}",
-            version_text.trim(),
-            sha256(&compiler_jar),
-            java.display(),
-            sha256(&java)
-        );
+        });
         Self {
-            java_home,
-            scalac,
-            java,
-            libraries: libraries
-                .iter()
-                .map(|(path, _)| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(":"),
+            java_home: pinned.java_home,
+            scalac: pinned.scalac,
+            java: pinned.java,
+            libraries: pinned.libraries,
         }
     }
 
     fn scalac(&self) -> Command {
-        let mut command = Command::new(&self.scalac);
-        command.env("JAVA_HOME", &self.java_home);
-        command.env(
-            "JAVA_TOOL_OPTIONS",
-            format!("-XX:-UsePerfData -Djava.io.tmpdir={}", task_dir().display()),
-        );
-        if let Some(path) = std::env::var_os("PATH") {
-            let mut paths = vec![self.java_home.join("bin")];
-            paths.extend(std::env::split_paths(&path));
-            command.env("PATH", std::env::join_paths(paths).expect("PATH is valid"));
-        }
-        command
+        scala39_toolchain::scalac(&self.java_home, &self.scalac, task_dir())
     }
 
     fn compile(&self, classpath: &str, out: &Path, source: &Path) -> Output {
