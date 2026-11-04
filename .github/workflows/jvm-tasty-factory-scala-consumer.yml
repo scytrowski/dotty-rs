@@ -23,6 +23,9 @@ on:
       - 'docs/jvm-tasty-dual-reference-constructors.md'
       - 'docs/jvm-tasty-dual-reference-forwarding.md'
       - 'docs/jvm-tasty-mixed-origin-constructor-arguments.md'
+      - 'docs/jvm-tasty-immutable-reference-local-pair.md'
+      - 'tests/fixtures/jvm_tasty_immutable_reference_local_pair/**'
+      - 'tests/jvm_tasty_immutable_reference_local_pair_scala_consumer.rs'
       - 'docs/classloader-semantic-tasty-convergence-iii/**'
       - 'tests/fixtures/jvm_tasty_dual_reference_forwarding/**'
   workflow_dispatch:
@@ -181,6 +184,7 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_MIXED_ORIGIN_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_PAIR_FORMAL_CONSTRUCTOR: '1'
           DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSTRUCTOR_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_IMMUTABLE_REFERENCE_LOCAL_PAIR_CONSUMER: '1'
           DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
           DOTTY_TASTY_PICKLER_ORACLE_TMP: ${{ github.workspace }}/target/scala-reader-oracle
           DOTTY_ISSUE_1960_ORACLE_DIR: ${{ github.workspace }}/target/issue-1960-oracle
@@ -208,6 +212,7 @@ jobs:
             jvm_tasty_dual_reference_forwarding
             jvm_tasty_dual_reference_forwarding_scala_consumer
             jvm_tasty_mixed_origin_constructor_scala_consumer
+            jvm_tasty_immutable_reference_local_pair_scala_consumer
             jvm_tasty_direct_formal_constructor_pair
             jvm_tasty_dual_reference_scala_consumer
             jvm_tasty_dual_reference_rust_consumer
