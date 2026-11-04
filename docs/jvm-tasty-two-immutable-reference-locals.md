@@ -89,6 +89,9 @@ Counter. These are Scala-only language and runtime controls.
 
 ## Authentic Rust source session and first reachable errors
 
+The observations in this section record the #2122/#2123 baseline before the
+#2124 ordered constructor argument proof was added.
+
 `two_immutable_reference_locals_preserve_authentic_source_typed_and_jvm_identity`
 runs the exact three-class source through the Rust lexer, parser, namer,
 `SourceTyper`, and JVM backend in one session. It retains the original
@@ -186,10 +189,58 @@ mutation is a valid source-level tree. Truncating PairFactory TASTy is rejected
 by the Rust structural TASTy parser, while Scala 3.9 `-from-tasty` fails with
 `IndexOutOfBoundsException`. Both outcomes are captured in the strict test.
 
-Stale/foreign source or typed bindings, wrong source-to-typed edges, and
-Rust-produced TASTy corruption are not measured after the paired-plan source
-shape error; those downstream checks remain masked. No TASTy address, JVM PC,
-or later-stage success is inferred for the Rust pair.
+At that baseline, stale/foreign final argument bindings, wrong source-to-typed
+edges, and Rust-produced TASTy corruption were not measured after the
+paired-plan source shape error. The #2124 proof now authenticates the final
+source/typed argument roots before the paired planner; later TASTy bytes and
+JVM PCs remain unmeasured. No later-stage success is inferred for the Rust
+pair.
+
+## #2124 ordered LocalVal pair proof
+
+Issue #2124 composes the two opaque initializer receipts above with the
+existing ordered constructor argument proof. Each final Pair argument is
+matched independently to one of the original local symbols through the exact
+typed `TermRef`, its original source `Ident`, and the source-to-typed tree
+mapping. The proof retains the Pair constructor's two formal identities
+separately from both method-local identities. It permits the same initialized
+local at both argument positions and does not infer distinct runtime objects
+from equal Counter types.
+
+The proof-only argument classifier reports `LocalValPair` for two local
+origins. The paired-plan adapter still only translates its previously
+supported origin kinds, so this classification does not authorize TASTy body
+serialization or paired output. The strict source test reaches the existing
+`TastyPlan(Unsupported { feature: BodyExpression, ... })` check and does not
+reach the paired-plan callback.
+
+| Final Pair arguments | Authenticated local positions | Proof classification |
+| --- | --- | --- |
+| `Pair(first, second)` | `[0, 1]` | `LocalValPair` |
+| `Pair(second, first)` | `[1, 0]` | `LocalValPair` |
+| `Pair(first, first)` | `[0, 0]` | `LocalValPair` |
+
+The aggregate still requires two distinct immutable declarations in original
+Block order, one method-owned scope, direct `new Counter(IntFormal)`
+initializers, and the exact selected public `Pair(Counter, Counter)` primary
+constructor. A third local, mutable local, helper/conditional/nested
+initializer, wrong formal or constructor ABI, stale typed root, or source name
+that disagrees with its typed local target fails before a constructor-argument
+pair receipt is returned. No TASTy bytes, JVM classes, or published artifacts
+are produced by this proof increment.
+
+The proof validation matrix records the first measured layer and does not
+continue into later checks after a failure:
+
+| Mutation | First observed rejection |
+| --- | --- |
+| Third local or helper initializer | Cross-class proof source-shape check |
+| Mutable local | Cross-class proof local identity check |
+| Swapped seed formal, conditional initializer, or nested seed expression | Cross-class proof initializer shape/identity check |
+| Missing declaration initializer, duplicate local name, or use before declaration | Source typer diagnostic |
+| Wrong local type or Pair constructor argument ABI | Source typer diagnostic |
+| Valid reversed or repeat-first Pair arguments | Ordered `LocalValPair` proof with `[1, 0]` or `[0, 0]` |
+| Valid two-local Pair body sent to paired producer | TASTy body plan rejects `BodyExpression`; callback is not reached |
 
 ## Strict target inventory and validation
 
