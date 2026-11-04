@@ -7206,27 +7206,107 @@ fn immutable_local_pair_batch_publisher_rejects_partial_and_unsafe_outputs() {
     assert_eq!(pairs.len(), 3);
 
     let root = TestDirectory::new("immutable-local-pair-publish-faults");
-    for (index, fault) in (1..=6)
-        .map(BatchPublishFault::AfterStagedFiles)
-        .chain([
-            BatchPublishFault::BeforePromotion,
-            BatchPublishFault::AfterPromotion,
-        ])
-        .enumerate()
-    {
-        let destination = root.path().join(format!("failed-{index}"));
-        assert!(matches!(
-            publish_batch_pairs(&destination, &pairs, Some(fault)),
-            Err(BatchPublishError::Io { .. })
-        ));
+
+    let staged_paths = pairs
+        .iter()
+        .flat_map(|pair| [pair.classfile_path, pair.tasty_path])
+        .collect::<Vec<_>>();
+    assert_eq!(staged_paths.len(), 6);
+    for (write_number, expected_relative_path) in staged_paths.iter().enumerate() {
+        let destination = root.path().join(format!("failed-write-{write_number}"));
+        let result = publish_batch_pairs(
+            &destination,
+            &pairs,
+            Some(BatchPublishFault::AfterStagedFiles(write_number + 1)),
+        );
+        let Err(BatchPublishError::Io {
+            phase,
+            path,
+            source,
+            cleanup_error,
+        }) = result
+        else {
+            panic!("write {write_number} did not return a publisher I/O error: {result:?}");
+        };
+        assert_eq!(phase, "staging write", "write {write_number}");
+        assert_eq!(source.kind(), std::io::ErrorKind::Other);
+        assert_eq!(
+            source.to_string(),
+            "injected failure during batch staging",
+            "write {write_number} must reach its requested injected failure"
+        );
+        assert!(
+            cleanup_error.is_none(),
+            "write {write_number}: {cleanup_error:?}"
+        );
+        let staged_path = path
+            .strip_prefix(root.path())
+            .expect("the staged artifact remains under the publisher root");
+        let mut components = staged_path.components();
+        let staging_directory = components
+            .next()
+            .expect("the error path names its private staging directory")
+            .as_os_str()
+            .to_string_lossy();
+        assert!(
+            staging_directory.starts_with(".dotty-jvm-tasty-batch-"),
+            "write {write_number} path is not a staging artifact: {}",
+            path.display()
+        );
+        assert_eq!(
+            components.as_path(),
+            std::path::Path::new(expected_relative_path),
+            "write {write_number} must fail on its requested artifact"
+        );
         assert!(
             !destination.exists(),
-            "fault case {index} must leave no accepted final tree"
+            "write {write_number} must leave no accepted final tree"
         );
         assert_eq!(
             std::fs::read_dir(root.path()).unwrap().count(),
             0,
-            "fault case {index} must clean its private staging directory"
+            "write {write_number} must clean its private staging directory"
+        );
+    }
+
+    for (label, fault, expected_phase, expected_message) in [
+        (
+            "before-promotion",
+            BatchPublishFault::BeforePromotion,
+            "promotion",
+            "injected failure before batch promotion",
+        ),
+        (
+            "after-promotion",
+            BatchPublishFault::AfterPromotion,
+            "post-promotion rollback",
+            "injected failure after batch promotion",
+        ),
+    ] {
+        let destination = root.path().join(label);
+        let result = publish_batch_pairs(&destination, &pairs, Some(fault));
+        let Err(BatchPublishError::Io {
+            phase,
+            path,
+            source,
+            cleanup_error,
+        }) = result
+        else {
+            panic!("{label} did not return a publisher I/O error: {result:?}");
+        };
+        assert_eq!(phase, expected_phase, "{label}");
+        assert_eq!(
+            path, destination,
+            "{label} must report the final destination"
+        );
+        assert_eq!(source.kind(), std::io::ErrorKind::Other, "{label}");
+        assert_eq!(source.to_string(), expected_message, "{label}");
+        assert!(cleanup_error.is_none(), "{label}: {cleanup_error:?}");
+        assert!(!destination.exists(), "{label} must leave no final tree");
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            0,
+            "{label} must leave no staging or promoted tree"
         );
     }
 

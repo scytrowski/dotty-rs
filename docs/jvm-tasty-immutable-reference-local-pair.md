@@ -559,8 +559,11 @@ class-file encoder, JVM backend, integrated source compilation, paired artifact
 publisher, immutable-local Java runtime and corruption controls, dual-reference
 identity, and stateful class contract targets. The issue-specific publisher
 regression also passed, including six staged-write faults, both promotion
-faults, pre-existing sentinel preservation, missing class data/path, unsafe
-path, and duplicate path checks.
+faults, and pre-existing sentinel preservation. Each staged-write case asserts
+the `staging write` phase, injected error kind/message, and exact relative
+artifact path; promotion cases assert their distinct phase, injected message,
+and destination. The regression also checks missing class data/path, unsafe
+path, and duplicate path rejection.
 
 Both commands used Rust/Cargo 1.98.1 and task-local `.tmp` and `.cargo-target`
 directories because `/tmp` had no free space. The JVM options disabled shared
