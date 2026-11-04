@@ -199,12 +199,15 @@ pair.
 ## #2124 ordered LocalVal pair proof
 
 Issue #2124 composes the two opaque initializer receipts above with the
-existing ordered constructor argument proof. Each final Pair argument is
-matched independently to one of the original local symbols through the exact
-typed `TermRef`, its original source `Ident`, and the source-to-typed tree
-mapping. The proof retains the Pair constructor's two formal identities
-separately from both method-local identities. It permits the same initialized
-local at both argument positions and does not infer distinct runtime objects
+existing ordered constructor argument proof. Each final Pair argument must be
+a direct source and typed `Ident` matched to one of the original local symbols
+through its exact typed `TermRef` and source-to-typed tree mapping. A nested
+expression or caller formal cannot use the two-local aggregate as partial
+evidence. The ordered proof retains both initializer receipts in original
+declaration order, independently of the two positional argument origins. Thus
+`Pair(first, first)` keeps initializer order `[0, 1]` and use order `[0, 0]`.
+The proof retains the Pair constructor's two formal identities separately
+from both method-local identities and does not infer distinct runtime objects
 from equal Counter types.
 
 The proof-only argument classifier reports `LocalValPair` for two local

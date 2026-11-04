@@ -1843,6 +1843,18 @@ fn ordered_two_local_pair_arguments_reuse_initializer_receipts_without_authorizi
                     .expect("both local arguments retain ordered receipts");
                 let arguments = pair.arguments();
                 let local_symbols = [bindings[0].symbol(), bindings[1].symbol()];
+                let initializer_symbols = pair
+                    .local_initializers()
+                    .expect("the pair proof retains both initializer receipts")
+                    .map(|receipt| receipt.symbol());
+                assert_eq!(initializer_symbols, local_symbols);
+                let initializer_positions = initializer_symbols.map(|symbol| {
+                    local_symbols
+                        .iter()
+                        .position(|candidate| *candidate == symbol)
+                        .expect("initializer receipt is one of the original local declarations")
+                });
+                assert_eq!(initializer_positions, [0, 1]);
                 let actual = arguments.map(|argument| {
                     argument
                         .local_val()

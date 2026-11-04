@@ -128,6 +128,10 @@ struct FormalConstructorArgumentProof {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// These proof variants are intentionally Copy: validation returns immutable
+// identity receipts to read-only consumers without allocating or transferring
+// the borrowed session stores.
+#[allow(clippy::large_enum_variant)]
 enum ConstructorArgumentProofShape {
     Formal(FormalConstructorArgumentProof),
     NestedNew(NestedConstructorArgumentProof),
@@ -145,6 +149,7 @@ struct OrderedConstructorArgumentPairProof {
     constructor_formals: [SymbolId; 2],
     constructor_formal_types: [TypeId; 2],
     arguments: [OrderedConstructorArgumentProof; 2],
+    local_initializers: Option<[ImmutableLocalInitializerReceipt; 2]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,7 +247,7 @@ pub struct ImmutableLocalInitializerPairProofInput<'session> {
     pub jvm_unit: &'session JvmCompilationUnit<'session>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ImmutableLocalInitializerReceipt {
     declaration: ImmutableLocalDeclarationCore,
     seed_formal: SymbolId,
@@ -470,7 +475,7 @@ pub struct ValidatedImmutableLocalInitializationProof<'session> {
 /// initializer receipts. This intentionally records identities borrowed from
 /// the one canonical frontend session; it does not authorize a constructor
 /// argument origin or producer plan.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ImmutableLocalDeclarationCore {
     declaration: TreeId<Untyped>,
     typed_declaration: TreeId<Typed>,
@@ -1210,6 +1215,21 @@ impl OrderedConstructorArgumentPairProofView {
                 proof: self.proof.arguments[1],
             },
         ]
+    }
+    /// Original immutable-local initializer receipts in source declaration order.
+    /// This remains distinct from `arguments()`, whose positions may repeat an alias.
+    pub const fn local_initializers(self) -> Option<[ImmutableLocalInitializerReceiptView; 2]> {
+        match self.proof.local_initializers {
+            Some(receipts) => Some([
+                ImmutableLocalInitializerReceiptView {
+                    receipt: receipts[0],
+                },
+                ImmutableLocalInitializerReceiptView {
+                    receipt: receipts[1],
+                },
+            ]),
+            None => None,
+        }
     }
 }
 
@@ -3599,6 +3619,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                     constructor_formals: target_formals,
                     constructor_formal_types: pair_formal_types,
                     arguments: ordered_argument_proofs,
+                    local_initializers: immutable_local_pair.map(|proof| proof.initializers),
                 },
             ),
         },
