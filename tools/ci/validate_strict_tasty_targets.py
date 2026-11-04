@@ -20,6 +20,7 @@ FROZEN_WORKFLOW = ".github/workflows/jvm-tasty-factory-scala-consumer.yml"
 TARGET_DECLARATION = "STRICT_REQUIRED_TARGETS"
 SUPPORT_DECLARATION = "STRICT_SUPPORT_TARGETS"
 ENV_DECLARATION = "STRICT_REQUIRED_ENVS"
+CARGO_GLOBAL_FLAGS = {"--verbose", "-v", "--quiet", "-q", "--locked", "--offline", "--frozen"}
 
 
 def _workflow_values(workflow: str, key: str) -> list[str]:
@@ -71,8 +72,39 @@ def _validate_invocations(workflow: str, strict: list[str], support: list[str]) 
             command = words[1:]
             if command and command[0].startswith("+"):
                 command = command[1:]
-            if command and (command[0].startswith("$") or "$(" in command[0] or "`" in command[0]):
-                raise ManifestError(f"unsupported dynamic Cargo subcommand: {command[0]}")
+            while command:
+                token = command[0]
+                if "$" in token or "`" in token:
+                    raise ManifestError(f"unsupported dynamic Cargo command construction: {token}")
+                if token in CARGO_GLOBAL_FLAGS:
+                    command = command[1:]
+                    continue
+                if token == "--color":
+                    if len(command) < 2 or command[1] not in {"always", "auto", "never"}:
+                        raise ManifestError("Cargo --color global option needs always, auto, or never")
+                    command = command[2:]
+                    continue
+                if token.startswith("--color="):
+                    if token.partition("=")[2] not in {"always", "auto", "never"}:
+                        raise ManifestError(f"unsupported Cargo --color value: {token}")
+                    command = command[1:]
+                    continue
+                if token == "--config":
+                    if len(command) < 2 or not command[1]:
+                        raise ManifestError("Cargo --config global option is missing its value")
+                    command = command[2:]
+                    continue
+                if token.startswith("--config="):
+                    if not token.partition("=")[2]:
+                        raise ManifestError("Cargo --config global option is missing its value")
+                    command = command[1:]
+                    continue
+                if token in {"--help", "-h", "--version", "-V"}:
+                    command = []
+                    break
+                if token.startswith("-"):
+                    raise ManifestError(f"unsupported Cargo global option before subcommand: {token}")
+                break
             if not command or command[0] != "test":
                 continue
 

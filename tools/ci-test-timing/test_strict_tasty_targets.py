@@ -238,11 +238,32 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
         commands = (
             "CARGO_COMMAND=test; cargo \"$CARGO_COMMAND\" --test future_required_consumer",
             'cargo "$CARGO_COMMAND" --test future_required_consumer',
+            'cargo t"${CARGO_COMMAND_SUFFIX:-est}" --test future_required_consumer',
         )
         for command in commands:
             with self.subTest(command=command):
                 with self.assertRaisesRegex(ManifestError, "unsupported dynamic"):
                     self.validate_real_manifest_with_run_step(command, block=True)
+
+    def test_real_inventory_scans_test_invocations_after_cargo_global_options(self):
+        repository = Path(__file__).parents[2]
+        manifest = json.loads((repository / "tools/ci/strict_tasty_targets.json").read_text(encoding="utf-8"))
+        target = manifest["targets"][0]["name"]
+        commands = (
+            "cargo +1.98.1 --color always test --test future_required_consumer --locked",
+            f"cargo +1.98.1 --color always test --test {target} --locked",
+        )
+        expected_errors = ("future_required_consumer", "strict targets invoked outside")
+        for block in (False, True):
+            for command, expected_error in zip(commands, expected_errors):
+                with self.subTest(block=block, command=command):
+                    with self.assertRaisesRegex(ManifestError, expected_error):
+                        self.validate_real_manifest_with_run_step(command, block=block)
+
+    def test_real_inventory_rejects_unsupported_cargo_global_options(self):
+        command = "cargo --unreviewed-global-option test --test future_required_consumer"
+        with self.assertRaisesRegex(ManifestError, "unsupported Cargo global option"):
+            self.validate_real_manifest_with_run_step(command, block=False)
 
     def test_shard_selection_returns_manifest_order(self):
         manifest = self.fixture("strict-targets-duplicate.json")
