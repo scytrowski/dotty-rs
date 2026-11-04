@@ -42,7 +42,7 @@ concurrency:
 
 jobs:
   strict_shard_1:
-    name: Strict Scala 3.9 TASTy shard 1/2
+    name: Strict Scala 3.9 TASTy shard 1/4
     outputs:
       strict_tests: ${{ steps.strict_tests.outcome }}
     runs-on: ubuntu-latest
@@ -244,13 +244,9 @@ jobs:
           key: ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-scala-${{ env.SCALA39_SOURCE_SHA }}-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
 
   strict_shard_2:
-    name: Strict Scala 3.9 TASTy shard 2/2
+    name: Strict Scala 3.9 TASTy shard 2/4
     outputs:
       strict_tests: ${{ steps.strict_tests.outcome }}
-      constructor_alias: ${{ steps.constructor_alias.outcome }}
-      loader_rejection: ${{ steps.loader_rejection.outcome }}
-      dual_reference_reader: ${{ steps.dual_reference_reader.outcome }}
-      java_verifier: ${{ steps.java_verifier.outcome }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -421,6 +417,364 @@ jobs:
             --cargo-exit-code "$cargo_status" >> "$GITHUB_STEP_SUMMARY"
           exit "$cargo_status"
 
+  strict_shard_3:
+    name: Strict Scala 3.9 TASTy shard 3/4
+    outputs:
+      strict_tests: ${{ steps.strict_tests.outcome }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SCALA39_ROOT: ${{ github.workspace }}/scala39-source
+      COURSIER_MAVEN_ROOT: ${{ github.workspace }}/.cache/coursier/v1/https/repo1.maven.org/maven2
+      SCALA39_SOURCE_SHA: 777528f19a58e794c9954a42f433373472ec57f8
+
+    steps:
+      - name: Check out dotty-rs
+        uses: actions/checkout@v4
+
+      - name: Check out pinned Scala 3.9.0 sources
+        uses: actions/checkout@v4
+        with:
+          repository: scala/scala3
+          ref: ${{ env.SCALA39_SOURCE_SHA }}
+          path: scala39-source
+          persist-credentials: false
+
+      - name: Install pinned JDK 21.0.13
+        id: install-jdk
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21.0.13+9.0.LTS'
+          check-latest: false
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+
+      - name: Restore pinned Scala dependencies and Rust build
+        id: dependency-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.ivy2/cache
+            ~/.sbt
+            .cache/coursier
+            target/debug
+            target/.rustc_info.json
+          key: ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-scala-${{ env.SCALA39_SOURCE_SHA }}-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
+          restore-keys: |
+            ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-
+
+      - name: Verify pinned source and JDK
+        run: |
+          set -euo pipefail
+          test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = "$SCALA39_SOURCE_SHA"
+          grep -q '^JAVA_VERSION="21.0.13"$' "$JAVA_HOME/release"
+          test -d "$JAVA_HOME/jmods"
+          mkdir -p "$COURSIER_MAVEN_ROOT"
+
+      - name: Install sbt runner
+        uses: sbt/setup-sbt@v1
+
+      - name: Restore exact pinned Scala build outputs
+        id: scala-build-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            scala39-source/target
+            scala39-source/**/target
+          key: ${{ runner.os }}-${{ runner.arch }}-scala39-targets-${{ env.SCALA39_SOURCE_SHA }}-jdk21.0.13-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
+
+      - name: Stage the pinned Scala source compiler
+        run: cd "$SCALA39_ROOT" && sbt "dist/universal:stage"
+
+      - name: Download and verify pinned Scala compiler artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS=' ' read -r relative_path sha256; do
+            [[ -z "$relative_path" ]] && continue
+            destination="$COURSIER_MAVEN_ROOT/$relative_path"
+            mkdir -p "$(dirname "$destination")"
+            if [[ ! -f "$destination" ]] || ! printf '%s  %s\n' "$sha256" "$destination" | sha256sum --check --status; then
+              curl --fail --location --retry 3 \
+                "https://repo1.maven.org/maven2/$relative_path" \
+                --output "$destination"
+            fi
+            printf '%s  %s\n' "$sha256" "$destination" | sha256sum --check --status
+          done <<'ARTIFACTS'
+          org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar 9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba
+          org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd
+          org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar 3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a
+          org/scala-lang/tasty-core_3/3.9.0/tasty-core_3-3.9.0.jar 66e12dda98bb23e864f3a31f8527c8338bf47bce9b85cc380b368c69c1ba8d0f
+          org/scala-lang/scala3-interfaces/3.9.0/scala3-interfaces-3.9.0.jar 64dfde1d2c6309d65a01c5f3ea836137eb84338dcadeb16f85764561ef4e10db
+          org/scala-lang/modules/scala-asm/9.9.0-scala-1/scala-asm-9.9.0-scala-1.jar 75ac366e8ecb691e06a7e85041eed0f67919a646e5262fa0901225698c104375
+          org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar 92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3
+          org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar 1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af
+          ARTIFACTS
+
+      - name: Record Scala cache state and output size
+        env:
+          SCALA_BUILD_CACHE_HIT: ${{ steps.scala-build-cache.outputs.cache-hit }}
+          SCALA_DEPENDENCY_CACHE_HIT: ${{ steps.dependency-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          target_bytes="$(find "$SCALA39_ROOT" -type d -name target -prune -print0 | xargs -0 -r du -sb | awk '{sum += $1} END {print sum + 0}')"
+          dependency_bytes="$(du -sb .cache/coursier "$HOME/.cache/coursier" "$HOME/.ivy2/cache" "$HOME/.sbt" target/debug 2>/dev/null | awk '{sum += $1} END {print sum + 0}' || echo 0)"
+          {
+            echo '### Pinned Scala cache measurement'
+            echo "- Source SHA: $SCALA39_SOURCE_SHA"
+            echo "- Shared dependency/build cache hit: ${SCALA_DEPENDENCY_CACHE_HIT:-false}"
+            echo "- Restored/generated dependency and Rust build cache bytes: $dependency_bytes"
+            echo "- Build-output cache hit: ${SCALA_BUILD_CACHE_HIT:-false}"
+            echo "- Restored/generated Scala target bytes: $target_bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run manifest-driven strict Scala and TASTy shard
+        id: strict_tests
+        env:
+          DOTTY_REQUIRE_SCALA_TASTY_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_OBJECT_COMPOSITION_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_CONSTRUCTOR_INJECTION_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_IMMUTABLE_REFERENCE_LOCAL_PAIR_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_FACTORY_RESULT_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_LOCAL_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_SIGNATURE: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_ALIAS: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_BATCH: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_ORACLE: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_BATCH: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_MIXED_ORIGIN_CONSTRUCTOR_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_PAIR_FORMAL_CONSTRUCTOR: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSTRUCTOR_CONSUMER: '1'
+          DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
+          DOTTY_TASTY_PICKLER_ORACLE_TMP: ${{ github.workspace }}/target/scala-reader-oracle
+          DOTTY_ISSUE_1960_ORACLE_DIR: ${{ github.workspace }}/target/issue-1960-oracle
+          TMPDIR: ${{ github.workspace }}/target/issue-1881-tmp
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR"
+          mkdir -p "$DOTTY_TASTY_PICKLER_ORACLE_TMP"
+          python3 tools/ci/validate_strict_tasty_targets.py
+          strict_target_output="$(python3 tools/ci/validate_strict_tasty_targets.py --shard shard-3)"
+          if [[ -z "$strict_target_output" ]]; then
+            echo "validated shard-3 contains no strict test targets" >&2
+            exit 1
+          fi
+          mapfile -t strict_targets <<<"$strict_target_output"
+          test_args=()
+          for target in "${strict_targets[@]}"; do
+            test_args+=(--test "$target")
+          done
+          timing_log="$RUNNER_TEMP/strict-scala-tasty-cargo-test.log"
+          SECONDS=0
+          set +e
+          cargo +1.98.1 test "${test_args[@]}" \
+            --locked -- --nocapture --test-threads=1 2>&1 | tee "$timing_log"
+          cargo_status=${PIPESTATUS[0]}
+          set -e
+          step_seconds=$SECONDS
+          python3 tools/ci-test-timing/summarize.py \
+            --log "$timing_log" \
+            --expected-targets "${strict_targets[@]}" \
+            --step-seconds "$step_seconds" \
+            --cargo-exit-code "$cargo_status" >> "$GITHUB_STEP_SUMMARY"
+          exit "$cargo_status"
+
+      - name: Record shard 3 cache size after strict tests
+        run: |
+          set -euo pipefail
+          cache_bytes="$(du -sb .cache/coursier "$HOME/.cache/coursier" "$HOME/.ivy2/cache" "$HOME/.sbt" target/debug 2>/dev/null | awk '{sum += $1} END {print sum + 0}' || echo 0)"
+          echo "- Shard 1 dependency and Rust build cache bytes after tests: $cache_bytes" >> "$GITHUB_STEP_SUMMARY"
+
+  strict_shard_4:
+    name: Strict Scala 3.9 TASTy shard 4/4
+    outputs:
+      strict_tests: ${{ steps.strict_tests.outcome }}
+      constructor_alias: ${{ steps.constructor_alias.outcome }}
+      loader_rejection: ${{ steps.loader_rejection.outcome }}
+      dual_reference_reader: ${{ steps.dual_reference_reader.outcome }}
+      java_verifier: ${{ steps.java_verifier.outcome }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SCALA39_ROOT: ${{ github.workspace }}/scala39-source
+      COURSIER_MAVEN_ROOT: ${{ github.workspace }}/.cache/coursier/v1/https/repo1.maven.org/maven2
+      SCALA39_SOURCE_SHA: 777528f19a58e794c9954a42f433373472ec57f8
+
+    steps:
+      - name: Check out dotty-rs
+        uses: actions/checkout@v4
+
+      - name: Check out pinned Scala 3.9.0 sources
+        uses: actions/checkout@v4
+        with:
+          repository: scala/scala3
+          ref: ${{ env.SCALA39_SOURCE_SHA }}
+          path: scala39-source
+          persist-credentials: false
+
+      - name: Install pinned JDK 21.0.13
+        id: install-jdk
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21.0.13+9.0.LTS'
+          check-latest: false
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+
+      - name: Restore pinned Scala dependencies and Rust build
+        id: dependency-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.ivy2/cache
+            ~/.sbt
+            .cache/coursier
+            target/debug
+            target/.rustc_info.json
+          key: ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-scala-${{ env.SCALA39_SOURCE_SHA }}-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
+          restore-keys: |
+            ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-
+
+      - name: Verify pinned source and JDK
+        run: |
+          set -euo pipefail
+          test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = "$SCALA39_SOURCE_SHA"
+          grep -q '^JAVA_VERSION="21.0.13"$' "$JAVA_HOME/release"
+          test -d "$JAVA_HOME/jmods"
+          mkdir -p "$COURSIER_MAVEN_ROOT"
+
+      - name: Install sbt runner
+        uses: sbt/setup-sbt@v1
+
+      - name: Restore exact pinned Scala build outputs
+        id: scala-build-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            scala39-source/target
+            scala39-source/**/target
+          key: ${{ runner.os }}-${{ runner.arch }}-scala39-targets-${{ env.SCALA39_SOURCE_SHA }}-jdk21.0.13-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
+
+      - name: Stage the pinned Scala source compiler
+        run: cd "$SCALA39_ROOT" && sbt "dist/universal:stage"
+
+      - name: Download and verify pinned Scala compiler artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS=' ' read -r relative_path sha256; do
+            [[ -z "$relative_path" ]] && continue
+            destination="$COURSIER_MAVEN_ROOT/$relative_path"
+            mkdir -p "$(dirname "$destination")"
+            if [[ ! -f "$destination" ]] || ! printf '%s  %s\n' "$sha256" "$destination" | sha256sum --check --status; then
+              curl --fail --location --retry 3 \
+                "https://repo1.maven.org/maven2/$relative_path" \
+                --output "$destination"
+            fi
+            printf '%s  %s\n' "$sha256" "$destination" | sha256sum --check --status
+          done <<'ARTIFACTS'
+          org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar 9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba
+          org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd
+          org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar 3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a
+          org/scala-lang/tasty-core_3/3.9.0/tasty-core_3-3.9.0.jar 66e12dda98bb23e864f3a31f8527c8338bf47bce9b85cc380b368c69c1ba8d0f
+          org/scala-lang/scala3-interfaces/3.9.0/scala3-interfaces-3.9.0.jar 64dfde1d2c6309d65a01c5f3ea836137eb84338dcadeb16f85764561ef4e10db
+          org/scala-lang/modules/scala-asm/9.9.0-scala-1/scala-asm-9.9.0-scala-1.jar 75ac366e8ecb691e06a7e85041eed0f67919a646e5262fa0901225698c104375
+          org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar 92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3
+          org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar 1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af
+          ARTIFACTS
+
+      - name: Record Scala cache state and output size
+        env:
+          SCALA_BUILD_CACHE_HIT: ${{ steps.scala-build-cache.outputs.cache-hit }}
+          SCALA_DEPENDENCY_CACHE_HIT: ${{ steps.dependency-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          target_bytes="$(find "$SCALA39_ROOT" -type d -name target -prune -print0 | xargs -0 -r du -sb | awk '{sum += $1} END {print sum + 0}')"
+          dependency_bytes="$(du -sb .cache/coursier "$HOME/.cache/coursier" "$HOME/.ivy2/cache" "$HOME/.sbt" target/debug 2>/dev/null | awk '{sum += $1} END {print sum + 0}' || echo 0)"
+          {
+            echo '### Pinned Scala cache measurement'
+            echo "- Source SHA: $SCALA39_SOURCE_SHA"
+            echo "- Shared dependency/build cache hit: ${SCALA_DEPENDENCY_CACHE_HIT:-false}"
+            echo "- Restored/generated dependency and Rust build cache bytes: $dependency_bytes"
+            echo "- Build-output cache hit: ${SCALA_BUILD_CACHE_HIT:-false}"
+            echo "- Restored/generated Scala target bytes: $target_bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run manifest-driven strict Scala and TASTy shard
+        id: strict_tests
+        env:
+          DOTTY_REQUIRE_SCALA_TASTY_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_OBJECT_COMPOSITION_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_CONSTRUCTOR_INJECTION_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_IMMUTABLE_REFERENCE_LOCAL_PAIR_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_FACTORY_RESULT_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_LOCAL_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_SIGNATURE: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_ALIAS: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_BATCH: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_ORACLE: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_BATCH: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_MIXED_ORIGIN_CONSTRUCTOR_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_PAIR_FORMAL_CONSTRUCTOR: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSTRUCTOR_CONSUMER: '1'
+          DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE: '1'
+          DOTTY_TASTY_PICKLER_ORACLE_TMP: ${{ github.workspace }}/target/scala-reader-oracle
+          DOTTY_ISSUE_1960_ORACLE_DIR: ${{ github.workspace }}/target/issue-1960-oracle
+          TMPDIR: ${{ github.workspace }}/target/issue-1881-tmp
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR"
+          mkdir -p "$DOTTY_TASTY_PICKLER_ORACLE_TMP"
+          python3 tools/ci/validate_strict_tasty_targets.py
+          strict_target_output="$(python3 tools/ci/validate_strict_tasty_targets.py --shard shard-4)"
+          if [[ -z "$strict_target_output" ]]; then
+            echo "validated shard-4 contains no strict test targets" >&2
+            exit 1
+          fi
+          mapfile -t strict_targets <<<"$strict_target_output"
+          test_args=()
+          for target in "${strict_targets[@]}"; do
+            test_args+=(--test "$target")
+          done
+          timing_log="$RUNNER_TEMP/strict-scala-tasty-cargo-test.log"
+          SECONDS=0
+          set +e
+          cargo +1.98.1 test "${test_args[@]}" \
+            --locked -- --nocapture --test-threads=1 2>&1 | tee "$timing_log"
+          cargo_status=${PIPESTATUS[0]}
+          set -e
+          step_seconds=$SECONDS
+          python3 tools/ci-test-timing/summarize.py \
+            --log "$timing_log" \
+            --expected-targets "${strict_targets[@]}" \
+            --step-seconds "$step_seconds" \
+            --cargo-exit-code "$cargo_status" >> "$GITHUB_STEP_SUMMARY"
+          exit "$cargo_status"
+
       - name: Verify constructor alias PARAM addresses with pinned Scala 3.9
         id: constructor_alias
         env:
@@ -465,7 +819,7 @@ jobs:
             --test jvm_stateful_class_contract \
             --locked -- --nocapture
 
-      - name: Record shard 2 cache size after required gates
+      - name: Record shard 4 cache size after required gates
         run: |
           set -euo pipefail
           cache_bytes="$(du -sb .cache/coursier "$HOME/.cache/coursier" "$HOME/.ivy2/cache" "$HOME/.sbt" target/debug 2>/dev/null | awk '{sum += $1} END {print sum + 0}' || echo 0)"
@@ -478,6 +832,8 @@ jobs:
     needs:
       - strict_shard_1
       - strict_shard_2
+      - strict_shard_3
+      - strict_shard_4
     env:
       # Independent inventory maintained alongside the real workflow invocations.
       # The validator compares it with the shard manifest and scans every literal
@@ -513,10 +869,14 @@ jobs:
       STRICT_TASTY_SHARD_1_TESTS: ${{ needs.strict_shard_1.outputs.strict_tests || 'missing' }}
       STRICT_TASTY_SHARD_2_JOB: ${{ needs.strict_shard_2.result }}
       STRICT_TASTY_SHARD_2_TESTS: ${{ needs.strict_shard_2.outputs.strict_tests || 'missing' }}
-      STRICT_TASTY_CONSTRUCTOR_ALIAS: ${{ needs.strict_shard_2.outputs.constructor_alias || 'missing' }}
-      STRICT_TASTY_LOADER_REJECTION: ${{ needs.strict_shard_2.outputs.loader_rejection || 'missing' }}
-      STRICT_TASTY_DUAL_REFERENCE_READER: ${{ needs.strict_shard_2.outputs.dual_reference_reader || 'missing' }}
-      STRICT_TASTY_JAVA_VERIFIER: ${{ needs.strict_shard_2.outputs.java_verifier || 'missing' }}
+      STRICT_TASTY_SHARD_3_JOB: ${{ needs.strict_shard_3.result }}
+      STRICT_TASTY_SHARD_3_TESTS: ${{ needs.strict_shard_3.outputs.strict_tests || 'missing' }}
+      STRICT_TASTY_SHARD_4_JOB: ${{ needs.strict_shard_4.result }}
+      STRICT_TASTY_SHARD_4_TESTS: ${{ needs.strict_shard_4.outputs.strict_tests || 'missing' }}
+      STRICT_TASTY_CONSTRUCTOR_ALIAS: ${{ needs.strict_shard_4.outputs.constructor_alias || 'missing' }}
+      STRICT_TASTY_LOADER_REJECTION: ${{ needs.strict_shard_4.outputs.loader_rejection || 'missing' }}
+      STRICT_TASTY_DUAL_REFERENCE_READER: ${{ needs.strict_shard_4.outputs.dual_reference_reader || 'missing' }}
+      STRICT_TASTY_JAVA_VERIFIER: ${{ needs.strict_shard_4.outputs.java_verifier || 'missing' }}
     steps:
       - name: Check out dotty-rs
         uses: actions/checkout@v4

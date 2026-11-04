@@ -57,4 +57,6 @@ The validator and workflow retain manifest-driven target selection:
 python3 tools/ci/validate_strict_tasty_targets.py
 python3 tools/ci/validate_strict_tasty_targets.py --shard shard-1
 python3 tools/ci/validate_strict_tasty_targets.py --shard shard-2
+python3 tools/ci/validate_strict_tasty_targets.py --shard shard-3
+python3 tools/ci/validate_strict_tasty_targets.py --shard shard-4
 ```
