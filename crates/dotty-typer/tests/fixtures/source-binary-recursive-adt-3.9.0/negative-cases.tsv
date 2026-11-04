@@ -12,6 +12,12 @@ RenamedConstructorFields	accepted	constructor field spelling does not change pos
 SwappedConstructorFields	accepted	swapped constructor field order compiles with its own field identities
 MissingParent	rejected	Add has no Expr parent
 WrongParent	rejected	Add extends Product instead of Expr
-EscapedCaseBinder	rejected	case binder is referenced outside its case scope
+EscapedCaseBinder	rejected	a real Add right binder is referenced from its sibling Num case
 InvalidRecursiveArgument	rejected	Int argument is passed to recursive eval(Expr)
 WarningOnly	accepted_with_warning	non-exhaustive eval match emits a warning only
+InvalidSecondRecursiveArgument	rejected	Int argument is passed to the second recursive eval(Expr) call
+RecursiveCallZeroArguments	rejected	eval is called without its required Expr argument
+RecursiveCallTwoArguments	rejected	eval is called with two arguments instead of one
+ForeignSameSpelledEval	accepted	qualified same-spelled eval calls select a foreign source method
+GenericAddFields	accepted	Add has generic applied reference field types bounded by Expr
+UnrelatedReferenceFields	rejected	Add fields are unrelated to Expr and recursive eval rejects each Other argument

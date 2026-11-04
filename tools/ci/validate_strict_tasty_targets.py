@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the frozen strict Scala/TASTy test inventory and shard proposal."""
+"""Validate independently declared strict workflow targets and shard proposal."""
 
 from __future__ import annotations
 
@@ -15,34 +15,40 @@ class ManifestError(ValueError):
 
 
 FROZEN_WORKFLOW = ".github/workflows/jvm-tasty-factory-scala-consumer.yml"
-FROZEN_BASELINE = "tools/ci/strict_tasty_target_baseline.json"
+TARGET_DECLARATION = "STRICT_REQUIRED_TARGETS"
+SUPPORT_DECLARATION = "STRICT_SUPPORT_TARGETS"
+ENV_DECLARATION = "STRICT_REQUIRED_ENVS"
 
 
-def _frozen_inventory(repository_root: Path, baseline_path: Path | None = None) -> list[str]:
-    path = baseline_path or (repository_root / FROZEN_BASELINE)
-    try:
-        baseline = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ManifestError(f"cannot read frozen target baseline {path}: {error}") from error
-    if not isinstance(baseline, dict) or not isinstance(baseline.get("targets"), list):
-        raise ManifestError("frozen baseline targets must be an array")
-    targets = baseline["targets"]
-    if any(not isinstance(name, str) or re.fullmatch(r"[a-zA-Z0-9_]+", name) is None for name in targets):
-        raise ManifestError("frozen baseline must contain one valid target name per entry")
-    if _duplicates(targets):
-        raise ManifestError("frozen baseline contains duplicate targets")
-    return targets
-
-
-def _workflow_inventory(workflow: str) -> list[str]:
-    match = re.search(r"(?ms)^\s*strict_targets=\(\s*(.*?)^\s*\)", workflow)
+def _workflow_values(workflow: str, key: str) -> list[str]:
+    pattern = rf"(?ms)^\s*{re.escape(key)}:\s*(?:>-\s*\n(.*?)(?=^\s*[A-Z][A-Z0-9_]*:|^\s*STRICT_TASTY_SHARD_1_JOB:)|([^\n]+))"
+    match = re.search(pattern, workflow)
     if match is None:
-        raise ManifestError("source workflow does not contain a strict_targets array")
-    names = [line.strip() for line in match.group(1).splitlines() if line.strip()]
-    if any(re.fullmatch(r"[a-zA-Z0-9_]+", name) is None for name in names):
-        raise ManifestError("strict_targets array must contain one target name per line")
-    return names
+        raise ManifestError(f"workflow is missing independent {key} declaration")
+    values = (match.group(1) if match.group(1) is not None else match.group(2)).split()
+    if not values or any(re.fullmatch(r"[A-Za-z0-9_]+", name) is None for name in values):
+        raise ManifestError(f"workflow {key} declaration must contain valid names")
+    if _duplicates(values):
+        raise ManifestError(f"workflow {key} declaration contains duplicates")
+    return values
 
+
+def _validate_invocations(workflow: str, strict: list[str], support: list[str]) -> None:
+    source = "\n".join(line for line in workflow.splitlines() if not line.lstrip().startswith("#"))
+    literal = re.findall(r"--test\s+([A-Za-z0-9_]+)", source)
+    dynamic = len(re.findall(r"--test\s+\"\$target\"", source))
+    if dynamic != 2:
+        raise ManifestError(f"expected exactly two manifest-driven --test loops; found {dynamic}")
+    allowed = set(strict) | set(support)
+    unknown = sorted(set(literal) - allowed)
+    if unknown:
+        raise ManifestError("required Cargo test invocation absent from workflow inventory/support declarations: " + ", ".join(unknown))
+    duplicates = sorted(set(literal) & set(strict))
+    if duplicates:
+        raise ManifestError("strict targets invoked outside manifest-driven shards: " + ", ".join(duplicates))
+    undeclared = sorted(set(literal) - set(strict) - set(support))
+    if undeclared:
+        raise ManifestError("undeclared Cargo test invocations: " + ", ".join(undeclared))
 
 def _duplicates(values: list[str]) -> list[str]:
     seen: set[str] = set()
@@ -77,20 +83,17 @@ def validate_manifest(
     if not isinstance(source, dict) or source.get("workflow") != FROZEN_WORKFLOW:
         raise ManifestError(f"source.workflow must remain {FROZEN_WORKFLOW!r}")
 
-    frozen_names = _frozen_inventory(repository_root, baseline_path)
     workflow_path = repository_root / FROZEN_WORKFLOW
     try:
         workflow_text = workflow_path.read_text(encoding="utf-8")
     except OSError as error:
         raise ManifestError(f"cannot read frozen inventory workflow {source['workflow']!r}: {error}") from error
-    if re.search(r"(?m)^\s*strict_targets\s*=", workflow_text):
-        workflow_names = _workflow_inventory(workflow_text)
-        if _duplicates(workflow_names):
-            raise ManifestError("source workflow strict_targets array contains duplicate targets")
-        if workflow_names != frozen_names:
-            raise ManifestError("source workflow inventory differs from the independent frozen baseline")
-    if len(frozen_names) != expected_count:
-        raise ManifestError(f"frozen baseline has {len(frozen_names)} targets; manifest expects {expected_count}")
+    workflow_names = _workflow_values(workflow_text, TARGET_DECLARATION)
+    support_names = _workflow_values(workflow_text, SUPPORT_DECLARATION)
+    required_envs = _workflow_values(workflow_text, ENV_DECLARATION)
+    _validate_invocations(workflow_text, workflow_names, support_names)
+    if len(workflow_names) != expected_count:
+        raise ManifestError(f"workflow declares {len(workflow_names)} strict targets; manifest expects {expected_count}")
 
     names: list[str] = []
     durations: dict[str, float] = {}
@@ -111,17 +114,17 @@ def validate_manifest(
         raise ManifestError(f"duplicate inventory targets: {', '.join(duplicates)}")
     if len(names) != expected_count:
         raise ManifestError(f"inventory has {len(names)} targets; expected {expected_count}")
-    if names != frozen_names:
-        missing = sorted(set(frozen_names) - set(names))
-        unexpected = sorted(set(names) - set(frozen_names))
+    if names != workflow_names:
+        missing = sorted(set(workflow_names) - set(names))
+        unexpected = sorted(set(names) - set(workflow_names))
         details = []
         if missing:
             details.append(f"omitted from manifest: {', '.join(missing)}")
         if unexpected:
-            details.append(f"not in frozen workflow inventory: {', '.join(unexpected)}")
+            details.append(f"not in workflow inventory: {', '.join(unexpected)}")
         if not details:
-            details.append("target order differs from the frozen workflow inventory")
-        raise ManifestError("manifest does not match frozen workflow inventory (" + "; ".join(details) + ")")
+            details.append("target order differs from workflow inventory")
+        raise ManifestError("manifest does not match independently declared workflow inventory (" + "; ".join(details) + ")")
 
     assignments: list[str] = []
     shard_ids: list[str] = []
@@ -154,6 +157,17 @@ def validate_manifest(
         declared_total = shard.get("estimated_test_seconds")
         if not isinstance(declared_total, (int, float)) or round(float(declared_total), 2) != measured_total:
             raise ManifestError(f"shard {shard['id']!r} estimated_test_seconds does not match its target measurements")
+
+    env_blocks = re.findall(
+        r"(?ms)^\s*-\s+name: Run manifest-driven strict Scala and TASTy shard\n\s+id: strict_tests\n\s+env:\n(.*?)(?=^\s+shell:|^\s+run:)",
+        workflow_text,
+    )
+    if len(env_blocks) != 2:
+        raise ManifestError(f"expected two strict shard env blocks; found {len(env_blocks)}")
+    for index, env_block in enumerate(env_blocks, 1):
+        actual_envs = re.findall(r"^\s*(DOTTY_REQUIRE_[A-Z0-9_]+):\s*'1'\s*$", env_block, re.MULTILINE)
+        if sorted(actual_envs) != sorted(required_envs) or len(actual_envs) != len(set(actual_envs)):
+            raise ManifestError(f"shard {index} strict env differs from independent requirements")
 
     missing_files = [name for name in names if not (repository_root / "tests" / f"{name}.rs").is_file()]
     if missing_files:

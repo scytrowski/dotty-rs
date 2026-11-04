@@ -19,12 +19,15 @@ on:
       - 'tests/fixtures/jvm_tasty_reference_local_constructor_flows/**'
       - 'tools/tasty-pickler-oracle/**'
       - 'tools/ci-test-timing/**'
+      - 'tools/ci/**'
       - 'docs/jvm-tasty-cross-class-factories.md'
       - 'docs/jvm-tasty-dual-reference-constructors.md'
       - 'docs/jvm-tasty-dual-reference-forwarding.md'
       - 'docs/strict-tasty-target-sharding.md'
-      - 'tools/ci/**'
       - 'docs/jvm-tasty-mixed-origin-constructor-arguments.md'
+      - 'docs/jvm-tasty-immutable-reference-local-pair.md'
+      - 'tests/fixtures/jvm_tasty_immutable_reference_local_pair/**'
+      - 'tests/jvm_tasty_immutable_reference_local_pair_scala_consumer.rs'
       - 'docs/classloader-semantic-tasty-convergence-iii/**'
       - 'tests/fixtures/jvm_tasty_dual_reference_forwarding/**'
   workflow_dispatch:
@@ -172,6 +175,7 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_IMMUTABLE_REFERENCE_LOCAL_PAIR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_FACTORY_RESULT_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_LOCAL_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_SIGNATURE: '1'
@@ -368,6 +372,7 @@ jobs:
           DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSUMER: '1'
+          DOTTY_REQUIRE_SCALA_TASTY_IMMUTABLE_REFERENCE_LOCAL_PAIR_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_FACTORY_RESULT_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_LOCAL_CONSUMER: '1'
           DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_SIGNATURE: '1'
@@ -473,6 +478,36 @@ jobs:
       - strict_shard_1
       - strict_shard_2
     env:
+      # Independent inventory maintained alongside the real workflow invocations.
+      # The validator compares it with the shard manifest and scans every literal
+      # Cargo --test invocation below, so an added consumer cannot silently escape.
+      STRICT_REQUIRED_TARGETS: >-
+        jvm_tasty_scala_consumer jvm_tasty_multiclass_scala_consumer
+        jvm_tasty_cross_class_scala_consumer jvm_tasty_factory_scala_consumer
+        jvm_tasty_object_composition_scala_consumer jvm_tasty_constructor_injection_scala_consumer
+        jvm_tasty_reference_constructor_scala_consumer jvm_tasty_nested_constructor_scala_consumer
+        jvm_tasty_multi_argument_constructor_calls jvm_tasty_multi_argument_constructor_scala_consumer
+        jvm_tasty_factory_result_scala_consumer jvm_tasty_reference_local_scala_consumer
+        jvm_tasty_dual_reference_signature jvm_tasty_dual_reference_artifacts
+        jvm_tasty_dual_reference_forwarding jvm_tasty_dual_reference_forwarding_scala_consumer
+        jvm_tasty_mixed_origin_constructor_scala_consumer jvm_tasty_immutable_reference_local_pair_scala_consumer
+        jvm_tasty_direct_formal_constructor_pair jvm_tasty_dual_reference_scala_consumer
+        jvm_tasty_dual_reference_rust_consumer jvm_tasty_cross_class_factories
+        jvm_tasty_factory_result_arguments tasty_source_pickling
+      STRICT_SUPPORT_TARGETS: jvm_tasty_plan jvm_tasty_artifacts classfile_jvm_encoder jvm_source_compilation jvm_stateful_class_contract
+      STRICT_REQUIRED_ENVS: >-
+        DOTTY_REQUIRE_SCALA_TASTY_CONSUMER DOTTY_REQUIRE_SCALA_TASTY_MULTICLASS_CONSUMER
+        DOTTY_REQUIRE_SCALA_TASTY_CROSS_CLASS_CONSUMER DOTTY_REQUIRE_SCALA_TASTY_FACTORY_CONSUMER
+        DOTTY_REQUIRE_SCALA_TASTY_OBJECT_COMPOSITION_CONSUMER DOTTY_REQUIRE_SCALA_TASTY_CONSTRUCTOR_INJECTION_CONSUMER
+        DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_CONSTRUCTOR_CONSUMER DOTTY_REQUIRE_SCALA_TASTY_NESTED_CONSTRUCTOR_CONSUMER
+        DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSUMER DOTTY_REQUIRE_SCALA_TASTY_FACTORY_RESULT_CONSUMER
+        DOTTY_REQUIRE_SCALA_TASTY_REFERENCE_LOCAL_CONSUMER DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_SIGNATURE
+        DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_ALIAS DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_BATCH
+        DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_CONSUMER DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_ORACLE
+        DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_BATCH DOTTY_REQUIRE_SCALA_TASTY_DUAL_REFERENCE_FORWARDING_CONSUMER
+        DOTTY_REQUIRE_SCALA_TASTY_MIXED_ORIGIN_CONSTRUCTOR_CONSUMER DOTTY_REQUIRE_SCALA_TASTY_PAIR_FORMAL_CONSTRUCTOR
+        DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSTRUCTOR_CONSUMER
+        DOTTY_REQUIRE_SCALA_TASTY_IMMUTABLE_REFERENCE_LOCAL_PAIR_CONSUMER
       STRICT_TASTY_SHARD_1_JOB: ${{ needs.strict_shard_1.result }}
       STRICT_TASTY_SHARD_1_TESTS: ${{ needs.strict_shard_1.outputs.strict_tests || 'missing' }}
       STRICT_TASTY_SHARD_2_JOB: ${{ needs.strict_shard_2.result }}

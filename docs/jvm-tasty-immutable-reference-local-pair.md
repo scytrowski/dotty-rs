@@ -36,6 +36,151 @@ TASTy snapshots preserve raw AST addresses and report the source method's
 BLOCK, one `fresh` VALDEF, its direct `new Counter(seed)` initializer, the
 outer `new Pair(existing, fresh)` application, and `TERMREFdirect` links.
 
+## Rust-authentic Scala 3.9 consumer
+
+`tests/jvm_tasty_immutable_reference_local_pair_scala_consumer.rs` now emits
+the primary and reversed producers through `emit_paired_jvm_tasty_batch` and
+compiles only the separate `Consumer.scala` client with the pinned official
+Scala compiler. The classes and sidecars used for runtime are the same six
+files inspected by `-decompile`, `-print-tasty`, and `-from-tasty`; reconstructed
+classes are written to a separate inspection directory and never enter the
+runtime classpath. The client runs with `java -Xverify:all -ea` against the
+unchanged Rust files plus the two approved published Scala runtime jars.
+
+The consumer checks the original identity on the expected Pair field, a fresh
+Counter on the other field, getter and setter source lookup, independent
+mutations, fresh instances for seeds `11`, `0`, and `-5`, and reversed Pair
+field ownership. Both Rust sessions repeat byte-for-byte with all six paths
+and TASTy links equal. SHA-256 values and UUID links below are from that strict
+run; shared Counter and Pair artifacts are identical between orientations.
+
+| Source | Artifact | SHA-256 | TASTy UUID |
+| --- | --- | --- | --- |
+| primary | `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008071c3-c009-68ac-0000-000000008193` |
+| primary | `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | — |
+| primary | `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d-7441-c7f0-0000-000000008198` |
+| primary | `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | — |
+| primary | `example/PairFactory.class` | `f5f98b7460958398e1871f473261cffd947c59abf6f3be4718f39d0cb6133b26` | `00aa4040-76fa-2cc8-0000-000000008199` |
+| primary | `example/PairFactory.tasty` | `243a9bf981e8fbc8403d6f6da9108798a8615446cbc8d1b608b8c60100cd36ca` | — |
+| reversed | `example/Counter.class` | same as primary | same as primary |
+| reversed | `example/Counter.tasty` | same as primary | — |
+| reversed | `example/Pair.class` | same as primary | same as primary |
+| reversed | `example/Pair.tasty` | same as primary | — |
+| reversed | `example/PairFactory.class` | `a8074b8b4fbb5e822eb38213ac789629462e734faf7623fbf52c0c1caf741493` | `00cc322d-08c2-3fc8-0000-000000008199` |
+| reversed | `example/PairFactory.tasty` | `e3126007b1309789e45a7fedef0b9f8d43bec44a15f3271367074a22a27b1735` | — |
+
+The original source hashes are `9072a8c50bf0c9b62568187e7152618d4ea5567b2bed412c76cdcaf192af18cb`
+(primary) and `81ee9e087f89eb071444244c4b2c8ca16c83711d89f07236ddfe35f331bc31db`
+(reversed). The independent consumer hashes are
+`10fd772dfd42d4ceaadf61373d543a2da01ec8b5d33f24d7aed26c650527f991`
+(primary) and
+`745f5779f8932aaa96d42230bcd3dea579b828e84a93bb130cff591f002d7087`
+(reversed). The Scala source revision is
+`777528f19a58e794c9954a42f433373472ec57f8`; Java is Temurin `21.0.13`, binary
+SHA-256 `9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`.
+Published `scala3-library_3-3.9.0.jar` and `scala-library-3.9.0.jar` SHA-256
+values are respectively
+`9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba` and
+`b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd`.
+
+### Scala lookup controls
+
+For each orientation, compilation succeeds with the original TASTy sidecar
+present after the corresponding classfile method/constructor entry is removed.
+The matched control removes the same entry, the TASTY class attribute, and the
+sidecar. The actual first Scala diagnostics are:
+
+| Lookup | TASTy-backed | Classfile-only first failure |
+| --- | --- | --- |
+| `Counter(Int)` | accepted | `[E173] Reference Error` |
+| `Counter.get(): Int` | accepted | `[E008] Not Found Error` |
+| `Counter.set(Int): Unit` | accepted | `[E008] Not Found Error` |
+| `Pair.leftValue(): Int` | accepted | `[E008] Not Found Error` |
+| `Pair.rightValue(): Int` | accepted | `[E008] Not Found Error` |
+| `Pair(Counter, Counter)` | accepted | `[E173] Reference Error` |
+| `PairFactory.create/createReversed(Counter, Int): Pair` | accepted | `[E008] Not Found Error` |
+
+In the official `-print-tasty` output, `PairFactory.create` has one `BLOCK`,
+two `PARAM` nodes, a single `VALDEF fresh` at address 74, and direct references
+to method formal address 32, local address 74, and seed formal address 41.
+Scala 3.9's BLOCK stream lists its final Pair expression before the local
+declaration, so target addresses and the decoded initializer are asserted
+separately from source evaluation order. The reversed producer swaps the two
+Pair-constructor reference targets while retaining the formal types and local
+initializer. `-from-tasty` reconstructs all three classes into the
+inspection-only directory.
+
+The negative matrix starts from fresh copies of the original Rust files.
+Removing or moving any one of `Counter.tasty`, `Pair.tasty`, or
+`PairFactory.tasty` fails with Scala's missing `.tasty` loader error;
+truncation fails in the TASTy reader as a broken file; and changing the
+classfile TASTY UUID fails with Scala's out-of-sync error. A dangling local
+`TERMREFdirect` is intentionally lazy: ordinary client signature lookup still
+passes, then official `-decompile` fails in phase `readTasty` with
+`TreeWithoutOwner`. It is recorded at that observed stage rather than treated
+as an eager lookup rejection. Three additional isolated Factory-sidecar copies
+exercise the local body. Repointing the local use at the enclosing BLOCK passes
+signature lookup and fails in `readTasty` with `TreeWithoutOwner`; this
+BLOCK-target probe is an invalid-reference control, not a declaration-owner
+mutation. Changing the
+initializer's `SHAREDTYPE` target from `Counter` to `Pair` passes lookup and
+`-decompile`, then fails in `-from-tasty` code generation with Scala's
+`Unexpected New(...Pair...) reached GenBCode` assertion. Changing the local
+VALDEF type from `Counter` to the valid `Pair` type passes signature lookup,
+`-decompile`, and `-from-tasty`; the decompiled local is explicitly asserted as
+`fresh: example.Pair = new example.Counter(seed)`. This is Scala's observed
+acceptance of a well-formed but semantically inconsistent lazy body annotation,
+not a claimed rejection. The source-bound first-error matrix separately
+rejects a wrong local type during method body typing with `TypeNameNotFound`;
+the pair proof rejects an incorrect constructor owner before TASTy planning.
+Separate source-bound ownership controls preserve the local declaration,
+typed binding, references, and proof plan, then mutate the canonical local
+`SymbolId` owner or its canonical `ScopeId` owner to the valid constructor
+class `SymbolId`. Each test asserts that exact mutation before validation and
+checks the corresponding first `SourceIdentity` failure. This exercises actual
+declaration ownership independently of the malformed BLOCK-target reference.
+
+The wrong-package control emits a separate genuine Rust batch in
+`renamed.example`, leaves the consumer correctly qualified as `example`, and
+fails to resolve `example.PairFactory` with `[E006] Not Found Error`. This
+exercises a producer-package mismatch; it does not manufacture the diagnostic
+by moving the client to an unrelated package. Existing UUID mismatch cases
+cover stale sidecars independently.
+
+Additional isolated signature controls replace only the Factory sidecar with
+a pinned-Scala-generated sidecar linked to the unchanged Rust Factory
+classfile. Wrong formal count, formal type, and result type each fail at
+independent Scala client compilation with `[E007] Type Mismatch Error`. Wrong
+package references fail with `[E006] Not Found Error`. Invalid `get`,
+`leftValue`, Factory `create`, and Pair-constructor descriptors are changed
+only in negative classfile copies; Scala compilation reads the valid sidecars,
+then JDK 21 `-Xverify:all` rejects the incompatible binaries with `VerifyError`
+(`Method does not expect a return value` for `get`/`leftValue`, `Bad local
+variable type` for Factory `create` and Pair constructor). These failures are
+observed in negative copies; the six runtime inputs remain unchanged.
+
+Fresh Rust sessions with renamed package/classes/method/local compile and run
+the matching independent client. Reordered class declarations also compile
+and run. Their producer source SHA-256 values are
+`35d686fd9ca9dbaa2242122c8e26ed31c348dfbb364903257899e6fc7a2cfd3f`
+(renamed) and
+`67745bd2818a9c99315cfd36df19351a9933b1a5946d21c4cf851957de86e26f`
+(reordered); consumer hashes are
+`e40aeca5b9609a7322f9d0b391917c645c3ed55abe7c0f0eeb5427de6182a840`
+(renamed) and the primary consumer hash above (reordered).
+
+The strict opt-in is
+`DOTTY_REQUIRE_SCALA_TASTY_IMMUTABLE_REFERENCE_LOCAL_PAIR_CONSUMER=1` in the
+existing pinned Scala consumer workflow. Required mode fails on absent paths,
+wrong source revision, runtime hash mismatch, missing compiler, or JDK version
+and hash mismatch; its test target is included in the workflow's strict target
+list.
+
+The locally staged compiler distribution SHA-256 was
+`048f38662a47f66dc0d7c5e0d2308c20d0419ab1bf4018ef09a9e3831a13e2c9`. This is
+an observation for this staged build only and is not a pinned compatibility
+value.
+
 Reproduction used the cached Scala 3.9 compiler dependencies and this source
 checkout at the pinned revision:
 

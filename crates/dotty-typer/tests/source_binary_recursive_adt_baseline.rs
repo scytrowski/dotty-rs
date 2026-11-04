@@ -14,6 +14,8 @@ use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
 
 const SOURCE: &str = include_str!("fixtures/source-binary-recursive-adt-3.9.0/Expr.scala");
+const STRUCTURAL_CONTROL_RECEIPTS: &str =
+    include_str!("fixtures/source-binary-recursive-adt-3.9.0/rust-structural-controls.tsv");
 
 #[test]
 fn binary_recursive_adt_roots_are_attempted_in_two_fresh_resolver_sessions() {
@@ -1220,10 +1222,11 @@ fn late_error_after_add_binder_rolls_back_and_original_select_left_retries() {
 
 #[test]
 fn corrupted_reference_product2_identities_reject_then_retry_original_select_left() {
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     enum Fault {
         SwappedSourceProvenance,
         SwappedScopeSelectors,
+        AliasedScopeSelectors,
         ForeignUnapplyOwner,
         ForeignCompanionLink,
         WrongParent,
@@ -1233,12 +1236,14 @@ fn corrupted_reference_product2_identities_reject_then_retry_original_select_lef
     let faults = [
         Fault::SwappedSourceProvenance,
         Fault::SwappedScopeSelectors,
+        Fault::AliasedScopeSelectors,
         Fault::ForeignUnapplyOwner,
         Fault::ForeignCompanionLink,
         Fault::WrongParent,
         Fault::BrokenProductIdentity,
         Fault::ForeignSelectorOwner,
     ];
+    let mut receipts = Vec::new();
     for (offset, fault) in faults.into_iter().enumerate() {
         let source = SourceId::from_index(20770 + offset as u32);
         let (ast, _root, index, mut store, definitions, packages) = setup(source);
@@ -1370,6 +1375,19 @@ fn corrupted_reference_product2_identities_reject_then_retry_original_select_lef
                     .get_mut(scope)
                     .enter(selector_names[1], selectors[0]);
             }
+            Fault::AliasedScopeSelectors => {
+                let scope = index.scope_of(add).unwrap();
+                store.scopes.get_mut(scope).remove(selectors[0]);
+                store.scopes.get_mut(scope).remove(selectors[1]);
+                store
+                    .scopes
+                    .get_mut(scope)
+                    .enter(selector_names[0], selectors[0]);
+                store
+                    .scopes
+                    .get_mut(scope)
+                    .enter(selector_names[1], selectors[0]);
+            }
             Fault::ForeignUnapplyOwner => {
                 store.symbols.get_mut(add_unapply).owner = Some(num_companion_class);
             }
@@ -1408,6 +1426,7 @@ fn corrupted_reference_product2_identities_reject_then_retry_original_select_lef
             )
             .with_resolver(Box::new(resolver(definitions)));
             let before_store = typer.store().checkpoint();
+            let before_store_contents = store_content_projection(typer.store());
             let before_typed = typer.typed_ast().checkpoint();
             let symbols = source_semantic_symbols(&ast, source, &index);
             let before_symbols = symbols
@@ -1449,6 +1468,11 @@ fn corrupted_reference_product2_identities_reject_then_retry_original_select_lef
                 typer.store().checkpoint(),
                 before_store,
                 "{offset}: store rollback"
+            );
+            assert_store_content_projection(
+                &before_store_contents,
+                &store_content_projection(typer.store()),
+                offset,
             );
             assert_eq!(
                 typer.typed_ast().checkpoint(),
@@ -1506,6 +1530,7 @@ fn corrupted_reference_product2_identities_reject_then_retry_original_select_lef
         let rejected_as_expected = match fault {
             Fault::SwappedSourceProvenance
             | Fault::SwappedScopeSelectors
+            | Fault::AliasedScopeSelectors
             | Fault::ForeignSelectorOwner => matches!(
                 error,
                 dotty_typer::TyperError::ExtractorResultMemberNotFound { .. }
@@ -1526,11 +1551,36 @@ fn corrupted_reference_product2_identities_reject_then_retry_original_select_lef
             rejected_as_expected,
             "corruption {offset} must reject through its expected diagnostic: {error:?}"
         );
-        println!("ISSUE2076_CORRUPTED_PRODUCT2\t{offset}\t{error:?}");
+        let method_span = ast
+            .get(method_tree.unwrap())
+            .position
+            .unwrap()
+            .span()
+            .range();
+        let receipt = format!(
+            "{fault:?}\tselectLeft@{}..{}\t{error:?}\trollback=complete,negative_retry=stable",
+            method_span.start(),
+            method_span.end()
+        );
+        println!("ISSUE2079_STRUCTURAL_CONTROL\t{receipt}");
+        receipts.push(receipt);
 
         match fault {
             Fault::SwappedSourceProvenance => {}
             Fault::SwappedScopeSelectors => {
+                let scope = index.scope_of(add).unwrap();
+                store.scopes.get_mut(scope).remove(selectors[0]);
+                store.scopes.get_mut(scope).remove(selectors[1]);
+                store
+                    .scopes
+                    .get_mut(scope)
+                    .enter(selector_names[0], selectors[0]);
+                store
+                    .scopes
+                    .get_mut(scope)
+                    .enter(selector_names[1], selectors[1]);
+            }
+            Fault::AliasedScopeSelectors => {
                 let scope = index.scope_of(add).unwrap();
                 store.scopes.get_mut(scope).remove(selectors[0]);
                 store.scopes.get_mut(scope).remove(selectors[1]);
@@ -1576,6 +1626,15 @@ fn corrupted_reference_product2_identities_reject_then_retry_original_select_lef
                 .expect("restoring authentic selector/extractor metadata retries selectLeft");
         }
     }
+    assert_eq!(receipts.len(), 8);
+    let header = STRUCTURAL_CONTROL_RECEIPTS
+        .lines()
+        .next()
+        .expect("structural control receipt header");
+    assert_eq!(
+        format!("{header}\n{}\n", receipts.join("\n")),
+        STRUCTURAL_CONTROL_RECEIPTS
+    );
 }
 
 #[test]
@@ -1778,6 +1837,31 @@ fn assert_type_ref(store: &SemanticStore, ty: dotty_core::TypeId, expected: dott
         ),
         "{ty:?} is the canonical TypeRef to {expected:?}: {:?}",
         store.types.try_get(ty)
+    );
+}
+
+fn store_content_projection(store: &SemanticStore) -> Vec<(&'static str, String)> {
+    vec![
+        ("symbols", format!("{:?}", store.symbols)),
+        ("types", format!("{:?}", store.types)),
+        ("scopes", format!("{:?}", store.scopes)),
+        ("annotations", format!("{:?}", store.annotations)),
+    ]
+}
+
+fn assert_store_content_projection(
+    before: &[(&'static str, String)],
+    after: &[(&'static str, String)],
+    fault: usize,
+) {
+    let changed = before
+        .iter()
+        .zip(after)
+        .filter_map(|((name, before), (_, after))| (before != after).then_some(*name))
+        .collect::<Vec<_>>();
+    assert!(
+        changed.is_empty(),
+        "{fault}: complete semantic-store state rolls back; changed {changed:?}"
     );
 }
 

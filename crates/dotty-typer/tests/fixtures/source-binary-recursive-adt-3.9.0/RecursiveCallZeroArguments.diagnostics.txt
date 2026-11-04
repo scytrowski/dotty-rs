@@ -1,0 +1,5 @@
+-- [E171] Type Error: RecursiveCallZeroArguments.scala:17:35 -------------------
+17 |      case Add(left, right) => eval() + eval(right)
+   |                               ^^^^^^
+   |missing argument for parameter expr of method eval in object Evaluator: (expr: adt.Expr): Int
+1 error found
