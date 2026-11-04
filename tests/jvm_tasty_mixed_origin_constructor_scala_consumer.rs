@@ -11,7 +11,7 @@ use dotty_tasty::writer::Writer;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "support/command_timing.rs"]
 mod command_timing;
@@ -589,7 +589,6 @@ fn lookup_probes(
     before: &[(String, String)],
     factory_method: &str,
 ) {
-    let lookup_started = Instant::now();
     let cases = [
         (
             "counter-get",
@@ -677,16 +676,11 @@ fn lookup_probes(
     )
     .unwrap();
     let classpath = format!("{}:{}", positive_sidecar_dir.display(), scala.libraries);
-    let positive_started = Instant::now();
     let positive_result = scala.compile_result(
         "lookup-tasty-combined-positive",
         &classpath,
         &positive_out,
         &positive_source,
-    );
-    eprintln!(
-        "LOOKUP_PROBE_TIMING combined-positive elapsed_ms={:.3}",
-        positive_started.elapsed().as_secs_f64() * 1000.0
     );
     assert!(
         positive_result.status.success(),
@@ -741,16 +735,11 @@ fn lookup_probes(
         )
         .unwrap();
         fs::remove_file(classfile_dir.join(class_path.replace(".class", ".tasty"))).unwrap();
-        let classfile_only_started = Instant::now();
         let control = scala.compile_result(
             &format!("lookup-classfile-only-{label}"),
             &format!("{}:{}", classfile_dir.display(), scala.libraries),
             &classfile_out,
             &source,
-        );
-        eprintln!(
-            "LOOKUP_PROBE_TIMING {label} classfile-only elapsed_ms={:.3}",
-            classfile_only_started.elapsed().as_secs_f64() * 1000.0
         );
         assert!(
             !control.status.success(),
@@ -764,10 +753,6 @@ fn lookup_probes(
         eprintln!("TASTY_LOOKUP_ACCEPTED {label}; CLASSFILE_ONLY_FIRST_REJECTION {diagnostic}");
         assert_unchanged(producer, before, "during TASTy lookup probes");
     }
-    eprintln!(
-        "LOOKUP_PROBES_TOTAL elapsed_ms={:.3} positive_members=6 negative_probes=6 scalac_calls=7",
-        lookup_started.elapsed().as_secs_f64() * 1000.0
-    );
 }
 
 fn inspect_original_tasty(
