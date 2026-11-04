@@ -1873,6 +1873,63 @@ fn ordered_two_local_pair_arguments_reuse_initializer_receipts_without_authorizi
 }
 
 #[test]
+fn two_local_pair_rejects_nested_argument_even_when_other_local_is_authenticated() {
+    let nested = TWO_IMMUTABLE_LOCALS_SOURCE.replace(
+        "new Pair(first, second)",
+        "new Pair(new Counter(firstSeed), second)",
+    );
+    with_two_local_proof_session_retaining_typer(
+        &nested,
+        21243,
+        |store,
+         definitions,
+         source_ast,
+         _typed_ast,
+         source_index,
+         _source_typed_index,
+         source_id,
+         _method_tree,
+         _bindings,
+         _other_local_binding,
+         typer,
+         jvm_unit| {
+            let typer = typer.expect("the authentic source session retains its Typer");
+            let source_root = source_ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    matches!(node.kind, TreeKind::PackageDef(_)).then_some(tree)
+                })
+                .expect("fixture retains its package root");
+            let result = dotty::jvm_tasty_cross_class::
+                validate_cross_class_constructor_call_proofs_with_typer(
+                    CrossClassConstructorCallProofInput {
+                        source_id,
+                        source_root,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast: typer.typed_ast(),
+                        source_index,
+                        source_typed_index: typer.source_typed_index(),
+                        jvm_unit,
+                    },
+                    typer,
+                );
+            let error = match result {
+                Ok(_) => panic!("a nested argument cannot borrow the second local receipt"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error,
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                    "two-local Pair arguments must be direct original local Idents"
+                )
+            );
+        },
+    );
+}
+
+#[test]
 fn two_local_initializer_receipt_rejects_stale_and_swapped_typed_edges() {
     with_two_local_proof_session(
         TWO_IMMUTABLE_LOCALS_SOURCE,

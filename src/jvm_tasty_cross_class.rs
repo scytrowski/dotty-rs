@@ -2796,6 +2796,18 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         let mut nested_proofs = Vec::with_capacity(2);
         for (index, typed_outer_argument) in typed_outer_args.iter().copied().enumerate() {
             let source_outer_argument = outer_apply.args[index];
+            if immutable_local_pair.is_some()
+                && !matches!(
+                    source_ast
+                        .try_get(source_outer_argument)
+                        .map(|node| &node.kind),
+                    Some(TreeKind::Ident(_))
+                )
+            {
+                return Err(source_error(
+                    "two-local Pair arguments must be direct original local Idents",
+                ));
+            }
             if matches!(
                 source_ast
                     .try_get(source_outer_argument)
@@ -2902,6 +2914,11 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                     continue;
                 }
                 if let Some(local_pair) = immutable_local_pair.as_ref() {
+                    if !matches!(typed_argument_node.kind, TreeKind::Ident(_)) {
+                        return Err(typed_error(
+                            "two-local Pair arguments must retain direct typed local Idents",
+                        ));
+                    }
                     let target = match store.types.try_get(typed_argument_node.ty) {
                         Some(Type::TermRef {
                             target: TermRefTarget::Symbol(target),
@@ -2971,6 +2988,9 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                         });
                         continue;
                     }
+                    return Err(typed_error(
+                        "each two-local Pair argument must resolve to one of its original local receipts",
+                    ));
                 }
                 let formal = match store.types.try_get(typed_argument_node.ty) {
                     Some(Type::TermRef {
