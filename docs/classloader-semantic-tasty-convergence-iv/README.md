@@ -3,7 +3,7 @@
 ## Verdict
 
 Functional acceptance: **MET** on PR head
-`0651ba9b899c5349f25d76f56cf9550de19ed094`. All four pinned class roots pass
+`016a7a843de900fb45dd7b5274c23f65fce2e93c`. All four pinned class roots pass
 through the same private semantic loader on both required orders and fresh
 stores; the selected `Open` resolver route passes; negative rollback and
 historical compatibility checks pass. Agent tracing: **BLOCKED / UNAVAILABLE**
@@ -144,16 +144,19 @@ closeout report and the workflow path trigger, with no production changes.
 - mandatory JDK 21 gate with `DOTTY_CLASSFILE_REQUIRE_JDK=1` — passed;
 - `git diff --check` — passed.
 
-| Required hosted check | Result | Run |
-| --- | --- | --- |
-| Rust checks (format, frontend boundaries, Clippy, rustdoc, workspace tests, diff) | passed | [job 126515157285](https://github.com/scytrowski/dotty-rs/actions/runs/41812556451/job/126515157285) |
-| Classfile/JVM encoder gate | passed | [job 126515158913](https://github.com/scytrowski/dotty-rs/actions/runs/41812556451/job/126515158913) |
-| Pinned Scala 3.9 consumer and strict TASTy gates | passed | [job 126515155853](https://github.com/scytrowski/dotty-rs/actions/runs/41812556499/job/126515155853) |
+| Required hosted check | Result | Tested PR head | Run |
+| --- | --- | --- | --- |
+| Rust checks (format, frontend boundaries, Clippy, rustdoc, workspace tests, diff) | passed | `0651ba9b899c5349f25d76f56cf9550de19ed094` | [job 126515157285](https://github.com/scytrowski/dotty-rs/actions/runs/41812556451/job/126515157285) |
+| Classfile/JVM encoder gate | passed | `0651ba9b899c5349f25d76f56cf9550de19ed094` | [job 126515158913](https://github.com/scytrowski/dotty-rs/actions/runs/41812556451/job/126515158913) |
+| Pinned Scala 3.9 consumer and strict TASTy gates | passed | `0651ba9b899c5349f25d76f56cf9550de19ed094` | [job 126515155853](https://github.com/scytrowski/dotty-rs/actions/runs/41812556499/job/126515155853) |
+| Rust checks (review-fix evidence rerun) | passed | `016a7a843de900fb45dd7b5274c23f65fce2e93c` | [job 126530617177](https://github.com/scytrowski/dotty-rs/actions/runs/41817093455/job/126530617177) |
+| Classfile/JVM encoder gate (review-fix evidence rerun) | passed | `016a7a843de900fb45dd7b5274c23f65fce2e93c` | [job 126530485872](https://github.com/scytrowski/dotty-rs/actions/runs/41817093455/job/126530485872) |
+| Pinned Scala 3.9 consumer and strict TASTy gates (review-fix evidence rerun) | passed | `016a7a843de900fb45dd7b5274c23f65fce2e93c` | [job 126530657193](https://github.com/scytrowski/dotty-rs/actions/runs/41817142961/job/126530657193) |
 
-The pinned consumer completed its required source-generated secondary-
-constructor rejection step successfully. The current PR is
-[#2114](https://github.com/scytrowski/dotty-rs/pull/2114); all links above are
-for its tested head SHA recorded at the start of this section.
+Both pinned Scala runs completed the required source-generated secondary-
+constructor rejection step successfully. Review-fix SHA `016a7a843de900fb45dd7b5274c23f65fce2e93c` changes this closeout README only;
+the implementation and acceptance tests are unchanged. The current PR is
+[#2114](https://github.com/scytrowski/dotty-rs/pull/2114).
 
 ## Trace provenance
 
