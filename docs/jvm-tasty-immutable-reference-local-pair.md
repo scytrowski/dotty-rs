@@ -258,6 +258,14 @@ The Rust classfiles are major 65, and the validator checks the class-file TASTy
 UUID links against each sidecar header before accepting the batch. The
 contract's bytecode check uses resolved class/method references and decoded
 local instructions; it does not rely on fixed PCs or constant-pool indexes.
-The pinned Scala consumer and independent JDK runtime remain later issue
-gates, as specified by #2073; these Rust hashes do not claim Scala
-interoperability.
+
+The strict pinned Scala 3.9 reader passed for both argument orders through
+`formal_local_pair_pickles_both_original_argument_orders` with
+`DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`. The compiler was staged from source
+revision `777528f19a58e794c9954a42f433373472ec57f8` under Temurin 21.0.13 and
+reported `3.9.0-bin-SNAPSHOT-git-777528f`. For each Rust-produced factory
+sidecar, the test checks Scala decompilation and `-print-tasty`, then uses
+`-from-tasty -release 21` to reconstruct the factory class. This establishes
+the required pinned reader result for primary and reversed argument order; it
+does not claim that Scala compiled or executed a client against the Rust JVM
+classfiles.
