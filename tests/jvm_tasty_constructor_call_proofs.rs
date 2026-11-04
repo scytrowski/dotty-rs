@@ -842,20 +842,21 @@ fn with_two_argument_proof<R>(
             );
 
             let foreign_index = typer.source_typed_index().clone();
-            let foreign_index_result = dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs_with_typer(
-                CrossClassConstructorCallProofInput {
-                    source_id,
-                    source_root: parsed.root,
-                    store: typer.store(),
-                    definitions: &definitions,
-                    source_ast: &parsed.ast,
-                    typed_ast: typer.typed_ast(),
-                    source_index: &source_index,
-                    source_typed_index: &foreign_index,
-                    jvm_unit: &jvm_unit,
-                },
-                &typer,
-            );
+            let foreign_index_result =
+                dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs_with_typer(
+                    CrossClassConstructorCallProofInput {
+                        source_id,
+                        source_root: parsed.root,
+                        store: typer.store(),
+                        definitions: &definitions,
+                        source_ast: &parsed.ast,
+                        typed_ast: typer.typed_ast(),
+                        source_index: &source_index,
+                        source_typed_index: &foreign_index,
+                        jvm_unit: &jvm_unit,
+                    },
+                    &typer,
+                );
             assert_eq!(
                 foreign_index_result.err().unwrap(),
                 dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::TypedBinding(
@@ -871,20 +872,21 @@ fn with_two_argument_proof<R>(
                 panic!("factory source remains the original Block")
             };
             block.stats.push(block.stats[0]);
-            let two_local_result = dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs_with_typer(
-                CrossClassConstructorCallProofInput {
-                    source_id,
-                    source_root: parsed.root,
-                    store: typer.store(),
-                    definitions: &definitions,
-                    source_ast: &two_local_source,
-                    typed_ast: typer.typed_ast(),
-                    source_index: &source_index,
-                    source_typed_index: typer.source_typed_index(),
-                    jvm_unit: &jvm_unit,
-                },
-                &typer,
-            );
+            let two_local_result =
+                dotty::jvm_tasty_cross_class::validate_cross_class_constructor_call_proofs_with_typer(
+                    CrossClassConstructorCallProofInput {
+                        source_id,
+                        source_root: parsed.root,
+                        store: typer.store(),
+                        definitions: &definitions,
+                        source_ast: &two_local_source,
+                        typed_ast: typer.typed_ast(),
+                        source_index: &source_index,
+                        source_typed_index: typer.source_typed_index(),
+                        jvm_unit: &jvm_unit,
+                    },
+                    &typer,
+                );
             assert!(matches!(
                 two_local_result,
                 Err(
@@ -896,7 +898,43 @@ fn with_two_argument_proof<R>(
         }
     }
     assert_eq!(proofs.len(), 1, "one source factory body has one proof");
-    consume(
+    let ownership_probe = proofs[0]
+        .argument_proof()
+        .ordered_pair()
+        .and_then(|pair| {
+            pair.arguments()
+                .iter()
+                .find_map(|argument| argument.local_val())
+        })
+        .map(|local| {
+            let method = proofs[0].method();
+            let method_tree = match source_index.definition_of(method) {
+                Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+                _ => panic!("local proof method retains its original source declaration"),
+            };
+            let binding = typer
+                .typed_local_binding_at(source_id, local.source_declaration())
+                .expect("proof local retains its canonical typed binding");
+            let local_symbol = binding.symbol();
+            let pair_class = typer
+                .store()
+                .symbols
+                .get(proofs[0].constructor())
+                .owner
+                .expect("proof constructor has its canonical class owner");
+            assert_ne!(pair_class, method);
+            assert_ne!(pair_class, local_symbol);
+            (
+                method,
+                method_tree,
+                binding,
+                pair_class,
+                clone_arena(typer.typed_ast()),
+                typer.source_typed_index().clone(),
+                jvm_unit.classes.clone(),
+            )
+        });
+    let result = consume(
         &proofs[0],
         typer.store(),
         &parsed.ast,
@@ -907,7 +945,93 @@ fn with_two_argument_proof<R>(
         parsed.root,
         &definitions,
         &jvm_unit,
-    )
+    );
+
+    drop(proofs);
+    drop(jvm_unit);
+    drop(typer);
+
+    if let Some((
+        method,
+        method_tree,
+        binding,
+        pair_class,
+        typed_ast,
+        source_typed_index,
+        classes,
+    )) = ownership_probe
+    {
+        let local_symbol = binding.symbol();
+        let local_scope = binding.scope();
+        assert_eq!(store.symbols.get(local_symbol).owner, Some(method));
+        assert_eq!(store.scopes.get(local_scope).owner, Some(method));
+
+        // Keep the canonical source/typed roots and valid references intact;
+        // corrupt only each owner edge before the authoritative proof check.
+        let original_symbol_owner = store.symbols.get(local_symbol).owner;
+        store.symbols.get_mut(local_symbol).owner = Some(pair_class);
+        assert_eq!(store.symbols.get(local_symbol).owner, Some(pair_class));
+        let wrong_symbol_owner_unit = JvmCompilationUnit {
+            store: &store,
+            typed_ast: &typed_ast,
+            classes: classes.clone(),
+        };
+        let wrong_symbol_owner =
+            validate_immutable_local_initialization_proof(ImmutableLocalInitializationProofInput {
+                source_id,
+                method_tree,
+                store: &store,
+                definitions: &definitions,
+                source_ast: &parsed.ast,
+                typed_ast: &typed_ast,
+                source_index: &source_index,
+                source_typed_index: &source_typed_index,
+                local_binding: Some(binding),
+                jvm_unit: &wrong_symbol_owner_unit,
+            });
+        assert_eq!(
+            wrong_symbol_owner
+                .err()
+                .expect("wrong symbol owner is rejected"),
+            dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                "local must be the original immutable method-owned local"
+            )
+        );
+        store.symbols.get_mut(local_symbol).owner = original_symbol_owner;
+
+        let original_scope_owner = store.scopes.get(local_scope).owner;
+        store.scopes.get_mut(local_scope).owner = Some(pair_class);
+        assert_eq!(store.scopes.get(local_scope).owner, Some(pair_class));
+        let wrong_scope_owner_unit = JvmCompilationUnit {
+            store: &store,
+            typed_ast: &typed_ast,
+            classes,
+        };
+        let wrong_scope_owner =
+            validate_immutable_local_initialization_proof(ImmutableLocalInitializationProofInput {
+                source_id,
+                method_tree,
+                store: &store,
+                definitions: &definitions,
+                source_ast: &parsed.ast,
+                typed_ast: &typed_ast,
+                source_index: &source_index,
+                source_typed_index: &source_typed_index,
+                local_binding: Some(binding),
+                jvm_unit: &wrong_scope_owner_unit,
+            });
+        assert_eq!(
+            wrong_scope_owner
+                .err()
+                .expect("wrong scope owner is rejected"),
+            dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                "local must occupy its exact single-entry method-owned Block scope"
+            )
+        );
+        store.scopes.get_mut(local_scope).owner = original_scope_owner;
+    }
+
+    result
 }
 
 struct PairReceiptContext<'a> {
