@@ -84,11 +84,23 @@ fn record(category: &str, operation: &str, elapsed_us: u128, outcome: &str) {
         return;
     };
     let operation = safe_operation(operation);
+    let _ = append_record(&path, category, &operation, elapsed_us, outcome);
+}
+
+fn append_record(
+    path: impl AsRef<std::path::Path>,
+    category: &str,
+    operation: &str,
+    elapsed_us: u128,
+    outcome: &str,
+) -> io::Result<()> {
+    // Format before opening the shared file so the lock protects one complete row.
+    let mut row = Vec::new();
+    write_event(&mut row, category, operation, elapsed_us, outcome)?;
     // Rows contain only normalized category, operation, duration, and outcome.
-    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
-        return;
-    };
-    let _ = write_event(&mut file, category, &operation, elapsed_us, outcome);
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.lock()?;
+    file.write_all(&row)
 }
 
 fn write_event(
@@ -107,6 +119,10 @@ fn write_event(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::fs::{read_to_string, remove_file};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     #[test]
     fn timing_identifiers_are_safe_for_json_strings() {
         for value in ["scalac", "java", "javap", "sha256sum", "git"] {
@@ -134,5 +150,69 @@ mod tests {
             String::from_utf8(row).unwrap(),
             "{\"event\":\"execute\",\"category\":\"scalac\",\"operation\":\"negative__tmp_source_scala\",\"elapsed_ms\":1.234,\"status\":\"failure\"}\n"
         );
+    }
+
+    #[test]
+    fn concurrent_appends_preserve_every_jsonl_record() {
+        const WRITERS: usize = 8;
+        const EVENTS_PER_WRITER: usize = 500;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!(
+                "command-timing-{}-{unique}.jsonl",
+                std::process::id()
+            ));
+
+        let expected = (0..WRITERS)
+            .flat_map(|writer| {
+                (0..EVENTS_PER_WRITER).map(move |event| {
+                    let operation = format!("writer-{writer}-event-{event}");
+                    let mut row = Vec::new();
+                    super::write_event(&mut row, "scalac", &operation, 1234, "success").unwrap();
+                    String::from_utf8(row).unwrap()
+                })
+            })
+            .collect::<HashSet<_>>();
+        let handles = (0..WRITERS)
+            .map(|writer| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for event in 0..EVENTS_PER_WRITER {
+                        super::append_record(
+                            &path,
+                            "scalac",
+                            &format!("writer-{writer}-event-{event}"),
+                            1234,
+                            "success",
+                        )
+                        .unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let contents = read_to_string(&path).unwrap();
+        remove_file(path).unwrap();
+        let mut remaining = expected;
+        let mut count = 0;
+        for row in contents.lines() {
+            assert!(
+                remaining.remove(&format!("{row}\n")),
+                "unexpected or damaged row: {row}"
+            );
+            count += 1;
+        }
+        assert_eq!(count, WRITERS * EVENTS_PER_WRITER);
+        assert!(remaining.is_empty());
     }
 }
