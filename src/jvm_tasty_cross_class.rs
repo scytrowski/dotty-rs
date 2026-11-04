@@ -114,6 +114,8 @@ pub enum ConstructorArgumentProofKind {
     PlannedCall,
     /// The outer constructor receives one initialized immutable local val.
     LocalVal,
+    /// The outer constructor receives two initialized immutable local vals.
+    LocalValPair,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +128,10 @@ struct FormalConstructorArgumentProof {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// These proof variants are intentionally Copy: validation returns immutable
+// identity receipts to read-only consumers without allocating or transferring
+// the borrowed session stores.
+#[allow(clippy::large_enum_variant)]
 enum ConstructorArgumentProofShape {
     Formal(FormalConstructorArgumentProof),
     NestedNew(NestedConstructorArgumentProof),
@@ -143,6 +149,7 @@ struct OrderedConstructorArgumentPairProof {
     constructor_formals: [SymbolId; 2],
     constructor_formal_types: [TypeId; 2],
     arguments: [OrderedConstructorArgumentProof; 2],
+    local_initializers: Option<[ImmutableLocalInitializerReceipt; 2]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,7 +247,7 @@ pub struct ImmutableLocalInitializerPairProofInput<'session> {
     pub jvm_unit: &'session JvmCompilationUnit<'session>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ImmutableLocalInitializerReceipt {
     declaration: ImmutableLocalDeclarationCore,
     seed_formal: SymbolId,
@@ -248,6 +255,45 @@ struct ImmutableLocalInitializerReceipt {
     initializer_result_type: TypeId,
     constructor_formal: SymbolId,
     constructor_formal_type: TypeId,
+}
+
+fn immutable_local_argument_from_initializer(
+    source_block: TreeId<Untyped>,
+    typed_block: TreeId<Typed>,
+    receipt: ImmutableLocalInitializerReceipt,
+    source_use: TreeId<Untyped>,
+    typed_use: TreeId<Typed>,
+    result_type: TypeId,
+) -> ImmutableLocalArgumentProof {
+    let declaration = receipt.declaration;
+    ImmutableLocalArgumentProof {
+        source_block,
+        source_declaration: declaration.declaration,
+        source_initializer: declaration.initializer,
+        source_initializer_select: declaration.source_select,
+        source_initializer_new: declaration.source_new,
+        source_seed_argument: declaration.source_argument,
+        source_use,
+        typed_block,
+        typed_declaration: declaration.typed_declaration,
+        typed_initializer: declaration.typed_initializer,
+        typed_initializer_select: declaration.typed_select,
+        typed_initializer_new: declaration.typed_new,
+        typed_seed_argument: declaration.typed_argument,
+        typed_use,
+        symbol: declaration.symbol,
+        scope: declaration.scope,
+        constructor: declaration.constructor,
+        local_type: declaration.local_type,
+        result_type,
+        seed_formal: receipt.seed_formal,
+        seed_formal_type: receipt.seed_formal_type,
+        source_type_tree: declaration.source_type_tree,
+        typed_type_tree: declaration.typed_type_tree,
+        initializer_result_type: receipt.initializer_result_type,
+        constructor_formal: receipt.constructor_formal,
+        constructor_formal_type: receipt.constructor_formal_type,
+    }
 }
 
 /// Opaque all-or-error proof of exactly two original immutable Counter
@@ -429,7 +475,7 @@ pub struct ValidatedImmutableLocalInitializationProof<'session> {
 /// initializer receipts. This intentionally records identities borrowed from
 /// the one canonical frontend session; it does not authorize a constructor
 /// argument origin or producer plan.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ImmutableLocalDeclarationCore {
     declaration: TreeId<Untyped>,
     typed_declaration: TreeId<Typed>,
@@ -886,6 +932,10 @@ impl ConstructorArgumentProof {
                         OrderedConstructorArgumentOrigin::LocalVal(_),
                         OrderedConstructorArgumentOrigin::Formal(_),
                     ) => ConstructorArgumentProofKind::FormalLocalPair,
+                    (
+                        OrderedConstructorArgumentOrigin::LocalVal(_),
+                        OrderedConstructorArgumentOrigin::LocalVal(_),
+                    ) => ConstructorArgumentProofKind::LocalValPair,
                     _ => ConstructorArgumentProofKind::FormalNestedPair,
                 }
             }
@@ -1165,6 +1215,21 @@ impl OrderedConstructorArgumentPairProofView {
                 proof: self.proof.arguments[1],
             },
         ]
+    }
+    /// Original immutable-local initializer receipts in source declaration order.
+    /// This remains distinct from `arguments()`, whose positions may repeat an alias.
+    pub const fn local_initializers(self) -> Option<[ImmutableLocalInitializerReceiptView; 2]> {
+        match self.proof.local_initializers {
+            Some(receipts) => Some([
+                ImmutableLocalInitializerReceiptView {
+                    receipt: receipts[0],
+                },
+                ImmutableLocalInitializerReceiptView {
+                    receipt: receipts[1],
+                },
+            ]),
+            None => None,
+        }
     }
 }
 
@@ -1999,31 +2064,32 @@ fn validate_two_argument_constructor_call_candidate<'session>(
     let (source_apply_tree, source_block) =
         match source_ast.try_get(source_rhs).map(|node| &node.kind) {
             Some(TreeKind::Apply(_)) => (source_rhs, None),
-            Some(TreeKind::Block(block)) if block.stats.len() == 1 => (block.expr, Some(block)),
+            Some(TreeKind::Block(block)) if matches!(block.stats.len(), 1 | 2) => {
+                (block.expr, Some(block))
+            }
             _ => {
                 return Err(source_error(
-                    "factory body must be a direct Apply or one-local Block",
+                    "factory body must be a direct Apply or a one- or two-local Block",
                 ));
             }
         };
-    let immutable_local = if let Some(block) = source_block {
-        let [declaration] = block.stats.as_slice() else {
-            return Err(source_error(
-                "local Pair call block must contain exactly one declaration",
-            ));
-        };
+    let typer_for_locals = if source_block.is_some() {
+        Some(typer.ok_or_else(|| {
+            typed_error("local Pair call requires the original Typer binding resolver")
+        })?)
+    } else {
+        None
+    };
+    let immutable_local = if let Some(block) = source_block.filter(|block| block.stats.len() == 1) {
+        let declaration = block.stats[0];
         if !matches!(
-            source_ast.try_get(*declaration).map(|node| &node.kind),
+            source_ast.try_get(declaration).map(|node| &node.kind),
             Some(TreeKind::ValDef(_))
         ) {
             return Err(source_error(
                 "local Pair call block must contain one val declaration",
             ));
         }
-        let typer = typer.ok_or_else(|| {
-            typed_error("local Pair call requires the original Typer binding resolver")
-        })?;
-        let local_binding = typer.typed_local_binding_at(source_id, *declaration);
         Some(validate_immutable_local_initialization_proof(
             ImmutableLocalInitializationProofInput {
                 source_id,
@@ -2034,13 +2100,49 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                 typed_ast,
                 source_index,
                 source_typed_index,
-                local_binding,
+                local_binding: typer_for_locals
+                    .ok_or_else(|| typed_error("one-local Pair call requires its original Typer"))?
+                    .typed_local_binding_at(source_id, declaration),
                 jvm_unit,
             },
         )?)
     } else {
         None
     };
+    let immutable_local_pair =
+        if let Some(block) = source_block.filter(|block| block.stats.len() == 2) {
+            if block.stats.iter().any(|declaration| {
+                !matches!(
+                    source_ast.try_get(*declaration).map(|node| &node.kind),
+                    Some(TreeKind::ValDef(_))
+                )
+            }) {
+                return Err(source_error(
+                    "two-local Pair call block must contain exactly two val declarations",
+                ));
+            }
+            let typer = typer_for_locals
+                .ok_or_else(|| typed_error("two-local Pair call requires its original Typer"))?;
+            Some(validate_immutable_local_initializer_pair_proof(
+                ImmutableLocalInitializerPairProofInput {
+                    source_id,
+                    method_tree,
+                    store,
+                    definitions,
+                    source_ast,
+                    typed_ast,
+                    source_index,
+                    source_typed_index,
+                    local_bindings: [
+                        typer.typed_local_binding_at(source_id, block.stats[0]),
+                        typer.typed_local_binding_at(source_id, block.stats[1]),
+                    ],
+                    jvm_unit,
+                },
+            )?)
+        } else {
+            None
+        };
     let TreeKind::Apply(outer_apply) = &source_ast
         .try_get(source_apply_tree)
         .ok_or_else(|| source_error("factory method RHS is stale"))?
@@ -2714,6 +2816,18 @@ fn validate_two_argument_constructor_call_candidate<'session>(
         let mut nested_proofs = Vec::with_capacity(2);
         for (index, typed_outer_argument) in typed_outer_args.iter().copied().enumerate() {
             let source_outer_argument = outer_apply.args[index];
+            if immutable_local_pair.is_some()
+                && !matches!(
+                    source_ast
+                        .try_get(source_outer_argument)
+                        .map(|node| &node.kind),
+                    Some(TreeKind::Ident(_))
+                )
+            {
+                return Err(source_error(
+                    "two-local Pair arguments must be direct original local Idents",
+                ));
+            }
             if matches!(
                 source_ast
                     .try_get(source_outer_argument)
@@ -2818,6 +2932,85 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                         origin: OrderedConstructorArgumentOrigin::LocalVal(proof),
                     });
                     continue;
+                }
+                if let Some(local_pair) = immutable_local_pair.as_ref() {
+                    if !matches!(typed_argument_node.kind, TreeKind::Ident(_)) {
+                        return Err(typed_error(
+                            "two-local Pair arguments must retain direct typed local Idents",
+                        ));
+                    }
+                    let target = match store.types.try_get(typed_argument_node.ty) {
+                        Some(Type::TermRef {
+                            target: TermRefTarget::Symbol(target),
+                            ..
+                        }) => *target,
+                        _ => {
+                            return Err(typed_error(
+                                "local Pair argument must retain its exact local TermRef",
+                            ));
+                        }
+                    };
+                    if let Some(receipt) = local_pair
+                        .initializers
+                        .iter()
+                        .copied()
+                        .find(|receipt| receipt.declaration.symbol == target)
+                    {
+                        let TreeKind::Ident(local_ident) = &source_ast
+                            .try_get(source_outer_argument)
+                            .ok_or_else(|| source_error("local Pair use is stale"))?
+                            .kind
+                        else {
+                            return Err(source_error("local Pair argument must be an Ident"));
+                        };
+                        let local_name = store.symbols.get(receipt.declaration.symbol).name;
+                        if store.names.resolve(local_ident.name.text())
+                            != store.names.resolve(local_name.text())
+                            || store.symbols.get(receipt.declaration.symbol).owner != Some(method)
+                            || store.symbols.get(receipt.declaration.symbol).info
+                                != SymbolInfo::Complete(receipt.declaration.local_type)
+                        {
+                            return Err(typed_error(
+                                "ordered local Pair argument must retain its exact initialized local identity and type",
+                            ));
+                        }
+                        if source_typed_index.get(source_id, source_outer_argument)
+                            != Some(typed_outer_argument)
+                        {
+                            return Err(typed_error(
+                                "local Pair argument must retain its exact source-to-typed binding",
+                            ));
+                        }
+                        require_matching_source_typed_positions(
+                            source_ast,
+                            typed_ast,
+                            source_id,
+                            source_outer_argument,
+                            typed_outer_argument,
+                            if index == 0 {
+                                "first initialized local Pair argument"
+                            } else {
+                                "second initialized local Pair argument"
+                            },
+                        )?;
+                        let proof = immutable_local_argument_from_initializer(
+                            local_pair.source_block,
+                            local_pair.typed_block,
+                            receipt,
+                            source_outer_argument,
+                            typed_outer_argument,
+                            typed_argument_node.ty,
+                        );
+                        ordered_argument_proofs.push(OrderedConstructorArgumentProof {
+                            source_argument: source_outer_argument,
+                            typed_argument: typed_outer_argument,
+                            origin: OrderedConstructorArgumentOrigin::LocalVal(proof),
+                        });
+                        continue;
+                    }
+                    return Err(typed_error(
+                        "each two-local Pair argument must resolve to one of its original local receipts",
+                    ));
                 }
                 let formal = match store.types.try_get(typed_argument_node.ty) {
                     Some(Type::TermRef {
@@ -3426,6 +3619,7 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                     constructor_formals: target_formals,
                     constructor_formal_types: pair_formal_types,
                     arguments: ordered_argument_proofs,
+                    local_initializers: immutable_local_pair.map(|proof| proof.initializers),
                 },
             ),
         },

@@ -50,18 +50,23 @@ const TWO_IMMUTABLE_REFERENCE_LOCALS_BATCH: &str =
 
 #[test]
 fn two_immutable_reference_locals_record_first_paired_plan_error_without_bypassing_it() {
+    let mut callback_reached = false;
     let error = with_paired_jvm_tasty_batch_plan(
         TWO_IMMUTABLE_REFERENCE_LOCALS_BATCH,
         "TwoLocals.scala",
         SourceId::from_index(21221),
-        |_| (),
+        |_| callback_reached = true,
     )
-    .expect_err("the audit records the existing paired-plan boundary");
+    .expect_err("proof construction alone must not authorize paired output");
+    assert!(
+        !callback_reached,
+        "unsupported body cannot reach output callback"
+    );
     let observed = format!("{error:?}");
     eprintln!("TWO_IMMUTABLE_LOCALS_PAIRED_PLAN_FIRST_ERROR {observed}");
     assert!(
-        observed.contains("factory body must be a direct Apply or one-local Block"),
-        "the existing exact guard is the first observed paired-plan error: {observed}"
+        observed.contains("TastyPlan(Unsupported { feature: BodyExpression"),
+        "LocalVal+LocalVal proof must remain outside paired output support: {observed}"
     );
 }
 
@@ -143,56 +148,55 @@ fn two_immutable_reference_locals_variations_record_first_observed_rejection() {
         reason_prefix: &'static str,
         class_and_declaration: Option<(usize, usize)>,
     }
-    let identity_proof_rejection =
-        "SourceShape(\"factory body must be a direct Apply or one-local Block\")";
+    let body_expression_rejection = "TastyPlan(Unsupported { feature: BodyExpression";
     let cases = [
         ExpectedFailure {
             label: "renamed",
             source: renamed,
-            phase: "cross-class constructor-call identity proof",
-            reason_prefix: identity_proof_rejection,
-            class_and_declaration: None,
+            phase: "JVM/TASTy cross-contract validation",
+            reason_prefix: body_expression_rejection,
+            class_and_declaration: Some((2, 74)),
         },
         ExpectedFailure {
             label: "reordered declarations",
             source: reordered,
-            phase: "cross-class constructor-call identity proof",
-            reason_prefix: identity_proof_rejection,
-            class_and_declaration: None,
+            phase: "JVM/TASTy cross-contract validation",
+            reason_prefix: body_expression_rejection,
+            class_and_declaration: Some((2, 74)),
         },
         ExpectedFailure {
             label: "reversed Pair arguments",
             source: reversed_pair_args,
-            phase: "cross-class constructor-call identity proof",
-            reason_prefix: identity_proof_rejection,
-            class_and_declaration: None,
+            phase: "JVM/TASTy cross-contract validation",
+            reason_prefix: body_expression_rejection,
+            class_and_declaration: Some((2, 74)),
         },
         ExpectedFailure {
             label: "alias Pair arguments",
             source: aliased_pair_args,
-            phase: "cross-class constructor-call identity proof",
-            reason_prefix: identity_proof_rejection,
-            class_and_declaration: None,
+            phase: "JVM/TASTy cross-contract validation",
+            reason_prefix: body_expression_rejection,
+            class_and_declaration: Some((2, 74)),
         },
         ExpectedFailure {
             label: "swapped initializer formals",
             source: swapped_initializer_args,
             phase: "cross-class constructor-call identity proof",
-            reason_prefix: identity_proof_rejection,
+            reason_prefix: "SourceShape(\"initializer must use the original seed formal\")",
             class_and_declaration: None,
         },
         ExpectedFailure {
             label: "third local",
             source: third_local,
             phase: "cross-class constructor-call identity proof",
-            reason_prefix: identity_proof_rejection,
+            reason_prefix: "SourceShape(\"factory body must be a direct Apply or a one- or two-local Block\")",
             class_and_declaration: None,
         },
         ExpectedFailure {
             label: "mutable local",
             source: mutable_local,
             phase: "cross-class constructor-call identity proof",
-            reason_prefix: identity_proof_rejection,
+            reason_prefix: "SourceIdentity(\"local must be the original immutable method-owned local\")",
             class_and_declaration: None,
         },
         ExpectedFailure {
@@ -241,21 +245,21 @@ fn two_immutable_reference_locals_variations_record_first_observed_rejection() {
             label: "helper initializer",
             source: helper_initializer,
             phase: "cross-class constructor-call identity proof",
-            reason_prefix: identity_proof_rejection,
+            reason_prefix: "SourceShape(\"factory body must be a direct Apply or a one- or two-local Block\")",
             class_and_declaration: None,
         },
         ExpectedFailure {
             label: "conditional initializer",
             source: conditional_initializer,
             phase: "cross-class constructor-call identity proof",
-            reason_prefix: identity_proof_rejection,
+            reason_prefix: "SourceShape(\"local initializer must be the original direct constructor Apply\")",
             class_and_declaration: None,
         },
         ExpectedFailure {
             label: "nested initializer",
             source: nested_initializer,
             phase: "cross-class constructor-call identity proof",
-            reason_prefix: identity_proof_rejection,
+            reason_prefix: "SourceShape(\"initializer argument must be the original seed Ident\")",
             class_and_declaration: None,
         },
         ExpectedFailure {
@@ -383,7 +387,7 @@ fn immutable_reference_local_pair_source_variation_first_error_matrix() {
         ),
         (
             "two locals",
-            "factory body must be a direct Apply or one-local Block",
+            "factory signature must preserve its two canonical Int formals",
             IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH.replace(
                 "    val fresh: Counter = new Counter(seed)",
                 "    val extra: Counter = new Counter(seed)\n    val fresh: Counter = new Counter(seed)",

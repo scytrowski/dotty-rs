@@ -58,10 +58,32 @@ fn with_two_local_proof_session<R>(
         dotty_core::TreeId<dotty_core::ast::Untyped>,
         [TypedLocalBinding; 2],
         Option<TypedLocalBinding>,
+        Option<&SourceTyper<'session>>,
         &JvmCompilationUnit<'session>,
     ) -> R,
 ) -> R {
-    with_two_local_proof_session_mutating(source, source_number, |_, _| {}, consume)
+    with_two_local_proof_session_internal(source, source_number, |_, _| {}, false, consume)
+}
+
+fn with_two_local_proof_session_retaining_typer<R>(
+    source: &str,
+    source_number: u32,
+    consume: impl for<'session> FnOnce(
+        &SemanticStore,
+        &Definitions,
+        &AstArena<dotty_core::ast::Untyped>,
+        &dotty_core::ast::TypedAst,
+        &dotty_core::SourceSemanticIndex,
+        &dotty_core::SourceTypedIndex,
+        SourceId,
+        dotty_core::TreeId<dotty_core::ast::Untyped>,
+        [TypedLocalBinding; 2],
+        Option<TypedLocalBinding>,
+        Option<&SourceTyper<'session>>,
+        &JvmCompilationUnit<'session>,
+    ) -> R,
+) -> R {
+    with_two_local_proof_session_internal(source, source_number, |_, _| {}, true, consume)
 }
 
 fn with_two_local_proof_session_mutating<R>(
@@ -79,6 +101,30 @@ fn with_two_local_proof_session_mutating<R>(
         dotty_core::TreeId<dotty_core::ast::Untyped>,
         [TypedLocalBinding; 2],
         Option<TypedLocalBinding>,
+        Option<&SourceTyper<'session>>,
+        &JvmCompilationUnit<'session>,
+    ) -> R,
+) -> R {
+    with_two_local_proof_session_internal(source, source_number, mutate_store, false, consume)
+}
+
+fn with_two_local_proof_session_internal<R>(
+    source: &str,
+    source_number: u32,
+    mutate_store: impl FnOnce(&mut SemanticStore, [TypedLocalBinding; 2]),
+    retain_typer: bool,
+    consume: impl for<'session> FnOnce(
+        &SemanticStore,
+        &Definitions,
+        &AstArena<dotty_core::ast::Untyped>,
+        &dotty_core::ast::TypedAst,
+        &dotty_core::SourceSemanticIndex,
+        &dotty_core::SourceTypedIndex,
+        SourceId,
+        dotty_core::TreeId<dotty_core::ast::Untyped>,
+        [TypedLocalBinding; 2],
+        Option<TypedLocalBinding>,
+        Option<&SourceTyper<'session>>,
         &JvmCompilationUnit<'session>,
     ) -> R,
 ) -> R {
@@ -330,27 +376,50 @@ fn with_two_local_proof_session_mutating<R>(
     };
     metadata_check.metadata(&definitions).unwrap();
     drop(metadata_check);
-    drop(typer);
-    mutate_store(&mut store, local_bindings);
-    let jvm_unit = JvmCompilationUnit {
-        store: &store,
-        typed_ast: &typed_ast,
-        classes,
-    };
     let _ = typed_body;
-    consume(
-        &store,
-        &definitions,
-        &parsed.ast,
-        &typed_ast,
-        &source_index,
-        &source_typed_index,
-        source_id,
-        method_tree,
-        local_bindings,
-        other_local_binding,
-        &jvm_unit,
-    )
+    if retain_typer {
+        let jvm_unit = JvmCompilationUnit {
+            store: typer.store(),
+            typed_ast: typer.typed_ast(),
+            classes,
+        };
+        consume(
+            typer.store(),
+            &definitions,
+            &parsed.ast,
+            &typed_ast,
+            &source_index,
+            &source_typed_index,
+            source_id,
+            method_tree,
+            local_bindings,
+            other_local_binding,
+            Some(&typer),
+            &jvm_unit,
+        )
+    } else {
+        drop(typer);
+        mutate_store(&mut store, local_bindings);
+        let jvm_unit = JvmCompilationUnit {
+            store: &store,
+            typed_ast: &typed_ast,
+            classes,
+        };
+        consume(
+            &store,
+            &definitions,
+            &parsed.ast,
+            &typed_ast,
+            &source_index,
+            &source_typed_index,
+            source_id,
+            method_tree,
+            local_bindings,
+            other_local_binding,
+            None,
+            &jvm_unit,
+        )
+    }
 }
 
 fn assert_generic_proof(source: &str, source_number: u32, expected_descriptor: &str) {
@@ -1205,8 +1274,8 @@ fn with_two_argument_proof<R>(
             assert!(matches!(
                 two_local_result,
                 Err(
-                    dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
-                        _
+                    dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SemanticIdentity(
+                        "factory signature must preserve its two canonical Int formals"
                     )
                 )
             ));
@@ -1596,6 +1665,7 @@ fn two_original_immutable_local_initializers_prove_atomically_in_one_block() {
              method_tree,
              bindings,
              _other_local_binding,
+             _typer,
              jvm_unit| {
                 let proof = validate_immutable_local_initializer_pair_proof(
                     ImmutableLocalInitializerPairProofInput {
@@ -1695,12 +1765,179 @@ fn two_original_immutable_local_initializers_prove_atomically_in_one_block() {
     assert!(
         matches!(
             paired_plan_error,
-            PairedPlanError::BatchUnit {
-                phase: "cross-class constructor-call identity proof",
+            PairedPlanError::BatchClass {
+                phase: "JVM/TASTy cross-contract validation",
+                ref reason,
                 ..
-            }
+            } if format!("{reason:?}").contains("Unsupported { feature: BodyExpression")
         ),
         "paired planning retains its existing rejection gate: {paired_plan_error:?}"
+    );
+}
+
+#[test]
+fn ordered_two_local_pair_arguments_reuse_initializer_receipts_without_authorizing_output() {
+    let aliased =
+        TWO_IMMUTABLE_LOCALS_SOURCE.replace("new Pair(first, second)", "new Pair(first, first)");
+    let cases = [
+        (TWO_IMMUTABLE_LOCALS_SOURCE, 21240, [0usize, 1usize]),
+        (
+            TWO_IMMUTABLE_LOCALS_REVERSED_SOURCE,
+            21241,
+            [1usize, 0usize],
+        ),
+        (aliased.as_str(), 21242, [0usize, 0usize]),
+    ];
+    let mut normalized = Vec::new();
+    for (source, source_number, expected_positions) in cases {
+        with_two_local_proof_session_retaining_typer(
+            source,
+            source_number,
+            |store,
+             definitions,
+             source_ast,
+             _typed_ast,
+             source_index,
+             _source_typed_index,
+             source_id,
+             method_tree,
+             bindings,
+             _other_local_binding,
+             typer,
+             jvm_unit| {
+                let typer = typer.expect("unmodified session retains its original Typer");
+                let source_root = source_ast
+                    .iter()
+                    .find_map(|(tree, node)| {
+                        matches!(node.kind, TreeKind::PackageDef(_)).then_some(tree)
+                    })
+                    .expect("fixture retains its original package root");
+                let proofs = dotty::jvm_tasty_cross_class::
+                    validate_cross_class_constructor_call_proofs_with_typer(
+                        CrossClassConstructorCallProofInput {
+                            source_id,
+                            source_root,
+                            store,
+                            definitions,
+                            source_ast,
+                            typed_ast: typer.typed_ast(),
+                            source_index,
+                            source_typed_index: typer.source_typed_index(),
+                            jvm_unit,
+                        },
+                        typer,
+                    )
+                    .unwrap();
+                let method = source_index.symbol_at(source_id, method_tree).unwrap();
+                let proof = proofs
+                    .iter()
+                    .find(|proof| proof.method() == method)
+                    .expect("the original factory method has a proof");
+                let argument_proof = proof.argument_proof();
+                assert_eq!(
+                    argument_proof.kind(),
+                    dotty::jvm_tasty_cross_class::ConstructorArgumentProofKind::LocalValPair
+                );
+                let pair = argument_proof
+                    .ordered_pair()
+                    .expect("both local arguments retain ordered receipts");
+                let arguments = pair.arguments();
+                let local_symbols = [bindings[0].symbol(), bindings[1].symbol()];
+                let initializer_symbols = pair
+                    .local_initializers()
+                    .expect("the pair proof retains both initializer receipts")
+                    .map(|receipt| receipt.symbol());
+                assert_eq!(initializer_symbols, local_symbols);
+                let initializer_positions = initializer_symbols.map(|symbol| {
+                    local_symbols
+                        .iter()
+                        .position(|candidate| *candidate == symbol)
+                        .expect("initializer receipt is one of the original local declarations")
+                });
+                assert_eq!(initializer_positions, [0, 1]);
+                let actual = arguments.map(|argument| {
+                    argument
+                        .local_val()
+                        .expect("each Pair position is an initialized local")
+                        .symbol()
+                });
+                assert_eq!(actual, expected_positions.map(|index| local_symbols[index]));
+                let actual_positions = actual.map(|symbol| {
+                    local_symbols
+                        .iter()
+                        .position(|candidate| *candidate == symbol)
+                        .expect("argument target is one of the original local symbols")
+                });
+                assert_eq!(actual_positions, expected_positions);
+                assert!(local_symbols.contains(&actual[0]));
+                assert!(local_symbols.contains(&actual[1]));
+                assert!(!local_symbols.contains(&pair.constructor_formals()[0]));
+                assert!(!local_symbols.contains(&pair.constructor_formals()[1]));
+                assert_ne!(pair.constructor_formals()[0], pair.constructor_formals()[1]);
+                assert!(arguments.iter().all(|argument| {
+                    argument.formal().is_none() && argument.nested_new().is_none()
+                }));
+                normalized.push(actual_positions);
+            },
+        );
+    }
+    assert_eq!(normalized, [[0, 1], [1, 0], [0, 0]]);
+}
+
+#[test]
+fn two_local_pair_rejects_nested_argument_even_when_other_local_is_authenticated() {
+    let nested = TWO_IMMUTABLE_LOCALS_SOURCE.replace(
+        "new Pair(first, second)",
+        "new Pair(new Counter(firstSeed), second)",
+    );
+    with_two_local_proof_session_retaining_typer(
+        &nested,
+        21243,
+        |store,
+         definitions,
+         source_ast,
+         _typed_ast,
+         source_index,
+         _source_typed_index,
+         source_id,
+         _method_tree,
+         _bindings,
+         _other_local_binding,
+         typer,
+         jvm_unit| {
+            let typer = typer.expect("the authentic source session retains its Typer");
+            let source_root = source_ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    matches!(node.kind, TreeKind::PackageDef(_)).then_some(tree)
+                })
+                .expect("fixture retains its package root");
+            let result = dotty::jvm_tasty_cross_class::
+                validate_cross_class_constructor_call_proofs_with_typer(
+                    CrossClassConstructorCallProofInput {
+                        source_id,
+                        source_root,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast: typer.typed_ast(),
+                        source_index,
+                        source_typed_index: typer.source_typed_index(),
+                        jvm_unit,
+                    },
+                    typer,
+                );
+            let error = match result {
+                Ok(_) => panic!("a nested argument cannot borrow the second local receipt"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error,
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                    "two-local Pair arguments must be direct original local Idents"
+                )
+            );
+        },
     );
 }
 
@@ -1719,6 +1956,7 @@ fn two_local_initializer_receipt_rejects_stale_and_swapped_typed_edges() {
          method_tree,
          bindings,
          _other_local_binding,
+         _typer,
          jvm_unit| {
             macro_rules! proof_input {
                 ($index:expr) => {
@@ -1826,6 +2064,7 @@ fn two_local_initializer_receipt_rejects_mutable_and_wrong_formal_initializers()
          method_tree,
          bindings,
          _other_local_binding,
+         _typer,
          jvm_unit| {
             assert_eq!(
                 validate_immutable_local_initializer_pair_proof(
@@ -1865,6 +2104,7 @@ fn two_local_initializer_receipt_rejects_mutable_and_wrong_formal_initializers()
          method_tree,
          bindings,
          _other_local_binding,
+         _typer,
          jvm_unit| {
             assert_eq!(
                 validate_immutable_local_initializer_pair_proof(
@@ -1906,6 +2146,7 @@ fn two_local_initializer_receipt_rejects_mutable_and_wrong_formal_initializers()
          method_tree,
          bindings,
          _other_local_binding,
+         _typer,
          jvm_unit| {
             assert_eq!(
                 validate_immutable_local_initializer_pair_proof(
@@ -1951,6 +2192,7 @@ fn two_local_initializer_receipt_rejects_third_local_and_missing_binding() {
          method_tree,
          bindings,
          _other_local_binding,
+         _typer,
          jvm_unit| {
             let error = validate_immutable_local_initializer_pair_proof(
                 ImmutableLocalInitializerPairProofInput {
@@ -1989,6 +2231,7 @@ fn two_local_initializer_receipt_rejects_third_local_and_missing_binding() {
          method_tree,
          bindings,
          _other_local_binding,
+         _typer,
          jvm_unit| {
             assert_eq!(
                 validate_immutable_local_initializer_pair_proof(
@@ -2036,6 +2279,7 @@ fn two_local_initializer_receipt_rejects_a_non_constructor_final_apply() {
          method_tree,
          bindings,
          _other_local_binding,
+         _typer,
          jvm_unit| {
             assert_eq!(
                 validate_immutable_local_initializer_pair_proof(
@@ -2086,6 +2330,7 @@ fn two_local_initializer_receipt_rejects_three_argument_result_constructors() {
          method_tree,
          bindings,
          _,
+         _typer,
          jvm_unit| {
             assert_eq!(
                 validate_immutable_local_initializer_pair_proof(
@@ -2124,7 +2369,7 @@ fn two_local_initializer_receipt_rejects_out_of_range_and_other_owner_bindings()
     let foreign_binding = with_two_local_proof_session(
         &foreign_source,
         2141,
-        |_, _, _, _, _, _, _, _, _, other_local_binding, _| {
+        |_, _, _, _, _, _, _, _, _, other_local_binding, _, _| {
             other_local_binding.expect("helper method exposes its authentic Typer binding")
         },
     );
@@ -2141,6 +2386,7 @@ fn two_local_initializer_receipt_rejects_out_of_range_and_other_owner_bindings()
          method_tree,
          bindings,
          _other_local_binding,
+         _typer,
          jvm_unit| {
             assert!(!store.symbols.contains(foreign_binding.symbol()));
             assert_eq!(
@@ -2184,6 +2430,7 @@ fn two_local_initializer_receipt_rejects_out_of_range_and_other_owner_bindings()
          method_tree,
          bindings,
          other_local_binding,
+         _typer,
          jvm_unit| {
             let foreign_scope = other_local_binding.unwrap();
             assert!(store.symbols.contains(foreign_scope.symbol()));
@@ -2231,6 +2478,7 @@ fn two_local_initializer_receipt_rejects_owner_scope_constructor_and_foreign_cou
          method_tree,
          bindings,
          _,
+         _typer,
          jvm_unit| {
             assert_eq!(
                 validate_immutable_local_initializer_pair_proof(
@@ -2271,6 +2519,7 @@ fn two_local_initializer_receipt_rejects_owner_scope_constructor_and_foreign_cou
          method_tree,
          bindings,
          _,
+         _typer,
          jvm_unit| {
             assert_eq!(
                 validate_immutable_local_initializer_pair_proof(
@@ -2308,6 +2557,7 @@ fn two_local_initializer_receipt_rejects_owner_scope_constructor_and_foreign_cou
          method_tree,
          bindings,
          _,
+         _typer,
          jvm_unit| {
             let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
                 unreachable!()
@@ -2393,6 +2643,7 @@ fn two_local_initializer_receipt_rejects_owner_scope_constructor_and_foreign_cou
          method_tree,
          bindings,
          _,
+         _typer,
          jvm_unit| {
             assert_eq!(
                 validate_immutable_local_initializer_pair_proof(
@@ -2434,6 +2685,7 @@ fn two_local_initializer_receipt_rejects_duplicate_roots_and_missing_rhs() {
          method_tree,
          bindings,
          _,
+         _typer,
          jvm_unit| {
             let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
                 panic!("method root is DefDef");
@@ -2546,6 +2798,7 @@ fn two_local_initializer_receipt_rejects_wrong_local_type() {
          method_tree,
          bindings,
          _other_local_binding,
+         _typer,
          jvm_unit| {
             assert_eq!(
                 validate_immutable_local_initializer_pair_proof(
