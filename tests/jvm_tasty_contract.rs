@@ -48,34 +48,45 @@ const IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH: &str =
 
 #[test]
 fn immutable_reference_local_pair_source_variation_first_error_matrix() {
+    let renamed = IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH
+        .replace("package example", "package renamed")
+        .replace("Counter", "Gauge")
+        .replace("Pair", "Duo")
+        .replace("create", "build")
+        .replace("fresh", "item");
+    assert!(
+        with_paired_jvm_tasty_batch_plan(
+            &renamed,
+            "PairFactory.scala",
+            SourceId::from_index(20640),
+            |_| ()
+        )
+        .is_ok(),
+        "package/class/method/local renames preserve the authenticated local/formal pair"
+    );
+    let source = IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH;
+    let counter_start = source.find("class Counter(").unwrap();
+    let pair_start = source.find("class Pair(").unwrap();
+    let factory_start = source.find("class PairFactory:").unwrap();
+    let reordered = format!(
+        "{}{}{}{}",
+        &source[..counter_start],
+        &source[pair_start..factory_start],
+        &source[counter_start..pair_start],
+        &source[factory_start..]
+    );
+    assert!(
+        with_paired_jvm_tasty_batch_plan(
+            &reordered,
+            "PairFactory.scala",
+            SourceId::from_index(20641),
+            |_| ()
+        )
+        .is_ok(),
+        "class declaration order preserves the authenticated local/formal pair"
+    );
+
     let cases = [
-        (
-            "package/class/method/local rename",
-            "BodyExpression",
-            IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH
-                .replace("package example", "package renamed")
-                .replace("Counter", "Gauge")
-                .replace("Pair", "Duo")
-                .replace("create", "build")
-                .replace("fresh", "item"),
-        ),
-        (
-            "class declaration reorder",
-            "BodyExpression",
-            {
-                let source = IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH;
-                let counter_start = source.find("class Counter(").unwrap();
-                let pair_start = source.find("class Pair(").unwrap();
-                let factory_start = source.find("class PairFactory:").unwrap();
-                format!(
-                    "{}{}{}{}",
-                    &source[..counter_start],
-                    &source[pair_start..factory_start],
-                    &source[counter_start..pair_start],
-                    &source[factory_start..]
-                )
-            },
-        ),
         (
             "missing initializer",
             "LocalValueRightHandSideMissing",

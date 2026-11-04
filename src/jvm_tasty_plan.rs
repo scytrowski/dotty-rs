@@ -22,7 +22,9 @@ use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_d
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty_pickler::{
     ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan,
-    DirectFormalConstructorCallPairBinding, LocalValueBinding, NestedConstructorCallBinding,
+    DirectFormalConstructorCallPairBinding, FormalLocalConstructorCallArgumentBinding,
+    FormalLocalConstructorCallArgumentOrigin, FormalLocalConstructorCallPairBinding,
+    LocalCounterInitializerBinding, LocalValueBinding, NestedConstructorCallBinding,
     NestedConstructorCallPairBinding, OrderedConstructorCallArgumentBinding,
     OrderedConstructorCallArgumentOrigin, OrderedConstructorCallArgumentPairBinding, PickleError,
     PlannedCallBinding, PrimaryConstructorInputPlan, SourceMetadata, SourceTypedBindings,
@@ -155,6 +157,9 @@ struct BatchSourceTypedBindings<'a> {
     )>,
     planned_calls: Vec<(SourceId, SymbolId, PlannedCallBinding)>,
     local_values: Vec<(SourceId, SymbolId, LocalValueBinding)>,
+    local_counter_initializers: Vec<(SourceId, SymbolId, LocalCounterInitializerBinding)>,
+    formal_local_constructor_call_pairs:
+        Vec<(SourceId, SymbolId, FormalLocalConstructorCallPairBinding)>,
 }
 
 impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
@@ -237,6 +242,30 @@ impl SourceTypedBindings for BatchSourceTypedBindings<'_> {
                 (*binding_source == source && *binding_method == method).then_some(*binding)
             })
             .collect()
+    }
+
+    fn local_counter_initializer(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<LocalCounterInitializerBinding> {
+        self.local_counter_initializers
+            .iter()
+            .find_map(|(proof_source, proof_method, binding)| {
+                (*proof_source == source && *proof_method == method).then_some(*binding)
+            })
+    }
+
+    fn formal_local_constructor_call_pair(
+        &self,
+        source: SourceId,
+        method: SymbolId,
+    ) -> Option<FormalLocalConstructorCallPairBinding> {
+        self.formal_local_constructor_call_pairs.iter().find_map(
+            |(proof_source, proof_method, binding)| {
+                (*proof_source == source && *proof_method == method).then_some(*binding)
+            },
+        )
     }
 }
 
@@ -1392,8 +1421,7 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
             .iter()
             .filter_map(|proof| {
                 if proof.argument_proof().kind()
-                    != crate::jvm_tasty_cross_class::ConstructorArgumentProofKind::FormalNestedPair
-                {
+                    != crate::jvm_tasty_cross_class::ConstructorArgumentProofKind::FormalNestedPair {
                     return None;
                 }
                 let pair = proof.argument_proof().ordered_pair()?;
@@ -1490,18 +1518,101 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
         local_values: constructor_call_proofs
             .iter()
             .filter_map(|proof| {
-                proof.argument_proof().local_val().map(|local| {
+                let local = proof.argument_proof().local_val().map(|local| {
+                    (local.source_declaration(), local.symbol(), local.typed_declaration(), local.scope())
+                }).or_else(|| {
+                    proof.argument_proof().ordered_pair().and_then(|pair| {
+                        pair.arguments().into_iter().find_map(|argument| argument.local_val()).map(|local| {
+                            (local.source_declaration(), local.symbol(), local.typed_declaration(), local.scope())
+                        })
+                    })
+                })?;
+                Some({
                     (
                         proof.source_id(),
                         proof.method(),
                         LocalValueBinding {
-                            source_tree: local.source_declaration(),
-                            symbol: local.symbol(),
-                            typed_declaration: local.typed_declaration(),
-                            scope: local.scope(),
+                            source_tree: local.0,
+                            symbol: local.1,
+                            typed_declaration: local.2,
+                            scope: local.3,
                         },
                     )
                 })
+            })
+            .collect(),
+        local_counter_initializers: constructor_call_proofs
+            .iter()
+            .filter_map(|proof| {
+                let pair = proof.argument_proof().ordered_pair()?;
+                let local = pair.arguments().into_iter().find_map(|argument| argument.local_val())?;
+                let call = NestedConstructorCallBinding {
+                    source_apply: local.source_initializer(),
+                    typed_apply: local.typed_initializer(),
+                    source_select: local.source_initializer_select(),
+                    source_new: local.source_initializer_new(),
+                    source_argument: local.source_seed_argument(),
+                    typed_select: local.typed_initializer_select(),
+                    typed_new: local.typed_initializer_new(),
+                    typed_argument: local.typed_seed_argument(),
+                    class: typer.store().symbols.get(local.constructor()).owner?,
+                    constructor: local.constructor(),
+                    formal: local.constructor_formal(),
+                    formal_type: local.constructor_formal_type(),
+                    result_type: local.initializer_result_type(),
+                };
+                Some((proof.source_id(), proof.method(), LocalCounterInitializerBinding {
+                    source_block: local.source_block(),
+                    typed_block: local.typed_block(),
+                    source_declaration: local.source_declaration(),
+                    typed_declaration: local.typed_declaration(),
+                    source_initializer: local.source_initializer(),
+                    typed_initializer: local.typed_initializer(),
+                    source_type_tree: local.source_type_tree(),
+                    typed_type_tree: local.typed_type_tree(),
+                    local: local.symbol(),
+                    scope: local.scope(),
+                    local_type: local.local_type(),
+                    argument_formal: local.seed_formal(),
+                    call,
+                }))
+            })
+            .collect(),
+        formal_local_constructor_call_pairs: constructor_call_proofs
+            .iter()
+            .filter_map(|proof| {
+                if proof.argument_proof().kind()
+                    != crate::jvm_tasty_cross_class::ConstructorArgumentProofKind::FormalLocalPair
+                {
+                    return None;
+                }
+                let pair = proof.argument_proof().ordered_pair()?;
+                let arguments = pair.arguments();
+                let map_argument = |argument: crate::jvm_tasty_cross_class::OrderedConstructorArgumentProofView| {
+                    let origin = if let Some(formal) = argument.formal() {
+                        FormalLocalConstructorCallArgumentOrigin::Formal {
+                            formal: formal.formal(),
+                            formal_type: formal.formal_type(),
+                            result_type: formal.result_type(),
+                        }
+                    } else {
+                        let local = argument.local_val()?;
+                        FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                            symbol: local.symbol(),
+                            result_type: local.result_type(),
+                        }
+                    };
+                    Some(FormalLocalConstructorCallArgumentBinding {
+                        source_argument: argument.source_argument(),
+                        typed_argument: argument.typed_argument(),
+                        origin,
+                    })
+                };
+                Some((proof.source_id(), proof.method(), FormalLocalConstructorCallPairBinding {
+                    source_method_formals: pair.source_method_formals(),
+                    method_formals: pair.method_formals(),
+                    arguments: [map_argument(arguments[0])?, map_argument(arguments[1])?],
+                }))
             })
             .collect(),
     };

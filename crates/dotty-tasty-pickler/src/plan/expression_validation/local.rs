@@ -205,25 +205,78 @@ impl Validator<'_, '_> {
             depth
         };
         if let Some(reference_type) = reference_local_type {
-            let binding = self
-                .plan
-                .typed_bindings
-                .planned_call(self.plan.source.id, method.symbol)
-                .ok_or_else(|| {
-                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
-                })?;
-            if binding.source_apply != source_rhs
-                || binding.typed_apply != typed_rhs
-                || reference_type != local_type
-            {
+            if reference_type != local_type {
                 return Err(
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                 );
             }
-            if !visited.insert(typed_rhs) {
-                return Err(PickleError::RepeatedExpression { tree: typed_rhs });
+            if let Some(initializer) = self
+                .plan
+                .typed_bindings
+                .local_counter_initializer(self.plan.source.id, method.symbol)
+            {
+                let pair = self
+                    .plan
+                    .typed_bindings
+                    .formal_local_constructor_call_pair(self.plan.source.id, method.symbol)
+                    .ok_or_else(|| {
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    })?;
+                let paired_local = pair.arguments.iter().any(|argument| {
+                    matches!(
+                        argument.origin,
+                        crate::FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                            symbol,
+                            ..
+                        } if symbol == initializer.local
+                    )
+                });
+                if initializer.source_declaration != source_id
+                    || initializer.typed_declaration != typed_id
+                    || initializer.source_initializer != source_rhs
+                    || initializer.typed_initializer != typed_rhs
+                    || initializer.source_type_tree != source_val.tpt
+                    || initializer.typed_type_tree != typed_val.tpt
+                    || initializer.local != binding.symbol
+                    || initializer.scope != binding.scope
+                    || initializer.local_type != local_type
+                    || !paired_local
+                {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    );
+                }
+                if !visited.insert(typed_rhs) {
+                    return Err(PickleError::RepeatedExpression { tree: typed_rhs });
+                }
+                self.validate_nested_constructor_argument(
+                    initializer.call,
+                    initializer.argument_formal,
+                    local_type,
+                    method,
+                    rhs_depth,
+                    visited,
+                )?;
+            } else {
+                let binding = self
+                    .plan
+                    .typed_bindings
+                    .planned_call(self.plan.source.id, method.symbol)
+                    .ok_or_else(|| {
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    })?;
+                if binding.source_apply != source_rhs || binding.typed_apply != typed_rhs {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    );
+                }
+                if !visited.insert(typed_rhs) {
+                    return Err(PickleError::RepeatedExpression { tree: typed_rhs });
+                }
+                self.validate_planned_call_argument(
+                    binding, local_type, method, rhs_depth, visited,
+                )?;
             }
-            self.validate_planned_call_argument(binding, local_type, method, rhs_depth, visited)?;
         } else {
             self.validate_method_expression_inner(
                 Some(source_rhs),

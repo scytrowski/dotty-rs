@@ -164,16 +164,29 @@ struct ImmutableLocalArgumentProof {
     source_block: TreeId<Untyped>,
     source_declaration: TreeId<Untyped>,
     source_initializer: TreeId<Untyped>,
+    source_initializer_select: TreeId<Untyped>,
+    source_initializer_new: TreeId<Untyped>,
+    source_seed_argument: TreeId<Untyped>,
     source_use: TreeId<Untyped>,
     typed_block: TreeId<Typed>,
     typed_declaration: TreeId<Typed>,
     typed_initializer: TreeId<Typed>,
+    typed_initializer_select: TreeId<Typed>,
+    typed_initializer_new: TreeId<Typed>,
+    typed_seed_argument: TreeId<Typed>,
     typed_use: TreeId<Typed>,
     symbol: SymbolId,
     scope: dotty_core::ScopeId,
     constructor: SymbolId,
     local_type: TypeId,
     result_type: TypeId,
+    seed_formal: SymbolId,
+    seed_formal_type: TypeId,
+    source_type_tree: TreeId<Untyped>,
+    typed_type_tree: TreeId<Typed>,
+    initializer_result_type: TypeId,
+    constructor_formal: SymbolId,
+    constructor_formal_type: TypeId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -247,6 +260,10 @@ pub struct ValidatedImmutableLocalInitializationProof<'session> {
     typed_use: TreeId<Typed>,
     local_type: TypeId,
     initializer_result_type: TypeId,
+    seed_formal: SymbolId,
+    seed_formal_type: TypeId,
+    constructor_formal: SymbolId,
+    constructor_formal_type: TypeId,
 }
 
 impl ValidatedImmutableLocalInitializationProof<'_> {
@@ -324,6 +341,18 @@ impl ValidatedImmutableLocalInitializationProof<'_> {
     }
     pub const fn initializer_result_type(&self) -> TypeId {
         self.initializer_result_type
+    }
+    pub const fn seed_formal(&self) -> SymbolId {
+        self.seed_formal
+    }
+    pub const fn seed_formal_type(&self) -> TypeId {
+        self.seed_formal_type
+    }
+    pub const fn constructor_formal(&self) -> SymbolId {
+        self.constructor_formal
+    }
+    pub const fn constructor_formal_type(&self) -> TypeId {
+        self.constructor_formal_type
     }
 }
 
@@ -560,6 +589,45 @@ impl ImmutableLocalArgumentProofView {
     }
     pub const fn result_type(self) -> TypeId {
         self.proof.result_type
+    }
+    pub const fn seed_formal(self) -> SymbolId {
+        self.proof.seed_formal
+    }
+    pub const fn seed_formal_type(self) -> TypeId {
+        self.proof.seed_formal_type
+    }
+    pub const fn constructor_formal(self) -> SymbolId {
+        self.proof.constructor_formal
+    }
+    pub const fn constructor_formal_type(self) -> TypeId {
+        self.proof.constructor_formal_type
+    }
+    pub const fn source_initializer_select(self) -> TreeId<Untyped> {
+        self.proof.source_initializer_select
+    }
+    pub const fn source_initializer_new(self) -> TreeId<Untyped> {
+        self.proof.source_initializer_new
+    }
+    pub const fn source_seed_argument(self) -> TreeId<Untyped> {
+        self.proof.source_seed_argument
+    }
+    pub const fn typed_initializer_select(self) -> TreeId<Typed> {
+        self.proof.typed_initializer_select
+    }
+    pub const fn typed_initializer_new(self) -> TreeId<Typed> {
+        self.proof.typed_initializer_new
+    }
+    pub const fn typed_seed_argument(self) -> TreeId<Typed> {
+        self.proof.typed_seed_argument
+    }
+    pub const fn source_type_tree(self) -> TreeId<Untyped> {
+        self.proof.source_type_tree
+    }
+    pub const fn typed_type_tree(self) -> TreeId<Typed> {
+        self.proof.typed_type_tree
+    }
+    pub const fn initializer_result_type(self) -> TypeId {
+        self.proof.initializer_result_type
     }
 }
 
@@ -2231,6 +2299,19 @@ fn validate_two_argument_constructor_call_candidate<'session>(
                         constructor: local.constructor(),
                         local_type: local.local_type(),
                         result_type: typed_argument_node.ty,
+                        seed_formal: local.seed_formal(),
+                        seed_formal_type: local.seed_formal_type(),
+                        source_initializer_select: local.source_initializer_select(),
+                        source_initializer_new: local.source_initializer_new(),
+                        source_seed_argument: local.source_seed_argument(),
+                        typed_initializer_select: local.typed_initializer_select(),
+                        typed_initializer_new: local.typed_initializer_new(),
+                        typed_seed_argument: local.typed_seed_argument(),
+                        source_type_tree: local.source_type_tree(),
+                        typed_type_tree: local.typed_type_tree(),
+                        initializer_result_type: local.initializer_result_type(),
+                        constructor_formal: local.constructor_formal(),
+                        constructor_formal_type: local.constructor_formal_type(),
                     };
                     ordered_argument_proofs.push(OrderedConstructorArgumentProof {
                         source_argument: source_outer_argument,
@@ -3958,6 +4039,10 @@ pub fn validate_immutable_local_initialization_proof<'session>(
             .try_get(typed_init)
             .ok_or_else(|| typed_error("typed initializer became stale"))?
             .ty,
+        seed_formal: formals[1].0,
+        seed_formal_type: formals[1].1,
+        constructor_formal: ctor_formal,
+        constructor_formal_type: definitions.int,
     })
 }
 

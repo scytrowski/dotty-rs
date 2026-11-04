@@ -110,6 +110,26 @@ pub trait SourceTypedBindings {
     fn local_value_bindings(&self, _source: SourceId, _method: SymbolId) -> Vec<LocalValueBinding> {
         Vec::new()
     }
+
+    /// Authenticated direct-New initializer for the one local admitted by a
+    /// FormalLocalPair constructor receipt. This is separate from the legacy
+    /// PlannedCallBinding path used by helper-local values.
+    fn local_counter_initializer(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<LocalCounterInitializerBinding> {
+        None
+    }
+
+    /// Exact ordered direct-formal/local pair receipt from the source proof.
+    fn formal_local_constructor_call_pair(
+        &self,
+        _source: SourceId,
+        _method: SymbolId,
+    ) -> Option<FormalLocalConstructorCallPairBinding> {
+        None
+    }
 }
 
 /// Source and typed tree identities retained by the cross-class constructor
@@ -166,6 +186,52 @@ pub enum OrderedConstructorCallArgumentOrigin {
         call: NestedConstructorCallBinding,
         argument_formal: SymbolId,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FormalLocalConstructorCallArgumentBinding {
+    pub source_argument: TreeId<Untyped>,
+    pub typed_argument: TreeId<Typed>,
+    pub origin: FormalLocalConstructorCallArgumentOrigin,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormalLocalConstructorCallArgumentOrigin {
+    Formal {
+        formal: SymbolId,
+        formal_type: TypeId,
+        result_type: TypeId,
+    },
+    LocalValue {
+        symbol: SymbolId,
+        result_type: TypeId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FormalLocalConstructorCallPairBinding {
+    pub source_method_formals: [TreeId<Untyped>; 2],
+    pub method_formals: [SymbolId; 2],
+    pub arguments: [FormalLocalConstructorCallArgumentBinding; 2],
+}
+
+/// Original source/typed identities for the direct `new Counter(seed)` local
+/// initializer authorized by the cross-class immutable-local proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalCounterInitializerBinding {
+    pub source_block: TreeId<Untyped>,
+    pub typed_block: TreeId<Typed>,
+    pub source_declaration: TreeId<Untyped>,
+    pub typed_declaration: TreeId<Typed>,
+    pub source_initializer: TreeId<Untyped>,
+    pub typed_initializer: TreeId<Typed>,
+    pub source_type_tree: TreeId<Untyped>,
+    pub typed_type_tree: TreeId<Typed>,
+    pub local: SymbolId,
+    pub scope: dotty_core::ScopeId,
+    pub local_type: TypeId,
+    pub argument_formal: SymbolId,
+    pub call: NestedConstructorCallBinding,
 }
 
 /// Exact source and typed roots plus the source-proven origin for one outer
