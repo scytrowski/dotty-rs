@@ -150,8 +150,7 @@ RECURSIVE_ADT_NEGATIVE_TESTS = {
     "typer::tests::method_parameter_capture::recursive_adt_rollback::binary_classified_source_controls_have_stable_retry_and_session_receipts",
 }
 BINARY_ADT_POSITIVE_TESTS = {
-    "select_left_completes_first_with_authentic_two_field_provenance_in_fresh_sessions",
-    "binary_recursive_eval_preserves_two_independent_add_binders_and_calls",
+    "binary_recursive_adt_original_roots_share_two_real_sessions",
 }
 BINARY_ADT_STRUCTURAL_TEST = {
     "corrupted_reference_product2_identities_reject_then_retry_original_select_left",
@@ -681,6 +680,62 @@ def validate_binary_recursive_adt_oracle_log(path: Path, root: Path) -> None:
     actual = set(path.read_text(encoding="utf-8").splitlines())
     if required - actual:
         raise ReceiptError(f"binary recursive Expr pinned Scala runner is missing evidence: {sorted(required - actual)!r}")
+
+
+def parse_binary_semantic_proof(method: str, proof: str) -> dict[str, str]:
+    actual: dict[str, str] = {}
+    for part in proof.split(";"):
+        key, separator, value = part.partition("=")
+        if not separator or not key or not value:
+            raise ReceiptError(f"{method}: semantic proof has a malformed key/value field")
+        if key in actual:
+            raise ReceiptError(f"{method}: semantic proof duplicates field {key!r}")
+        actual[key] = value
+    common = {
+        "Expr": "source-sealed-trait",
+        "Num/Add": "source-case-class",
+        "Add.parents": "Expr+scala.Product",
+        "Add.fields": "left/right:Expr,distinct,class-owned",
+        "Add.selectors": "_1/_2:Expr,distinct,class-owned",
+        "no": "_3",
+    }
+    expected = {
+        "selectLeft": {
+            "root": "selectLeft@158:271",
+            "signature": "(Expr):Expr",
+            "selector": "expr:Expr",
+            "cases": "Num(_)=>expr,Add(left,_2)=>left",
+            "Add.unapply": "companion-owned(Add):Add",
+            "selectors": "_1(left):Expr,_2(right):Expr",
+            "binder": "left@Add._1:case-local",
+            "wildcard": "Add._2:unbound",
+            "mapped_source_trees": "19",
+            **common,
+        },
+        "eval": {
+            "root": "eval@275:410",
+            "signature": "(Expr):Int",
+            "Add.binders": "left@_1:Expr,right@_2:Expr,distinct",
+            "calls": "eval(left):Int+eval(right):Int",
+            "callee": "Evaluator.eval:same_source_symbol",
+            "addition": "Int+Int:Int",
+            "match": "Int",
+            "mappings": "25",
+            "Add.unapply": "companion-owned(Add):Add",
+            **common,
+        },
+    }.get(method)
+    if expected is None or actual != expected:
+        missing = sorted(set(expected or ()) - set(actual))
+        extra = sorted(set(actual) - set(expected or ()))
+        wrong = sorted(key for key in set(actual) & set(expected or ()) if actual[key] != expected[key])
+        raise ReceiptError(
+            f"{method}: semantic proof does not equal the complete canonical proof "
+            f"(missing={missing}, extra={extra}, wrong_values={wrong})"
+        )
+    return actual
+
+
 def validate_binary_recursive_adt_positive_logs(
     root: Path,
     logs: list[Path],
@@ -695,40 +750,42 @@ def validate_binary_recursive_adt_positive_logs(
         raise ReceiptError("binary recursive Expr evidence is not bound to the evaluated PR head")
     if not re.fullmatch(r"[0-9a-f]{40}", baseline_sha):
         raise ReceiptError("binary recursive Expr evidence contains a malformed baseline SHA")
+    if len(logs) != 1:
+        raise ReceiptError("binary recursive Expr proof must come from one integrated Rust test log")
     require_test_logs(logs, BINARY_ADT_POSITIVE_TESTS)
     actual: dict[tuple[str, str], tuple[str, str, str]] = {}
-    for path in logs:
-        text = path.read_text(encoding="utf-8")
-        tested_markers = marker_lines(text, "ISSUE2080_TESTED_SHA\t")
-        if tested_markers != [f"ISSUE2080_TESTED_SHA\t{tested_sha}"]:
-            raise ReceiptError(f"{path}: positive evidence does not carry the exact tested SHA")
-        for line in marker_lines(text, "ISSUE2080_POSITIVE\t"):
-            fields = line.split("\t")
-            if len(fields) != 6:
-                raise ReceiptError("binary recursive Expr positive row is malformed")
-            _, session, method, source_path_tree, span, proof = fields
-            key = session, method
-            if key in actual or (session, method, source_path_tree, span) not in BINARY_ADT_POSITIVE_ROWS:
-                raise ReceiptError("binary recursive Expr positive row is duplicated or substituted")
-            expected_prefix = {
-                "selectLeft": "root=selectLeft@158:271;signature=(Expr):Expr;selector=expr:Expr;cases=Num(_)=>expr,Add(left,_2)=>left;",
-                "eval": "eval@275:410;signature=(Expr):Int;Add.binders=left@_1:Expr,right@_2:Expr,distinct;",
-            }[method]
-            required_graph = (
-                "Expr=source-sealed-trait;Num/Add=source-case-class;Add.parents=Expr+scala.Product;"
-                "Add.fields=left/right:Expr,distinct,class-owned;Add.selectors=_1/_2:Expr,distinct,class-owned;"
-                "Add.unapply=companion-owned(Add):Add;no=_3"
-            )
-            if not proof.startswith(expected_prefix) or not proof.endswith(required_graph):
-                raise ReceiptError(f"{method}: semantic proof omits a required source/Product identity")
-            if method == "selectLeft" and "mapped_source_trees=19" not in proof:
-                raise ReceiptError("selectLeft receipt lacks its complete source mapping count")
-            if method == "eval" and not all(token in proof for token in (
-                "calls=eval(left):Int+eval(right):Int", "callee=Evaluator.eval:same_source_symbol",
-                "addition=Int+Int:Int", "match=Int", "mappings=25",
-            )):
-                raise ReceiptError("eval receipt lacks both recursive roles, result types, or mapping proof")
-            actual[key] = (source_path_tree, span, proof)
+    text = logs[0].read_text(encoding="utf-8")
+    tested_markers = marker_lines(text, "ISSUE2080_TESTED_SHA\t")
+    if tested_markers != [f"ISSUE2080_TESTED_SHA\t{tested_sha}"]:
+        raise ReceiptError(f"{logs[0]}: positive evidence does not carry the exact tested SHA")
+    session_markers = marker_lines(text, "ISSUE2080_SESSION\t")
+    session_witnesses: dict[str, tuple[str, ...]] = {}
+    for line in session_markers:
+        fields = line.split("\t")
+        if len(fields) != 7 or fields[1] in session_witnesses:
+            raise ReceiptError("binary recursive Expr session witness is malformed or duplicated")
+        witness = tuple(fields[2:6])
+        if any(not re.fullmatch(r"(?:owner|store|ast|index)=0x[0-9a-f]+", value) for value in witness):
+            raise ReceiptError("binary recursive Expr session witness contains a malformed owner address")
+        if not re.fullmatch(r"source=SourceId\([0-9]+\)", fields[6]):
+            raise ReceiptError("binary recursive Expr session witness contains a malformed source identity")
+        witness += (fields[6],)
+        session_witnesses[fields[1]] = witness
+    if set(session_witnesses) != {"session-a", "session-b"}:
+        raise ReceiptError("binary recursive Expr requires two identified owned sessions")
+    for slot in range(5):
+        if session_witnesses["session-a"][slot] == session_witnesses["session-b"][slot]:
+            raise ReceiptError("binary recursive Expr sessions share an ownership/store/AST/index witness")
+    for line in marker_lines(text, "ISSUE2080_POSITIVE\t"):
+        fields = line.split("\t")
+        if len(fields) != 6:
+            raise ReceiptError("binary recursive Expr positive row is malformed")
+        _, session, method, source_path_tree, span, proof = fields
+        key = session, method
+        if key in actual or (session, method, source_path_tree, span) not in BINARY_ADT_POSITIVE_ROWS:
+            raise ReceiptError("binary recursive Expr positive row is duplicated or substituted")
+        parse_binary_semantic_proof(method, proof)
+        actual[key] = (source_path_tree, span, proof)
     expected = {(session, method) for session in ("session-a", "session-b") for method in ("selectLeft", "eval")}
     if len(actual) != 4 or set(actual) != expected:
         raise ReceiptError("binary recursive Expr acceptance requires exactly four original roots in two sessions")

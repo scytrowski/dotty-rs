@@ -399,21 +399,18 @@ jobs:
             >> "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-rust.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-rust.log"
 
-      - name: Prove both original binary Expr roots in two fresh sessions
+      - name: Prove both original binary Expr roots in two owned sessions
         shell: bash
         env:
           DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
         run: |
           set -euo pipefail
-          for test_name in \
-            select_left_completes_first_with_authentic_two_field_provenance_in_fresh_sessions \
-            binary_recursive_eval_preserves_two_independent_add_binders_and_calls; do
-            log="$DOTTY_AUDIT_REPORT_DIR/binary-positive-$test_name.log"
-            cargo +1.98.1 test -p dotty-typer --test source_binary_recursive_adt_baseline \
-              "$test_name" --locked -- --exact --nocapture > "$log" 2>&1
-            printf 'ISSUE2080_TESTED_SHA\t%s\n' "$(git rev-parse HEAD)" >> "$log"
-            cat "$log"
-          done
+          log="$DOTTY_AUDIT_REPORT_DIR/binary-positive.log"
+          cargo +1.98.1 test -p dotty-typer --test source_binary_recursive_adt_baseline \
+            binary_recursive_adt_original_roots_share_two_real_sessions \
+            --locked -- --exact --nocapture > "$log" 2>&1
+          printf 'ISSUE2080_TESTED_SHA\t%s\n' "$(git rev-parse HEAD)" >> "$log"
+          cat "$log"
 
       - name: Run binary recursive structural identity controls
         shell: bash
@@ -450,8 +447,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" binary-oracle-log \
             "$DOTTY_AUDIT_REPORT_DIR/source-binary-recursive-adt-oracle.log"
           PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" binary-positive-log \
-            --log "$DOTTY_AUDIT_REPORT_DIR/binary-positive-select_left_completes_first_with_authentic_two_field_provenance_in_fresh_sessions.log" \
-            --log "$DOTTY_AUDIT_REPORT_DIR/binary-positive-binary_recursive_eval_preserves_two_independent_add_binders_and_calls.log" \
+            --log "$DOTTY_AUDIT_REPORT_DIR/binary-positive.log" \
             --tested-sha "$(git rev-parse HEAD)" --expected-sha "$DOTTY_EXPECTED_SOURCE_SHA" \
             --expected-head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
             --baseline-sha "$DOTTY_EXPECTED_BASE_SHA" \

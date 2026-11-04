@@ -83,27 +83,39 @@ fn select_left_completes_first_with_authentic_two_field_provenance_in_fresh_sess
         .ends_with(&after),
         "the checked receipt records both fresh after sessions: {after}"
     );
-    for session in ["session-a", "session-b"] {
-        println!(
-            "ISSUE2080_POSITIVE\t{session}\tselectLeft\tExpr.scala#tree39\t158:271\t{first};Expr=source-sealed-trait;Num/Add=source-case-class;Add.parents=Expr+scala.Product;Add.fields=left/right:Expr,distinct,class-owned;Add.selectors=_1/_2:Expr,distinct,class-owned;Add.unapply=companion-owned(Add):Add;no=_3"
-        );
-    }
     println!("ISSUE2076_SELECT_LEFT_PROOF\t{first}");
 }
 
 fn select_left_receipt(source: SourceId) -> String {
-    let (ast, _root, index, mut store, definitions, packages) = setup(source);
+    let mut session = BinarySession::new(source);
+    session
+        .with_typer(|ast, index, typer, _definitions| select_left_proof(source, ast, index, typer))
+}
+
+fn select_left_proof(
+    source: SourceId,
+    ast: &dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+    index: &SourceSemanticIndex,
+    typer: &mut dotty_typer::SourceTyper<'_>,
+) -> String {
     let mut method = None;
     let mut classes = std::collections::BTreeMap::new();
     for (tree, node) in ast.iter() {
         match &node.kind {
             TreeKind::DefDef(definition)
-                if store.names.resolve(definition.name.as_name().text()) == "selectLeft" =>
+                if typer
+                    .store()
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    == "selectLeft" =>
             {
                 method = Some((tree, definition.clone(), node.position.unwrap()));
             }
             TreeKind::TypeDef(definition) => {
-                let name = store.names.resolve(definition.name.as_name().text());
+                let name = typer
+                    .store()
+                    .names
+                    .resolve(definition.name.as_name().text());
                 if matches!(name, "Expr" | "Num" | "Add") {
                     classes.insert(
                         name.to_owned(),
@@ -123,8 +135,15 @@ fn select_left_receipt(source: SourceId) -> String {
     let expr = classes["Expr"].1;
     let num = classes["Num"].1;
     let add = classes["Add"].1;
-    assert_eq!(store.symbols.get(expr).kind, SymbolKind::Trait);
-    assert!(store.symbols.get(expr).flags.contains(SymbolFlags::SEALED));
+    assert_eq!(typer.store().symbols.get(expr).kind, SymbolKind::Trait);
+    assert!(
+        typer
+            .store()
+            .symbols
+            .get(expr)
+            .flags
+            .contains(SymbolFlags::SEALED)
+    );
     for (name, symbol) in [("Num", num), ("Add", add)] {
         let (class_tree, _) = classes[name];
         let TreeKind::TypeDef(definition) = &ast.get(class_tree).kind else {
@@ -137,10 +156,10 @@ fn select_left_receipt(source: SourceId) -> String {
         let TreeKind::Ident(parent) = &ast.get(template.parents[0]).kind else {
             panic!("{name} must retain its source parent tree")
         };
-        assert_eq!(store.names.resolve(parent.name.text()), "Expr");
-        assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Class);
+        assert_eq!(typer.store().names.resolve(parent.name.text()), "Expr");
+        assert_eq!(typer.store().symbols.get(symbol).kind, SymbolKind::Class);
         assert!(
-            matches!(store.symbols.get(symbol).origin, SymbolOrigin::Source(id) if id == source)
+            matches!(typer.store().symbols.get(symbol).origin, SymbolOrigin::Source(id) if id == source)
         );
     }
 
@@ -149,27 +168,25 @@ fn select_left_receipt(source: SourceId) -> String {
     let parameter_symbol = index.symbol_at(source, parameter_tree).unwrap();
     assert_ne!(method_symbol, parameter_symbol);
     assert_eq!(
-        store.symbols.get(parameter_symbol).owner,
+        typer.store().symbols.get(parameter_symbol).owner,
         Some(method_symbol)
     );
     assert!(
-        matches!(store.symbols.get(method_symbol).origin, SymbolOrigin::Source(id) if id == source)
+        matches!(typer.store().symbols.get(method_symbol).origin, SymbolOrigin::Source(id) if id == source)
     );
     assert!(
-        matches!(store.symbols.get(parameter_symbol).origin, SymbolOrigin::Source(id) if id == source)
+        matches!(typer.store().symbols.get(parameter_symbol).origin, SymbolOrigin::Source(id) if id == source)
     );
-    let method_owner = store.symbols.get(method_symbol).owner.unwrap();
+    let method_owner = typer.store().symbols.get(method_symbol).owner.unwrap();
     assert_eq!(
-        store
+        typer
+            .store()
             .names
-            .resolve(store.symbols.get(method_owner).name.text()),
+            .resolve(typer.store().symbols.get(method_owner).name.text()),
         "Evaluator$"
     );
 
-    let mut typer =
-        dotty_typer::SourceTyper::new(&ast, source, &index, &mut store, definitions, &packages)
-            .with_resolver(Box::new(resolver(definitions)));
-    assert_product2_parent(&mut typer, &index, add, expr);
+    assert_product2_parent(typer, index, add, expr);
     let typed_root = typer
         .type_method_definition(method_tree)
         .expect("selectLeft must type before eval in a fresh resolver session");
@@ -575,9 +592,9 @@ fn select_left_receipt(source: SourceId) -> String {
         );
         mapped += 1;
     }
-    assert!(
-        mapped >= 19,
-        "all original nested source trees have mappings: {mapped}"
+    assert_eq!(
+        mapped, 19,
+        "every original selectLeft source node is mapped"
     );
     format!(
         "root=selectLeft@{}:{};signature=(Expr):Expr;selector=expr:Expr;cases={};Add.unapply=companion-owned(Add):Add;selectors=_1(left):Expr,_2(right):Expr;binder=left@Add._1:case-local;wildcard=Add._2:unbound;mapped_source_trees={mapped}",
@@ -612,22 +629,33 @@ fn binary_recursive_eval_preserves_two_independent_add_binders_and_calls() {
         .expect("before row")
         .1
     );
-    for session in ["session-a", "session-b"] {
-        println!(
-            "ISSUE2080_POSITIVE\t{session}\teval\tExpr.scala#tree64\t275:410\t{eval_first};Expr=source-sealed-trait;Num/Add=source-case-class;Add.parents=Expr+scala.Product;Add.fields=left/right:Expr,distinct,class-owned;Add.selectors=_1/_2:Expr,distinct,class-owned;Add.unapply=companion-owned(Add):Add;no=_3"
-        );
-    }
     println!("ISSUE2078_BINARY_EVAL_PROOF\t{eval_first}");
 }
 
 fn binary_eval_receipt(source: SourceId, select_left_first: bool) -> String {
-    let (ast, _root, index, mut store, definitions, packages) = setup(source);
+    let mut session = BinarySession::new(source);
+    session.with_typer(|ast, index, typer, definitions| {
+        binary_eval_proof(source, ast, index, typer, definitions, select_left_first)
+    })
+}
+
+fn binary_eval_proof(
+    source: SourceId,
+    ast: &dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+    index: &SourceSemanticIndex,
+    typer: &mut dotty_typer::SourceTyper<'_>,
+    definitions: Definitions,
+    select_left_first: bool,
+) -> String {
     let mut roots = std::collections::BTreeMap::new();
     let mut classes = std::collections::BTreeMap::new();
     for (tree, node) in ast.iter() {
         match &node.kind {
             TreeKind::DefDef(definition) => {
-                let name = store.names.resolve(definition.name.as_name().text());
+                let name = typer
+                    .store()
+                    .names
+                    .resolve(definition.name.as_name().text());
                 if matches!(name, "eval" | "selectLeft") {
                     roots.insert(
                         name.to_owned(),
@@ -636,7 +664,10 @@ fn binary_eval_receipt(source: SourceId, select_left_first: bool) -> String {
                 }
             }
             TreeKind::TypeDef(definition) => {
-                let name = store.names.resolve(definition.name.as_name().text());
+                let name = typer
+                    .store()
+                    .names
+                    .resolve(definition.name.as_name().text());
                 if matches!(name, "Expr" | "Add") {
                     classes.insert(name.to_owned(), index.symbol_at(source, tree).unwrap());
                 }
@@ -653,7 +684,7 @@ fn binary_eval_receipt(source: SourceId, select_left_first: bool) -> String {
     let (select_tree, _) = roots["selectLeft"];
     let expr = classes["Expr"];
     let add = classes["Add"];
-    let int = match store.types.get(definitions.int) {
+    let int = match typer.store().types.get(definitions.int) {
         Type::TypeRef {
             target: TypeRefTarget::Symbol(symbol),
             ..
@@ -665,17 +696,19 @@ fn binary_eval_receipt(source: SourceId, select_left_first: bool) -> String {
     };
     let parameter_tree = source_method.value_param_clauses[0][0];
     let parameter = index.symbol_at(source, parameter_tree).unwrap();
-    let owner = store.symbols.get(eval_symbol).owner.unwrap();
+    let owner = typer.store().symbols.get(eval_symbol).owner.unwrap();
     assert_eq!(
-        store.names.resolve(store.symbols.get(owner).name.text()),
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(owner).name.text()),
         "Evaluator$"
     );
-    assert_eq!(store.symbols.get(parameter).owner, Some(eval_symbol));
-    let resolver = resolver(definitions);
-    let mut typer =
-        dotty_typer::SourceTyper::new(&ast, source, &index, &mut store, definitions, &packages)
-            .with_resolver(Box::new(resolver));
-    assert_product2_parent(&mut typer, &index, add, expr);
+    assert_eq!(
+        typer.store().symbols.get(parameter).owner,
+        Some(eval_symbol)
+    );
+    assert_product2_parent(typer, index, add, expr);
     if select_left_first {
         typer
             .type_method_definition(select_tree)
@@ -1038,6 +1071,7 @@ fn binary_eval_receipt(source: SourceId, select_left_first: bool) -> String {
         assert_eq!(typer.typed_ast().get(typed).position, node.position);
         mapped += 1;
     }
+    assert_eq!(mapped, 25, "every original eval source node is mapped");
     let _ = typer
         .type_method_definition(select_tree)
         .expect("selectLeft remains complete after eval");
@@ -1047,6 +1081,87 @@ fn binary_eval_receipt(source: SourceId, select_left_first: bool) -> String {
         range.end(),
         call_receipts.join("+")
     )
+}
+
+#[test]
+fn binary_recursive_adt_original_roots_share_two_real_sessions() {
+    let mut sessions = [
+        BinarySession::new(SourceId::from_index(20801)),
+        BinarySession::new(SourceId::from_index(20802)),
+    ];
+    assert_ne!(
+        std::ptr::addr_of!(sessions[0].store),
+        std::ptr::addr_of!(sessions[1].store),
+        "each session owns a distinct semantic store"
+    );
+    assert_ne!(
+        std::ptr::addr_of!(sessions[0].ast),
+        std::ptr::addr_of!(sessions[1].ast),
+        "each session owns a distinct source AST"
+    );
+    assert_ne!(
+        std::ptr::addr_of!(sessions[0].index),
+        std::ptr::addr_of!(sessions[1].index),
+        "each session owns a distinct source index"
+    );
+    let owners = sessions
+        .each_ref()
+        .map(|session| &*session.ownership_witness as *const u8 as usize);
+    assert_ne!(
+        owners[0], owners[1],
+        "session ownership witnesses are disjoint"
+    );
+
+    let mut receipts = Vec::new();
+    for (ordinal, session) in sessions.iter_mut().enumerate() {
+        let label = if ordinal == 0 {
+            "session-a"
+        } else {
+            "session-b"
+        };
+        let source = session.source;
+        let owner = &*session.ownership_witness as *const u8;
+        let store = &session.store as *const SemanticStore;
+        let ast = &session.ast as *const dotty_core::ast::AstArena<dotty_core::ast::Untyped>;
+        let index = &session.index as *const SourceSemanticIndex;
+        println!(
+            "ISSUE2080_SESSION\t{label}\towner={owner:p}\tstore={store:p}\tast={ast:p}\tindex={index:p}\tsource={:?}",
+            session.source
+        );
+        let (select_left, eval) = session.with_typer(|ast, index, typer, definitions| {
+            let select_left = select_left_proof(source, ast, index, typer);
+            let eval = binary_eval_proof(source, ast, index, typer, definitions, false);
+            (select_left, eval)
+        });
+        receipts.push((select_left, eval));
+    }
+    assert_eq!(
+        receipts[0].0, receipts[1].0,
+        "selectLeft normalizes across sessions"
+    );
+    assert_eq!(
+        receipts[0].1, receipts[1].1,
+        "eval normalizes across sessions"
+    );
+
+    for (ordinal, (select_left, eval)) in receipts.into_iter().enumerate() {
+        let label = if ordinal == 0 {
+            "session-a"
+        } else {
+            "session-b"
+        };
+        let select_proof = format!(
+            "{select_left};Expr=source-sealed-trait;Num/Add=source-case-class;Add.parents=Expr+scala.Product;Add.fields=left/right:Expr,distinct,class-owned;Add.selectors=_1/_2:Expr,distinct,class-owned;no=_3"
+        );
+        let eval = eval.replacen("eval@", "root=eval@", 1);
+        let eval_proof = format!(
+            "{eval};Expr=source-sealed-trait;Num/Add=source-case-class;Add.parents=Expr+scala.Product;Add.fields=left/right:Expr,distinct,class-owned;Add.selectors=_1/_2:Expr,distinct,class-owned;Add.unapply=companion-owned(Add):Add;no=_3"
+        );
+        println!(
+            "ISSUE2080_POSITIVE\t{label}\tselectLeft\tExpr.scala#tree39\t158:271\t{select_proof}"
+        );
+        println!("ISSUE2080_POSITIVE\t{label}\teval\tExpr.scala#tree64\t275:410\t{eval_proof}");
+    }
 }
 
 #[test]
@@ -2129,6 +2244,54 @@ fn setup(
     )
     .expect("frozen source names");
     (parsed.ast, parsed.root, index, store, definitions, packages)
+}
+
+struct BinarySession {
+    source: SourceId,
+    ownership_witness: Box<u8>,
+    ast: dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+    index: SourceSemanticIndex,
+    store: SemanticStore,
+    definitions: Definitions,
+    packages: Packages,
+}
+
+impl BinarySession {
+    fn new(source: SourceId) -> Self {
+        let (ast, _root, index, store, definitions, packages) = setup(source);
+        Self {
+            source,
+            ownership_witness: Box::new(0),
+            ast,
+            index,
+            store,
+            definitions,
+            packages,
+        }
+    }
+
+    fn with_typer<R>(
+        &mut self,
+        f: impl FnOnce(
+            &dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+            &SourceSemanticIndex,
+            &mut dotty_typer::SourceTyper<'_>,
+            Definitions,
+        ) -> R,
+    ) -> R {
+        let definitions = self.definitions;
+        let resolver = resolver(definitions);
+        let mut typer = dotty_typer::SourceTyper::new(
+            &self.ast,
+            self.source,
+            &self.index,
+            &mut self.store,
+            definitions,
+            &self.packages,
+        )
+        .with_resolver(Box::new(resolver));
+        f(&self.ast, &self.index, &mut typer, definitions)
+    }
 }
 
 fn resolver(definitions: Definitions) -> ClasspathSymbolResolver<CompositeClassPath> {
