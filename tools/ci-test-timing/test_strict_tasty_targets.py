@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -71,6 +72,31 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
             "\n".join("    " + line for line in command.splitlines()) + "\n",
             encoding="utf-8",
         )
+
+    def validate_real_manifest_with_run_step(self, command, block=False):
+        repository = Path(__file__).parents[2]
+        manifest = json.loads((repository / "tools/ci/strict_tasty_targets.json").read_text(encoding="utf-8"))
+        workflow_text = (repository / manifest["source"]["workflow"]).read_text(encoding="utf-8")
+        steps_match = re.search(r"(?m)^(\s*)steps:\s*$", workflow_text)
+        self.assertIsNotNone(steps_match)
+        step_indent = len(steps_match.group(1)) + 2
+        indent = " " * step_indent
+        if block:
+            step = f"{indent}- run: |\n{indent}  {command}\n"
+        else:
+            step = f"{indent}- run: {command}\n"
+        insertion = steps_match.end() + 1
+        workflow_text = workflow_text[:insertion] + step + workflow_text[insertion:]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflow_path = root / manifest["source"]["workflow"]
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(workflow_text, encoding="utf-8")
+            (root / "tests").mkdir()
+            for target in manifest["targets"]:
+                (root / "tests" / f"{target['name']}.rs").touch()
+            validate_manifest(manifest, root)
 
     def test_command_rejects_invalid_fixture_manifests(self):
         validator = Path(__file__).parents[1] / "ci" / "validate_strict_tasty_targets.py"
@@ -185,6 +211,38 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
         self.append_run_step('cargo test --test "$FUTURE_REQUIRED_TARGET"')
         with self.assertRaisesRegex(ManifestError, "unsupported dynamic Cargo --test target"):
             validate_manifest(self.valid_manifest(), self.root)
+
+    def test_real_inventory_rejects_unassigned_targets_in_sequence_run_steps(self):
+        repository = Path(__file__).parents[2]
+        manifest = json.loads((repository / "tools/ci/strict_tasty_targets.json").read_text(encoding="utf-8"))
+        commands = (
+            "cargo +1.98.1 test --test future_required_consumer --locked",
+            "cargo +1.98.1 test --test future_required_consumer --locked",
+        )
+        for block, command in zip((False, True), commands):
+            with self.subTest(block=block):
+                with self.assertRaisesRegex(ManifestError, "future_required_consumer"):
+                    self.validate_real_manifest_with_run_step(command, block=block)
+
+    def test_real_inventory_rejects_duplicate_strict_targets_in_sequence_run_steps(self):
+        repository = Path(__file__).parents[2]
+        manifest = json.loads((repository / "tools/ci/strict_tasty_targets.json").read_text(encoding="utf-8"))
+        target = manifest["targets"][0]["name"]
+        command = f"cargo +1.98.1 test --test {target} --locked"
+        for block in (False, True):
+            with self.subTest(block=block):
+                with self.assertRaisesRegex(ManifestError, "strict targets invoked outside"):
+                    self.validate_real_manifest_with_run_step(command, block=block)
+
+    def test_real_inventory_rejects_dynamic_cargo_subcommand_construction(self):
+        commands = (
+            "CARGO_COMMAND=test; cargo \"$CARGO_COMMAND\" --test future_required_consumer",
+            'cargo "$CARGO_COMMAND" --test future_required_consumer',
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(ManifestError, "unsupported dynamic"):
+                    self.validate_real_manifest_with_run_step(command, block=True)
 
     def test_shard_selection_returns_manifest_order(self):
         manifest = self.fixture("strict-targets-duplicate.json")

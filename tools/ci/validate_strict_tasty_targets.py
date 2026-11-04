@@ -64,11 +64,15 @@ def _validate_invocations(workflow: str, strict: list[str], support: list[str]) 
             if not cargo_positions:
                 continue
             if cargo_positions != [0]:
+                if any(word.startswith("$") or "$(" in word or "`" in word for word in words[cargo_positions[0] + 1:]):
+                    raise ManifestError("unsupported dynamic or wrapped Cargo command construction")
                 raise ManifestError("unsupported wrapped Cargo invocation in workflow shell")
 
             command = words[1:]
             if command and command[0].startswith("+"):
                 command = command[1:]
+            if command and (command[0].startswith("$") or "$(" in command[0] or "`" in command[0]):
+                raise ManifestError(f"unsupported dynamic Cargo subcommand: {command[0]}")
             if not command or command[0] != "test":
                 continue
 
@@ -130,13 +134,16 @@ def _workflow_run_scripts(workflow: str) -> list[str]:
     index = 0
     while index < len(lines):
         line = lines[index]
-        match = re.match(r"^(\s*)run:\s*(.*)$", line)
+        match = re.match(r"^(\s*)(?:-\s+)?run:\s*(.*)$", line)
         if match is None:
+            if not line.lstrip().startswith("#") and re.search(r"\brun\s*:", line):
+                raise ManifestError(f"unsupported workflow run key syntax: {line.strip()!r}")
             index += 1
             continue
         indent = len(match.group(1))
         value = match.group(2).strip()
-        if value in {"|", "|-", "|+", ">", ">-", ">+"}:
+        block_indicator = re.fullmatch(r"([|>])(?:[1-9])?(?:[+-])?|([|>])(?:[+-])?(?:[1-9])?", value)
+        if block_indicator:
             index += 1
             block: list[str] = []
             while index < len(lines):
@@ -147,6 +154,8 @@ def _workflow_run_scripts(workflow: str) -> list[str]:
                 index += 1
             scripts.append(dedent("\n".join(block)))
             continue
+        if not value or value.startswith(("'", '"')) or value.startswith(("|", ">")):
+            raise ManifestError(f"unsupported workflow run scalar syntax: {value!r}")
         scripts.append(value)
         index += 1
     if not scripts:
