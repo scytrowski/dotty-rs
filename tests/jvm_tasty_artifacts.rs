@@ -68,6 +68,10 @@ const FACTORY_RESULT_BATCH: &str =
     include_str!("fixtures/jvm_tasty_factory_result_arguments/CounterOwnerFactory.scala");
 const REFERENCE_LOCAL_BATCH: &str =
     include_str!("fixtures/jvm_tasty_reference_local_constructor_flows/CounterOwnerFactory.scala");
+const IMMUTABLE_LOCAL_PAIR_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactory.scala");
+const IMMUTABLE_LOCAL_PAIR_REVERSED_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
 const COUNTER_FACTORY_IDENTITY_ONLY: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n";
 const COUNTER_FACTORY_PRIMITIVE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def identity(counter: Counter): Counter = counter\n  def create(seed: Int): Int = seed\n";
 const COUNTER_FACTORY_REFERENCE_CREATE: &str = "package example\n\nclass Counter:\n  def value(): Int = 1\n\nclass CounterFactory:\n  def create(counter: Counter): Counter = counter\n";
@@ -7114,6 +7118,223 @@ fn sibling_constructor_batches_are_deterministic_after_renaming_and_reordering()
             assert_eq!(left.tasty_link_id(), right.tasty_link_id());
         }
     }
+}
+
+#[test]
+fn immutable_local_pair_batches_emit_deterministic_authenticated_artifacts() {
+    let renamed = IMMUTABLE_LOCAL_PAIR_BATCH
+        .replace("package example", "package renamed.example")
+        .replace("Counter", "Token")
+        .replace("Pair", "Envelope")
+        .replace("existing", "prior")
+        .replace("seed", "initial")
+        .replace("fresh", "newer")
+        .replace("create", "build");
+    let counter_start = IMMUTABLE_LOCAL_PAIR_BATCH.find("class Counter(").unwrap();
+    let pair_start = IMMUTABLE_LOCAL_PAIR_BATCH.find("class Pair(").unwrap();
+    let factory_start = IMMUTABLE_LOCAL_PAIR_BATCH
+        .find("class PairFactory:")
+        .unwrap();
+    let reordered = format!(
+        "{}\n\n{}\n\n{}\n\n{}",
+        &IMMUTABLE_LOCAL_PAIR_BATCH[..counter_start],
+        &IMMUTABLE_LOCAL_PAIR_BATCH[factory_start..],
+        &IMMUTABLE_LOCAL_PAIR_BATCH[pair_start..factory_start],
+        &IMMUTABLE_LOCAL_PAIR_BATCH[counter_start..pair_start],
+    );
+    for (source, source_name, source_id, expected) in [
+        (
+            IMMUTABLE_LOCAL_PAIR_BATCH,
+            "PairFactory.scala",
+            20730,
+            ["example/Counter", "example/Pair", "example/PairFactory"],
+        ),
+        (
+            IMMUTABLE_LOCAL_PAIR_REVERSED_BATCH,
+            "PairFactory.scala",
+            20740,
+            ["example/Counter", "example/Pair", "example/PairFactory"],
+        ),
+        (
+            renamed.as_str(),
+            "EnvelopeFactory.scala",
+            20750,
+            [
+                "renamed/example/Token",
+                "renamed/example/Envelope",
+                "renamed/example/EnvelopeFactory",
+            ],
+        ),
+        (
+            reordered.as_str(),
+            "PairFactory.scala",
+            20760,
+            ["example/PairFactory", "example/Pair", "example/Counter"],
+        ),
+    ] {
+        let first =
+            emit_paired_jvm_tasty_batch(source, source_name, SourceId::from_index(source_id))
+                .expect("the original immutable local Pair source emits a complete paired batch");
+        let second =
+            emit_paired_jvm_tasty_batch(source, source_name, SourceId::from_index(source_id + 1))
+                .expect(
+                    "an independent frontend session emits the same immutable local Pair batch",
+                );
+        assert_eq!(first.classes().len(), 3);
+        assert_eq!(second.classes().len(), 3);
+        for ((left, right), internal_name) in
+            first.classes().iter().zip(second.classes()).zip(expected)
+        {
+            assert_eq!(left.classfile_path(), format!("{internal_name}.class"));
+            assert_eq!(left.tasty_path(), format!("{internal_name}.tasty"));
+            assert_eq!(left.classfile_bytes(), right.classfile_bytes());
+            assert_eq!(left.tasty_bytes(), right.tasty_bytes());
+            assert_eq!(left.tasty_link_id(), right.tasty_link_id());
+        }
+    }
+}
+
+#[test]
+fn immutable_local_pair_contract_rejects_wrong_local_store_slot() {
+    let source_id = SourceId::from_index(20751);
+    let emitted =
+        emit_paired_jvm_tasty_batch(IMMUTABLE_LOCAL_PAIR_BATCH, "PairFactory.scala", source_id)
+            .unwrap();
+    with_paired_jvm_tasty_batch_plan(
+        IMMUTABLE_LOCAL_PAIR_BATCH,
+        "PairFactory.scala",
+        source_id,
+        |plan| {
+            let tasty_plans = plan
+                .classes
+                .iter()
+                .map(|class| class.tasty_plan)
+                .collect::<Vec<_>>();
+            let validated = validate_jvm_tasty_batch(plan.jvm_unit, &tasty_plans).unwrap();
+            let mut classfiles = emitted
+                .classes()
+                .iter()
+                .map(|artifact| JvmTastyClassFileArtifact {
+                    classfile_path: artifact.classfile_path().to_owned(),
+                    classfile_bytes: artifact.classfile_bytes().to_vec(),
+                })
+                .collect::<Vec<_>>();
+            let sidecars = emitted
+                .classes()
+                .iter()
+                .map(|artifact| JvmTastySidecarArtifact {
+                    tasty_path: artifact.tasty_path().to_owned(),
+                    tasty_bytes: artifact.tasty_bytes().to_vec(),
+                })
+                .collect::<Vec<_>>();
+            let factory = classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                .unwrap();
+            let mut reader = Reader::new(&factory.classfile_bytes);
+            let decoded = ClassFile::decode(&mut reader).unwrap();
+            let create = decoded
+                .methods
+                .iter()
+                .find(|method| decoded.constant_pool.utf8(method.name_index).unwrap() == "create")
+                .unwrap();
+            let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                panic!("PairFactory.create has one Code attribute");
+            };
+            let stores_to_fresh = code
+                .code
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, opcode)| (*opcode == 0x4e).then_some(offset))
+                .collect::<Vec<_>>();
+            assert_eq!(stores_to_fresh.len(), 1, "one astore_3 stores fresh");
+            let code_start =
+                code.code.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
+            factory.classfile_bytes[code_start + stores_to_fresh[0]] = 0x4d;
+            let error = validate_jvm_tasty_batch_artifacts(
+                &validated,
+                JvmTastyBatchArtifacts {
+                    classfiles,
+                    sidecars,
+                },
+            )
+            .expect_err("storing fresh into seed's slot must fail before accepting the batch");
+            assert!(
+                matches!(
+                    error,
+                    JvmTastyContractError::BatchArtifact {
+                        class_index: 2,
+                        phase: "cross-class invocation",
+                        ..
+                    }
+                ),
+                "wrong local slot is rejected at paired bytecode authentication: {error:?}"
+            );
+
+            let mut swapped_classfiles = emitted
+                .classes()
+                .iter()
+                .map(|artifact| JvmTastyClassFileArtifact {
+                    classfile_path: artifact.classfile_path().to_owned(),
+                    classfile_bytes: artifact.classfile_bytes().to_vec(),
+                })
+                .collect::<Vec<_>>();
+            let factory = swapped_classfiles
+                .iter_mut()
+                .find(|artifact| artifact.classfile_path == "example/PairFactory.class")
+                .unwrap();
+            let mut reader = Reader::new(&factory.classfile_bytes);
+            let decoded = ClassFile::decode(&mut reader).unwrap();
+            let create = decoded
+                .methods
+                .iter()
+                .find(|method| decoded.constant_pool.utf8(method.name_index).unwrap() == "create")
+                .unwrap();
+            let [Attribute::Code(code)] = create.attributes.as_slice() else {
+                panic!("PairFactory.create has one Code attribute");
+            };
+            let existing_and_fresh_loads = code
+                .code
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, opcode)| matches!(opcode, 0x2b | 0x2d).then_some(offset))
+                .collect::<Vec<_>>();
+            assert_eq!(existing_and_fresh_loads.len(), 2);
+            let code_start =
+                code.code.as_ptr() as usize - factory.classfile_bytes.as_ptr() as usize;
+            factory.classfile_bytes.swap(
+                code_start + existing_and_fresh_loads[0],
+                code_start + existing_and_fresh_loads[1],
+            );
+            let error = validate_jvm_tasty_batch_artifacts(
+                &validated,
+                JvmTastyBatchArtifacts {
+                    classfiles: swapped_classfiles,
+                    sidecars: emitted
+                        .classes()
+                        .iter()
+                        .map(|artifact| JvmTastySidecarArtifact {
+                            tasty_path: artifact.tasty_path().to_owned(),
+                            tasty_bytes: artifact.tasty_bytes().to_vec(),
+                        })
+                        .collect(),
+                },
+            )
+            .expect_err("a JVM-legal reference swap must fail the source-bound contract");
+            assert!(
+                matches!(
+                    error,
+                    JvmTastyContractError::BatchArtifact {
+                        class_index: 2,
+                        phase: "cross-class invocation",
+                        ..
+                    }
+                ),
+                "source argument order is authenticated independently of JVM validity: {error:?}"
+            );
+        },
+    )
+    .unwrap();
 }
 
 #[test]
