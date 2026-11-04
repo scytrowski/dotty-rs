@@ -1,4 +1,4 @@
-use dotty::jvm_tasty_plan::with_paired_jvm_tasty_batch_plan;
+use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 use dotty_classfile::access_flags::{ACC_FINAL, ACC_PRIVATE};
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::classfile::{
@@ -136,37 +136,201 @@ fn two_immutable_reference_locals_variations_record_first_observed_rejection() {
         "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)\n    new Pair(first, second)",
         "    if firstSeed > 0 then\n      val first: Counter = new Counter(firstSeed)\n      val second: Counter = new Counter(secondSeed)\n      new Pair(first, second)\n    else\n      val first: Counter = new Counter(firstSeed)\n      val second: Counter = new Counter(secondSeed)\n      new Pair(first, second)",
     );
+    struct ExpectedFailure {
+        label: &'static str,
+        source: String,
+        phase: &'static str,
+        reason_prefix: &'static str,
+        class_and_declaration: Option<(usize, usize)>,
+    }
+    let identity_proof_rejection =
+        "SourceShape(\"factory body must be a direct Apply or one-local Block\")";
     let cases = [
-        ("renamed", renamed),
-        ("reordered declarations", reordered),
-        ("reversed Pair arguments", reversed_pair_args),
-        ("alias Pair arguments", aliased_pair_args),
-        ("swapped initializer formals", swapped_initializer_args),
-        ("third local", third_local),
-        ("mutable local", mutable_local),
-        ("missing initializer", missing_initializer),
-        ("duplicate local", duplicate_local),
-        ("use before declaration", use_before_declaration),
-        ("shadowed formal", shadowed_formal),
-        ("wrong local type", wrong_type),
-        (
-            "wrong Pair constructor signature",
-            wrong_constructor_signature,
-        ),
-        ("helper initializer", helper_initializer),
-        ("conditional initializer", conditional_initializer),
-        ("nested initializer", nested_initializer),
-        ("branch-local declarations", branch_local),
+        ExpectedFailure {
+            label: "renamed",
+            source: renamed,
+            phase: "cross-class constructor-call identity proof",
+            reason_prefix: identity_proof_rejection,
+            class_and_declaration: None,
+        },
+        ExpectedFailure {
+            label: "reordered declarations",
+            source: reordered,
+            phase: "cross-class constructor-call identity proof",
+            reason_prefix: identity_proof_rejection,
+            class_and_declaration: None,
+        },
+        ExpectedFailure {
+            label: "reversed Pair arguments",
+            source: reversed_pair_args,
+            phase: "cross-class constructor-call identity proof",
+            reason_prefix: identity_proof_rejection,
+            class_and_declaration: None,
+        },
+        ExpectedFailure {
+            label: "alias Pair arguments",
+            source: aliased_pair_args,
+            phase: "cross-class constructor-call identity proof",
+            reason_prefix: identity_proof_rejection,
+            class_and_declaration: None,
+        },
+        ExpectedFailure {
+            label: "swapped initializer formals",
+            source: swapped_initializer_args,
+            phase: "cross-class constructor-call identity proof",
+            reason_prefix: identity_proof_rejection,
+            class_and_declaration: None,
+        },
+        ExpectedFailure {
+            label: "third local",
+            source: third_local,
+            phase: "cross-class constructor-call identity proof",
+            reason_prefix: identity_proof_rejection,
+            class_and_declaration: None,
+        },
+        ExpectedFailure {
+            label: "mutable local",
+            source: mutable_local,
+            phase: "cross-class constructor-call identity proof",
+            reason_prefix: identity_proof_rejection,
+            class_and_declaration: None,
+        },
+        ExpectedFailure {
+            label: "missing initializer",
+            source: missing_initializer,
+            phase: "method body typing",
+            reason_prefix: "LocalValueRightHandSideMissing {",
+            class_and_declaration: Some((2, 0)),
+        },
+        ExpectedFailure {
+            label: "duplicate local",
+            source: duplicate_local,
+            phase: "method body typing",
+            reason_prefix: "DuplicateLocalValue {",
+            class_and_declaration: Some((2, 0)),
+        },
+        ExpectedFailure {
+            label: "use before declaration",
+            source: use_before_declaration,
+            phase: "method body typing",
+            reason_prefix: "TermNameNotFound {",
+            class_and_declaration: Some((2, 0)),
+        },
+        ExpectedFailure {
+            label: "shadowed formal",
+            source: shadowed_formal,
+            phase: "method body typing",
+            reason_prefix: "RecursiveLocalValueInitializer {",
+            class_and_declaration: Some((2, 0)),
+        },
+        ExpectedFailure {
+            label: "wrong local type",
+            source: wrong_type,
+            phase: "method body typing",
+            reason_prefix: "TypeNameNotFound {",
+            class_and_declaration: Some((2, 0)),
+        },
+        ExpectedFailure {
+            label: "wrong Pair constructor signature",
+            source: wrong_constructor_signature,
+            phase: "method body typing",
+            reason_prefix: "ApplicationArgumentTypeMismatch {",
+            class_and_declaration: Some((2, 0)),
+        },
+        ExpectedFailure {
+            label: "helper initializer",
+            source: helper_initializer,
+            phase: "cross-class constructor-call identity proof",
+            reason_prefix: identity_proof_rejection,
+            class_and_declaration: None,
+        },
+        ExpectedFailure {
+            label: "conditional initializer",
+            source: conditional_initializer,
+            phase: "cross-class constructor-call identity proof",
+            reason_prefix: identity_proof_rejection,
+            class_and_declaration: None,
+        },
+        ExpectedFailure {
+            label: "nested initializer",
+            source: nested_initializer,
+            phase: "cross-class constructor-call identity proof",
+            reason_prefix: identity_proof_rejection,
+            class_and_declaration: None,
+        },
+        ExpectedFailure {
+            label: "branch-local declarations",
+            source: branch_local,
+            phase: "JVM/TASTy cross-contract validation",
+            reason_prefix: "TastyPlan(BodyType {",
+            class_and_declaration: Some((2, 99)),
+        },
     ];
-    for (index, (label, source)) in cases.into_iter().enumerate() {
+    for (index, expected) in cases.into_iter().enumerate() {
+        let mut callback_reached = false;
         let error = with_paired_jvm_tasty_batch_plan(
-            &source,
+            &expected.source,
             "TwoLocals.scala",
             SourceId::from_index(21230 + index as u32),
-            |_| (),
+            |_| callback_reached = true,
         )
-        .expect_err("each variation's first paired-plan rejection is observable");
-        eprintln!("TWO_LOCAL_VARIATION {label}: {error:?}");
+        .expect_err("each variation is rejected before the paired-plan callback");
+        assert!(
+            !callback_reached,
+            "{} must not reach later paired-plan stages",
+            expected.label
+        );
+        let reason = match (error, expected.class_and_declaration) {
+            (PairedPlanError::BatchUnit { phase, reason }, None) => {
+                assert_eq!(
+                    phase, expected.phase,
+                    "{} first failure phase",
+                    expected.label
+                );
+                reason
+            }
+            (
+                PairedPlanError::BatchClass {
+                    class_index,
+                    declaration_index,
+                    phase,
+                    reason,
+                },
+                Some((expected_class, expected_declaration)),
+            ) => {
+                assert_eq!(
+                    class_index, expected_class,
+                    "{} first failure class",
+                    expected.label
+                );
+                assert_eq!(
+                    declaration_index, expected_declaration,
+                    "{} first failure declaration",
+                    expected.label
+                );
+                assert_eq!(
+                    phase, expected.phase,
+                    "{} first failure phase",
+                    expected.label
+                );
+                reason
+            }
+            (other, _) => panic!(
+                "{} returned the wrong first-error category: {other:?}",
+                expected.label
+            ),
+        };
+        assert!(
+            reason.starts_with(expected.reason_prefix),
+            "{} first failure must be {} in {}, got {reason}",
+            expected.label,
+            expected.reason_prefix,
+            expected.phase
+        );
+        eprintln!(
+            "TWO_LOCAL_VARIATION {}: phase={} reason={reason} later_paired_plan_stages=masked",
+            expected.label, expected.phase
+        );
     }
 }
 

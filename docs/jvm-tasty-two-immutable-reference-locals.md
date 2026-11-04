@@ -111,8 +111,17 @@ scope owner and source spans rather than recovering identity from spelling.
 
 The JVM-only source path succeeds and emits all three classes. Its
 `PairFactory.create` has descriptor `(II)Lexample/Pair;`, `max_stack=4`,
-`max_locals=5`, and allocates local references in slots 3 and 4. The exact
-emitted byte sequence is printed by the test.
+`max_locals=5`, and allocates local references in slots 3 and 4. The test
+asserts the complete operation/offset sequence: allocate and initialize a
+Counter from slot 1, store it in slot 3; allocate and initialize another
+Counter from slot 2, store it in slot 4; allocate Pair, load slots 3 and 4 in
+order, invoke the canonical Counter and Pair constructor references, and
+return. It checks both `new` class references, all constructor owners and
+descriptors, stack/local bounds, and the exact encoded local slot operands.
+With the required JDK gate enabled, `java -Xverify:all` loads and executes the
+Rust-produced Counter, Pair and PairFactory classes. The consumer verifies
+7/3 values, distinct local references, independent mutation, and fresh
+references across repeated calls.
 
 Calling the existing paired-plan entry point on that same source records this
 first error:
@@ -135,8 +144,10 @@ manufacture a later-stage observation.
 The Scala compiler test generates each case deterministically from the frozen
 source and records its source hash and compiler result. The paired-plan test
 runs the Scala-typed cases through the actual existing Rust entry point and
-records its first error. “Masked” means no later paired-plan, pickler or
-contract stage was executed.
+asserts the exact error category, phase and diagnostic variant/payload prefix
+for every case. It also asserts the paired-plan callback was not reached.
+“Masked” means no later paired-plan callback, pickler or contract stage was
+executed.
 
 | Variation | Scala 3.9 | Rust first observed result |
 | --- | --- | --- |
@@ -157,6 +168,7 @@ contract stage was executed.
 | Local shadowing an ordinary formal | Rejected, Scala `[E007]` type mismatch | `method body typing`, `RecursiveLocalValueInitializer` |
 | Wrong local type | Rejected, Scala `[E007]` type mismatch | `method body typing`, `TypeNameNotFound` |
 | Wrong Pair constructor argument types | Rejected, Scala `[E007]` type mismatch | `method body typing`, `ApplicationArgumentTypeMismatch` |
+| Wrong Pair constructor signature using Int formals | Rejected, Scala `[E007]` type mismatch | `method body typing`, `ApplicationArgumentTypeMismatch` |
 
 The exact generated-source SHA-256 values and Scala observations are in
 `oracle.json` and the required-mode test log. The Rust variation test also

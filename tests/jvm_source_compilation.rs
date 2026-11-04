@@ -26374,10 +26374,144 @@ fn two_immutable_reference_locals_preserve_authentic_source_typed_and_jvm_identi
     let [Attribute::Code(code)] = method.attributes.as_slice() else {
         panic!("create has one code attribute")
     };
+    assert_eq!(factory.version.major, 65);
+    assert_eq!(
+        code.max_stack, 4,
+        "duplicated Pair receiver plus two constructor arguments"
+    );
     assert_eq!(code.max_locals, 5, "JVM-only layout assigns slots 0..4");
+    let instructions = decode_subset_instructions(code.code);
+    assert_eq!(
+        instructions,
+        [
+            (0, 0xbb),  // new Counter
+            (3, 0x59),  // dup
+            (4, 0x1b),  // iload_1 (firstSeed)
+            (5, 0xb7),  // Counter.<init>(I)V
+            (8, 0x4e),  // astore_3 (first)
+            (9, 0xbb),  // new Counter
+            (12, 0x59), // dup
+            (13, 0x1c), // iload_2 (secondSeed)
+            (14, 0xb7), // Counter.<init>(I)V
+            (17, 0x3a), // astore 4 (second)
+            (19, 0xbb), // new Pair
+            (22, 0x59), // dup
+            (23, 0x2d), // aload_3 (first)
+            (24, 0x19), // aload 4 (second)
+            (26, 0xb7), // Pair.<init>(Counter, Counter)
+            (29, 0xb0), // areturn
+        ],
+        "Rust JVM-only output allocates and initializes two local Counters in formal order, then forwards both locals to Pair"
+    );
+    for (offset, expected_owner) in [
+        (0, "example/Counter"),
+        (9, "example/Counter"),
+        (19, "example/Pair"),
+    ] {
+        let class_index = u16::from_be_bytes([code.code[offset + 1], code.code[offset + 2]]);
+        assert_eq!(
+            factory
+                .constant_pool
+                .class_name(ConstantPoolIndex(class_index)),
+            Ok(expected_owner),
+            "new at bytecode offset {offset} retains its canonical owner"
+        );
+    }
+    assert_eq!(code.code[17 + 1], 4, "second local stores into slot 4");
+    assert_eq!(code.code[24 + 1], 4, "Pair's second argument loads slot 4");
+    assert_invocation_sequence(
+        &factory,
+        code.code,
+        &[
+            (0xb7, "example/Counter", "<init>", "(I)V"),
+            (0xb7, "example/Counter", "<init>", "(I)V"),
+            (
+                0xb7,
+                "example/Pair",
+                "<init>",
+                "(Lexample/Counter;Lexample/Counter;)V",
+            ),
+        ],
+    );
     eprintln!(
         "two-local JVM-only result descriptor=(II)Lexample/Pair; max_stack={} max_locals={} code={:02x?}",
         code.max_stack, code.max_locals, code.code
+    );
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let classpath = output
+        .path()
+        .to_str()
+        .expect("UTF-8 generated class directory");
+    let harness = output.path().join("TwoLocalRustArtifactsHarness.java");
+    fs::write(
+        &harness,
+        r#"import example.Counter;
+import example.Pair;
+import example.PairFactory;
+import java.lang.reflect.Field;
+
+public final class TwoLocalRustArtifactsHarness {
+  private static Counter counter(Pair pair, String fieldName) throws Exception {
+    Field field = Pair.class.getDeclaredField(fieldName);
+    field.setAccessible(true);
+    return (Counter) field.get(pair);
+  }
+
+  public static void main(String[] args) throws Exception {
+    PairFactory factory = new PairFactory();
+    Pair first = factory.create(7, 3);
+    Counter firstLeft = counter(first, "left");
+    Counter firstRight = counter(first, "right");
+    if (first.leftValue() != 7 || first.rightValue() != 3) throw new AssertionError("formal values/order");
+    if (firstLeft == firstRight) throw new AssertionError("locals must allocate distinct Counters");
+    firstLeft.set(70);
+    if (first.leftValue() != 70 || first.rightValue() != 3) throw new AssertionError("local state must be independent");
+
+    Pair second = factory.create(7, 3);
+    Counter secondLeft = counter(second, "left");
+    Counter secondRight = counter(second, "right");
+    if (secondLeft == secondRight || secondLeft == firstLeft || secondRight == firstRight) {
+      throw new AssertionError("each call and each local must allocate a fresh Counter");
+    }
+    if (second.leftValue() != 7 || second.rightValue() != 3) throw new AssertionError("fresh call values/order");
+    System.out.println("Rust two-local artifacts verified");
+  }
+}
+"#,
+    )
+    .expect("write Rust artifact JDK harness");
+    let javac = Command::new("javac")
+        .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for Rust two-local artifacts");
+    assert!(
+        javac.status.success(),
+        "javac rejected the Rust artifact harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            classpath,
+            "TwoLocalRustArtifactsHarness",
+        ])
+        .output()
+        .expect("start JDK verification and execution of Rust two-local artifacts");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected or failed the Rust artifacts\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "Rust two-local artifacts verified"
     );
 }
 
