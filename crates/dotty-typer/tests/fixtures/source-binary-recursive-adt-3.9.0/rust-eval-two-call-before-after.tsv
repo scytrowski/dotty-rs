@@ -1,0 +1,4 @@
+stage	session	root
+before	issue-2076	eval whole DefDef completed; nested two-binder/two-call identity not yet asserted
+session-a	fresh-session-a	eval@275:410;signature=(Expr):Int;Add.binders=left@_1:Expr,right@_2:Expr,distinct;calls=eval(left):Int+eval(right):Int;callee=Evaluator.eval:same_source_symbol;addition=Int+Int:Int;match=Int;mappings=25
+session-b	fresh-session-b	eval@275:410;signature=(Expr):Int;Add.binders=left@_1:Expr,right@_2:Expr,distinct;calls=eval(left):Int+eval(right):Int;callee=Evaluator.eval:same_source_symbol;addition=Int+Int:Int;match=Int;mappings=25
