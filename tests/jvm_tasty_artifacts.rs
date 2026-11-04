@@ -7195,6 +7195,83 @@ fn immutable_local_pair_batches_emit_deterministic_authenticated_artifacts() {
 }
 
 #[test]
+fn immutable_local_pair_batch_publisher_rejects_partial_and_unsafe_outputs() {
+    let batch = emit_paired_jvm_tasty_batch(
+        IMMUTABLE_LOCAL_PAIR_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(20771),
+    )
+    .expect("emit the authentic immutable-local Pair producer batch");
+    let pairs = batch_publish_pairs(&batch);
+    assert_eq!(pairs.len(), 3);
+
+    let root = TestDirectory::new("immutable-local-pair-publish-faults");
+    for (index, fault) in (1..=6)
+        .map(BatchPublishFault::AfterStagedFiles)
+        .chain([
+            BatchPublishFault::BeforePromotion,
+            BatchPublishFault::AfterPromotion,
+        ])
+        .enumerate()
+    {
+        let destination = root.path().join(format!("failed-{index}"));
+        assert!(matches!(
+            publish_batch_pairs(&destination, &pairs, Some(fault)),
+            Err(BatchPublishError::Io { .. })
+        ));
+        assert!(
+            !destination.exists(),
+            "fault case {index} must leave no accepted final tree"
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            0,
+            "fault case {index} must clean its private staging directory"
+        );
+    }
+
+    let existing = root.path().join("existing-output");
+    std::fs::create_dir(&existing).unwrap();
+    let sentinel = existing.join("sentinel");
+    std::fs::write(&sentinel, b"preserve immutable-local output").unwrap();
+    assert!(matches!(
+        publish_batch_pairs(&existing, &pairs, None),
+        Err(BatchPublishError::DestinationExists { .. })
+    ));
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap(),
+        b"preserve immutable-local output"
+    );
+    assert_eq!(read_relative_files(&existing).unwrap(), ["sentinel"]);
+
+    let mut missing_class_path = pairs.clone();
+    missing_class_path[2].classfile_path = "";
+    let mut missing_class_bytes = pairs.clone();
+    missing_class_bytes[2].classfile_bytes = &[];
+    let mut unsafe_sidecar_path = pairs.clone();
+    unsafe_sidecar_path[2].tasty_path = "../PairFactory.tasty";
+    let mut duplicate_class_path = pairs.clone();
+    duplicate_class_path[2].classfile_path = pairs[1].classfile_path;
+
+    for (label, changed) in [
+        ("missing-class-path", missing_class_path),
+        ("missing-class-bytes", missing_class_bytes),
+        ("unsafe-sidecar-path", unsafe_sidecar_path),
+        ("duplicate-class-path", duplicate_class_path),
+    ] {
+        let destination = root.path().join(label);
+        assert!(matches!(
+            publish_batch_pairs(&destination, &changed, None),
+            Err(BatchPublishError::InvalidManifest { .. })
+        ));
+        assert!(
+            !destination.exists(),
+            "{label} must be rejected before publication"
+        );
+    }
+}
+
+#[test]
 fn immutable_local_pair_contract_rejects_wrong_local_store_slot() {
     let source_id = SourceId::from_index(20751);
     let emitted =
