@@ -7195,6 +7195,163 @@ fn immutable_local_pair_batches_emit_deterministic_authenticated_artifacts() {
 }
 
 #[test]
+fn immutable_local_pair_batch_publisher_rejects_partial_and_unsafe_outputs() {
+    let batch = emit_paired_jvm_tasty_batch(
+        IMMUTABLE_LOCAL_PAIR_BATCH,
+        "PairFactory.scala",
+        SourceId::from_index(20771),
+    )
+    .expect("emit the authentic immutable-local Pair producer batch");
+    let pairs = batch_publish_pairs(&batch);
+    assert_eq!(pairs.len(), 3);
+
+    let root = TestDirectory::new("immutable-local-pair-publish-faults");
+
+    let staged_paths = pairs
+        .iter()
+        .flat_map(|pair| [pair.classfile_path, pair.tasty_path])
+        .collect::<Vec<_>>();
+    assert_eq!(staged_paths.len(), 6);
+    for (write_number, expected_relative_path) in staged_paths.iter().enumerate() {
+        let destination = root.path().join(format!("failed-write-{write_number}"));
+        let result = publish_batch_pairs(
+            &destination,
+            &pairs,
+            Some(BatchPublishFault::AfterStagedFiles(write_number + 1)),
+        );
+        let Err(BatchPublishError::Io {
+            phase,
+            path,
+            source,
+            cleanup_error,
+        }) = result
+        else {
+            panic!("write {write_number} did not return a publisher I/O error: {result:?}");
+        };
+        assert_eq!(phase, "staging write", "write {write_number}");
+        assert_eq!(source.kind(), std::io::ErrorKind::Other);
+        assert_eq!(
+            source.to_string(),
+            "injected failure during batch staging",
+            "write {write_number} must reach its requested injected failure"
+        );
+        assert!(
+            cleanup_error.is_none(),
+            "write {write_number}: {cleanup_error:?}"
+        );
+        let staged_path = path
+            .strip_prefix(root.path())
+            .expect("the staged artifact remains under the publisher root");
+        let mut components = staged_path.components();
+        let staging_directory = components
+            .next()
+            .expect("the error path names its private staging directory")
+            .as_os_str()
+            .to_string_lossy();
+        assert!(
+            staging_directory.starts_with(".dotty-jvm-tasty-batch-"),
+            "write {write_number} path is not a staging artifact: {}",
+            path.display()
+        );
+        assert_eq!(
+            components.as_path(),
+            std::path::Path::new(expected_relative_path),
+            "write {write_number} must fail on its requested artifact"
+        );
+        assert!(
+            !destination.exists(),
+            "write {write_number} must leave no accepted final tree"
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            0,
+            "write {write_number} must clean its private staging directory"
+        );
+    }
+
+    for (label, fault, expected_phase, expected_message) in [
+        (
+            "before-promotion",
+            BatchPublishFault::BeforePromotion,
+            "promotion",
+            "injected failure before batch promotion",
+        ),
+        (
+            "after-promotion",
+            BatchPublishFault::AfterPromotion,
+            "post-promotion rollback",
+            "injected failure after batch promotion",
+        ),
+    ] {
+        let destination = root.path().join(label);
+        let result = publish_batch_pairs(&destination, &pairs, Some(fault));
+        let Err(BatchPublishError::Io {
+            phase,
+            path,
+            source,
+            cleanup_error,
+        }) = result
+        else {
+            panic!("{label} did not return a publisher I/O error: {result:?}");
+        };
+        assert_eq!(phase, expected_phase, "{label}");
+        assert_eq!(
+            path, destination,
+            "{label} must report the final destination"
+        );
+        assert_eq!(source.kind(), std::io::ErrorKind::Other, "{label}");
+        assert_eq!(source.to_string(), expected_message, "{label}");
+        assert!(cleanup_error.is_none(), "{label}: {cleanup_error:?}");
+        assert!(!destination.exists(), "{label} must leave no final tree");
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            0,
+            "{label} must leave no staging or promoted tree"
+        );
+    }
+
+    let existing = root.path().join("existing-output");
+    std::fs::create_dir(&existing).unwrap();
+    let sentinel = existing.join("sentinel");
+    std::fs::write(&sentinel, b"preserve immutable-local output").unwrap();
+    assert!(matches!(
+        publish_batch_pairs(&existing, &pairs, None),
+        Err(BatchPublishError::DestinationExists { .. })
+    ));
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap(),
+        b"preserve immutable-local output"
+    );
+    assert_eq!(read_relative_files(&existing).unwrap(), ["sentinel"]);
+
+    let mut missing_class_path = pairs.clone();
+    missing_class_path[2].classfile_path = "";
+    let mut missing_class_bytes = pairs.clone();
+    missing_class_bytes[2].classfile_bytes = &[];
+    let mut unsafe_sidecar_path = pairs.clone();
+    unsafe_sidecar_path[2].tasty_path = "../PairFactory.tasty";
+    let mut duplicate_class_path = pairs.clone();
+    duplicate_class_path[2].classfile_path = pairs[1].classfile_path;
+
+    for (label, changed) in [
+        ("missing-class-path", missing_class_path),
+        ("missing-class-bytes", missing_class_bytes),
+        ("unsafe-sidecar-path", unsafe_sidecar_path),
+        ("duplicate-class-path", duplicate_class_path),
+    ] {
+        let destination = root.path().join(label);
+        assert!(matches!(
+            publish_batch_pairs(&destination, &changed, None),
+            Err(BatchPublishError::InvalidManifest { .. })
+        ));
+        assert!(
+            !destination.exists(),
+            "{label} must be rejected before publication"
+        );
+    }
+}
+
+#[test]
 fn immutable_local_pair_contract_rejects_wrong_local_store_slot() {
     let source_id = SourceId::from_index(20751);
     let emitted =

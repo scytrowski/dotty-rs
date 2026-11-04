@@ -7,6 +7,50 @@ are Scala oracle artifacts; they are not Rust output or Rust/Scala
 interoperability evidence. `oracle.json` records each source/artifact hash,
 class-file major version, sidecar TASTy UUID, and the matching class-file link.
 
+## Issue #2077 integrated release gate
+
+The gate is based on merged main `7481ead4ca969b5fd897983aa7ae096e03413439`,
+the merge of PR #2115. The seven predecessor PR heads below are ancestors of
+that commit. Each final logical review was `READY_FOR_MERGE` on the listed PR
+head, and each PR's Rust, class-file/JVM and pinned Scala workflow checks
+completed successfully. This release gate adds tests and evidence only; it
+does not add producer semantics.
+
+| Issue | Merged PR | Reviewed/tested head | Merge commit | Final review |
+| --- | --- | --- | --- | --- |
+| #2063 | [#2081](https://github.com/scytrowski/dotty-rs/pull/2081) | `2cac3adb7a6ca9426a53f62c77a81bf744df40e3` | `91f982aa6946aec5584e700084a6acee82ee630e` | [`READY_FOR_MERGE`](https://github.com/scytrowski/dotty-rs/pull/2081#pullrequestreview-5756227050), zero blockers |
+| #2065 | [#2085](https://github.com/scytrowski/dotty-rs/pull/2085) | `0c637cc3f33b50fb8dcad7b0de65988d7ec6c8b5` | `254f00c2c03f027c1b2f0da3f35e78d54bab953d` | [`READY_FOR_MERGE`](https://github.com/scytrowski/dotty-rs/pull/2085#pullrequestreview-5758791335), zero blockers |
+| #2068 | [#2089](https://github.com/scytrowski/dotty-rs/pull/2089) | `356bb699888cd89bf106f3a1f012ccaa643a7112` | `caf81e06693700c9211c095f971c62ed21ef49d5` | [`READY_FOR_MERGE`](https://github.com/scytrowski/dotty-rs/pull/2089#pullrequestreview-5760659588), zero blockers |
+| #2069 | [#2105](https://github.com/scytrowski/dotty-rs/pull/2105) | `4d9f7b33894b34c6963c38099cb265985c9fad64` | `b3e2a35b219959cecddee14a24ee0452e61458f7` | [`READY_FOR_MERGE`](https://github.com/scytrowski/dotty-rs/pull/2105#pullrequestreview-5761897981), zero blockers |
+| #2073 | [#2107](https://github.com/scytrowski/dotty-rs/pull/2107) | `01cf0fa45b92df64ca41c638b9b442154a142ba0` | `eedcf312b989c9e5003a26a7a2576124db3ff05b` | [`READY_FOR_MERGE`](https://github.com/scytrowski/dotty-rs/pull/2107#pullrequestreview-5762653424), zero blockers |
+| #2074 | [#2110](https://github.com/scytrowski/dotty-rs/pull/2110) | `68d80b84ffc22a8de1649bce7fb59c424e1682c8` | `e318bd76c638bedf0ec1ebd4b82b8ee58baaa104` | [`READY_FOR_MERGE`](https://github.com/scytrowski/dotty-rs/pull/2110#pullrequestreview-5765172055), zero blockers |
+| #2075 | [#2115](https://github.com/scytrowski/dotty-rs/pull/2115) | `dbf93dec536c75ae9b792f51ae290be249c4818e` | `7481ead4ca969b5fd897983aa7ae096e03413439` | [`READY_FOR_MERGE`](https://github.com/scytrowski/dotty-rs/pull/2115#pullrequestreview-5767433762), zero blockers |
+
+The Scala source revision is
+`777528f19a58e794c9954a42f433373472ec57f8` (Scala 3.9.0 / TASTy 28.9.0);
+the JDK is Temurin 21.0.13+9 (binary SHA-256
+`9cad3f2620d3ef2ed10b26f922af7e773d54fdaa05f615d6d6df014f3fec4155`). The
+published runtime JAR hashes below are pinned; the locally staged compiler
+snapshot JAR hash is recorded only as an observation. The Rust toolchain is
+the repository-pinned 1.98.1 from `rust-toolchain.toml`.
+
+Acceptance evidence map: AC1 is this provenance ledger and the source/client,
+toolchain and artifact hashes below; AC2–AC3 are the original-session and
+ordered proof sections; AC4–AC5 are the TASTy address and six-artifact
+determinism sections; AC6–AC7 are the decoded local instruction evidence and
+independent Java/Scala clients; AC8 is the observed first-failure matrix plus
+the immutable-local publisher fault regression; AC9 is the integrated strict
+gate receipt below; AC10 is this document's combined ledger. Historical audit
+failures are marked as such and are not used as current acceptance evidence.
+
+This gate is limited to one immutable local initialized by direct
+`new Counter(seed)` and passed as one of two `Pair` constructor arguments. It
+does not cover multiple locals, `var`, nested or branch-local scopes,
+helper-produced locals, a third constructor argument, cross-unit/imported
+classes, generic/contextual/default/secondary constructors, a public compiler
+CLI, or broader Scala ABI support. Publisher tests cover handled injected
+failures and do not claim crash-atomic multi-file durability.
+
 ## Pinned Scala observations
 
 The checked sources were compiled separately with Scala 3.9.0, revision
@@ -493,4 +537,42 @@ ran the external verifier/runtime controls. The full selected strict-JDK
 integration command did not pass locally: its existing mixed-origin test
 requires exactly Temurin 21.0.13. GitHub's strict-JDK CI job is configured for
 21.0.13 and remains the authoritative full-gate result; no local full-gate
-pass is claimed here.
+pass was claimed at the #2110 checkpoint. The #2077 integrated run below uses
+Temurin 21.0.13 and records the later full-gate result.
+
+## Issue #2077 integrated execution
+
+The implementation delta was tested from frozen main
+`7481ead4ca969b5fd897983aa7ae096e03413439`; the publisher regression is commit
+`faacce7f3f631f26cba6af8ba59d3849de10ae81`. The full inherited pinned Scala
+3.9 workflow target list in
+[`jvm-tasty-factory-scala-consumer.yml`](../.github/workflows/jvm-tasty-factory-scala-consumer.yml)
+was executed with every listed `DOTTY_REQUIRE_SCALA_*` opt-in enabled and
+`DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1`; it passed with no required skips.
+This includes the immutable-local consumer test, both source orientations,
+Scala `-decompile`/`-print-tasty`/`-from-tasty`, lookup controls, and original
+Rust artifact hash checks.
+
+The mandatory JDK 21 CI suite passed with
+`DOTTY_CLASSFILE_REQUIRE_JDK=1` on Temurin `21.0.13+9`. It included the
+class-file encoder, JVM backend, integrated source compilation, paired artifact
+publisher, immutable-local Java runtime and corruption controls, dual-reference
+identity, and stateful class contract targets. The issue-specific publisher
+regression also passed, including six staged-write faults, both promotion
+faults, and pre-existing sentinel preservation. Each staged-write case asserts
+the `staging write` phase, injected error kind/message, and exact relative
+artifact path; promotion cases assert their distinct phase, injected message,
+and destination. The regression also checks missing class data/path, unsafe
+path, and duplicate path rejection.
+
+Both commands used Rust/Cargo 1.98.1 and task-local `.tmp` and `.cargo-target`
+directories because `/tmp` had no free space. The JVM options disabled shared
+perf data and redirected Java temporary files into `.tmp`; the required JDK
+version and tools remained enabled. The standard repository gates also passed:
+`cargo +1.98.1 fmt --all -- --check`,
+`python3 tools/check-frontend-boundaries.py`,
+`cargo +1.98.1 clippy --workspace --all-targets --locked -- -D warnings`,
+`RUSTDOCFLAGS="-D warnings" cargo +1.98.1 doc --workspace --no-deps --locked`,
+and `DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo +1.98.1 test --workspace --all-targets
+--locked -- --test-threads=2`. `git diff --check` passed after the evidence
+ledger update.
