@@ -312,6 +312,9 @@ fn mixed_factory_code<'a>(
             (0x4e, None) => {
                 sequence.instruction(Instruction::AStore(LocalIndex::new(3)));
             }
+            (0x4c, None) => {
+                sequence.instruction(Instruction::AStore(LocalIndex::new(1)));
+            }
             (0x2c, None) => {
                 sequence.instruction(Instruction::ALoad(LocalIndex::new(2)));
             }
@@ -1526,6 +1529,7 @@ fn immutable_reference_local_pair_executes_original_rust_classes_on_strict_jdk21
                     .find(|line| line.contains(expected.split(':').next().unwrap()))
                     .unwrap_or(expected)
             );
+            text
         };
 
     let insert_code = |at: usize, insertion: &[u8]| {
@@ -1544,8 +1548,23 @@ fn immutable_reference_local_pair_executes_original_rust_classes_on_strict_jdk21
     };
 
     let mut wrong_store = factory.clone();
-    wrong_store[code_start + store_pc] = 0x4f; // astore 4, leaving slot 3 uninitialized.
-    assert_negative("wrong-astore-slot", Some(&wrong_store), None, "VerifyError");
+    wrong_store[code_start + store_pc] = 0x4c; // astore_1 overwrites existing; slot 3 stays uninitialized.
+    let (_, wrong_store_instructions, _, _, _, _) = mixed_factory_code(&wrong_store, "create");
+    assert!(
+        wrong_store_instructions
+            .iter()
+            .any(|instruction| { instruction.pc == store_pc && instruction.opcode == 0x4c })
+    );
+    let wrong_store_output = assert_negative(
+        "wrong-reference-astore-slot",
+        Some(&wrong_store),
+        None,
+        "VerifyError",
+    );
+    assert!(
+        wrong_store_output.contains("locals[3]"),
+        "wrong reference store must be rejected when the uninitialized fresh local is loaded:\n{wrong_store_output}"
+    );
 
     let mut load_before_store = factory.clone();
     load_before_store.swap(code_start + store_pc, code_start + fresh_load_pc);
@@ -1585,6 +1604,28 @@ fn immutable_reference_local_pair_executes_original_rust_classes_on_strict_jdk21
         Some(&omitted_init),
         None,
         "VerifyError",
+    );
+
+    let seed_load_pc = instructions
+        .iter()
+        .find(|instruction| instruction.opcode == 0x1c)
+        .unwrap()
+        .pc;
+    let mut uninitialized_reference_escape = factory.clone();
+    uninitialized_reference_escape[code_start + seed_load_pc] = 0x57; // pop duplicate, leaving the uninitialized Counter
+    uninitialized_reference_escape[code_start + counter_init_pc..code_start + counter_init_pc + 3]
+        .fill(0);
+    let uninitialized_escape_output = assert_negative(
+        "uninitialized-counter-escapes-to-pair",
+        Some(&uninitialized_reference_escape),
+        None,
+        "VerifyError",
+    );
+    assert!(
+        uninitialized_escape_output
+            .to_ascii_lowercase()
+            .contains("uninitialized"),
+        "Pair use must be rejected because the Counter reference remains uninitialized:\n{uninitialized_escape_output}"
     );
 
     let counter_class_ref = instructions

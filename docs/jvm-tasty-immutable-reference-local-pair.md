@@ -314,11 +314,12 @@ The isolated controls report their first observed rejecting stage:
 | Control | First observed failure |
 | --- | --- |
 | Swap same-typed Pair argument loads | Java identity assertion (`caller Counter identity moved`) |
-| Store fresh reference in slot 4 | JVM `VerifyError` |
+| Store fresh reference into existing slot 1 with `astore_1` | JVM `VerifyError` at the later `aload_3`; local 3 remains `top` |
 | Load slot 3 before its store | JVM `VerifyError` |
 | Load the wrong local slot (`aload_0`) | JVM `VerifyError` |
 | Load existing slot twice | Java identity assertion (`fresh local aliases the caller Counter`) |
 | Remove `Counter.new` or `Counter.<init>` | JVM `VerifyError` |
+| Replace the seed load with `pop` and remove `Counter.<init>` while retaining the `new` reference in local 3 | JVM `VerifyError` when the uninitialized reference is passed to `Pair.<init>` |
 | Duplicate `Counter.new` or `Counter.<init>` | JVM `VerifyError` |
 | Use the Counter constructor reference at the Pair call | JVM `VerifyError` |
 | Use the Counter constructor descriptor at the Pair call | JVM `VerifyError` |
@@ -329,3 +330,22 @@ The isolated controls report their first observed rejecting stage:
 The existing dual-reference runtime regression still covers valid
 `wrap(a, a)` aliasing. The new identity controls reject only incorrect wiring
 of this issue's required fresh local.
+
+The `astore_1` control is decoded back from the mutated classfile and asserted
+to be the reference store opcode at the original store PC. Its verifier output
+identifies a bad local-variable type at the later fresh-local load. The
+uninitialized-reference control preserves bytecode length and the Pair
+argument shape by changing the seed load to `pop` and replacing the Counter
+constructor call with `nop`s. The duplicate uninitialized Counter left on the
+stack is stored in slot 3 and reaches the Pair constructor argument. The
+harness observes `VerifyError` whose diagnostic identifies the uninitialized
+type. The independent missing-constructor case remains in the matrix.
+
+For PR #2110, the focused
+`immutable_reference_local_pair_executes_original_rust_classes_on_strict_jdk21`
+test passed with `DOTTY_CLASSFILE_REQUIRE_JDK=1` on local Temurin 21.0.8 and
+ran the external verifier/runtime controls. The full selected strict-JDK
+integration command did not pass locally: its existing mixed-origin test
+requires exactly Temurin 21.0.13. GitHub's strict-JDK CI job is configured for
+21.0.13 and remains the authoritative full-gate result; no local full-gate
+pass is claimed here.
