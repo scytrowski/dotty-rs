@@ -10373,10 +10373,11 @@ mod tests {
             type_ref_symbol(loader.store, loader.definitions.int)
         );
 
-        for (name, expected) in [(
+        let (name, expected) = (
             wrong_owner_name.clone(),
             "the TASTy package must match the requested binary name",
-        )] {
+        );
+        {
             let store_mark = loader.store.checkpoint();
             let session_mark = loader.session.checkpoint();
             let package_mark = loader.session.packages.checkpoint();
