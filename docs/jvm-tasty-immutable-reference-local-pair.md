@@ -269,3 +269,83 @@ sidecar, the test checks Scala decompilation and `-print-tasty`, then uses
 the required pinned reader result for primary and reversed argument order; it
 does not claim that Scala compiled or executed a client against the Rust JVM
 classfiles.
+
+## Original Rust runtime proof for issue #2074
+
+`tests/jvm_tasty_mixed_origin_runtime.rs::immutable_reference_local_pair_executes_original_rust_classes_on_strict_jdk21`
+drives both frozen sources through one authentic Rust paired producer session
+each. It snapshots each six-file batch, validates class/TASTy versions and
+links, hashes files before compiling a separate Java harness, and places only
+the three original Rust classfiles on the runtime classpath. The test checks
+all six original bytes and hashes after compilation, execution, and the
+isolated corruption runs. The test binary is included in the mandatory JDK
+workflow target list.
+
+Measured with Temurin 21.0.8+9 (`javac --release 21`,
+`java -Xverify:all -ea`), both methods have descriptor
+`(Lexample/Counter;I)Lexample/Pair;`, `stack=4`, and `locals=4`. The observed
+PCs are the same in both orientations: `new Counter` at 0,
+`Counter.<init>(I)V` at 5, `astore_3` at 8, `new Pair` at 9,
+`Pair.<init>(Counter,Counter)V` at 15, and `areturn` at 18. Slots are
+`this=0`, `existing=1`, `seed=2`, and `fresh=3`. The primary method loads
+`existing` at PC 13 and initialized `fresh` at PC 14; the reversed method
+loads `fresh` and then `existing`. The Rust classfile CFG analysis accepts both
+methods with `(max_stack, max_locals) = (4, 4)` and observes the initialized
+slot store before the Pair call. The test checks original `javap -v -p -c`
+output as well.
+
+The Java harness reported
+`primary=identity:true;mutations=isolated;repeat=fresh;seeds=0,-5` and
+`reversed=identity:true;mutations=isolated;repeat=fresh;seeds=0,-5`. It checks
+the reflected Pair fields, both mutation directions, a distinct fresh object
+on a repeated call, and seed values 0 and -5.
+
+The runtime snapshots reproduce the artifact hashes and UUIDs recorded in the
+preceding #2073 table. The primary and reversed factory class/TASTy hashes are
+`f5f98b7460958398e1871f473261cffd947c59abf6f3be4718f39d0cb6133b26` /
+`243a9bf981e8fbc8403d6f6da9108798a8615446cbc8d1b608b8c60100cd36ca` and
+`a8074b8b4fbb5e822eb38213ac789629462e734faf7623fbf52c0c1caf741493` /
+`e3126007b1309789e45a7fedef0b9f8d43bec44a15f3271367074a22a27b1735`.
+This test executes Rust-produced classfiles. It makes no claim about Scala
+source TASTy interoperability.
+
+The isolated controls report their first observed rejecting stage:
+
+| Control | First observed failure |
+| --- | --- |
+| Swap same-typed Pair argument loads | Java identity assertion (`caller Counter identity moved`) |
+| Store fresh reference into existing slot 1 with `astore_1` | JVM `VerifyError` at the later `aload_3`; local 3 remains `top` |
+| Load slot 3 before its store | JVM `VerifyError` |
+| Load the wrong local slot (`aload_0`) | JVM `VerifyError` |
+| Load existing slot twice | Java identity assertion (`fresh local aliases the caller Counter`) |
+| Remove `Counter.new` or `Counter.<init>` | JVM `VerifyError` |
+| Replace the seed load with `pop` and remove `Counter.<init>` while retaining the `new` reference in local 3 | JVM `VerifyError` when the uninitialized reference is passed to `Pair.<init>` |
+| Duplicate `Counter.new` or `Counter.<init>` | JVM `VerifyError` |
+| Use the Counter constructor reference at the Pair call | JVM `VerifyError` |
+| Use the Counter constructor descriptor at the Pair call | JVM `VerifyError` |
+| Invoke the Pair constructor at the Counter initialization site | JVM `VerifyError` |
+| Reduce `max_stack` or `max_locals` | JVM `VerifyError` |
+| Omit `Counter.class` or `Pair.class` | JVM `NoClassDefFoundError` |
+
+The existing dual-reference runtime regression still covers valid
+`wrap(a, a)` aliasing. The new identity controls reject only incorrect wiring
+of this issue's required fresh local.
+
+The `astore_1` control is decoded back from the mutated classfile and asserted
+to be the reference store opcode at the original store PC. Its verifier output
+identifies a bad local-variable type at the later fresh-local load. The
+uninitialized-reference control preserves bytecode length and the Pair
+argument shape by changing the seed load to `pop` and replacing the Counter
+constructor call with `nop`s. The duplicate uninitialized Counter left on the
+stack is stored in slot 3 and reaches the Pair constructor argument. The
+harness observes `VerifyError` whose diagnostic identifies the uninitialized
+type. The independent missing-constructor case remains in the matrix.
+
+For PR #2110, the focused
+`immutable_reference_local_pair_executes_original_rust_classes_on_strict_jdk21`
+test passed with `DOTTY_CLASSFILE_REQUIRE_JDK=1` on local Temurin 21.0.8 and
+ran the external verifier/runtime controls. The full selected strict-JDK
+integration command did not pass locally: its existing mixed-origin test
+requires exactly Temurin 21.0.13. GitHub's strict-JDK CI job is configured for
+21.0.13 and remains the authoritative full-gate result; no local full-gate
+pass is claimed here.
