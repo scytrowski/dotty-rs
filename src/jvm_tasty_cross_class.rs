@@ -4783,14 +4783,187 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
             "final Block expression must be one regular constructor Apply",
         ));
     }
-    if !matches!(
-        typed_ast
-            .try_get(typed_final_expression)
-            .ok_or_else(|| typed_error("typed final expression is stale"))?
-            .kind,
-        TreeKind::Apply(_)
-    ) {
+    let source_final_select = final_apply.function;
+    let TreeKind::Select(source_final_selection) = &source_ast
+        .try_get(source_final_select)
+        .ok_or_else(|| source_error("final constructor Select is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "final constructor Apply function must be Select",
+        ));
+    };
+    if store.names.resolve(source_final_selection.name.text()) != "<init>" {
+        return Err(source_error(
+            "final Block expression must select a primary constructor",
+        ));
+    }
+    let source_final_new = source_final_selection.qualifier;
+    let TreeKind::New(source_final_new_tree) = &source_ast
+        .try_get(source_final_new)
+        .ok_or_else(|| source_error("final constructor New is stale"))?
+        .kind
+    else {
+        return Err(source_error(
+            "final constructor Select qualifier must be New",
+        ));
+    };
+    let typed_final_select = source_typed_index
+        .get(source_id, source_final_select)
+        .ok_or_else(|| typed_error("final constructor Select has no typed mapping"))?;
+    let typed_final_new = source_typed_index
+        .get(source_id, source_final_new)
+        .ok_or_else(|| typed_error("final constructor New has no typed mapping"))?;
+    let typed_final_new_type = source_typed_index
+        .get(source_id, source_final_new_tree.tpt)
+        .ok_or_else(|| typed_error("final constructor type tree has no typed mapping"))?;
+    let TreeKind::Apply(typed_final_apply) = &typed_ast
+        .try_get(typed_final_expression)
+        .ok_or_else(|| typed_error("typed final expression is stale"))?
+        .kind
+    else {
         return Err(typed_error("final source Apply must remain a typed Apply"));
+    };
+    if typed_final_apply.kind != ApplyKind::Regular
+        || typed_final_apply.function != typed_final_select
+    {
+        return Err(typed_error(
+            "typed final constructor Apply must retain its original Select edge",
+        ));
+    }
+    let TreeKind::Select(typed_final_selection) = &typed_ast
+        .try_get(typed_final_select)
+        .ok_or_else(|| typed_error("typed final constructor Select is stale"))?
+        .kind
+    else {
+        return Err(typed_error(
+            "typed final constructor function must remain Select",
+        ));
+    };
+    let TreeKind::New(typed_final_new_tree) = &typed_ast
+        .try_get(typed_final_new)
+        .ok_or_else(|| typed_error("typed final constructor New is stale"))?
+        .kind
+    else {
+        return Err(typed_error(
+            "typed final constructor receiver must remain New",
+        ));
+    };
+    if typed_final_selection.qualifier != typed_final_new
+        || typed_final_new_tree.tpt != typed_final_new_type
+    {
+        return Err(typed_error(
+            "typed final constructor must preserve exact Select/New/type edges",
+        ));
+    }
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(result_class),
+        ..
+    } = store
+        .types
+        .try_get(signature.result)
+        .ok_or_else(|| semantic_error("factory result type is stale"))?
+    else {
+        return Err(semantic_error(
+            "factory result type must be a canonical class TypeRef",
+        ));
+    };
+    if !store.symbols.contains(*result_class)
+        || store.symbols.get(*result_class).kind != SymbolKind::Class
+        || !has_source_origin(store, *result_class, source_id)
+        || source_index.definition_of(*result_class).is_none_or(|definition| {
+            !matches!(definition, SourceDefinition::Canonical { source, .. } if source == source_id)
+        })
+        || !is_canonical_class_type_ref(
+            store,
+            signature.result,
+            *result_class,
+            package,
+            definitions.no_prefix,
+        )
+    {
+        return Err(identity_error(
+            "factory result class must be canonical in the original source package",
+        ));
+    }
+    let typed_final_new_type_value = typed_ast
+        .try_get(typed_final_new_type)
+        .ok_or_else(|| typed_error("typed final constructor type tree is stale"))?
+        .ty;
+    let typed_final_new_value = typed_ast
+        .try_get(typed_final_new)
+        .ok_or_else(|| typed_error("typed final constructor New is stale"))?
+        .ty;
+    let typed_final_apply_value = typed_ast
+        .try_get(typed_final_expression)
+        .ok_or_else(|| typed_error("typed final constructor Apply is stale"))?
+        .ty;
+    if !is_canonical_class_type_ref(
+        store,
+        typed_final_new_type_value,
+        *result_class,
+        package,
+        definitions.no_prefix,
+    ) || !matches!(
+        store.types.try_get(typed_final_new_value),
+        Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == *result_class
+    ) || !matches!(
+        store.types.try_get(typed_final_apply_value),
+        Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == *result_class
+    ) {
+        return Err(typed_error(
+            "typed final constructor must preserve the canonical method result class",
+        ));
+    }
+    let final_constructor = match store.types.try_get(
+        typed_ast
+            .try_get(typed_final_select)
+            .ok_or_else(|| typed_error("typed final constructor Select is stale"))?
+            .ty,
+    ) {
+        Some(Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }) => *symbol,
+        _ => {
+            return Err(typed_error(
+                "typed final constructor Select must retain its canonical TermRef",
+            ));
+        }
+    };
+    let result_class_tree = match source_index.definition_of(*result_class) {
+        Some(SourceDefinition::Canonical { source, tree }) if source == source_id => tree,
+        _ => {
+            return Err(identity_error(
+                "factory result class is not canonical source",
+            ));
+        }
+    };
+    let TreeKind::TypeDef(result_class_def) = &source_ast
+        .try_get(result_class_tree)
+        .ok_or_else(|| identity_error("factory result class tree is stale"))?
+        .kind
+    else {
+        return Err(identity_error("factory result source root must be TypeDef"));
+    };
+    let TreeKind::Template(result_class_template) = &source_ast
+        .try_get(result_class_def.rhs)
+        .ok_or_else(|| identity_error("factory result class template is stale"))?
+        .kind
+    else {
+        return Err(identity_error("factory result class must have Template"));
+    };
+    let expected_final_constructor = source_index
+        .symbol_at(source_id, result_class_template.constructor)
+        .ok_or_else(|| identity_error("factory result constructor is not canonical"))?;
+    if final_constructor != expected_final_constructor
+        || !store.symbols.contains(final_constructor)
+        || store.symbols.get(final_constructor).kind != SymbolKind::Constructor
+        || store.symbols.get(final_constructor).owner != Some(*result_class)
+    {
+        return Err(semantic_error(
+            "typed final Apply must select the original result-class constructor",
+        ));
     }
     let bindings = [
         local_bindings[0].ok_or_else(|| {
@@ -4804,6 +4977,14 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
     if local_symbols[0] == local_symbols[1] {
         return Err(identity_error(
             "two local declarations must have distinct original symbols",
+        ));
+    }
+    if local_symbols
+        .iter()
+        .any(|symbol| !store.symbols.contains(*symbol))
+    {
+        return Err(identity_error(
+            "Typer local binding names a stale or foreign symbol",
         ));
     }
     let first_type = match store.symbols.get(local_symbols[0]).info {
@@ -5069,6 +5250,28 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
         typed_final_expression,
         "final Block expression",
     )?;
+    for (source_tree, typed_tree, description) in [
+        (
+            source_final_select,
+            typed_final_select,
+            "final constructor Select",
+        ),
+        (source_final_new, typed_final_new, "final constructor New"),
+        (
+            source_final_new_tree.tpt,
+            typed_final_new_type,
+            "final constructor New type",
+        ),
+    ] {
+        require_matching_source_typed_positions(
+            source_ast,
+            typed_ast,
+            source_id,
+            source_tree,
+            typed_tree,
+            description,
+        )?;
+    }
     Ok(ValidatedImmutableLocalInitializerPairProof {
         _store: store,
         _source_ast: source_ast,
