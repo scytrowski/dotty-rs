@@ -96,6 +96,19 @@ class StrictTastyTargetManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ManifestError, "differs from the independent frozen baseline"):
             validate_manifest(self.fixture("strict-targets-missing.json"), self.root)
 
+    def test_manifest_remains_valid_after_workflow_array_is_removed(self):
+        workflow = self.root / ".github" / "workflows" / "jvm-tasty-factory-scala-consumer.yml"
+        workflow.write_text("name: sharded workflow\n", encoding="utf-8")
+        manifest = self.fixture("strict-targets-duplicate.json")
+        manifest["sharding"] = {
+            "shard_count": 2,
+            "shards": [
+                {"id": "shard-1", "estimated_test_seconds": 1.0, "targets": ["first_target"]},
+                {"id": "shard-2", "estimated_test_seconds": 2.0, "targets": ["second_target"]},
+            ],
+        }
+        validate_manifest(manifest, self.root)
+
     def test_shard_selection_returns_manifest_order(self):
         manifest = self.fixture("strict-targets-duplicate.json")
         manifest["sharding"] = {
@@ -115,6 +128,28 @@ class StrictTastyTargetManifestTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ManifestError, "unknown shard 'shard-3'"):
             shard_targets(self.fixture("strict-targets-duplicate.json"), "shard-3")
+
+    def test_workflow_cli_rejects_unconfigured_third_shard(self):
+        manifest = self.fixture("strict-targets-duplicate.json")
+        manifest["sharding"] = {
+            "shard_count": 3,
+            "shards": [
+                {"id": "shard-1", "estimated_test_seconds": 1.0, "targets": ["first_target"]},
+                {"id": "shard-2", "estimated_test_seconds": 2.0, "targets": ["second_target"]},
+                {"id": "shard-3", "estimated_test_seconds": 0.0, "targets": []},
+            ],
+        }
+        path = self.root / "three-shards.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        validator = Path(__file__).parents[1] / "ci" / "validate_strict_tasty_targets.py"
+        result = subprocess.run(
+            [sys.executable, str(validator), "--manifest", str(path), "--root", str(self.root), "--shard", "shard-1"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("exactly the ordered shard ids", result.stderr)
 
     def test_rejects_unknown_shard_target(self):
         manifest = self.fixture("strict-targets-duplicate.json")

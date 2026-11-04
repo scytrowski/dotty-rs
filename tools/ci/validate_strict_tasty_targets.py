@@ -80,13 +80,15 @@ def validate_manifest(
     frozen_names = _frozen_inventory(repository_root, baseline_path)
     workflow_path = repository_root / FROZEN_WORKFLOW
     try:
-        workflow_names = _workflow_inventory(workflow_path.read_text(encoding="utf-8"))
+        workflow_text = workflow_path.read_text(encoding="utf-8")
     except OSError as error:
         raise ManifestError(f"cannot read frozen inventory workflow {source['workflow']!r}: {error}") from error
-    if _duplicates(workflow_names):
-        raise ManifestError("source workflow strict_targets array contains duplicate targets")
-    if workflow_names != frozen_names:
-        raise ManifestError("source workflow inventory differs from the independent frozen baseline")
+    if re.search(r"(?m)^\s*strict_targets\s*=", workflow_text):
+        workflow_names = _workflow_inventory(workflow_text)
+        if _duplicates(workflow_names):
+            raise ManifestError("source workflow strict_targets array contains duplicate targets")
+        if workflow_names != frozen_names:
+            raise ManifestError("source workflow inventory differs from the independent frozen baseline")
     if len(frozen_names) != expected_count:
         raise ManifestError(f"frozen baseline has {len(frozen_names)} targets; manifest expects {expected_count}")
 
@@ -175,6 +177,11 @@ def main() -> int:
     try:
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
         validate_manifest(manifest, args.root)
+        if args.shard:
+            expected_ids = ["shard-1", "shard-2"]
+            actual_ids = [shard["id"] for shard in manifest["sharding"]["shards"]]
+            if actual_ids != expected_ids:
+                raise ManifestError(f"workflow requires exactly the ordered shard ids {expected_ids}; found {actual_ids}")
         selected = shard_targets(manifest, args.shard) if args.shard else None
     except (OSError, json.JSONDecodeError, ManifestError) as error:
         parser.error(str(error))
