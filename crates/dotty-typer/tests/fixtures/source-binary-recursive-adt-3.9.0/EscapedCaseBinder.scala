@@ -8,8 +8,8 @@ final case class Add(left: Expr, right: Expr) extends Expr
 object Evaluator:
   def selectLeft(expr: Expr): Expr =
     expr match
-      case Num(_)       => expr
-      case Add(left, _) => right
+      case Num(_)       => right
+      case Add(left, right) => left
 
   def eval(expr: Expr): Int =
     expr match

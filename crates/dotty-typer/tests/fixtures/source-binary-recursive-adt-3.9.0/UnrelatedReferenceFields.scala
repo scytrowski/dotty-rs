@@ -3,14 +3,21 @@ package adt
 sealed trait Expr
 
 final case class Num(value: Int) extends Expr
-final case class Other(value: Int) extends Expr
-final case class Add(left: Other, right: Other) extends Expr
+final case class Other(value: Int)
+final class OtherPair(val _1: Other, val _2: Other):
+  def isEmpty: Boolean = false
+  def get: OtherPair = this
+
+final class Add(val left: Other, val right: Other) extends Expr
+
+object Add:
+  def unapply(value: Add): OtherPair = new OtherPair(value.left, value.right)
 
 object Evaluator:
   def selectLeft(expr: Expr): Expr =
     expr match
       case Num(_)       => expr
-      case Add(left, _) => left
+      case Add(_, _)    => expr
 
   def eval(expr: Expr): Int =
     expr match

@@ -50,16 +50,18 @@ second bad arguments and recursive call arity.
 ## Classified controls
 
 The pinned Scala runner and Rust test harness cover 22 source controls. Scala
-classifies 13 as rejected, 7 as accepted, and 2 as accepted with a warning.
+classifies 14 as rejected, 7 as accepted, and 1 as accepted with a warning.
 Rust records 6 accepted roots and 16 deferred diagnostics. Each Rust row stores
 the selected root and span, the first diagnostic tree and span (or normalized
 accepted owner/type/call receipt), same-session retry, and fresh-session parity
 in [`rust-control-matrix.tsv`](../crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/rust-control-matrix.tsv).
 The rows include the three Add extractor arities, nested literal/reference
 types, both recursive argument positions, zero/two argument call arity, both
-result failures, scope escape, wrong/missing parent, foreign same-spelled
-extractors and evals, generic/applied reference fields, unrelated reference
-fields, explicit unapply/selector collisions, and warning-only matches.
+result failures, a sibling-case reference to a real Add binder, wrong/missing
+parent, foreign same-spelled extractors and evals, generic/applied reference
+fields, and a custom extractor whose unrelated `Other` fields reach the
+recursive `eval(Other)` argument check. They also cover explicit
+unapply/selector collisions and warning-only matches.
 
 Rust-only semantic-store corruption is tested separately because those inputs
 are not Scala source. Eight named rows cover swapped and aliased selector scope

@@ -20,4 +20,4 @@ RecursiveCallZeroArguments	rejected
 RecursiveCallTwoArguments	rejected
 ForeignSameSpelledEval	accepted
 GenericAddFields	accepted
-UnrelatedReferenceFields	accepted_with_warning
+UnrelatedReferenceFields	rejected

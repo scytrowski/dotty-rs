@@ -1304,7 +1304,7 @@ fn binary_late_failure_restores_complete_state_retries_then_types_both_original_
     let recovered = format!(
         "{}\n{}",
         normalized_success_root(&parsed, &typer, source, select_left, "selectLeft"),
-        normalized_success_root(&parsed, &typer, source, eval, "eval")
+        normalized_binary_eval_recovery(&parsed, &typer, source, eval)
     );
 
     let fresh_source = SourceId::from_index(20_792);
@@ -1358,13 +1358,7 @@ fn binary_late_failure_restores_complete_state_retries_then_types_both_original_
             fresh_select_left,
             "selectLeft"
         ),
-        normalized_success_root(
-            &fresh_parsed,
-            &fresh_typer,
-            fresh_source,
-            fresh_eval,
-            "eval"
-        )
+        normalized_binary_eval_recovery(&fresh_parsed, &fresh_typer, fresh_source, fresh_eval)
     );
     assert_eq!(
         recovered, fresh_recovered,
@@ -1749,4 +1743,107 @@ fn binary_add_case_nodes(
         calls,
         arguments,
     }
+}
+
+fn normalized_binary_eval_recovery(
+    parsed: &dotty_parser::ParseResult,
+    typer: &SourceTyper<'_>,
+    source: SourceId,
+    root: TreeId<Untyped>,
+) -> String {
+    let store = typer.store();
+    let nodes = binary_add_case_nodes(parsed, root);
+    let eval_symbol = typer
+        .index
+        .symbol_at(source, root)
+        .expect("recovered eval has its canonical source symbol");
+    let expr_symbol = class_symbol(parsed, store, typer.index, source, "Expr");
+    let mut binder_symbols = Vec::new();
+    let mut binder_receipts = Vec::new();
+    for binder_tree in nodes.binders {
+        let binder_symbol = typer
+            .pattern_binding_symbol_at(source, binder_tree)
+            .expect("recovered binary Add binder is published");
+        let SymbolInfo::Complete(binder_type) = *store.symbols.info(binder_symbol) else {
+            panic!("recovered Add binder has a complete type")
+        };
+        assert_eq!(type_symbol(store, binder_type), expr_symbol);
+        let name = match &parsed.ast.get(binder_tree).kind {
+            TreeKind::Ident(ident) => store.names.resolve(ident.name.text()),
+            TreeKind::Bind(binding) => store.names.resolve(binding.name.text()),
+            other => panic!("recovered Add binder is a named pattern: {other:?}"),
+        };
+        binder_symbols.push(binder_symbol);
+        binder_receipts.push(format!(
+            "{name}:{}:{}",
+            symbol_path(store, binder_symbol),
+            normalized_type_shape(store, binder_type)
+        ));
+    }
+    assert_ne!(binder_symbols[0], binder_symbols[1]);
+
+    let typed_calls = nodes.calls.map(|call| {
+        typer
+            .source_typed_index()
+            .get(source, call)
+            .expect("both recovered recursive calls have source mappings")
+    });
+    assert_ne!(typed_calls[0], typed_calls[1]);
+    let mut call_receipts = Vec::new();
+    let mut typed_arguments = Vec::new();
+    for (position, ((source_call, source_argument), typed_call)) in nodes
+        .calls
+        .into_iter()
+        .zip(nodes.arguments)
+        .zip(typed_calls)
+        .enumerate()
+    {
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_call).kind else {
+            panic!("recovered recursive call is a typed Apply")
+        };
+        assert_eq!(application.args.len(), 1);
+        let selected_callee = match store
+            .types
+            .get(typer.typed_ast().get(application.function).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("recovered recursive callee is canonical: {other:?}"),
+        };
+        assert_eq!(selected_callee, eval_symbol);
+        let typed_argument = application.args[0];
+        assert_eq!(
+            typer.source_typed_index().get(source, source_call),
+            Some(typed_call)
+        );
+        assert_eq!(
+            typer.source_typed_index().get(source, source_argument),
+            Some(typed_argument),
+            "each recovered call maps its own original source argument"
+        );
+        assert_ne!(typed_argument, application.function);
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(argument_symbol),
+            ..
+        } = store.types.get(typer.typed_ast().get(typed_argument).ty)
+        else {
+            panic!("each recovered recursive argument is its original Add binder")
+        };
+        assert_eq!(*argument_symbol, binder_symbols[position]);
+        typed_arguments.push(typed_argument);
+        let call_span = tree_span(parsed, source_call.index());
+        call_receipts.push(format!(
+            "{call_span}:{}({})",
+            symbol_path(store, selected_callee),
+            symbol_path(store, *argument_symbol)
+        ));
+    }
+    assert_ne!(typed_arguments[0], typed_arguments[1]);
+    format!(
+        "eval-binary;binders=[{}];calls=[{}]",
+        binder_receipts.join(","),
+        call_receipts.join(",")
+    )
 }
