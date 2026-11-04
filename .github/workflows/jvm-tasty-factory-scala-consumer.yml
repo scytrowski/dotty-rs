@@ -24,6 +24,7 @@ on:
       - 'docs/jvm-tasty-dual-reference-forwarding.md'
       - 'docs/jvm-tasty-mixed-origin-constructor-arguments.md'
       - 'docs/classloader-semantic-tasty-convergence-iii/**'
+      - 'docs/classloader-semantic-tasty-convergence-iv/**'
       - 'tests/fixtures/jvm_tasty_dual_reference_forwarding/**'
   workflow_dispatch:
 
