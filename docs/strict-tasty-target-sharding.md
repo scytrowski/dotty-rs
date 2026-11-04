@@ -57,8 +57,6 @@ The validator and workflow retain manifest-driven target selection:
 python3 tools/ci/validate_strict_tasty_targets.py
 python3 tools/ci/validate_strict_tasty_targets.py --shard shard-1
 python3 tools/ci/validate_strict_tasty_targets.py --shard shard-2
-python3 tools/ci/validate_strict_tasty_targets.py --shard shard-3
-python3 tools/ci/validate_strict_tasty_targets.py --shard shard-4
 ```
 
 ## Initial hosted four-shard candidate
@@ -89,8 +87,9 @@ this as a cold Scala-target run and exclude it from warm latency comparison.
 ## Decision
 
 **No-go: retain the two-shard gate.** The candidate proved four jobs could start
-concurrently and all recorded target and follow-up steps passed by 21m33s after the workflow
-started, but the stuck shard status prevented the aggregate from completing.
+concurrently and all recorded target and follow-up steps passed by 21m33s after
+the workflow started, but the stuck shard status prevented the aggregate from
+completing.
 It did not yield a valid complete PR-to-green sample, and the exact Scala-target
 cache miss made its latency incomparable with the three warm two-way runs. The
 recorded intervals through each job's last successful step total about 56
