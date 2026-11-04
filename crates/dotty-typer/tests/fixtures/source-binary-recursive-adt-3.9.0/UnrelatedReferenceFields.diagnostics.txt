@@ -1,0 +1,17 @@
+-- [E029] Pattern Match Exhaustivity Warning: UnrelatedReferenceFields.scala:11:4
+11 |    expr match
+   |    ^^^^
+   |    match may not be exhaustive.
+   |
+   |    It would fail on pattern case: adt.Other(_)
+   |
+   | longer explanation available when compiling with `-explain`
+-- [E029] Pattern Match Exhaustivity Warning: UnrelatedReferenceFields.scala:16:4
+16 |    expr match
+   |    ^^^^
+   |    match may not be exhaustive.
+   |
+   |    It would fail on pattern case: adt.Other(_)
+   |
+   | longer explanation available when compiling with `-explain`
+2 warnings found

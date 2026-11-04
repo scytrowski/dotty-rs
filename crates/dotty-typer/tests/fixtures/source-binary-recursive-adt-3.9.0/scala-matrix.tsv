@@ -15,3 +15,9 @@ WrongParent	rejected
 EscapedCaseBinder	rejected
 InvalidRecursiveArgument	rejected
 WarningOnly	accepted_with_warning
+InvalidSecondRecursiveArgument	rejected
+RecursiveCallZeroArguments	rejected
+RecursiveCallTwoArguments	rejected
+ForeignSameSpelledEval	accepted
+GenericAddFields	accepted
+UnrelatedReferenceFields	accepted_with_warning
