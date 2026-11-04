@@ -37,6 +37,17 @@ derived method information, and entered scope members, then types the original
 `selectLeft` successfully in the same typer. This tests the existing
 transactional contract; it does not add recursive evaluation.
 
+The reference-Product2 negative controls separately corrupt source provenance,
+scope selector order, Add's `unapply` owner and companion link, its parent
+graph, the canonical Product identity, and a selector owner. The mutable
+identity controls restore their metadata and retry `selectLeft` in the same
+`SourceTyper` and resolver after checking that source type mappings, typed
+mappings, pattern bindings, scopes, symbols, and arenas match their
+pre-attempt snapshots. The source-provenance control changes the immutable
+`SourceSemanticIndex`, which a live typer borrows and cannot replace; it checks
+stable rejection and rollback, while the two fresh authentic sessions above
+prove valid-source completion.
+
 Oracle classifications and source hashes remain in the pinned fixture set:
 `negative-cases.tsv` distinguishes rejected malformed cases from valid
 foreign-extractor, renamed/swapped-field, and warning-only sources. The

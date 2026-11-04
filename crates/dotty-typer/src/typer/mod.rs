@@ -1023,6 +1023,11 @@ pub(in crate::typer) fn source_method_flags(modifiers: &[Modifier]) -> SymbolFla
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Keep the metadata corruption/recovery proof in a descendant unit module
+    // so it can restore borrowed session state through private fields without
+    // exposing a production mutable accessor.
+    #[path = "issue_2076_product2_recovery.rs"]
+    mod issue_2076_product2_recovery;
     use dotty_classloader::classloader::{
         ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource,
     };
