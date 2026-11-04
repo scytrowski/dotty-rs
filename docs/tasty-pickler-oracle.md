@@ -226,6 +226,14 @@ A local instrumentation smoke sample using one Python child that slept for
 that process startup is included in the measurement; use the consumer command
 above for representative Scala/JDK costs.
 
+Issue [#2099](https://github.com/scytrowski/dotty-rs/issues/2099) records a
+three-pair warm baseline and a no-go decision in
+[`tasty-pickler-oracle-factory-result-profile-2099.md`](tasty-pickler-oracle-factory-result-profile-2099.md).
+The ordinary and reference-local consumers had the same 54-command telemetry
+shape; inspection found no invocation safe to remove or consolidate while
+retaining the separate diagnostic, output-root, provenance, and runtime
+evidence.
+
 Use the same executable harness for a future producer's candidate:
 
 ```sh
