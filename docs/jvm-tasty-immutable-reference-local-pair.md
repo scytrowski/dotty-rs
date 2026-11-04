@@ -390,10 +390,39 @@ formal occupies argument one. The seed remains only the initializer input.
 The proof API does not authorize a paired plan or change JVM/TASTy bytes.
 
 The earlier Rust first-error table is historical evidence from before #2068:
-its valid Block cases reached the direct-Apply shape rejection. Current focused
-positive coverage accepts only the one-local direct-New initializer with one
-other original Counter formal. Multi-local, mutable, shadowed, helper,
-conditional, nested-initializer, branch and other origins remain unsupported.
+its valid Block cases reached the direct-Apply shape rejection. The ordered
+formal/local argument proof still accepts only the one-local direct-New
+initializer with one other original Counter formal. Its paired-planning path
+does not consume the later two-initializer receipt.
+
+## Issue #2123 proof-only two-initializer receipt
+
+`validate_immutable_local_initializer_pair_proof` composes the shared
+canonical declaration/initializer validator for exactly two distinct
+immutable `Counter` ValDefs in one original straight-line Block. It requires
+two ordinary Int method formals, one direct `new Counter(formal)` initializer
+per local, distinct declarations/symbols, one exact method-owned scope with
+both entries, original source-to-typed mappings, and declaration/initializer
+order before the final Block expression. The pair is returned only after both
+individual receipts and the shared Block/scope/order checks succeed.
+
+| Receipt field | Preserved original identity |
+| --- | --- |
+| Block roots | source and typed Block, plus final expression roots |
+| declaration | source and typed ValDef, local SymbolId, ScopeId, declared TypeId |
+| initializer | source and typed Apply, Select, New, New type tree, and Int argument roots |
+| constructor | selected original Counter primary constructor and its Int formal |
+| caller input | exact corresponding original method formal SymbolId and Int type |
+
+The focused authentic frontend test proves the frozen source and reversed
+argument source in independent sessions, plus consistently renamed and
+class-reordered sessions. Negative controls cover stale and swapped typed
+edges, a missing Typer binding, mutable locals, an initializer using the wrong
+formal, a conditional initializer, and a third local. The same frozen
+two-local source still fails at the existing paired-planning cross-class proof
+gate. This aggregate receipt does not prove Pair argument order or origins and
+is not consumed by TASTy planning, class emission, or a CLI. It does not
+change emitted bytes.
 
 The updated cross-contract first-error matrix records the now-reached boundary:
 
