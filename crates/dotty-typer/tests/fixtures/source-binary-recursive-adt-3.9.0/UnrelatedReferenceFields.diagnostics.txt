@@ -1,0 +1,8 @@
+-- [E007] Type Mismatch Error: UnrelatedReferenceFields.scala:25:36 ------------
+25 |      case Add(left, right) => eval(left) + eval(right)
+   |                                    ^^^^
+   |                                    Found:    (left : adt.Other)
+   |                                    Required: adt.Expr
+   |
+   | longer explanation available when compiling with `-explain`
+1 error found

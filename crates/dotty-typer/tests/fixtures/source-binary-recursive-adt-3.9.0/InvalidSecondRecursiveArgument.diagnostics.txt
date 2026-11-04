@@ -1,0 +1,8 @@
+-- [E007] Type Mismatch Error: InvalidSecondRecursiveArgument.scala:17:49 ------
+17 |      case Add(left, right) => eval(left) + eval(true)
+   |                                                 ^^^^
+   |                                              Found:    (true : Boolean)
+   |                                              Required: adt.Expr
+   |
+   | longer explanation available when compiling with `-explain`
+1 error found
