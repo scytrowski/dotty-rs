@@ -48,6 +48,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       TMPDIR: ${{ github.workspace }}/target/tmp
       DOTTY_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      DOTTY_EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
 
     steps:
       - name: Prepare worktree-local scratch
@@ -69,13 +70,20 @@ jobs:
             31ed0e3232069410e76dfa9ccfe2291bebeb97f9 \
             5b8a7f0603f89d458fbfb1213d7dd2b94f5204da \
             e5afcb6fb70c6aeea574d0543df937a6e95c80ef \
-            60cc3ce645b216b14fe90a31ee5ce975b9e2c2e6; do
+            60cc3ce645b216b14fe90a31ee5ce975b9e2c2e6 \
+            3c1755c84042411681ec7bf05045fe00ce1c9d41 \
+            b3f0d16ee03826fb76333e885e10281762f09cd3 \
+            0a42c58ca5fbb10b2fa7059ad0a327d9d3a4e711 \
+            bdf64e102ac7d5dc247205a7365b5728f883d1d6 \
+            fde2273680bc367594debba49725b58a0bc8bd98 \
+            5b9e24ab3f16bc8f500d99f99b3277079d4b00ff \
+            b598e1c38a420a657a41e20ffe87e1a7832cb345; do
             git merge-base --is-ancestor "$prerequisite" HEAD || {
               echo "required recursive Expr prerequisite $prerequisite is not integrated in HEAD=$(git rev-parse HEAD)" >&2
               exit 1
             }
           done
-          printf 'Verified #2034-#2039 prerequisite merge ancestry at HEAD %s\n' "$(git rev-parse HEAD)"
+          printf 'Verified #2034-#2039 and #2061/#2066/#2071/#2072/#2076/#2078/#2079 prerequisite merge ancestry at HEAD %s\n' "$(git rev-parse HEAD)"
 
       - name: Run audit tooling unit tests
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/typer-classpath-corpus-audit -p 'test_*.py'
@@ -92,6 +100,8 @@ jobs:
             tools/typer-classpath-corpus-audit/verify_source_case_class_match_acceptance.py inputs
           PYTHONDONTWRITEBYTECODE=1 python3 \
             tools/typer-classpath-corpus-audit/verify_source_case_class_match_acceptance.py recursive-inputs
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            tools/typer-classpath-corpus-audit/verify_source_case_class_match_acceptance.py binary-inputs
 
       - name: Check out pinned Scala 3.9.0 sources
         uses: actions/checkout@v4
@@ -142,6 +152,9 @@ jobs:
             printf 'pull_request_head_sha\t%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
             printf 'tested_source_sha\t%s\n' "$(git rev-parse HEAD)"
             printf 'pull_request_base_sha\t%s\n' "${{ github.event.pull_request.base.sha || github.sha }}"
+            printf 'issue2080_baseline_sha\t%s\n' "$DOTTY_EXPECTED_BASE_SHA"
+            printf 'issue2080_tested_sha\t%s\n' "$(git rev-parse HEAD)"
+            printf 'issue2080_pr_head_sha\t%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
             printf 'github_actions_run\t%s/%s/actions/runs/%s\n' \
               "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
             printf 'main_manifest_sha256\t%s\n' \
@@ -182,6 +195,12 @@ jobs:
               "$(sha256sum docs/typer-sealed-adt-e2e-cohorts-3.9.0.tsv | cut -d' ' -f1)"
             printf 'product2_positive_source_sha256\t%s\n' \
               "$(sha256sum crates/dotty-typer/tests/fixtures/source-case-class-product2-3.9.0/Positive.scala | cut -d' ' -f1)"
+            printf 'binary_recursive_adt_source_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/Expr.scala | cut -d' ' -f1)"
+            printf 'binary_recursive_adt_source_manifest_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/source-hashes.tsv | cut -d' ' -f1)"
+            printf 'binary_recursive_adt_artifact_manifest_sha256\t%s\n' \
+              "$(sha256sum crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/scala-artifacts.sha256.tsv | cut -d' ' -f1)"
             printf 'pull_request_url\t%s\n' "${{ github.event.pull_request.html_url || '' }}"
             printf 'inherited_source_sha256\t%s\n' \
               "$(sha256sum crates/dotty-typer/tests/fixtures/inherited-members-3.9.0/InheritedMembers.scala | cut -d' ' -f1)"
@@ -311,6 +330,19 @@ jobs:
             > "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-oracle.log" 2>&1
           cat "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-oracle.log"
 
+      - name: Run pinned binary recursive ADT Scala 3.9 oracle
+        shell: bash
+        env:
+          SCALA39_ROOT: ${{ github.workspace }}/scala39-source
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/target/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_BINARY_RECURSIVE_ADT_TMP_ROOT: ${{ github.workspace }}/target/source-binary-recursive-adt-oracle
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/run \
+            > "$DOTTY_AUDIT_REPORT_DIR/source-binary-recursive-adt-oracle.log" 2>&1
+          cat "$DOTTY_AUDIT_REPORT_DIR/source-binary-recursive-adt-oracle.log"
+
       - name: Run pinned recursive Expr ADT negative matrix
         shell: bash
         env:
@@ -367,6 +399,32 @@ jobs:
             >> "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-rust.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-match-rust.log"
 
+      - name: Prove both original binary Expr roots in two owned sessions
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          log="$DOTTY_AUDIT_REPORT_DIR/binary-positive.log"
+          cargo +1.98.1 test -p dotty-typer --test source_binary_recursive_adt_baseline \
+            binary_recursive_adt_original_roots_share_two_real_sessions \
+            --locked -- --exact --nocapture > "$log" 2>&1
+          printf 'ISSUE2080_TESTED_SHA\t%s\n' "$(git rev-parse HEAD)" >> "$log"
+          cat "$log"
+
+      - name: Run binary recursive structural identity controls
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          structural_log="$DOTTY_AUDIT_REPORT_DIR/binary-structural-rust.log"
+          cargo +1.98.1 test -p dotty-typer --test source_binary_recursive_adt_baseline \
+            corrupted_reference_product2_identities_reject_then_retry_original_select_left \
+            --locked -- --exact --nocapture > "$structural_log" 2>&1
+          printf 'ISSUE2080_TESTED_SHA\t%s\n' "$(git rev-parse HEAD)" >> "$structural_log"
+          cat "$structural_log"
+
       - name: Run recursive Expr negative, rollback, retry, and recovery tests
         shell: bash
         env:
@@ -375,7 +433,32 @@ jobs:
           set -euo pipefail
           cargo +1.98.1 test -p dotty-typer --lib --locked recursive_adt \
             -- --nocapture > "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-negative-rust.log" 2>&1
+          printf 'ISSUE2080_TESTED_SHA\t%s\n' "$(git rev-parse HEAD)" \
+            >> "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-negative-rust.log"
           cat "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-negative-rust.log"
+
+      - name: Verify binary recursive ADT receipts and revision pins
+        shell: bash
+        env:
+          DOTTY_AUDIT_REPORT_DIR: ${{ github.workspace }}/target/typer-focused-report
+        run: |
+          set -euo pipefail
+          verifier=tools/typer-classpath-corpus-audit/verify_source_case_class_match_acceptance.py
+          PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" binary-oracle-log \
+            "$DOTTY_AUDIT_REPORT_DIR/source-binary-recursive-adt-oracle.log"
+          PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" binary-positive-log \
+            --log "$DOTTY_AUDIT_REPORT_DIR/binary-positive.log" \
+            --tested-sha "$(git rev-parse HEAD)" --expected-sha "$DOTTY_EXPECTED_SOURCE_SHA" \
+            --expected-head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --baseline-sha "$DOTTY_EXPECTED_BASE_SHA" \
+            --output "$DOTTY_AUDIT_REPORT_DIR/binary-recursive-adt-positive.tsv"
+          PYTHONDONTWRITEBYTECODE=1 python3 "$verifier" binary-negative-logs \
+            --control-log "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-negative-rust.log" \
+            --structural-log "$DOTTY_AUDIT_REPORT_DIR/binary-structural-rust.log" \
+            --rollback-log "$DOTTY_AUDIT_REPORT_DIR/source-recursive-adt-negative-rust.log" \
+            --baseline-sha "$DOTTY_EXPECTED_BASE_SHA" --tested-sha "$(git rev-parse HEAD)" \
+            --expected-head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --output "$DOTTY_AUDIT_REPORT_DIR/binary-recursive-adt-negative-rollback.tsv"
 
       - name: Verify strict recursive Expr receipts and pinned controls
         shell: bash
@@ -574,6 +657,13 @@ jobs:
               --report "$DOTTY_AUDIT_REPORT_DIR/analysis-cohort-second.tsv" \
               --baseline-receipt docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv \
               --output "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-cohorts.tsv"
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            tools/typer-classpath-corpus-audit/verify_source_case_class_match_acceptance.py binary-cohorts \
+              --source "$DOTTY_AUDIT_REPORT_DIR/source-case-class-match-cohorts.tsv" \
+              --baseline-sha "$DOTTY_EXPECTED_BASE_SHA" \
+              --tested-sha "$(git rev-parse HEAD)" \
+              --expected-head-sha "${{ github.event.pull_request.head.sha || github.sha }}" \
+              --output "$DOTTY_AUDIT_REPORT_DIR/binary-recursive-adt-protected-cohorts.tsv"
 
       - name: Run existing deterministic focused audit baseline
         shell: bash
@@ -625,5 +715,6 @@ jobs:
             ${{ github.workspace }}/target/source-sealed-adt-match-rollback-oracle/
             ${{ github.workspace }}/target/source-recursive-adt-match-oracle/
             ${{ github.workspace }}/target/source-recursive-adt-negative-matrix/
+            ${{ github.workspace }}/target/source-binary-recursive-adt-oracle/
           if-no-files-found: error
           retention-days: 30

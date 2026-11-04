@@ -1364,6 +1364,9 @@ fn binary_late_failure_restores_complete_state_retries_then_types_both_original_
         recovered, fresh_recovered,
         "recovery receipts normalize across sessions"
     );
+    println!(
+        "ISSUE2080_ROLLBACK\tlate_after_two_calls\tbefore=both_Add_Expr_binders_and_both_eval_Applies_same_canonical_method_distinct_argument_binders;restored=complete_state_projection+resolver+typed_ast+types+SourceTypedIndex+scope_buckets;retry=stable_failure_then_selectLeft_and_eval_recovered_in_session;fresh_session=normalized_equal"
+    );
 }
 
 fn binary_complete_state_projection(

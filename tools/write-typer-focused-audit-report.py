@@ -124,3 +124,59 @@ report = [
 ]
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 (REPORT_DIR / "sealed-adt-e2e-report.md").write_text("\n".join(report))
+
+binary_required = (
+    REPORT_DIR / "binary-recursive-adt-positive.tsv",
+    REPORT_DIR / "binary-recursive-adt-negative-rollback.tsv",
+    REPORT_DIR / "binary-recursive-adt-protected-cohorts.tsv",
+)
+environment = {}
+try:
+    for line in (REPORT_DIR / "environment.tsv").read_text(encoding="utf-8").splitlines():
+        key, value = line.split("\t", maxsplit=1)
+        environment[key] = value
+except (OSError, ValueError):
+    pass
+
+binary_report = [
+    "# Binary recursive ADT E2E acceptance (Scala 3.9.0)",
+    "",
+    "**Disposition:** SPRINT GOAL UNMET — independent review of this PR head is still required.",
+    "",
+    f"**Focused audit job:** {'PASS' if status == 'success' else 'SPRINT GOAL UNMET'}",
+    "",
+    "The issue is PASS only after all mandatory hosted checks and an independent review succeed. This report never marks the sprint PASS while review is pending.",
+    "",
+    "| Evidence | Value |",
+    "| --- | --- |",
+    f"| PR head | `{environment.get('issue2080_pr_head_sha', 'missing')}` |",
+    f"| Tested source | `{environment.get('issue2080_tested_sha', command('git', 'rev-parse', 'HEAD'))}` |",
+    f"| Integrated baseline | `{environment.get('issue2080_baseline_sha', 'missing')}` |",
+    f"| Workflow run | {os.environ.get('GITHUB_SERVER_URL', '')}/{os.environ.get('GITHUB_REPOSITORY', '')}/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')} |",
+    f"| Pull request / independent review target | {os.environ.get('DOTTY_PR_URL', '')} |",
+    f"| Frozen source SHA-256 | `{sha256(Path('crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/Expr.scala'))}` |",
+    f"| Scala 3.9.0 source revision | `{command('git', '-C', str(scala_root), 'rev-parse', 'HEAD')}` |",
+    f"| Rust toolchain | `{environment.get('rust', command('rustc', '+1.98.1', '--version'))}` |",
+    f"| Scala artifact manifest SHA-256 | `{sha256(Path('crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/scala-artifacts.sha256.tsv'))}` |",
+    f"| JDK | `{jdk_version}` |",
+    "| Positive numerator | `Evaluator.selectLeft` and `Evaluator.eval`, exactly 2 roots × 2 fresh sessions |",
+    "| Prior source roots | `18/18` required: Box 2 + Flagged 2 + Event 2 + Succ 2 + closures 6 + inherited members 4 |",
+    "| Protected ordinary cohorts | `16/25` main + `15/25` analysis; two deterministic passes, full Scala corpus disabled |",
+    "",
+    "## Run-bound TSV sidecars",
+    "",
+]
+for path in binary_required:
+    binary_report.append(f"- `{path.name}` — SHA-256 `{sha256(path)}`")
+binary_report.extend([
+    "",
+    "## Eight pinned Scala artifacts",
+    "",
+    "```text",
+    Path("crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/scala-artifacts.sha256.tsv").read_text(encoding="utf-8").rstrip("\n"),
+    "```",
+    "",
+    "The sidecars are generated only after the verifier confirms all four positive rows, the named Scala-classified controls and late rollback/retry tests, exact protected roots, and matching baseline/tested/PR-head SHAs. Missing or malformed evidence fails the focused gate.",
+    "",
+])
+(REPORT_DIR / "binary-recursive-adt-e2e-report.md").write_text("\n".join(binary_report))

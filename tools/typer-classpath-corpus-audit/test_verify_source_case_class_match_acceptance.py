@@ -311,5 +311,159 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
                 gate.validate_product2_oracle_log(log)
 
 
+    def binary_positive_rows(self):
+        graph = (
+            ";Expr=source-sealed-trait;Num/Add=source-case-class;Add.parents=Expr+scala.Product;"
+            "Add.fields=left/right:Expr,distinct,class-owned;Add.selectors=_1/_2:Expr,distinct,class-owned;"
+        )
+        select = (
+            "root=selectLeft@158:271;signature=(Expr):Expr;selector=expr:Expr;"
+            "cases=Num(_)=>expr,Add(left,_2)=>left;Add.unapply=companion-owned(Add):Add;"
+            "selectors=_1(left):Expr,_2(right):Expr;binder=left@Add._1:case-local;"
+            "wildcard=Add._2:unbound;mapped_source_trees=19" + graph + "no=_3"
+        )
+        evaluate = (
+            "root=eval@275:410;signature=(Expr):Int;Add.binders=left@_1:Expr,right@_2:Expr,distinct;"
+            "calls=eval(left):Int+eval(right):Int;callee=Evaluator.eval:same_source_symbol;"
+            "addition=Int+Int:Int;match=Int;mappings=25" + graph
+            + "Add.unapply=companion-owned(Add):Add;no=_3"
+        )
+        return [
+            *((session, "selectLeft", "Expr.scala#tree39", "158:271", select)
+              for session in ("session-a", "session-b")),
+            *((session, "eval", "Expr.scala#tree64", "275:410", evaluate)
+              for session in ("session-a", "session-b")),
+        ]
+
+    def binary_positive_log(self, rows) -> str:
+        lines = [
+            "running 1 test",
+            "ISSUE2080_SESSION\tsession-a\towner=0x101\tstore=0x201\tast=0x301\tindex=0x401\tsource=SourceId(1)",
+            "ISSUE2080_SESSION\tsession-b\towner=0x102\tstore=0x202\tast=0x302\tindex=0x402\tsource=SourceId(2)",
+            f"ISSUE2080_TESTED_SHA\t{'a' * 40}",
+        ]
+        lines.extend("ISSUE2080_POSITIVE\t" + "\t".join(row) for row in rows)
+        lines.extend([
+            "test binary_recursive_adt_original_roots_share_two_real_sessions ... ok",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out",
+        ])
+        return "\n".join(lines) + "\n"
+
+    def test_binary_recursive_adt_positive_receipt_writes_exact_four_run_bound_rows(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "positive.log"
+            log.write_text(self.binary_positive_log(self.binary_positive_rows()), encoding="utf-8")
+            output = Path(directory) / "positive.tsv"
+            gate.validate_binary_recursive_adt_positive_logs(
+                root, [log], "a" * 40, "a" * 40, "a" * 40, "b" * 40, output
+            )
+            self.assertEqual(len(gate.read_tsv(output)[1]), 4)
+
+    def test_binary_recursive_adt_positive_receipt_rejects_incomplete_contradictory_and_prefix_counts(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        lines = self.binary_positive_log(self.binary_positive_rows())
+        mutations = (
+            # Remove a required selector proof from both sessions; parity alone must not accept it.
+            lines.replace(";selectors=_1(left):Expr,_2(right):Expr", ""),
+            # Duplicate a semantic key with a contradictory value.
+            lines.replace(";mappings=25", ";mappings=250;mappings=25"),
+            lines.replace("mappings=25", "mappings=24"),
+            # Prefix counts are invalid even when duplicated identically across sessions.
+            lines.replace("mapped_source_trees=19", "mapped_source_trees=190"),
+            lines.replace("mappings=25", "mappings=250"),
+            # Duplicate and contradictory session ownership evidence is not a fresh-session proof.
+            lines.replace("store=0x202", "store=0x201"),
+        )
+        for index, mutated in enumerate(mutations):
+            with tempfile.TemporaryDirectory() as directory:
+                log = Path(directory) / "bad.log"
+                log.write_text(mutated, encoding="utf-8")
+                with self.assertRaises(gate.ReceiptError, msg=f"mutation {index} was accepted"):
+                    gate.validate_binary_recursive_adt_positive_logs(
+                        root, [log], "a" * 40, "a" * 40, "a" * 40, "b" * 40,
+                        Path(directory) / "bad.tsv",
+                    )
+
+    def test_binary_recursive_adt_positive_receipt_rejects_duplicate_rows_and_stale_head(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        text = self.binary_positive_log(self.binary_positive_rows())
+        first = next(line for line in text.splitlines() if line.startswith("ISSUE2080_POSITIVE\t"))
+        mutations = (text + first + "\n", text)
+        for index, mutated in enumerate(mutations):
+            with tempfile.TemporaryDirectory() as directory:
+                log = Path(directory) / "bad.log"
+                log.write_text(mutated, encoding="utf-8")
+                expected_sha = "c" * 40 if index else "a" * 40
+                with self.assertRaises(gate.ReceiptError):
+                    gate.validate_binary_recursive_adt_positive_logs(
+                        root, [log], "a" * 40, expected_sha, "a" * 40, "b" * 40,
+                        Path(directory) / "bad.tsv",
+                    )
+
+    def test_binary_recursive_adt_cohort_sidecar_preserves_exact_roots_and_provenance(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "cohorts.tsv"
+            gate.validate_binary_recursive_adt_cohort_receipt(
+                root, root / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv",
+                "a" * 40, "b" * 40, "b" * 40, output,
+            )
+            self.assertEqual(len(gate.read_tsv(output)[1]), 50)
+
+    def binary_negative_logs(self, root: Path, directory: Path, *, omit_control: bool = False):
+        fixture = root / gate.BINARY_ADT_SOURCE
+        rust_rows = gate.read_tsv(fixture / "rust-control-matrix.tsv")[1]
+        control_lines = ["ISSUE2080_TESTED_SHA\t" + "a" * 40]
+        control_lines.extend(
+            "ISSUE2079_BINARY_CONTROL\t" + "\t".join(row[column] for column in gate.read_tsv(fixture / "rust-control-matrix.tsv")[0])
+            for row in (rust_rows[:-1] if omit_control else rust_rows)
+        )
+        required = (
+            "ISSUE2078_BINARY_EVAL_FAILURES\tsecond_argument\tApplicationArgumentTypeMismatch(Boolean,Expr);first_call=observed;second_call=unpublished;rollback=both_calls,arguments,binders;retry=original_eval",
+            "late_result\tExpectedExpressionTypeMismatch;observed=eval(left):canonical,eval(right):canonical;rollback=both_calls,arguments,binders;retry=original_eval",
+            "ISSUE2080_ROLLBACK\tlate_after_two_calls\tbefore=both_Add_Expr_binders_and_both_eval_Applies_same_canonical_method_distinct_argument_binders;restored=complete_state_projection+resolver+typed_ast+types+SourceTypedIndex+scope_buckets;retry=stable_failure_then_selectLeft_and_eval_recovered_in_session;fresh_session=normalized_equal",
+        )
+        control_lines.extend(required)
+        control_lines.extend(f"test {name} ... ok" for name in sorted(gate.RECURSIVE_ADT_NEGATIVE_TESTS))
+        control_lines.append("test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out")
+        control = self.write_log(directory / "negative.log", "\n".join(control_lines) + "\n")
+
+        structural_file = fixture / "rust-structural-controls.tsv"
+        structural_rows = gate.read_tsv(structural_file)[1]
+        structural_header = gate.read_tsv(structural_file)[0]
+        structural_lines = ["ISSUE2080_TESTED_SHA\t" + "a" * 40]
+        structural_lines.extend(
+            "ISSUE2079_STRUCTURAL_CONTROL\t" + "\t".join(row[column] for column in structural_header)
+            for row in structural_rows
+        )
+        structural_lines.extend([
+            "test corrupted_reference_product2_identities_reject_then_retry_original_select_left ... ok",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out",
+        ])
+        structural = self.write_log(directory / "structural.log", "\n".join(structural_lines) + "\n")
+        return control, structural
+
+    def test_binary_recursive_adt_negative_receipt_requires_controls_and_late_rollback(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            control, structural = self.binary_negative_logs(root, Path(directory))
+            output = Path(directory) / "negative.tsv"
+            gate.validate_binary_recursive_adt_negative_logs(
+                root, control, structural, control, "b" * 40, "a" * 40, "a" * 40, output,
+            )
+            self.assertEqual(len(gate.read_tsv(output)[1]), 33)
+
+    def test_binary_recursive_adt_negative_receipt_rejects_omitted_control(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            control, structural = self.binary_negative_logs(root, Path(directory), omit_control=True)
+            with self.assertRaises(gate.ReceiptError):
+                gate.validate_binary_recursive_adt_negative_logs(
+                    root, control, structural, control, "b" * 40, "a" * 40, "a" * 40,
+                    Path(directory) / "negative.tsv",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
