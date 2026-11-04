@@ -632,14 +632,11 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         store: &mut SemanticStore,
         name: &BinaryName,
     ) -> Result<SymbolId, SemanticMemberLoadFailure> {
-        if let Some(&existing) = self.session.identified.get(name) {
-            if self.is_semantic_class_identity(store, existing) {
-                return Ok(existing);
-            }
+        if self.session.identified.contains_key(name) {
             return Err(SemanticMemberLoadFailure {
                 binary_name: name.clone(),
                 source: SemanticTastyLoadError::UnsupportedShape(
-                    "the canonical class identity was published by another loading path",
+                    "the canonical class identity is not the sole validated package declaration",
                 ),
             });
         }
@@ -676,18 +673,55 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
     }
 
     #[allow(dead_code)]
-    fn is_semantic_class_identity(&self, store: &SemanticStore, class: SymbolId) -> bool {
-        if !store.symbols.contains(class) {
+    fn is_semantic_class_identity(
+        &self,
+        store: &SemanticStore,
+        class: SymbolId,
+        package: SymbolId,
+        package_scope: dotty_core::ScopeId,
+        member_name: Name,
+        binary_name: &BinaryName,
+    ) -> bool {
+        if !store.symbols.contains(class)
+            || !store.symbols.contains(package)
+            || store.symbols.get(package).kind != SymbolKind::Package
+            || !store.scopes.contains(package_scope)
+            || store.scopes.get(package_scope).owner != Some(package)
+            || store.scopes.get(package_scope).lookup_all(&member_name) != [class]
+        {
             return false;
         }
         let symbol = store.symbols.get(class);
+        let Some(package_path) = package_path_of_symbol(store, package) else {
+            return false;
+        };
+        let internal_name = if package_path.is_empty() {
+            store.names.resolve(member_name.text()).to_owned()
+        } else {
+            format!(
+                "{}/{}",
+                package_path.join("/"),
+                store.names.resolve(member_name.text())
+            )
+        };
+        if symbol.kind != SymbolKind::Class
+            || symbol.name != member_name
+            || !member_name.is_type()
+            || symbol.owner != Some(package)
+            || BinaryName::from_internal(internal_name) != *binary_name
+        {
+            return false;
+        }
         let SymbolInfo::Complete(info) = symbol.info else {
             return false;
         };
         let Some(Type::ClassInfo(class_info)) = store.types.try_get(info) else {
             return false;
         };
-        if class_info.class != class || !store.scopes.contains(class_info.declarations) {
+        if class_info.class != class
+            || !store.scopes.contains(class_info.declarations)
+            || store.scopes.get(class_info.declarations).owner != Some(class)
+        {
             return false;
         }
         let Some(constructor) = store
@@ -727,7 +761,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         request: &MemberRequest,
         selected_name: &BinaryName,
     ) -> Result<Option<SymbolId>, MemberResolutionFailure> {
-        let selected_for_request = if request.selector == MemberSelector::Unique
+        let selected_package = if request.selector == MemberSelector::Unique
             && request.name.is_type()
         {
             let owner_type = match request.space {
@@ -743,7 +777,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     let owner = self
                         .resolve_target(store, target)
                         .map_err(MemberResolutionFailure::Resolver)?;
-                    if let Some((owner, _)) = owner
+                    if let Some((owner, scope)) = owner
                         && store.symbols.get(owner).kind == SymbolKind::Package
                     {
                         let package_path =
@@ -759,27 +793,74 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                             format!("{}/{simple_name}", package_path.join("/"))
                         };
                         let binary_name = BinaryName::from_internal(internal_name);
-                        binary_name.is_path_safe() && &binary_name == selected_name
+                        if binary_name.is_path_safe() && &binary_name == selected_name {
+                            Some((owner, scope))
+                        } else {
+                            None
+                        }
                     } else {
-                        false
+                        None
                     }
                 } else {
-                    false
+                    None
                 }
             } else {
-                false
+                None
             }
         } else {
-            false
+            None
         };
 
-        if selected_for_request {
-            self.load_semantic_class_for_member(store, selected_name)
+        let Some((package, scope)) = selected_package else {
+            return self
+                .resolve_member_inner(store, request)
+                .map_err(MemberResolutionFailure::Resolver);
+        };
+        let candidates = store.scopes.get(scope).lookup_all(&request.name);
+        match candidates {
+            [] => self
+                .load_semantic_class_for_member(store, selected_name)
                 .map(Some)
-                .map_err(MemberResolutionFailure::SemanticLoad)
-        } else {
-            self.resolve_member_inner(store, request)
-                .map_err(MemberResolutionFailure::Resolver)
+                .map_err(MemberResolutionFailure::SemanticLoad),
+            [_] => {
+                let selected = self
+                    .resolve_member_inner(store, request)
+                    .map_err(MemberResolutionFailure::Resolver)?;
+                let Some(selected) = selected else {
+                    return Err(MemberResolutionFailure::SemanticLoad(
+                        SemanticMemberLoadFailure {
+                            binary_name: selected_name.clone(),
+                            source: SemanticTastyLoadError::UnsupportedShape(
+                                "the package declaration is not a complete semantic class",
+                            ),
+                        },
+                    ));
+                };
+                if self.is_semantic_class_identity(
+                    store,
+                    selected,
+                    package,
+                    scope,
+                    request.name,
+                    selected_name,
+                ) {
+                    Ok(Some(selected))
+                } else {
+                    Err(MemberResolutionFailure::SemanticLoad(
+                        SemanticMemberLoadFailure {
+                            binary_name: selected_name.clone(),
+                            source: SemanticTastyLoadError::UnsupportedShape(
+                                "the canonical class identity was published by another loading path",
+                            ),
+                        },
+                    ))
+                }
+            }
+            many => Err(MemberResolutionFailure::Resolver(
+                ResolutionError::Ambiguous {
+                    candidates: many.len(),
+                },
+            )),
         }
     }
 
@@ -2741,6 +2822,128 @@ mod tests {
             Some(package),
             "the same arena slot is safe to reuse after its prior allocation was rolled back"
         );
+    }
+
+    #[test]
+    fn selected_semantic_repeat_rejects_conflicting_package_declaration_then_retries() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(open_class_path(true), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("Open package");
+        let request = open_member_request(&mut store, package, definitions.no_prefix);
+        let open_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let semantic = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &open_name)
+            .unwrap()
+            .expect("selected semantic Open");
+        let package_scope = resolver.package_scope(package).expect("package scope");
+
+        let store_before_conflict = store.checkpoint();
+        let conflicting = store.symbols.alloc(Symbol {
+            name: request.name,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Source(SourceId::from_index(0)),
+            annotations: Vec::new(),
+            position: None,
+            links: Default::default(),
+        });
+        store
+            .scopes
+            .get_mut(package_scope)
+            .enter(request.name, conflicting);
+        let candidates = [semantic, conflicting];
+        let store_mark = store.checkpoint();
+        let resolver_mark = resolver.checkpoint();
+        let session_mark = resolver.session.checkpoint();
+
+        let error = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &open_name)
+            .expect_err("a selected repeat must preserve package ambiguity");
+
+        assert!(matches!(
+            error,
+            ResolutionError::Ambiguous { candidates: 2 }
+        ));
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.checkpoint(), resolver_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&request.name),
+            candidates
+        );
+
+        store.scopes.get_mut(package_scope).remove(conflicting);
+        store.rollback_to(store_before_conflict);
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&request.name),
+            [semantic]
+        );
+        let retried = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &open_name)
+            .unwrap()
+            .expect("selected repeat succeeds once the conflict is removed");
+        assert_eq!(retried, semantic);
+    }
+
+    #[test]
+    fn selected_semantic_repeat_rejects_invalid_owner_then_retries() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(open_class_path(true), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("Open package");
+        let request = open_member_request(&mut store, package, definitions.no_prefix);
+        let open_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let semantic = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &open_name)
+            .unwrap()
+            .expect("selected semantic Open");
+        let unrelated_package = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "unrelated");
+        store.symbols.get_mut(semantic).owner = Some(unrelated_package);
+        let store_mark = store.checkpoint();
+        let resolver_mark = resolver.checkpoint();
+        let session_mark = resolver.session.checkpoint();
+
+        let error = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &open_name)
+            .expect_err("a selected repeat must validate the canonical package owner");
+
+        assert!(matches!(
+            error,
+            ResolutionError::Malformed { ref reason }
+                if reason.contains("does not match its canonical package/name")
+        ));
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.checkpoint(), resolver_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+        assert_eq!(store.symbols.get(semantic).owner, Some(unrelated_package));
+
+        store.symbols.get_mut(semantic).owner = Some(package);
+        let retried = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &open_name)
+            .unwrap()
+            .expect("selected repeat succeeds after canonical owner is restored");
+        assert_eq!(retried, semantic);
     }
 
     #[test]
