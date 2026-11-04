@@ -33,7 +33,6 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
   env:
     DOTTY_REQUIRE_FIRST: '1'
   run: |
-    strict_target_output="$(python3 tools/ci/validate_strict_tasty_targets.py --shard shard-1)"
     test_args=()
     test_args+=(--test "$target")
     cargo test "${test_args[@]}"
@@ -42,7 +41,6 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
   env:
     DOTTY_REQUIRE_FIRST: '1'
   run: |
-    strict_target_output="$(python3 tools/ci/validate_strict_tasty_targets.py --shard shard-2)"
     test_args=()
     test_args+=(--test "$target")
     cargo test "${test_args[@]}"
@@ -267,30 +265,6 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
         with self.assertRaisesRegex(ManifestError, "unsupported Cargo global option"):
             self.validate_real_manifest_with_run_step(command, block=False)
 
-    def test_rejects_missing_or_duplicate_workflow_shard_selection(self):
-        manifest = self.valid_manifest()
-        workflow = self.root / ".github" / "workflows" / "jvm-tasty-factory-scala-consumer.yml"
-        for replacement in ("shard-1", "shard-3"):
-            with self.subTest(replacement=replacement):
-                workflow.write_text(self.base_workflow.replace("--shard shard-2", f"--shard {replacement}"), encoding="utf-8")
-                with self.assertRaisesRegex(ManifestError, "workflow must select each fixed shard once in order"):
-                    validate_manifest(manifest, self.root)
-
-    def test_real_inventory_supports_four_fixed_shards_and_preserves_24_targets(self):
-        repository = Path(__file__).parents[2]
-        manifest_path = repository / "tools/ci/strict_tasty_targets.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["baseline"]["inventory_count"], 24)
-        self.assertIn(
-            "jvm_tasty_immutable_reference_local_pair_scala_consumer",
-            [target["name"] for target in manifest["targets"]],
-        )
-        self.assertEqual(
-            [shard["id"] for shard in manifest["sharding"]["shards"]],
-            ["shard-1", "shard-2", "shard-3", "shard-4"],
-        )
-        validate_manifest(manifest, repository)
-
     def test_shard_selection_returns_manifest_order(self):
         manifest = self.fixture("strict-targets-duplicate.json")
         manifest["sharding"] = {
@@ -331,7 +305,7 @@ STRICT_REQUIRED_ENVS: DOTTY_REQUIRE_FIRST
             text=True,
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("manifest declares 3 shards; workflow selects 2", result.stderr)
+        self.assertIn("exactly the ordered shard ids", result.stderr)
 
     def test_rejects_unknown_shard_target(self):
         manifest = self.fixture("strict-targets-duplicate.json")

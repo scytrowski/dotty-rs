@@ -12,10 +12,6 @@ REQUIRED_RESULTS = (
     "shard-1-tests",
     "shard-2-job",
     "shard-2-tests",
-    "shard-3-job",
-    "shard-3-tests",
-    "shard-4-job",
-    "shard-4-tests",
     "constructor-alias",
     "loader-rejection",
     "dual-reference-reader",
@@ -43,7 +39,7 @@ def main() -> int:
             print(f"{name}: {result}")
         return 1
     if args.report:
-        print("all four strict TASTy shards and four mandatory follow-up gates succeeded")
+        print("both strict TASTy shards and all four mandatory follow-up gates succeeded")
     return 0
 
 

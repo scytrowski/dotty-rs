@@ -74,13 +74,32 @@ follow-up gates and verifier took a further 5m24s.
 The first three job checks completed successfully. Every recorded step on
 shard 4, including its strict tests, all follow-up gates, and the Java 21
 verifier, also completed successfully by 17:22:40 UTC. GitHub continued to
-report shard 4 as in progress, however, and left the aggregate queued. The
-run therefore has no complete PR-to-green measurement. Full Rust/JDK CI
-completed successfully at 17:13:36 UTC.
+report shard 4 as in progress, however, and left the aggregate queued. The run
+never reached a green aggregate. Full Rust/JDK CI completed successfully at
+17:13:36 UTC.
 
-This first run is recorded separately from warm comparisons. The run did not
-finalize, so its cache hit flags and byte transfers are unavailable. GitHub's
-cache API shows candidate-ref entries of 643,398,136 bytes for Scala build
-targets and 849,106,509 bytes for dependencies/Rust build, but these sizes do
-not establish how much each shard restored. Compare warm runs on this PR cache
-scope before deciding whether the added four-way setup is justified.
+The exact Scala-target cache missed: shard 1 saved a candidate-ref cache after
+staging, and no exact pinned target cache was available to the other jobs at
+startup. The exact dependency/Rust key also missed; a prefix cache may have
+restored, but its hit state and transfer bytes are unavailable because the run
+did not finalize. Candidate-ref cache entries measured 643,398,136 bytes for
+Scala build targets and 849,106,509 bytes for dependencies/Rust build. Treat
+this as a cold Scala-target run and exclude it from warm latency comparison.
+
+## Decision
+
+**No-go: retain the two-shard gate.** The candidate proved four jobs could start
+concurrently and all recorded target and follow-up steps passed by 21m33s after the workflow
+started, but the stuck shard status prevented the aggregate from completing.
+It did not yield a valid complete PR-to-green sample, and the exact Scala-target
+cache miss made its latency incomparable with the three warm two-way runs. The
+recorded intervals through each job's last successful step total about 56
+runner-minutes, compared with the two-way warm mean of 35m21s; this is a
+cold-run cost signal, not an equivalent warm comparison.
+
+A second same-SHA dispatch and the next pull-request workflow both remained
+queued behind the unresolved job. Three comparable warm four-way measurements
+were therefore not feasible. Keep the tested four-shard candidate and its
+local validation in this PR's commit history as evidence, while restoring the
+active workflow, manifest, validator, and aggregate to the two-shard baseline.
+Do not claim a four-way latency improvement from these results.
