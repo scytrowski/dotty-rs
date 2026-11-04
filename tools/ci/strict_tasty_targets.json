@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "source": {
+    "workflow": ".github/workflows/jvm-tasty-factory-scala-consumer.yml",
+    "step": "Run strict linked Scala and TASTy oracle release gates",
+    "evidence_run": "https://github.com/scytrowski/dotty-rs/actions/runs/41743845738",
+    "sample_sha": "c1e6873dc72287ebd1b0271d8f00637bc331b82a",
+    "timing_method": "Cargo/libtest final per-binary test result lines"
+  },
+  "baseline": {
+    "inventory_count": 23,
+    "accounted_test_seconds": 1389.31,
+    "cargo_build_seconds": 73.0,
+    "strict_step_seconds": 1464.0,
+    "full_job_seconds": 2344.0
+  },
+  "targets": [
+    { "name": "jvm_tasty_scala_consumer", "measured_seconds": 16.56 },
+    { "name": "jvm_tasty_multiclass_scala_consumer", "measured_seconds": 57.93 },
+    { "name": "jvm_tasty_cross_class_scala_consumer", "measured_seconds": 35.33 },
+    { "name": "jvm_tasty_factory_scala_consumer", "measured_seconds": 46.39 },
+    { "name": "jvm_tasty_object_composition_scala_consumer", "measured_seconds": 57.52 },
+    { "name": "jvm_tasty_constructor_injection_scala_consumer", "measured_seconds": 64.33 },
+    { "name": "jvm_tasty_reference_constructor_scala_consumer", "measured_seconds": 94.21 },
+    { "name": "jvm_tasty_nested_constructor_scala_consumer", "measured_seconds": 62.69 },
+    { "name": "jvm_tasty_multi_argument_constructor_calls", "measured_seconds": 13.11 },
+    { "name": "jvm_tasty_multi_argument_constructor_scala_consumer", "measured_seconds": 125.38 },
+    { "name": "jvm_tasty_factory_result_scala_consumer", "measured_seconds": 94.90 },
+    { "name": "jvm_tasty_reference_local_scala_consumer", "measured_seconds": 101.84 },
+    { "name": "jvm_tasty_dual_reference_signature", "measured_seconds": 9.31 },
+    { "name": "jvm_tasty_dual_reference_artifacts", "measured_seconds": 4.84 },
+    { "name": "jvm_tasty_dual_reference_forwarding", "measured_seconds": 54.83 },
+    { "name": "jvm_tasty_dual_reference_forwarding_scala_consumer", "measured_seconds": 154.24 },
+    { "name": "jvm_tasty_mixed_origin_constructor_scala_consumer", "measured_seconds": 231.09 },
+    { "name": "jvm_tasty_direct_formal_constructor_pair", "measured_seconds": 0.00 },
+    { "name": "jvm_tasty_dual_reference_scala_consumer", "measured_seconds": 8.67 },
+    { "name": "jvm_tasty_dual_reference_rust_consumer", "measured_seconds": 99.52 },
+    { "name": "jvm_tasty_cross_class_factories", "measured_seconds": 16.09 },
+    { "name": "jvm_tasty_factory_result_arguments", "measured_seconds": 9.05 },
+    { "name": "tasty_source_pickling", "measured_seconds": 31.48 }
+  ],
+  "sharding": {
+    "strategy": "longest-processing-time-first; ties by target name, next shard by lowest accumulated time then ordinal",
+    "shard_count": 2,
+    "estimated_runner_minutes": 25.59,
+    "estimated_critical_path_minutes": 12.82,
+    "shards": [
+      {
+        "id": "shard-1",
+        "estimated_test_seconds": 696.10,
+        "targets": [
+          "jvm_tasty_mixed_origin_constructor_scala_consumer",
+          "jvm_tasty_reference_local_scala_consumer",
+          "jvm_tasty_factory_result_scala_consumer",
+          "jvm_tasty_constructor_injection_scala_consumer",
+          "jvm_tasty_multiclass_scala_consumer",
+          "jvm_tasty_dual_reference_forwarding",
+          "jvm_tasty_cross_class_scala_consumer",
+          "jvm_tasty_scala_consumer",
+          "jvm_tasty_cross_class_factories",
+          "jvm_tasty_dual_reference_signature",
+          "jvm_tasty_factory_result_arguments",
+          "jvm_tasty_dual_reference_artifacts"
+        ]
+      },
+      {
+        "id": "shard-2",
+        "estimated_test_seconds": 693.21,
+        "targets": [
+          "jvm_tasty_dual_reference_forwarding_scala_consumer",
+          "jvm_tasty_multi_argument_constructor_scala_consumer",
+          "jvm_tasty_dual_reference_rust_consumer",
+          "jvm_tasty_reference_constructor_scala_consumer",
+          "jvm_tasty_nested_constructor_scala_consumer",
+          "jvm_tasty_object_composition_scala_consumer",
+          "jvm_tasty_factory_scala_consumer",
+          "tasty_source_pickling",
+          "jvm_tasty_multi_argument_constructor_calls",
+          "jvm_tasty_dual_reference_scala_consumer",
+          "jvm_tasty_direct_formal_constructor_pair"
+        ]
+      }
+    ]
+  },
+  "four_shard_path": {
+    "strategy": "rerun the same deterministic longest-processing-time-first assignment with shard_count=4; generate every shard command from this manifest",
+    "estimated_runner_minutes": 28.02,
+    "estimated_critical_path_minutes": 7.04
+  }
+}

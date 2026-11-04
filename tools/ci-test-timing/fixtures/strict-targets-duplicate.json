@@ -1,0 +1,15 @@
+{
+  "source": { "workflow": ".github/workflows/jvm-tasty-factory-scala-consumer.yml" },
+  "baseline": { "inventory_count": 2 },
+  "targets": [
+    { "name": "first_target", "measured_seconds": 1.0 },
+    { "name": "second_target", "measured_seconds": 2.0 }
+  ],
+  "sharding": {
+    "shard_count": 2,
+    "shards": [
+      { "id": "shard-1", "targets": ["first_target", "second_target"] },
+      { "id": "shard-2", "targets": ["first_target"] }
+    ]
+  }
+}
