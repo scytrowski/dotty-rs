@@ -8,7 +8,7 @@ use crate::session::{LoadingSession, SessionCheckpoint};
 use dotty_core::{
     Definitions, MemberRequest, MemberSelector, MemberSpace, Name, Namespace, Packages,
     ResolutionError, ResolverCheckpoint, SemanticStore, Symbol, SymbolId, SymbolInfo, SymbolKind,
-    SymbolResolver, Type, TypeId, TypeRefTarget,
+    SymbolOrigin, SymbolResolver, Type, TypeId, TypeRefTarget,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
@@ -682,7 +682,10 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         member_name: Name,
         binary_name: &BinaryName,
     ) -> bool {
-        if !store.symbols.contains(class)
+        if self.session.identified.get(binary_name) != Some(&class)
+            || self.session.resolved.get(binary_name) != Some(&class)
+            || !self.session.origins.contains_key(&class)
+            || !store.symbols.contains(class)
             || !store.symbols.contains(package)
             || store.symbols.get(package).kind != SymbolKind::Package
             || !store.scopes.contains(package_scope)
@@ -692,6 +695,9 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             return false;
         }
         let symbol = store.symbols.get(class);
+        if !matches!(symbol.origin, SymbolOrigin::Tasty(_)) {
+            return false;
+        }
         let Some(package_path) = package_path_of_symbol(store, package) else {
             return false;
         };
@@ -816,6 +822,15 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 .resolve_member_inner(store, request)
                 .map_err(MemberResolutionFailure::Resolver);
         };
+        if !store.scopes.contains(scope) || store.scopes.get(scope).owner != Some(package) {
+            return Err(MemberResolutionFailure::Resolver(
+                ResolutionError::Malformed {
+                    reason:
+                        "selected package declaration scope is not owned by its canonical package"
+                            .to_owned(),
+                },
+            ));
+        }
         let candidates = store.scopes.get(scope).lookup_all(&request.name);
         match candidates {
             [] => self
@@ -2633,6 +2648,40 @@ mod tests {
         ])
     }
 
+    struct OpenResourceControl {
+        inner: CompositeClassPath,
+        selected: Arc<Mutex<Option<ClassResource>>>,
+    }
+
+    impl ClassPathEntry for OpenResourceControl {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            if name.as_internal() == "me/cytrowski/tastyfixtures/visibility/Open" {
+                Ok(self
+                    .selected
+                    .lock()
+                    .expect("selected resource lock")
+                    .clone())
+            } else {
+                self.inner.find_class(name)
+            }
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            self.inner.contains_package(package)
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            self.inner.contains_package_prefix(package)
+        }
+    }
+
+    fn open_control_class_path(selected: Arc<Mutex<Option<ClassResource>>>) -> CompositeClassPath {
+        CompositeClassPath::new(vec![Box::new(OpenResourceControl {
+            inner: open_class_path(true),
+            selected,
+        })])
+    }
+
     fn selected_open_graph_with_padding(padding: bool) -> (String, SymbolId) {
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
@@ -2944,6 +2993,193 @@ mod tests {
             .unwrap()
             .expect("selected repeat succeeds after canonical owner is restored");
         assert_eq!(retried, semantic);
+    }
+
+    #[test]
+    fn selected_semantic_initial_singleton_requires_published_session_identity() {
+        let open_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let valid_resource =
+            DirectoryClassPath::new(fixture_path("tests/fixtures/tasty_visibility"))
+                .find_class(&open_name)
+                .unwrap()
+                .expect("checked-in Open TASTy");
+        let malformed_resource = ClassResource::new(
+            vec![0, 1, 2],
+            ClassFormat::Tasty,
+            ClassOrigin::Directory(PathBuf::from("<malformed-Open>")),
+        );
+
+        for (initial_resource, expected_load_error) in [(None, 0), (Some(malformed_resource), 1)] {
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut publishing_resolver = ClasspathSymbolResolver::new(
+                open_class_path(true),
+                definitions,
+                LoadingSession::new(),
+            );
+            let package = publishing_resolver
+                .resolve_package(
+                    &mut store,
+                    &["me", "cytrowski", "tastyfixtures", "visibility"],
+                )
+                .unwrap()
+                .expect("Open package");
+            let request = open_member_request(&mut store, package, definitions.no_prefix);
+            let unowned = publishing_resolver
+                .resolve_member_with_semantic_class(&mut store, &request, &open_name)
+                .unwrap()
+                .expect("seed complete semantic-shaped singleton");
+            let package_scope = publishing_resolver
+                .package_scope(package)
+                .expect("package scope");
+            let packages = publishing_resolver.session.into_packages();
+            assert_eq!(
+                store.scopes.get(package_scope).lookup_all(&request.name),
+                [unowned]
+            );
+
+            let selected = Arc::new(Mutex::new(initial_resource));
+            let mut resolver = ClasspathSymbolResolver::new(
+                open_control_class_path(selected.clone()),
+                definitions,
+                LoadingSession::with_packages(packages),
+            );
+            assert!(!resolver.session.identified.contains_key(&open_name));
+            assert!(!resolver.session.resolved.contains_key(&open_name));
+            assert!(!resolver.session.origins.contains_key(&unowned));
+
+            let store_mark = store.checkpoint();
+            let resolver_mark = resolver.checkpoint();
+            let session_mark = resolver.session.checkpoint();
+            let collision = resolver
+                .transact(&mut store, |resolver, store| {
+                    resolver.resolve_member_inner_with_semantic_request(store, &request, &open_name)
+                })
+                .expect_err("a structural singleton without session provenance is not reusable");
+            assert!(matches!(
+                collision,
+                MemberResolutionFailure::SemanticLoad(SemanticMemberLoadFailure {
+                    ref binary_name,
+                    source: SemanticTastyLoadError::UnsupportedShape(
+                        "the canonical class identity was published by another loading path"
+                    ),
+                }) if binary_name == &open_name
+            ));
+            assert_eq!(store.checkpoint(), store_mark);
+            assert_eq!(resolver.checkpoint(), resolver_mark);
+            assert_eq!(resolver.session.checkpoint(), session_mark);
+            assert_eq!(
+                store.scopes.get(package_scope).lookup_all(&request.name),
+                [unowned]
+            );
+
+            store.scopes.get_mut(package_scope).remove(unowned);
+            let retry_store_mark = store.checkpoint();
+            let retry_resolver_mark = resolver.checkpoint();
+            let retry_session_mark = resolver.session.checkpoint();
+            let load_error = resolver
+                .transact(&mut store, |resolver, store| {
+                    resolver.resolve_member_inner_with_semantic_request(store, &request, &open_name)
+                })
+                .expect_err("removing the unowned declaration retries the selected resource");
+            let expected_error = match (expected_load_error, load_error) {
+                (
+                    0,
+                    MemberResolutionFailure::SemanticLoad(SemanticMemberLoadFailure {
+                        binary_name,
+                        source: SemanticTastyLoadError::ClassLoad(ClassLoadError::NotFound(name)),
+                    }),
+                ) => binary_name == open_name && name == open_name,
+                (
+                    1,
+                    MemberResolutionFailure::SemanticLoad(SemanticMemberLoadFailure {
+                        binary_name,
+                        source:
+                            SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(name, _)),
+                    }),
+                ) => binary_name == open_name && name == open_name,
+                _ => false,
+            };
+            assert!(
+                expected_error,
+                "resource retry returns its typed load error"
+            );
+            assert_eq!(store.checkpoint(), retry_store_mark);
+            assert_eq!(resolver.checkpoint(), retry_resolver_mark);
+            assert_eq!(resolver.session.checkpoint(), retry_session_mark);
+            assert!(!resolver.session.identified.contains_key(&open_name));
+            assert!(!resolver.session.resolved.contains_key(&open_name));
+
+            *selected.lock().expect("selected resource lock") = Some(valid_resource.clone());
+            let retried = resolver
+                .resolve_member_with_semantic_class(&mut store, &request, &open_name)
+                .unwrap()
+                .expect("same-session retry succeeds after valid selected bytes are restored");
+            assert_ne!(retried, unowned);
+            assert_eq!(resolver.session.identified.get(&open_name), Some(&retried));
+            assert_eq!(resolver.session.resolved.get(&open_name), Some(&retried));
+            assert!(resolver.session.origins.contains_key(&retried));
+        }
+    }
+
+    #[test]
+    fn selected_semantic_initial_load_rejects_invalid_package_scope_owner_then_retries() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(open_class_path(true), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("Open package");
+        let request = open_member_request(&mut store, package, definitions.no_prefix);
+        let open_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let package_scope = resolver.package_scope(package).expect("package scope");
+        assert!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&request.name)
+                .is_empty()
+        );
+
+        store.scopes.get_mut(package_scope).owner = None;
+        let store_mark = store.checkpoint();
+        let resolver_mark = resolver.checkpoint();
+        let session_mark = resolver.session.checkpoint();
+        let error = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &open_name)
+            .expect_err("an invalid canonical package scope must fail before loading");
+        assert!(matches!(
+            error,
+            ResolutionError::Malformed { ref reason }
+                if reason.contains("selected package declaration scope is not owned")
+        ));
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.checkpoint(), resolver_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+        assert!(!resolver.session.identified.contains_key(&open_name));
+        assert!(!resolver.session.resolved.contains_key(&open_name));
+        assert!(resolver.session.origins.is_empty());
+        assert!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&request.name)
+                .is_empty()
+        );
+
+        store.scopes.get_mut(package_scope).owner = Some(package);
+        let retried = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &open_name)
+            .unwrap()
+            .expect("same-session retry succeeds after restoring canonical scope owner");
+        assert_eq!(resolver.session.identified.get(&open_name), Some(&retried));
+        assert_eq!(resolver.session.resolved.get(&open_name), Some(&retried));
+        assert!(resolver.session.origins.contains_key(&retried));
     }
 
     #[test]
