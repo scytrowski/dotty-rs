@@ -60,3 +60,27 @@ python3 tools/ci/validate_strict_tasty_targets.py --shard shard-2
 python3 tools/ci/validate_strict_tasty_targets.py --shard shard-3
 python3 tools/ci/validate_strict_tasty_targets.py --shard shard-4
 ```
+
+## Initial hosted four-shard candidate
+
+The first candidate run is [41873333835](https://github.com/scytrowski/dotty-rs/actions/runs/41873333835)
+on SHA `864b6daa559dda2d7384b27fe35d841bfc3bde38`. All four shard jobs
+started at 17:01:09 UTC, confirming runner concurrency. Their recorded total
+job intervals were 11m02s, 12m41s, 10m46s, and 21m31s (about 56 runner
+minutes). Scala staging took 4m58s, 5m47s, 4m54s, and 7m49s respectively;
+strict test steps took 5m03s, 6m02s, 5m04s, and 7m28s. Shard 4's four
+follow-up gates and verifier took a further 5m24s.
+
+The first three job checks completed successfully. Every recorded step on
+shard 4, including its strict tests, all follow-up gates, and the Java 21
+verifier, also completed successfully by 17:22:40 UTC. GitHub continued to
+report shard 4 as in progress, however, and left the aggregate queued. The
+run therefore has no complete PR-to-green measurement. Full Rust/JDK CI
+completed successfully at 17:13:36 UTC.
+
+This first run is recorded separately from warm comparisons. The run did not
+finalize, so its cache hit flags and byte transfers are unavailable. GitHub's
+cache API shows candidate-ref entries of 643,398,136 bytes for Scala build
+targets and 849,106,509 bytes for dependencies/Rust build, but these sizes do
+not establish how much each shard restored. Compare warm runs on this PR cache
+scope before deciding whether the added four-way setup is justified.
