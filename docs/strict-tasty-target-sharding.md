@@ -49,7 +49,12 @@ The workflow pins Scala sources to
 and runs Rust `1.98.1`. These pins and the separate gate commands are part of
 the inventory's surrounding contract, not shard members.
 
-The validator checks unique frozen membership, exact one-time coverage by the
-proposed shards, and a corresponding `tests/<target>.rs` file for every member.
-Negative fixtures cover an unassigned target, a duplicate shard assignment,
-and a missing test file.
+The validator reads the current workflow's `strict_targets` array as the
+independent pre-sharding inventory. It rejects any manifest replacement,
+omission or reorder against that list, then checks unique one-time shard
+coverage, measured shard totals and a corresponding `tests/<target>.rs` file
+for every member. When a later rollout replaces the workflow's flat list with
+generated shard commands, it must retain an independently frozen baseline for
+the validator to compare against. Negative fixtures cover inventory
+replacement/removal, an unassigned target, duplicate shard assignment and a
+missing test file.

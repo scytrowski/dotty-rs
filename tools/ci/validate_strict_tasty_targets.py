@@ -5,12 +5,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 
 class ManifestError(ValueError):
     """The target manifest is malformed or does not cover real test targets."""
+
+
+FROZEN_WORKFLOW = ".github/workflows/jvm-tasty-factory-scala-consumer.yml"
+
+
+def _workflow_inventory(workflow: str) -> list[str]:
+    match = re.search(r"(?ms)^\s*strict_targets=\(\s*(.*?)^\s*\)", workflow)
+    if match is None:
+        raise ManifestError("source workflow does not contain a strict_targets array")
+    names = [line.strip() for line in match.group(1).splitlines() if line.strip()]
+    if any(re.fullmatch(r"[a-zA-Z0-9_]+", name) is None for name in names):
+        raise ManifestError("strict_targets array must contain one target name per line")
+    return names
 
 
 def _duplicates(values: list[str]) -> list[str]:
@@ -24,16 +38,35 @@ def _duplicates(values: list[str]) -> list[str]:
 
 
 def validate_manifest(manifest: dict[str, Any], repository_root: Path) -> None:
+    if not isinstance(manifest, dict):
+        raise ManifestError("manifest root must be an object")
+    source = manifest.get("source")
     targets = manifest.get("targets")
-    shards = manifest.get("sharding", {}).get("shards")
-    expected_count = manifest.get("baseline", {}).get("inventory_count")
-    shard_count = manifest.get("sharding", {}).get("shard_count")
+    sharding = manifest.get("sharding")
+    baseline = manifest.get("baseline")
+    if not isinstance(sharding, dict) or not isinstance(baseline, dict):
+        raise ManifestError("baseline and sharding must be objects")
+    shards = sharding.get("shards")
+    expected_count = baseline.get("inventory_count")
+    shard_count = sharding.get("shard_count")
     if not isinstance(targets, list) or not isinstance(shards, list):
         raise ManifestError("targets and sharding.shards must be arrays")
     if not isinstance(expected_count, int) or expected_count <= 0:
         raise ManifestError("baseline.inventory_count must be a positive integer")
     if not isinstance(shard_count, int) or shard_count != len(shards):
         raise ManifestError("sharding.shard_count must match the shard list")
+    if not isinstance(source, dict) or source.get("workflow") != FROZEN_WORKFLOW:
+        raise ManifestError(f"source.workflow must remain {FROZEN_WORKFLOW!r}")
+
+    workflow_path = repository_root / FROZEN_WORKFLOW
+    try:
+        frozen_names = _workflow_inventory(workflow_path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ManifestError(f"cannot read frozen inventory workflow {source['workflow']!r}: {error}") from error
+    if _duplicates(frozen_names):
+        raise ManifestError("source workflow strict_targets array contains duplicate targets")
+    if len(frozen_names) != expected_count:
+        raise ManifestError(f"workflow inventory has {len(frozen_names)} targets; manifest expects {expected_count}")
 
     names: list[str] = []
     durations: dict[str, float] = {}
@@ -54,6 +87,17 @@ def validate_manifest(manifest: dict[str, Any], repository_root: Path) -> None:
         raise ManifestError(f"duplicate inventory targets: {', '.join(duplicates)}")
     if len(names) != expected_count:
         raise ManifestError(f"inventory has {len(names)} targets; expected {expected_count}")
+    if names != frozen_names:
+        missing = sorted(set(frozen_names) - set(names))
+        unexpected = sorted(set(names) - set(frozen_names))
+        details = []
+        if missing:
+            details.append(f"omitted from manifest: {', '.join(missing)}")
+        if unexpected:
+            details.append(f"not in frozen workflow inventory: {', '.join(unexpected)}")
+        if not details:
+            details.append("target order differs from the frozen workflow inventory")
+        raise ManifestError("manifest does not match frozen workflow inventory (" + "; ".join(details) + ")")
 
     assignments: list[str] = []
     shard_ids: list[str] = []
