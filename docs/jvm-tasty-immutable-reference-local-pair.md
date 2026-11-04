@@ -1,7 +1,7 @@
 # Immutable reference local passed to `Pair`
 
-This is an audit of the single-local constructor flow from issue #2063. It
-does not enable JVM or TASTy producer behavior. Scala-generated files in
+This document records the single-local constructor audit from issue #2063 and
+the paired Rust producer increment from issue #2073. Scala-generated files in
 [`tests/fixtures/jvm_tasty_immutable_reference_local_pair/`](../tests/fixtures/jvm_tasty_immutable_reference_local_pair/)
 are Scala oracle artifacts; they are not Rust output or Rust/Scala
 interoperability evidence. `oracle.json` records each source/artifact hash,
@@ -220,6 +220,44 @@ The updated cross-contract first-error matrix records the now-reached boundary:
 | helper initializer | `SourceShape`: initializer function must be the constructor Select |
 | wrong constructor owner | `TypedBinding`: final Apply must retain the method's canonical Pair result type |
 
-The two positive rows stop downstream because this issue only adds proof
-acceptance: the current paired TASTy path still reports unsupported
-`BodyExpression`, and no JVM/TASTy output is enabled by this change.
+The two positive rows record the proof-only status at the end of #2068. Issue
+#2069 added paired TASTy body serialization, and issue #2073 completes the
+bounded paired JVM/TASTy artifact path as recorded below.
+
+## Paired Rust producer evidence for issue #2073
+
+The paired planner now projects the exact source-typed local binding from the
+`FormalLocalPair` proof into the existing `JvmLocalBinding` and checked local
+layout. The whole-batch contract consumes the same pair and direct initializer
+receipts. It checks the local's source/typed Block, ValDef, initializer and
+ordered use roots, and validates emitted symbolic bytecode against that
+identity: initialize one Counter from seed slot 2, store the initialized value
+in local slot 3, then allocate Pair and load the original arguments in their
+source order. The reversed method retains slots 1/2/3 and reverses only those
+Pair argument loads. Existing helper-local checks remain covered separately.
+
+`tests/jvm_tasty_artifacts.rs::immutable_local_pair_batches_emit_deterministic_authenticated_artifacts`
+emits the complete six-file batch from each frozen source using the real paired
+frontend pipeline. Independent sessions for each identical source produce
+byte-identical artifacts and the same UUIDs. These hashes identify the Rust
+output from that regression at this revision; the identical Counter and Pair
+declarations produce identical files in both orientations.
+
+| Variant | Artifact | SHA-256 | TASTy UUID |
+| --- | --- | --- | --- |
+| both | `example/Counter.class` | `fe3d5bc2169b6e02e28fec36271518d476e1b3aea7ac65077a8d382958f7ef6b` | `008047c3c00968ac0000000000008193` |
+| both | `example/Counter.tasty` | `3d6289dd35b38698347de93f679605547ac61ca1c87842b8dca96ca7a8293045` | `008047c3c00968ac0000000000008193` |
+| both | `example/Pair.class` | `77257daed358c452f0291b26bcc7d4a2778483b47df0b1861948b13e43b8e317` | `000b7d8d7441c7f00000000000008198` |
+| both | `example/Pair.tasty` | `4a7dcc31a6f771af5685afa6464bad85acdc869e7fec2feb9b3d41ee98dfd284` | `000b7d8d7441c7f00000000000008198` |
+| primary | `example/PairFactory.class` | `f5f98b7460958398e1871f473261cffd947c59abf6f3be4718f39d0cb6133b26` | `00aa404076fa2cc80000000000008199` |
+| primary | `example/PairFactory.tasty` | `243a9bf981e8fbc8403d6f6da9108798a8615446cbc8d1b608b8c60100cd36ca` | `00aa404076fa2cc80000000000008199` |
+| reversed | `example/PairFactory.class` | `a8074b8b4fbb5e822eb38213ac789629462e734faf7623fbf52c0c1caf741493` | `00cc322d08c23fc80000000000008199` |
+| reversed | `example/PairFactory.tasty` | `e3126007b1309789e45a7fedef0b9f8d43bec44a15f3271367074a22a27b1735` | `00cc322d08c23fc80000000000008199` |
+
+The Rust classfiles are major 65, and the validator checks the class-file TASTy
+UUID links against each sidecar header before accepting the batch. The
+contract's bytecode check uses resolved class/method references and decoded
+local instructions; it does not rely on fixed PCs or constant-pool indexes.
+The pinned Scala consumer and independent JDK runtime remain later issue
+gates, as specified by #2073; these Rust hashes do not claim Scala
+interoperability.

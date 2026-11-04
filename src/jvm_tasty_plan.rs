@@ -1103,7 +1103,7 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                     });
                     // The only reference local projected by this paired
                     // adapter is the exact immutable ValDef consumed by the
-                    // final one-argument constructor application. The
+                    // final constructor application. The
                     // cross-class proof below revalidates the complete shape;
                     // this projection only makes its canonical local
                     // identity available to the existing JVM layout/codegen.
@@ -1119,11 +1119,12 @@ pub fn with_paired_jvm_tasty_batch_plan<R>(
                             let final_constructor_uses_local = matches!(
                                 parsed.ast.try_get(block.expr).map(|node| &node.kind),
                                 Some(TreeKind::Apply(application))
-                                    if application.args.len() == 1
-                                        && matches!(
-                                            parsed.ast.try_get(application.args[0]).map(|node| &node.kind),
+                                    if (application.args.len() == 1
+                                        || application.args.len() == 2)
+                                        && application.args.iter().any(|argument| matches!(
+                                            parsed.ast.try_get(*argument).map(|node| &node.kind),
                                             Some(TreeKind::Ident(_))
-                                        )
+                                        ))
                             );
                             if !final_constructor_uses_local {
                                 Vec::new()

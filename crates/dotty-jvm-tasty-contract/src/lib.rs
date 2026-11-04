@@ -25,8 +25,8 @@ use dotty_jvm::{
 };
 use dotty_tasty::tasty::{TastyFile, TastyFileError};
 use dotty_tasty_pickler::{
-    ClassMemberPicklePlan, OrderedConstructorCallArgumentOrigin, PickleError,
-    ValidatedClassStatePlan,
+    ClassMemberPicklePlan, FormalLocalConstructorCallArgumentOrigin,
+    OrderedConstructorCallArgumentOrigin, PickleError, ValidatedClassStatePlan,
 };
 
 /// A typed, read-only failure while proving one JVM class and TASTy plan agree.
@@ -1703,12 +1703,511 @@ struct NestedConstructorMethodRef {
 
 enum MixedConstructorArgumentRef {
     Formal { local_slot: u16 },
+    LocalValue { local_slot: u16 },
     Nested(NestedConstructorMethodRef),
 }
 
 struct MixedConstructorPairRef {
     arguments: [MixedConstructorArgumentRef; 2],
+    local_initializer: Option<LocalCounterInitializerRef>,
     max_stack: u16,
+}
+
+struct LocalCounterInitializerRef {
+    owner_internal_name: String,
+    descriptor: String,
+    argument_local_slot: u16,
+    result_local_slot: u16,
+}
+
+fn validate_formal_local_constructor_pair(
+    proof: &ValidatedJvmTastyClass<'_, '_, '_, '_>,
+    caller: SymbolId,
+    (source_rhs, typed_rhs): (TreeId<Untyped>, TreeId<Typed>),
+    outer_application: &dotty_core::ast::Apply<Typed>,
+    outer_constructor_symbol: SymbolId,
+    outer_metadata: &JvmClassMetadata,
+    all_metadata: &[JvmClassMetadata],
+) -> Result<MixedConstructorPairRef, String> {
+    use dotty_core::ast::TreeKind;
+
+    let tasty = proof.tasty_plan.plan();
+    let source_id = tasty.source.id;
+    let pair = tasty
+        .typed_bindings
+        .formal_local_constructor_call_pair(source_id, caller)
+        .ok_or_else(|| {
+            "two-argument local constructor has no FormalLocalPair receipt".to_owned()
+        })?;
+    let initializer = tasty
+        .typed_bindings
+        .local_counter_initializer(source_id, caller)
+        .ok_or_else(|| {
+            "FormalLocalPair has no direct local Counter initializer receipt".to_owned()
+        })?;
+    let Some(TreeKind::Block(source_block)) =
+        tasty.source_ast.try_get(source_rhs).map(|tree| &tree.kind)
+    else {
+        return Err("FormalLocalPair source RHS is not the original Block".into());
+    };
+    let Some(TreeKind::Block(typed_block)) =
+        tasty.typed_ast.try_get(typed_rhs).map(|tree| &tree.kind)
+    else {
+        return Err("FormalLocalPair typed RHS is not the original Block".into());
+    };
+    let [source_declaration] = source_block.stats.as_slice() else {
+        return Err("FormalLocalPair Block must contain exactly one local declaration".into());
+    };
+    let [typed_declaration] = typed_block.stats.as_slice() else {
+        return Err(
+            "FormalLocalPair typed Block must contain exactly one local declaration".into(),
+        );
+    };
+    if initializer.source_block != source_rhs
+        || initializer.typed_block != typed_rhs
+        || initializer.source_declaration != *source_declaration
+        || initializer.typed_declaration != *typed_declaration
+        || tasty.typed_bindings.typed_at(source_id, source_rhs) != Some(typed_rhs)
+    {
+        return Err(
+            "FormalLocalPair initializer roots differ from the original source/typed Block".into(),
+        );
+    }
+    let Some(TreeKind::ValDef(source_val)) = tasty
+        .source_ast
+        .try_get(*source_declaration)
+        .map(|tree| &tree.kind)
+    else {
+        return Err("FormalLocalPair declaration is not a source ValDef".into());
+    };
+    let Some(TreeKind::ValDef(typed_val)) = tasty
+        .typed_ast
+        .try_get(*typed_declaration)
+        .map(|tree| &tree.kind)
+    else {
+        return Err("FormalLocalPair declaration is not a typed ValDef".into());
+    };
+    if source_val.rhs != Some(initializer.source_initializer)
+        || typed_val.rhs != Some(initializer.typed_initializer)
+        || source_val.tpt != initializer.source_type_tree
+        || typed_val.tpt != initializer.typed_type_tree
+        || tasty
+            .typed_bindings
+            .typed_at(source_id, initializer.source_declaration)
+            != Some(initializer.typed_declaration)
+        || tasty
+            .typed_bindings
+            .typed_at(source_id, initializer.source_initializer)
+            != Some(initializer.typed_initializer)
+        || tasty
+            .typed_bindings
+            .typed_at(source_id, initializer.source_type_tree)
+            != Some(initializer.typed_type_tree)
+    {
+        return Err(
+            "FormalLocalPair declaration or initializer has stale/mutable source bindings".into(),
+        );
+    }
+    let local_bindings = tasty.typed_bindings.local_value_bindings(source_id, caller);
+    let [local_binding] = local_bindings.as_slice() else {
+        return Err("FormalLocalPair must retain exactly one canonical local binding".into());
+    };
+    if local_binding.source_tree != initializer.source_declaration
+        || local_binding.typed_declaration != initializer.typed_declaration
+        || local_binding.symbol != initializer.local
+        || local_binding.scope != initializer.scope
+        || !tasty.store.symbols.contains(initializer.local)
+        || tasty.store.symbols.get(initializer.local).kind != SymbolKind::Local
+        || tasty.store.symbols.get(initializer.local).owner != Some(caller)
+        || tasty.store.symbols.get(initializer.local).origin != SymbolOrigin::Source(source_id)
+        || !tasty.store.symbols.get(initializer.local).flags.is_empty()
+        || !matches!(tasty.store.symbols.get(initializer.local).info, SymbolInfo::Complete(ty) if ty == initializer.local_type)
+        || !matches!(tasty.store.types.try_get(initializer.local_type), Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == initializer.call.class)
+        || tasty.typed_ast.get(*typed_declaration).ty != initializer.local_type
+    {
+        return Err(
+            "FormalLocalPair local symbol/type/scope is not canonical for this method".into(),
+        );
+    }
+    let Some(TreeKind::Apply(source_outer)) = tasty
+        .source_ast
+        .try_get(source_block.expr)
+        .map(|tree| &tree.kind)
+    else {
+        return Err("FormalLocalPair source Block result is not a constructor Apply".into());
+    };
+    let Some(TreeKind::Apply(typed_outer)) = tasty
+        .typed_ast
+        .try_get(typed_block.expr)
+        .map(|tree| &tree.kind)
+    else {
+        return Err("FormalLocalPair typed Block result is not a constructor Apply".into());
+    };
+    if source_outer.kind != dotty_core::ast::ApplyKind::Regular
+        || typed_outer.kind != dotty_core::ast::ApplyKind::Regular
+        || outer_application.kind != dotty_core::ast::ApplyKind::Regular
+        || source_outer.args.as_slice() != pair.arguments.map(|argument| argument.source_argument)
+        || typed_outer.args.as_slice() != pair.arguments.map(|argument| argument.typed_argument)
+        || outer_application.args.as_slice()
+            != pair.arguments.map(|argument| argument.typed_argument)
+        || !matches!(
+            tasty
+                .source_ast
+                .try_get(source_outer.function)
+                .map(|tree| &tree.kind),
+            Some(TreeKind::Select(_))
+        )
+        || !matches!(
+            tasty
+                .typed_ast
+                .try_get(typed_outer.function)
+                .map(|tree| &tree.kind),
+            Some(TreeKind::Select(_))
+        )
+        || !matches!(
+            tasty.source_ast.try_get(source_outer.function).map(|tree| &tree.kind),
+            Some(TreeKind::Select(selection))
+                if matches!(tasty.source_ast.try_get(selection.qualifier).map(|tree| &tree.kind), Some(TreeKind::New(_)))
+        )
+        || !matches!(
+            tasty.typed_ast.try_get(typed_outer.function).map(|tree| &tree.kind),
+            Some(TreeKind::Select(selection))
+                if matches!(tasty.typed_ast.try_get(selection.qualifier).map(|tree| &tree.kind), Some(TreeKind::New(_)))
+        )
+        || !matches!(
+            tasty.typed_ast.try_get(typed_outer.function).and_then(|tree| tasty.store.types.try_get(tree.ty)),
+            Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. })
+                if *symbol == outer_constructor_symbol
+        )
+        || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(typed_rhs).ty), Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == outer_metadata.identity().symbol())
+        || tasty.store.symbols.get(outer_constructor_symbol).kind != SymbolKind::Constructor
+        || tasty.store.symbols.get(outer_constructor_symbol).owner
+            != Some(outer_metadata.identity().symbol())
+    {
+        return Err(
+            "FormalLocalPair outer constructor arguments differ from the ordered original call"
+                .into(),
+        );
+    }
+    let method = proof
+        .metadata
+        .methods()
+        .iter()
+        .find(|method| method.symbol() == caller)
+        .ok_or_else(|| "FormalLocalPair caller is absent from the JVM plan".to_owned())?;
+    if pair.method_formals[0] == pair.method_formals[1]
+        || pair.source_method_formals[0] == pair.source_method_formals[1]
+        || method.parameters().len() != 2
+        || method.parameters()[0].symbol() != pair.method_formals[0]
+        || method.parameters()[1].symbol() != pair.method_formals[1]
+        || method.parameters()[0].slot() != 1
+        || method.parameters()[1].slot() != 2
+        || tasty
+            .source_index
+            .symbol_at(source_id, pair.source_method_formals[0])
+            != Some(pair.method_formals[0])
+        || tasty
+            .source_index
+            .symbol_at(source_id, pair.source_method_formals[1])
+            != Some(pair.method_formals[1])
+        || pair.method_formals.iter().any(|formal| {
+            !tasty.store.symbols.contains(*formal)
+                || tasty.store.symbols.get(*formal).kind != SymbolKind::Parameter
+                || tasty.store.symbols.get(*formal).owner != Some(caller)
+                || tasty.store.symbols.get(*formal).origin != SymbolOrigin::Source(source_id)
+        })
+        || !matches!(tasty.store.symbols.get(pair.method_formals[0]).info, SymbolInfo::Complete(ty) if matches!(tasty.store.types.try_get(ty), Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == initializer.call.class))
+        || !matches!(tasty.store.symbols.get(pair.method_formals[1]).info, SymbolInfo::Complete(ty) if ty == tasty.definitions.int)
+        || method.descriptor().as_str()
+            != format!(
+                "(L{};I)L{};",
+                all_metadata
+                    .iter()
+                    .find(|metadata| metadata.identity().symbol() == initializer.call.class)
+                    .ok_or_else(|| "FormalLocalPair Counter class is outside the batch".to_owned())?
+                    .identity()
+                    .internal_name(),
+                outer_metadata.identity().internal_name()
+            )
+    {
+        return Err("FormalLocalPair method formals do not preserve the source JVM ABI".into());
+    }
+    let outer_constructor = outer_metadata
+        .constructor()
+        .filter(|constructor| constructor.symbol() == outer_constructor_symbol)
+        .ok_or_else(|| "FormalLocalPair Pair constructor is absent from the JVM plan".to_owned())?;
+    if outer_constructor.parameters().len() != 2
+        || outer_constructor.descriptor().as_str()
+            != format!(
+                "(L{};L{};)V",
+                all_metadata
+                    .iter()
+                    .find(|metadata| metadata.identity().symbol() == initializer.call.class)
+                    .ok_or_else(|| "FormalLocalPair Counter class is outside the batch".to_owned())?
+                    .identity()
+                    .internal_name(),
+                all_metadata
+                    .iter()
+                    .find(|metadata| metadata.identity().symbol() == initializer.call.class)
+                    .ok_or_else(|| "FormalLocalPair Counter class is outside the batch".to_owned())?
+                    .identity()
+                    .internal_name()
+            )
+    {
+        return Err(
+            "FormalLocalPair Pair constructor descriptor is not the exact Counter pair ABI".into(),
+        );
+    }
+    let caller_plan = proof
+        .jvm_unit
+        .classes
+        .iter()
+        .find(|class| class.class == tasty.class)
+        .and_then(|class| class.methods.iter().find(|method| method.method == caller))
+        .ok_or_else(|| "FormalLocalPair caller has no JVM method plan".to_owned())?;
+    let layout = proof
+        .jvm_unit
+        .local_layout_for(method, &caller_plan.locals, tasty.definitions)
+        .map_err(|error| format!("cannot derive FormalLocalPair local layout: {error:?}"))?;
+    let local_slot = layout
+        .local(initializer.local)
+        .map_err(|error| format!("FormalLocalPair local has no checked slot: {error:?}"))?;
+    if local_slot.declaration() != initializer.typed_declaration
+        || local_slot.is_mutable()
+        || local_slot.ty() != dotty_jvm::JvmType::Reference(initializer.call.class)
+    {
+        return Err(
+            "FormalLocalPair local slot differs from the exact immutable Counter declaration"
+                .into(),
+        );
+    }
+    let mut arguments = Vec::with_capacity(2);
+    let mut formal_count = 0;
+    let mut local_count = 0;
+    for (index, argument) in pair.arguments.iter().enumerate() {
+        if tasty
+            .typed_bindings
+            .typed_at(source_id, argument.source_argument)
+            != Some(argument.typed_argument)
+        {
+            return Err(format!(
+                "FormalLocalPair argument {index} has a stale source-to-typed edge"
+            ));
+        }
+        let source_argument = tasty
+            .source_ast
+            .try_get(argument.source_argument)
+            .ok_or_else(|| format!("FormalLocalPair source argument {index} is stale"))?;
+        let typed_argument = tasty
+            .typed_ast
+            .try_get(argument.typed_argument)
+            .ok_or_else(|| format!("FormalLocalPair typed argument {index} is stale"))?;
+        match argument.origin {
+            FormalLocalConstructorCallArgumentOrigin::Formal {
+                formal,
+                result_type,
+                ..
+            } => {
+                let Some(Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(target),
+                }) = tasty.store.types.try_get(typed_argument.ty)
+                else {
+                    return Err(format!(
+                        "FormalLocalPair formal argument {index} is not a canonical TermRef"
+                    ));
+                };
+                let Some(formal_index) = pair
+                    .method_formals
+                    .iter()
+                    .position(|candidate| *candidate == formal)
+                else {
+                    return Err(format!(
+                        "FormalLocalPair formal argument {index} is not an original method formal"
+                    ));
+                };
+                let Some(TreeKind::Ident(source_ident)) = Some(&source_argument.kind) else {
+                    return Err(format!(
+                        "FormalLocalPair formal source argument {index} is not an Ident"
+                    ));
+                };
+                let Some(TreeKind::ValDef(source_formal)) = tasty
+                    .source_ast
+                    .try_get(pair.source_method_formals[formal_index])
+                    .map(|tree| &tree.kind)
+                else {
+                    return Err(format!(
+                        "FormalLocalPair source formal {formal_index} is not a ValDef"
+                    ));
+                };
+                if *prefix != tasty.definitions.no_prefix
+                    || *target != formal
+                    || typed_argument.ty != result_type
+                    || !matches!(source_argument.kind, TreeKind::Ident(_))
+                    || !matches!(typed_argument.kind, TreeKind::Ident(_))
+                    || source_ident.name != *source_formal.name.as_name()
+                    || formal_index != 0
+                    || outer_constructor.parameters()[index].ty()
+                        != dotty_jvm::JvmType::Reference(initializer.call.class)
+                {
+                    return Err(format!(
+                        "FormalLocalPair formal argument {index} is not the original first formal"
+                    ));
+                }
+                formal_count += 1;
+                arguments.push(MixedConstructorArgumentRef::Formal {
+                    local_slot: method.parameters()[0].slot(),
+                });
+            }
+            FormalLocalConstructorCallArgumentOrigin::LocalValue {
+                symbol,
+                result_type,
+            } => {
+                let Some(Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(target),
+                }) = tasty.store.types.try_get(typed_argument.ty)
+                else {
+                    return Err(format!(
+                        "FormalLocalPair local argument {index} is not a canonical TermRef"
+                    ));
+                };
+                if symbol != initializer.local
+                    || *prefix != tasty.definitions.no_prefix
+                    || *target != symbol
+                    || typed_argument.ty != result_type
+                    || !matches!(source_argument.kind, TreeKind::Ident(_))
+                    || !matches!(typed_argument.kind, TreeKind::Ident(_))
+                    || !matches!(&source_argument.kind, TreeKind::Ident(ident) if ident.name == *source_val.name.as_name())
+                    || outer_constructor.parameters()[index].ty()
+                        != dotty_jvm::JvmType::Reference(initializer.call.class)
+                {
+                    return Err(format!(
+                        "FormalLocalPair local argument {index} does not name the exact initialized local"
+                    ));
+                }
+                local_count += 1;
+                arguments.push(MixedConstructorArgumentRef::LocalValue {
+                    local_slot: local_slot.slot(),
+                });
+            }
+        }
+    }
+    if formal_count != 1
+        || local_count != 1
+        || arguments.len() != 2
+        || initializer.call.formal_type != tasty.definitions.int
+    {
+        return Err(
+            "FormalLocalPair must contain one formal and one initialized local argument".into(),
+        );
+    }
+    let Some(TreeKind::Apply(source_initializer)) = tasty
+        .source_ast
+        .try_get(initializer.source_initializer)
+        .map(|tree| &tree.kind)
+    else {
+        return Err("FormalLocalPair local initializer is not a source Apply".into());
+    };
+    if source_initializer.kind != dotty_core::ast::ApplyKind::Regular
+        || source_initializer.args.as_slice() != [initializer.call.source_argument]
+    {
+        return Err(
+            "FormalLocalPair initializer is not the direct one-argument Counter constructor call"
+                .into(),
+        );
+    }
+    let Some(TreeKind::Apply(typed_initializer)) = tasty
+        .typed_ast
+        .try_get(initializer.call.typed_apply)
+        .map(|tree| &tree.kind)
+    else {
+        return Err("FormalLocalPair typed initializer is not an Apply".into());
+    };
+    if typed_initializer.kind != dotty_core::ast::ApplyKind::Regular
+        || typed_initializer.function != initializer.call.typed_select
+        || typed_initializer.args.as_slice() != [initializer.call.typed_argument]
+        || source_initializer.function != initializer.call.source_select
+        || !matches!(tasty.typed_ast.try_get(initializer.call.typed_select).map(|tree| &tree.kind), Some(TreeKind::Select(selection)) if selection.qualifier == initializer.call.typed_new)
+        || !matches!(
+            tasty
+                .typed_ast
+                .try_get(initializer.call.typed_new)
+                .map(|tree| &tree.kind),
+            Some(TreeKind::New(_))
+        )
+        || !matches!(
+            tasty
+                .typed_ast
+                .try_get(initializer.call.typed_argument)
+                .map(|tree| &tree.kind),
+            Some(TreeKind::Ident(_))
+        )
+        || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(initializer.call.typed_argument).ty), Some(Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) }) if *prefix == tasty.definitions.no_prefix && *symbol == pair.method_formals[1])
+        || !matches!(tasty.store.types.try_get(tasty.typed_ast.get(initializer.call.typed_new).ty), Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == initializer.call.class)
+        || tasty.typed_ast.get(initializer.call.typed_apply).ty != initializer.call.result_type
+    {
+        return Err("FormalLocalPair Counter initializer does not bind new Counter(seed) to the original seed formal".into());
+    }
+    let nested_metadata = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == initializer.call.class)
+        .ok_or_else(|| "FormalLocalPair Counter class is outside the batch".to_owned())?;
+    let nested_constructor = nested_metadata
+        .constructor()
+        .filter(|constructor| constructor.symbol() == initializer.call.constructor)
+        .ok_or_else(|| {
+            "FormalLocalPair Counter constructor is absent from the JVM plan".to_owned()
+        })?;
+    if nested_constructor.descriptor().as_str() != "(I)V"
+        || !nested_constructor.access_flags().is_public()
+        || !tasty.store.symbols.contains(initializer.call.formal)
+        || tasty.store.symbols.get(initializer.call.formal).kind != SymbolKind::Parameter
+        || tasty.store.symbols.get(initializer.call.formal).owner
+            != Some(initializer.call.constructor)
+        || tasty.store.symbols.get(initializer.call.formal).origin
+            != SymbolOrigin::Source(source_id)
+        || !matches!(tasty.store.symbols.get(initializer.call.formal).info, SymbolInfo::Complete(ty) if ty == tasty.definitions.int)
+        || !nested_constructor.parameters().iter().any(|parameter| {
+            parameter.symbol() == initializer.call.formal
+                && parameter.ty() == dotty_jvm::JvmType::Int
+        })
+        || tasty
+            .typed_bindings
+            .typed_at(source_id, initializer.call.source_select)
+            != Some(initializer.call.typed_select)
+        || tasty
+            .typed_bindings
+            .typed_at(source_id, initializer.call.source_new)
+            != Some(initializer.call.typed_new)
+        || tasty
+            .typed_bindings
+            .typed_at(source_id, initializer.call.source_argument)
+            != Some(initializer.call.typed_argument)
+        || !matches!(
+            tasty
+                .source_ast
+                .try_get(initializer.call.source_new)
+                .map(|tree| &tree.kind),
+            Some(TreeKind::New(_))
+        )
+        || !matches!(tasty.source_ast.try_get(initializer.call.source_select).map(|tree| &tree.kind), Some(TreeKind::Select(selection)) if selection.qualifier == initializer.call.source_new)
+        || !matches!(tasty.typed_ast.try_get(initializer.call.typed_select).and_then(|tree| tasty.store.types.try_get(tree.ty)), Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }) if *symbol == initializer.call.constructor)
+    {
+        return Err("FormalLocalPair initializer differs from its canonical Counter(seed) constructor receipt".into());
+    }
+    Ok(MixedConstructorPairRef {
+        arguments: arguments
+            .try_into()
+            .map_err(|_| "FormalLocalPair argument receipt is incomplete")?,
+        local_initializer: Some(LocalCounterInitializerRef {
+            owner_internal_name: nested_metadata.identity().internal_name().to_owned(),
+            descriptor: nested_constructor.descriptor().as_str().to_owned(),
+            argument_local_slot: method.parameters()[1].slot(),
+            result_local_slot: local_slot.slot(),
+        }),
+        max_stack: 4,
+    })
 }
 
 fn validate_mixed_constructor_pair(
@@ -2193,6 +2692,7 @@ fn validate_mixed_constructor_pair(
     };
     Ok(MixedConstructorPairRef {
         arguments: [first, second],
+        local_initializer: None,
         max_stack,
     })
 }
@@ -2561,6 +3061,13 @@ fn reference_local_factory_call(
     let Some(typed_initializer) = typed_val.rhs else {
         return Err("reference-local typed ValDef has no initializer".into());
     };
+    if tasty
+        .typed_bindings
+        .formal_local_constructor_call_pair(tasty.source.id, caller)
+        .is_some()
+    {
+        return Ok(None);
+    }
     let Some(call) = tasty.typed_bindings.planned_call(tasty.source.id, caller) else {
         return Err("reference-local initializer has no planned helper receipt".into());
     };
@@ -2843,6 +3350,82 @@ fn validate_cross_class_call_code(
                 reference_local_factory_call(proof, caller, rhs, root, &all_metadata)?
             {
                 calls.push(call);
+                continue;
+            }
+            if tasty
+                .typed_bindings
+                .formal_local_constructor_call_pair(tasty.source.id, caller)
+                .is_some()
+            {
+                let TreeKind::Block(block) = &root_tree.kind else {
+                    return Err(format!(
+                        "method {caller:?} changed from Block after typed-root validation"
+                    ));
+                };
+                let Some(TreeKind::Apply(application)) =
+                    tasty.typed_ast.try_get(block.expr).map(|tree| &tree.kind)
+                else {
+                    return Err("FormalLocalPair Block result is not a constructor Apply".into());
+                };
+                let Some(TreeKind::Select(_)) = tasty
+                    .typed_ast
+                    .try_get(application.function)
+                    .map(|tree| &tree.kind)
+                else {
+                    return Err("FormalLocalPair constructor function is not a Select".into());
+                };
+                let Some(Type::TermRef {
+                    target: TermRefTarget::Symbol(target),
+                    ..
+                }) = tasty
+                    .typed_ast
+                    .try_get(application.function)
+                    .and_then(|tree| tasty.store.types.try_get(tree.ty))
+                else {
+                    return Err(
+                        "FormalLocalPair constructor selection has no canonical target".into(),
+                    );
+                };
+                let target_info = tasty.store.symbols.get(*target);
+                let Some(owner) = target_info.owner else {
+                    return Err("FormalLocalPair constructor has no canonical owner".into());
+                };
+                let target_metadata = all_metadata
+                    .iter()
+                    .find(|metadata| metadata.identity().symbol() == owner)
+                    .ok_or_else(|| "FormalLocalPair Pair class is outside the batch".to_owned())?;
+                let mixed_pair = validate_formal_local_constructor_pair(
+                    proof,
+                    caller,
+                    (rhs, root),
+                    application,
+                    *target,
+                    target_metadata,
+                    &all_metadata,
+                )?;
+                let constructor = target_metadata
+                    .constructor()
+                    .filter(|constructor| constructor.symbol() == *target)
+                    .ok_or_else(|| {
+                        "FormalLocalPair Pair constructor is absent from its JVM plan".to_owned()
+                    })?;
+                calls.push(CrossClassMethodRef {
+                    caller,
+                    target: *target,
+                    owner_internal_name: target_metadata.identity().internal_name().to_owned(),
+                    name: "<init>".to_owned(),
+                    descriptor: constructor.descriptor().as_str().to_owned(),
+                    constructor: true,
+                    argument_load_opcode: None,
+                    receiver_field: None,
+                    nested_constructor: None,
+                    nested_constructor_pair: None,
+                    mixed_constructor_pair: Some(mixed_pair),
+                    direct_formal_constructor_pair: None,
+                    factory_method: None,
+                    factory_local_slot: None,
+                    factory_local_max_locals: None,
+                });
                 continue;
             }
             if typed_tree_has_sibling_call(
@@ -3723,6 +4306,65 @@ fn validate_cross_class_call_code(
         }
         if let Some(mixed_pair) = &call.mixed_constructor_pair {
             let mut pc = 0;
+            if let Some(local) = &mixed_pair.local_initializer {
+                let allocation = take_factory_call_operand(code.code, &mut pc, 0xbb, "new")?;
+                take_factory_call_opcode(code.code, &mut pc, 0x59, "dup")?;
+                take_int_local(code.code, &mut pc, local.argument_local_slot)?;
+                let initializer =
+                    take_factory_call_operand(code.code, &mut pc, 0xb7, "invokespecial")?;
+                take_factory_local(code.code, &mut pc, true, local.result_local_slot)?;
+                let class_name = |index| -> Result<&str, String> {
+                    let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Class {
+                        name_index,
+                    }) = class_file.constant_pool.get(index)
+                    else {
+                        return Err(
+                            "local Counter allocation does not reference CONSTANT_Class".into()
+                        );
+                    };
+                    class_file.constant_pool.utf8(*name_index).map_err(|error| {
+                        format!("invalid local Counter allocation class: {error:?}")
+                    })
+                };
+                let method_ref = |index| -> Result<(&str, (&str, &str)), String> {
+                    let Some(dotty_classfile::constant_pool::ConstantPoolEntry::Methodref {
+                        class_index,
+                        name_and_type_index,
+                    }) = class_file.constant_pool.get(index)
+                    else {
+                        return Err(
+                            "local Counter initializer does not reference CONSTANT_Methodref"
+                                .into(),
+                        );
+                    };
+                    let owner =
+                        class_file
+                            .constant_pool
+                            .class_name(*class_index)
+                            .map_err(|error| {
+                                format!("invalid local Counter initializer owner: {error:?}")
+                            })?;
+                    let method = class_file
+                        .constant_pool
+                        .name_and_type(*name_and_type_index)
+                        .map_err(|error| {
+                            format!("invalid local Counter initializer Methodref: {error:?}")
+                        })?;
+                    Ok((owner, method))
+                };
+                if class_name(allocation)? != local.owner_internal_name
+                    || method_ref(initializer)?
+                        != (
+                            local.owner_internal_name.as_str(),
+                            ("<init>", local.descriptor.as_str()),
+                        )
+                {
+                    return Err(format!(
+                        "caller method {:?} does not initialize the exact local Counter before Pair construction",
+                        call.caller
+                    ));
+                }
+            }
             let outer_allocation = take_factory_call_operand(code.code, &mut pc, 0xbb, "new")?;
             take_factory_call_opcode(code.code, &mut pc, 0x59, "dup")?;
             let mut nested_allocations = Vec::new();
@@ -3730,6 +4372,9 @@ fn validate_cross_class_call_code(
             for argument in &mixed_pair.arguments {
                 match argument {
                     MixedConstructorArgumentRef::Formal { local_slot } => {
+                        take_factory_local(code.code, &mut pc, false, *local_slot)?;
+                    }
+                    MixedConstructorArgumentRef::LocalValue { local_slot } => {
                         take_factory_local(code.code, &mut pc, false, *local_slot)?;
                     }
                     MixedConstructorArgumentRef::Nested(nested) => {
@@ -3749,10 +4394,17 @@ fn validate_cross_class_call_code(
             take_factory_call_opcode(code.code, &mut pc, 0xb0, "areturn")?;
             if pc != code.code.len()
                 || code.max_stack != mixed_pair.max_stack
-                || code.max_locals != 3
+                || code.max_locals
+                    != if mixed_pair.local_initializer.is_some() {
+                        4
+                    } else {
+                        3
+                    }
                 || !code.exception_table.is_empty()
-                || nested_allocations.len() != 1
-                || nested_initializers.len() != 1
+                || (mixed_pair.local_initializer.is_some()
+                    && (!nested_allocations.is_empty() || !nested_initializers.is_empty()))
+                || (mixed_pair.local_initializer.is_none()
+                    && (nested_allocations.len() != 1 || nested_initializers.len() != 1))
             {
                 return Err(format!(
                     "caller method {:?} has invalid mixed constructor instructions, stack/local bounds, or exception metadata",
