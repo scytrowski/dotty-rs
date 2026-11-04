@@ -649,6 +649,16 @@ fn mixed_source_rejects_third_argument_deeper_construction_and_wrong_result() {
         "    new Pair(existing, new Counter(seed))",
         "    val candidate: Counter = new Counter(seed)\n    new Pair(existing, candidate)",
     );
+    assert!(
+        with_paired_jvm_tasty_batch_plan(
+            &local_argument,
+            "PairFactory.scala",
+            SourceId::from_index(201418),
+            |_| (),
+        )
+        .is_ok(),
+        "a single authenticated direct-New local can provide the outer Pair argument"
+    );
     let branch_argument = FORWARD.replace(
         "new Pair(existing, new Counter(seed))",
         "new Pair(existing, if seed > 0 then new Counter(seed) else existing)",
@@ -668,7 +678,6 @@ fn mixed_source_rejects_third_argument_deeper_construction_and_wrong_result() {
         (201413, wrong_result),
         (201414, wrong_seed_type),
         (201415, helper_result),
-        (201418, local_argument),
         (201419, branch_argument),
         (201420, foreign_counter),
     ] {
@@ -678,7 +687,6 @@ fn mixed_source_rejects_third_argument_deeper_construction_and_wrong_result() {
             SourceId::from_index(source_id),
             |_| (),
         );
-        eprintln!("MIXED_NEGATIVE_FIRST_REJECTION source_id={source_id} {result:?}");
         assert!(result.is_err(), "unsupported mixed shape cannot be planned");
     }
 }
