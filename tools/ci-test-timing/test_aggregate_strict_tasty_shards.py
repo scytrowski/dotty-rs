@@ -31,7 +31,7 @@ class StrictTastyAggregateTests(unittest.TestCase):
                     self.assertEqual(failed_results(statuses), {name: result})
 
     def test_each_target_shard_failure_is_red(self):
-        for name in ("shard-1-tests", "shard-2-tests"):
+        for name in ("shard-1-tests", "shard-2-tests", "shard-3-tests", "shard-4-tests"):
             with self.subTest(name=name):
                 statuses = self.success.copy()
                 statuses[name] = "failure"
@@ -85,7 +85,7 @@ class StrictTastyAggregateTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("both strict TASTy shards", result.stdout)
+        self.assertIn("all four strict TASTy shards", result.stdout)
 
 
 if __name__ == "__main__":

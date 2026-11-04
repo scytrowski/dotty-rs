@@ -24,7 +24,7 @@ CARGO_GLOBAL_FLAGS = {"--verbose", "-v", "--quiet", "-q", "--locked", "--offline
 
 
 def _workflow_values(workflow: str, key: str) -> list[str]:
-    pattern = rf"(?ms)^\s*{re.escape(key)}:\s*(?:>-\s*\n(.*?)(?=^\s*[A-Z][A-Z0-9_]*:|^\s*STRICT_TASTY_SHARD_1_JOB:)|([^\n]+))"
+    pattern = rf"(?ms)^\s*{re.escape(key)}:\s*(?:>-\s*\n(.*?)(?=^\s*[A-Z][A-Z0-9_]*:|^\s*STRICT_TASTY_SHARD_[0-9]+_JOB:)|([^\n]+))"
     match = re.search(pattern, workflow)
     if match is None:
         raise ManifestError(f"workflow is missing independent {key} declaration")
@@ -36,7 +36,7 @@ def _workflow_values(workflow: str, key: str) -> list[str]:
     return values
 
 
-def _validate_invocations(workflow: str, strict: list[str], support: list[str]) -> None:
+def _validate_invocations(workflow: str, strict: list[str], support: list[str], shard_count: int) -> None:
     scripts = _workflow_run_scripts(workflow)
     allowed = set(strict) | set(support)
     literal: list[str] = []
@@ -143,11 +143,15 @@ def _validate_invocations(workflow: str, strict: list[str], support: list[str]) 
             if any(argument.startswith("${") and argument != "${test_args[@]}" for argument in arguments):
                 raise ManifestError("unsupported dynamic Cargo test argument array")
 
-    if shard_array_builders != 2 or shard_array_invocations != 2:
+    if shard_array_builders != shard_count or shard_array_invocations != shard_count:
         raise ManifestError(
-            "expected exactly two manifest-driven --test loops and Cargo invocations; "
+            f"expected exactly {shard_count} manifest-driven --test loops and Cargo invocations; "
             f"found {shard_array_builders} loop builders and {shard_array_invocations} invocations"
         )
+    expected_shards = [f"shard-{index}" for index in range(1, shard_count + 1)]
+    selected_shards = re.findall(r"validate_strict_tasty_targets\.py\s+--shard\s+(shard-[0-9]+)", workflow)
+    if selected_shards != expected_shards:
+        raise ManifestError(f"workflow must select each fixed shard once in order; expected {expected_shards}, found {selected_shards}")
     unknown = sorted(set(literal) - allowed)
     if unknown:
         raise ManifestError("required Cargo test invocation absent from workflow inventory/support declarations: " + ", ".join(unknown))
@@ -235,7 +239,9 @@ def validate_manifest(
     workflow_names = _workflow_values(workflow_text, TARGET_DECLARATION)
     support_names = _workflow_values(workflow_text, SUPPORT_DECLARATION)
     required_envs = _workflow_values(workflow_text, ENV_DECLARATION)
-    _validate_invocations(workflow_text, workflow_names, support_names)
+    configured_shards = re.findall(r"validate_strict_tasty_targets\.py\s+--shard\s+(shard-[0-9]+)", workflow_text)
+    workflow_shard_count = len(configured_shards)
+    _validate_invocations(workflow_text, workflow_names, support_names, workflow_shard_count)
     if len(workflow_names) != expected_count:
         raise ManifestError(f"workflow declares {len(workflow_names)} strict targets; manifest expects {expected_count}")
 
@@ -285,6 +291,9 @@ def validate_manifest(
         raise ManifestError(f"targets assigned more than once: {', '.join(repeated_assignments)}")
     if len(set(shard_ids)) != len(shard_ids):
         raise ManifestError("shard ids must be unique")
+    expected_ids = [f"shard-{index}" for index in range(1, shard_count + 1)]
+    if shard_ids != expected_ids:
+        raise ManifestError(f"manifest requires exactly the ordered shard ids {expected_ids}; found {shard_ids}")
 
     missing = sorted(set(names) - set(assignments))
     unknown = sorted(set(assignments) - set(names))
@@ -306,8 +315,8 @@ def validate_manifest(
         r"(?ms)^\s*-\s+name: Run manifest-driven strict Scala and TASTy shard\n\s+id: strict_tests\n\s+env:\n(.*?)(?=^\s+shell:|^\s+run:)",
         workflow_text,
     )
-    if len(env_blocks) != 2:
-        raise ManifestError(f"expected two strict shard env blocks; found {len(env_blocks)}")
+    if len(env_blocks) != workflow_shard_count:
+        raise ManifestError(f"expected {workflow_shard_count} strict shard env blocks; found {len(env_blocks)}")
     for index, env_block in enumerate(env_blocks, 1):
         actual_envs = re.findall(r"^\s*(DOTTY_REQUIRE_[A-Z0-9_]+):\s*'1'\s*$", env_block, re.MULTILINE)
         if sorted(actual_envs) != sorted(required_envs) or len(actual_envs) != len(set(actual_envs)):
@@ -316,6 +325,8 @@ def validate_manifest(
     missing_files = [name for name in names if not (repository_root / "tests" / f"{name}.rs").is_file()]
     if missing_files:
         raise ManifestError(f"missing tests/<target>.rs files: {', '.join(missing_files)}")
+    if shard_count != workflow_shard_count:
+        raise ManifestError(f"manifest declares {shard_count} shards; workflow selects {workflow_shard_count}")
 
 
 def shard_targets(manifest: dict[str, Any], shard_id: str) -> list[str]:
@@ -336,7 +347,9 @@ def main() -> int:
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
         validate_manifest(manifest, args.root)
         if args.shard:
-            expected_ids = ["shard-1", "shard-2"]
+            if manifest["sharding"]["shard_count"] not in {2, 4}:
+                raise ManifestError("workflow supports exactly two or four fixed shards")
+            expected_ids = [f"shard-{index}" for index in range(1, manifest["sharding"]["shard_count"] + 1)]
             actual_ids = [shard["id"] for shard in manifest["sharding"]["shards"]]
             if actual_ids != expected_ids:
                 raise ManifestError(f"workflow requires exactly the ordered shard ids {expected_ids}; found {actual_ids}")
