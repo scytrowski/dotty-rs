@@ -2606,7 +2606,7 @@ fn nested_roots(source: SourceId, session: &str) -> RootReceipt {
                         TreeKind::DefDef(_)
                     ));
                     typed_roots.insert(name.clone(), (tree, typed));
-                    format!("complete=whole_DefDef;typed_index=present")
+                    "complete=whole_DefDef;typed_index=present".to_owned()
                 }
                 Err(error) => {
                     assert!(typer.source_typed_index().get(source, tree).is_none());
@@ -3153,83 +3153,78 @@ fn assert_pattern_projection(
     typed_pattern: dotty_core::TreeId<dotty_core::ast::Typed>,
     classes: &std::collections::BTreeMap<String, dotty_core::SymbolId>,
 ) {
-    match &ast.get(source_pattern).kind {
-        TreeKind::Apply(source_extractor) => {
-            let TreeKind::Ident(extractor_name) = &ast.get(source_extractor.function).kind else {
-                panic!("source extractor has a canonical class name")
-            };
-            let name = typer.store().names.resolve(extractor_name.name.text());
-            let class = classes[name];
-            let role = GeneratedCaseClassMethodRole::Unapply;
-            let unapply = index.generated_case_class_method(class, role).unwrap();
-            let typed_patterns = match &typer.typed_ast().get(typed_pattern).kind {
-                TreeKind::UnApply(typed_extractor) => {
-                    assert_term_ref(
-                        typer.store(),
-                        typer.typed_ast().get(typed_extractor.function).ty,
-                        unapply,
-                    );
-                    typed_extractor.patterns.clone()
-                }
-                _ => panic!("source extractor projects to typed UnApply"),
-            };
-            assert_eq!(source_extractor.args.len(), typed_patterns.len());
-            let SymbolInfo::Complete(unapply_type) = *typer.store().symbols.info(unapply) else {
-                panic!("generated unapply signature is complete")
-            };
-            let Type::Method(signature) = typer.store().types.get(unapply_type) else {
-                panic!("generated unapply signature is a method")
-            };
-            assert_eq!(signature.params.len(), 1);
-            let unapply_owner = typer.store().symbols.get(unapply).owner.unwrap();
-            let class_name = typer
+    if let TreeKind::Apply(source_extractor) = &ast.get(source_pattern).kind {
+        let TreeKind::Ident(extractor_name) = &ast.get(source_extractor.function).kind else {
+            panic!("source extractor has a canonical class name")
+        };
+        let name = typer.store().names.resolve(extractor_name.name.text());
+        let class = classes[name];
+        let role = GeneratedCaseClassMethodRole::Unapply;
+        let unapply = index.generated_case_class_method(class, role).unwrap();
+        let typed_patterns = match &typer.typed_ast().get(typed_pattern).kind {
+            TreeKind::UnApply(typed_extractor) => {
+                assert_term_ref(
+                    typer.store(),
+                    typer.typed_ast().get(typed_extractor.function).ty,
+                    unapply,
+                );
+                typed_extractor.patterns.clone()
+            }
+            _ => panic!("source extractor projects to typed UnApply"),
+        };
+        assert_eq!(source_extractor.args.len(), typed_patterns.len());
+        let SymbolInfo::Complete(unapply_type) = *typer.store().symbols.info(unapply) else {
+            panic!("generated unapply signature is complete")
+        };
+        let Type::Method(signature) = typer.store().types.get(unapply_type) else {
+            panic!("generated unapply signature is a method")
+        };
+        assert_eq!(signature.params.len(), 1);
+        let unapply_owner = typer.store().symbols.get(unapply).owner.unwrap();
+        let class_name = typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(class).name.text());
+        assert_eq!(
+            typer
                 .store()
                 .names
-                .resolve(typer.store().symbols.get(class).name.text());
-            assert_eq!(
-                typer
-                    .store()
-                    .names
-                    .resolve(typer.store().symbols.get(unapply_owner).name.text()),
-                format!("{class_name}$")
-            );
-            assert_type_ref(typer.store(), signature.params[0].ty, class);
-            assert_type_ref(typer.store(), signature.result, class);
-            for (source_child, typed_child) in source_extractor.args.iter().zip(&typed_patterns) {
-                if matches!(ast.get(*source_child).kind, TreeKind::Apply(_)) {
-                    assert_pattern_projection(
-                        source,
-                        ast,
-                        index,
-                        typer,
-                        *source_child,
-                        *typed_child,
-                        classes,
-                    );
-                } else if let TreeKind::Ident(source_binder) = &ast.get(*source_child).kind {
-                    if typer.store().names.resolve(source_binder.name.text()) != "_" {
-                        let binder = typer
-                            .pattern_binding_symbol_at(source, *source_child)
-                            .unwrap();
-                        let TreeKind::Bind(typed_binder) =
-                            &typer.typed_ast().get(*typed_child).kind
-                        else {
-                            panic!("source variable pattern projects to Bind")
-                        };
-                        assert_eq!(
-                            typer.store().names.resolve(typed_binder.name.text()),
-                            typer.store().names.resolve(source_binder.name.text())
-                        );
-                        assert_term_ref(
-                            typer.store(),
-                            typer.typed_ast().get(*typed_child).ty,
-                            binder,
-                        );
-                    }
-                }
+                .resolve(typer.store().symbols.get(unapply_owner).name.text()),
+            format!("{class_name}$")
+        );
+        assert_type_ref(typer.store(), signature.params[0].ty, class);
+        assert_type_ref(typer.store(), signature.result, class);
+        for (source_child, typed_child) in source_extractor.args.iter().zip(&typed_patterns) {
+            if matches!(ast.get(*source_child).kind, TreeKind::Apply(_)) {
+                assert_pattern_projection(
+                    source,
+                    ast,
+                    index,
+                    typer,
+                    *source_child,
+                    *typed_child,
+                    classes,
+                );
+            } else if let TreeKind::Ident(source_binder) = &ast.get(*source_child).kind
+                && typer.store().names.resolve(source_binder.name.text()) != "_"
+            {
+                let binder = typer
+                    .pattern_binding_symbol_at(source, *source_child)
+                    .unwrap();
+                let TreeKind::Bind(typed_binder) = &typer.typed_ast().get(*typed_child).kind else {
+                    panic!("source variable pattern projects to Bind")
+                };
+                assert_eq!(
+                    typer.store().names.resolve(typed_binder.name.text()),
+                    typer.store().names.resolve(source_binder.name.text())
+                );
+                assert_term_ref(
+                    typer.store(),
+                    typer.typed_ast().get(*typed_child).ty,
+                    binder,
+                );
             }
         }
-        _ => {}
     }
 }
 
