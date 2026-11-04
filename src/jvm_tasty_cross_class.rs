@@ -4808,6 +4808,11 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
             "final constructor Select qualifier must be New",
         ));
     };
+    if final_apply.args.len() != 2 {
+        return Err(source_error(
+            "final constructor Apply must have exactly two arguments",
+        ));
+    }
     let typed_final_select = source_typed_index
         .get(source_id, source_final_select)
         .ok_or_else(|| typed_error("final constructor Select has no typed mapping"))?;
@@ -4825,6 +4830,7 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
         return Err(typed_error("final source Apply must remain a typed Apply"));
     };
     if typed_final_apply.kind != ApplyKind::Regular
+        || typed_final_apply.args.len() != 2
         || typed_final_apply.function != typed_final_select
     {
         return Err(typed_error(
@@ -4991,6 +4997,36 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
         SymbolInfo::Complete(ty) => ty,
         _ => return Err(semantic_error("first local type is incomplete")),
     };
+    let final_constructor_definition = source_ast
+        .try_get(result_class_template.constructor)
+        .ok_or_else(|| identity_error("factory result constructor tree is stale"))?;
+    let TreeKind::DefDef(final_constructor_source) = &final_constructor_definition.kind else {
+        return Err(identity_error(
+            "factory result primary constructor must be a source DefDef",
+        ));
+    };
+    if !final_constructor_source.type_params.is_empty()
+        || final_constructor_source.value_param_clauses.len() != 1
+        || final_constructor_source.value_param_clauses[0].len() != 2
+    {
+        return Err(source_error(
+            "result primary constructor must have exactly two ordinary formals",
+        ));
+    }
+    let SymbolInfo::Complete(final_constructor_type) =
+        store.symbols.get(expected_final_constructor).info
+    else {
+        return Err(semantic_error(
+            "result primary constructor signature is incomplete",
+        ));
+    };
+    let Some(Type::Method(final_constructor_signature)) =
+        store.types.try_get(final_constructor_type)
+    else {
+        return Err(semantic_error(
+            "result primary constructor must have a method signature",
+        ));
+    };
     let counter = canonical_class_type_symbol(store, first_type, package, definitions.no_prefix)
         .ok_or_else(|| semantic_error("first local type must be a canonical Counter TypeRef"))?;
     if !has_source_origin(store, counter, source_id)
@@ -5001,6 +5037,17 @@ pub fn validate_immutable_local_initializer_pair_proof<'session>(
     {
         return Err(identity_error(
             "Counter must be a canonical class in the original source batch",
+        ));
+    }
+    if final_constructor_signature.kind != dotty_core::MethodKind::Plain
+        || final_constructor_signature.params.len() != 2
+        || final_constructor_signature.params.iter().any(|parameter| {
+            canonical_class_type_symbol(store, parameter.ty, package, definitions.no_prefix)
+                != Some(counter)
+        })
+    {
+        return Err(semantic_error(
+            "result primary constructor must take exactly two canonical Counter formals",
         ));
     }
     if !matches!(

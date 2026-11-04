@@ -9,7 +9,7 @@ use dotty::jvm_tasty_plan::{PairedPlanError, with_paired_jvm_tasty_batch_plan};
 use dotty_core::ast::{AstArena, AstPhase, TreeKind};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceDefinition, SourceId, SourceSpan, SourceText,
-    SymbolOrigin, TermRefTarget, Type, TypeRefTarget,
+    SymbolInfo, SymbolOrigin, TermRefTarget, Type, TypeRefTarget,
 };
 use dotty_jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmMethodPlan,
@@ -47,6 +47,27 @@ fn clone_arena<P: AstPhase + Clone>(source: &AstArena<P>) -> AstArena<P> {
 fn with_two_local_proof_session<R>(
     source: &str,
     source_number: u32,
+    consume: impl for<'session> FnOnce(
+        &SemanticStore,
+        &Definitions,
+        &AstArena<dotty_core::ast::Untyped>,
+        &dotty_core::ast::TypedAst,
+        &dotty_core::SourceSemanticIndex,
+        &dotty_core::SourceTypedIndex,
+        SourceId,
+        dotty_core::TreeId<dotty_core::ast::Untyped>,
+        [TypedLocalBinding; 2],
+        Option<TypedLocalBinding>,
+        &JvmCompilationUnit<'session>,
+    ) -> R,
+) -> R {
+    with_two_local_proof_session_mutating(source, source_number, |_, _| {}, consume)
+}
+
+fn with_two_local_proof_session_mutating<R>(
+    source: &str,
+    source_number: u32,
+    mutate_store: impl FnOnce(&mut SemanticStore, [TypedLocalBinding; 2]),
     consume: impl for<'session> FnOnce(
         &SemanticStore,
         &Definitions,
@@ -278,7 +299,7 @@ fn with_two_local_proof_session<R>(
             ));
         }
     }
-    let classes = class_data
+    let classes: Vec<JvmClassPlan> = class_data
         .iter()
         .map(|(_, class, constructor, parameters)| JvmClassPlan {
             class: *class,
@@ -300,20 +321,30 @@ fn with_two_local_proof_session<R>(
             ),
         })
         .collect();
-    let jvm_unit = JvmCompilationUnit {
+    let typed_ast = clone_arena(typer.typed_ast());
+    let source_typed_index = typer.source_typed_index().clone();
+    let metadata_check = JvmCompilationUnit {
         store: typer.store(),
         typed_ast: typer.typed_ast(),
+        classes: classes.clone(),
+    };
+    metadata_check.metadata(&definitions).unwrap();
+    drop(metadata_check);
+    drop(typer);
+    mutate_store(&mut store, local_bindings);
+    let jvm_unit = JvmCompilationUnit {
+        store: &store,
+        typed_ast: &typed_ast,
         classes,
     };
-    jvm_unit.metadata(&definitions).unwrap();
     let _ = typed_body;
     consume(
-        typer.store(),
+        &store,
         &definitions,
         &parsed.ast,
-        typer.typed_ast(),
+        &typed_ast,
         &source_index,
-        typer.source_typed_index(),
+        &source_typed_index,
         source_id,
         method_tree,
         local_bindings,
@@ -2032,6 +2063,56 @@ fn two_local_initializer_receipt_rejects_a_non_constructor_final_apply() {
 }
 
 #[test]
+fn two_local_initializer_receipt_rejects_three_argument_result_constructors() {
+    let three_argument = TWO_IMMUTABLE_LOCALS_SOURCE
+        .replace(
+            "class Pair(first: Counter, second: Counter):",
+            "class Pair(first: Counter, second: Counter, extra: Int):",
+        )
+        .replace(
+            "new Pair(first, second)",
+            "new Pair(first, second, firstSeed)",
+        );
+    with_two_local_proof_session(
+        &three_argument,
+        2147,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         jvm_unit| {
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    },
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceShape(
+                    "final constructor Apply must have exactly two arguments"
+                )
+            );
+        },
+    );
+}
+
+#[test]
 fn two_local_initializer_receipt_rejects_out_of_range_and_other_owner_bindings() {
     // The foreign binding is created from another genuine Typer session with
     // the same Counter declaration name as this session.
@@ -2126,6 +2207,212 @@ fn two_local_initializer_receipt_rejects_out_of_range_and_other_owner_bindings()
                 .unwrap(),
                 dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
                     "Typer local binding must name this exact original ValDef"
+                )
+            );
+        },
+    );
+}
+
+#[test]
+fn two_local_initializer_receipt_rejects_owner_scope_constructor_and_foreign_counter() {
+    with_two_local_proof_session_mutating(
+        TWO_IMMUTABLE_LOCALS_SOURCE,
+        2148,
+        |store, bindings| {
+            store.symbols.get_mut(bindings[0].symbol()).owner = Some(bindings[1].symbol());
+        },
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         jvm_unit| {
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    },
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                    "local must be the original immutable method-owned local"
+                )
+            );
+        },
+    );
+    with_two_local_proof_session_mutating(
+        TWO_IMMUTABLE_LOCALS_SOURCE,
+        2149,
+        |store, bindings| {
+            store.scopes.get_mut(bindings[0].scope()).owner = Some(bindings[1].symbol());
+        },
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         jvm_unit| {
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    },
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                    "local must occupy its exact method-owned Block scope"
+                )
+            );
+        },
+    );
+    with_two_local_proof_session(
+        TWO_IMMUTABLE_LOCALS_SOURCE,
+        2150,
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         jvm_unit| {
+            let TreeKind::DefDef(method) = &source_ast.get(method_tree).kind else {
+                unreachable!()
+            };
+            let TreeKind::Block(block) = &source_ast.get(method.rhs.unwrap()).kind else {
+                unreachable!()
+            };
+            let TreeKind::ValDef(first) = &source_ast.get(block.stats[0]).kind else {
+                unreachable!()
+            };
+            let initializer = first.rhs.unwrap();
+            let TreeKind::Apply(apply) = &source_ast.get(initializer).kind else {
+                unreachable!()
+            };
+            let typed_select = source_typed_index.get(source_id, apply.function).unwrap();
+            let TreeKind::Apply(final_apply) = &source_ast.get(block.expr).kind else {
+                unreachable!()
+            };
+            let typed_final_select = source_typed_index
+                .get(source_id, final_apply.function)
+                .unwrap();
+            let mut wrong_constructor_ast = clone_arena(typed_ast);
+            wrong_constructor_ast.get_mut(typed_select).ty = typed_ast.get(typed_final_select).ty;
+            let wrong_constructor_unit = JvmCompilationUnit {
+                store,
+                typed_ast: &wrong_constructor_ast,
+                classes: jvm_unit.classes.clone(),
+            };
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast: &wrong_constructor_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit: &wrong_constructor_unit,
+                    },
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SemanticIdentity(
+                    "selected constructor must belong to the canonical Counter class"
+                )
+            );
+        },
+    );
+    with_two_local_proof_session_mutating(
+        TWO_IMMUTABLE_LOCALS_SOURCE,
+        2151,
+        |store, bindings| {
+            let SymbolInfo::Complete(local_type) = store.symbols.get(bindings[0].symbol()).info
+            else {
+                panic!("local type is complete");
+            };
+            let Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(counter),
+            } = store.types.get(local_type)
+            else {
+                panic!("local type is Counter TypeRef");
+            };
+            let mut foreign_counter = store.symbols.get(*counter).clone();
+            foreign_counter.origin = SymbolOrigin::Source(SourceId::from_index(999_991));
+            let foreign_counter_id = store.symbols.alloc(foreign_counter);
+            let foreign_type = store.types.alloc(Type::TypeRef {
+                prefix: *prefix,
+                target: TypeRefTarget::Symbol(foreign_counter_id),
+            });
+            store.symbols.get_mut(bindings[0].symbol()).info = SymbolInfo::Complete(foreign_type);
+        },
+        |store,
+         definitions,
+         source_ast,
+         typed_ast,
+         source_index,
+         source_typed_index,
+         source_id,
+         method_tree,
+         bindings,
+         _,
+         jvm_unit| {
+            assert_eq!(
+                validate_immutable_local_initializer_pair_proof(
+                    ImmutableLocalInitializerPairProofInput {
+                        source_id,
+                        method_tree,
+                        store,
+                        definitions,
+                        source_ast,
+                        typed_ast,
+                        source_index,
+                        source_typed_index,
+                        local_bindings: [Some(bindings[0]), Some(bindings[1])],
+                        jvm_unit,
+                    },
+                )
+                .err()
+                .unwrap(),
+                dotty::jvm_tasty_cross_class::CrossClassConstructorCallProofError::SourceIdentity(
+                    "Counter must be a canonical class in the original source batch"
                 )
             );
         },
@@ -2234,6 +2521,12 @@ fn two_local_initializer_receipt_rejects_wrong_local_type() {
             "class Counter(start: Int):",
             "class Base\n\nclass Counter(start: Int) extends Base:",
         )
+        .replace(
+            "class Pair(first: Counter, second: Counter):",
+            "class Pair(first: Base, second: Base):",
+        )
+        .replace("private val left: Counter", "private val left: Base")
+        .replace("private val right: Counter", "private val right: Base")
         .replace("val first: Counter", "val first: Base")
         .replace("val second: Counter", "val second: Base")
         .replace(
