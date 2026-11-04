@@ -7,12 +7,23 @@ const NEGATIVE_CASES: &str =
 const RUST_NEGATIVE_MATRIX: &str = include_str!(
     "../../../tests/fixtures/source-recursive-adt-match-3.9.0/rust-negative-matrix.tsv"
 );
+const BINARY_EXPR_SOURCE: &str =
+    include_str!("../../../tests/fixtures/source-binary-recursive-adt-3.9.0/Expr.scala");
+const BINARY_EVAL_FAILURE_RECEIPT: &str = include_str!(
+    "../../../tests/fixtures/source-binary-recursive-adt-3.9.0/rust-eval-negative-two-call.tsv"
+);
 
 struct NegativeCase {
     name: String,
     root: String,
     scala_result: String,
     mutations: Vec<(String, String)>,
+}
+
+struct BinaryAddCaseNodes {
+    binders: [TreeId<Untyped>; 2],
+    calls: [TreeId<Untyped>; 2],
+    arguments: [TreeId<Untyped>; 2],
 }
 
 fn negative_cases() -> Vec<NegativeCase> {
@@ -872,4 +883,297 @@ fn recursive_adt_negative_matrix_is_stable_across_fresh_sessions() {
         15,
         "the named negative matrix inventory changed"
     );
+}
+
+#[test]
+fn binary_recursive_second_argument_failure_and_late_failure_restore_then_retry_eval() {
+    let source_text = format!(
+        "{BINARY_EXPR_SOURCE}\nobject BinaryEvalControls:\n  def invalidSecondArgument(expr: Expr): Int =\n    expr match\n      case Num(value) => value\n      case Add(left, right) => Evaluator.eval(left) + Evaluator.eval(true)\n  def failsAfterBoth(expr: Expr): Boolean =\n    expr match\n      case Num(_) => true\n      case Add(left, right) => Evaluator.eval(left) + Evaluator.eval(right)\n"
+    );
+    let source = SourceId::from_index(20_781);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let (parsed, index) = parse_and_name_unit(&source_text, source, &mut store, &mut packages);
+    let eval = tree_named(&parsed, &store, "eval");
+    let invalid = tree_named(&parsed, &store, "invalidSecondArgument");
+    let late_failure = tree_named(&parsed, &store, "failsAfterBoth");
+    let eval_symbol = index.symbol_at(source, eval).unwrap();
+    let invalid_symbol = index.symbol_at(source, invalid).unwrap();
+    let expr = class_symbol(&parsed, &store, &index, source, "Expr");
+    let boolean = type_symbol(&store, definitions.boolean);
+    let invalid_nodes = binary_add_case_nodes(&parsed, invalid);
+    let invalid_binders = invalid_nodes.binders;
+    let invalid_calls = invalid_nodes.calls;
+    let invalid_arguments = invalid_nodes.arguments;
+    let late_nodes = binary_add_case_nodes(&parsed, late_failure);
+    let late_binders = late_nodes.binders;
+    let late_calls = late_nodes.calls;
+    let late_arguments = late_nodes.arguments;
+    let TreeKind::Apply(invalid_second_application) = &parsed.ast.get(invalid_calls[1]).kind else {
+        unreachable!()
+    };
+    let invalid_second_function = invalid_second_application.function;
+    let invalid_bool_argument = invalid_arguments[1];
+    assert!(matches!(
+        parsed.ast.get(invalid_bool_argument).kind,
+        TreeKind::Literal(_)
+    ));
+
+    let mut typer = typer_for(&parsed, &mut store, &packages, definitions, &index, source);
+
+    let before_store = typer.store().checkpoint();
+    let before_typed = typer.typed_ast().checkpoint();
+    let before_mappings = typer.source_typed_index().len();
+    let invalid_observed = Rc::new(RefCell::new(false));
+    let invalid_observed_by_callback = Rc::clone(&invalid_observed);
+    typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+        let Some(first_call) = typer.source_typed_index().get(source, invalid_calls[0]) else {
+            return;
+        };
+        let TreeKind::Apply(first_application) = &typer.typed_ast().get(first_call).kind else {
+            panic!("the first recursive application is typed before the second argument fails")
+        };
+        assert_eq!(first_application.args.len(), 1);
+        let left_binder = typer
+            .pattern_binding_symbol_at(source, invalid_binders[0])
+            .expect("first Add binder is live before rollback");
+        assert_eq!(
+            typer.source_typed_index().get(source, invalid_arguments[0]),
+            Some(first_application.args[0])
+        );
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, invalid_arguments[1])
+                .is_some()
+        );
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, invalid_calls[1])
+                .is_none(),
+            "the invalid second application is not published"
+        );
+        let typed_second_function = typer
+            .source_typed_index()
+            .get(source, invalid_second_function)
+            .expect("the second call resolves its canonical function before argument checking");
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_second_function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == eval_symbol
+        ));
+        let SymbolInfo::Complete(eval_signature) = *typer.store().symbols.info(eval_symbol) else {
+            panic!("the canonical eval signature is complete before argument checking")
+        };
+        let Type::Method(eval_signature) = typer.store().types.get(eval_signature) else {
+            panic!("canonical eval has a method signature")
+        };
+        assert_eq!(eval_signature.params.len(), 1);
+        assert_eq!(
+            type_symbol(typer.store(), eval_signature.params[0].ty),
+            expr
+        );
+        let typed_bad_argument = typer
+            .source_typed_index()
+            .get(source, invalid_arguments[1])
+            .unwrap();
+        assert!(
+            matches!(
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(typed_bad_argument).ty),
+                Type::Constant(dotty_core::Constant::Boolean(true))
+            ),
+            "the second recursive argument is Boolean where canonical eval expects Expr"
+        );
+        let right_binder = typer
+            .pattern_binding_symbol_at(source, invalid_binders[1])
+            .expect("second Add binder is live before rollback");
+        let SymbolInfo::Complete(right_type) = *typer.store().symbols.info(right_binder) else {
+            panic!("the second Add binder has its canonical type before rollback")
+        };
+        assert_eq!(type_symbol(typer.store(), right_type), expr);
+        assert_eq!(
+            typer.store().symbols.get(left_binder).owner,
+            Some(invalid_symbol)
+        );
+        *invalid_observed_by_callback.borrow_mut() = true;
+    }));
+    let error = typer
+        .type_method_definition(invalid)
+        .expect_err("eval(true) is rejected as the second Expr argument");
+    assert!(
+        matches!(
+            error,
+            TyperError::ApplicationArgumentTypeMismatch {
+                tree_index,
+                argument_index: 0,
+                actual,
+                ..
+            } if tree_index == invalid_calls[1].index()
+                && type_symbol(typer.store(), actual) == boolean
+        ),
+        "the second call reports a concrete argument type mismatch: {error:?}"
+    );
+    assert!(
+        *invalid_observed.borrow(),
+        "the first call and second argument were observed before rollback"
+    );
+    assert_eq!(typer.store().checkpoint(), before_store);
+    assert_eq!(typer.typed_ast().checkpoint(), before_typed);
+    assert_eq!(typer.source_typed_index().len(), before_mappings);
+    assert!(typer.source_typed_index().get(source, invalid).is_none());
+    for call in invalid_calls {
+        assert!(typer.source_typed_index().get(source, call).is_none());
+    }
+    for argument in invalid_arguments {
+        assert!(typer.source_typed_index().get(source, argument).is_none());
+    }
+    for binder in invalid_binders {
+        assert!(typer.source_typed_index().get(source, binder).is_none());
+        assert!(typer.pattern_binding_symbol_at(source, binder).is_none());
+    }
+
+    let before_store = typer.store().checkpoint();
+    let before_typed = typer.typed_ast().checkpoint();
+    let before_mappings = typer.source_typed_index().len();
+    let late_observation = Rc::new(RefCell::new(None));
+    let late_observation_by_callback = Rc::clone(&late_observation);
+    typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+        let mapped_calls = late_calls.map(|call| typer.source_typed_index().get(source, call));
+        let [Some(first_call), Some(second_call)] = mapped_calls else {
+            return;
+        };
+        for (position, (call, argument)) in [first_call, second_call]
+            .into_iter()
+            .zip(late_arguments)
+            .enumerate()
+        {
+            let TreeKind::Apply(application) = &typer.typed_ast().get(call).kind else {
+                panic!("both recursive calls remain ordinary Apply nodes before rollback")
+            };
+            assert_eq!(application.args.len(), 1);
+            let callee = match typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty)
+            {
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } => *symbol,
+                other => panic!("recursive callee is a canonical term reference: {other:?}"),
+            };
+            assert_eq!(
+                callee, eval_symbol,
+                "both calls select canonical Evaluator.eval"
+            );
+            assert_eq!(
+                application.args[0],
+                typer.source_typed_index().get(source, argument).unwrap()
+            );
+            let binder = typer
+                .pattern_binding_symbol_at(source, late_binders[position])
+                .expect("both Add binders are live before rollback");
+            assert!(matches!(
+                typer.store().types.get(typer.typed_ast().get(application.args[0]).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == binder
+            ));
+        }
+        *late_observation_by_callback.borrow_mut() = Some((first_call, second_call));
+    }));
+    let late_error = typer
+        .type_method_definition(late_failure)
+        .expect_err("Int-valued Add case mismatches failsAfterBoth's Boolean result");
+    assert!(
+        matches!(
+            late_error,
+            TyperError::ExpectedExpressionTypeMismatch { .. }
+        ),
+        "the whole-method mismatch occurs after the binary case has typed: {late_error:?}"
+    );
+    let observed_calls = (*late_observation.borrow())
+        .expect("failure observer saw both recursive Apply mappings before rollback");
+    assert_ne!(observed_calls.0, observed_calls.1);
+    assert_eq!(typer.store().checkpoint(), before_store);
+    assert_eq!(typer.typed_ast().checkpoint(), before_typed);
+    assert_eq!(typer.source_typed_index().len(), before_mappings);
+    assert!(
+        typer
+            .source_typed_index()
+            .get(source, late_failure)
+            .is_none()
+    );
+    for call in late_calls {
+        assert!(typer.source_typed_index().get(source, call).is_none());
+    }
+    for argument in late_arguments {
+        assert!(typer.source_typed_index().get(source, argument).is_none());
+    }
+    for binder in late_binders {
+        assert!(typer.source_typed_index().get(source, binder).is_none());
+        assert!(typer.pattern_binding_symbol_at(source, binder).is_none());
+    }
+
+    let typed_eval = typer
+        .type_method_definition(eval)
+        .expect("the original binary recursive eval retries in the same SourceTyper");
+    assert_eq!(
+        typer.source_typed_index().get(source, eval),
+        Some(typed_eval)
+    );
+    let receipt = concat!(
+        "second_argument\tApplicationArgumentTypeMismatch(Boolean,Expr);first_call=observed;second_call=unpublished;rollback=both_calls,arguments,binders;retry=original_eval\n",
+        "late_result\tExpectedExpressionTypeMismatch;observed=eval(left):canonical,eval(right):canonical;rollback=both_calls,arguments,binders;retry=original_eval"
+    );
+    assert_eq!(
+        receipt,
+        BINARY_EVAL_FAILURE_RECEIPT
+            .split_once('\n')
+            .expect("binary failure receipt header")
+            .1
+            .trim_end()
+    );
+    println!("ISSUE2078_BINARY_EVAL_FAILURES\t{receipt}");
+}
+
+fn binary_add_case_nodes(
+    parsed: &dotty_parser::ParseResult,
+    root: TreeId<Untyped>,
+) -> BinaryAddCaseNodes {
+    let TreeKind::DefDef(definition) = &parsed.ast.get(root).kind else {
+        unreachable!()
+    };
+    let TreeKind::Match(matched) = &parsed.ast.get(definition.rhs.unwrap()).kind else {
+        panic!("binary failure control retains its source Match")
+    };
+    let TreeKind::CaseDef(add_case) = &parsed.ast.get(matched.cases[1]).kind else {
+        unreachable!()
+    };
+    let TreeKind::Apply(extractor) = &parsed.ast.get(add_case.pattern).kind else {
+        panic!("Add case has two source binders")
+    };
+    assert_eq!(extractor.args.len(), 2);
+    let body = match &parsed.ast.get(add_case.body).kind {
+        TreeKind::Block(block) => block.expr,
+        _ => add_case.body,
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::InfixOp(addition)) = &parsed.ast.get(body).kind else {
+        panic!("Add body contains its two recursive calls")
+    };
+    let calls = [addition.left, addition.right];
+    let arguments = calls.map(|call| {
+        let TreeKind::Apply(application) = &parsed.ast.get(call).kind else {
+            panic!("Add operand is a recursive Apply")
+        };
+        assert_eq!(application.args.len(), 1);
+        application.args[0]
+    });
+    BinaryAddCaseNodes {
+        binders: [extractor.args[0], extractor.args[1]],
+        calls,
+        arguments,
+    }
 }

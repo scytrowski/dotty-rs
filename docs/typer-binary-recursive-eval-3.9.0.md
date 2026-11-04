@@ -26,6 +26,19 @@ Existing selectLeft provenance and rollback controls continue to run alongside
 this proof. The comprehensive negative and transaction matrix remains in
 #2079.
 
+The focused transaction regression adds two controls. A Boolean passed to the
+second recursive `eval` call produces `ApplicationArgumentTypeMismatch` after
+the first call and both Add binders are observed; the second application is
+not published, and rollback removes both call mappings, argument mappings,
+and binder mappings. A second method declares a Boolean result while its Add
+case performs both canonical recursive calls and integer addition. Its
+`ExpectedExpressionTypeMismatch` is observed only after both applications and
+their corresponding binder references are mapped. That failure also rolls
+back the root, calls, arguments and binders. The test then types the original
+`Evaluator.eval` successfully in that same `SourceTyper`. The normalized
+negative receipts are in
+[`rust-eval-negative-two-call.tsv`](../crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0/rust-eval-negative-two-call.tsv).
+
 No production typer behavior changed: the frozen method already completed on
 the integrated base. This increment adds assertions and evidence for the two
 independent recursive calls and their argument identities.
