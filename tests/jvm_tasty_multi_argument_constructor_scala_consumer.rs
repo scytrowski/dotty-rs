@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "support/command_timing.rs"]
+mod command_timing;
+
 const REQUIRE: &str = "DOTTY_REQUIRE_SCALA_TASTY_MULTI_ARGUMENT_CONSTRUCTOR_CONSUMER";
 const SCALA_REVISION: &str = "777528f19a58e794c9954a42f433373472ec57f8";
 const SOURCE: &str =
@@ -34,9 +37,34 @@ fn required() -> bool {
 
 fn output(command: &mut Command) -> Output {
     let rendered = format!("{command:?}");
-    let result = command
-        .output()
-        .unwrap_or_else(|error| panic!("run {rendered}: {error}"));
+    let program = Path::new(command.get_program())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let args = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>();
+    let operation = match program {
+        "java" if !args.iter().any(|arg| arg == "-version") => Some("multi-argument-runtime"),
+        "scalac" if args.iter().any(|arg| arg == "-decompile") => Some("multi-argument-decompile"),
+        "scalac" if args.iter().any(|arg| arg == "-print-tasty") => {
+            Some("multi-argument-print-tasty")
+        }
+        "scalac" if args.iter().any(|arg| arg == "-from-tasty") => {
+            Some("multi-argument-from-tasty")
+        }
+        _ => None,
+    };
+    let result = match operation {
+        Some(operation) => command_timing::output(operation, command),
+        None => command.output(),
+    }
+    .unwrap_or_else(|error| panic!("run {rendered}: {error}"));
+    assert_success(rendered, result)
+}
+
+fn assert_success(rendered: String, result: Output) -> Output {
     assert!(
         result.status.success(),
         "command failed: {rendered}\nstdout:\n{}\nstderr:\n{}",
@@ -44,6 +72,17 @@ fn output(command: &mut Command) -> Output {
         String::from_utf8_lossy(&result.stderr)
     );
     result
+}
+
+fn timed_output(operation: &str, command: &mut Command) -> Output {
+    command_timing::output(operation, command)
+        .unwrap_or_else(|error| panic!("run {operation}: {error}"))
+}
+
+fn successful_timed_output(operation: &str, command: &mut Command) -> Output {
+    let rendered = format!("{command:?}");
+    let result = timed_output(operation, command);
+    assert_success(rendered, result)
 }
 
 fn task_dir() -> PathBuf {
@@ -181,7 +220,8 @@ impl Scala {
     }
 
     fn compile(&self, classpath: &str, out: &Path, source: &Path) -> Output {
-        output(
+        successful_timed_output(
+            "multi-argument-source-compile",
             self.scalac()
                 .args(["-Werror", "-release", "21", "-classpath"])
                 .arg(classpath)
@@ -192,14 +232,15 @@ impl Scala {
     }
 
     fn compile_result(&self, classpath: &str, out: &Path, source: &Path) -> Output {
-        self.scalac()
-            .args(["-Werror", "-release", "21", "-classpath"])
-            .arg(classpath)
-            .arg("-d")
-            .arg(out)
-            .arg(source)
-            .output()
-            .expect("run pinned scalac probe")
+        timed_output(
+            "multi-argument-negative-probe",
+            self.scalac()
+                .args(["-Werror", "-release", "21", "-classpath"])
+                .arg(classpath)
+                .arg("-d")
+                .arg(out)
+                .arg(source),
+        )
     }
 }
 
@@ -652,12 +693,10 @@ fn inspect_original_tasty(
         .into_iter()
         .zip(&sidecars)
     {
-        let decompiled = scala
-            .scalac()
-            .arg("-decompile")
-            .arg(sidecar)
-            .output()
-            .expect("run pinned Scala decompiler");
+        let decompiled = timed_output(
+            "multi-argument-decompile",
+            scala.scalac().arg("-decompile").arg(sidecar),
+        );
         assert!(
             decompiled.status.success(),
             "Scala -decompile rejected Rust {name}.tasty: {}",
@@ -717,12 +756,10 @@ fn inspect_original_tasty(
             }
             _ => unreachable!(),
         }
-        let printed = scala
-            .scalac()
-            .arg("-print-tasty")
-            .arg(sidecar)
-            .output()
-            .expect("run pinned Scala -print-tasty");
+        let printed = timed_output(
+            "multi-argument-print-tasty",
+            scala.scalac().arg("-print-tasty").arg(sidecar),
+        );
         assert!(
             printed.status.success(),
             "Scala -print-tasty rejected Rust {name}.tasty: {}",
@@ -740,15 +777,16 @@ fn inspect_original_tasty(
         );
     }
     assert!(factory_dump.contains("first") && factory_dump.contains("second"));
-    let from_tasty = scala
-        .scalac()
-        .args(["-release", "21", "-from-tasty", "-classpath"])
-        .arg(format!("{}:{}", producer.display(), scala.libraries))
-        .arg("-d")
-        .arg(&reconstructed)
-        .args(&sidecars)
-        .output()
-        .expect("run pinned Scala -from-tasty on original Rust sidecars");
+    let from_tasty = timed_output(
+        "multi-argument-from-tasty",
+        scala
+            .scalac()
+            .args(["-release", "21", "-from-tasty", "-classpath"])
+            .arg(format!("{}:{}", producer.display(), scala.libraries))
+            .arg("-d")
+            .arg(&reconstructed)
+            .args(&sidecars),
+    );
     assert!(
         from_tasty.status.success(),
         "Scala -from-tasty rejected Rust sidecars: {}",
@@ -998,12 +1036,13 @@ fn negative_reader_probes(
         descriptor_classes.display(),
         scala.libraries
     );
-    let descriptor_runtime = Command::new(&scala.java)
-        .args(["-Xverify:all", "-ea", "-classpath"])
-        .arg(classpath)
-        .arg("example.RustArtifactConsumer")
-        .output()
-        .expect("run stale Pair constructor descriptor control");
+    let descriptor_runtime = timed_output(
+        "multi-argument-runtime",
+        Command::new(&scala.java)
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("example.RustArtifactConsumer"),
+    );
     assert!(!descriptor_runtime.status.success());
     let descriptor_error = format!(
         "{}{}",
@@ -1044,12 +1083,13 @@ fn negative_reader_probes(
         classes.display(),
         scala.libraries
     );
-    let runtime = Command::new(&scala.java)
-        .args(["-Xverify:all", "-ea", "-classpath"])
-        .arg(classpath)
-        .arg("example.RustArtifactConsumer")
-        .output()
-        .expect("run against missing-classfile control");
+    let runtime = timed_output(
+        "multi-argument-runtime",
+        Command::new(&scala.java)
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("example.RustArtifactConsumer"),
+    );
     assert!(
         !runtime.status.success(),
         "runtime unexpectedly found missing original Counter classfile"
@@ -1097,12 +1137,13 @@ fn negative_reader_probes(
         "Scala accepts a type-correct wire mutation without validating its argument identity: {}",
         String::from_utf8_lossy(&swapped_compile.stderr)
     );
-    let swapped_decompile = scala
-        .scalac()
-        .arg("-decompile")
-        .arg(swapped_classes.join("example/PairFactory.tasty"))
-        .output()
-        .expect("decompile swapped source-formal wire copy");
+    let swapped_decompile = timed_output(
+        "multi-argument-decompile",
+        scala
+            .scalac()
+            .arg("-decompile")
+            .arg(swapped_classes.join("example/PairFactory.tasty")),
+    );
     assert!(swapped_decompile.status.success());
     let swapped_text = strip_ansi(&String::from_utf8_lossy(&swapped_decompile.stdout));
     assert!(
@@ -1135,12 +1176,13 @@ fn negative_reader_probes(
         "consumer signature lookup is lazy and does not force the malformed Factory body: {}",
         String::from_utf8_lossy(&corrupt_compile.stderr)
     );
-    let corrupt_read = scala
-        .scalac()
-        .arg("-decompile")
-        .arg(corrupt_classes.join("example/PairFactory.tasty"))
-        .output()
-        .expect("force official Scala readTasty of corrupted nested reference");
+    let corrupt_read = timed_output(
+        "multi-argument-decompile",
+        scala
+            .scalac()
+            .arg("-decompile")
+            .arg(corrupt_classes.join("example/PairFactory.tasty")),
+    );
     assert!(
         !corrupt_read.status.success(),
         "Scala -decompile accepted an absent nested AST reference"
@@ -1187,12 +1229,13 @@ fn negative_reader_probes(
         methodref_classes.display(),
         scala.libraries
     );
-    let methodref_runtime = Command::new(&scala.java)
-        .args(["-Xverify:all", "-ea", "-classpath"])
-        .arg(classpath)
-        .arg("example.RustArtifactConsumer")
-        .output()
-        .expect("run Factory with a stale Pair constructor Methodref");
+    let methodref_runtime = timed_output(
+        "multi-argument-runtime",
+        Command::new(&scala.java)
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(classpath)
+            .arg("example.RustArtifactConsumer"),
+    );
     assert!(
         !methodref_runtime.status.success(),
         "wrong Factory Pair constructor Methodref unexpectedly ran"
