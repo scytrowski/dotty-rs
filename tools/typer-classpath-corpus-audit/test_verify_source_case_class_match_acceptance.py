@@ -311,5 +311,138 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
                 gate.validate_product2_oracle_log(log)
 
 
+    def binary_positive_rows(self):
+        graph = (
+            ";Expr=source-sealed-trait;Num/Add=source-case-class;Add.parents=Expr+scala.Product;"
+            "Add.fields=left/right:Expr,distinct,class-owned;Add.selectors=_1/_2:Expr,distinct,class-owned;"
+            "Add.unapply=companion-owned(Add):Add;no=_3"
+        )
+        select = (
+            "root=selectLeft@158:271;signature=(Expr):Expr;selector=expr:Expr;"
+            "cases=Num(_)=>expr,Add(left,_2)=>left;Add.unapply=companion-owned(Add):Add;"
+            "selectors=_1(left):Expr,_2(right):Expr;binder=left@Add._1:case-local;"
+            "wildcard=Add._2:unbound;mapped_source_trees=19" + graph
+        )
+        evaluate = (
+            "eval@275:410;signature=(Expr):Int;Add.binders=left@_1:Expr,right@_2:Expr,distinct;"
+            "calls=eval(left):Int+eval(right):Int;callee=Evaluator.eval:same_source_symbol;"
+            "addition=Int+Int:Int;match=Int;mappings=25" + graph
+        )
+        return (
+            [(s, "selectLeft", "Expr.scala#tree39", "158:271", select) for s in ("session-a", "session-b")],
+            [(s, "eval", "Expr.scala#tree64", "275:410", evaluate) for s in ("session-a", "session-b")],
+        )
+
+    def binary_positive_log(self, test_name: str, rows) -> str:
+        lines = ["running 1 test", f"ISSUE2080_TESTED_SHA\t{'a' * 40}"]
+        lines.extend("ISSUE2080_POSITIVE\t" + "\t".join(row) for row in rows)
+        lines.extend([f"test {test_name} ... ok", "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out"])
+        return "\n".join(lines) + "\n"
+
+    def test_binary_recursive_adt_positive_receipt_writes_exact_four_run_bound_rows(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        select_rows, eval_rows = self.binary_positive_rows()
+        names = (
+            "select_left_completes_first_with_authentic_two_field_provenance_in_fresh_sessions",
+            "binary_recursive_eval_preserves_two_independent_add_binders_and_calls",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            logs = []
+            for name, rows in zip(names, (select_rows, eval_rows), strict=True):
+                path = Path(directory) / f"{name}.log"
+                path.write_text(self.binary_positive_log(name, rows), encoding="utf-8")
+                logs.append(path)
+            output = Path(directory) / "positive.tsv"
+            gate.validate_binary_recursive_adt_positive_logs(root, logs, "a" * 40, "a" * 40, "a" * 40, "b" * 40, output)
+            self.assertEqual(len(gate.read_tsv(output)[1]), 4)
+
+    def test_binary_recursive_adt_positive_receipt_rejects_missing_duplicate_partial_and_stale_rows(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        select_rows, eval_rows = self.binary_positive_rows()
+        select_name = "select_left_completes_first_with_authentic_two_field_provenance_in_fresh_sessions"
+        eval_name = "binary_recursive_eval_preserves_two_independent_add_binders_and_calls"
+        select = self.binary_positive_log(select_name, select_rows)
+        evaluate = self.binary_positive_log(eval_name, eval_rows)
+        mutations = (
+            (select.replace("session-b\tselectLeft", "session-b\tmissing"), evaluate, "a" * 40),
+            (select + next(line for line in select.splitlines() if line.startswith("ISSUE2080_POSITIVE\t")) + "\n", evaluate, "a" * 40),
+            (select.replace("mapped_source_trees=19", "mapped_source_trees=partial"), evaluate, "a" * 40),
+            (select, evaluate, "c" * 40),
+        )
+        for index, (select_log, eval_log, expected_sha) in enumerate(mutations):
+            with tempfile.TemporaryDirectory() as directory:
+                logs = [Path(directory) / "select.log", Path(directory) / "eval.log"]
+                logs[0].write_text(select_log, encoding="utf-8")
+                logs[1].write_text(eval_log, encoding="utf-8")
+                with self.assertRaises(gate.ReceiptError):
+                    gate.validate_binary_recursive_adt_positive_logs(
+                        root, logs, "a" * 40, expected_sha, "a" * 40, "b" * 40,
+                        Path(directory) / f"bad-{index}.tsv",
+                    )
+
+    def test_binary_recursive_adt_cohort_sidecar_preserves_exact_roots_and_provenance(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "cohorts.tsv"
+            gate.validate_binary_recursive_adt_cohort_receipt(
+                root, root / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv",
+                "a" * 40, "b" * 40, "b" * 40, output,
+            )
+            self.assertEqual(len(gate.read_tsv(output)[1]), 50)
+
+    def binary_negative_logs(self, root: Path, directory: Path, *, omit_control: bool = False):
+        fixture = root / gate.BINARY_ADT_SOURCE
+        rust_rows = gate.read_tsv(fixture / "rust-control-matrix.tsv")[1]
+        control_lines = ["ISSUE2080_TESTED_SHA\t" + "a" * 40]
+        control_lines.extend(
+            "ISSUE2079_BINARY_CONTROL\t" + "\t".join(row[column] for column in gate.read_tsv(fixture / "rust-control-matrix.tsv")[0])
+            for row in (rust_rows[:-1] if omit_control else rust_rows)
+        )
+        required = (
+            "ISSUE2078_BINARY_EVAL_FAILURES\tsecond_argument\tApplicationArgumentTypeMismatch(Boolean,Expr);first_call=observed;second_call=unpublished;rollback=both_calls,arguments,binders;retry=original_eval",
+            "late_result\tExpectedExpressionTypeMismatch;observed=eval(left):canonical,eval(right):canonical;rollback=both_calls,arguments,binders;retry=original_eval",
+            "ISSUE2080_ROLLBACK\tlate_after_two_calls\tbefore=both_Add_Expr_binders_and_both_eval_Applies_same_canonical_method_distinct_argument_binders;restored=complete_state_projection+resolver+typed_ast+types+SourceTypedIndex+scope_buckets;retry=stable_failure_then_selectLeft_and_eval_recovered_in_session;fresh_session=normalized_equal",
+        )
+        control_lines.extend(required)
+        control_lines.extend(f"test {name} ... ok" for name in sorted(gate.RECURSIVE_ADT_NEGATIVE_TESTS))
+        control_lines.append("test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out")
+        control = self.write_log(directory / "negative.log", "\n".join(control_lines) + "\n")
+
+        structural_file = fixture / "rust-structural-controls.tsv"
+        structural_rows = gate.read_tsv(structural_file)[1]
+        structural_header = gate.read_tsv(structural_file)[0]
+        structural_lines = ["ISSUE2080_TESTED_SHA\t" + "a" * 40]
+        structural_lines.extend(
+            "ISSUE2079_STRUCTURAL_CONTROL\t" + "\t".join(row[column] for column in structural_header)
+            for row in structural_rows
+        )
+        structural_lines.extend([
+            "test corrupted_reference_product2_identities_reject_then_retry_original_select_left ... ok",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out",
+        ])
+        structural = self.write_log(directory / "structural.log", "\n".join(structural_lines) + "\n")
+        return control, structural
+
+    def test_binary_recursive_adt_negative_receipt_requires_controls_and_late_rollback(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            control, structural = self.binary_negative_logs(root, Path(directory))
+            output = Path(directory) / "negative.tsv"
+            gate.validate_binary_recursive_adt_negative_logs(
+                root, control, structural, control, "b" * 40, "a" * 40, "a" * 40, output,
+            )
+            self.assertEqual(len(gate.read_tsv(output)[1]), 33)
+
+    def test_binary_recursive_adt_negative_receipt_rejects_omitted_control(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            control, structural = self.binary_negative_logs(root, Path(directory), omit_control=True)
+            with self.assertRaises(gate.ReceiptError):
+                gate.validate_binary_recursive_adt_negative_logs(
+                    root, control, structural, control, "b" * 40, "a" * 40, "a" * 40,
+                    Path(directory) / "negative.tsv",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

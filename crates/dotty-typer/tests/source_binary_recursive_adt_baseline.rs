@@ -62,8 +62,14 @@ fn binary_recursive_adt_generated_identities_are_discoverable_without_completion
 
 #[test]
 fn select_left_completes_first_with_authentic_two_field_provenance_in_fresh_sessions() {
-    let first = select_left_receipt(SourceId::from_index(20761));
-    let second = select_left_receipt(SourceId::from_index(20762));
+    let first_source = SourceId::from_index(20761);
+    let second_source = SourceId::from_index(20762);
+    assert_ne!(
+        first_source, second_source,
+        "fresh sessions have disjoint source identities"
+    );
+    let first = select_left_receipt(first_source);
+    let second = select_left_receipt(second_source);
     assert_eq!(
         first, second,
         "fresh source/resolver sessions normalize equally"
@@ -77,6 +83,11 @@ fn select_left_completes_first_with_authentic_two_field_provenance_in_fresh_sess
         .ends_with(&after),
         "the checked receipt records both fresh after sessions: {after}"
     );
+    for session in ["session-a", "session-b"] {
+        println!(
+            "ISSUE2080_POSITIVE\t{session}\tselectLeft\tExpr.scala#tree39\t158:271\t{first};Expr=source-sealed-trait;Num/Add=source-case-class;Add.parents=Expr+scala.Product;Add.fields=left/right:Expr,distinct,class-owned;Add.selectors=_1/_2:Expr,distinct,class-owned;Add.unapply=companion-owned(Add):Add;no=_3"
+        );
+    }
     println!("ISSUE2076_SELECT_LEFT_PROOF\t{first}");
 }
 
@@ -104,6 +115,11 @@ fn select_left_receipt(source: SourceId) -> String {
         }
     }
     let (method_tree, source_method, method_position) = method.expect("original selectLeft root");
+    assert_eq!(
+        method_tree.index(),
+        39,
+        "the immutable #2061 source tree is preserved"
+    );
     let expr = classes["Expr"].1;
     let num = classes["Num"].1;
     let add = classes["Add"].1;
@@ -153,6 +169,7 @@ fn select_left_receipt(source: SourceId) -> String {
     let mut typer =
         dotty_typer::SourceTyper::new(&ast, source, &index, &mut store, definitions, &packages)
             .with_resolver(Box::new(resolver(definitions)));
+    assert_product2_parent(&mut typer, &index, add, expr);
     let typed_root = typer
         .type_method_definition(method_tree)
         .expect("selectLeft must type before eval in a fresh resolver session");
@@ -572,8 +589,14 @@ fn select_left_receipt(source: SourceId) -> String {
 
 #[test]
 fn binary_recursive_eval_preserves_two_independent_add_binders_and_calls() {
-    let eval_first = binary_eval_receipt(SourceId::from_index(20781), false);
-    let select_left_first = binary_eval_receipt(SourceId::from_index(20782), true);
+    let first_source = SourceId::from_index(20781);
+    let second_source = SourceId::from_index(20782);
+    assert_ne!(
+        first_source, second_source,
+        "fresh sessions have disjoint source identities"
+    );
+    let eval_first = binary_eval_receipt(first_source, false);
+    let select_left_first = binary_eval_receipt(second_source, true);
     assert_eq!(eval_first, select_left_first);
     assert_eq!(
         format!(
@@ -589,6 +612,11 @@ fn binary_recursive_eval_preserves_two_independent_add_binders_and_calls() {
         .expect("before row")
         .1
     );
+    for session in ["session-a", "session-b"] {
+        println!(
+            "ISSUE2080_POSITIVE\t{session}\teval\tExpr.scala#tree64\t275:410\t{eval_first};Expr=source-sealed-trait;Num/Add=source-case-class;Add.parents=Expr+scala.Product;Add.fields=left/right:Expr,distinct,class-owned;Add.selectors=_1/_2:Expr,distinct,class-owned;Add.unapply=companion-owned(Add):Add;no=_3"
+        );
+    }
     println!("ISSUE2078_BINARY_EVAL_PROOF\t{eval_first}");
 }
 
@@ -617,6 +645,11 @@ fn binary_eval_receipt(source: SourceId, select_left_first: bool) -> String {
         }
     }
     let (eval_tree, eval_symbol) = roots["eval"];
+    assert_eq!(
+        eval_tree.index(),
+        64,
+        "the immutable #2061 source tree is preserved"
+    );
     let (select_tree, _) = roots["selectLeft"];
     let expr = classes["Expr"];
     let add = classes["Add"];
@@ -642,6 +675,7 @@ fn binary_eval_receipt(source: SourceId, select_left_first: bool) -> String {
     let mut typer =
         dotty_typer::SourceTyper::new(&ast, source, &index, &mut store, definitions, &packages)
             .with_resolver(Box::new(resolver));
+    assert_product2_parent(&mut typer, &index, add, expr);
     if select_left_first {
         typer
             .type_method_definition(select_tree)
@@ -2107,6 +2141,94 @@ fn resolver(definitions: Definitions) -> ClasspathSymbolResolver<CompositeClassP
         Box::new(JdkClassPath::new(PathBuf::from(java_home).join("jmods")).expect("JDK modules")),
     ]);
     ClasspathSymbolResolver::new(classpath, definitions, LoadingSession::new())
+}
+
+fn assert_product2_parent(
+    typer: &mut dotty_typer::SourceTyper<'_>,
+    index: &SourceSemanticIndex,
+    add: dotty_core::SymbolId,
+    expr: dotty_core::SymbolId,
+) {
+    let add_info = typer
+        .complete_symbol(add)
+        .expect("source Add completes with its canonical Scala Product parent");
+    let Type::ClassInfo(class_info) = typer.store().types.get(add_info) else {
+        panic!("Add has a completed class info")
+    };
+    let parents = class_info
+        .parents
+        .iter()
+        .map(|parent| match typer.store().types.get(*parent) {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } => (
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(*symbol).name.text())
+                    .to_owned(),
+                *symbol,
+            ),
+            other => panic!("Add parent is a canonical class symbol: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        parents
+            .iter()
+            .filter(|(parent, _)| parent == "Expr")
+            .count(),
+        1
+    );
+    assert_eq!(
+        parents
+            .iter()
+            .filter(|(parent, _)| parent == "Product")
+            .count(),
+        1
+    );
+    assert_eq!(
+        parents
+            .iter()
+            .find(|(parent, _)| parent == "Expr")
+            .unwrap()
+            .1,
+        expr
+    );
+    let product = parents
+        .iter()
+        .find(|(parent, _)| parent == "Product")
+        .unwrap()
+        .1;
+    assert_eq!(typer.store().symbols.get(product).kind, SymbolKind::Trait);
+    let scala_package = typer.store().symbols.get(product).owner.unwrap();
+    assert_eq!(
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(scala_package).name.text()),
+        "scala"
+    );
+    assert!(
+        !parents
+            .iter()
+            .any(|(parent, _)| matches!(parent.as_str(), "Option" | "Tuple2"))
+    );
+    let add_scope = index.scope_of(add).unwrap();
+    assert!(
+        typer
+            .store()
+            .scopes
+            .get(add_scope)
+            .entered_symbols()
+            .all(|symbol| {
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(symbol).name.text())
+                    != "_3"
+            })
+    );
 }
 
 fn analyze_roots(source: SourceId, session: &str) -> RootReceipt {

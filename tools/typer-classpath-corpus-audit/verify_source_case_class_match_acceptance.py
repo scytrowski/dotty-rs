@@ -149,6 +149,26 @@ RECURSIVE_ADT_NEGATIVE_TESTS = {
     "typer::tests::method_parameter_capture::recursive_adt_rollback::binary_late_failure_restores_complete_state_retries_then_types_both_original_roots",
     "typer::tests::method_parameter_capture::recursive_adt_rollback::binary_classified_source_controls_have_stable_retry_and_session_receipts",
 }
+BINARY_ADT_POSITIVE_TESTS = {
+    "select_left_completes_first_with_authentic_two_field_provenance_in_fresh_sessions",
+    "binary_recursive_eval_preserves_two_independent_add_binders_and_calls",
+}
+BINARY_ADT_STRUCTURAL_TEST = {
+    "corrupted_reference_product2_identities_reject_then_retry_original_select_left",
+}
+BINARY_ADT_CONTROL_TEST = {
+    "typer::tests::method_parameter_capture::recursive_adt_rollback::binary_classified_source_controls_have_stable_retry_and_session_receipts",
+}
+BINARY_ADT_SOURCE = Path("crates/dotty-typer/tests/fixtures/source-binary-recursive-adt-3.9.0")
+BINARY_SOURCE_MANIFEST_SHA256 = "5e79d33b024b27a348dc5f72e3e599871cc3cd792f75973734326045478b5691"
+BINARY_OUTPUT_MANIFEST_SHA256 = "d09a74b2900e9fc51a4ee8855561fba42cc38ac8ac0ff6c542bbd0f500f707b9"
+BINARY_ARTIFACT_MANIFEST_SHA256 = "0b69527d4b2d2bb9d6cebba92b481f0a0f2d9aed7b2a8a2b15dbda3233128573"
+BINARY_ADT_POSITIVE_ROWS = {
+    ("session-a", "selectLeft", "Expr.scala#tree39", "158:271"),
+    ("session-b", "selectLeft", "Expr.scala#tree39", "158:271"),
+    ("session-a", "eval", "Expr.scala#tree64", "275:410"),
+    ("session-b", "eval", "Expr.scala#tree64", "275:410"),
+}
 RECURSIVE_ADT_POSITIVE_PROOFS = {
     "unwrap": (
         "owner=adt.Evaluator$|signature=(Expr):Expr|selector=Expr|"
@@ -597,6 +617,255 @@ def validate_recursive_adt_negative_log(path: Path) -> None:
         raise ReceiptError("committed recursive Expr negative/rollback sidecar differs from executed evidence")
 
 
+def _write_tsv(path: Path, header: list[str], rows: list[tuple[str, ...]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream, delimiter="\t", lineterminator="\n")
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def validate_binary_recursive_adt_inputs(root: Path) -> None:
+    fixture = root / BINARY_ADT_SOURCE
+    for name, expected_hash in (
+        ("source-hashes.tsv", BINARY_SOURCE_MANIFEST_SHA256),
+        ("output-sha256.tsv", BINARY_OUTPUT_MANIFEST_SHA256),
+        ("scala-artifacts.sha256.tsv", BINARY_ARTIFACT_MANIFEST_SHA256),
+    ):
+        if hashlib.sha256((fixture / name).read_bytes()).hexdigest() != expected_hash:
+            raise ReceiptError(f"binary recursive Expr pinned manifest changed: {name}")
+    source_rows = read_tsv(fixture / "source-hashes.tsv")[1]
+    source_hashes = {row["file"]: row["sha256"] for row in source_rows}
+    scala_files = {path.name for path in fixture.glob("*.scala")}
+    if len(source_hashes) != len(source_rows) or set(source_hashes) != scala_files:
+        raise ReceiptError("binary recursive Expr source hash inventory changed")
+    for name, expected in source_hashes.items():
+        if hashlib.sha256((fixture / name).read_bytes()).hexdigest() != expected:
+            raise ReceiptError(f"binary recursive Expr source hash changed: {name}")
+    output_rows = read_tsv(fixture / "output-sha256.tsv")[1]
+    for row in output_rows:
+        path = fixture / row["file"]
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != row["sha256"]:
+            raise ReceiptError(f"binary recursive Expr output hash changed: {row['file']}")
+    artifacts = [line.split("\t") for line in (fixture / "scala-artifacts.sha256.tsv").read_text(encoding="utf-8").splitlines()]
+    if len(artifacts) != 8 or any(len(row) != 2 or not re.fullmatch(r"[0-9a-f]{64}", row[0]) for row in artifacts):
+        raise ReceiptError("binary recursive Expr oracle must pin exactly eight valid artifact hashes")
+    control_roots = read_tsv(fixture / "rust-control-roots.tsv")[1]
+    scala = read_tsv(fixture / "scala-matrix.tsv")[1]
+    rust = read_tsv(fixture / "rust-control-matrix.tsv")[1]
+    structural = read_tsv(fixture / "rust-structural-controls.tsv")[1]
+    if (
+        len(control_roots) != 22
+        or len(scala) != 22
+        or len(rust) != 22
+        or len(structural) != 8
+        or {row["case"] for row in control_roots} != {row["source"] for row in scala}
+        or {row["case"] for row in control_roots} != {row["case"] for row in rust}
+        or len({row["case"] for row in structural}) != 8
+    ):
+        raise ReceiptError("binary recursive Expr source/Scala/Rust/structural control inventory changed")
+
+
+def validate_binary_recursive_adt_oracle_log(path: Path, root: Path) -> None:
+    fixture = root / BINARY_ADT_SOURCE
+    source_sha = hashlib.sha256((fixture / "Expr.scala").read_bytes()).hexdigest()
+    required = {
+        "verified all 8 pinned Scala 3.9.0 artifacts",
+        f"verified immutable positive source SHA-256: {source_sha}",
+        f"Scala source revision: {SCALA_REVISION}",
+        'JDK: JAVA_VERSION="21.0.8"; IMPLEMENTOR_VERSION="Temurin-21.0.8+9"',
+        "verified 22 classified controls and rationales",
+        "verified pinned typed snapshot and diagnostic output hashes",
+        "Two original source roots and 22 Scala control classifications match.",
+    }
+    actual = set(path.read_text(encoding="utf-8").splitlines())
+    if required - actual:
+        raise ReceiptError(f"binary recursive Expr pinned Scala runner is missing evidence: {sorted(required - actual)!r}")
+def validate_binary_recursive_adt_positive_logs(
+    root: Path,
+    logs: list[Path],
+    tested_sha: str,
+    expected_sha: str,
+    expected_head_sha: str,
+    baseline_sha: str,
+    output: Path,
+) -> None:
+    validate_binary_recursive_adt_inputs(root)
+    if not re.fullmatch(r"[0-9a-f]{40}", tested_sha) or tested_sha != expected_sha or tested_sha != expected_head_sha:
+        raise ReceiptError("binary recursive Expr evidence is not bound to the evaluated PR head")
+    if not re.fullmatch(r"[0-9a-f]{40}", baseline_sha):
+        raise ReceiptError("binary recursive Expr evidence contains a malformed baseline SHA")
+    require_test_logs(logs, BINARY_ADT_POSITIVE_TESTS)
+    actual: dict[tuple[str, str], tuple[str, str, str]] = {}
+    for path in logs:
+        text = path.read_text(encoding="utf-8")
+        tested_markers = marker_lines(text, "ISSUE2080_TESTED_SHA\t")
+        if tested_markers != [f"ISSUE2080_TESTED_SHA\t{tested_sha}"]:
+            raise ReceiptError(f"{path}: positive evidence does not carry the exact tested SHA")
+        for line in marker_lines(text, "ISSUE2080_POSITIVE\t"):
+            fields = line.split("\t")
+            if len(fields) != 6:
+                raise ReceiptError("binary recursive Expr positive row is malformed")
+            _, session, method, source_path_tree, span, proof = fields
+            key = session, method
+            if key in actual or (session, method, source_path_tree, span) not in BINARY_ADT_POSITIVE_ROWS:
+                raise ReceiptError("binary recursive Expr positive row is duplicated or substituted")
+            expected_prefix = {
+                "selectLeft": "root=selectLeft@158:271;signature=(Expr):Expr;selector=expr:Expr;cases=Num(_)=>expr,Add(left,_2)=>left;",
+                "eval": "eval@275:410;signature=(Expr):Int;Add.binders=left@_1:Expr,right@_2:Expr,distinct;",
+            }[method]
+            required_graph = (
+                "Expr=source-sealed-trait;Num/Add=source-case-class;Add.parents=Expr+scala.Product;"
+                "Add.fields=left/right:Expr,distinct,class-owned;Add.selectors=_1/_2:Expr,distinct,class-owned;"
+                "Add.unapply=companion-owned(Add):Add;no=_3"
+            )
+            if not proof.startswith(expected_prefix) or not proof.endswith(required_graph):
+                raise ReceiptError(f"{method}: semantic proof omits a required source/Product identity")
+            if method == "selectLeft" and "mapped_source_trees=19" not in proof:
+                raise ReceiptError("selectLeft receipt lacks its complete source mapping count")
+            if method == "eval" and not all(token in proof for token in (
+                "calls=eval(left):Int+eval(right):Int", "callee=Evaluator.eval:same_source_symbol",
+                "addition=Int+Int:Int", "match=Int", "mappings=25",
+            )):
+                raise ReceiptError("eval receipt lacks both recursive roles, result types, or mapping proof")
+            actual[key] = (source_path_tree, span, proof)
+    expected = {(session, method) for session in ("session-a", "session-b") for method in ("selectLeft", "eval")}
+    if len(actual) != 4 or set(actual) != expected:
+        raise ReceiptError("binary recursive Expr acceptance requires exactly four original roots in two sessions")
+    for method in ("selectLeft", "eval"):
+        if actual[("session-a", method)] != actual[("session-b", method)]:
+            raise ReceiptError(f"{method}: normalized semantic proof differs across fresh sessions")
+    header = ["session", "root", "source_path_tree", "source_span", "normalized_semantic_sha256", "proof", "baseline_sha", "tested_sha", "pr_head_sha"]
+    rows = []
+    for session, method in ((s, m) for s in ("session-a", "session-b") for m in ("selectLeft", "eval")):
+        source_path_tree, span, proof = actual[(session, method)]
+        rows.append((session, method, source_path_tree, span, hashlib.sha256(proof.encode()).hexdigest(), proof, baseline_sha, tested_sha, expected_head_sha))
+    _write_tsv(output, header, rows)
+
+
+def validate_binary_recursive_adt_negative_logs(
+    root: Path,
+    control_log: Path,
+    structural_log: Path,
+    rollback_log: Path,
+    baseline_sha: str,
+    tested_sha: str,
+    expected_head_sha: str,
+    output: Path,
+) -> None:
+    validate_binary_recursive_adt_inputs(root)
+    for sha in (baseline_sha, tested_sha, expected_head_sha):
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise ReceiptError("binary recursive Expr negative receipt contains a malformed revision SHA")
+    if tested_sha != expected_head_sha:
+        raise ReceiptError("binary recursive Expr negative evidence does not match the PR head")
+    for log in (control_log, structural_log, rollback_log):
+        markers = marker_lines(log.read_text(encoding="utf-8"), "ISSUE2080_TESTED_SHA\t")
+        if markers != [f"ISSUE2080_TESTED_SHA\t{tested_sha}"]:
+            raise ReceiptError(f"{log}: negative evidence does not carry the exact tested SHA")
+    control_text = control_log.read_text(encoding="utf-8")
+    if BINARY_ADT_CONTROL_TEST - passed_tests(control_text):
+        raise ReceiptError("binary recursive source controls did not execute in the required Rust negative suite")
+    fixture = root / BINARY_ADT_SOURCE
+    rust_rows = read_tsv(fixture / "rust-control-matrix.tsv")[1]
+    source_rows = read_tsv(fixture / "rust-control-roots.tsv")[1]
+    scala_rows = read_tsv(fixture / "scala-matrix.tsv")[1]
+    expected_control_lines = ["ISSUE2079_BINARY_CONTROL\t" + "\t".join(row[column] for column in read_tsv(fixture / "rust-control-matrix.tsv")[0]) for row in rust_rows]
+    actual_control_lines = marker_lines(control_text, "ISSUE2079_BINARY_CONTROL\t")
+    if actual_control_lines != expected_control_lines:
+        raise ReceiptError("binary recursive Expr controls were missing, reordered, duplicated, or changed")
+
+    structural_text = require_test_log(structural_log, BINARY_ADT_STRUCTURAL_TEST)
+    structural_rows = read_tsv(fixture / "rust-structural-controls.tsv")[1]
+    expected_structural_lines = ["ISSUE2079_STRUCTURAL_CONTROL\t" + "\t".join(row[column] for column in read_tsv(fixture / "rust-structural-controls.tsv")[0]) for row in structural_rows]
+    if marker_lines(structural_text, "ISSUE2079_STRUCTURAL_CONTROL\t") != expected_structural_lines:
+        raise ReceiptError("binary recursive Expr structural rollback controls were missing or changed")
+
+    rollback_text = require_test_log(rollback_log, RECURSIVE_ADT_NEGATIVE_TESTS)
+    required_rollback = (
+        "ISSUE2078_BINARY_EVAL_FAILURES\tsecond_argument\tApplicationArgumentTypeMismatch(Boolean,Expr);first_call=observed;second_call=unpublished;rollback=both_calls,arguments,binders;retry=original_eval",
+        "late_result\tExpectedExpressionTypeMismatch;observed=eval(left):canonical,eval(right):canonical;rollback=both_calls,arguments,binders;retry=original_eval",
+        "ISSUE2080_ROLLBACK\tlate_after_two_calls\tbefore=both_Add_Expr_binders_and_both_eval_Applies_same_canonical_method_distinct_argument_binders;restored=complete_state_projection+resolver+typed_ast+types+SourceTypedIndex+scope_buckets;retry=stable_failure_then_selectLeft_and_eval_recovered_in_session;fresh_session=normalized_equal",
+    )
+    if marker_lines(rollback_text, "ISSUE2078_BINARY_EVAL_FAILURES\t") != [required_rollback[0]]:
+        raise ReceiptError("binary recursive Expr second-argument rollback receipt is missing, duplicated, or changed")
+    if rollback_text.splitlines().count(required_rollback[1]) != 1:
+        raise ReceiptError("binary recursive Expr late-result receipt is missing, duplicated, or changed")
+    if marker_lines(rollback_text, "ISSUE2080_ROLLBACK\t") != [required_rollback[2]]:
+        raise ReceiptError("binary recursive Expr full-state rollback receipt is missing, duplicated, or changed")
+    root_by_case = {row["case"]: row["root"] for row in source_rows}
+    scala_by_case = {row["source"]: row["classification"] for row in scala_rows}
+    sidecar_rows: list[tuple[str, ...]] = []
+    for row in rust_rows:
+        if row["case"] not in root_by_case or root_by_case[row["case"]] != row["root"] or scala_by_case[row["case"]] != row["scala_classification"]:
+            raise ReceiptError(f"{row['case']}: Rust and Scala control classifications diverged")
+        evidence = (
+            f"first_outcome={row['first_outcome']};first_span={row['first_span']};"
+            f"first_rust_receipt={row['first_rust_receipt']};fresh_outcome={row['fresh_outcome']};"
+            f"fresh_span={row['fresh_span']};fresh_rust_receipt={row['fresh_rust_receipt']}"
+        )
+        retry = f"first={row['first_retry']};fresh={row['fresh_retry']}"
+        sidecar_rows.append((row["case"], row["scala_classification"], row["rust_outcome"], f"{row['root']}:{row['first_span']}", evidence, retry, baseline_sha, tested_sha, expected_head_sha))
+    for row in structural_rows:
+        marker = "ISSUE2079_STRUCTURAL_CONTROL\t" + "\t".join(row[column] for column in read_tsv(fixture / "rust-structural-controls.tsv")[0])
+        if marker not in structural_text:
+            raise ReceiptError(f"{row['case']}: structural corruption receipt did not execute")
+        sidecar_rows.append(("structural:" + row["case"], "not applicable", "rejected", row["failure_root"], row["diagnostic"], row["rollback_retry"], baseline_sha, tested_sha, expected_head_sha))
+    sidecar_rows.extend([
+        ("second_argument_after_first_call", "rejected", "rolled_back_then_retry_succeeded", "Add(left,right)", required_rollback[0].split("\t", 2)[2], "first call/binders observed; invalid second call unpublished", baseline_sha, tested_sha, expected_head_sha),
+        ("late_result_after_two_calls", "rejected", "rolled_back_then_retry_succeeded", "Add(left,right)", required_rollback[1].split("\t", 1)[1], "both canonical calls/binders observed before failure", baseline_sha, tested_sha, expected_head_sha),
+        ("full_state_late_rollback", "rejected", "complete_state_restored_and_recovered", "Add(left,right)", required_rollback[2].split("\t", 2)[2], "same-session and independent-session recovery", baseline_sha, tested_sha, expected_head_sha),
+    ])
+    _write_tsv(output, ["case", "scala_classification", "rust_outcome", "source_root_or_span", "first_error_or_evidence", "retry_and_rollback", "baseline_sha", "tested_sha", "pr_head_sha"], sidecar_rows)
+
+
+def validate_binary_recursive_adt_cohort_receipt(
+    root: Path,
+    source: Path,
+    baseline_sha: str,
+    tested_sha: str,
+    expected_head_sha: str,
+    output: Path,
+) -> None:
+    if any(not re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (baseline_sha, tested_sha, expected_head_sha)):
+        raise ReceiptError("binary recursive Expr cohort contains a malformed revision SHA")
+    if tested_sha != expected_head_sha:
+        raise ReceiptError("binary recursive Expr cohort is not bound to the evaluated PR head")
+    recorded = read_tsv(root / "docs/typer-sealed-adt-e2e-cohort-receipt-3.9.0.tsv")[1]
+    rows = read_tsv(source)[1]
+    if len(rows) != 50 or len(recorded) != 50:
+        raise ReceiptError("protected stdlib proof must contain the original exact 25 + 25 roots")
+    if [(r["cohort"], r["identity"], r["source_tree"]) for r in rows] != [(r["cohort"], r["identity"], r["source_tree"]) for r in recorded]:
+        raise ReceiptError("two-pass cohort receipt changed the original source identities or order")
+    protected_paths = {
+        "main": root / "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-main.tsv",
+        "analysis": root / "docs/typer-lexical-closure-acceptance-recovery-3.9.0/required-analysis.tsv",
+    }
+    protected_ids = {
+        cohort: {row["identity"] for row in read_tsv(path)[1]}
+        for cohort, path in protected_paths.items()
+    }
+    actual_protected = {"main": set(), "analysis": set()}
+    for row in rows:
+        if row["first_status"] != row["second_status"] or row["two_pass_equal"] != "true":
+            raise ReceiptError(f"{row['identity']}: deterministic cohort passes disagree")
+        if row["protected_success"] not in {"true", "false"}:
+            raise ReceiptError(f"{row['identity']}: protected-success flag is malformed")
+        if row["protected_success"] == "true":
+            if row["first_status"] != "typed" or row["second_status"] != "typed":
+                raise ReceiptError(f"{row['identity']}: an accepted protected root regressed")
+            actual_protected[row["cohort"]].add(row["identity"])
+        elif row["gate"] == "required_typed":
+            raise ReceiptError(f"{row['identity']}: required_typed root was not marked protected")
+    if actual_protected != protected_ids or {name: len(values) for name, values in actual_protected.items()} != {"main": 16, "analysis": 15}:
+        raise ReceiptError("two-pass cohort receipt changed the protected 16 + 15 root sets")
+    _write_tsv(
+        output,
+        ["cohort", "identity", "source_tree", "baseline_status", "gate", "first_status", "second_status", "actual_result", "protected_success", "two_pass_equal", "baseline_sha", "tested_sha", "pr_head_sha"],
+        [tuple(row[key] for key in ("cohort", "identity", "source_tree", "baseline_status", "gate", "first_status", "second_status", "actual_result", "protected_success", "two_pass_equal")) + (baseline_sha, tested_sha, expected_head_sha) for row in rows],
+    )
+
+
 def validate_sealed_rollback_sidecar(root: Path) -> None:
     fixture = root / "crates/dotty-typer/tests/fixtures/source-sealed-adt-match-3.9.0"
     rust_failures = read_tsv(fixture / "rust-failure-matrix.tsv")[1]
@@ -995,6 +1264,8 @@ def main() -> int:
     inputs.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
     recursive_inputs = sub.add_parser("recursive-inputs")
     recursive_inputs.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
+    binary_inputs = sub.add_parser("binary-inputs")
+    binary_inputs.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
     for command, tests in (("rust-log", RUST_TESTS), ("namer-log", NAMER_TESTS), ("typer-log", TYPER_TESTS)):
         item = sub.add_parser(command)
         item.add_argument("log", type=Path, nargs="+" if command == "typer-log" else None)
@@ -1013,6 +1284,33 @@ def main() -> int:
     recursive_positive.add_argument("--expected-sha", required=True)
     recursive_negative = sub.add_parser("recursive-negative-log")
     recursive_negative.add_argument("log", type=Path)
+    binary_positive = sub.add_parser("binary-positive-log")
+    binary_positive.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
+    binary_positive.add_argument("--log", type=Path, action="append", required=True)
+    binary_positive.add_argument("--tested-sha", required=True)
+    binary_positive.add_argument("--expected-sha", required=True)
+    binary_positive.add_argument("--expected-head-sha", required=True)
+    binary_positive.add_argument("--baseline-sha", required=True)
+    binary_positive.add_argument("--output", type=Path, required=True)
+    binary_oracle = sub.add_parser("binary-oracle-log")
+    binary_oracle.add_argument("log", type=Path)
+    binary_oracle.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
+    binary_negative = sub.add_parser("binary-negative-logs")
+    binary_negative.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
+    binary_negative.add_argument("--control-log", type=Path, required=True)
+    binary_negative.add_argument("--structural-log", type=Path, required=True)
+    binary_negative.add_argument("--rollback-log", type=Path, required=True)
+    binary_negative.add_argument("--baseline-sha", required=True)
+    binary_negative.add_argument("--tested-sha", required=True)
+    binary_negative.add_argument("--expected-head-sha", required=True)
+    binary_negative.add_argument("--output", type=Path, required=True)
+    binary_cohorts = sub.add_parser("binary-cohorts")
+    binary_cohorts.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
+    binary_cohorts.add_argument("--source", type=Path, required=True)
+    binary_cohorts.add_argument("--baseline-sha", required=True)
+    binary_cohorts.add_argument("--tested-sha", required=True)
+    binary_cohorts.add_argument("--expected-head-sha", required=True)
+    binary_cohorts.add_argument("--output", type=Path, required=True)
     scope_rollback = sub.add_parser("scope-rollback-rust-log")
     scope_rollback.add_argument("log", type=Path)
     oracle = sub.add_parser("oracle-log")
@@ -1035,6 +1333,9 @@ def main() -> int:
         elif args.command == "recursive-inputs":
             validate_recursive_adt_inputs(root)
             print("frozen recursive Expr source, Scala artifacts, oracle outputs, and 15-case matrix verified")
+        elif args.command == "binary-inputs":
+            validate_binary_recursive_adt_inputs(root)
+            print("frozen binary recursive Expr source, eight artifacts, typed tree, and control matrices verified")
         elif args.command == "recursive-oracle-log":
             validate_recursive_adt_oracle_log(args.log)
             print("pinned recursive Expr Scala/JDK positive oracle and artifact hashes verified")
@@ -1047,6 +1348,28 @@ def main() -> int:
         elif args.command == "recursive-negative-log":
             validate_recursive_adt_negative_log(args.log)
             print("15 recursive Expr negative cases and late rollback/retry proof verified")
+        elif args.command == "binary-positive-log":
+            validate_binary_recursive_adt_positive_logs(
+                root, args.log, args.tested_sha, args.expected_sha,
+                args.expected_head_sha, args.baseline_sha, args.output,
+            )
+            print("exact four original binary recursive ADT DefDefs and revision-bound receipts verified")
+        elif args.command == "binary-oracle-log":
+            validate_binary_recursive_adt_inputs(root)
+            validate_binary_recursive_adt_oracle_log(args.log, root)
+            print("binary recursive ADT Scala 3.9.0/JDK and eight artifact hashes verified")
+        elif args.command == "binary-negative-logs":
+            validate_binary_recursive_adt_negative_logs(
+                root, args.control_log, args.structural_log, args.rollback_log,
+                args.baseline_sha, args.tested_sha, args.expected_head_sha, args.output,
+            )
+            print("all Scala-classified binary controls, structural negatives, and two-call rollback verified")
+        elif args.command == "binary-cohorts":
+            validate_binary_recursive_adt_cohort_receipt(
+                root, args.source, args.baseline_sha, args.tested_sha,
+                args.expected_head_sha, args.output,
+            )
+            print("exact 25 + 25 per-root two-pass receipt with 16 + 15 protected roots verified")
         elif args.command == "rust-log":
             validate_rust_log(args.log, args.tested_sha, args.expected_sha)
             print("exact Box and sealed Event roots, negative matrix, and tested SHA verified")
