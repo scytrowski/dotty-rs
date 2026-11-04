@@ -46,7 +46,7 @@ fn output(command: &mut Command) -> Output {
         .map(|arg| arg.to_string_lossy())
         .collect::<Vec<_>>();
     let operation = match program {
-        "java" => Some("multi-argument-runtime"),
+        "java" if !args.iter().any(|arg| arg == "-version") => Some("multi-argument-runtime"),
         "scalac" if args.iter().any(|arg| arg == "-decompile") => Some("multi-argument-decompile"),
         "scalac" if args.iter().any(|arg| arg == "-print-tasty") => {
             Some("multi-argument-print-tasty")
@@ -61,6 +61,10 @@ fn output(command: &mut Command) -> Output {
         None => command.output(),
     }
     .unwrap_or_else(|error| panic!("run {rendered}: {error}"));
+    assert_success(rendered, result)
+}
+
+fn assert_success(rendered: String, result: Output) -> Output {
     assert!(
         result.status.success(),
         "command failed: {rendered}\nstdout:\n{}\nstderr:\n{}",
@@ -73,6 +77,12 @@ fn output(command: &mut Command) -> Output {
 fn timed_output(operation: &str, command: &mut Command) -> Output {
     command_timing::output(operation, command)
         .unwrap_or_else(|error| panic!("run {operation}: {error}"))
+}
+
+fn successful_timed_output(operation: &str, command: &mut Command) -> Output {
+    let rendered = format!("{command:?}");
+    let result = timed_output(operation, command);
+    assert_success(rendered, result)
 }
 
 fn task_dir() -> PathBuf {
@@ -210,7 +220,7 @@ impl Scala {
     }
 
     fn compile(&self, classpath: &str, out: &Path, source: &Path) -> Output {
-        timed_output(
+        successful_timed_output(
             "multi-argument-source-compile",
             self.scalac()
                 .args(["-Werror", "-release", "21", "-classpath"])
@@ -224,8 +234,7 @@ impl Scala {
     fn compile_result(&self, classpath: &str, out: &Path, source: &Path) -> Output {
         timed_output(
             "multi-argument-negative-probe",
-            &mut self
-                .scalac()
+            self.scalac()
                 .args(["-Werror", "-release", "21", "-classpath"])
                 .arg(classpath)
                 .arg("-d")
@@ -686,7 +695,7 @@ fn inspect_original_tasty(
     {
         let decompiled = timed_output(
             "multi-argument-decompile",
-            &mut scala.scalac().arg("-decompile").arg(sidecar),
+            scala.scalac().arg("-decompile").arg(sidecar),
         );
         assert!(
             decompiled.status.success(),
@@ -749,7 +758,7 @@ fn inspect_original_tasty(
         }
         let printed = timed_output(
             "multi-argument-print-tasty",
-            &mut scala.scalac().arg("-print-tasty").arg(sidecar),
+            scala.scalac().arg("-print-tasty").arg(sidecar),
         );
         assert!(
             printed.status.success(),
@@ -770,7 +779,7 @@ fn inspect_original_tasty(
     assert!(factory_dump.contains("first") && factory_dump.contains("second"));
     let from_tasty = timed_output(
         "multi-argument-from-tasty",
-        &mut scala
+        scala
             .scalac()
             .args(["-release", "21", "-from-tasty", "-classpath"])
             .arg(format!("{}:{}", producer.display(), scala.libraries))
@@ -1029,7 +1038,7 @@ fn negative_reader_probes(
     );
     let descriptor_runtime = timed_output(
         "multi-argument-runtime",
-        &mut Command::new(&scala.java)
+        Command::new(&scala.java)
             .args(["-Xverify:all", "-ea", "-classpath"])
             .arg(classpath)
             .arg("example.RustArtifactConsumer"),
@@ -1076,7 +1085,7 @@ fn negative_reader_probes(
     );
     let runtime = timed_output(
         "multi-argument-runtime",
-        &mut Command::new(&scala.java)
+        Command::new(&scala.java)
             .args(["-Xverify:all", "-ea", "-classpath"])
             .arg(classpath)
             .arg("example.RustArtifactConsumer"),
@@ -1130,7 +1139,7 @@ fn negative_reader_probes(
     );
     let swapped_decompile = timed_output(
         "multi-argument-decompile",
-        &mut scala
+        scala
             .scalac()
             .arg("-decompile")
             .arg(swapped_classes.join("example/PairFactory.tasty")),
@@ -1169,7 +1178,7 @@ fn negative_reader_probes(
     );
     let corrupt_read = timed_output(
         "multi-argument-decompile",
-        &mut scala
+        scala
             .scalac()
             .arg("-decompile")
             .arg(corrupt_classes.join("example/PairFactory.tasty")),
@@ -1222,7 +1231,7 @@ fn negative_reader_probes(
     );
     let methodref_runtime = timed_output(
         "multi-argument-runtime",
-        &mut Command::new(&scala.java)
+        Command::new(&scala.java)
             .args(["-Xverify:all", "-ea", "-classpath"])
             .arg(classpath)
             .arg("example.RustArtifactConsumer"),
