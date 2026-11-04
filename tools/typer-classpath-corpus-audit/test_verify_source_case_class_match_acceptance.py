@@ -171,7 +171,7 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
         self.assertEqual({row["case"] for row in rows if row["case"].startswith("foreign_")},
                          {"foreign_succ_owner", "foreign_eval_wrong_argument", "foreign_eval_control", "foreign_expr_succ_owner"})
 
-    def test_recursive_expr_negative_gate_requires_all_cases_and_both_rollback_tests(self) -> None:
+    def test_recursive_expr_negative_gate_requires_all_cases_and_all_three_rollback_tests(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = self.write_log(Path(directory) / "negative.log", self.recursive_negative_log())
             gate.validate_recursive_adt_negative_log(log)
@@ -186,7 +186,7 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
     def recursive_negative_log(self) -> str:
         root = Path(__file__).resolve().parents[2]
         fixture = root / gate.RECURSIVE_ADT_SOURCE / "rust-negative-matrix.tsv"
-        lines = ["running 2 tests"]
+        lines = ["running 3 tests"]
         for row in gate.read_tsv(fixture)[1]:
             lines.append(f"ISSUE2039_NEGATIVE\t{row['case']}\t{row['root']}\t{row['scala_result']}\t{row['rust_result']}")
         for case, evidence in (
@@ -197,7 +197,8 @@ class SourceCaseClassMatchAcceptanceTests(unittest.TestCase):
         lines.extend([
             "test typer::tests::method_parameter_capture::recursive_adt_rollback::recursive_eval_late_result_failure_observes_binder_call_and_rolls_back_for_retry ... ok",
             "test typer::tests::method_parameter_capture::recursive_adt_rollback::recursive_adt_negative_matrix_is_stable_across_fresh_sessions ... ok",
-            "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 998 filtered out",
+            "test typer::tests::method_parameter_capture::recursive_adt_rollback::binary_recursive_second_argument_failure_and_late_failure_restore_then_retry_eval ... ok",
+            "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 997 filtered out",
         ])
         return "\n".join(lines) + "\n"
 

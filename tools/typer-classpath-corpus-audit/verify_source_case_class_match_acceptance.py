@@ -145,6 +145,7 @@ RECURSIVE_ADT_POSITIVE_TESTS = {
 RECURSIVE_ADT_NEGATIVE_TESTS = {
     "typer::tests::method_parameter_capture::recursive_adt_rollback::recursive_adt_negative_matrix_is_stable_across_fresh_sessions",
     "typer::tests::method_parameter_capture::recursive_adt_rollback::recursive_eval_late_result_failure_observes_binder_call_and_rolls_back_for_retry",
+    "typer::tests::method_parameter_capture::recursive_adt_rollback::binary_recursive_second_argument_failure_and_late_failure_restore_then_retry_eval",
 }
 RECURSIVE_ADT_POSITIVE_PROOFS = {
     "unwrap": (
