@@ -2,10 +2,15 @@
 
 ## Verdict
 
-Functional acceptance: **PENDING** until integrated checks finish. Agent tracing:
-**not available in this report**; no tracer result is inferred from compiler
-behavior or prerequisite PR traces. If no original issue trace is recovered,
-record `functional=MET`, `tracing=UNAVAILABLE`, and `SPRINT GOAL=PARTIAL`.
+Functional acceptance: **MET** on PR head
+`0651ba9b899c5349f25d76f56cf9550de19ed094`. All four pinned class roots pass
+through the same private semantic loader on both required orders and fresh
+stores; the selected `Open` resolver route passes; negative rollback and
+historical compatibility checks pass. Agent tracing: **BLOCKED / UNAVAILABLE**
+because the original issue-level tracer telemetry is not observable in this
+report. Sprint verdict: **PARTIAL**, solely because the requested tracer
+provenance remains unavailable. This does not change the functional verdict or
+imply a compiler correctness failure.
 
 This closeout integrates the separately reviewed immutable-field and explicit
 resolver-request increments. It adds no production semantics. Public/default
@@ -124,8 +129,10 @@ checks are workspace format, frontend boundaries, Clippy, rustdoc, locked
 workspace tests, strict JDK 21 verification and `git diff --check`. The existing
 pinned Scala/JDK consumer workflow is a required gate.
 
-Local validation on the frozen source baseline
-`e309e1f950ffe9dc0cda25647086f64f6c9b7b60`:
+Local checks ran against frozen integrated source baseline
+`e309e1f950ffe9dc0cda25647086f64f6c9b7b60`. Hosted checks below ran on PR head
+`0651ba9b899c5349f25d76f56cf9550de19ed094`; that PR commit adds only this
+closeout report and the workflow path trigger, with no production changes.
 
 - focused four-root sequence and selected resolver acceptance — passed;
 - CtorWithVal positive/unsupported-shape regression — passed;
@@ -135,6 +142,23 @@ Local validation on the frozen source baseline
 - format, frontend boundary, workspace Clippy and rustdoc checks — passed;
 - locked workspace all-target tests — passed;
 - mandatory JDK 21 gate with `DOTTY_CLASSFILE_REQUIRE_JDK=1` — passed;
-- `git diff --check` — pending final diff review.
+- `git diff --check` — passed.
 
-Final tested PR SHA and hosted check-run URLs are added after publication.
+| Required hosted check | Result | Run |
+| --- | --- | --- |
+| Rust checks (format, frontend boundaries, Clippy, rustdoc, workspace tests, diff) | passed | [job 126515157285](https://github.com/scytrowski/dotty-rs/actions/runs/41812556451/job/126515157285) |
+| Classfile/JVM encoder gate | passed | [job 126515158913](https://github.com/scytrowski/dotty-rs/actions/runs/41812556451/job/126515158913) |
+| Pinned Scala 3.9 consumer and strict TASTy gates | passed | [job 126515155853](https://github.com/scytrowski/dotty-rs/actions/runs/41812556499/job/126515155853) |
+
+The pinned consumer completed its required source-generated secondary-
+constructor rejection step successfully. The current PR is
+[#2114](https://github.com/scytrowski/dotty-rs/pull/2114); all links above are
+for its tested head SHA recorded at the start of this section.
+
+## Trace provenance
+
+The original issue-level tracer result remains **BLOCKED / UNAVAILABLE**; this
+report contains no original trace artifact and prerequisite PR traces are not
+substitutes. Functional acceptance is **MET**. The sprint verdict is **PARTIAL**
+because tracer provenance remains unmet. Missing telemetry is not treated as a
+compiler correctness failure and is not reported as complete.
