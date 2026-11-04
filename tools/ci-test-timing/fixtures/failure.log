@@ -1,0 +1,11 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/failing_target.rs (target/debug/deps/failing_target-1234)
+
+running 2 tests
+test first ... ok
+test second ... FAILED
+
+failures:
+    second
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.75s

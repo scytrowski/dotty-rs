@@ -147,29 +147,76 @@ impl Validator<'_, '_> {
             ) else {
                 unreachable!("reference block shape was checked")
             };
-            if source_result_apply.args.len() != 1
-                || source_local.rhs.is_none()
+            let local_argument_index = self
+                .plan
+                .typed_bindings
+                .formal_local_constructor_call_pair(self.plan.source.id, method.symbol)
+                .and_then(|binding| {
+                    binding.arguments.iter().position(|argument| {
+                        matches!(
+                            argument.origin,
+                            crate::FormalLocalConstructorCallArgumentOrigin::LocalValue { .. }
+                        )
+                    })
+                });
+            if !matches!(
+                (source_result_apply.args.len(), local_argument_index),
+                (1, None) | (2, Some(_))
+            ) || source_local.rhs.is_none()
                 || typed_local.rhs.is_none()
             {
                 return Err(
                     self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                 );
             }
-            let source_use = self.source_tree(source_result_apply.args[0])?;
+            let use_index = local_argument_index.unwrap_or(0);
+            let source_use = self.source_tree(source_result_apply.args[use_index])?;
             let typed_result_apply = match &typed_result.kind {
-                TreeKind::Apply(application) if application.args.len() == 1 => application,
+                TreeKind::Apply(application)
+                    if application.args.len() == source_result_apply.args.len() =>
+                {
+                    application
+                }
                 _ => {
                     return Err(
                         self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                     );
                 }
             };
+            if let Some(index) = local_argument_index {
+                let initializer = self
+                    .plan
+                    .typed_bindings
+                    .local_counter_initializer(self.plan.source.id, method.symbol)
+                    .ok_or_else(|| {
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    })?;
+                let pair = self
+                    .plan
+                    .typed_bindings
+                    .formal_local_constructor_call_pair(self.plan.source.id, method.symbol)
+                    .ok_or_else(|| {
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    })?;
+                let argument = pair.arguments[index];
+                if initializer.source_block != source_id
+                    || initializer.typed_block != typed_id
+                    || initializer.source_declaration != source_block.stats[0]
+                    || initializer.typed_declaration != typed_block.stats[0]
+                    || argument.source_argument != source_result_apply.args[index]
+                    || argument.typed_argument != typed_result_apply.args[index]
+                {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    );
+                }
+            }
             let typed_use = self
                 .plan
                 .typed_ast
-                .try_get(typed_result_apply.args[0])
+                .try_get(typed_result_apply.args[use_index])
                 .ok_or(PickleError::InvalidTypedTree {
-                    tree: typed_result_apply.args[0],
+                    tree: typed_result_apply.args[use_index],
                 })?;
             let (TreeKind::Ident(_), Some(declaration_span), Some(use_span)) = (
                 &source_use.kind,
