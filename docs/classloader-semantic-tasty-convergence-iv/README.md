@@ -6,10 +6,13 @@ Functional acceptance: **MET** on PR head
 `016a7a843de900fb45dd7b5274c23f65fce2e93c`. All four pinned class roots pass
 through the same private semantic loader on both required orders and fresh
 stores; the selected `Open` resolver route passes; negative rollback and
-historical compatibility checks pass. Agent tracing: **BLOCKED / UNAVAILABLE**
-because the original issue-level tracer telemetry is not observable in this
-report. Sprint verdict: **PARTIAL**, solely because the requested tracer
-provenance remains unavailable. This does not change the functional verdict or
+historical compatibility checks pass. The original issue-level trace is frozen
+as **BLOCKED** and reports `ROOT_LINKED_USAGE_OBSERVED` with
+`root_resolution=root_already_registered`; this records observed linked usage,
+not proof of full telemetry ([trace report](https://github.com/scytrowski/dotty-rs/issues/2070#issuecomment-6627776023)).
+That trace status is historical. Later PR validation records functional
+acceptance as **MET**; it does not change the trace's status. Sprint verdict:
+**PARTIAL** because full telemetry acceptance remains unmet. This does not
 imply a compiler correctness failure.
 
 This closeout integrates the separately reviewed immutable-field and explicit
@@ -160,8 +163,10 @@ the implementation and acceptance tests are unchanged. The current PR is
 
 ## Trace provenance
 
-The original issue-level tracer result remains **BLOCKED / UNAVAILABLE**; this
-report contains no original trace artifact and prerequisite PR traces are not
-substitutes. Functional acceptance is **MET**. The sprint verdict is **PARTIAL**
-because tracer provenance remains unmet. Missing telemetry is not treated as a
-compiler correctness failure and is not reported as complete.
+The published [original issue-level trace report](https://github.com/scytrowski/dotty-rs/issues/2070#issuecomment-6627776023)
+is frozen with status **BLOCKED**. It records
+`ROOT_LINKED_USAGE_OBSERVED` and `root_resolution=root_already_registered`:
+observed linked usage, not proof of full telemetry. Later PR progress records
+functional acceptance as **MET**, without changing the historical trace status.
+The sprint verdict remains **PARTIAL** because full telemetry acceptance is
+unmet. This distinction does not indicate a compiler correctness failure.
