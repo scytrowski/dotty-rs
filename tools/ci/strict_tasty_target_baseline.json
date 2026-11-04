@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "source": "The strict linked Scala/TASTy inventory before the two-shard rollout",
+  "targets": [
+    "jvm_tasty_scala_consumer",
+    "jvm_tasty_multiclass_scala_consumer",
+    "jvm_tasty_cross_class_scala_consumer",
+    "jvm_tasty_factory_scala_consumer",
+    "jvm_tasty_object_composition_scala_consumer",
+    "jvm_tasty_constructor_injection_scala_consumer",
+    "jvm_tasty_reference_constructor_scala_consumer",
+    "jvm_tasty_nested_constructor_scala_consumer",
+    "jvm_tasty_multi_argument_constructor_calls",
+    "jvm_tasty_multi_argument_constructor_scala_consumer",
+    "jvm_tasty_factory_result_scala_consumer",
+    "jvm_tasty_reference_local_scala_consumer",
+    "jvm_tasty_dual_reference_signature",
+    "jvm_tasty_dual_reference_artifacts",
+    "jvm_tasty_dual_reference_forwarding",
+    "jvm_tasty_dual_reference_forwarding_scala_consumer",
+    "jvm_tasty_mixed_origin_constructor_scala_consumer",
+    "jvm_tasty_direct_formal_constructor_pair",
+    "jvm_tasty_dual_reference_scala_consumer",
+    "jvm_tasty_dual_reference_rust_consumer",
+    "jvm_tasty_cross_class_factories",
+    "jvm_tasty_factory_result_arguments",
+    "tasty_source_pickling"
+  ]
+}

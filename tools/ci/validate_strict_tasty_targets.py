@@ -15,6 +15,23 @@ class ManifestError(ValueError):
 
 
 FROZEN_WORKFLOW = ".github/workflows/jvm-tasty-factory-scala-consumer.yml"
+FROZEN_BASELINE = "tools/ci/strict_tasty_target_baseline.json"
+
+
+def _frozen_inventory(repository_root: Path, baseline_path: Path | None = None) -> list[str]:
+    path = baseline_path or (repository_root / FROZEN_BASELINE)
+    try:
+        baseline = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ManifestError(f"cannot read frozen target baseline {path}: {error}") from error
+    if not isinstance(baseline, dict) or not isinstance(baseline.get("targets"), list):
+        raise ManifestError("frozen baseline targets must be an array")
+    targets = baseline["targets"]
+    if any(not isinstance(name, str) or re.fullmatch(r"[a-zA-Z0-9_]+", name) is None for name in targets):
+        raise ManifestError("frozen baseline must contain one valid target name per entry")
+    if _duplicates(targets):
+        raise ManifestError("frozen baseline contains duplicate targets")
+    return targets
 
 
 def _workflow_inventory(workflow: str) -> list[str]:
@@ -37,7 +54,9 @@ def _duplicates(values: list[str]) -> list[str]:
     return sorted(repeated)
 
 
-def validate_manifest(manifest: dict[str, Any], repository_root: Path) -> None:
+def validate_manifest(
+    manifest: dict[str, Any], repository_root: Path, baseline_path: Path | None = None
+) -> None:
     if not isinstance(manifest, dict):
         raise ManifestError("manifest root must be an object")
     source = manifest.get("source")
@@ -58,15 +77,18 @@ def validate_manifest(manifest: dict[str, Any], repository_root: Path) -> None:
     if not isinstance(source, dict) or source.get("workflow") != FROZEN_WORKFLOW:
         raise ManifestError(f"source.workflow must remain {FROZEN_WORKFLOW!r}")
 
+    frozen_names = _frozen_inventory(repository_root, baseline_path)
     workflow_path = repository_root / FROZEN_WORKFLOW
     try:
-        frozen_names = _workflow_inventory(workflow_path.read_text(encoding="utf-8"))
+        workflow_names = _workflow_inventory(workflow_path.read_text(encoding="utf-8"))
     except OSError as error:
         raise ManifestError(f"cannot read frozen inventory workflow {source['workflow']!r}: {error}") from error
-    if _duplicates(frozen_names):
+    if _duplicates(workflow_names):
         raise ManifestError("source workflow strict_targets array contains duplicate targets")
+    if workflow_names != frozen_names:
+        raise ManifestError("source workflow inventory differs from the independent frozen baseline")
     if len(frozen_names) != expected_count:
-        raise ManifestError(f"workflow inventory has {len(frozen_names)} targets; manifest expects {expected_count}")
+        raise ManifestError(f"frozen baseline has {len(frozen_names)} targets; manifest expects {expected_count}")
 
     names: list[str] = []
     durations: dict[str, float] = {}
@@ -136,17 +158,30 @@ def validate_manifest(manifest: dict[str, Any], repository_root: Path) -> None:
         raise ManifestError(f"missing tests/<target>.rs files: {', '.join(missing_files)}")
 
 
+def shard_targets(manifest: dict[str, Any], shard_id: str) -> list[str]:
+    shards = manifest["sharding"]["shards"]
+    matches = [shard for shard in shards if shard["id"] == shard_id]
+    if len(matches) != 1:
+        raise ManifestError(f"unknown shard {shard_id!r}; expected one of: {', '.join(s['id'] for s in shards)}")
+    return matches[0]["targets"]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=Path("tools/ci/strict_tasty_targets.json"))
     parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument("--shard", help="print the validated ordered target names assigned to this shard")
     args = parser.parse_args()
     try:
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
         validate_manifest(manifest, args.root)
+        selected = shard_targets(manifest, args.shard) if args.shard else None
     except (OSError, json.JSONDecodeError, ManifestError) as error:
         parser.error(str(error))
-    print(f"validated {manifest['baseline']['inventory_count']} strict TASTy targets across {manifest['sharding']['shard_count']} proposed shards")
+    if selected is not None:
+        print("\n".join(selected))
+    else:
+        print(f"validated {manifest['baseline']['inventory_count']} strict TASTy targets across {manifest['sharding']['shard_count']} proposed shards")
     return 0
 
 

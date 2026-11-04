@@ -25,6 +25,9 @@ class StrictTastyTargetManifestTests(unittest.TestCase):
         workflow.write_text(
             "strict_targets=(\n first_target\n second_target\n)\n", encoding="utf-8"
         )
+        baseline = self.root / "tools" / "ci" / "strict_tasty_target_baseline.json"
+        baseline.parent.mkdir(parents=True)
+        baseline.write_text(json.dumps({"schema_version": 1, "targets": ["first_target", "second_target"]}), encoding="utf-8")
 
     def tearDown(self):
         self.temporary_directory.cleanup()
@@ -62,8 +65,14 @@ class StrictTastyTargetManifestTests(unittest.TestCase):
             validate_manifest(self.fixture("strict-targets-replaced.json"), self.root)
 
     def test_rejects_removal_when_count_and_shards_are_adjusted(self):
-        with self.assertRaisesRegex(ManifestError, "workflow inventory has 2 targets; manifest expects 1"):
+        with self.assertRaisesRegex(ManifestError, "frozen baseline has 2 targets; manifest expects 1"):
             validate_manifest(self.fixture("strict-targets-removed.json"), self.root)
+
+    def test_rejects_duplicate_workflow_inventory(self):
+        workflow = self.root / ".github" / "workflows" / "jvm-tasty-factory-scala-consumer.yml"
+        workflow.write_text("strict_targets=(\n first_target\n first_target\n second_target\n)\n", encoding="utf-8")
+        with self.assertRaisesRegex(ManifestError, "source workflow strict_targets array contains duplicate targets"):
+            validate_manifest(self.fixture("strict-targets-duplicate.json"), self.root)
 
     def test_rejects_manifest_repointing_its_inventory_source(self):
         manifest = self.fixture("strict-targets-replaced.json")
@@ -79,6 +88,41 @@ class StrictTastyTargetManifestTests(unittest.TestCase):
             "shards": [{"id": "shard-1", "estimated_test_seconds": 3.0, "targets": ["first_target", "second_target"]}],
         }
         with self.assertRaisesRegex(ManifestError, "missing tests/<target>.rs files: second_target"):
+            validate_manifest(manifest, self.root)
+
+    def test_rejects_workflow_inventory_drift_from_independent_baseline(self):
+        workflow = self.root / ".github" / "workflows" / "jvm-tasty-factory-scala-consumer.yml"
+        workflow.write_text("strict_targets=(\n first_target\n)\n", encoding="utf-8")
+        with self.assertRaisesRegex(ManifestError, "differs from the independent frozen baseline"):
+            validate_manifest(self.fixture("strict-targets-missing.json"), self.root)
+
+    def test_shard_selection_returns_manifest_order(self):
+        manifest = self.fixture("strict-targets-duplicate.json")
+        manifest["sharding"] = {
+            "shard_count": 2,
+            "shards": [
+                {"id": "shard-1", "estimated_test_seconds": 1.0, "targets": ["second_target"]},
+                {"id": "shard-2", "estimated_test_seconds": 2.0, "targets": ["first_target"]},
+            ],
+        }
+        from validate_strict_tasty_targets import shard_targets
+
+        self.assertEqual(shard_targets(manifest, "shard-1"), ["second_target"])
+        self.assertEqual(shard_targets(manifest, "shard-2"), ["first_target"])
+
+    def test_shard_selection_rejects_invalid_id(self):
+        from validate_strict_tasty_targets import shard_targets
+
+        with self.assertRaisesRegex(ManifestError, "unknown shard 'shard-3'"):
+            shard_targets(self.fixture("strict-targets-duplicate.json"), "shard-3")
+
+    def test_rejects_unknown_shard_target(self):
+        manifest = self.fixture("strict-targets-duplicate.json")
+        manifest["sharding"] = {
+            "shard_count": 1,
+            "shards": [{"id": "shard-1", "estimated_test_seconds": 3.0, "targets": ["first_target", "rogue_target"]}],
+        }
+        with self.assertRaisesRegex(ManifestError, "unknown assigned targets: rogue_target"):
             validate_manifest(manifest, self.root)
 
 
