@@ -188,6 +188,7 @@ sanitized JSONL telemetry explicitly:
 ```sh
 mkdir -p target
 export DOTTY_ORACLE_TIMINGS_FILE="$PWD/target/oracle-timings.jsonl"
+export DOTTY_REQUIRE_SCALA_TASTY_FACTORY_RESULT_CONSUMER=1
 : > "$DOTTY_ORACLE_TIMINGS_FILE"
 cargo test --locked -p dotty --test jvm_tasty_factory_result_scala_consumer -- --nocapture
 ```

@@ -186,6 +186,45 @@ class HarnessTests(unittest.TestCase):
                               "compiler_artifact_sha256", "version_probes"])
             self.assertTrue(all(stage["status"] == "success" for stage in stages))
 
+    def test_toolchain_stages_preserve_timeout_status_through_execute_wrapper(self):
+        for timed_stage in ("scala_source_pin", "version_probes"):
+            with self.subTest(stage=timed_stage), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.fake_cache(root)
+                fixtures = root / "fixtures"
+                fixtures.mkdir()
+                artifacts = {f"{artifact}-{version}.jar": oracle.digest(
+                    root / group / artifact / version / f"{artifact}-{version}.jar")
+                    for group, artifact, version in oracle.ARTIFACTS}
+                (fixtures / "provenance.json").write_text(json.dumps({
+                    "compiler_artifacts_sha256": artifacts}))
+                events = root / "timings.jsonl"
+                env = {k: temporary for k in
+                       ("SCALA39_ROOT", "JAVA_HOME", "COURSIER_MAVEN_ROOT")}
+                env["DOTTY_ORACLE_TIMINGS_FILE"] = str(events)
+                calls = 0
+
+                def run_command(command, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    if timed_stage == "version_probes" and calls == 1:
+                        return subprocess.CompletedProcess(command, 0, oracle.REVISION + "\n")
+                    raise subprocess.TimeoutExpired(command, 180)
+
+                with mock.patch.dict(os.environ, env, clear=True):
+                    with mock.patch.object(oracle, "FIXTURES", fixtures):
+                        with mock.patch.object(oracle.subprocess, "run", side_effect=run_command):
+                            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                                oracle.Toolchain()
+
+                records = [json.loads(line) for line in events.read_text().splitlines()]
+                command_events = [record for record in records if record["event"] == "execute"]
+                stage_events = [record for record in records if record["event"] == "toolchain_stage"]
+                self.assertEqual(command_events[-1]["status"], "timeout")
+                matching_stage = next(record for record in stage_events
+                                      if record["operation"] == timed_stage)
+                self.assertEqual(matching_stage["status"], "timeout")
+
     def test_timeout_is_a_harness_failure_not_a_reader_negative_control(self):
         with mock.patch.object(oracle.subprocess, "run", side_effect=
                                subprocess.TimeoutExpired(["compiler"], 180)):

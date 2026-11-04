@@ -94,10 +94,21 @@ def _timed_stage(operation: str):
     try:
         yield
     except BaseException as error:
-        status = "timeout" if isinstance(error, subprocess.TimeoutExpired) else "failure"
+        status = "timeout" if _has_timeout_cause(error) else "failure"
         raise
     finally:
         _telemetry("toolchain_stage", "toolchain", operation, started_ns, status)
+
+
+def _has_timeout_cause(error: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, subprocess.TimeoutExpired):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def execute(args: list[str | Path], *, cwd: Path = ROOT) -> str:
