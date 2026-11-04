@@ -5,7 +5,8 @@ use dotty_classfile::constant_pool::ConstantPoolIndex;
 use dotty_classfile::reader::Reader;
 use dotty_core::SourceId;
 use dotty_tasty::ast::{
-    BLOCK_TAG, DEFDEF_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TYPEREF_TAG, VALDEF_TAG,
+    APPLY_TAG, BLOCK_TAG, DEFDEF_TAG, SELECTIN_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TYPEREF_TAG,
+    VALDEF_TAG,
 };
 use dotty_tasty::reader::Reader as TastyReader;
 use dotty_tasty::section::StandardSection;
@@ -27,6 +28,16 @@ const CLIENTS: [&str; 2] = [
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/Consumer.scala"),
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/ConsumerReversed.scala"),
 ];
+const TWO_LOCAL_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+const TWO_LOCAL_REVERSED_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocalsReversed.scala");
+const TWO_LOCAL_ALIAS_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/PairFactoryAlias.scala");
+const TWO_LOCAL_CLIENT: &str =
+    include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/Consumer.scala");
+const TWO_LOCAL_REVERSED_CLIENT: &str =
+    include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/ConsumerReversed.scala");
 
 fn required() -> bool {
     match std::env::var(REQUIRE).as_deref() {
@@ -515,6 +526,70 @@ fn change_initializer_constructor(tasty_bytes: &[u8], method_name: &str) -> Vec<
     changed[start..start + replacement_encoded.len()].copy_from_slice(&replacement_encoded);
     TastyFile::parse_and_validate_scala_3_9(&changed)
         .expect("constructor-mutated TASTy remains structurally valid");
+    changed
+}
+
+fn change_first_local_signed_constructor(tasty_bytes: &[u8]) -> Vec<u8> {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes)
+        .expect("parse pinned PairFactory TASTy before signed-name mutation");
+    let index = tasty.ast_address_index().unwrap();
+    let asts = tasty.section(StandardSection::Asts).unwrap();
+    let locals = index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .filter(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .and_then(|parent| index.get(parent.offset as u32))
+                .is_some_and(|parent| parent.tag == BLOCK_TAG)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(locals.len(), 2, "the oracle has exactly two BLOCK locals");
+    let first_local_address = locals[0].offset as u32;
+    let select = index
+        .iter_nodes_with_tag(SELECTIN_TAG)
+        .find(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == first_local_address)
+        })
+        .expect("first local initializer contains its SELECTin constructor name");
+    let raw = index.get(select.offset as u32).unwrap();
+    let selected = raw.decode_select_in().unwrap();
+    assert_eq!(
+        selected.name, 23,
+        "oracle signed Counter constructor name index"
+    );
+    let printed = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "tests/fixtures/jvm_tasty_two_immutable_reference_locals/PairFactory.print-tasty.txt",
+    ))
+    .unwrap();
+    assert!(printed.lines().any(|line| {
+        line.trim_start().starts_with("23:")
+            && line.contains("Signed Signature(List(scala.Int),example.Counter)")
+    }));
+    assert!(printed.lines().any(|line| {
+        line.trim_start().starts_with("20:")
+            && line
+                .contains("Signed Signature(List(example.Counter, example.Counter),example.Pair)")
+    }));
+    let mut original = Writer::default();
+    original.write_nat(selected.name);
+    let mut replacement = Writer::default();
+    replacement.write_nat(20);
+    let original = original.into_inner();
+    let replacement = replacement.into_inner();
+    assert_eq!(
+        original.len(),
+        replacement.len(),
+        "signed name slot width is unchanged"
+    );
+    let payload_offset = raw.payload.as_ptr() as usize - asts.payload.as_ptr() as usize;
+    let mut changed = tasty_bytes.to_vec();
+    let start = asts.offset + payload_offset;
+    changed[start..start + replacement.len()].copy_from_slice(&replacement);
+    TastyFile::parse_and_validate_scala_3_9(&changed)
+        .expect("wrong signed constructor name remains structurally valid TASTy");
     changed
 }
 
@@ -1473,4 +1548,511 @@ fn immutable_local_pair_required_mode_does_not_skip_when_configuration_is_missin
         assert!(std::env::var_os(key).is_some(), "required mode needs {key}");
     }
     assert!(Scala::required().compiler.is_file());
+}
+
+#[test]
+fn scala39_two_local_oracle_records_wire_abi_slots_and_identity_controls() {
+    if !required() {
+        return;
+    }
+    let scala = Scala::required();
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture = repo.join("tests/fixtures/jvm_tasty_two_immutable_reference_locals");
+    for (file, source) in [
+        ("TwoLocals.scala", TWO_LOCAL_SOURCE),
+        ("TwoLocalsReversed.scala", TWO_LOCAL_REVERSED_SOURCE),
+        ("PairFactoryAlias.scala", TWO_LOCAL_ALIAS_SOURCE),
+        ("Consumer.scala", TWO_LOCAL_CLIENT),
+        ("ConsumerReversed.scala", TWO_LOCAL_REVERSED_CLIENT),
+    ] {
+        assert_eq!(
+            fs::read_to_string(fixture.join(file)).unwrap(),
+            source,
+            "compiler input {file} is the checked-in fixture"
+        );
+    }
+    let output_root = task_dir();
+    let primary = output_root.join("primary");
+    let alias = output_root.join("alias");
+    let reversed = output_root.join("reversed");
+    let primary_client = output_root.join("primary-client");
+    let reversed_client = output_root.join("reversed-client");
+    for directory in [
+        &primary,
+        &alias,
+        &reversed,
+        &primary_client,
+        &reversed_client,
+    ] {
+        fs::create_dir_all(directory).unwrap();
+    }
+
+    let source = fixture.join("TwoLocals.scala");
+    scala.compile(&scala.libraries, &primary, &source);
+    for class_name in ["Counter", "Pair", "PairFactory"] {
+        for extension in ["class", "tasty"] {
+            let relative = format!("scala39/primary/example/{class_name}.{extension}");
+            let generated = primary.join(format!("example/{class_name}.{extension}"));
+            let checked = fixture.join(&relative);
+            assert_eq!(
+                fs::read(&generated).unwrap(),
+                fs::read(&checked).unwrap(),
+                "pinned Scala output is reproducible for {relative}"
+            );
+        }
+
+        let class_bytes = fs::read(primary.join(format!("example/{class_name}.class"))).unwrap();
+        let class = decode_class(&class_bytes);
+        assert_eq!(
+            class.version.major, 65,
+            "Java 21 classfile major for {class_name}"
+        );
+        let tasty_bytes = fs::read(primary.join(format!("example/{class_name}.tasty"))).unwrap();
+        let tasty = TastyFile::parse_and_validate_scala_3_9(&tasty_bytes)
+            .expect("pinned Scala sidecar is valid TASTy 28.9");
+        assert_eq!(
+            class
+                .tasty_link_id()
+                .expect("oracle class TASTY link decodes")
+                .expect("oracle class has exactly one TASTY link")
+                .as_bytes(),
+            &tasty.header().uuid,
+            "classfile TASTY link equals {class_name} sidecar UUID"
+        );
+    }
+
+    let factory_tasty = fs::read(primary.join("example/PairFactory.tasty")).unwrap();
+    let tasty = TastyFile::parse_and_validate_scala_3_9(&factory_tasty)
+        .expect("PairFactory oracle sidecar parses");
+    let index = tasty.ast_address_index().unwrap();
+    let method = index
+        .iter_nodes_with_tag(DEFDEF_TAG)
+        .find(|node| {
+            index
+                .get(node.offset as u32)
+                .and_then(|raw| raw.decode_defdef_body().ok())
+                .and_then(|body| tasty.names().render(body.name).ok())
+                .is_some_and(|name| name == "create")
+        })
+        .expect("PairFactory.create is present in oracle TASTy");
+    let method_address = method.offset as u32;
+    let block = index
+        .iter_nodes_with_tag(BLOCK_TAG)
+        .find(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == method_address)
+        })
+        .expect("create body has its original BLOCK");
+    let block_address = block.offset as u32;
+    let locals = index
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .filter(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == block_address)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(locals.len(), 2, "BLOCK owns exactly two local VALDEFs");
+    let local_names = locals
+        .iter()
+        .map(|node| {
+            match index
+                .get(node.offset as u32)
+                .unwrap()
+                .decode_definition_body()
+                .unwrap()
+            {
+                dotty_tasty::ast::DefinitionBody::ValDef { name, .. } => {
+                    tasty.names().render(name).unwrap()
+                }
+                other => panic!("BLOCK local has a VALDEF body: {other:?}"),
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(local_names, ["first", "second"]);
+    let pair_apply = index
+        .iter_nodes_with_tag(APPLY_TAG)
+        .find(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset as u32 == block_address)
+        })
+        .expect("BLOCK has a direct final Pair constructor Apply");
+    assert!(
+        pair_apply.offset < locals[0].offset && locals[0].offset < locals[1].offset,
+        "wire order is final Apply, first VALDEF, second VALDEF; declaration/evaluation order remains source order"
+    );
+    let asts = tasty.section(StandardSection::Asts).unwrap();
+    let final_local_targets = index
+        .iter_nodes_with_tag(TERMREFDIRECT_TAG)
+        .filter(|node| {
+            index
+                .parent_of(node.offset as u32)
+                .is_some_and(|parent| parent.offset == pair_apply.offset)
+        })
+        .map(|node| {
+            let mut reader =
+                TastyReader::with_range(asts.payload, node.offset, asts.payload.len()).unwrap();
+            match RawTree::decode(&mut reader).unwrap() {
+                RawTree::Leaf(term)
+                    if term.tag == TERMREFDIRECT_TAG
+                        && matches!(term.value, TermValue::AstRef(_)) =>
+                {
+                    let TermValue::AstRef(value) = term.value else {
+                        unreachable!("the TERMREFdirect leaf carries its decoded address")
+                    };
+                    value
+                }
+                other => panic!("final Pair argument is a direct term reference: {other:?}"),
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        final_local_targets,
+        locals
+            .iter()
+            .map(|node| node.offset as u32)
+            .collect::<Vec<_>>(),
+        "final Pair Apply refers to both original local VALDEF addresses in argument order"
+    );
+    eprintln!(
+        "SCALA_TWO_LOCAL_TASTY method={} block={} final_apply={} local_valdefs={:?} final_termref_targets={:?}",
+        method_address,
+        block_address,
+        pair_apply.offset,
+        locals.iter().map(|node| node.offset).collect::<Vec<_>>(),
+        final_local_targets
+    );
+
+    let wrong_signed = change_first_local_signed_constructor(&factory_tasty);
+    let wrong_signed_file = output_root.join("mutations/wrong-signed-constructor.tasty");
+    let wrong_signed_output = output_root.join("mutations/wrong-signed-constructor-output");
+    fs::create_dir_all(wrong_signed_file.parent().unwrap()).unwrap();
+    fs::create_dir_all(&wrong_signed_output).unwrap();
+    fs::write(&wrong_signed_file, &wrong_signed).unwrap();
+    let oracle_classpath = format!("{}:{}", primary.display(), scala.libraries);
+    let wrong_signed_result =
+        scala.run_from_tasty(&oracle_classpath, &wrong_signed_output, &wrong_signed_file);
+    assert!(
+        wrong_signed_result.status.success(),
+        "the pinned Scala compiler currently accepts this structurally valid wrong signed slot"
+    );
+    let wrong_signed_message = plain(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&wrong_signed_result.stdout),
+        String::from_utf8_lossy(&wrong_signed_result.stderr)
+    ));
+    let wrong_signed_first = wrong_signed_message
+        .lines()
+        .find(|line| line.contains("error") || line.contains("Exception"))
+        .unwrap_or("accepted")
+        .trim();
+    eprintln!(
+        "SCALA_TWO_LOCAL_MUTATION wrong_signed_constructor status={} first_error={wrong_signed_first}",
+        if wrong_signed_result.status.success() {
+            "accepted"
+        } else {
+            "rejected"
+        }
+    );
+    let mut truncated = factory_tasty.clone();
+    truncated.truncate(truncated.len() / 2);
+    assert!(TastyFile::parse_and_validate_scala_3_9(&truncated).is_err());
+    let truncated_file = output_root.join("mutations/truncated.tasty");
+    let truncated_output = output_root.join("mutations/truncated-output");
+    fs::create_dir_all(&truncated_output).unwrap();
+    fs::write(&truncated_file, &truncated).unwrap();
+    let truncated_result =
+        scala.run_from_tasty(&oracle_classpath, &truncated_output, &truncated_file);
+    assert!(
+        !truncated_result.status.success(),
+        "Scala -from-tasty rejects a truncated PairFactory sidecar"
+    );
+    let truncated_message = plain(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&truncated_result.stdout),
+        String::from_utf8_lossy(&truncated_result.stderr)
+    ));
+    let truncated_first = truncated_message
+        .lines()
+        .find(|line| line.contains("error") || line.contains("Exception"))
+        .unwrap_or("accepted")
+        .trim();
+    eprintln!(
+        "SCALA_TWO_LOCAL_MUTATION truncated_tasty status={} rust_structural=reject first_error={truncated_first}",
+        if truncated_result.status.success() {
+            "accepted"
+        } else {
+            "rejected"
+        }
+    );
+
+    let factory_class_bytes = fs::read(primary.join("example/PairFactory.class")).unwrap();
+    let factory_class = decode_class(&factory_class_bytes);
+    let create = factory_class
+        .methods
+        .iter()
+        .find(|method| {
+            factory_class.constant_pool.utf8(method.name_index) == Ok("create")
+                && factory_class.constant_pool.utf8(method.descriptor_index)
+                    == Ok("(II)Lexample/Pair;")
+        })
+        .expect("create has the observed two-Int ABI");
+    let code = create
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            Attribute::Code(code) => Some(code),
+            _ => None,
+        })
+        .expect("create has a JVM Code attribute");
+    assert_eq!((code.max_stack, code.max_locals), (4, 5));
+    assert_eq!(
+        [
+            code.code[4],
+            code.code[8],
+            code.code[13],
+            code.code[17],
+            code.code[18],
+            code.code[23],
+            code.code[24],
+            code.code[25]
+        ],
+        [0x1b, 0x4e, 0x1c, 0x3a, 0x04, 0x2d, 0x19, 0x04],
+        "new Counter initializers use Int slots 1/2 and reference slots 3/4 before Pair constructor loads"
+    );
+    let javap = output(
+        Command::new(scala.java.with_file_name("javap"))
+            .args(["-classpath"])
+            .arg(&primary)
+            .args(["-v", "-p", "-c", "example.PairFactory"]),
+    );
+    let javap_text = String::from_utf8_lossy(&javap.stdout);
+    for fragment in [
+        "descriptor: (II)Lexample/Pair;",
+        "stack=4, locals=5",
+        "astore_3",
+        "astore        4",
+        "aload_3",
+        "aload         4",
+        "example/Pair.\"<init>\":(Lexample/Counter;Lexample/Counter;)V",
+    ] {
+        assert!(
+            javap_text.contains(fragment),
+            "javap lacks {fragment}: {javap_text}"
+        );
+    }
+    eprintln!(
+        "SCALA_TWO_LOCAL_ABI descriptor=(II)Lexample/Pair; stack=4 locals=5 reference_slots=[3,4]"
+    );
+
+    let alias_source = fixture.join("PairFactoryAlias.scala");
+    scala.compile(
+        &format!("{}:{}", primary.display(), scala.libraries),
+        &alias,
+        &alias_source,
+    );
+    let primary_cp = format!(
+        "{}:{}:{}",
+        primary.display(),
+        alias.display(),
+        scala.libraries
+    );
+    scala.compile(
+        &primary_cp,
+        &primary_client,
+        &fixture.join("Consumer.scala"),
+    );
+    output(
+        Command::new(&scala.java)
+            .env(
+                "JAVA_TOOL_OPTIONS",
+                format!(
+                    "-XX:-UsePerfData -Djava.io.tmpdir={}",
+                    std::env::var("TMPDIR").unwrap()
+                ),
+            )
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(format!(
+                "{}:{}:{}:{}",
+                primary.display(),
+                alias.display(),
+                primary_client.display(),
+                scala.libraries
+            ))
+            .arg("client.Consumer"),
+    );
+
+    scala.compile(
+        &format!("{}:{}", primary.display(), scala.libraries),
+        &reversed,
+        &fixture.join("TwoLocalsReversed.scala"),
+    );
+    scala.compile(
+        &format!(
+            "{}:{}:{}",
+            reversed.display(),
+            alias.display(),
+            scala.libraries
+        ),
+        &reversed_client,
+        &fixture.join("ConsumerReversed.scala"),
+    );
+    output(
+        Command::new(&scala.java)
+            .env(
+                "JAVA_TOOL_OPTIONS",
+                format!(
+                    "-XX:-UsePerfData -Djava.io.tmpdir={}",
+                    std::env::var("TMPDIR").unwrap()
+                ),
+            )
+            .args(["-Xverify:all", "-ea", "-classpath"])
+            .arg(format!(
+                "{}:{}:{}:{}",
+                reversed.display(),
+                alias.display(),
+                reversed_client.display(),
+                scala.libraries
+            ))
+            .arg("client.Consumer"),
+    );
+    eprintln!(
+        "SCALA_TWO_LOCAL_CLIENTS primary=7/3 reversed=3/7 alias=left-equals-right; independent mutation and fresh allocations passed"
+    );
+}
+
+#[test]
+fn scala39_two_local_variation_matrix_records_language_validity() {
+    if !required() {
+        return;
+    }
+    let scala = Scala::required();
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/jvm_tasty_two_immutable_reference_locals");
+    let source = TWO_LOCAL_SOURCE;
+    let renamed = source
+        .replace("package example", "package renamed")
+        .replace("Counter", "Gauge")
+        .replace("PairFactory", "DuoFactory")
+        .replace("Pair", "Duo")
+        .replace("firstSeed", "leftSeed")
+        .replace("secondSeed", "rightSeed")
+        .replace("val first:", "val item:")
+        .replace("val second:", "val item2:")
+        .replace("new Duo(first, second)", "new Duo(item, item2)");
+    let counter_start = source.find("class Counter(").unwrap();
+    let pair_start = source.find("class Pair(").unwrap();
+    let factory_start = source.find("class PairFactory:").unwrap();
+    let reordered = format!(
+        "{}{}{}{}",
+        &source[..counter_start],
+        &source[pair_start..factory_start],
+        &source[counter_start..pair_start],
+        &source[factory_start..]
+    );
+    let swapped_initializers = source
+        .replace("new Counter(firstSeed)", "new Counter($swap)")
+        .replace("new Counter(secondSeed)", "new Counter(firstSeed)")
+        .replace("new Counter($swap)", "new Counter(secondSeed)");
+    let third_local = source.replace(
+        "    val second: Counter = new Counter(secondSeed)\n    new Pair(first, second)",
+        "    val second: Counter = new Counter(secondSeed)\n    val third: Counter = new Counter(firstSeed)\n    new Pair(first, second)",
+    );
+    let mutable_local = source.replace("val first: Counter", "var first: Counter");
+    let helper_initializer = source.replace(
+        "    val first: Counter = new Counter(firstSeed)",
+        "    def make(seed: Int): Counter = new Counter(seed)\n    val first: Counter = make(firstSeed)",
+    );
+    let conditional_initializer = source.replace(
+        "val first: Counter = new Counter(firstSeed)",
+        "val first: Counter = if firstSeed > 0 then new Counter(firstSeed) else new Counter(0)",
+    );
+    let nested_initializer = source.replace(
+        "val first: Counter = new Counter(firstSeed)",
+        "val first: Counter = new Counter(new Counter(firstSeed).get())",
+    );
+    let branch_local = source.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)\n    new Pair(first, second)",
+        "    if firstSeed > 0 then\n      val first: Counter = new Counter(firstSeed)\n      val second: Counter = new Counter(secondSeed)\n      new Pair(first, second)\n    else\n      val first: Counter = new Counter(firstSeed)\n      val second: Counter = new Counter(secondSeed)\n      new Pair(first, second)",
+    );
+    let reversed_args = source.replace("new Pair(first, second)", "new Pair(second, first)");
+    let alias_args = source.replace("new Pair(first, second)", "new Pair(first, first)");
+    let missing_initializer = source.replace(
+        "val first: Counter = new Counter(firstSeed)",
+        "val first: Counter",
+    );
+    let duplicate_local = source
+        .replace("val second: Counter", "val first: Counter")
+        .replace("new Pair(first, second)", "new Pair(first, first)");
+    let use_before_declaration = source.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)\n    new Pair(first, second)",
+        "    val result: Pair = new Pair(first, second)\n    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)\n    result",
+    );
+    let shadowed_formal = source.replace(
+        "val first: Counter = new Counter(firstSeed)",
+        "val firstSeed: Counter = new Counter(firstSeed)",
+    );
+    let wrong_local_type = source.replace(
+        "val first: Counter = new Counter(firstSeed)",
+        "val first: String = new Counter(firstSeed)",
+    );
+    let wrong_pair_signature =
+        source.replace("new Pair(first, second)", "new Pair(firstSeed, secondSeed)");
+    let cases = [
+        ("renamed-package-classes-locals", renamed, true),
+        ("reordered-class-declarations", reordered, true),
+        ("swapped-initializer-formals", swapped_initializers, true),
+        ("third-local", third_local, true),
+        ("mutable-local", mutable_local, true),
+        ("helper-initializer", helper_initializer, true),
+        ("conditional-initializer", conditional_initializer, true),
+        ("nested-initializer", nested_initializer, true),
+        ("branch-local", branch_local, true),
+        ("reversed-pair-arguments", reversed_args, true),
+        ("aliased-pair-arguments", alias_args, true),
+        ("missing-initializer", missing_initializer, false),
+        ("duplicate-local-name", duplicate_local, false),
+        ("use-before-declaration", use_before_declaration, false),
+        ("shadowed-formal", shadowed_formal, false),
+        ("wrong-local-type", wrong_local_type, false),
+        (
+            "wrong-pair-constructor-signature",
+            wrong_pair_signature,
+            false,
+        ),
+    ];
+    let root = task_dir().join("scala-variation-matrix");
+    fs::create_dir_all(&root).unwrap();
+    for (label, source, should_compile) in cases {
+        let source_path = root.join(format!("{label}.scala"));
+        let output_path = root.join(label);
+        fs::create_dir_all(&output_path).unwrap();
+        fs::write(&source_path, &source).unwrap();
+        let result = scala.compile_result(&scala.libraries, &output_path, &source_path);
+        assert_eq!(
+            result.status.success(),
+            should_compile,
+            "Scala validity of {label}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let first_error = plain(&String::from_utf8_lossy(&result.stderr))
+            .lines()
+            .find(|line| line.trim_start().starts_with("-- [E"))
+            .unwrap_or("accepted")
+            .trim()
+            .to_owned();
+        eprintln!(
+            "SCALA_TWO_LOCAL_VARIATION label={label} source_sha256={} result={} first_error={first_error}",
+            hash(&source_path),
+            if should_compile {
+                "accepted"
+            } else {
+                "rejected"
+            }
+        );
+    }
+    let _ = fixture;
 }

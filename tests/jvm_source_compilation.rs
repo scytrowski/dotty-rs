@@ -53,6 +53,8 @@ const IMMUTABLE_REFERENCE_LOCAL_PAIR_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactory.scala");
 const IMMUTABLE_REFERENCE_LOCAL_PAIR_REVERSED_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactoryReversed.scala");
+const TWO_IMMUTABLE_REFERENCE_LOCALS_SOURCE: &str =
+    include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
 const MULTI_ARGUMENT_FACTORY_SOURCE: &str =
     include_str!("fixtures/jvm_tasty_multi_argument_constructor_calls/PairFactory.scala");
 const MIXED_ORIGIN_WRAP_AND_CREATE_SOURCE: &str = include_str!(
@@ -26141,6 +26143,242 @@ fn source_local_declarations_export_method_scoped_canonical_bindings() {
         }],
     };
     assert_eq!(unit.validate(), Ok(()));
+}
+
+#[test]
+fn two_immutable_reference_locals_preserve_authentic_source_typed_and_jvm_identity() {
+    let output = TestOutputDirectory::new("two-immutable-reference-locals-authentic-session");
+    let source_id = SourceId::from_index(21220);
+    let bindings = RefCell::new(None);
+    let mut observe_typer = |ast: &AstArena<Untyped>,
+                             _root: TreeId<Untyped>,
+                             index: &SourceSemanticIndex,
+                             typer: &mut SourceTyper<'_>,
+                             _definitions: &Definitions| {
+        let (method_tree, method) = ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(method)
+                    if typer.store().names.resolve(method.name.as_name().text()) == "create" =>
+                {
+                    Some((tree, method))
+                }
+                _ => None,
+            })
+            .expect("the original two-local create method exists");
+        let method_symbol = index.symbol_at(source_id, method_tree).unwrap();
+        let rhs = method.rhs.expect("create has its original source body");
+        let TreeKind::Block(block) = &ast.get(rhs).kind else {
+            panic!("create has the original straight-line source Block")
+        };
+        assert_eq!(block.stats.len(), 2);
+        let locals = block
+            .stats
+            .iter()
+            .map(|declaration| {
+                let binding = typer
+                    .typed_local_binding_at(source_id, *declaration)
+                    .expect("Typer records each original immutable local");
+                assert_eq!(
+                    typer.store().symbols.get(binding.symbol()).owner,
+                    Some(method_symbol)
+                );
+                assert_eq!(
+                    typer.store().scopes.get(binding.scope()).owner,
+                    Some(method_symbol)
+                );
+                assert!(
+                    !typer
+                        .store()
+                        .symbols
+                        .get(binding.symbol())
+                        .flags
+                        .contains(SymbolFlags::MUTABLE)
+                );
+                (*declaration, binding)
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(locals[0].1.symbol(), locals[1].1.symbol());
+        assert_ne!(locals[0].1.declaration(), locals[1].1.declaration());
+        *bindings.borrow_mut() = Some((method_tree, method_symbol, locals));
+    };
+    let mut observe_source = |ast: &AstArena<Untyped>,
+                              _root: TreeId<Untyped>,
+                              index: &SourceSemanticIndex,
+                              typed_index: &SourceTypedIndex,
+                              unit: &mut JvmCompilationUnit<'_>,
+                              definitions: &Definitions| {
+        let (method_tree, method_symbol, locals) = bindings
+            .borrow()
+            .clone()
+            .expect("source and typed observations belong to one frontend session");
+        let method = ast.get(method_tree);
+        let TreeKind::DefDef(method) = &method.kind else {
+            panic!("captured method tree remains the original DefDef")
+        };
+        let [first_param_tree, second_param_tree] = method.value_param_clauses[0].as_slice() else {
+            panic!("create retains its two ordered Int formals")
+        };
+        let first_param = index.symbol_at(source_id, *first_param_tree).unwrap();
+        let second_param = index.symbol_at(source_id, *second_param_tree).unwrap();
+        let rhs = method.rhs.unwrap();
+        let TreeKind::Block(block) = &ast.get(rhs).kind else {
+            panic!("create source body is the original Block")
+        };
+        let local_symbols = locals
+            .iter()
+            .map(|(_, binding)| binding.symbol())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            block.stats,
+            locals.iter().map(|(tree, _)| *tree).collect::<Vec<_>>()
+        );
+
+        for (position, ((declaration, binding), expected_param)) in
+            locals.iter().zip([first_param, second_param]).enumerate()
+        {
+            let TreeKind::ValDef(definition) = &ast.get(*declaration).kind else {
+                panic!("Block statistic {position} is the original ValDef")
+            };
+            let initializer = definition.rhs.unwrap();
+            let typed_declaration = typed_index.get(source_id, *declaration).unwrap();
+            assert_eq!(typed_declaration, binding.declaration());
+            let typed_initializer = typed_index.get(source_id, initializer).unwrap();
+            let TreeKind::Apply(initializer_apply) = &ast.get(initializer).kind else {
+                panic!("each original local initializer is a constructor Apply")
+            };
+            let TreeKind::Select(initializer_select) = &ast.get(initializer_apply.function).kind
+            else {
+                panic!("each local initializer selects Counter's constructor")
+            };
+            let typed_selection = typed_index
+                .get(source_id, initializer_apply.function)
+                .expect("the original constructor selection has a typed binding");
+            let selected_constructor =
+                match unit.store.types.get(unit.typed_ast.get(typed_selection).ty) {
+                    Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    } => *symbol,
+                    other => panic!("constructor Select retains its canonical TermRef: {other:?}"),
+                };
+            assert_eq!(
+                unit.store.symbols.get(selected_constructor).owner,
+                Some(audit_class_named(unit, "Counter"))
+            );
+            let initializer_argument = initializer_apply.args[0];
+            let typed_argument = typed_index.get(source_id, initializer_argument).unwrap();
+            let argument_type = unit.typed_ast.get(typed_argument).ty;
+            assert!(matches!(
+                unit.store.types.get(argument_type),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                    if *symbol == expected_param
+            ));
+            let typed_type = unit.typed_ast.get(typed_declaration).ty;
+            let local_type = unit.store.symbols.get(binding.symbol()).info;
+            assert!(
+                matches!(local_type, SymbolInfo::Complete(symbol_type) if symbol_type == typed_type)
+            );
+            assert!(
+                typed_index
+                    .get(source_id, initializer_apply.function)
+                    .is_some()
+            );
+            assert!(
+                typed_index
+                    .get(source_id, initializer_select.qualifier)
+                    .is_some()
+            );
+            eprintln!(
+                "two-local source identity position={position} name={} source_id={source_id:?} method={method_symbol:?} formal={expected_param:?} local={:?} scope={:?} owner={:?} source_tree={declaration:?} typed_tree={typed_declaration:?} initializer={initializer:?}->{typed_initializer:?} initializer_select={:?} constructor={selected_constructor:?} argument={initializer_argument:?}->{typed_argument:?} argument_type={argument_type:?} local_type={typed_type:?} source_span={:?}",
+                unit.store.names.resolve(definition.name.as_name().text()),
+                binding.symbol(),
+                binding.scope(),
+                unit.store.scopes.get(binding.scope()).owner,
+                initializer_apply.function,
+                ast.get(*declaration).position
+            );
+        }
+
+        let TreeKind::Apply(final_apply) = &ast.get(block.expr).kind else {
+            panic!("the original final expression is Pair's constructor Apply")
+        };
+        assert_eq!(final_apply.args.len(), 2);
+        let typed_final = typed_index.get(source_id, block.expr).unwrap();
+        let mut final_reference_symbols = Vec::new();
+        for (argument, local_symbol) in final_apply.args.iter().zip(local_symbols.iter().copied()) {
+            let typed_argument = typed_index.get(source_id, *argument).unwrap();
+            let argument_type = unit.typed_ast.get(typed_argument).ty;
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } = unit.store.types.get(argument_type)
+            else {
+                panic!("Pair argument is an original local TERMREF")
+            };
+            assert_eq!(*symbol, local_symbol);
+            final_reference_symbols.push(*symbol);
+        }
+        assert_eq!(final_reference_symbols, local_symbols);
+        let TreeKind::Apply(typed_final_apply) = &unit.typed_ast.get(typed_final).kind else {
+            panic!("the source Pair Apply has its exact typed Apply root")
+        };
+        let typed_constructor_select = typed_final_apply.function;
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(pair_constructor),
+            ..
+        } = unit
+            .store
+            .types
+            .get(unit.typed_ast.get(typed_constructor_select).ty)
+        else {
+            panic!("the typed final Pair constructor selection retains its canonical symbol")
+        };
+        let pair_symbol = audit_class_named(unit, "Pair");
+        assert_eq!(
+            unit.store.symbols.get(*pair_constructor).owner,
+            Some(pair_symbol)
+        );
+        eprintln!(
+            "two-local final Pair Apply source={:?} typed={typed_final:?} typed_constructor={pair_constructor:?} source_args={:?} local_symbols={:?} source_typed_edges=preserved",
+            block.expr, final_apply.args, final_reference_symbols
+        );
+        assert_eq!(
+            unit.classes.len(),
+            3,
+            "the one-session JVM pipeline compiles Counter, Pair and PairFactory"
+        );
+        let _ = definitions;
+    };
+    let artifacts = compile_source_batch_with_typer_and_source_observer(
+        TWO_IMMUTABLE_REFERENCE_LOCALS_SOURCE,
+        "TwoLocals.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe_typer,
+        &mut observe_source,
+    )
+    .expect("JVM-only source compilation accepts and emits the exact two-local producer");
+    assert_eq!(artifacts.len(), 3);
+    let factory = decode_emitted_class_named(&artifacts, "example/PairFactory");
+    let method = factory
+        .methods
+        .iter()
+        .find(|method| factory.constant_pool.utf8(method.name_index) == Ok("create"))
+        .expect("PairFactory.create is emitted by the JVM-only path");
+    assert_eq!(
+        factory.constant_pool.utf8(method.descriptor_index),
+        Ok("(II)Lexample/Pair;")
+    );
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("create has one code attribute")
+    };
+    assert_eq!(code.max_locals, 5, "JVM-only layout assigns slots 0..4");
+    eprintln!(
+        "two-local JVM-only result descriptor=(II)Lexample/Pair; max_stack={} max_locals={} code={:02x?}",
+        code.max_stack, code.max_locals, code.code
+    );
 }
 
 #[test]

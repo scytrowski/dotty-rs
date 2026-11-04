@@ -45,6 +45,130 @@ const NESTED_CONSTRUCTOR_BATCH: &str =
 
 const IMMUTABLE_REFERENCE_LOCAL_PAIR_BATCH: &str =
     include_str!("fixtures/jvm_tasty_immutable_reference_local_pair/PairFactory.scala");
+const TWO_IMMUTABLE_REFERENCE_LOCALS_BATCH: &str =
+    include_str!("fixtures/jvm_tasty_two_immutable_reference_locals/TwoLocals.scala");
+
+#[test]
+fn two_immutable_reference_locals_record_first_paired_plan_error_without_bypassing_it() {
+    let error = with_paired_jvm_tasty_batch_plan(
+        TWO_IMMUTABLE_REFERENCE_LOCALS_BATCH,
+        "TwoLocals.scala",
+        SourceId::from_index(21221),
+        |_| (),
+    )
+    .expect_err("the audit records the existing paired-plan boundary");
+    let observed = format!("{error:?}");
+    eprintln!("TWO_IMMUTABLE_LOCALS_PAIRED_PLAN_FIRST_ERROR {observed}");
+    assert!(
+        observed.contains("factory body must be a direct Apply or one-local Block"),
+        "the existing exact guard is the first observed paired-plan error: {observed}"
+    );
+}
+
+#[test]
+fn two_immutable_reference_locals_variations_record_first_observed_rejection() {
+    let exact = TWO_IMMUTABLE_REFERENCE_LOCALS_BATCH;
+    let renamed = exact
+        .replace("package example", "package renamed")
+        .replace("Counter", "Gauge")
+        .replace("PairFactory", "DuoFactory")
+        .replace("Pair", "Duo")
+        .replace("firstSeed", "leftSeed")
+        .replace("secondSeed", "rightSeed")
+        .replace("val first:", "val item:")
+        .replace("val second:", "val item2:")
+        .replace("new Duo(first, second)", "new Duo(item, item2)");
+    let counter_start = exact.find("class Counter(").unwrap();
+    let pair_start = exact.find("class Pair(").unwrap();
+    let factory_start = exact.find("class PairFactory:").unwrap();
+    let reordered = format!(
+        "{}{}{}{}",
+        &exact[..counter_start],
+        &exact[pair_start..factory_start],
+        &exact[counter_start..pair_start],
+        &exact[factory_start..]
+    );
+    let reversed_pair_args = exact.replace("new Pair(first, second)", "new Pair(second, first)");
+    let aliased_pair_args = exact.replace("new Pair(first, second)", "new Pair(first, first)");
+    let swapped_initializer_args = exact
+        .replace("new Counter(firstSeed)", "new Counter($swap)")
+        .replace("new Counter(secondSeed)", "new Counter(firstSeed)")
+        .replace("new Counter($swap)", "new Counter(secondSeed)");
+    let third_local = exact.replace(
+        "    val second: Counter = new Counter(secondSeed)\n    new Pair(first, second)",
+        "    val second: Counter = new Counter(secondSeed)\n    val third: Counter = new Counter(firstSeed)\n    new Pair(first, second)",
+    );
+    let mutable_local = exact.replace("val first: Counter", "var first: Counter");
+    let missing_initializer = exact.replace(
+        "val first: Counter = new Counter(firstSeed)",
+        "val first: Counter",
+    );
+    let duplicate_local = exact
+        .replace("val second: Counter", "val first: Counter")
+        .replace("new Pair(first, second)", "new Pair(first, first)");
+    let use_before_declaration = exact.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)\n    new Pair(first, second)",
+        "    val result: Pair = new Pair(first, second)\n    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)\n    result",
+    );
+    let shadowed_formal = exact.replace(
+        "val first: Counter = new Counter(firstSeed)",
+        "val firstSeed: Counter = new Counter(firstSeed)",
+    );
+    let wrong_type = exact.replace(
+        "val first: Counter = new Counter(firstSeed)",
+        "val first: String = new Counter(firstSeed)",
+    );
+    let wrong_constructor_signature =
+        exact.replace("new Pair(first, second)", "new Pair(firstSeed, secondSeed)");
+    let helper_initializer = exact.replace(
+        "    val first: Counter = new Counter(firstSeed)",
+        "    def make(seed: Int): Counter = new Counter(seed)\n    val first: Counter = make(firstSeed)",
+    );
+    let conditional_initializer = exact.replace(
+        "val first: Counter = new Counter(firstSeed)",
+        "val first: Counter = if firstSeed > 0 then new Counter(firstSeed) else new Counter(0)",
+    );
+    let nested_initializer = exact.replace(
+        "val first: Counter = new Counter(firstSeed)",
+        "val first: Counter = new Counter(new Counter(firstSeed).get())",
+    );
+    let branch_local = exact.replace(
+        "    val first: Counter = new Counter(firstSeed)\n    val second: Counter = new Counter(secondSeed)\n    new Pair(first, second)",
+        "    if firstSeed > 0 then\n      val first: Counter = new Counter(firstSeed)\n      val second: Counter = new Counter(secondSeed)\n      new Pair(first, second)\n    else\n      val first: Counter = new Counter(firstSeed)\n      val second: Counter = new Counter(secondSeed)\n      new Pair(first, second)",
+    );
+    let cases = [
+        ("renamed", renamed),
+        ("reordered declarations", reordered),
+        ("reversed Pair arguments", reversed_pair_args),
+        ("alias Pair arguments", aliased_pair_args),
+        ("swapped initializer formals", swapped_initializer_args),
+        ("third local", third_local),
+        ("mutable local", mutable_local),
+        ("missing initializer", missing_initializer),
+        ("duplicate local", duplicate_local),
+        ("use before declaration", use_before_declaration),
+        ("shadowed formal", shadowed_formal),
+        ("wrong local type", wrong_type),
+        (
+            "wrong Pair constructor signature",
+            wrong_constructor_signature,
+        ),
+        ("helper initializer", helper_initializer),
+        ("conditional initializer", conditional_initializer),
+        ("nested initializer", nested_initializer),
+        ("branch-local declarations", branch_local),
+    ];
+    for (index, (label, source)) in cases.into_iter().enumerate() {
+        let error = with_paired_jvm_tasty_batch_plan(
+            &source,
+            "TwoLocals.scala",
+            SourceId::from_index(21230 + index as u32),
+            |_| (),
+        )
+        .expect_err("each variation's first paired-plan rejection is observable");
+        eprintln!("TWO_LOCAL_VARIATION {label}: {error:?}");
+    }
+}
 
 #[test]
 fn immutable_reference_local_pair_source_variation_first_error_matrix() {
