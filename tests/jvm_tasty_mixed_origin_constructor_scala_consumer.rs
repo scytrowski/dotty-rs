@@ -660,6 +660,7 @@ fn lookup_probes(
     let mut positive_definitions = String::new();
     for (label, _, _, _, original_expression, _) in cases {
         let expression = original_expression.replace("wrapAndCreate", factory_method);
+        let probe_name = label.replace('-', "_");
         let result_type = if label == "counter-set" {
             "Unit"
         } else if label == "counter-get" {
@@ -668,7 +669,7 @@ fn lookup_probes(
             "example.Pair"
         };
         positive_definitions.push_str(&format!(
-            "  def probe_{label}(): {result_type} = {expression}\n"
+            "  def probe_{probe_name}(): {result_type} = {expression}\n"
         ));
     }
     fs::write(
@@ -697,15 +698,16 @@ fn lookup_probes(
     let compiled_bytes = fs::read(positive_out.join("example/Lookup$.class")).unwrap();
     let compiled = decode_class(&compiled_bytes);
     for (label, _, _, _, _, _) in cases {
+        let probe_name = label.replace('-', "_");
         let method = compiled.methods.iter().find(|method| {
-            compiled.constant_pool.utf8(method.name_index).unwrap() == format!("probe_{label}")
+            compiled.constant_pool.utf8(method.name_index).unwrap() == format!("probe_{probe_name}")
         });
         assert!(
             method.is_some_and(|method| method
                 .attributes
                 .iter()
                 .any(|attribute| matches!(attribute, Attribute::Code(_)))),
-            "combined TASTy lookup did not emit probe_{label}"
+            "combined TASTy lookup did not emit probe_{probe_name}"
         );
         eprintln!("TASTY_LOOKUP_ACCEPTED {label}; combined positive method emitted");
     }
