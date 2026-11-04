@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 
 
@@ -38,7 +40,69 @@ class CommandFailure(RuntimeError):
         self.output = output
 
 
+def _telemetry(event_type: str, category: str, operation: str,
+               started_ns: int, status: str) -> None:
+    """Append privacy-safe timing data when explicitly enabled."""
+    destination = os.environ.get("DOTTY_ORACLE_TIMINGS_FILE")
+    if not destination:
+        return
+    record = {
+        "event": event_type,
+        "category": category,
+        "operation": operation,
+        "elapsed_ms": (time.perf_counter_ns() - started_ns) / 1_000_000,
+        "status": status,
+        "pid": os.getpid(),
+    }
+    try:
+        with open(destination, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except Exception:
+        # Telemetry must not replace a command result or harness exception.
+        pass
+
+
+def _command_category(command: list[str]) -> tuple[str, str]:
+    executable = Path(command[0]).name if command else "unknown"
+    if executable in ("java", "javac", "javap"):
+        category = executable
+        if "-version" in command:
+            operation = "version"
+        elif executable == "java":
+            if "dotty.tools.dotc.decompiler.Main" in command:
+                operation = "decompile"
+            elif "dotty.tools.dotc.Main" in command:
+                operation = "compile"
+            else:
+                operation = "runtime"
+        else:
+            operation = "compile" if executable == "javac" else "inspect"
+    elif executable == "git":
+        category, operation = "git", "revision_check"
+    elif executable == "cargo":
+        category = "cargo"
+        operation = "build" if "build" in command else "metadata" if "metadata" in command else "other"
+    else:
+        category, operation = "other", "command"
+    return category, operation
+
+
+@contextmanager
+def _timed_stage(operation: str):
+    started_ns = time.perf_counter_ns()
+    status = "success"
+    try:
+        yield
+    except BaseException as error:
+        status = "timeout" if isinstance(error, subprocess.TimeoutExpired) else "failure"
+        raise
+    finally:
+        _telemetry("toolchain_stage", "toolchain", operation, started_ns, status)
+
+
 def execute(args: list[str | Path], *, cwd: Path = ROOT) -> str:
+    started_ns = time.perf_counter_ns()
+    category, operation = _command_category([str(arg) for arg in args])
     command = [str(a) for a in args]
     task_tmp = os.environ.get("TMPDIR")
     if task_tmp and command:
@@ -54,10 +118,16 @@ def execute(args: list[str | Path], *, cwd: Path = ROOT) -> str:
                                 timeout=180)
     except subprocess.TimeoutExpired as error:
         # A timeout is a harness failure, never an expected reader rejection.
+        _telemetry("execute", category, operation, started_ns, "timeout")
         raise RuntimeError(f"command timed out after 180 seconds: {args}") from error
+    except OSError:
+        _telemetry("execute", category, operation, started_ns, "failure")
+        raise
     if result.returncode:
+        _telemetry("execute", category, operation, started_ns, "failure")
         raise CommandFailure(f"command failed ({result.returncode}): {args}\n{result.stdout}",
                              result.stdout)
+    _telemetry("execute", category, operation, started_ns, "success")
     return result.stdout
 
 
@@ -271,49 +341,54 @@ def verify_provenance() -> None:
 
 class Toolchain:
     def __init__(self) -> None:
-        required = ("SCALA39_ROOT", "JAVA_HOME", "COURSIER_MAVEN_ROOT")
-        for key in required:
-            if not os.environ.get(key):
-                raise RuntimeError(f"{key} is required for the explicitly requested oracle")
-        scala_root = Path(os.environ["SCALA39_ROOT"])
-        actual = execute(["git", "-C", scala_root, "rev-parse", "HEAD"]).strip()
-        if actual != REVISION:
-            raise RuntimeError(f"Scala source revision {actual}; expected {REVISION}")
+        with _timed_stage("scala_source_pin"):
+            required = ("SCALA39_ROOT", "JAVA_HOME", "COURSIER_MAVEN_ROOT")
+            for key in required:
+                if not os.environ.get(key):
+                    raise RuntimeError(f"{key} is required for the explicitly requested oracle")
+            scala_root = Path(os.environ["SCALA39_ROOT"])
+            actual = execute(["git", "-C", scala_root, "rev-parse", "HEAD"]).strip()
+            if actual != REVISION:
+                raise RuntimeError(f"Scala source revision {actual}; expected {REVISION}")
         java_home = Path(os.environ["JAVA_HOME"])
         self.java = java_home / "bin/java"
         self.javac = java_home / "bin/javac"
         self.javap = java_home / "bin/javap"
-        for executable, label in ((self.java, "Java"), (self.javac, "javac"),
-                                  (self.javap, "javap")):
-            if not executable.is_file():
-                raise RuntimeError(f"missing JDK {label} executable: {executable}")
-        release = dict(re.findall(r'^([A-Z_]+)="(.*)"$',
-                                  (java_home / "release").read_text(), re.MULTILINE))
-        self.jdk_release = {key: release[key] for key in
-                            ("JAVA_VERSION", "IMPLEMENTOR", "IMPLEMENTOR_VERSION", "OS_ARCH")}
-        java_version = re.match(r"(\d+)", self.jdk_release["JAVA_VERSION"])
-        if java_version is None or int(java_version.group(1)) < 21:
-            raise RuntimeError(f"JDK 21 or newer is required, got {self.jdk_release['JAVA_VERSION']}")
+        with _timed_stage("jdk_validation"):
+            for executable, label in ((self.java, "Java"), (self.javac, "javac"),
+                                      (self.javap, "javap")):
+                if not executable.is_file():
+                    raise RuntimeError(f"missing JDK {label} executable: {executable}")
+            release = dict(re.findall(r'^([A-Z_]+)="(.*)"$',
+                                      (java_home / "release").read_text(), re.MULTILINE))
+            self.jdk_release = {key: release[key] for key in
+                                ("JAVA_VERSION", "IMPLEMENTOR", "IMPLEMENTOR_VERSION", "OS_ARCH")}
+            java_version = re.match(r"(\d+)", self.jdk_release["JAVA_VERSION"])
+            if java_version is None or int(java_version.group(1)) < 21:
+                raise RuntimeError(f"JDK 21 or newer is required, got {self.jdk_release['JAVA_VERSION']}")
         base = Path(os.environ["COURSIER_MAVEN_ROOT"])
         jars = [base / group / artifact / version / f"{artifact}-{version}.jar"
                 for group, artifact, version in ARTIFACTS]
-        for jar in jars:
-            if not jar.is_file():
-                raise RuntimeError(f"missing cached compiler dependency: {jar}")
+        with _timed_stage("cached_jar_validation"):
+            for jar in jars:
+                if not jar.is_file():
+                    raise RuntimeError(f"missing cached compiler dependency: {jar}")
         self.classpath = os.pathsep.join(str(p) for p in jars)
         self.runtime_jars = [p for p in jars if p.name in
                              ("scala3-library_3-3.9.0.jar", "scala-library-3.9.0.jar")]
         self.runtime_classpath = os.pathsep.join(str(p) for p in self.runtime_jars)
-        self.artifacts = {p.name: digest(p) for p in jars}
-        pinned = json.loads((FIXTURES / "provenance.json").read_text())
-        if self.artifacts != pinned["compiler_artifacts_sha256"]:
-            raise RuntimeError("compiler artifacts differ from pinned SHA-256 provenance")
-        version = self.compiler(["-version"])
-        if not re.search(r"Scala compiler version 3\.9\.0 --", version):
-            raise RuntimeError(f"expected Scala 3.9.0 compiler, got: {version}")
-        self.compiler_version = version.strip()
-        self.javac_version = execute([self.javac, "-version"]).strip()
-        self.javap_version = execute([self.javap, "-version"]).strip()
+        with _timed_stage("compiler_artifact_sha256"):
+            self.artifacts = {p.name: digest(p) for p in jars}
+            pinned = json.loads((FIXTURES / "provenance.json").read_text())
+            if self.artifacts != pinned["compiler_artifacts_sha256"]:
+                raise RuntimeError("compiler artifacts differ from pinned SHA-256 provenance")
+        with _timed_stage("version_probes"):
+            version = self.compiler(["-version"])
+            if not re.search(r"Scala compiler version 3\.9\.0 --", version):
+                raise RuntimeError(f"expected Scala 3.9.0 compiler, got: {version}")
+            self.compiler_version = version.strip()
+            self.javac_version = execute([self.javac, "-version"]).strip()
+            self.javap_version = execute([self.javap, "-version"]).strip()
 
     def compiler(self, args: list[str | Path], *, decompile: bool = False,
                  classpath: str | None = None, cwd: Path = ROOT) -> str:

@@ -106,6 +106,86 @@ class HarnessTests(unittest.TestCase):
             with self.assertRaisesRegex(oracle.CommandFailure, "specific reader failure"):
                 oracle.execute(["compiler"])
 
+    def test_execute_timing_records_success_failure_and_timeout_without_arguments(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            events = Path(temporary) / "timings.jsonl"
+            env = {"DOTTY_ORACLE_TIMINGS_FILE": str(events)}
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch.object(oracle.subprocess, "run", return_value=
+                                       subprocess.CompletedProcess(["java"], 0, "private stdout")):
+                    self.assertEqual(oracle.execute(["/private/path/java", "-Dsecret=value"]),
+                                     "private stdout")
+                with mock.patch.object(oracle.subprocess, "run", return_value=
+                                       subprocess.CompletedProcess(["javac"], 4, "private stderr")):
+                    with self.assertRaises(oracle.CommandFailure):
+                        oracle.execute(["/private/path/javac", "Secret.java"])
+                with mock.patch.object(oracle.subprocess, "run", side_effect=
+                                       subprocess.TimeoutExpired(["javap"], 180)):
+                    with self.assertRaisesRegex(RuntimeError, "timed out"):
+                        oracle.execute(["/private/path/javap", "Secret"])
+            records = [json.loads(line) for line in events.read_text().splitlines()]
+            self.assertEqual([record["status"] for record in records],
+                             ["success", "failure", "timeout"])
+            self.assertEqual([(record["category"], record["operation"]) for record in records],
+                             [("java", "runtime"), ("javac", "compile"),
+                              ("javap", "inspect")])
+            for record in records:
+                self.assertEqual(set(record), {"event", "category", "operation", "elapsed_ms",
+                                               "status", "pid"})
+                self.assertEqual(record["event"], "execute")
+                self.assertGreaterEqual(record["elapsed_ms"], 0)
+                self.assertEqual(record["pid"], os.getpid())
+            telemetry = events.read_text()
+            for private_value in ("/private/path", "secret=value", "Secret.java", "private stdout",
+                                  "private stderr"):
+                self.assertNotIn(private_value, telemetry)
+
+    def test_execute_timing_is_opt_in_and_does_not_change_stdout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            events = Path(temporary) / "timings.jsonl"
+            with mock.patch.dict(os.environ, {}, clear=True):
+                with mock.patch.object(oracle.subprocess, "run", return_value=
+                                       subprocess.CompletedProcess(["compiler"], 0, "unchanged\n")):
+                    self.assertEqual(oracle.execute(["compiler"]), "unchanged\n")
+            self.assertFalse(events.exists())
+
+    def test_execute_timing_records_process_start_failure_without_wrapping_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            events = Path(temporary) / "timings.jsonl"
+            with mock.patch.dict(os.environ, {"DOTTY_ORACLE_TIMINGS_FILE": str(events)}, clear=True):
+                with mock.patch.object(oracle.subprocess, "run", side_effect=FileNotFoundError("private")):
+                    with self.assertRaisesRegex(FileNotFoundError, "private"):
+                        oracle.execute(["missing-tool", "private-argument"])
+            record = json.loads(events.read_text())
+            self.assertEqual(record["status"], "failure")
+            self.assertNotIn("private", events.read_text())
+
+    def test_toolchain_setup_phases_are_distinguished(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.fake_cache(root)
+            fixtures = root / "fixtures"
+            fixtures.mkdir()
+            artifacts = {f"{artifact}-{version}.jar": oracle.digest(
+                root / group / artifact / version / f"{artifact}-{version}.jar")
+                for group, artifact, version in oracle.ARTIFACTS}
+            (fixtures / "provenance.json").write_text(json.dumps({
+                "compiler_artifacts_sha256": artifacts}))
+            events = root / "timings.jsonl"
+            env = {k: temporary for k in ("SCALA39_ROOT", "JAVA_HOME", "COURSIER_MAVEN_ROOT")}
+            env["DOTTY_ORACLE_TIMINGS_FILE"] = str(events)
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch.object(oracle, "FIXTURES", fixtures):
+                    with mock.patch.object(oracle, "execute", side_effect=[
+                            oracle.REVISION, "Scala compiler version 3.9.0 -- test", "javac 21", "javap 21"]):
+                        oracle.Toolchain()
+            stages = [json.loads(line) for line in events.read_text().splitlines()
+                      if json.loads(line)["event"] == "toolchain_stage"]
+            self.assertEqual([stage["operation"] for stage in stages],
+                             ["scala_source_pin", "jdk_validation", "cached_jar_validation",
+                              "compiler_artifact_sha256", "version_probes"])
+            self.assertTrue(all(stage["status"] == "success" for stage in stages))
+
     def test_timeout_is_a_harness_failure_not_a_reader_negative_control(self):
         with mock.patch.object(oracle.subprocess, "run", side_effect=
                                subprocess.TimeoutExpired(["compiler"], 180)):

@@ -182,6 +182,49 @@ misplaced package file. A JSON result records each successful reader/compiler
 stage, fresh class and absence of adjacent input classfiles. On 2026-10-17 all
 eight full fixtures plus reduced Answer passed with the pinned inputs above.
 
+To measure subprocess startup and Toolchain setup for a consumer run, enable
+sanitized JSONL telemetry explicitly:
+
+```sh
+mkdir -p target
+export DOTTY_ORACLE_TIMINGS_FILE="$PWD/target/oracle-timings.jsonl"
+: > "$DOTTY_ORACLE_TIMINGS_FILE"
+cargo test --locked -p dotty --test jvm_tasty_factory_result_scala_consumer -- --nocapture
+```
+
+The `execute` events report fixed executable and operation categories, status,
+elapsed milliseconds and PID. `toolchain_stage` events separately time Scala
+source pin validation, JDK and cached JAR checks, compiler artifact SHA-256
+validation, and version probes. The log omits command arguments, paths, output
+and environment values. Aggregate by category, operation and status with:
+
+```sh
+python3 - "$DOTTY_ORACLE_TIMINGS_FILE" <<'PY'
+import json
+import statistics
+import sys
+from collections import defaultdict
+
+groups = defaultdict(list)
+with open(sys.argv[1], encoding="utf-8") as stream:
+    for line in stream:
+        event = json.loads(line)
+        key = (event["event"], event["category"], event["operation"], event["status"])
+        groups[key].append(event["elapsed_ms"])
+for key, samples in sorted(groups.items()):
+    print(f"{key}: count={len(samples)} total_ms={sum(samples):.3f} "
+          f"mean_ms={statistics.mean(samples):.3f}")
+PY
+```
+
+Without `DOTTY_ORACLE_TIMINGS_FILE`, no telemetry is written and the harness
+keeps its existing command output and failure behavior. The opt-in timing path
+does not affect the 180-second subprocess timeout or pinned compiler checks.
+A local instrumentation smoke sample using one Python child that slept for
+10 ms recorded one successful `execute` event at 18.565 ms total. This checks
+that process startup is included in the measurement; use the consumer command
+above for representative Scala/JDK costs.
+
 Use the same executable harness for a future producer's candidate:
 
 ```sh
