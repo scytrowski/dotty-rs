@@ -1034,7 +1034,7 @@ fn malformed_local_body_probe(scala: &Scala, root: &Path, batch: &PairedJvmTasty
             "from-TASTy",
         ),
         (
-            "wrong-local-owner",
+            "invalid-block-target-termref",
             change_termref_target(factory.tasty_bytes(), local, block),
             "readTasty",
         ),
@@ -1069,7 +1069,7 @@ fn malformed_local_body_probe(scala: &Scala, root: &Path, batch: &PairedJvmTasty
                 .arg("-decompile")
                 .arg(classes.join(factory.tasty_path()))
                 .output()
-                .expect("run Scala reader against wrong-owner local address")
+                .expect("run Scala reader against invalid local reference")
         } else {
             scala.run_from_tasty(
                 &classpath,
@@ -1080,7 +1080,7 @@ fn malformed_local_body_probe(scala: &Scala, root: &Path, batch: &PairedJvmTasty
         if stage == "readTasty" {
             assert!(
                 !result.status.success(),
-                "Scala accepted malformed local owner negative {label}"
+                "Scala accepted malformed local-reference negative {label}"
             );
         } else if result.status.success() {
             let decompiled = scala
@@ -1130,7 +1130,7 @@ fn malformed_local_body_probe(scala: &Scala, root: &Path, batch: &PairedJvmTasty
                     || stderr.contains("Unexpected New") && stderr.contains("GenBCode"),
                 "unexpected {stage} failure for {label}: {stderr}"
             ),
-            "wrong-local-owner" => assert!(
+            "invalid-block-target-termref" => assert!(
                 first.contains("TreeWithoutOwner"),
                 "unexpected {stage} failure for {label}: {stderr}"
             ),
