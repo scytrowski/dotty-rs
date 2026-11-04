@@ -18,6 +18,7 @@ on:
       - 'tests/fixtures/jvm_tasty_factory_result_arguments/**'
       - 'tests/fixtures/jvm_tasty_reference_local_constructor_flows/**'
       - 'tools/tasty-pickler-oracle/**'
+      - 'tools/ci-test-timing/**'
       - 'docs/jvm-tasty-cross-class-factories.md'
       - 'docs/jvm-tasty-dual-reference-constructors.md'
       - 'docs/jvm-tasty-dual-reference-forwarding.md'
@@ -184,34 +185,54 @@ jobs:
           DOTTY_TASTY_PICKLER_ORACLE_TMP: ${{ github.workspace }}/target/scala-reader-oracle
           DOTTY_ISSUE_1960_ORACLE_DIR: ${{ github.workspace }}/target/issue-1960-oracle
           TMPDIR: ${{ github.workspace }}/target/issue-1881-tmp
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p "$TMPDIR"
           mkdir -p "$DOTTY_TASTY_PICKLER_ORACLE_TMP"
-          cargo +1.98.1 test \
-            --test jvm_tasty_scala_consumer \
-            --test jvm_tasty_multiclass_scala_consumer \
-            --test jvm_tasty_cross_class_scala_consumer \
-            --test jvm_tasty_factory_scala_consumer \
-            --test jvm_tasty_object_composition_scala_consumer \
-            --test jvm_tasty_constructor_injection_scala_consumer \
-            --test jvm_tasty_reference_constructor_scala_consumer \
-            --test jvm_tasty_nested_constructor_scala_consumer \
-            --test jvm_tasty_multi_argument_constructor_calls \
-            --test jvm_tasty_multi_argument_constructor_scala_consumer \
-            --test jvm_tasty_factory_result_scala_consumer \
-            --test jvm_tasty_reference_local_scala_consumer \
-            --test jvm_tasty_dual_reference_signature \
-            --test jvm_tasty_dual_reference_artifacts \
-            --test jvm_tasty_dual_reference_forwarding \
-            --test jvm_tasty_dual_reference_forwarding_scala_consumer \
-            --test jvm_tasty_mixed_origin_constructor_scala_consumer \
-            --test jvm_tasty_direct_formal_constructor_pair \
-            --test jvm_tasty_dual_reference_scala_consumer \
-            --test jvm_tasty_dual_reference_rust_consumer \
-            --test jvm_tasty_cross_class_factories \
-            --test jvm_tasty_factory_result_arguments \
-            --test tasty_source_pickling \
-            --locked -- --nocapture --test-threads=1
+          strict_targets=(
+            jvm_tasty_scala_consumer
+            jvm_tasty_multiclass_scala_consumer
+            jvm_tasty_cross_class_scala_consumer
+            jvm_tasty_factory_scala_consumer
+            jvm_tasty_object_composition_scala_consumer
+            jvm_tasty_constructor_injection_scala_consumer
+            jvm_tasty_reference_constructor_scala_consumer
+            jvm_tasty_nested_constructor_scala_consumer
+            jvm_tasty_multi_argument_constructor_calls
+            jvm_tasty_multi_argument_constructor_scala_consumer
+            jvm_tasty_factory_result_scala_consumer
+            jvm_tasty_reference_local_scala_consumer
+            jvm_tasty_dual_reference_signature
+            jvm_tasty_dual_reference_artifacts
+            jvm_tasty_dual_reference_forwarding
+            jvm_tasty_dual_reference_forwarding_scala_consumer
+            jvm_tasty_mixed_origin_constructor_scala_consumer
+            jvm_tasty_direct_formal_constructor_pair
+            jvm_tasty_dual_reference_scala_consumer
+            jvm_tasty_dual_reference_rust_consumer
+            jvm_tasty_cross_class_factories
+            jvm_tasty_factory_result_arguments
+            tasty_source_pickling
+          )
+          test_args=()
+          for target in "${strict_targets[@]}"; do
+            test_args+=(--test "$target")
+          done
+          timing_log="$RUNNER_TEMP/strict-scala-tasty-cargo-test.log"
+          SECONDS=0
+          set +e
+          cargo +1.98.1 test "${test_args[@]}" \
+            --locked -- --nocapture --test-threads=1 2>&1 | tee "$timing_log"
+          cargo_status=${PIPESTATUS[0]}
+          set -e
+          step_seconds=$SECONDS
+          python3 tools/ci-test-timing/summarize.py \
+            --log "$timing_log" \
+            --expected-targets "${strict_targets[@]}" \
+            --step-seconds "$step_seconds" \
+            --cargo-exit-code "$cargo_status" >> "$GITHUB_STEP_SUMMARY"
+          exit "$cargo_status"
 
       - name: Verify constructor alias PARAM addresses with pinned Scala 3.9
         env:
