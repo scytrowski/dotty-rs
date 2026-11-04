@@ -97,11 +97,41 @@ fn validate_with_formal_local_fault(
     plan: &ClassStatePicklePlan<'_>,
     bindings: &dyn SourceTypedBindings,
 ) -> Result<(), PickleError> {
-    let candidate = ClassStatePicklePlan {
+    validate_with_formal_local_fault_and_ast(plan, bindings, plan.typed_ast)
+}
+
+fn validate_with_formal_local_fault_and_ast(
+    plan: &ClassStatePicklePlan<'_>,
+    bindings: &dyn SourceTypedBindings,
+    typed_ast: &TypedAst,
+) -> Result<(), PickleError> {
+    formal_local_fault_candidate(plan, bindings, typed_ast)?
+        .validate()?
+        .validate_method_bodies()
+}
+
+fn pickle_with_formal_local_fault_and_ast(
+    plan: &ClassStatePicklePlan<'_>,
+    bindings: &dyn SourceTypedBindings,
+    typed_ast: &TypedAst,
+) -> Result<(), PickleError> {
+    let candidate = formal_local_fault_candidate(plan, bindings, typed_ast)?;
+    let validated = candidate.validate()?;
+    validated.validate_method_bodies()?;
+    validated.pickle()?;
+    Ok(())
+}
+
+fn formal_local_fault_candidate<'a>(
+    plan: &ClassStatePicklePlan<'a>,
+    bindings: &'a dyn SourceTypedBindings,
+    typed_ast: &'a TypedAst,
+) -> Result<ClassStatePicklePlan<'a>, PickleError> {
+    Ok(ClassStatePicklePlan {
         store: plan.store,
         definitions: plan.definitions,
         source_ast: plan.source_ast,
-        typed_ast: plan.typed_ast,
+        typed_ast,
         source_index: plan.source_index,
         typed_bindings: bindings,
         source: plan.source.clone(),
@@ -109,8 +139,7 @@ fn validate_with_formal_local_fault(
         class_tree: plan.class_tree,
         constructor: plan.constructor.clone(),
         members: plan.members,
-    };
-    candidate.validate()?.validate_method_bodies()
+    })
 }
 
 impl SourceTypedBindings for AuditBindings<'_> {
@@ -2759,6 +2788,59 @@ fn formal_local_pair_pickles_both_original_argument_orders() {
                 let locals = plan
                     .typed_bindings
                     .local_value_bindings(plan.source.id, proof.method());
+
+                let formal_argument = pair
+                    .arguments
+                    .iter()
+                    .find(|argument| {
+                        matches!(
+                            argument.origin,
+                            dotty_tasty_pickler::FormalLocalConstructorCallArgumentOrigin::Formal {
+                                ..
+                            }
+                        )
+                    })
+                    .expect("the ordered pair retains the existing formal argument")
+                    .typed_argument;
+                let mut detached_ast = clone_typed_ast(plan.typed_ast);
+                let detached_apply = detached_ast.alloc(
+                    detached_ast
+                        .get(initializer.typed_initializer)
+                        .clone(),
+                );
+                let wrong_seed = detached_ast.alloc(detached_ast.get(formal_argument).clone());
+                let TreeKind::Apply(actual_initializer) =
+                    &mut detached_ast.get_mut(initializer.typed_initializer).kind
+                else {
+                    panic!("the local initializer is the original Apply");
+                };
+                actual_initializer.args[0] = wrong_seed;
+                let detached_initializer = LocalCounterInitializerBinding {
+                    call: dotty_tasty_pickler::NestedConstructorCallBinding {
+                        typed_apply: detached_apply,
+                        ..initializer.call
+                    },
+                    ..initializer
+                };
+                let detached_receipt = FormalLocalFaultBindings {
+                    base: plan.typed_bindings,
+                    pair: Some(pair),
+                    initializer: Some(detached_initializer),
+                    locals: locals.clone(),
+                };
+                assert!(validate_with_formal_local_fault_and_ast(
+                    plan,
+                    &detached_receipt,
+                    &detached_ast
+                )
+                .is_err());
+                assert!(pickle_with_formal_local_fault_and_ast(
+                    plan,
+                    &detached_receipt,
+                    &detached_ast
+                )
+                .is_err());
+
                 let mut forged_pair = pair;
                 forged_pair.arguments[1].typed_argument = forged_pair.arguments[0].typed_argument;
                 let forged = FormalLocalFaultBindings {

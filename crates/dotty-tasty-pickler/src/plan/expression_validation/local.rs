@@ -235,6 +235,8 @@ impl Validator<'_, '_> {
                     || initializer.typed_declaration != typed_id
                     || initializer.source_initializer != source_rhs
                     || initializer.typed_initializer != typed_rhs
+                    || initializer.call.source_apply != source_rhs
+                    || initializer.call.typed_apply != typed_rhs
                     || initializer.source_type_tree != source_val.tpt
                     || initializer.typed_type_tree != typed_val.tpt
                     || initializer.local != binding.symbol
@@ -246,6 +248,18 @@ impl Validator<'_, '_> {
                         self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
                     );
                 }
+                let source_initializer = self.source_tree(source_rhs)?;
+                let typed_initializer = self
+                    .plan
+                    .typed_ast
+                    .try_get(typed_rhs)
+                    .ok_or(PickleError::InvalidTypedTree { tree: typed_rhs })?;
+                self.source_typed_binding(source_rhs, typed_rhs)?;
+                self.paired_source_typed_span(
+                    source_initializer.position,
+                    typed_initializer.position,
+                    typed_rhs,
+                )?;
                 if !visited.insert(typed_rhs) {
                     return Err(PickleError::RepeatedExpression { tree: typed_rhs });
                 }
