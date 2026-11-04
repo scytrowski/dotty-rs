@@ -59,6 +59,19 @@ fn nested_recursive_adt_original_roots_are_attempted_in_two_fresh_sessions() {
     let first = nested_roots(source_a, "session-a");
     let second = nested_roots(source_b, "session-b");
     assert_eq!(first.normalized, second.normalized);
+    assert_eq!(
+        first.evidence, second.evidence,
+        "fresh sessions have normalized peelLeft semantic parity"
+    );
+    assert_eq!(
+        first.evidence,
+        include_str!("fixtures/source-nested-recursive-adt-3.9.0/rust-peelleft-complete.tsv")
+            .split_once('\n')
+            .expect("current-main reproduction header")
+            .1,
+        "the original peelLeft result is pinned without changing the #2132 receipt"
+    );
+    println!("ISSUE2133_PEELLEFT\t{}", first.evidence.trim_end());
     let receipt = first
         .roots
         .iter()
@@ -75,6 +88,184 @@ fn nested_recursive_adt_original_roots_are_attempted_in_two_fresh_sessions() {
     for row in receipt {
         println!("ISSUE2132_NESTED_ROOT\t{row}");
     }
+}
+
+#[test]
+fn nested_peelleft_controls_keep_bounded_rejections_and_positional_identity() {
+    let wrong_arity = NESTED_SOURCE.replace(
+        "case Add(Add(left, _), _) => left",
+        "case Add(Add(left, _, _), _) => left",
+    );
+    assert_ne!(
+        wrong_arity, NESTED_SOURCE,
+        "wrong-arity control mutation applies"
+    );
+    let wrong_arity_error = type_nested_peel_root(&wrong_arity, SourceId::from_index(21332))
+        .expect_err("three nested extractor arguments are rejected");
+    assert!(
+        wrong_arity_error.starts_with("ExtractorProductSelectorCountMismatch"),
+        "wrong-arity control reports its typed rejection: {wrong_arity_error}"
+    );
+
+    let escaped_binder = NESTED_SOURCE.replacen("case _ => expr", "case _ => left", 1);
+    assert_ne!(
+        escaped_binder, NESTED_SOURCE,
+        "escaped-binder control mutation applies"
+    );
+    let escaped_error = type_nested_peel_root(&escaped_binder, SourceId::from_index(21333))
+        .expect_err("a first-case binder is unavailable in the fallback case");
+    assert!(
+        escaped_error.starts_with("TermNameNotFound"),
+        "escaped-binder control reports an unresolved reference: {escaped_error}"
+    );
+
+    let renamed_source =
+        include_str!("fixtures/source-nested-recursive-adt-3.9.0/RenamedReorderedFields.scala");
+    let mut renamed_session =
+        BinarySession::new_with_source(SourceId::from_index(21334), renamed_source);
+    renamed_session.with_typer(|ast, index, typer, _definitions| {
+        let root = find_method_tree(ast, typer.store(), "peelLeft");
+        typer
+            .type_method_definition(root)
+            .expect("renamed and reordered product fields preserve positional matching");
+        let (classes, expr) = nested_class_symbols(ast, index, typer, SourceId::from_index(21334));
+        assert_source_product_fields(
+            typer,
+            ast,
+            index,
+            SourceId::from_index(21334),
+            classes["Add"],
+            &["right", "left"],
+            expr,
+        );
+    });
+
+    let foreign_source_id = SourceId::from_index(21335);
+    let mut foreign_owner_session =
+        BinarySession::new_with_source(foreign_source_id, NESTED_SOURCE);
+    let add = foreign_owner_session
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::TypeDef(definition) = &node.kind else {
+                return None;
+            };
+            (foreign_owner_session
+                .store
+                .names
+                .resolve(definition.name.as_name().text())
+                == "Add")
+                .then(|| {
+                    foreign_owner_session
+                        .index
+                        .symbol_at(foreign_source_id, tree)
+                        .unwrap()
+                })
+        })
+        .unwrap();
+    let num = foreign_owner_session
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::TypeDef(definition) = &node.kind else {
+                return None;
+            };
+            (foreign_owner_session
+                .store
+                .names
+                .resolve(definition.name.as_name().text())
+                == "Num")
+                .then(|| {
+                    foreign_owner_session
+                        .index
+                        .symbol_at(foreign_source_id, tree)
+                        .unwrap()
+                })
+        })
+        .unwrap();
+    let add_unapply = foreign_owner_session
+        .index
+        .generated_case_class_method(add, GeneratedCaseClassMethodRole::Unapply)
+        .unwrap();
+    let num_unapply = foreign_owner_session
+        .index
+        .generated_case_class_method(num, GeneratedCaseClassMethodRole::Unapply)
+        .unwrap();
+    let fake_owner = foreign_owner_session
+        .store
+        .symbols
+        .get(num_unapply)
+        .owner
+        .unwrap();
+    foreign_owner_session
+        .store
+        .symbols
+        .get_mut(add_unapply)
+        .owner = Some(fake_owner);
+    foreign_owner_session.with_typer(|ast, _index, typer, _definitions| {
+        let root = find_method_tree(ast, typer.store(), "peelLeft");
+        let error = typer
+            .type_method_definition(root)
+            .expect_err("nested Add rejects an unapply with a foreign owner");
+        assert!(
+            matches!(
+                error,
+                dotty_typer::TyperError::SymbolSourceKindMismatch { .. }
+            ),
+            "fake-owner control reports the original identity mismatch: {error:?}"
+        );
+    });
+}
+
+fn type_nested_peel_root(source_text: &str, source: SourceId) -> Result<(), String> {
+    let mut session = BinarySession::new_with_source(source, source_text);
+    session.with_typer(|ast, _index, typer, _definitions| {
+        let root = find_method_tree(ast, typer.store(), "peelLeft");
+        typer
+            .type_method_definition(root)
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}"))
+    })
+}
+
+fn find_method_tree(
+    ast: &dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+    store: &SemanticStore,
+    name: &str,
+) -> dotty_core::TreeId<dotty_core::ast::Untyped> {
+    ast.iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == name).then_some(tree)
+        })
+        .unwrap_or_else(|| panic!("source contains method {name}"))
+}
+
+fn nested_class_symbols(
+    ast: &dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+    index: &SourceSemanticIndex,
+    typer: &dotty_typer::SourceTyper<'_>,
+    source: SourceId,
+) -> (
+    std::collections::BTreeMap<String, dotty_core::SymbolId>,
+    dotty_core::SymbolId,
+) {
+    let mut classes = std::collections::BTreeMap::new();
+    for (tree, node) in ast.iter() {
+        if let TreeKind::TypeDef(definition) = &node.kind {
+            let name = typer
+                .store()
+                .names
+                .resolve(definition.name.as_name().text());
+            if matches!(name, "Expr" | "Num" | "Add") {
+                classes.insert(name.to_owned(), index.symbol_at(source, tree).unwrap());
+            }
+        }
+    }
+    let expr = classes["Expr"];
+    (classes, expr)
 }
 
 #[test]
@@ -1400,6 +1591,168 @@ fn late_error_after_add_binder_rolls_back_and_original_select_left_retries() {
 }
 
 #[test]
+fn nested_peelleft_late_failure_rolls_back_and_original_retries() {
+    let source_text = format!(
+        "{NESTED_SOURCE}\nobject BrokenEvaluator:\n  def nestedBad(expr: Expr): Int =\n    expr match\n      case Add(Add(left, _), _) => left\n      case _ => 0\n"
+    );
+    let source = SourceId::from_index(21331);
+    let mut session = BinarySession::new_with_source(source, &source_text);
+    session.with_typer(|ast, index, typer, _definitions| {
+        let method_named = |name: &str| {
+            ast.iter()
+                .find_map(|(tree, node)| {
+                    let TreeKind::DefDef(definition) = &node.kind else {
+                        return None;
+                    };
+                    (typer
+                        .store()
+                        .names
+                        .resolve(definition.name.as_name().text())
+                        == name)
+                        .then_some(tree)
+                })
+                .unwrap_or_else(|| panic!("source contains method {name}"))
+        };
+        let broken_method = method_named("nestedBad");
+        let peel_method = method_named("peelLeft");
+        let TreeKind::DefDef(broken_definition) = &ast.get(broken_method).kind else {
+            unreachable!()
+        };
+        let TreeKind::Match(broken_match) = &ast.get(broken_definition.rhs.unwrap()).kind else {
+            panic!("late-failure method has a Match RHS")
+        };
+        let TreeKind::CaseDef(broken_case) = &ast.get(broken_match.cases[0]).kind else {
+            unreachable!()
+        };
+        let TreeKind::Apply(outer) = &ast.get(broken_case.pattern).kind else {
+            unreachable!()
+        };
+        let nested_pattern = outer.args[0];
+        assert!(matches!(ast.get(nested_pattern).kind, TreeKind::Apply(_)));
+        let TreeKind::Apply(inner) = &ast.get(nested_pattern).kind else {
+            unreachable!()
+        };
+        let failed_result = match &ast.get(broken_case.body).kind {
+            TreeKind::Block(block) => block.expr,
+            _ => broken_case.body,
+        };
+        let TreeKind::Ident(result_name) = &ast.get(failed_result).kind else {
+            panic!("the late type mismatch is the nested left result")
+        };
+        assert_eq!(typer.store().names.resolve(result_name.name.text()), "left");
+
+        let mappings_before = typer.source_typed_index().len();
+        let typed_nodes_before = typer.typed_ast().iter().count();
+        let store_before = typer.store().checkpoint();
+        let first_error = typer
+            .type_method_definition(broken_method)
+            .expect_err("Expr result cannot satisfy the declared Int result");
+        let first_diagnostic = format!("{first_error:?}");
+        assert!(
+            first_diagnostic.starts_with("ExpectedExpressionTypeMismatch"),
+            "nested patterns type before the result mismatch: {first_diagnostic}"
+        );
+        let diagnostic_tree = parse_tree_index(&first_diagnostic).unwrap();
+        assert_eq!(
+            diagnostic_tree,
+            broken_definition.rhs.unwrap().index(),
+            "the late mismatch is reported at the completed nested Match"
+        );
+        assert_eq!(typer.store().checkpoint(), store_before);
+        assert_eq!(typer.source_typed_index().len(), mappings_before);
+        assert_eq!(typer.typed_ast().iter().count(), typed_nodes_before);
+        for source_tree in [
+            broken_method,
+            broken_definition.rhs.unwrap(),
+            broken_match.cases[0],
+            broken_case.pattern,
+            nested_pattern,
+            inner.args[0],
+            failed_result,
+        ] {
+            assert_eq!(
+                typer.source_typed_index().get(source, source_tree),
+                None,
+                "failed nested root publishes no partial source mapping"
+            );
+        }
+
+        let retry_error = typer
+            .type_method_definition(broken_method)
+            .expect_err("the malformed nested root remains invalid on retry");
+        assert_eq!(format!("{retry_error:?}"), first_diagnostic);
+        assert_eq!(typer.store().checkpoint(), store_before);
+        assert_eq!(typer.source_typed_index().len(), mappings_before);
+        assert_eq!(typer.typed_ast().iter().count(), typed_nodes_before);
+
+        let typed_peel = typer
+            .type_method_definition(peel_method)
+            .expect("the original nested peelLeft root retries in the same session");
+        assert_eq!(
+            typer.source_typed_index().get(source, peel_method),
+            Some(typed_peel)
+        );
+        let TreeKind::DefDef(peel_definition) = &ast.get(peel_method).kind else {
+            unreachable!()
+        };
+        let peel_rhs = peel_definition.rhs.unwrap();
+        let TreeKind::Match(peel_match) = &ast.get(peel_rhs).kind else {
+            unreachable!()
+        };
+        let TreeKind::CaseDef(peel_case) = &ast.get(peel_match.cases[0]).kind else {
+            unreachable!()
+        };
+        let TreeKind::Apply(outer) = &ast.get(peel_case.pattern).kind else {
+            unreachable!()
+        };
+        let TreeKind::Apply(inner) = &ast.get(outer.args[0]).kind else {
+            unreachable!()
+        };
+        let binder = index
+            .symbol_at(source, inner.args[0])
+            .or_else(|| typer.pattern_binding_symbol_at(source, inner.args[0]))
+            .expect("same-session retry restores the case-local left binder");
+        let returned = match &ast.get(peel_case.body).kind {
+            TreeKind::Block(block) => block.expr,
+            _ => peel_case.body,
+        };
+        let typed_return = typer
+            .source_typed_index()
+            .get(source, returned)
+            .expect("same-session retry maps the returned binder reference");
+        assert_term_ref(
+            typer.store(),
+            typer.typed_ast().get(typed_return).ty,
+            binder,
+        );
+        let peel_symbol = index.symbol_at(source, peel_method).unwrap();
+        let SymbolInfo::Complete(signature) = *typer.store().symbols.info(peel_symbol) else {
+            panic!("successful retry publishes the original peelLeft signature")
+        };
+        let Type::Method(signature) = typer.store().types.get(signature) else {
+            panic!("peelLeft signature remains a method")
+        };
+        assert_eq!(signature.params.len(), 1);
+        let expr = ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::TypeDef(definition) = &node.kind else {
+                    return None;
+                };
+                (typer
+                    .store()
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    == "Expr")
+                    .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .expect("the original Expr source trait remains available");
+        assert_type_ref(typer.store(), signature.params[0].ty, expr);
+        assert_type_ref(typer.store(), signature.result, expr);
+    });
+}
+
+#[test]
 fn corrupted_reference_product2_identities_reject_then_retry_original_select_left() {
     #[derive(Clone, Copy, Debug)]
     enum Fault {
@@ -2242,6 +2595,7 @@ fn index_with_swapped_add_selector_provenance(
 struct RootReceipt {
     roots: Vec<String>,
     normalized: Vec<String>,
+    evidence: String,
 }
 
 fn setup(
@@ -2536,6 +2890,7 @@ fn analyze_roots(source: SourceId, session: &str) -> RootReceipt {
     RootReceipt {
         roots: rows,
         normalized,
+        evidence: String::new(),
     }
 }
 
@@ -2644,10 +2999,12 @@ fn nested_roots(source: SourceId, session: &str) -> RootReceipt {
                 range.end(),
             ));
         }
-        assert_nested_typed_shapes(source, ast, index, typer, definitions, &typed_roots);
+        let evidence =
+            assert_nested_typed_shapes(source, ast, index, typer, definitions, &typed_roots);
         RootReceipt {
             roots: rows,
             normalized,
+            evidence,
         }
     })
 }
@@ -2665,7 +3022,7 @@ fn assert_nested_typed_shapes(
             dotty_core::TreeId<dotty_core::ast::Typed>,
         ),
     >,
-) {
+) -> String {
     let mut classes = std::collections::BTreeMap::new();
     for (tree, node) in ast.iter() {
         if let TreeKind::TypeDef(definition) = &node.kind {
@@ -2701,6 +3058,7 @@ fn assert_nested_typed_shapes(
     let TreeKind::DefDef(peel_typed_method) = &typer.typed_ast().get(peel_typed_root).kind else {
         unreachable!()
     };
+    let peel_typed_method = peel_typed_method.clone();
     let peel_typed_match = typer
         .source_typed_index()
         .get(source, peel_source.rhs.unwrap())
@@ -2709,6 +3067,15 @@ fn assert_nested_typed_shapes(
     else {
         panic!("peelLeft's complete typed RHS remains a Match")
     };
+    let peel_typed_cases = peel_typed_match_node.cases.clone();
+    assert_eq!(peel_typed_cases.len(), 2);
+    assert_eq!(
+        typer
+            .source_typed_index()
+            .get(source, peel_source.rhs.unwrap()),
+        Some(peel_typed_match),
+        "the whole source Match maps to its typed replacement"
+    );
     assert_type_ref(
         typer.store(),
         typer.typed_ast().get(peel_typed_match).ty,
@@ -2734,11 +3101,15 @@ fn assert_nested_typed_shapes(
     assert_eq!(peel_signature.params.len(), 1);
     assert_type_ref(typer.store(), peel_signature.params[0].ty, expr);
     assert_type_ref(typer.store(), peel_signature.result, expr);
-    let TreeKind::CaseDef(peel_typed_case) =
-        &typer.typed_ast().get(peel_typed_match_node.cases[0]).kind
+    let TreeKind::CaseDef(peel_typed_case) = &typer.typed_ast().get(peel_typed_cases[0]).kind
     else {
         unreachable!()
     };
+    assert_eq!(
+        typer.source_typed_index().get(source, peel_match.cases[0]),
+        Some(peel_typed_cases[0]),
+        "the nested-pattern CaseDef has a complete typed mapping"
+    );
     let peel_parameter = index
         .symbol_at(source, peel_source.value_param_clauses[0][0])
         .unwrap();
@@ -2768,6 +3139,101 @@ fn assert_nested_typed_shapes(
     let TreeKind::Apply(peel_inner) = &ast.get(peel_outer.args[0]).kind else {
         panic!("peelLeft nests Add inside Add")
     };
+    let typed_outer = typer
+        .source_typed_index()
+        .get(source, peel_case.pattern)
+        .expect("outer Add pattern has a typed mapping");
+    let typed_inner = typer
+        .source_typed_index()
+        .get(source, peel_outer.args[0])
+        .expect("inner Add pattern has a typed mapping");
+    assert_ne!(peel_case.pattern, peel_outer.args[0]);
+    assert_ne!(
+        typed_outer, typed_inner,
+        "nested Add occurrences stay distinct"
+    );
+    for (source_tree, typed_tree) in [
+        (peel_case.pattern, typed_outer),
+        (peel_outer.args[0], typed_inner),
+    ] {
+        let source_span = ast.get(source_tree).position.unwrap().span().range();
+        let typed_span = typer
+            .typed_ast()
+            .get(typed_tree)
+            .position
+            .unwrap()
+            .span()
+            .range();
+        assert_eq!(
+            source_span, typed_span,
+            "extractor occurrence span is preserved"
+        );
+    }
+    let TreeKind::UnApply(typed_outer_unapply) = &typer.typed_ast().get(typed_outer).kind else {
+        panic!("outer Add source pattern maps to UnApply")
+    };
+    let TreeKind::UnApply(typed_inner_unapply) = &typer.typed_ast().get(typed_inner).kind else {
+        panic!("inner Add source pattern maps to UnApply")
+    };
+    assert_ne!(typed_outer_unapply.function, typed_inner_unapply.function);
+    let add_unapply = index
+        .generated_case_class_method(add, GeneratedCaseClassMethodRole::Unapply)
+        .expect("Add has one canonical generated unapply");
+    assert_term_ref(
+        typer.store(),
+        typer.typed_ast().get(typed_outer_unapply.function).ty,
+        add_unapply,
+    );
+    assert_term_ref(
+        typer.store(),
+        typer.typed_ast().get(typed_inner_unapply.function).ty,
+        add_unapply,
+    );
+    let source_outer_unapply = typer
+        .source_typed_index()
+        .get(source, peel_outer.function)
+        .expect("outer extractor function has a typed mapping");
+    let source_inner_unapply = typer
+        .source_typed_index()
+        .get(source, peel_inner.function)
+        .expect("inner extractor function has a typed mapping");
+    for (unapply_function, source_qualifier) in [
+        (typed_outer_unapply.function, source_outer_unapply),
+        (typed_inner_unapply.function, source_inner_unapply),
+    ] {
+        let TreeKind::Select(selection) = &typer.typed_ast().get(unapply_function).kind else {
+            panic!("typed extractor function is a companion unapply selection")
+        };
+        assert_eq!(selection.qualifier, source_qualifier);
+        assert_eq!(
+            typer.store().names.resolve(selection.name.text()),
+            "unapply"
+        );
+    }
+    assert_eq!(typed_outer_unapply.patterns.len(), 2);
+    assert_eq!(typed_inner_unapply.patterns.len(), 2);
+    for (source_apply, typed_apply, typed_unapply) in [
+        (peel_case.pattern, typed_outer, typed_outer_unapply),
+        (peel_outer.args[0], typed_inner, typed_inner_unapply),
+    ] {
+        assert_eq!(
+            typer.source_typed_index().get(source, source_apply),
+            Some(typed_apply)
+        );
+        let TreeKind::Apply(source_application) = &ast.get(source_apply).kind else {
+            unreachable!()
+        };
+        assert_eq!(source_application.args.len(), 2);
+        for (source_argument, typed_argument) in
+            source_application.args.iter().zip(&typed_unapply.patterns)
+        {
+            assert_eq!(
+                typer.source_typed_index().get(source, *source_argument),
+                Some(*typed_argument),
+                "each positional extractor argument preserves its source mapping"
+            );
+        }
+    }
     let TreeKind::Ident(peel_binder) = &ast.get(peel_inner.args[0]).kind else {
         panic!("the nested Add binds left")
     };
@@ -2784,6 +3250,81 @@ fn assert_nested_typed_shapes(
         panic!("nested peelLeft binder has a complete semantic type")
     };
     assert_type_ref(typer.store(), peel_binder_type, expr);
+    let source_return = match &ast.get(peel_case.body).kind {
+        TreeKind::Block(block) => block.expr,
+        _ => peel_case.body,
+    };
+    let typed_return = typer
+        .source_typed_index()
+        .get(source, source_return)
+        .expect("peelLeft returns a mapped source expression");
+    let TreeKind::Ident(typed_return_name) = &typer.typed_ast().get(typed_return).kind else {
+        panic!("the returned value remains the exact bound identifier")
+    };
+    assert_eq!(
+        typer.store().names.resolve(typed_return_name.name.text()),
+        "left"
+    );
+    assert_term_ref(
+        typer.store(),
+        typer.typed_ast().get(typed_return).ty,
+        peel_binder_symbol,
+    );
+    assert!(
+        typer
+            .pattern_binding_symbol_at(source, peel_outer.args[1])
+            .is_none(),
+        "outer wildcard does not enter the binder scope"
+    );
+    assert!(
+        typer
+            .pattern_binding_symbol_at(source, peel_inner.args[1])
+            .is_none(),
+        "inner wildcard does not enter the binder scope"
+    );
+    let TreeKind::CaseDef(fallback_case) = &ast.get(peel_match.cases[1]).kind else {
+        unreachable!()
+    };
+    let TreeKind::CaseDef(typed_fallback_case) = &typer.typed_ast().get(peel_typed_cases[1]).kind
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        typer.source_typed_index().get(source, peel_match.cases[1]),
+        Some(peel_typed_cases[1]),
+        "the fallback CaseDef has a complete typed mapping"
+    );
+    let fallback_pattern = typer
+        .source_typed_index()
+        .get(source, fallback_case.pattern)
+        .expect("fallback pattern has a typed mapping");
+    assert_eq!(fallback_pattern, typed_fallback_case.pattern);
+    assert!(
+        typer
+            .pattern_binding_symbol_at(source, fallback_case.pattern)
+            .is_none(),
+        "fallback wildcard does not inherit the first case binder"
+    );
+    let fallback_return = match &ast.get(fallback_case.body).kind {
+        TreeKind::Block(block) => block.expr,
+        _ => fallback_case.body,
+    };
+    let typed_fallback_return = typer
+        .source_typed_index()
+        .get(source, fallback_return)
+        .expect("fallback expression has a typed mapping");
+    let peel_parameter = index
+        .symbol_at(source, peel_source.value_param_clauses[0][0])
+        .unwrap();
+    assert_term_ref(
+        typer.store(),
+        typer.typed_ast().get(typed_fallback_return).ty,
+        peel_parameter,
+    );
+    let retyped_root = typer
+        .type_method_definition(peel_left.0)
+        .expect("retyping peelLeft is idempotent");
+    assert_eq!(retyped_root, peel_typed_root);
 
     let sum_root = roots["sum"];
     let TreeKind::DefDef(sum_source) = &ast.get(sum_root.0).kind else {
@@ -2949,6 +3490,18 @@ fn assert_nested_typed_shapes(
     assert_type_ref(typer.store(), sum_signature.params[0].ty, expr);
     assert_type_ref(typer.store(), sum_signature.result, int);
 
+    let typed_binder = typer
+        .source_typed_index()
+        .get(source, peel_inner.args[0])
+        .expect("nested binder has a typed mapping");
+    let source_match = peel_source.rhs.unwrap();
+    let source_outer_span = ast.get(peel_case.pattern).position.unwrap().span().range();
+    let source_inner_span = ast.get(peel_outer.args[0]).position.unwrap().span().range();
+    let fallback_case_tree = peel_match.cases[1];
+    let typed_fallback_case_tree = peel_typed_cases[1];
+    let source_root_typed = peel_left.1;
+    assert_eq!(retyped_root, source_root_typed);
+
     let source_tree_receipt = nested_source_tree_receipt(source, ast, roots);
     assert_eq!(
         format!("{source_tree_receipt}\n"),
@@ -2958,6 +3511,35 @@ fn assert_nested_typed_shapes(
             .1,
         "the immutable source tree IDs and spans remain pinned"
     );
+    format!(
+        "peelLeft\troot={}->{}\tmatch={}->{}\tcases={}->{}:{}->{}\textractors={}->{}@{}..{}:{}->{}@{}..{}\tunapply={}\tbinder={}->{}:symbol{}\treturn={}->{}\tfallback={}->{}:parameter{}\tretype={}\n",
+        peel_left.0.index(),
+        source_root_typed.index(),
+        source_match.index(),
+        peel_typed_match.index(),
+        peel_match.cases[0].index(),
+        peel_typed_cases[0].index(),
+        fallback_case_tree.index(),
+        typed_fallback_case_tree.index(),
+        peel_case.pattern.index(),
+        typed_outer.index(),
+        source_outer_span.start(),
+        source_outer_span.end(),
+        peel_outer.args[0].index(),
+        typed_inner.index(),
+        source_inner_span.start(),
+        source_inner_span.end(),
+        add_unapply.index(),
+        peel_inner.args[0].index(),
+        typed_binder.index(),
+        peel_binder_symbol.index(),
+        source_return.index(),
+        typed_return.index(),
+        fallback_return.index(),
+        typed_fallback_return.index(),
+        peel_parameter.index(),
+        retyped_root.index(),
+    )
 }
 
 fn nested_source_tree_receipt(
