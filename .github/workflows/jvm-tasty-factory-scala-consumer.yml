@@ -27,6 +27,7 @@ on:
       - 'tests/fixtures/jvm_tasty_immutable_reference_local_pair/**'
       - 'tests/jvm_tasty_immutable_reference_local_pair_scala_consumer.rs'
       - 'docs/classloader-semantic-tasty-convergence-iii/**'
+      - 'docs/classloader-semantic-tasty-convergence-iv/**'
       - 'tests/fixtures/jvm_tasty_dual_reference_forwarding/**'
   workflow_dispatch:
 
