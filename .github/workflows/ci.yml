@@ -113,6 +113,7 @@ jobs:
             -p dotty-jvm --lib \
             -p dotty --test jvm_source_compilation \
             --test jvm_tasty_artifacts \
+            --test jvm_tasty_mixed_origin_runtime \
             --test jvm_tasty_dual_reference_identity \
             --test jvm_stateful_class_contract \
             --locked -- --nocapture
