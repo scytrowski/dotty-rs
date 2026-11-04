@@ -14,6 +14,7 @@ use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
 
 const SOURCE: &str = include_str!("fixtures/source-binary-recursive-adt-3.9.0/Expr.scala");
+const NESTED_SOURCE: &str = include_str!("fixtures/source-nested-recursive-adt-3.9.0/Expr.scala");
 const STRUCTURAL_CONTROL_RECEIPTS: &str =
     include_str!("fixtures/source-binary-recursive-adt-3.9.0/rust-structural-controls.tsv");
 
@@ -44,6 +45,35 @@ fn binary_recursive_adt_roots_are_attempted_in_two_fresh_resolver_sessions() {
     );
     for row in receipt {
         println!("ISSUE2072_ROOT_AFTER_PRODUCT2\t{row}");
+    }
+}
+
+#[test]
+fn nested_recursive_adt_original_roots_are_attempted_in_two_fresh_sessions() {
+    let source_a = SourceId::from_index(21321);
+    let source_b = SourceId::from_index(21322);
+    assert_ne!(
+        source_a, source_b,
+        "fresh sessions use disjoint source identities"
+    );
+    let first = nested_roots(source_a, "session-a");
+    let second = nested_roots(source_b, "session-b");
+    assert_eq!(first.normalized, second.normalized);
+    let receipt = first
+        .roots
+        .iter()
+        .chain(second.roots.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        format!("{}\n", receipt.join("\n")),
+        include_str!("fixtures/source-nested-recursive-adt-3.9.0/rust-two-root-baseline.tsv")
+            .split_once('\n')
+            .expect("nested two-root receipt header")
+            .1
+    );
+    for row in receipt {
+        println!("ISSUE2132_NESTED_ROOT\t{row}");
     }
 }
 
@@ -2224,12 +2254,26 @@ fn setup(
     Definitions,
     Packages,
 ) {
+    setup_with_source(source, SOURCE)
+}
+
+fn setup_with_source(
+    source: SourceId,
+    source_text: &str,
+) -> (
+    dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+    dotty_core::TreeId<dotty_core::ast::Untyped>,
+    dotty_core::SourceSemanticIndex,
+    SemanticStore,
+    Definitions,
+    Packages,
+) {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
     let parsed = dotty_parser::parse_compilation_unit(
-        SourceText::new(SOURCE).expect("frozen source is valid"),
+        SourceText::new(source_text).expect("frozen source is valid"),
         source,
-        ContextualScanner::new(SOURCE).expect("frozen source scans"),
+        ContextualScanner::new(source_text).expect("frozen source scans"),
         &mut store.names,
     );
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
@@ -2258,7 +2302,12 @@ struct BinarySession {
 
 impl BinarySession {
     fn new(source: SourceId) -> Self {
-        let (ast, _root, index, store, definitions, packages) = setup(source);
+        Self::new_with_source(source, SOURCE)
+    }
+
+    fn new_with_source(source: SourceId, source_text: &str) -> Self {
+        let (ast, _root, index, store, definitions, packages) =
+            setup_with_source(source, source_text);
         Self {
             source,
             ownership_witness: Box::new(0),
@@ -2487,6 +2536,700 @@ fn analyze_roots(source: SourceId, session: &str) -> RootReceipt {
     RootReceipt {
         roots: rows,
         normalized,
+    }
+}
+
+fn nested_roots(source: SourceId, session: &str) -> RootReceipt {
+    let mut rust_session = BinarySession::new_with_source(source, NESTED_SOURCE);
+    rust_session.with_typer(|ast, index, typer, definitions| {
+        let mut roots = Vec::new();
+        for (tree, node) in ast.iter() {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                continue;
+            };
+            let name = typer
+                .store()
+                .names
+                .resolve(definition.name.as_name().text());
+            if !matches!(name, "peelLeft" | "sum") {
+                continue;
+            }
+            let method = index
+                .symbol_at(source, tree)
+                .expect("source method identity");
+            let parameter_tree = definition.value_param_clauses[0][0];
+            let parameter = index
+                .symbol_at(source, parameter_tree)
+                .expect("source parameter identity");
+            let owner = typer
+                .store()
+                .symbols
+                .get(method)
+                .owner
+                .expect("method owner");
+            assert_eq!(typer.store().symbols.get(parameter).owner, Some(method));
+            assert_ne!(method, parameter);
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(owner).name.text()),
+                "Evaluator$"
+            );
+            assert!(matches!(
+                typer.store().symbols.get(method).origin,
+                SymbolOrigin::Source(id) if id == source
+            ));
+            assert!(matches!(
+                typer.store().symbols.get(parameter).origin,
+                SymbolOrigin::Source(id) if id == source
+            ));
+            roots.push((name.to_owned(), tree, node.position.unwrap()));
+        }
+        roots.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            roots.len(),
+            2,
+            "only the two requested source DefDefs count"
+        );
+
+        let mut rows = Vec::new();
+        let mut normalized = Vec::new();
+        let mut typed_roots = std::collections::BTreeMap::new();
+        for (name, tree, position) in roots {
+            let range = position.span().range();
+            let outcome = match typer.type_method_definition(tree) {
+                Ok(typed) => {
+                    assert_eq!(typer.source_typed_index().get(source, tree), Some(typed));
+                    assert!(matches!(
+                        typer.typed_ast().get(typed).kind,
+                        TreeKind::DefDef(_)
+                    ));
+                    typed_roots.insert(name.clone(), (tree, typed));
+                    format!("complete=whole_DefDef;typed_index=present")
+                }
+                Err(error) => {
+                    assert!(typer.source_typed_index().get(source, tree).is_none());
+                    let debug = format!("{error:?}");
+                    let error_kind = debug.split(" {").next().unwrap_or(&debug);
+                    let nested_tree = parse_tree_index(&debug);
+                    let nested = nested_tree
+                        .and_then(|number| {
+                            ast.iter()
+                                .find(|(candidate, _)| candidate.index() == number)
+                        })
+                        .map(|(nested_tree, nested_node)| {
+                            let nested_range = nested_node.position.unwrap().span().range();
+                            format!(
+                                "Expr.scala#tree{}@{}:{}",
+                                nested_tree.index(),
+                                nested_range.start(),
+                                nested_range.end()
+                            )
+                        })
+                        .unwrap_or_else(|| "UNREPORTED".to_owned());
+                    format!("first_error={error_kind}(nested={nested});typed_index=absent")
+                }
+            };
+            rows.push(format!(
+                "{session}\t{name}\tExpr.scala#tree{}\t{}:{}\tEvaluator$\t{outcome}",
+                tree.index(),
+                range.start(),
+                range.end(),
+            ));
+            normalized.push(format!(
+                "{name}\tExpr.scala#tree{}\t{}:{}\tEvaluator$\t{outcome}",
+                tree.index(),
+                range.start(),
+                range.end(),
+            ));
+        }
+        assert_nested_typed_shapes(source, ast, index, typer, definitions, &typed_roots);
+        RootReceipt {
+            roots: rows,
+            normalized,
+        }
+    })
+}
+
+fn assert_nested_typed_shapes(
+    source: SourceId,
+    ast: &dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+    index: &SourceSemanticIndex,
+    typer: &mut dotty_typer::SourceTyper<'_>,
+    definitions: Definitions,
+    roots: &std::collections::BTreeMap<
+        String,
+        (
+            dotty_core::TreeId<dotty_core::ast::Untyped>,
+            dotty_core::TreeId<dotty_core::ast::Typed>,
+        ),
+    >,
+) {
+    let mut classes = std::collections::BTreeMap::new();
+    for (tree, node) in ast.iter() {
+        if let TreeKind::TypeDef(definition) = &node.kind {
+            let name = typer
+                .store()
+                .names
+                .resolve(definition.name.as_name().text());
+            if matches!(name, "Expr" | "Num" | "Add") {
+                classes.insert(name.to_owned(), index.symbol_at(source, tree).unwrap());
+            }
+        }
+    }
+    let expr = classes["Expr"];
+    let num = classes["Num"];
+    let add = classes["Add"];
+    assert_product2_parent(typer, index, add, expr);
+    let int = definitions_int(typer.store(), definitions);
+    assert_source_product_fields(typer, ast, index, source, num, &["value"], int);
+    assert_source_product_fields(typer, ast, index, source, add, &["left", "right"], expr);
+
+    let peel_left = roots["peelLeft"];
+    let TreeKind::DefDef(peel_source) = &ast.get(peel_left.0).kind else {
+        unreachable!()
+    };
+    let TreeKind::Match(peel_match) = &ast.get(peel_source.rhs.unwrap()).kind else {
+        panic!("peelLeft's original RHS is a Match")
+    };
+    assert_eq!(peel_match.cases.len(), 2);
+    let TreeKind::CaseDef(peel_case) = &ast.get(peel_match.cases[0]).kind else {
+        unreachable!()
+    };
+    let peel_typed_root = peel_left.1;
+    let TreeKind::DefDef(peel_typed_method) = &typer.typed_ast().get(peel_typed_root).kind else {
+        unreachable!()
+    };
+    let peel_typed_match = typer
+        .source_typed_index()
+        .get(source, peel_source.rhs.unwrap())
+        .unwrap();
+    let TreeKind::Match(peel_typed_match_node) = &typer.typed_ast().get(peel_typed_match).kind
+    else {
+        panic!("peelLeft's complete typed RHS remains a Match")
+    };
+    assert_type_ref(
+        typer.store(),
+        typer.typed_ast().get(peel_typed_match).ty,
+        expr,
+    );
+    let typed_peel_result = typer
+        .source_typed_index()
+        .get(source, peel_source.tpt)
+        .unwrap();
+    assert_eq!(peel_typed_method.tpt, typed_peel_result);
+    assert_type_ref(
+        typer.store(),
+        typer.typed_ast().get(typed_peel_result).ty,
+        expr,
+    );
+    let peel_symbol = index.symbol_at(source, peel_left.0).unwrap();
+    let SymbolInfo::Complete(peel_signature) = *typer.store().symbols.info(peel_symbol) else {
+        panic!("peelLeft's complete signature is published")
+    };
+    let Type::Method(peel_signature) = typer.store().types.get(peel_signature) else {
+        panic!("peelLeft's signature is a method type")
+    };
+    assert_eq!(peel_signature.params.len(), 1);
+    assert_type_ref(typer.store(), peel_signature.params[0].ty, expr);
+    assert_type_ref(typer.store(), peel_signature.result, expr);
+    let TreeKind::CaseDef(peel_typed_case) =
+        &typer.typed_ast().get(peel_typed_match_node.cases[0]).kind
+    else {
+        unreachable!()
+    };
+    let peel_parameter = index
+        .symbol_at(source, peel_source.value_param_clauses[0][0])
+        .unwrap();
+    let SymbolInfo::Complete(peel_parameter_type) = *typer.store().symbols.info(peel_parameter)
+    else {
+        panic!("peelLeft source parameter type is complete")
+    };
+    assert_eq!(
+        typer
+            .typed_ast()
+            .get(peel_typed_method.value_param_clauses[0][0])
+            .ty,
+        peel_parameter_type
+    );
+    assert_pattern_projection(
+        source,
+        ast,
+        index,
+        typer,
+        peel_case.pattern,
+        peel_typed_case.pattern,
+        &classes,
+    );
+    let TreeKind::Apply(peel_outer) = &ast.get(peel_case.pattern).kind else {
+        panic!("peelLeft uses an outer Add extractor")
+    };
+    let TreeKind::Apply(peel_inner) = &ast.get(peel_outer.args[0]).kind else {
+        panic!("peelLeft nests Add inside Add")
+    };
+    let TreeKind::Ident(peel_binder) = &ast.get(peel_inner.args[0]).kind else {
+        panic!("the nested Add binds left")
+    };
+    assert_eq!(typer.store().names.resolve(peel_binder.name.text()), "left");
+    let peel_binder_symbol = typer
+        .pattern_binding_symbol_at(source, peel_inner.args[0])
+        .unwrap();
+    assert_eq!(
+        typer.store().symbols.get(peel_binder_symbol).owner,
+        Some(index.symbol_at(source, peel_left.0).unwrap())
+    );
+    let SymbolInfo::Complete(peel_binder_type) = *typer.store().symbols.info(peel_binder_symbol)
+    else {
+        panic!("nested peelLeft binder has a complete semantic type")
+    };
+    assert_type_ref(typer.store(), peel_binder_type, expr);
+
+    let sum_root = roots["sum"];
+    let TreeKind::DefDef(sum_source) = &ast.get(sum_root.0).kind else {
+        unreachable!()
+    };
+    let TreeKind::Match(sum_match) = &ast.get(sum_source.rhs.unwrap()).kind else {
+        panic!("sum's original RHS is a Match")
+    };
+    assert_eq!(sum_match.cases.len(), 3);
+    let sum_typed_root = sum_root.1;
+    let sum_symbol = index.symbol_at(source, sum_root.0).unwrap();
+    let sum_typed_match_tree = typer
+        .source_typed_index()
+        .get(source, sum_source.rhs.unwrap())
+        .unwrap();
+    let TreeKind::Match(sum_typed_match) = &typer.typed_ast().get(sum_typed_match_tree).kind else {
+        panic!("sum's complete typed RHS remains a Match")
+    };
+    assert_eq!(sum_typed_match.cases.len(), 3);
+    let sum_typed_cases = sum_typed_match.cases.clone();
+    let mut recursive_calls = Vec::new();
+    for (case_index, source_case) in sum_match.cases.iter().copied().enumerate() {
+        let TreeKind::CaseDef(source_case_node) = &ast.get(source_case).kind else {
+            unreachable!()
+        };
+        let TreeKind::CaseDef(typed_case_node) =
+            &typer.typed_ast().get(sum_typed_cases[case_index]).kind
+        else {
+            unreachable!()
+        };
+        assert_pattern_projection(
+            source,
+            ast,
+            index,
+            typer,
+            source_case_node.pattern,
+            typed_case_node.pattern,
+            &classes,
+        );
+        let mut case_binders = std::collections::BTreeMap::new();
+        let mut pattern_work = vec![source_case_node.pattern];
+        while let Some(pattern_tree) = pattern_work.pop() {
+            match &ast.get(pattern_tree).kind {
+                TreeKind::Apply(application) => {
+                    pattern_work.extend(application.args.iter().copied());
+                }
+                TreeKind::Ident(ident) => {
+                    if let Some(binder) = typer.pattern_binding_symbol_at(source, pattern_tree) {
+                        case_binders.insert(
+                            typer.store().names.resolve(ident.name.text()).to_owned(),
+                            binder,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        let TreeKind::Block(source_body) = &ast.get(source_case_node.body).kind else {
+            panic!("sum case body is a source block")
+        };
+        let source_return = source_body.expr;
+        let mut pending = vec![source_return];
+        while let Some(tree) = pending.pop() {
+            match &ast.get(tree).kind {
+                TreeKind::Apply(application) => {
+                    let TreeKind::Ident(function) = &ast.get(application.function).kind else {
+                        continue;
+                    };
+                    if typer.store().names.resolve(function.name.text()) != "sum" {
+                        continue;
+                    }
+                    assert_eq!(application.args.len(), 1);
+                    let typed_call = typer.source_typed_index().get(source, tree).unwrap();
+                    let TreeKind::Apply(typed_application) =
+                        &typer.typed_ast().get(typed_call).kind
+                    else {
+                        panic!("recursive sum call remains an ordinary Apply")
+                    };
+                    let typed_function = typer
+                        .source_typed_index()
+                        .get(source, application.function)
+                        .unwrap();
+                    assert_eq!(typed_application.function, typed_function);
+                    assert_term_ref(
+                        typer.store(),
+                        typer.typed_ast().get(typed_function).ty,
+                        sum_symbol,
+                    );
+                    let source_argument = application.args[0];
+                    let typed_argument = typer
+                        .source_typed_index()
+                        .get(source, source_argument)
+                        .unwrap();
+                    assert_eq!(typed_application.args, [typed_argument]);
+                    let TreeKind::Ident(argument_name) = &ast.get(source_argument).kind else {
+                        panic!("recursive argument resolves to a source pattern binder")
+                    };
+                    let argument_name_text = typer.store().names.resolve(argument_name.name.text());
+                    let binder = case_binders
+                        .get(argument_name_text)
+                        .copied()
+                        .expect("recursive argument refers to the original case binder");
+                    assert_eq!(
+                        typer
+                            .store()
+                            .names
+                            .resolve(typer.store().symbols.get(binder).name.text()),
+                        typer.store().names.resolve(argument_name.name.text())
+                    );
+                    assert_term_ref(
+                        typer.store(),
+                        typer.typed_ast().get(typed_argument).ty,
+                        binder,
+                    );
+                    assert_type_ref(typer.store(), typer.typed_ast().get(typed_call).ty, int);
+                    let range = ast.get(tree).position.unwrap().span().range();
+                    recursive_calls.push((
+                        range.start(),
+                        typer
+                            .store()
+                            .names
+                            .resolve(argument_name.name.text())
+                            .to_owned(),
+                    ));
+                }
+                TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(infix)) => {
+                    pending.extend([infix.left, infix.right]);
+                }
+                _ => {}
+            }
+        }
+    }
+    recursive_calls.sort_by_key(|(start, _)| *start);
+    assert_eq!(
+        recursive_calls
+            .iter()
+            .map(|(_, name)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["right", "left", "right"],
+        "sum retains three distinct source-owned calls with right/left/right binders"
+    );
+    assert_eq!(recursive_calls.len(), 3);
+    let TreeKind::DefDef(sum_typed_method) = &typer.typed_ast().get(sum_typed_root).kind else {
+        unreachable!()
+    };
+    let typed_sum_result = typer
+        .source_typed_index()
+        .get(source, sum_source.tpt)
+        .unwrap();
+    assert_eq!(sum_typed_method.tpt, typed_sum_result);
+    assert_type_ref(
+        typer.store(),
+        typer.typed_ast().get(typed_sum_result).ty,
+        int,
+    );
+    let SymbolInfo::Complete(sum_signature) = *typer.store().symbols.info(sum_symbol) else {
+        panic!("sum's complete signature is published")
+    };
+    let Type::Method(sum_signature) = typer.store().types.get(sum_signature) else {
+        panic!("sum's signature is a method type")
+    };
+    assert_eq!(sum_signature.params.len(), 1);
+    assert_type_ref(typer.store(), sum_signature.params[0].ty, expr);
+    assert_type_ref(typer.store(), sum_signature.result, int);
+
+    let source_tree_receipt = nested_source_tree_receipt(source, ast, roots);
+    assert_eq!(
+        format!("{source_tree_receipt}\n"),
+        include_str!("fixtures/source-nested-recursive-adt-3.9.0/source-tree-spans.tsv")
+            .split_once('\n')
+            .expect("source tree and span receipt header")
+            .1,
+        "the immutable source tree IDs and spans remain pinned"
+    );
+}
+
+fn nested_source_tree_receipt(
+    _source: SourceId,
+    ast: &dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+    roots: &std::collections::BTreeMap<
+        String,
+        (
+            dotty_core::TreeId<dotty_core::ast::Untyped>,
+            dotty_core::TreeId<dotty_core::ast::Typed>,
+        ),
+    >,
+) -> String {
+    let row = |path: &str, tree: dotty_core::TreeId<dotty_core::ast::Untyped>| {
+        let node = ast.get(tree);
+        let range = node.position.unwrap().span().range();
+        let kind = match &node.kind {
+            TreeKind::DefDef(_) => "DefDef",
+            TreeKind::Match(_) => "Match",
+            TreeKind::CaseDef(_) => "CaseDef",
+            TreeKind::Apply(_) => "Apply",
+            TreeKind::Ident(_) => "Ident",
+            _ => "Other",
+        };
+        format!(
+            "{path}\tExpr.scala#tree{}\t{}:{}\t{kind}",
+            tree.index(),
+            range.start(),
+            range.end(),
+        )
+    };
+    let (peel_tree, _) = roots["peelLeft"];
+    let TreeKind::DefDef(peel) = &ast.get(peel_tree).kind else {
+        unreachable!()
+    };
+    let peel_rhs = peel.rhs.unwrap();
+    let TreeKind::Match(peel_match) = &ast.get(peel_rhs).kind else {
+        unreachable!()
+    };
+    let TreeKind::CaseDef(peel_case) = &ast.get(peel_match.cases[0]).kind else {
+        unreachable!()
+    };
+    let TreeKind::Apply(peel_outer) = &ast.get(peel_case.pattern).kind else {
+        unreachable!()
+    };
+    let peel_nested = peel_outer.args[0];
+    let TreeKind::Apply(peel_inner) = &ast.get(peel_nested).kind else {
+        unreachable!()
+    };
+    let peel_binder = peel_inner.args[0];
+
+    let (sum_tree, _) = roots["sum"];
+    let TreeKind::DefDef(sum) = &ast.get(sum_tree).kind else {
+        unreachable!()
+    };
+    let sum_rhs = sum.rhs.unwrap();
+    let TreeKind::Match(sum_match) = &ast.get(sum_rhs).kind else {
+        unreachable!()
+    };
+    let TreeKind::CaseDef(sum_nested_case) = &ast.get(sum_match.cases[1]).kind else {
+        unreachable!()
+    };
+    let TreeKind::Apply(sum_outer) = &ast.get(sum_nested_case.pattern).kind else {
+        unreachable!()
+    };
+    let sum_nested_num = sum_outer.args[0];
+    let TreeKind::Apply(sum_num) = &ast.get(sum_nested_num).kind else {
+        unreachable!()
+    };
+    let mut calls = Vec::new();
+    for case in &sum_match.cases {
+        let TreeKind::CaseDef(case) = &ast.get(*case).kind else {
+            unreachable!()
+        };
+        let TreeKind::Block(body) = &ast.get(case.body).kind else {
+            unreachable!()
+        };
+        let mut pending = vec![body.expr];
+        while let Some(tree) = pending.pop() {
+            match &ast.get(tree).kind {
+                TreeKind::Apply(_) => calls.push(tree),
+                TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::InfixOp(infix)) => {
+                    pending.extend([infix.left, infix.right]);
+                }
+                _ => {}
+            }
+        }
+    }
+    calls.sort_by_key(|tree| ast.get(*tree).position.unwrap().span().range().start());
+
+    let mut rows = vec![
+        row("peelLeft.root", peel_tree),
+        row("peelLeft.match", peel_rhs),
+        row("peelLeft.case0.outer_Add", peel_case.pattern),
+        row("peelLeft.case0.inner_Add", peel_nested),
+        row("peelLeft.case0.left_binder", peel_binder),
+        row("sum.root", sum_tree),
+        row("sum.match", sum_rhs),
+        row("sum.case1.outer_Add", sum_nested_case.pattern),
+        row("sum.case1.inner_Num", sum_nested_num),
+        row("sum.case1.value_binder", sum_num.args[0]),
+    ];
+    for (position, call) in calls.into_iter().enumerate() {
+        rows.push(row(&format!("sum.recursive_call_{}", position + 1), call));
+    }
+    rows.join("\n")
+}
+
+fn definitions_int(store: &SemanticStore, definitions: Definitions) -> dotty_core::SymbolId {
+    match store.types.get(definitions.int) {
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } => *symbol,
+        other => panic!("canonical Int type is a TypeRef: {other:?}"),
+    }
+}
+
+fn assert_source_product_fields(
+    typer: &mut dotty_typer::SourceTyper<'_>,
+    ast: &dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+    index: &SourceSemanticIndex,
+    source: SourceId,
+    class: dotty_core::SymbolId,
+    fields: &[&str],
+    field_type: dotty_core::SymbolId,
+) {
+    let SourceDefinition::Canonical {
+        source: owner_source,
+        tree,
+    } = index.definition_of(class).unwrap()
+    else {
+        panic!("product class retains its source definition")
+    };
+    assert_eq!(owner_source, source);
+    let TreeKind::TypeDef(definition) = &ast.get(tree).kind else {
+        unreachable!()
+    };
+    let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
+        unreachable!()
+    };
+    let TreeKind::DefDef(constructor) = &ast.get(template.constructor).kind else {
+        unreachable!()
+    };
+    let source_fields = &constructor.value_param_clauses[0];
+    assert_eq!(source_fields.len(), fields.len());
+    let mut field_symbols = Vec::new();
+    let mut selector_symbols = Vec::new();
+    for (position, (field_tree, expected_name)) in source_fields.iter().zip(fields).enumerate() {
+        let TreeKind::ValDef(field) = &ast.get(*field_tree).kind else {
+            unreachable!()
+        };
+        assert_eq!(
+            typer.store().names.resolve(field.name.as_name().text()),
+            *expected_name
+        );
+        let field_symbol = index.symbol_at(source, *field_tree).unwrap();
+        let selector = index.derived_symbol_at(class, source, *field_tree).unwrap();
+        field_symbols.push(field_symbol);
+        selector_symbols.push(selector);
+        assert_eq!(typer.store().symbols.get(field_symbol).owner, Some(class));
+        assert_eq!(typer.store().symbols.get(selector).owner, Some(class));
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(selector).name.text()),
+            if position == 0 { "_1" } else { "_2" }
+        );
+        let SymbolInfo::Complete(selector_signature) = *typer.store().symbols.info(selector) else {
+            panic!("Product selector signature is complete")
+        };
+        let Type::Method(selector_signature) = typer.store().types.get(selector_signature) else {
+            panic!("Product selector uses a method signature")
+        };
+        assert!(selector_signature.params.is_empty());
+        assert_type_ref(typer.store(), selector_signature.result, field_type);
+    }
+    for left in 0..field_symbols.len() {
+        for right in left + 1..field_symbols.len() {
+            assert_ne!(field_symbols[left], field_symbols[right]);
+            assert_ne!(selector_symbols[left], selector_symbols[right]);
+        }
+    }
+}
+
+fn assert_pattern_projection(
+    source: SourceId,
+    ast: &dotty_core::ast::AstArena<dotty_core::ast::Untyped>,
+    index: &SourceSemanticIndex,
+    typer: &mut dotty_typer::SourceTyper<'_>,
+    source_pattern: dotty_core::TreeId<dotty_core::ast::Untyped>,
+    typed_pattern: dotty_core::TreeId<dotty_core::ast::Typed>,
+    classes: &std::collections::BTreeMap<String, dotty_core::SymbolId>,
+) {
+    match &ast.get(source_pattern).kind {
+        TreeKind::Apply(source_extractor) => {
+            let TreeKind::Ident(extractor_name) = &ast.get(source_extractor.function).kind else {
+                panic!("source extractor has a canonical class name")
+            };
+            let name = typer.store().names.resolve(extractor_name.name.text());
+            let class = classes[name];
+            let role = GeneratedCaseClassMethodRole::Unapply;
+            let unapply = index.generated_case_class_method(class, role).unwrap();
+            let typed_patterns = match &typer.typed_ast().get(typed_pattern).kind {
+                TreeKind::UnApply(typed_extractor) => {
+                    assert_term_ref(
+                        typer.store(),
+                        typer.typed_ast().get(typed_extractor.function).ty,
+                        unapply,
+                    );
+                    typed_extractor.patterns.clone()
+                }
+                _ => panic!("source extractor projects to typed UnApply"),
+            };
+            assert_eq!(source_extractor.args.len(), typed_patterns.len());
+            let SymbolInfo::Complete(unapply_type) = *typer.store().symbols.info(unapply) else {
+                panic!("generated unapply signature is complete")
+            };
+            let Type::Method(signature) = typer.store().types.get(unapply_type) else {
+                panic!("generated unapply signature is a method")
+            };
+            assert_eq!(signature.params.len(), 1);
+            let unapply_owner = typer.store().symbols.get(unapply).owner.unwrap();
+            let class_name = typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(class).name.text());
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(unapply_owner).name.text()),
+                format!("{class_name}$")
+            );
+            assert_type_ref(typer.store(), signature.params[0].ty, class);
+            assert_type_ref(typer.store(), signature.result, class);
+            for (source_child, typed_child) in source_extractor.args.iter().zip(&typed_patterns) {
+                if matches!(ast.get(*source_child).kind, TreeKind::Apply(_)) {
+                    assert_pattern_projection(
+                        source,
+                        ast,
+                        index,
+                        typer,
+                        *source_child,
+                        *typed_child,
+                        classes,
+                    );
+                } else if let TreeKind::Ident(source_binder) = &ast.get(*source_child).kind {
+                    if typer.store().names.resolve(source_binder.name.text()) != "_" {
+                        let binder = typer
+                            .pattern_binding_symbol_at(source, *source_child)
+                            .unwrap();
+                        let TreeKind::Bind(typed_binder) =
+                            &typer.typed_ast().get(*typed_child).kind
+                        else {
+                            panic!("source variable pattern projects to Bind")
+                        };
+                        assert_eq!(
+                            typer.store().names.resolve(typed_binder.name.text()),
+                            typer.store().names.resolve(source_binder.name.text())
+                        );
+                        assert_term_ref(
+                            typer.store(),
+                            typer.typed_ast().get(*typed_child).ty,
+                            binder,
+                        );
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 

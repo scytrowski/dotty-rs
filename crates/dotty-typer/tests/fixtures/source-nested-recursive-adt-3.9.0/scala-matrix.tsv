@@ -1,0 +1,8 @@
+source	classification
+WrongNestedArity	rejected
+WrongNestedLiteralType	rejected
+EscapedCaseBinder	rejected
+ForeignSameSpelledExtractor	accepted
+InvalidRecursiveArgument	rejected
+WrongMethodResult	rejected
+RenamedReorderedFields	accepted

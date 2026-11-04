@@ -1,0 +1,5 @@
+-- [E172] Type Error: WrongNestedLiteralType.scala:17:15 -----------------------
+17 |      case Add(1, right) =>
+   |               ^
+   |       Values of types Int and adt.Expr cannot be compared with == or !=
+1 error found

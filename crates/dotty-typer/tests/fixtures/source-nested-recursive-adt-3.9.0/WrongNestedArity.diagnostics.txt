@@ -1,0 +1,7 @@
+-- [E107] Syntax Error: WrongNestedArity.scala:17:18 ---------------------------
+17 |      case Add(Num(value, extra), right) =>
+   |               ^^^^^^^^^^^^^^^^^
+   |          Wrong number of argument patterns for adt.Num; expected: (Int)
+   |
+   | longer explanation available when compiling with `-explain`
+1 error found
