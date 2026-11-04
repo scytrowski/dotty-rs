@@ -3,7 +3,7 @@
 use crate::binary_name::BinaryName;
 use crate::class_path::{ClassPathEntry, safe_package_segments};
 use crate::error::ClassLoadError;
-use crate::loader::{ClassLoadProfile, ClassLoader};
+use crate::loader::{ClassLoadProfile, ClassLoader, SemanticTastyLoadError};
 use crate::session::{LoadingSession, SessionCheckpoint};
 use dotty_core::{
     Definitions, MemberRequest, MemberSelector, MemberSpace, Name, Namespace, Packages,
@@ -199,6 +199,37 @@ struct ResolverUndo {
     object_class: Symbol,
 }
 
+#[derive(Debug)]
+// This staged, crate-private handoff is intentionally opt-in and has no
+// production caller until the follow-up convergence increment.
+#[allow(dead_code)]
+pub(crate) struct SemanticMemberLoadFailure {
+    pub(crate) binary_name: BinaryName,
+    pub(crate) source: SemanticTastyLoadError,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+enum MemberResolutionFailure {
+    Resolver(ResolutionError),
+    SemanticLoad(SemanticMemberLoadFailure),
+}
+
+#[allow(dead_code)]
+impl MemberResolutionFailure {
+    fn into_resolution_error(self) -> ResolutionError {
+        match self {
+            Self::Resolver(error) => error,
+            Self::SemanticLoad(failure) => ResolutionError::Malformed {
+                reason: format!(
+                    "semantic loading of {} failed: {:?}",
+                    failure.binary_name, failure.source
+                ),
+            },
+        }
+    }
+}
+
 /// Stable observations for package-term and external-module member requests.
 /// Target keys use binary names and semantic member namespaces, never arena IDs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -271,6 +302,8 @@ pub struct ClasspathSymbolResolver<E: ClassPathEntry> {
         HashMap<BinaryName, BTreeMap<BinaryName, crate::class_path::ClassResource>>,
     #[cfg(test)]
     package_failure_after_segment: Option<usize>,
+    #[cfg(test)]
+    inject_semantic_late_failure: bool,
 }
 
 impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
@@ -292,6 +325,8 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             validated_module_resources: HashMap::new(),
             #[cfg(test)]
             package_failure_after_segment: None,
+            #[cfg(test)]
+            inject_semantic_late_failure: false,
         }
     }
 
@@ -496,11 +531,11 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             _ => None,
         }
     }
-    fn transact<T>(
+    fn transact<T, TransactionError>(
         &mut self,
         store: &mut SemanticStore,
-        operation: impl FnOnce(&mut Self, &mut SemanticStore) -> Result<Option<T>, ResolutionError>,
-    ) -> Result<Option<T>, ResolutionError> {
+        operation: impl FnOnce(&mut Self, &mut SemanticStore) -> Result<Option<T>, TransactionError>,
+    ) -> Result<Option<T>, TransactionError> {
         let transaction_started = self.collect_resolver_profile.then(Instant::now);
         let store_checkpoint = store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
@@ -589,6 +624,176 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         self.session = session;
         self.record_resolver_phase(ResolverProfilePhase::ClassLoadingInclusive, profile_started);
         result
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn load_semantic_class_for_member(
+        &mut self,
+        store: &mut SemanticStore,
+        name: &BinaryName,
+    ) -> Result<SymbolId, SemanticMemberLoadFailure> {
+        if let Some(&existing) = self.session.identified.get(name) {
+            if self.is_semantic_class_identity(store, existing) {
+                return Ok(existing);
+            }
+            return Err(SemanticMemberLoadFailure {
+                binary_name: name.clone(),
+                source: SemanticTastyLoadError::UnsupportedShape(
+                    "the canonical class identity was published by another loading path",
+                ),
+            });
+        }
+
+        let class_path = self
+            .class_path
+            .take()
+            .expect("resolver operation is exclusive");
+        let session = std::mem::replace(&mut self.session, LoadingSession::new());
+        let mut loader =
+            ClassLoader::with_definitions(class_path, store, self.definitions, session);
+        loader.set_load_profile_collection(
+            self.collect_load_profiles || self.collect_resolver_profile,
+        );
+        #[cfg(test)]
+        let result = if self.inject_semantic_late_failure {
+            loader.load_semantic_class_with_tasty_unpickler_injected_failure(name)
+        } else {
+            loader.load_semantic_class_with_tasty_unpickler(name)
+        };
+        #[cfg(not(test))]
+        let result = loader.load_semantic_class_with_tasty_unpickler(name);
+        for profile in loader.take_load_profiles() {
+            self.collect_class_load_profile(&profile);
+            self.load_profiles.push(profile);
+        }
+        let (class_path, session) = loader.into_parts();
+        self.class_path = Some(class_path);
+        self.session = session;
+        result.map_err(|source| SemanticMemberLoadFailure {
+            binary_name: name.clone(),
+            source,
+        })
+    }
+
+    #[allow(dead_code)]
+    fn is_semantic_class_identity(&self, store: &SemanticStore, class: SymbolId) -> bool {
+        if !store.symbols.contains(class) {
+            return false;
+        }
+        let symbol = store.symbols.get(class);
+        let SymbolInfo::Complete(info) = symbol.info else {
+            return false;
+        };
+        let Some(Type::ClassInfo(class_info)) = store.types.try_get(info) else {
+            return false;
+        };
+        if class_info.class != class || !store.scopes.contains(class_info.declarations) {
+            return false;
+        }
+        let Some(constructor) = store
+            .scopes
+            .get(class_info.declarations)
+            .entered_symbols()
+            .find(|constructor| {
+                let symbol = store.symbols.get(*constructor);
+                symbol.kind == SymbolKind::Constructor
+                    && symbol.name.namespace() == Namespace::Term
+                    && store.names.resolve(symbol.name.text()) == "<init>"
+            })
+        else {
+            return false;
+        };
+        let constructor = store.symbols.get(constructor);
+        if constructor.kind != SymbolKind::Constructor || constructor.owner != Some(class) {
+            return false;
+        }
+        let SymbolInfo::Complete(constructor_type) = constructor.info else {
+            return false;
+        };
+        let Some(Type::Method(method)) = store.types.try_get(constructor_type) else {
+            return false;
+        };
+        method.params.is_empty()
+            && matches!(
+                store.types.get(method.result),
+                Type::TypeRef { target: TypeRefTarget::Symbol(result), .. } if *result == class
+            )
+    }
+
+    #[allow(dead_code)]
+    fn resolve_member_inner_with_semantic_request(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+        selected_name: &BinaryName,
+    ) -> Result<Option<SymbolId>, MemberResolutionFailure> {
+        let selected_for_request = if request.selector == MemberSelector::Unique
+            && request.name.is_type()
+        {
+            let owner_type = match request.space {
+                MemberSpace::Prefix => Some(request.prefix),
+                MemberSpace::Explicit(owner) => Some(owner),
+                _ => None,
+            };
+            if let Some(owner_type) = owner_type {
+                let target = self
+                    .prefix_target(store, owner_type)
+                    .map_err(MemberResolutionFailure::Resolver)?;
+                if let Some(target) = target {
+                    let owner = self
+                        .resolve_target(store, target)
+                        .map_err(MemberResolutionFailure::Resolver)?;
+                    if let Some((owner, _)) = owner
+                        && store.symbols.get(owner).kind == SymbolKind::Package
+                    {
+                        let package_path =
+                            package_path_of_symbol(store, owner).ok_or_else(|| {
+                                MemberResolutionFailure::Resolver(ResolutionError::Malformed {
+                                    reason: "package prefix has an invalid owner chain".to_owned(),
+                                })
+                            })?;
+                        let simple_name = store.names.resolve(request.name.text());
+                        let internal_name = if package_path.is_empty() {
+                            simple_name.to_owned()
+                        } else {
+                            format!("{}/{simple_name}", package_path.join("/"))
+                        };
+                        let binary_name = BinaryName::from_internal(internal_name);
+                        binary_name.is_path_safe() && &binary_name == selected_name
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if selected_for_request {
+            self.load_semantic_class_for_member(store, selected_name)
+                .map(Some)
+                .map_err(MemberResolutionFailure::SemanticLoad)
+        } else {
+            self.resolve_member_inner(store, request)
+                .map_err(MemberResolutionFailure::Resolver)
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn resolve_member_with_semantic_class(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+        selected_name: &BinaryName,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.transact(store, |resolver, store| {
+            resolver.resolve_member_inner_with_semantic_request(store, request, selected_name)
+        })
+        .map_err(MemberResolutionFailure::into_resolution_error)
     }
 
     fn ensure_module_identity(
@@ -2246,6 +2451,554 @@ mod tests {
 
     fn fixture_path(relative: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
+    }
+
+    fn open_member_request(
+        store: &mut SemanticStore,
+        package: SymbolId,
+        no_prefix: TypeId,
+    ) -> MemberRequest {
+        MemberRequest {
+            prefix: store.types.alloc(Type::type_ref(no_prefix, package)),
+            name: Name::new(store.names.intern("Open"), Namespace::Type),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        }
+    }
+
+    fn open_class_path(include_jdk: bool) -> CompositeClassPath {
+        let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(DirectoryClassPath::new(
+            fixture_path("tests/fixtures/tasty_visibility"),
+        ))];
+        if include_jdk {
+            let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+            entries.push(Box::new(
+                JdkClassPath::new(java_home.join("jmods")).expect("JDK 21 jmods"),
+            ));
+        } else {
+            entries.push(Box::new(JavaLangWithoutObject(DirectoryClassPath::new(
+                fixture_path("tests/fixtures/tasty_visibility"),
+            ))));
+        }
+        CompositeClassPath::new(entries)
+    }
+
+    struct JavaLangWithoutObject(DirectoryClassPath);
+
+    impl ClassPathEntry for JavaLangWithoutObject {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            if name.as_internal() == "java/lang/Object" {
+                Ok(None)
+            } else {
+                self.0.find_class(name)
+            }
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            if package == ["java", "lang"] {
+                Ok(true)
+            } else {
+                self.0.contains_package(package)
+            }
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            if package == ["java"] || package == ["java", "lang"] {
+                Ok(true)
+            } else {
+                self.0.contains_package_prefix(package)
+            }
+        }
+    }
+
+    struct OpenResourceOverride {
+        inner: DirectoryClassPath,
+        format: ClassFormat,
+        bytes: Vec<u8>,
+    }
+
+    impl ClassPathEntry for OpenResourceOverride {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            if name.as_internal() == "me/cytrowski/tastyfixtures/visibility/Open" {
+                return Ok(Some(ClassResource::new(
+                    self.bytes.clone(),
+                    self.format,
+                    ClassOrigin::Directory(PathBuf::from("<Open-override>")),
+                )));
+            }
+            self.inner.find_class(name)
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            self.inner.contains_package(package)
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            self.inner.contains_package_prefix(package)
+        }
+    }
+
+    fn open_override_class_path(format: ClassFormat, bytes: Vec<u8>) -> CompositeClassPath {
+        let fixture = fixture_path("tests/fixtures/tasty_visibility");
+        let java_home = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        CompositeClassPath::new(vec![
+            Box::new(OpenResourceOverride {
+                inner: DirectoryClassPath::new(fixture.clone()),
+                format,
+                bytes,
+            }),
+            Box::new(DirectoryClassPath::new(fixture)),
+            Box::new(JdkClassPath::new(java_home.join("jmods")).expect("JDK 21 jmods")),
+        ])
+    }
+
+    fn selected_open_graph_with_padding(padding: bool) -> (String, SymbolId) {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        if padding {
+            let name = Name::new(store.names.intern("unrelated-padding"), Namespace::Type);
+            store.symbols.alloc(Symbol {
+                name,
+                owner: None,
+                kind: SymbolKind::Class,
+                flags: SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Missing,
+                origin: SymbolOrigin::Synthetic,
+                annotations: Vec::new(),
+                position: None,
+                links: Default::default(),
+            });
+        }
+        let mut resolver =
+            ClasspathSymbolResolver::new(open_class_path(true), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("Open package");
+        let request = open_member_request(&mut store, package, definitions.no_prefix);
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let class = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &name)
+            .unwrap()
+            .expect("selected semantic Open");
+        let SymbolInfo::Complete(info) = store.symbols.get(class).info else {
+            panic!("Open is complete");
+        };
+        let Type::ClassInfo(class_info) = store.types.get(info) else {
+            panic!("Open has ClassInfo");
+        };
+        assert_eq!(store.symbols.get(class).owner, Some(package));
+        assert_eq!(class_info.class, class);
+        assert_eq!(class_info.parents.len(), 1);
+        assert!(matches!(
+            store.types.get(class_info.parents[0]),
+            Type::TypeRef { target: TypeRefTarget::Symbol(parent), .. }
+                if *parent == definitions.object_class
+        ));
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructor = store
+            .scopes
+            .get(class_info.declarations)
+            .lookup(&constructor_name)
+            .expect("Open constructor");
+        let SymbolInfo::Complete(constructor_type) = store.symbols.get(constructor).info else {
+            panic!("constructor is complete");
+        };
+        let Type::Method(method) = store.types.get(constructor_type) else {
+            panic!("constructor is a method");
+        };
+        assert_eq!(store.symbols.get(constructor).owner, Some(class));
+        assert!(method.params.is_empty());
+        assert!(matches!(
+            store.types.get(method.result),
+            Type::TypeRef { target: TypeRefTarget::Symbol(result), .. } if *result == class
+        ));
+        assert_eq!(
+            resolver
+                .session
+                .packages
+                .get(&["me", "cytrowski", "tastyfixtures", "visibility"]),
+            Some(package)
+        );
+        assert_eq!(
+            resolver.session.origins.get(&class),
+            Some(&ClassOrigin::Directory(fixture_path(
+                "tests/fixtures/tasty_visibility"
+            )))
+        );
+        let receipt = format!(
+            "class=Class;owner=me/cytrowski/tastyfixtures/visibility;visibility={:?};parent=java/lang/Object;constructor=owner:Open,params:0,result:Open;origin=tasty_visibility;package=canonical",
+            store.symbols.get(class).visibility
+        );
+        (receipt, class)
+    }
+
+    #[test]
+    fn explicit_semantic_open_request_reuses_identity_and_rolls_back_cleanly() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(open_class_path(true), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("Open package");
+        let request = open_member_request(&mut store, package, definitions.no_prefix);
+        let open_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let store_checkpoint = store.checkpoint();
+        let checkpoint = resolver.checkpoint();
+        let object_before = store.symbols.get(definitions.object_class).clone();
+
+        let open = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &open_name)
+            .unwrap()
+            .expect("selected semantic Open request");
+        assert_eq!(resolver.session.identified.get(&open_name), Some(&open));
+        assert_eq!(resolver.session.resolved.get(&open_name), Some(&open));
+        assert!(resolver.class_path.is_some(), "classpath is returned");
+        assert_eq!(store.symbols.get(open).kind, SymbolKind::Class);
+        assert_eq!(store.symbols.get(open).owner, Some(package));
+        assert_eq!(store.symbols.get(open).visibility, Visibility::Public);
+        let SymbolInfo::Complete(info) = store.symbols.get(open).info else {
+            panic!("Open is complete");
+        };
+        let Type::ClassInfo(class_info) = store.types.get(info) else {
+            panic!("Open has ClassInfo");
+        };
+        assert_eq!(class_info.class, open);
+        assert_eq!(class_info.parents.len(), 1);
+        assert!(matches!(
+            store.types.get(class_info.parents[0]),
+            Type::TypeRef { target: TypeRefTarget::Symbol(parent), .. }
+                if *parent == definitions.object_class
+        ));
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructor = store
+            .scopes
+            .get(class_info.declarations)
+            .lookup(&constructor_name)
+            .expect("Open constructor");
+        let SymbolInfo::Complete(constructor_type) = store.symbols.get(constructor).info else {
+            panic!("constructor is complete");
+        };
+        let Type::Method(method) = store.types.get(constructor_type) else {
+            panic!("constructor has a method type");
+        };
+        assert!(method.params.is_empty());
+        assert!(matches!(
+            store.types.get(method.result),
+            Type::TypeRef { target: TypeRefTarget::Symbol(result), .. } if *result == open
+        ));
+        assert_eq!(
+            resolver.session.origins.get(&open),
+            Some(&ClassOrigin::Directory(fixture_path(
+                "tests/fixtures/tasty_visibility"
+            )))
+        );
+
+        let repeated = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &open_name)
+            .unwrap()
+            .expect("selected semantic repeat");
+        assert_eq!(repeated, open);
+        let ordinary = resolver
+            .resolve_member(&mut store, &request)
+            .unwrap()
+            .expect("ordinary resolver request reuses selected identity");
+        assert_eq!(ordinary, open);
+
+        resolver.rollback_to(&mut store, checkpoint);
+        store.rollback_to(store_checkpoint);
+        assert_eq!(store.checkpoint(), store_checkpoint);
+        assert!(resolver.class_path.is_some());
+        assert!(!resolver.session.identified.contains_key(&open_name));
+        assert!(!resolver.session.resolved.contains_key(&open_name));
+        assert!(!resolver.session.origins.contains_key(&open));
+        assert!(store.symbols.contains(package));
+        assert_eq!(store.symbols.get(definitions.object_class), &object_before);
+        let scope = resolver
+            .session
+            .packages
+            .scope_of(package)
+            .expect("package scope");
+        let open_type = Name::new(store.names.intern("Open"), Namespace::Type);
+        assert!(store.scopes.get(scope).lookup_all(&open_type).is_empty());
+
+        let retried = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &open_name)
+            .unwrap()
+            .expect("same-session retry after outer rollback");
+        assert_eq!(resolver.session.resolved.get(&open_name), Some(&retried));
+        assert_eq!(
+            store.symbols.get(retried).owner,
+            Some(package),
+            "the same arena slot is safe to reuse after its prior allocation was rolled back"
+        );
+    }
+
+    #[test]
+    fn explicit_semantic_request_rejects_legacy_first_and_missing_object_without_mutation() {
+        let open_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(open_class_path(true), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("Open package");
+        let request = open_member_request(&mut store, package, definitions.no_prefix);
+        let legacy = resolver
+            .resolve_member(&mut store, &request)
+            .unwrap()
+            .expect("default route remains legacy");
+        let SymbolInfo::Complete(legacy_info) = store.symbols.get(legacy).info else {
+            panic!("legacy Open is complete");
+        };
+        let Type::ClassInfo(legacy_class_info) = store.types.get(legacy_info) else {
+            panic!("legacy Open has ClassInfo");
+        };
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let legacy_constructor = store
+            .scopes
+            .get(legacy_class_info.declarations)
+            .lookup(&constructor_name)
+            .expect("legacy Open constructor");
+        let SymbolInfo::Complete(legacy_constructor_type) =
+            store.symbols.get(legacy_constructor).info
+        else {
+            panic!("legacy constructor is complete");
+        };
+        let Type::Method(legacy_method) = store.types.get(legacy_constructor_type) else {
+            panic!("legacy constructor has a method type");
+        };
+        assert_eq!(
+            store.types.get(legacy_method.result).reference_symbol(),
+            store.types.get(definitions.unit).reference_symbol(),
+            "default routing retains the legacy Unit constructor result"
+        );
+        let store_mark = store.checkpoint();
+        let session_mark = resolver.session.checkpoint();
+        let collision = resolver
+            .transact(&mut store, |resolver, store| {
+                resolver.resolve_member_inner_with_semantic_request(store, &request, &open_name)
+            })
+            .expect_err("selected semantic loading must reject a legacy identity");
+        assert!(matches!(
+            collision,
+            MemberResolutionFailure::SemanticLoad(SemanticMemberLoadFailure {
+                ref binary_name,
+                source: SemanticTastyLoadError::UnsupportedShape(
+                    "the canonical class identity was published by another loading path"
+                ),
+            }) if binary_name == &open_name
+        ));
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+        assert!(resolver.class_path.is_some());
+        assert_eq!(resolver.session.resolved.get(&open_name), Some(&legacy));
+
+        let mut missing_store = SemanticStore::new();
+        let missing_definitions = Definitions::bootstrap(&mut missing_store);
+        let mut missing_resolver = ClasspathSymbolResolver::new(
+            open_class_path(false),
+            missing_definitions,
+            LoadingSession::new(),
+        );
+        let missing_package = missing_resolver
+            .resolve_package(
+                &mut missing_store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("Open package");
+        let missing_request = open_member_request(
+            &mut missing_store,
+            missing_package,
+            missing_definitions.no_prefix,
+        );
+        let store_mark = missing_store.checkpoint();
+        let session_mark = missing_resolver.session.checkpoint();
+        let error = missing_resolver
+            .transact(&mut missing_store, |resolver, store| {
+                resolver.resolve_member_inner_with_semantic_request(
+                    store,
+                    &missing_request,
+                    &open_name,
+                )
+            })
+            .expect_err("missing JDK Object is a terminal semantic failure");
+        assert!(
+            matches!(
+                &error,
+                MemberResolutionFailure::SemanticLoad(SemanticMemberLoadFailure {
+                    binary_name,
+                    source: SemanticTastyLoadError::UnsupportedShape(reason),
+                }) if binary_name == &open_name && reason.contains("java.lang.Object")
+            ),
+            "missing Object preserves typed error: {error:?}"
+        );
+        assert_eq!(missing_store.checkpoint(), store_mark);
+        assert_eq!(missing_resolver.session.checkpoint(), session_mark);
+        assert!(missing_resolver.class_path.is_some());
+        assert!(!missing_resolver.session.resolved.contains_key(&open_name));
+
+        type FailureCase = (ClassFormat, Vec<u8>, fn(&SemanticTastyLoadError) -> bool);
+        let cases: [FailureCase; 2] = [
+            (
+                ClassFormat::Class,
+                Vec::new(),
+                |source: &SemanticTastyLoadError| {
+                    matches!(
+                        source,
+                        SemanticTastyLoadError::UnsupportedShape(
+                            "the selected classpath resource is not TASTy"
+                        )
+                    )
+                },
+            ),
+            (
+                ClassFormat::Tasty,
+                vec![0, 1, 2],
+                |source: &SemanticTastyLoadError| {
+                    matches!(
+                        source,
+                        SemanticTastyLoadError::ClassLoad(ClassLoadError::InvalidTastyFile(
+                            name, _
+                        )) if name.as_internal() == "me/cytrowski/tastyfixtures/visibility/Open"
+                    )
+                },
+            ),
+        ];
+        for (format, bytes, expected_source) in cases {
+            let mut case_store = SemanticStore::new();
+            let case_definitions = Definitions::bootstrap(&mut case_store);
+            let mut case_resolver = ClasspathSymbolResolver::new(
+                open_override_class_path(format, bytes),
+                case_definitions,
+                LoadingSession::new(),
+            );
+            let case_package = case_resolver
+                .resolve_package(
+                    &mut case_store,
+                    &["me", "cytrowski", "tastyfixtures", "visibility"],
+                )
+                .unwrap()
+                .expect("Open package");
+            let case_request =
+                open_member_request(&mut case_store, case_package, case_definitions.no_prefix);
+            let case_store_mark = case_store.checkpoint();
+            let case_session_mark = case_resolver.session.checkpoint();
+            let case_error = case_resolver
+                .transact(&mut case_store, |resolver, store| {
+                    resolver.resolve_member_inner_with_semantic_request(
+                        store,
+                        &case_request,
+                        &open_name,
+                    )
+                })
+                .expect_err("selected invalid resource must fail without legacy retry");
+            let MemberResolutionFailure::SemanticLoad(failure) = case_error else {
+                panic!("selected resource failure remains typed");
+            };
+            assert_eq!(failure.binary_name, open_name);
+            assert!(
+                expected_source(&failure.source),
+                "typed cause: {:?}",
+                failure.source
+            );
+            assert_eq!(case_store.checkpoint(), case_store_mark);
+            assert_eq!(case_resolver.session.checkpoint(), case_session_mark);
+            assert!(case_resolver.class_path.is_some());
+            assert!(!case_resolver.session.resolved.contains_key(&open_name));
+        }
+    }
+
+    #[test]
+    fn explicit_semantic_late_failure_rolls_back_root_object_unit_and_retries() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(open_class_path(true), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "visibility"],
+            )
+            .unwrap()
+            .expect("Open package");
+        let request = open_member_request(&mut store, package, definitions.no_prefix);
+        let open_name = BinaryName::from_internal("me/cytrowski/tastyfixtures/visibility/Open");
+        let package_scope = resolver
+            .session
+            .packages
+            .scope_of(package)
+            .expect("package scope");
+        let store_mark = store.checkpoint();
+        let session_mark = resolver.session.checkpoint();
+        let object_before = store.symbols.get(definitions.object_class).clone();
+        resolver.inject_semantic_late_failure = true;
+
+        let error = resolver
+            .transact(&mut store, |resolver, store| {
+                resolver.resolve_member_inner_with_semantic_request(store, &request, &open_name)
+            })
+            .expect_err("injected post-materialization error is terminal");
+        assert!(matches!(
+            error,
+            MemberResolutionFailure::SemanticLoad(SemanticMemberLoadFailure {
+                ref binary_name,
+                source: SemanticTastyLoadError::UnsupportedShape(
+                    "injected failure after class and constructor completion"
+                ),
+            }) if binary_name == &open_name
+        ));
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+        assert_eq!(store.symbols.get(definitions.object_class), &object_before);
+        assert!(resolver.class_path.is_some());
+        assert!(!resolver.session.identified.contains_key(&open_name));
+        assert!(!resolver.session.resolved.contains_key(&open_name));
+        assert!(resolver.session.origins.is_empty());
+        let open_type = Name::new(store.names.intern("Open"), Namespace::Type);
+        assert!(
+            store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&open_type)
+                .is_empty()
+        );
+        assert!(resolver.session.packages.get(&["scala"]).is_none());
+
+        resolver.inject_semantic_late_failure = false;
+        let retried = resolver
+            .resolve_member_with_semantic_class(&mut store, &request, &open_name)
+            .unwrap()
+            .expect("original bytes succeed after injected failure is removed");
+        assert_eq!(resolver.session.resolved.get(&open_name), Some(&retried));
+        assert_eq!(store.symbols.get(retried).owner, Some(package));
+        assert!(resolver.class_path.is_some());
+    }
+
+    #[test]
+    fn independent_selected_open_resolvers_have_the_same_normalized_graph() {
+        let (first, first_class) = selected_open_graph_with_padding(false);
+        let (second, second_class) = selected_open_graph_with_padding(true);
+        assert_ne!(
+            first_class, second_class,
+            "fresh stores allocate distinct IDs"
+        );
+        assert_eq!(first, second, "normalized semantic graph is stable");
     }
 
     #[test]
