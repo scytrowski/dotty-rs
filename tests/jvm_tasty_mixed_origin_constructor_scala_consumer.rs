@@ -640,6 +640,76 @@ fn lookup_probes(
             "[E008] Not Found Error",
         ),
     ];
+    let positive_case = root.join("lookup-combined-positive");
+    let positive_sidecar_dir = positive_case.join("original-sidecar");
+    let positive_out = positive_case.join("out");
+    fs::create_dir_all(&positive_sidecar_dir).unwrap();
+    fs::create_dir_all(&positive_out).unwrap();
+    write_batch(&positive_sidecar_dir, batch);
+    for (label, class_path, original_member, descriptor, _, _) in cases {
+        let member = if label == "factory-wrap-and-create" {
+            factory_method
+        } else {
+            original_member
+        };
+        let classfile = positive_sidecar_dir.join(class_path);
+        let masked = without_method(&fs::read(&classfile).unwrap(), member, descriptor);
+        fs::write(&classfile, masked).unwrap();
+    }
+    let positive_source = positive_case.join("Lookup.scala");
+    let mut positive_definitions = String::new();
+    for (label, _, _, _, original_expression, _) in cases {
+        let expression = original_expression.replace("wrapAndCreate", factory_method);
+        let result_type = if label == "counter-set" {
+            "Unit"
+        } else if label == "counter-get" {
+            "Int"
+        } else {
+            "example.Pair"
+        };
+        positive_definitions.push_str(&format!(
+            "  def probe_{label}(): {result_type} = {expression}\n"
+        ));
+    }
+    fs::write(
+        &positive_source,
+        format!("package example\nobject Lookup {{\n{positive_definitions}}}\n"),
+    )
+    .unwrap();
+    let classpath = format!("{}:{}", positive_sidecar_dir.display(), scala.libraries);
+    let positive_started = Instant::now();
+    let positive_result = scala.compile_result(
+        "lookup-tasty-combined-positive",
+        &classpath,
+        &positive_out,
+        &positive_source,
+    );
+    eprintln!(
+        "LOOKUP_PROBE_TIMING combined-positive elapsed_ms={:.3}",
+        positive_started.elapsed().as_secs_f64() * 1000.0
+    );
+    assert!(
+        positive_result.status.success(),
+        "combined original TASTy lookup failed: {}",
+        String::from_utf8_lossy(&positive_result.stderr)
+    );
+    assert_unchanged(producer, before, "during combined TASTy lookup probe");
+    let compiled_bytes = fs::read(positive_out.join("example/Lookup$.class")).unwrap();
+    let compiled = decode_class(&compiled_bytes);
+    for (label, _, _, _, _, _) in cases {
+        let method = compiled.methods.iter().find(|method| {
+            compiled.constant_pool.utf8(method.name_index).unwrap() == format!("probe_{label}")
+        });
+        assert!(
+            method.is_some_and(|method| method
+                .attributes
+                .iter()
+                .any(|attribute| matches!(attribute, Attribute::Code(_)))),
+            "combined TASTy lookup did not emit probe_{label}"
+        );
+        eprintln!("TASTY_LOOKUP_ACCEPTED {label}; combined positive method emitted");
+    }
+
     for (label, class_path, original_member, descriptor, original_expression, missing) in cases {
         let member = if label == "factory-wrap-and-create" {
             factory_method
@@ -648,44 +718,21 @@ fn lookup_probes(
         };
         let expression = original_expression.replace("wrapAndCreate", factory_method);
         let case = root.join(format!("lookup-{label}"));
-        let sidecar_dir = case.join("original-sidecar");
-        let sidecar_out = case.join("original-sidecar-out");
         let classfile_dir = case.join("classfile-only");
         let classfile_out = case.join("classfile-only-out");
-        for dir in [&sidecar_dir, &sidecar_out, &classfile_dir, &classfile_out] {
+        for dir in [&classfile_dir, &classfile_out] {
             fs::create_dir_all(dir).unwrap();
         }
-        write_batch(&sidecar_dir, batch);
         write_batch(&classfile_dir, batch);
-        for dir in [&sidecar_dir, &classfile_dir] {
-            let classfile = dir.join(class_path);
-            let masked = without_method(&fs::read(&classfile).unwrap(), member, descriptor);
-            fs::write(&classfile, masked).unwrap();
-        }
+        let classfile = classfile_dir.join(class_path);
+        let masked = without_method(&fs::read(&classfile).unwrap(), member, descriptor);
+        fs::write(&classfile, masked).unwrap();
         let source = case.join("Lookup.scala");
         fs::write(
             &source,
             format!("package example\nobject Lookup {{ val selected = {{ {expression} }} }}\n"),
         )
         .unwrap();
-        let classpath = format!("{}:{}", sidecar_dir.display(), scala.libraries);
-        let tasty_started = Instant::now();
-        let sidecar_result = scala.compile_result(
-            &format!("lookup-tasty-{label}"),
-            &classpath,
-            &sidecar_out,
-            &source,
-        );
-        eprintln!(
-            "LOOKUP_PROBE_TIMING {label} tasty elapsed_ms={:.3}",
-            tasty_started.elapsed().as_secs_f64() * 1000.0
-        );
-        assert!(
-            sidecar_result.status.success(),
-            "original TASTy lookup for {member}{descriptor} failed: {}",
-            String::from_utf8_lossy(&sidecar_result.stderr)
-        );
-
         let classfile = classfile_dir.join(class_path);
         fs::write(
             &classfile,
@@ -717,10 +764,9 @@ fn lookup_probes(
         assert_unchanged(producer, before, "during TASTy lookup probes");
     }
     eprintln!(
-        "LOOKUP_PROBES_TOTAL elapsed_ms={:.3} probe_pairs=6 scalac_calls=12",
+        "LOOKUP_PROBES_TOTAL elapsed_ms={:.3} positive_members=6 negative_probes=6 scalac_calls=7",
         lookup_started.elapsed().as_secs_f64() * 1000.0
     );
-    let _ = batch;
 }
 
 fn inspect_original_tasty(
