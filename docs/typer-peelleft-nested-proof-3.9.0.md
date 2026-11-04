@@ -7,14 +7,17 @@ The issue #2133 reproduction used verified current main commit
 
 On that commit, `Evaluator.peelLeft(expr: Expr): Expr` already completed as a
 whole typed `DefDef` in both independent sessions. Its outer and inner `Add`
-patterns have distinct source and typed IDs and retain their source spans; both
-resolve through the canonical `Add` companion `unapply`. The inner `left`
-binder is case-local, the method returns its exact typed reference, and the
-fallback refers to the parameter. Retyping returns the same typed root. This
-reproduction found no semantic defect, so the issue preserves the existing
-result and adds occurrence, mapping, scope, and parity assertions only. The
-captured root IDs and spans are pinned in
+patterns are distinct occurrences, retain their source spans, and resolve
+through the canonical `Add` companion `unapply` with ordered `_1` and `_2`
+fields of type `Expr`. The inner `left` binder is case-local, the method
+returns its exact typed reference, and the fallback refers to the parameter.
+Retyping returns the same typed root. This reproduction found no semantic
+defect, so the issue preserves the existing result and adds occurrence,
+mapping, scope, and parity assertions only. The two sessions are compared
+using the normalized source-span and semantic-role receipt in
 `crates/dotty-typer/tests/fixtures/source-nested-recursive-adt-3.9.0/rust-peelleft-complete.tsv`.
+Arena IDs are printed only as diagnostic output and are not part of that
+cross-session comparison or pinned receipt.
 
 The regression also checks both positional arguments and source mappings,
 wildcard and sibling-case scope isolation, and idempotent retyping. A nested

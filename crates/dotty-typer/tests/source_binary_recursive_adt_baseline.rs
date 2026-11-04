@@ -60,18 +60,18 @@ fn nested_recursive_adt_original_roots_are_attempted_in_two_fresh_sessions() {
     let second = nested_roots(source_b, "session-b");
     assert_eq!(first.normalized, second.normalized);
     assert_eq!(
-        first.evidence, second.evidence,
+        first.semantic_receipt, second.semantic_receipt,
         "fresh sessions have normalized peelLeft semantic parity"
     );
     assert_eq!(
-        first.evidence,
+        first.semantic_receipt,
         include_str!("fixtures/source-nested-recursive-adt-3.9.0/rust-peelleft-complete.tsv")
             .split_once('\n')
-            .expect("current-main reproduction header")
+            .expect("normalized semantic receipt header")
             .1,
-        "the original peelLeft result is pinned without changing the #2132 receipt"
+        "the original peelLeft semantics are pinned without arena allocation IDs"
     );
-    println!("ISSUE2133_PEELLEFT\t{}", first.evidence.trim_end());
+    println!("ISSUE2133_PEELLEFT\t{}", first.semantic_receipt.trim_end());
     let receipt = first
         .roots
         .iter()
@@ -2595,7 +2595,7 @@ fn index_with_swapped_add_selector_provenance(
 struct RootReceipt {
     roots: Vec<String>,
     normalized: Vec<String>,
-    evidence: String,
+    semantic_receipt: String,
 }
 
 fn setup(
@@ -2890,7 +2890,7 @@ fn analyze_roots(source: SourceId, session: &str) -> RootReceipt {
     RootReceipt {
         roots: rows,
         normalized,
-        evidence: String::new(),
+        semantic_receipt: String::new(),
     }
 }
 
@@ -2999,12 +2999,12 @@ fn nested_roots(source: SourceId, session: &str) -> RootReceipt {
                 range.end(),
             ));
         }
-        let evidence =
+        let semantic_receipt =
             assert_nested_typed_shapes(source, ast, index, typer, definitions, &typed_roots);
         RootReceipt {
             roots: rows,
             normalized,
-            evidence,
+            semantic_receipt,
         }
     })
 }
@@ -3313,6 +3313,16 @@ fn assert_nested_typed_shapes(
         .source_typed_index()
         .get(source, fallback_return)
         .expect("fallback expression has a typed mapping");
+    let TreeKind::Ident(fallback_return_name) = &ast.get(fallback_return).kind else {
+        panic!("peelLeft's fallback returns its source parameter")
+    };
+    assert_eq!(
+        typer
+            .store()
+            .names
+            .resolve(fallback_return_name.name.text()),
+        "expr"
+    );
     let peel_parameter = index
         .symbol_at(source, peel_source.value_param_clauses[0][0])
         .unwrap();
@@ -3495,13 +3505,17 @@ fn assert_nested_typed_shapes(
         .get(source, peel_inner.args[0])
         .expect("nested binder has a typed mapping");
     let source_match = peel_source.rhs.unwrap();
-    let source_outer_span = ast.get(peel_case.pattern).position.unwrap().span().range();
-    let source_inner_span = ast.get(peel_outer.args[0]).position.unwrap().span().range();
-    let fallback_case_tree = peel_match.cases[1];
-    let typed_fallback_case_tree = peel_typed_cases[1];
-    let source_root_typed = peel_left.1;
-    assert_eq!(retyped_root, source_root_typed);
-
+    let source_root_span = ast.get(peel_left.0).position.unwrap().span().range();
+    let source_match_span = ast.get(source_match).position.unwrap().span().range();
+    let source_case_span = |tree| ast.get(tree).position.unwrap().span().range();
+    let span = |range: dotty_core::source::TextRange| format!("{}..{}", range.start(), range.end());
+    let outer_span = span(source_case_span(peel_case.pattern));
+    let inner_span = span(source_case_span(peel_outer.args[0]));
+    let binder_span = span(source_case_span(peel_inner.args[0]));
+    let return_span = span(source_case_span(source_return));
+    let fallback_case_span = span(source_case_span(peel_match.cases[1]));
+    let fallback_pattern_span = span(source_case_span(fallback_case.pattern));
+    let fallback_return_span = span(source_case_span(fallback_return));
     let source_tree_receipt = nested_source_tree_receipt(source, ast, roots);
     assert_eq!(
         format!("{source_tree_receipt}\n"),
@@ -3511,24 +3525,34 @@ fn assert_nested_typed_shapes(
             .1,
         "the immutable source tree IDs and spans remain pinned"
     );
-    format!(
-        "peelLeft\troot={}->{}\tmatch={}->{}\tcases={}->{}:{}->{}\textractors={}->{}@{}..{}:{}->{}@{}..{}\tunapply={}\tbinder={}->{}:symbol{}\treturn={}->{}\tfallback={}->{}:parameter{}\tretype={}\n",
+    let semantic_receipt = format!(
+        "peelLeft\troot=DefDef@{}..{}\tresult=Expr\tmatch=Match@{}..{}:Expr\tcases=2\tcase0=CaseDef@{}\tcase1=CaseDef@{}\textractors=outer:Add@{}:canonical_Add_companion_unapply(Add);fields=[_1:Expr,_2:Expr]\tinner:Add@{}:same_canonical_unapply;fields=[_1:Expr,_2:Expr]\tbinder=left@{}:case_local_to_peelLeft:Expr\treturn=Ident(left)@{}:same_binder\twildcards=outer._2@{}+inner._2@{}:unbound\tfallback=wildcard@{}:unbound;Ident(expr)@{}:peelLeft_parameter:Expr\tmappings=complete_source_to_typed\tretype=same_typed_root\n",
+        source_root_span.start(),
+        source_root_span.end(),
+        source_match_span.start(),
+        source_match_span.end(),
+        span(source_case_span(peel_match.cases[0])),
+        fallback_case_span,
+        outer_span,
+        inner_span,
+        binder_span,
+        return_span,
+        span(source_case_span(peel_outer.args[1])),
+        span(source_case_span(peel_inner.args[1])),
+        fallback_pattern_span,
+        fallback_return_span,
+    );
+    eprintln!(
+        "ISSUE2133_PEELLEFT_IDS source={} root={}=>{} match={}=>{} outer={}=>{} inner={}=>{} unapply={} binder={}=>{} symbol={} return={}=>{} fallback={}=>{} parameter={} retype={}",
+        source.index(),
         peel_left.0.index(),
-        source_root_typed.index(),
+        peel_left.1.index(),
         source_match.index(),
         peel_typed_match.index(),
-        peel_match.cases[0].index(),
-        peel_typed_cases[0].index(),
-        fallback_case_tree.index(),
-        typed_fallback_case_tree.index(),
         peel_case.pattern.index(),
         typed_outer.index(),
-        source_outer_span.start(),
-        source_outer_span.end(),
         peel_outer.args[0].index(),
         typed_inner.index(),
-        source_inner_span.start(),
-        source_inner_span.end(),
         add_unapply.index(),
         peel_inner.args[0].index(),
         typed_binder.index(),
@@ -3539,7 +3563,8 @@ fn assert_nested_typed_shapes(
         typed_fallback_return.index(),
         peel_parameter.index(),
         retyped_root.index(),
-    )
+    );
+    semantic_receipt
 }
 
 fn nested_source_tree_receipt(
