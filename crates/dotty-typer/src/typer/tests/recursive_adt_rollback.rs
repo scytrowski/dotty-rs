@@ -1139,6 +1139,308 @@ fn binary_recursive_second_argument_failure_and_late_failure_restore_then_retry_
     println!("ISSUE2078_BINARY_EVAL_FAILURES\t{receipt}");
 }
 
+#[test]
+fn binary_late_failure_restores_complete_state_retries_then_types_both_original_roots() {
+    let source_text = format!(
+        "{BINARY_EXPR_SOURCE}\nobject BinaryRollbackControls:\n  def prior(value: Int): Int = value\n  def failsAfterBoth(expr: Expr): Boolean =\n    expr match\n      case Num(_) => true\n      case Add(left, right) => Evaluator.eval(left) + Evaluator.eval(right)\n"
+    );
+    let source = SourceId::from_index(20_791);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let (parsed, index) = parse_and_name_unit(&source_text, source, &mut store, &mut packages);
+    let prior = tree_named(&parsed, &store, "prior");
+    let late_failure = tree_named(&parsed, &store, "failsAfterBoth");
+    let select_left = tree_named(&parsed, &store, "selectLeft");
+    let eval = tree_named(&parsed, &store, "eval");
+    let eval_symbol = index.symbol_at(source, eval).unwrap();
+    let expr = class_symbol(&parsed, &store, &index, source, "Expr");
+    let nodes = binary_add_case_nodes(&parsed, late_failure);
+    let TreeKind::DefDef(failing_definition) = &parsed.ast.get(late_failure).kind else {
+        unreachable!()
+    };
+    let late_match_tree = failing_definition.rhs.unwrap();
+    let mut typer = typer_for(&parsed, &mut store, &packages, definitions, &index, source);
+    let prior_typed = typer
+        .type_method_definition(prior)
+        .expect("an unrelated successful root remains published before the late failure");
+    let before = binary_complete_state_projection(&typer, &parsed);
+    let nodes_seen = Rc::new(RefCell::new(false));
+    let nodes_seen_by_observer = Rc::clone(&nodes_seen);
+    typer.transaction_failure_observer = Some(Rc::new(move |typer| {
+        let typed_calls = nodes
+            .calls
+            .map(|call| typer.source_typed_index().get(source, call));
+        let [Some(first_call), Some(second_call)] = typed_calls else {
+            return;
+        };
+        let mut binder_symbols = Vec::new();
+        for (position, (typed_call, source_argument)) in [first_call, second_call]
+            .into_iter()
+            .zip(nodes.arguments)
+            .enumerate()
+        {
+            let TreeKind::Apply(application) = &typer.typed_ast().get(typed_call).kind else {
+                panic!("both recursive applications are typed before rollback")
+            };
+            assert_eq!(application.args.len(), 1);
+            let selected = match typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty)
+            {
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } => *symbol,
+                other => panic!("recursive callee is canonical: {other:?}"),
+            };
+            assert_eq!(selected, eval_symbol);
+            assert_eq!(
+                typer.source_typed_index().get(source, source_argument),
+                Some(application.args[0]),
+                "each call argument maps from its original source reference"
+            );
+            let binder = typer
+                .pattern_binding_symbol_at(source, nodes.binders[position])
+                .expect("each original Add binder is live before rollback");
+            assert!(matches!(
+                typer.store().types.get(typer.typed_ast().get(application.args[0]).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == binder
+            ));
+            let SymbolInfo::Complete(binder_type) = *typer.store().symbols.info(binder) else {
+                panic!("the live Add binder has a complete type")
+            };
+            assert_eq!(type_symbol(typer.store(), binder_type), expr);
+            binder_symbols.push(binder);
+        }
+        assert_ne!(binder_symbols[0], binder_symbols[1]);
+        let typed_match = typer
+            .source_typed_index()
+            .get(source, late_match_tree)
+            .expect("the failing root's Match was typed before result checking");
+        assert!(matches!(
+            typer.typed_ast().get(typed_match).kind,
+            TreeKind::Match(_)
+        ));
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, late_failure)
+                .is_none()
+        );
+        *nodes_seen_by_observer.borrow_mut() = true;
+    }));
+
+    let first = typer
+        .type_method_definition(late_failure)
+        .expect_err("the Boolean result fails after both recursive Add calls type");
+    assert!(
+        matches!(first, TyperError::ExpectedExpressionTypeMismatch { .. }),
+        "{first:?}"
+    );
+    assert!(
+        *nodes_seen.borrow(),
+        "both calls and binders existed before unwind"
+    );
+    let first_debug = format!("{first:?}");
+    assert_eq!(
+        binary_complete_state_projection(&typer, &parsed),
+        before,
+        "late failure restores all prior state contents, indexes, and scope buckets"
+    );
+    assert_eq!(
+        typer.source_typed_index().get(source, prior),
+        Some(prior_typed)
+    );
+    assert!(
+        typer
+            .source_typed_index()
+            .get(source, late_failure)
+            .is_none()
+    );
+    for tree in nodes
+        .calls
+        .into_iter()
+        .chain(nodes.arguments)
+        .chain(nodes.binders)
+    {
+        assert!(typer.source_typed_index().get(source, tree).is_none());
+    }
+    for binder in nodes.binders {
+        assert!(typer.pattern_binding_symbol_at(source, binder).is_none());
+    }
+
+    let retry = typer
+        .type_method_definition(late_failure)
+        .expect_err("the same failing root can be retried deterministically");
+    assert_eq!(format!("{retry:?}"), first_debug);
+    assert_eq!(
+        binary_complete_state_projection(&typer, &parsed),
+        before,
+        "repeated failure preserves the same complete state"
+    );
+
+    let typed_select_left = typer
+        .type_method_definition(select_left)
+        .expect("the original selectLeft first succeeds in this live typer after rollback");
+    let typed_eval = typer
+        .type_method_definition(eval)
+        .expect("the original eval first succeeds in this live typer after rollback");
+    assert_eq!(
+        typer.source_typed_index().get(source, select_left),
+        Some(typed_select_left)
+    );
+    assert_eq!(
+        typer.source_typed_index().get(source, eval),
+        Some(typed_eval)
+    );
+    let recovered = format!(
+        "{}\n{}",
+        normalized_success_root(&parsed, &typer, source, select_left, "selectLeft"),
+        normalized_success_root(&parsed, &typer, source, eval, "eval")
+    );
+
+    let fresh_source = SourceId::from_index(20_792);
+    let mut fresh_store = SemanticStore::new();
+    let fresh_definitions = Definitions::bootstrap(&mut fresh_store);
+    let mut fresh_packages = Packages::new();
+    let (fresh_parsed, fresh_index) = parse_and_name_unit(
+        &source_text,
+        fresh_source,
+        &mut fresh_store,
+        &mut fresh_packages,
+    );
+    let fresh_prior = tree_named(&fresh_parsed, &fresh_store, "prior");
+    let fresh_late_failure = tree_named(&fresh_parsed, &fresh_store, "failsAfterBoth");
+    let fresh_select_left = tree_named(&fresh_parsed, &fresh_store, "selectLeft");
+    let fresh_eval = tree_named(&fresh_parsed, &fresh_store, "eval");
+    let mut fresh_typer = typer_for(
+        &fresh_parsed,
+        &mut fresh_store,
+        &fresh_packages,
+        fresh_definitions,
+        &fresh_index,
+        fresh_source,
+    );
+    fresh_typer
+        .type_method_definition(fresh_prior)
+        .expect("the independent session retains the same prior successful root");
+    let fresh_error = fresh_typer
+        .type_method_definition(fresh_late_failure)
+        .expect_err("the independent session rejects the same late-failing root");
+    assert_eq!(
+        normalized_error(&fresh_error, &fresh_parsed),
+        normalized_error(&first, &parsed)
+    );
+    let fresh_retry = fresh_typer
+        .type_method_definition(fresh_late_failure)
+        .expect_err("the independent failure also retries deterministically");
+    assert_eq!(format!("{fresh_retry:?}"), format!("{fresh_error:?}"));
+    fresh_typer
+        .type_method_definition(fresh_select_left)
+        .expect("selectLeft remains recoverable in a fresh session");
+    fresh_typer
+        .type_method_definition(fresh_eval)
+        .expect("eval remains recoverable in a fresh session");
+    let fresh_recovered = format!(
+        "{}\n{}",
+        normalized_success_root(
+            &fresh_parsed,
+            &fresh_typer,
+            fresh_source,
+            fresh_select_left,
+            "selectLeft"
+        ),
+        normalized_success_root(
+            &fresh_parsed,
+            &fresh_typer,
+            fresh_source,
+            fresh_eval,
+            "eval"
+        )
+    );
+    assert_eq!(
+        recovered, fresh_recovered,
+        "recovery receipts normalize across sessions"
+    );
+}
+
+fn binary_complete_state_projection(
+    typer: &SourceTyper<'_>,
+    parsed: &dotty_parser::ParseResult,
+) -> Vec<(&'static str, String)> {
+    let mut state = issue_1999_late_failure_projection(typer, parsed);
+    state.extend([
+        ("source type index", format!("{:?}", typer.type_index)),
+        (
+            "synthetic package entries",
+            format!("{:?}", typer.synthetic_package_entries),
+        ),
+        (
+            "synthetic generated member entries",
+            format!("{:?}", typer.synthetic_class_member_entries),
+        ),
+        (
+            "import qualifier cache",
+            format!("{:?}", typer.import_qualifier_cache),
+        ),
+        (
+            "import member cache",
+            format!("{:?}", typer.import_member_cache),
+        ),
+        (
+            "semantic transaction depth",
+            format!("{}", typer.semantic_transaction_depth),
+        ),
+        (
+            "source type projection depth",
+            format!("{}", typer.source_type_projection_depth),
+        ),
+        (
+            "signature parameter in progress",
+            format!("{:?}", typer.signature_parameter_in_progress),
+        ),
+        (
+            "uninitialized parent receiver",
+            format!("{:?}", typer.uninitialized_parent_receiver),
+        ),
+        (
+            "pattern definition attempts",
+            format!("{:?}", typer.patdef_typing_attempts),
+        ),
+        (
+            "local method symbol index",
+            format!("{:?}", typer.local_methods.symbols_by_tree),
+        ),
+        (
+            "local method definition index",
+            format!("{:?}", typer.local_methods.definitions),
+        ),
+        (
+            "local method scope index",
+            format!("{:?}", typer.local_methods.scopes),
+        ),
+        (
+            "local method declaration contexts",
+            format!("{:?}", typer.local_methods.declaration_contexts),
+        ),
+        (
+            "local method parameter indexes",
+            format!(
+                "{:?}:{:?}:{:?}:{:?}:{:?}:{:?}",
+                typer.local_methods.parameter_symbols_by_tree,
+                typer.local_methods.parameter_definitions,
+                typer.local_methods.parameter_contexts,
+                typer.local_methods.type_parameter_symbols_by_tree,
+                typer.local_methods.type_parameter_definitions,
+                typer.local_methods.type_parameter_contexts
+            ),
+        ),
+    ]);
+    state
+}
+
 fn binary_add_case_nodes(
     parsed: &dotty_parser::ParseResult,
     root: TreeId<Untyped>,
