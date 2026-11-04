@@ -63,26 +63,22 @@ jobs:
           distribution: temurin
           java-version: '21.0.13+9.0.LTS'
           check-latest: false
-          cache: sbt
-          cache-dependency-path: |
-            scala39-source/build.sbt
-            scala39-source/project/build.properties
-            scala39-source/project/*.sbt
-            scala39-source/project/*.scala
-            scala39-source/project/**/*.sbt
-            scala39-source/project/**/*.scala
 
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal
 
-      - name: Cache pinned Scala artifacts and Rust build
-        uses: actions/cache@v4
+      - name: Restore pinned Scala dependencies and Rust build
+        id: dependency-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
+            ~/.cache/coursier
+            ~/.ivy2/cache
+            ~/.sbt
             .cache/coursier
             target/debug
             target/.rustc_info.json
-          key: ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-scala-3.9.0
+          key: ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-scala-${{ env.SCALA39_SOURCE_SHA }}-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
           restore-keys: |
             ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-
 
@@ -146,14 +142,16 @@ jobs:
       - name: Record Scala cache state and output size
         env:
           SCALA_BUILD_CACHE_HIT: ${{ steps.scala-build-cache.outputs.cache-hit }}
-          SCALA_DEPENDENCY_CACHE_HIT: ${{ steps.install-jdk.outputs.cache-hit }}
+          SCALA_DEPENDENCY_CACHE_HIT: ${{ steps.dependency-cache.outputs.cache-hit }}
         run: |
           set -euo pipefail
           target_bytes="$(find "$SCALA39_ROOT" -type d -name target -prune -print0 | xargs -0 -r du -sb | awk '{sum += $1} END {print sum + 0}')"
+          dependency_bytes="$(du -sb .cache/coursier "$HOME/.cache/coursier" "$HOME/.ivy2/cache" "$HOME/.sbt" target/debug 2>/dev/null | awk '{sum += $1} END {print sum + 0}' || echo 0)"
           {
             echo '### Pinned Scala cache measurement'
             echo "- Source SHA: $SCALA39_SOURCE_SHA"
-            echo "- Dependency cache hit: ${SCALA_DEPENDENCY_CACHE_HIT:-false}"
+            echo "- Shared dependency/build cache hit: ${SCALA_DEPENDENCY_CACHE_HIT:-false}"
+            echo "- Restored/generated dependency and Rust build cache bytes: $dependency_bytes"
             echo "- Build-output cache hit: ${SCALA_BUILD_CACHE_HIT:-false}"
             echo "- Restored/generated Scala target bytes: $target_bytes"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -273,3 +271,16 @@ jobs:
             --test jvm_tasty_artifacts \
             --test jvm_stateful_class_contract \
             --locked -- --nocapture
+
+      - name: Save pinned Scala dependencies and Rust build (single owner)
+        if: success() && steps.dependency-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.ivy2/cache
+            ~/.sbt
+            .cache/coursier
+            target/debug
+            target/.rustc_info.json
+          key: ${{ runner.os }}-jvm-tasty-factory-1.98.1-${{ hashFiles('**/Cargo.lock') }}-scala-${{ env.SCALA39_SOURCE_SHA }}-${{ hashFiles('scala39-source/build.sbt', 'scala39-source/project/build.properties', 'scala39-source/project/*.sbt', 'scala39-source/project/*.scala', 'scala39-source/project/**/*.sbt', 'scala39-source/project/**/*.scala') }}
