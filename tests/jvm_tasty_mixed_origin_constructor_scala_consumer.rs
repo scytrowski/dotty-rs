@@ -661,12 +661,11 @@ fn lookup_probes(
     for (label, _, _, _, original_expression, _) in cases {
         let expression = original_expression.replace("wrapAndCreate", factory_method);
         let probe_name = label.replace('-', "_");
-        let result_type = if label == "counter-set" {
-            "Unit"
-        } else if label == "counter-get" {
-            "Int"
-        } else {
-            "example.Pair"
+        let result_type = match label {
+            "counter-set" => "Unit",
+            "counter-get" | "pair-left" | "pair-right" => "Int",
+            "pair-constructor" | "factory-wrap-and-create" => "example.Pair",
+            _ => unreachable!("known lookup case"),
         };
         positive_definitions.push_str(&format!(
             "  def probe_{probe_name}(): {result_type} = {expression}\n"
