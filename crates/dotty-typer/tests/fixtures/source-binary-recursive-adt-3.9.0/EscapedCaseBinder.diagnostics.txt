@@ -1,5 +1,5 @@
--- [E006] Not Found Error: EscapedCaseBinder.scala:11:27 -----------------------
-11 |      case Num(_)       => right
+-- [E006] Not Found Error: EscapedCaseBinder.scala:12:27 -----------------------
+12 |      case Num(_)       => right
    |                           ^^^^^
    |                           Not found: right
    |
