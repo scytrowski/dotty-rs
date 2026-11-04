@@ -1,0 +1,8 @@
+case	classification	reason
+WrongNestedArity	rejected	Num extractor receives two patterns where its generated unapply has arity one
+WrongNestedLiteralType	rejected	Int literal is incompatible with the nested Expr component
+EscapedCaseBinder	rejected	left from a sibling Add case is out of scope in the Num case
+ForeignSameSpelledExtractor	accepted	qualified Foreign.Add has an unrelated source-owned unapply and an exhaustive fallback
+InvalidRecursiveArgument	rejected	Int literal is passed to sum which requires Expr
+WrongMethodResult	rejected	Int-valued cases do not satisfy the changed Expr result annotation
+RenamedReorderedFields	accepted	field rename and declaration reorder preserve positional extractor acceptance

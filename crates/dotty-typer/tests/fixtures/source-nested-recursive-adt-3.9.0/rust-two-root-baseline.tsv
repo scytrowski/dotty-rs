@@ -1,0 +1,5 @@
+session	root	source_path	source_span_bytes	owner	outcome
+session-a	peelLeft	Expr.scala#tree40	158:266	Evaluator$	complete=whole_DefDef;typed_index=present
+session-a	sum	Expr.scala#tree78	270:468	Evaluator$	complete=whole_DefDef;typed_index=present
+session-b	peelLeft	Expr.scala#tree40	158:266	Evaluator$	complete=whole_DefDef;typed_index=present
+session-b	sum	Expr.scala#tree78	270:468	Evaluator$	complete=whole_DefDef;typed_index=present

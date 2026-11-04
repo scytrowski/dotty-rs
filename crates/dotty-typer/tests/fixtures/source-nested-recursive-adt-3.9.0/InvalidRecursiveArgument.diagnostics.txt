@@ -1,0 +1,8 @@
+-- [E007] Type Mismatch Error: InvalidRecursiveArgument.scala:18:20 ------------
+18 |        value + sum(1)
+   |                    ^
+   |                    Found:    (1 : Int)
+   |                    Required: adt.Expr
+   |
+   | longer explanation available when compiling with `-explain`
+1 error found
