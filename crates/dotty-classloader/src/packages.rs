@@ -108,6 +108,30 @@ impl PackageRegistry {
         }
     }
 
+    /// Adds an already-published package-scope class link to this session's
+    /// rollback journal. Semantic unpickling enters the root through
+    /// `dotty_core::Packages`, so the class link must be adopted after the
+    /// unpickler succeeds for an enclosing resolver checkpoint to undo it.
+    pub(crate) fn track_existing_class(&mut self, store: &SemanticStore, class: SymbolId) -> bool {
+        if !store.symbols.contains(class) {
+            return false;
+        }
+        let Some(package) = store.symbols.get(class).owner else {
+            return false;
+        };
+        let Some(scope) = self.scope_of(package) else {
+            return false;
+        };
+        let name = store.symbols.get(class).name;
+        if !store.scopes.get(scope).lookup_all(&name).contains(&class) {
+            return false;
+        }
+        if !self.class_entries.contains(&(scope, class)) {
+            self.class_entries.push((scope, class));
+        }
+        true
+    }
+
     /// `path` is a `/`-joined package path, or `""` for the root/unnamed
     /// package.
     fn resolve_path(&mut self, store: &mut SemanticStore, path: &str) -> SymbolId {

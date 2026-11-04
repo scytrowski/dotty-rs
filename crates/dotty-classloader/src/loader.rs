@@ -1208,6 +1208,22 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         &mut self,
         name: &BinaryName,
     ) -> Result<SymbolId, SemanticTastyLoadError> {
+        self.load_semantic_class_with_tasty_unpickler_injected(name, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_semantic_class_with_tasty_unpickler_injected_failure(
+        &mut self,
+        name: &BinaryName,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
+        self.load_semantic_class_with_tasty_unpickler_injected(name, true)
+    }
+
+    fn load_semantic_class_with_tasty_unpickler_injected(
+        &mut self,
+        name: &BinaryName,
+        inject_late_failure: bool,
+    ) -> Result<SymbolId, SemanticTastyLoadError> {
         if let Some(&symbol) = self.semantic_tasty_loaded.get(name) {
             return Ok(symbol);
         }
@@ -1242,7 +1258,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             name,
             &selection,
             resource.origin().clone(),
-            false,
+            inject_late_failure,
         )
     }
 
@@ -1272,6 +1288,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .load_semantic_class_semantics(file, name, selection)
             .and_then(|class| {
                 materialized_class = Some(class);
+                if !self
+                    .session
+                    .packages
+                    .track_existing_class(self.store, class)
+                {
+                    return Err(SemanticTastyLoadError::UnsupportedShape(
+                        "the semantic root is missing from its canonical package scope",
+                    ));
+                }
                 if inject_late_failure {
                     #[cfg(test)]
                     {
