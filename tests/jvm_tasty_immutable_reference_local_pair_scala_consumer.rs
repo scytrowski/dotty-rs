@@ -4,9 +4,13 @@ use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::ConstantPoolIndex;
 use dotty_classfile::reader::Reader;
 use dotty_core::SourceId;
-use dotty_tasty::ast::{BLOCK_TAG, DEFDEF_TAG, TERMREFDIRECT_TAG, VALDEF_TAG};
+use dotty_tasty::ast::{
+    BLOCK_TAG, DEFDEF_TAG, SHAREDTYPE_TAG, TERMREFDIRECT_TAG, TYPEREF_TAG, VALDEF_TAG,
+};
+use dotty_tasty::reader::Reader as TastyReader;
 use dotty_tasty::section::StandardSection;
 use dotty_tasty::tasty::TastyFile;
+use dotty_tasty::term::{RawTree, TermValue};
 use dotty_tasty::writer::Writer;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -237,6 +241,17 @@ impl Scala {
             .output()
             .expect("run pinned Scala lookup probe")
     }
+
+    fn run_from_tasty(&self, cp: &str, out: &Path, tasty: &Path) -> Output {
+        self.command()
+            .args(["-release", "21", "-from-tasty", "-classpath"])
+            .arg(cp)
+            .arg("-d")
+            .arg(out)
+            .arg(tasty)
+            .output()
+            .expect("run pinned Scala from-TASTy probe")
+    }
 }
 
 fn decode_class(bytes: &[u8]) -> ClassFile<'_> {
@@ -338,6 +353,17 @@ fn local_address(tasty_bytes: &[u8], method_name: &str) -> u32 {
         .offset as u32
 }
 
+fn block_address(tasty_bytes: &[u8], method_name: &str) -> u32 {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).expect("parse Rust TASTy");
+    let index = tasty.ast_address_index().unwrap();
+    let local = local_address(tasty_bytes, method_name);
+    index
+        .parent_of(local)
+        .filter(|parent| parent.tag == BLOCK_TAG)
+        .expect("local VALDEF is owned by its method BLOCK")
+        .offset as u32
+}
+
 fn direct_termref_bytes(address: u32) -> Vec<u8> {
     let mut writer = Writer::default();
     writer.write_nat(address);
@@ -368,6 +394,127 @@ fn change_termref_target(tasty_bytes: &[u8], address: u32, replacement: u32) -> 
     let mut changed = tasty_bytes.to_vec();
     let offset = asts.offset + matches[0] + 1;
     changed[offset..offset + replacement.len()].copy_from_slice(&replacement);
+    changed
+}
+
+fn change_local_type_ref(
+    tasty_bytes: &[u8],
+    method_name: &str,
+    reference_index: usize,
+    replacement_name: &str,
+) -> Vec<u8> {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).expect("parse Rust TASTy");
+    let index = tasty.ast_address_index().unwrap();
+    let section = tasty.section(StandardSection::Asts).unwrap();
+    let local = local_address(tasty_bytes, method_name);
+    let replacement = tasty
+        .names()
+        .find_utf8(replacement_name)
+        .unwrap_or_else(|| panic!("TASTy name table has {replacement_name}"));
+    let mut references = index
+        .iter_nodes_with_tag(TYPEREF_TAG)
+        .filter(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == local)
+        })
+        .filter_map(|node| {
+            let mut reader =
+                TastyReader::with_range(section.payload, node.offset, section.payload.len())
+                    .ok()?;
+            match RawTree::decode(&mut reader).ok()? {
+                RawTree::NatAst {
+                    tag: TYPEREF_TAG,
+                    value,
+                    ..
+                } => Some((node.offset, value, tasty.names().render(value).ok()?)),
+                _ => None,
+            }
+        })
+        .filter(|(_, _, name)| name.ends_with("Counter"))
+        .collect::<Vec<_>>();
+    references.sort_by_key(|(offset, _, _)| *offset);
+    let (offset, original, _) = *references
+        .get(reference_index)
+        .unwrap_or_else(|| panic!("local VALDEF has Counter type reference #{reference_index}"));
+    let mut original_encoded = Writer::default();
+    original_encoded.write_nat(original);
+    let mut replacement_encoded = Writer::default();
+    replacement_encoded.write_nat(replacement);
+    let original_encoded = original_encoded.into_inner();
+    let replacement_encoded = replacement_encoded.into_inner();
+    assert_eq!(
+        original_encoded.len(),
+        replacement_encoded.len(),
+        "mutated type name retains encoded width"
+    );
+    let mut changed = tasty_bytes.to_vec();
+    let start = section.offset + offset + 1;
+    changed[start..start + replacement_encoded.len()].copy_from_slice(&replacement_encoded);
+    TastyFile::parse_and_validate_scala_3_9(&changed)
+        .expect("type-mutated TASTy remains structurally valid");
+    changed
+}
+
+fn change_initializer_constructor(tasty_bytes: &[u8], method_name: &str) -> Vec<u8> {
+    let tasty = TastyFile::parse_and_validate_scala_3_9(tasty_bytes).expect("parse Rust TASTy");
+    let index = tasty.ast_address_index().unwrap();
+    let section = tasty.section(StandardSection::Asts).unwrap();
+    let local = local_address(tasty_bytes, method_name);
+    let pair_type = index
+        .iter_nodes_with_tag(TYPEREF_TAG)
+        .find_map(|node| {
+            let mut reader =
+                TastyReader::with_range(section.payload, node.offset, section.payload.len())
+                    .ok()?;
+            match RawTree::decode(&mut reader).ok()? {
+                RawTree::NatAst {
+                    tag: TYPEREF_TAG,
+                    value,
+                    ..
+                } if tasty
+                    .names()
+                    .render(value)
+                    .ok()
+                    .is_some_and(|name| name.ends_with("Pair")) =>
+                {
+                    Some(node.offset as u32)
+                }
+                _ => None,
+            }
+        })
+        .expect("method TASTy has the Pair result type reference");
+    let shared_type = index
+        .iter_nodes_with_tag(SHAREDTYPE_TAG)
+        .find(|node| {
+            std::iter::successors(Some(*node), |current| {
+                index.parent_of(current.offset as u32)
+            })
+            .any(|parent| parent.offset as u32 == local)
+        })
+        .expect("initializer has a shared type reference");
+    let mut reader =
+        TastyReader::with_range(section.payload, shared_type.offset, section.payload.len())
+            .expect("valid shared-type reference range");
+    let RawTree::Leaf(reference) = RawTree::decode(&mut reader).expect("decode shared type") else {
+        panic!("SHAREDTYPE is a category-two reference")
+    };
+    let TermValue::AstRef(original) = reference.value else {
+        panic!("SHAREDTYPE carries an AST address")
+    };
+    let mut original_encoded = Writer::default();
+    original_encoded.write_nat(original);
+    let mut replacement_encoded = Writer::default();
+    replacement_encoded.write_nat(pair_type);
+    let original_encoded = original_encoded.into_inner();
+    let replacement_encoded = replacement_encoded.into_inner();
+    assert_eq!(original_encoded.len(), replacement_encoded.len());
+    let mut changed = tasty_bytes.to_vec();
+    let start = section.offset + shared_type.offset + 1;
+    changed[start..start + replacement_encoded.len()].copy_from_slice(&replacement_encoded);
+    TastyFile::parse_and_validate_scala_3_9(&changed)
+        .expect("constructor-mutated TASTy remains structurally valid");
     changed
 }
 
@@ -872,6 +1019,129 @@ fn malformed_local_reference_probe(
     );
 }
 
+fn malformed_local_body_probe(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatchArtifacts) {
+    let factory = batch
+        .classes()
+        .iter()
+        .find(|artifact| artifact.tasty_path() == "example/PairFactory.tasty")
+        .unwrap();
+    let local = local_address(factory.tasty_bytes(), "create");
+    let block = block_address(factory.tasty_bytes(), "create");
+    let cases = [
+        (
+            "wrong-local-type",
+            change_local_type_ref(factory.tasty_bytes(), "create", 0, "Pair"),
+            "from-TASTy",
+        ),
+        (
+            "wrong-local-owner",
+            change_termref_target(factory.tasty_bytes(), local, block),
+            "readTasty",
+        ),
+        (
+            "wrong-initializer-constructor",
+            change_initializer_constructor(factory.tasty_bytes(), "create"),
+            "from-TASTy",
+        ),
+    ];
+    for (label, changed_tasty, stage) in cases {
+        let case = root.join(format!("negative-{label}"));
+        let classes = case.join("classes");
+        let lookup_out = case.join("lookup-out");
+        let reconstructed = case.join("reconstructed");
+        fs::create_dir_all(&classes).unwrap();
+        fs::create_dir_all(&lookup_out).unwrap();
+        fs::create_dir_all(&reconstructed).unwrap();
+        write_batch(&classes, batch);
+        fs::write(classes.join(factory.tasty_path()), changed_tasty).unwrap();
+        let client = case.join("Consumer.scala");
+        fs::write(&client, CLIENTS[0]).unwrap();
+        let classpath = format!("{}:{}", classes.display(), scala.libraries);
+        let lookup = scala.compile_result(&classpath, &lookup_out, &client);
+        assert!(
+            lookup.status.success(),
+            "{label} unexpectedly affected lazy signature lookup: {}",
+            String::from_utf8_lossy(&lookup.stderr)
+        );
+        let result = if stage == "readTasty" {
+            scala
+                .command()
+                .arg("-decompile")
+                .arg(classes.join(factory.tasty_path()))
+                .output()
+                .expect("run Scala reader against wrong-owner local address")
+        } else {
+            scala.run_from_tasty(
+                &classpath,
+                &reconstructed,
+                &classes.join(factory.tasty_path()),
+            )
+        };
+        if stage == "readTasty" {
+            assert!(
+                !result.status.success(),
+                "Scala accepted malformed local owner negative {label}"
+            );
+        } else if result.status.success() {
+            let decompiled = scala
+                .command()
+                .arg("-decompile")
+                .arg(classes.join(factory.tasty_path()))
+                .output()
+                .expect("run Scala decompiler on a type-corrupted local body");
+            assert!(
+                decompiled.status.success(),
+                "from-TASTy accepted {label} but decompile failed: {}",
+                String::from_utf8_lossy(&decompiled.stderr)
+            );
+            let dump = plain(&String::from_utf8_lossy(&decompiled.stdout));
+            let observed = if label == "wrong-local-type" {
+                dump.lines()
+                    .find(|line| line.contains("fresh"))
+                    .unwrap_or(&dump)
+            } else {
+                dump.lines()
+                    .find(|line| line.contains("new Pair"))
+                    .unwrap_or(&dump)
+            };
+            assert!(
+                observed.contains("Pair"),
+                "mutated local body was not visible to official Scala: {label}: {dump}"
+            );
+            eprintln!(
+                "SCALA_NEGATIVE_FIRST_OUTCOME {label} lazy-signature-lookup=accepted; -from-tasty=accepted; -decompile=accepted with mutated body: {observed}"
+            );
+            continue;
+        }
+        let stderr = plain(&String::from_utf8_lossy(&result.stderr));
+        let first = stderr
+            .lines()
+            .find(|line| {
+                line.contains("TreeWithoutOwner")
+                    || line.contains("[E")
+                    || line.contains("AssertionError")
+            })
+            .unwrap_or(&stderr);
+        match label {
+            "wrong-initializer-constructor" => assert!(
+                first.contains("[E007]")
+                    || first.contains("[E171]")
+                    || first.contains("TreeWithoutOwner")
+                    || stderr.contains("Unexpected New") && stderr.contains("GenBCode"),
+                "unexpected {stage} failure for {label}: {stderr}"
+            ),
+            "wrong-local-owner" => assert!(
+                first.contains("TreeWithoutOwner"),
+                "unexpected {stage} failure for {label}: {stderr}"
+            ),
+            _ => unreachable!(),
+        }
+        eprintln!(
+            "SCALA_NEGATIVE_FIRST_FAILURE {label} lazy-signature-lookup=accepted; {stage}: {first}"
+        );
+    }
+}
+
 fn factory_signature_negative_probes(
     scala: &Scala,
     root: &Path,
@@ -1046,19 +1316,28 @@ fn abi_descriptor_negative_probes(
     }
 }
 
-fn wrong_package_probe(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatchArtifacts) {
+fn wrong_package_probe(scala: &Scala, root: &Path) {
     let case = root.join("negative-wrong-package");
     let classes = case.join("classes");
     let out = case.join("out");
     fs::create_dir_all(&classes).unwrap();
     fs::create_dir_all(&out).unwrap();
-    write_batch(&classes, batch);
-    let client = case.join("WrongPackage.scala");
-    fs::write(
-        &client,
-        "package wrong\nobject Probe:\n  val pair = new PairFactory().create(new Counter(1), 2)\n",
+    let (wrong_package_source, _) = renamed_variant(SOURCES[0], CLIENTS[0]);
+    let wrong_package_batch = emit_paired_jvm_tasty_batch(
+        &wrong_package_source,
+        "PairFactory.scala",
+        SourceId::from_index(20790),
     )
-    .unwrap();
+    .expect("wrong-package producer is a genuine Rust session");
+    assert!(
+        wrong_package_batch
+            .classes()
+            .iter()
+            .all(|artifact| artifact.classfile_path().starts_with("renamed/example/"))
+    );
+    write_batch(&classes, &wrong_package_batch);
+    let client = case.join("WrongPackage.scala");
+    fs::write(&client, CLIENTS[0]).unwrap();
     let result = scala.compile_result(
         &format!("{}:{}", classes.display(), scala.libraries),
         &out,
@@ -1066,7 +1345,7 @@ fn wrong_package_probe(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatchAr
     );
     assert!(
         !result.status.success(),
-        "Scala accepted wrong-package Factory references"
+        "Scala accepted client references against a producer emitted in a different package"
     );
     let stderr = plain(&String::from_utf8_lossy(&result.stderr));
     let first = stderr
@@ -1077,7 +1356,7 @@ fn wrong_package_probe(scala: &Scala, root: &Path, batch: &PairedJvmTastyBatchAr
         first.contains("[E006]"),
         "wrong package failure stage: {stderr}"
     );
-    eprintln!("SCALA_NEGATIVE_FIRST_FAILURE wrong-package: {first}");
+    eprintln!("SCALA_NEGATIVE_FIRST_FAILURE wrong-producer-package: {first}");
 }
 
 fn renamed_variant(source: &str, client: &str) -> (String, String) {
@@ -1145,9 +1424,10 @@ fn official_scala_consumes_original_rust_immutable_local_pair_batch() {
         if i == 0 {
             sidecar_negative_probes(&scala, &root, &batch);
             malformed_local_reference_probe(&scala, &root, &batch);
+            malformed_local_body_probe(&scala, &root, &batch);
             factory_signature_negative_probes(&scala, &root, &batch);
             abi_descriptor_negative_probes(&scala, &root, &batch);
-            wrong_package_probe(&scala, &root, &batch);
+            wrong_package_probe(&scala, &root);
         }
     }
     let (renamed_source, renamed_client) = renamed_variant(SOURCES[0], CLIENTS[0]);

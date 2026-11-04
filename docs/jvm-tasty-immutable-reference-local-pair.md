@@ -118,7 +118,26 @@ classfile TASTY UUID fails with Scala's out-of-sync error. A dangling local
 `TERMREFdirect` is intentionally lazy: ordinary client signature lookup still
 passes, then official `-decompile` fails in phase `readTasty` with
 `TreeWithoutOwner`. It is recorded at that observed stage rather than treated
-as an eager lookup rejection.
+as an eager lookup rejection. Three additional isolated Factory-sidecar copies
+exercise the local body. Repointing the local use at the enclosing BLOCK passes
+signature lookup and fails in `readTasty` with `TreeWithoutOwner`; changing the
+initializer's `SHAREDTYPE` target from `Counter` to `Pair` passes lookup and
+`-decompile`, then fails in `-from-tasty` code generation with Scala's
+`Unexpected New(...Pair...) reached GenBCode` assertion. Changing the local
+VALDEF type from `Counter` to the valid `Pair` type passes signature lookup,
+`-decompile`, and `-from-tasty`; the decompiled local is explicitly asserted as
+`fresh: example.Pair = new example.Counter(seed)`. This is Scala's observed
+acceptance of a well-formed but semantically inconsistent lazy body annotation,
+not a claimed rejection. The source-bound first-error matrix separately
+rejects a wrong local type during method body typing with `TypeNameNotFound`;
+the pair proof rejects an incorrect constructor owner before TASTy planning.
+
+The wrong-package control emits a separate genuine Rust batch in
+`renamed.example`, leaves the consumer correctly qualified as `example`, and
+fails to resolve `example.PairFactory` with `[E006] Not Found Error`. This
+exercises a producer-package mismatch; it does not manufacture the diagnostic
+by moving the client to an unrelated package. Existing UUID mismatch cases
+cover stale sidecars independently.
 
 Additional isolated signature controls replace only the Factory sidecar with
 a pinned-Scala-generated sidecar linked to the unchanged Rust Factory
