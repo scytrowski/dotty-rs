@@ -6472,6 +6472,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tuple2_applied_parent_profile_freezes_the_pinned_constructor_shape() {
+        let profiles = profile_parent_references(
+            &fixture_bytes("scala3-library/scala/Tuple2.tasty"),
+            &BinaryName::from_internal("scala/Tuple2"),
+            false,
+            |_, _| None,
+            |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(profiles.len(), 4);
+        let constructor = &profiles[0];
+        assert_eq!(constructor.reference.parent_index, 0);
+        assert_eq!(constructor.reference.shape, "applied");
+        assert!(constructor.reference.has_semantic_reference);
+        assert!(constructor.reference.has_reference_prefix);
+        assert_eq!(constructor.reference.reference_name.as_deref(), Some("*:"));
+        assert_eq!(
+            constructor.reference.reference_prefix.as_deref(),
+            Some("scala")
+        );
+        assert!(
+            constructor
+                .reference
+                .raw_tree
+                .starts_with("Apply(function=TypeApply(function=SelectIn(")
+        );
+        assert!(
+            constructor
+                .reference
+                .raw_tree
+                .contains("underlying=Leaf(tag=")
+        );
+
+        let product2 = &profiles[1];
+        assert_eq!(product2.reference.parent_index, 1);
+        assert_eq!(
+            product2.reference.reference_name.as_deref(),
+            Some("Product2")
+        );
+        assert_eq!(
+            product2.reference.reference_prefix.as_deref(),
+            Some("scala")
+        );
+        assert_eq!(
+            product2.resolved_binary_name.as_deref(),
+            Some("scala/Product2")
+        );
+        assert_eq!(
+            profiles[2].resolved_binary_name.as_deref(),
+            Some("scala/Product")
+        );
+        assert_eq!(
+            profiles[3].resolved_binary_name.as_deref(),
+            Some("scala/Serializable")
+        );
+    }
+
     /// The same fixture as `decodes_a_case_class_with_cross_package_mixins`,
     /// but requested under a (fictitious) non-root package — proving the
     /// requested package only fills in a *bare* reference and is never
